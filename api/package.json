@@ -1,0 +1,42 @@
+{
+  "name": "unm-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "UnifiedNetworkManager API service, driven by the OpenAPI spec.",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn src/index.ts",
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "test": "jest --passWithNoTests"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "express-openapi-validator": "^5.1.2",
+    "pg": "^8.11.3",
+    "jsonwebtoken": "^9.0.2",
+    "otplib": "^12.0.1",
+    "bcryptjs": "^2.4.3",
+    "yaml": "^2.3.4",
+    "uuid": "^9.0.0",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "axios": "^1.7.9",
+    "express-rate-limit": "^7.4.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/pg": "^8.10.9",
+    "@types/jsonwebtoken": "^9.0.5",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/uuid": "^9.0.7",
+    "@types/cors": "^2.8.17",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.2",
+    "ts-node-dev": "^2.0.0",
+    "ts-node": "^10.9.2",
+    "jest": "^29.7.0",
+    "@types/jest": "^29.5.10",
+    "ts-jest": "^29.1.1"
+  }
+}
