@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
-import { db, UserRow } from '../db';
+import { query, UserRow } from '../db';
 import { signToken } from '../auth/jwt';
 import { verifyTotp } from '../auth/totp';
 
@@ -26,10 +26,11 @@ function purgeExpiredChallenges(): void {
   }
 }
 
-router.post('/auth/login', (req, res) => {
+router.post('/auth/login', async (req, res) => {
   const { username, password } = req.body ?? {};
 
-  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username) as UserRow | undefined;
+  const result = await query<UserRow>('SELECT * FROM users WHERE username = $1', [username]);
+  const user = result.rows[0];
   if (!user || !bcrypt.compareSync(password ?? '', user.passwordHash)) {
     res.status(401).json({ error: 'Invalid username or password' });
     return;
@@ -43,7 +44,7 @@ router.post('/auth/login', (req, res) => {
   res.status(200).json({ challengeToken, twoFactorRequired: true });
 });
 
-router.post('/auth/2fa/verify', (req, res) => {
+router.post('/auth/2fa/verify', async (req, res) => {
   const { challengeToken, totpCode } = req.body ?? {};
 
   purgeExpiredChallenges();
@@ -53,7 +54,8 @@ router.post('/auth/2fa/verify', (req, res) => {
     return;
   }
 
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(entry.userId) as UserRow | undefined;
+  const result = await query<UserRow>('SELECT * FROM users WHERE id = $1', [entry.userId]);
+  const user = result.rows[0];
   if (!user) {
     res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
     return;

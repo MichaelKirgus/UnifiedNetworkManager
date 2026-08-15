@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
-import { db, DeviceRow, PluginRow } from '../db';
+import { query, DeviceRow, PluginRow } from '../db';
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -10,9 +10,8 @@ interface MonitoringResponse {
 }
 
 async function pollDevice(device: DeviceRow): Promise<void> {
-  const plugin = db.prepare('SELECT * FROM plugins WHERE id = ?').get(device.pluginId) as
-    | PluginRow
-    | undefined;
+  const pluginResult = await query<PluginRow>('SELECT * FROM plugins WHERE id = $1', [device.pluginId]);
+  const plugin = pluginResult.rows[0];
 
   if (!plugin) {
     return;
@@ -29,23 +28,24 @@ async function pollDevice(device: DeviceRow): Promise<void> {
     const metrics = response.data?.metrics ?? {};
     const collectedAt = new Date().toISOString();
 
-    db.prepare(
-      `INSERT INTO telemetry (id, deviceId, collectedAt, health, metrics)
-       VALUES (?, ?, ?, ?, ?)`
-    ).run(uuidv4(), device.id, collectedAt, health, JSON.stringify(metrics));
+    await query(
+      `INSERT INTO telemetry (id, "deviceId", "collectedAt", health, metrics)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [uuidv4(), device.id, collectedAt, health, JSON.stringify(metrics)]
+    );
 
     const status = health === 'ok' ? 'online' : health === 'critical' ? 'offline' : 'degraded';
-    db.prepare('UPDATE devices SET status = ? WHERE id = ?').run(status, device.id);
+    await query('UPDATE devices SET status = $1 WHERE id = $2', [status, device.id]);
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error(`[telemetry] failed to poll device ${device.id}:`, (err as Error).message);
-    db.prepare('UPDATE devices SET status = ? WHERE id = ?').run('unknown', device.id);
+    await query('UPDATE devices SET status = $1 WHERE id = $2', ['unknown', device.id]);
   }
 }
 
 async function pollAllDevices(): Promise<void> {
-  const devices = db.prepare('SELECT * FROM devices').all() as DeviceRow[];
-  await Promise.all(devices.map((device) => pollDevice(device)));
+  const result = await query<DeviceRow>('SELECT * FROM devices');
+  await Promise.all(result.rows.map((device) => pollDevice(device)));
 }
 
 /**

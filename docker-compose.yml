@@ -1,6 +1,18 @@
 version: "3.9"
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: unm
+      POSTGRES_PASSWORD: unm
+      POSTGRES_DB: unm
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
   api:
     build:
       context: .
@@ -10,9 +22,9 @@ services:
     environment:
       - PORT=3000
       - JWT_SECRET=dev-secret
-      - UNM_DB_PATH=/app/api/data/unm.db
-    volumes:
-      - unm-api-data:/app/api/data
+      - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
+    depends_on:
+      - postgres
     restart: unless-stopped
 
   opnsense-plugin:
@@ -52,4 +64,4 @@ services:
   #     - "6379:6379"
 
 volumes:
-  unm-api-data:
+  pgdata:

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { db, ConfigJobRow } from '../db';
+import { query, ConfigJobRow } from '../db';
 import { requireAuth } from '../auth/middleware';
 
 const router = Router();
@@ -16,9 +16,10 @@ function serializeConfigJob(row: ConfigJobRow) {
   };
 }
 
-router.get('/config-jobs/:jobId', requireAuth, (req, res) => {
+router.get('/config-jobs/:jobId', requireAuth, async (req, res) => {
   const { jobId } = req.params;
-  const job = db.prepare('SELECT * FROM config_jobs WHERE id = ?').get(jobId) as ConfigJobRow | undefined;
+  const result = await query<ConfigJobRow>('SELECT * FROM config_jobs WHERE id = $1', [jobId]);
+  const job = result.rows[0];
   if (!job) {
     res.status(404).json({ error: 'Job not found' });
     return;
@@ -34,9 +35,9 @@ router.get('/config-jobs/:jobId', requireAuth, (req, res) => {
  * the validator middleware in index.ts.
  */
 export const configJobsListRouter = Router();
-configJobsListRouter.get('/config-jobs', requireAuth, (_req, res) => {
-  const rows = db.prepare('SELECT * FROM config_jobs ORDER BY createdAt DESC LIMIT 100').all() as ConfigJobRow[];
-  res.status(200).json(rows.map(serializeConfigJob));
+configJobsListRouter.get('/config-jobs', requireAuth, async (_req, res) => {
+  const result = await query<ConfigJobRow>('SELECT * FROM config_jobs ORDER BY "createdAt" DESC LIMIT 100');
+  res.status(200).json(result.rows.map(serializeConfigJob));
 });
 
 export default router;

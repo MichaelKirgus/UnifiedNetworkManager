@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { db, ConfigJobRow, DeviceRow, PluginRow } from '../db';
+import { query, ConfigJobRow, DeviceRow, PluginRow } from '../db';
 import { configJobQueue } from '../queue';
 
 const PROCESS_INTERVAL_MS = 5_000;
@@ -10,28 +10,31 @@ interface ConfigResponse {
 }
 
 async function processJob(jobId: string): Promise<void> {
-  const job = db.prepare('SELECT * FROM config_jobs WHERE id = ?').get(jobId) as ConfigJobRow | undefined;
+  const jobResult = await query<ConfigJobRow>('SELECT * FROM config_jobs WHERE id = $1', [jobId]);
+  const job = jobResult.rows[0];
   if (!job || job.status !== 'queued') {
     return;
   }
 
-  db.prepare('UPDATE config_jobs SET status = ? WHERE id = ?').run('running', jobId);
+  await query('UPDATE config_jobs SET status = $1 WHERE id = $2', ['running', jobId]);
 
-  const device = db.prepare('SELECT * FROM devices WHERE id = ?').get(job.deviceId) as DeviceRow | undefined;
+  const deviceResult = await query<DeviceRow>('SELECT * FROM devices WHERE id = $1', [job.deviceId]);
+  const device = deviceResult.rows[0];
   if (!device) {
-    db.prepare(
-      'UPDATE config_jobs SET status = ?, result = ?, finishedAt = ? WHERE id = ?'
-    ).run('failed', JSON.stringify({ error: 'Device not found' }), new Date().toISOString(), jobId);
+    await query(
+      'UPDATE config_jobs SET status = $1, result = $2, "finishedAt" = $3 WHERE id = $4',
+      ['failed', JSON.stringify({ error: 'Device not found' }), new Date().toISOString(), jobId]
+    );
     return;
   }
 
-  const plugin = db.prepare('SELECT * FROM plugins WHERE id = ?').get(device.pluginId) as
-    | PluginRow
-    | undefined;
+  const pluginResult = await query<PluginRow>('SELECT * FROM plugins WHERE id = $1', [device.pluginId]);
+  const plugin = pluginResult.rows[0];
   if (!plugin) {
-    db.prepare(
-      'UPDATE config_jobs SET status = ?, result = ?, finishedAt = ? WHERE id = ?'
-    ).run('failed', JSON.stringify({ error: 'Plugin not found' }), new Date().toISOString(), jobId);
+    await query(
+      'UPDATE config_jobs SET status = $1, result = $2, "finishedAt" = $3 WHERE id = $4',
+      ['failed', JSON.stringify({ error: 'Plugin not found' }), new Date().toISOString(), jobId]
+    );
     return;
   }
 
@@ -48,13 +51,15 @@ async function processJob(jobId: string): Promise<void> {
     );
 
     const status = response.data?.success === false ? 'failed' : 'succeeded';
-    db.prepare(
-      'UPDATE config_jobs SET status = ?, result = ?, finishedAt = ? WHERE id = ?'
-    ).run(status, JSON.stringify(response.data?.result ?? response.data ?? {}), new Date().toISOString(), jobId);
+    await query(
+      'UPDATE config_jobs SET status = $1, result = $2, "finishedAt" = $3 WHERE id = $4',
+      [status, JSON.stringify(response.data?.result ?? response.data ?? {}), new Date().toISOString(), jobId]
+    );
   } catch (err) {
-    db.prepare(
-      'UPDATE config_jobs SET status = ?, result = ?, finishedAt = ? WHERE id = ?'
-    ).run('failed', JSON.stringify({ error: (err as Error).message }), new Date().toISOString(), jobId);
+    await query(
+      'UPDATE config_jobs SET status = $1, result = $2, "finishedAt" = $3 WHERE id = $4',
+      ['failed', JSON.stringify({ error: (err as Error).message }), new Date().toISOString(), jobId]
+    );
   }
 }
 

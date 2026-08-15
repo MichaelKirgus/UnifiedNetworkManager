@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { db, DeviceRow, PluginRow, TelemetryRow, ConfigJobRow } from '../db';
+import { query, DeviceRow, PluginRow, TelemetryRow, ConfigJobRow } from '../db';
 import { requireAuth, requirePermission, require2FA } from '../auth/middleware';
 import { configJobQueue } from '../queue';
 
@@ -19,33 +19,34 @@ function serializeDevice(row: DeviceRow) {
   };
 }
 
-router.get('/devices', requireAuth, (req, res) => {
+router.get('/devices', requireAuth, async (req, res) => {
   const { vendor, site } = req.query;
 
   const clauses: string[] = [];
   const params: string[] = [];
   if (typeof vendor === 'string' && vendor.length > 0) {
-    clauses.push('vendor = ?');
     params.push(vendor);
+    clauses.push(`vendor = $${params.length}`);
   }
   if (typeof site === 'string' && site.length > 0) {
-    clauses.push('site = ?');
     params.push(site);
+    clauses.push(`site = $${params.length}`);
   }
 
   const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-  const rows = db
-    .prepare(`SELECT * FROM devices ${where} ORDER BY createdAt DESC`)
-    .all(...params) as DeviceRow[];
+  const result = await query<DeviceRow>(
+    `SELECT * FROM devices ${where} ORDER BY "createdAt" DESC`,
+    params
+  );
 
-  res.status(200).json(rows.map(serializeDevice));
+  res.status(200).json(result.rows.map(serializeDevice));
 });
 
-router.post('/devices', requireAuth, requirePermission('devices:write'), (req, res) => {
+router.post('/devices', requireAuth, requirePermission('devices:write'), async (req, res) => {
   const { name, vendor, deviceType, pluginId, managementAddress, site } = req.body ?? {};
 
-  const plugin = db.prepare('SELECT * FROM plugins WHERE id = ?').get(pluginId) as PluginRow | undefined;
-  if (!plugin) {
+  const pluginResult = await query<PluginRow>('SELECT * FROM plugins WHERE id = $1', [pluginId]);
+  if (!pluginResult.rows[0]) {
     res.status(404).json({ error: 'Referenced plugin not found' });
     return;
   }
@@ -54,27 +55,30 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), (req, r
   const createdAt = new Date().toISOString();
   const status = 'unknown';
 
-  db.prepare(
-    `INSERT INTO devices (id, name, vendor, deviceType, pluginId, managementAddress, site, status, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(id, name, vendor, deviceType, pluginId, managementAddress, site ?? null, status, createdAt);
+  await query(
+    `INSERT INTO devices (id, name, vendor, "deviceType", "pluginId", "managementAddress", site, status, "createdAt")
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [id, name, vendor, deviceType, pluginId, managementAddress, site ?? null, status, createdAt]
+  );
 
-  const created = db.prepare('SELECT * FROM devices WHERE id = ?').get(id) as DeviceRow;
-  res.status(201).json(serializeDevice(created));
+  const created = await query<DeviceRow>('SELECT * FROM devices WHERE id = $1', [id]);
+  res.status(201).json(serializeDevice(created.rows[0]));
 });
 
-router.get('/devices/:deviceId/monitoring', requireAuth, (req, res) => {
+router.get('/devices/:deviceId/monitoring', requireAuth, async (req, res) => {
   const { deviceId } = req.params;
 
-  const device = db.prepare('SELECT * FROM devices WHERE id = ?').get(deviceId) as DeviceRow | undefined;
-  if (!device) {
+  const deviceResult = await query<DeviceRow>('SELECT * FROM devices WHERE id = $1', [deviceId]);
+  if (!deviceResult.rows[0]) {
     res.status(404).json({ error: 'Device not found' });
     return;
   }
 
-  const telemetry = db
-    .prepare('SELECT * FROM telemetry WHERE deviceId = ? ORDER BY collectedAt DESC LIMIT 1')
-    .get(deviceId) as TelemetryRow | undefined;
+  const telemetryResult = await query<TelemetryRow>(
+    'SELECT * FROM telemetry WHERE "deviceId" = $1 ORDER BY "collectedAt" DESC LIMIT 1',
+    [deviceId]
+  );
+  const telemetry = telemetryResult.rows[0];
 
   if (!telemetry) {
     res.status(200).json({
@@ -99,12 +103,12 @@ router.post(
   requireAuth,
   require2FA,
   requirePermission('configs:apply'),
-  (req, res) => {
+  async (req, res) => {
     const { deviceId } = req.params;
     const { action, payload } = req.body ?? {};
 
-    const device = db.prepare('SELECT * FROM devices WHERE id = ?').get(deviceId) as DeviceRow | undefined;
-    if (!device) {
+    const deviceResult = await query<DeviceRow>('SELECT * FROM devices WHERE id = $1', [deviceId]);
+    if (!deviceResult.rows[0]) {
       res.status(404).json({ error: 'Device not found' });
       return;
     }
@@ -112,14 +116,16 @@ router.post(
     const id = uuidv4();
     const createdAt = new Date().toISOString();
 
-    db.prepare(
-      `INSERT INTO config_jobs (id, deviceId, action, status, payload, result, createdAt, finishedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(id, deviceId, action, 'queued', JSON.stringify(payload ?? {}), null, createdAt, null);
+    await query(
+      `INSERT INTO config_jobs (id, "deviceId", action, status, payload, result, "createdAt", "finishedAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [id, deviceId, action, 'queued', JSON.stringify(payload ?? {}), null, createdAt, null]
+    );
 
     configJobQueue.add(id, { jobId: id, deviceId });
 
-    const created = db.prepare('SELECT * FROM config_jobs WHERE id = ?').get(id) as ConfigJobRow;
+    const createdResult = await query<ConfigJobRow>('SELECT * FROM config_jobs WHERE id = $1', [id]);
+    const created = createdResult.rows[0];
     res.status(202).json({
       id: created.id,
       deviceId: created.deviceId,
