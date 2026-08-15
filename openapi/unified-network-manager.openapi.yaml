@@ -64,7 +64,7 @@ paths:
               required: [challengeToken, totpCode]
               properties:
                 challengeToken: { type: string }
-                totpCode: { type: string, minLength: 6, maxLength: 6, pattern: '^\d{6}$' }
+                totpCode: { type: string, minLength: 6, maxLength: 6, pattern: "^\\d{6}$" }
       responses:
         '200':
           description: Authenticated
@@ -128,8 +128,10 @@ paths:
           description: Authentication required
         '403':
           description: Missing required permission
+        '404':
+          description: Referenced plugin not found
         '422':
-          description: Referenced plugin is invalid or not found
+          description: Referenced plugin ID is invalid
 
   /devices/{deviceId}/monitoring:
     get:
@@ -158,8 +160,6 @@ paths:
       summary: Queue asynchronous configuration action
       description: Requires 2FA-completed session and permission `configs:apply`.
       x-2fa-required: true
-      security:
-        - bearerAuth: []
       parameters:
         - in: path
           name: deviceId
