@@ -2,7 +2,7 @@
 
 Open source network management and monitoring platform for mixed-vendor environments.
 
-## What this project now provides
+## Features
 
 This repository now defines a concrete, implementation-ready foundation for a unified manager that can operate across:
 

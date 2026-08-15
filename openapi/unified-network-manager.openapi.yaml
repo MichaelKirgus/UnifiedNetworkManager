@@ -2,6 +2,9 @@ openapi: 3.1.0
 info:
   title: UnifiedNetworkManager API
   version: 0.1.0
+  contact:
+    name: UnifiedNetworkManager Maintainers
+    url: https://github.com/MichaelKirgus/UnifiedNetworkManager
   description: >-
     Open, vendor-neutral API for monitoring and configuring mixed network
     environments (OPNsense, OpenWrt, MikroTik) through a plugin model.
@@ -125,6 +128,8 @@ paths:
           description: Authentication required
         '403':
           description: Missing required permission
+        '422':
+          description: Referenced plugin is invalid or not found
 
   /devices/{deviceId}/monitoring:
     get:
@@ -144,12 +149,17 @@ paths:
                 $ref: '#/components/schemas/TelemetrySnapshot'
         '401':
           description: Authentication required
+        '404':
+          description: Device not found
 
   /devices/{deviceId}/config-jobs:
     post:
       tags: [Configuration]
       summary: Queue asynchronous configuration action
       description: Requires 2FA-completed session and permission `configs:apply`.
+      x-2fa-required: true
+      security:
+        - bearerAuth: []
       parameters:
         - in: path
           name: deviceId
@@ -172,6 +182,8 @@ paths:
           description: Authentication required
         '403':
           description: Missing required permission
+        '404':
+          description: Device not found
 
   /config-jobs/{jobId}:
     get:
@@ -191,6 +203,8 @@ paths:
                 $ref: '#/components/schemas/ConfigJob'
         '401':
           description: Authentication required
+        '404':
+          description: Job not found
 
   /plugins:
     get:
@@ -235,6 +249,10 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+      description: >-
+        Authenticated JWT used for RBAC protected endpoints. Privileged operations
+        marked with `x-2fa-required: true` additionally expect a token with a 2FA
+        completion claim (for example `amr` includes `totp`).
 
   schemas:
     Device:
