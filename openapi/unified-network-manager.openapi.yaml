@@ -61,7 +61,7 @@ paths:
               required: [challengeToken, totpCode]
               properties:
                 challengeToken: { type: string }
-              totpCode: { type: string, minLength: 6, maxLength: 6 }
+                totpCode: { type: string, minLength: 6, maxLength: 6, pattern: '^\d{6}$' }
       responses:
         '200':
           description: Authenticated
