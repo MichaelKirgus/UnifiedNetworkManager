@@ -20,6 +20,7 @@ paths:
     post:
       tags: [Authentication]
       summary: Authenticate user and issue pre-2FA token
+      security: []
       requestBody:
         required: true
         content:
@@ -50,6 +51,7 @@ paths:
     post:
       tags: [Authentication]
       summary: Complete login using TOTP code
+      security: []
       requestBody:
         required: true
         content:
@@ -59,7 +61,7 @@ paths:
               required: [challengeToken, totpCode]
               properties:
                 challengeToken: { type: string }
-                totpCode: { type: string, minLength: 6, maxLength: 8 }
+              totpCode: { type: string, minLength: 6, maxLength: 6 }
       responses:
         '200':
           description: Authenticated
@@ -100,6 +102,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Device'
+        '401':
+          description: Authentication required
     post:
       tags: [Devices]
       summary: Register device
@@ -117,6 +121,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Device'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
 
   /devices/{deviceId}/monitoring:
     get:
@@ -134,6 +142,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TelemetrySnapshot'
+        '401':
+          description: Authentication required
 
   /devices/{deviceId}/config-jobs:
     post:
@@ -158,6 +168,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConfigJob'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
 
   /config-jobs/{jobId}:
     get:
@@ -175,6 +189,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConfigJob'
+        '401':
+          description: Authentication required
 
   /plugins:
     get:
@@ -189,6 +205,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Plugin'
+        '401':
+          description: Authentication required
     post:
       tags: [Plugins]
       summary: Register plugin
@@ -206,6 +224,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Plugin'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
 
 components:
   securitySchemes:
@@ -243,7 +265,7 @@ components:
         deviceType: { type: string }
         pluginId: { type: string }
         managementAddress: { type: string }
-        credentialsRef: { type: string, description: Reference to secret store key }
+        credentialsRef: { type: string, description: "Reference to secret store key" }
         site: { type: string }
 
     TelemetrySnapshot:
@@ -277,7 +299,9 @@ components:
       properties:
         id: { type: string }
         deviceId: { type: string }
-        action: { type: string }
+        action:
+          type: string
+          enum: [applyConfig, rollbackConfig, syncState]
         status:
           type: string
           enum: [queued, running, succeeded, failed]

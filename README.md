@@ -8,7 +8,7 @@ This repository now defines a concrete, implementation-ready foundation for a un
 
 - **MikroTik** (switching/routing)
 - **OPNsense** (routing/firewall)
-- **OpenWrt/OpenLEDE** (WLAN/edge)
+- **OpenWrt** (WLAN/edge; including legacy LEDE/OpenWrt deployments)
 
 Core requirements addressed:
 
