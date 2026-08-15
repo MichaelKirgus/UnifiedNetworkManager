@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { query, DeviceRow, PluginRow, TelemetryRow, ConfigJobRow } from '../db';
+import { encrypt } from '../utils/crypto';
 import { requireAuth, requirePermission, require2FA } from '../auth/middleware';
 import { configJobQueue } from '../queue';
 
@@ -43,7 +44,7 @@ router.get('/devices', requireAuth, async (req, res) => {
 });
 
 router.post('/devices', requireAuth, requirePermission('devices:write'), async (req, res) => {
-  const { name, vendor, deviceType, pluginId, managementAddress, site } = req.body ?? {};
+  const { name, vendor, deviceType, pluginId, managementAddress, site, apiKey, apiSecret } = req.body ?? {};
 
   const pluginResult = await query<PluginRow>('SELECT * FROM plugins WHERE id = $1', [pluginId]);
   if (!pluginResult.rows[0]) {
@@ -52,13 +53,23 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
   }
 
   const id = uuidv4();
+  const secretId = uuidv4();
   const createdAt = new Date().toISOString();
   const status = 'unknown';
 
+  const secretValue = JSON.stringify({ apiKey: apiKey ?? '', apiSecret: apiSecret ?? '' });
+  const encryptedSecret = encrypt(secretValue);
+
   await query(
-    `INSERT INTO devices (id, name, vendor, "deviceType", "pluginId", "managementAddress", site, status, "createdAt")
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [id, name, vendor, deviceType, pluginId, managementAddress, site ?? null, status, createdAt]
+    `INSERT INTO secrets (id, encryptedValue, createdAt)
+     VALUES ($1, $2, $3)`,
+    [secretId, encryptedSecret, createdAt]
+  );
+
+  await query(
+    `INSERT INTO devices (id, name, vendor, "deviceType", "pluginId", "managementAddress", site, status, "secretId", "createdAt")
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [id, name, vendor, deviceType, pluginId, managementAddress, site ?? null, status, secretId, createdAt]
   );
 
   const created = await query<DeviceRow>('SELECT * FROM devices WHERE id = $1', [id]);

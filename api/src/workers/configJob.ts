@@ -39,11 +39,26 @@ async function processJob(jobId: string): Promise<void> {
   }
 
   try {
+    const secretResult = await query<any>(
+      `SELECT encryptedValue FROM secrets WHERE id = $1`,
+      [device.secretId]
+    );
+    const secret = secretResult.rows[0];
+    if (!secret) {
+      throw new Error(`Secret not found for device ${device.id}`);
+    }
+
+    const decryptedSecret = JSON.parse(
+      await import('../utils/crypto').then(m => m.decrypt(secret.encryptedValue))
+    );
+
     const response = await axios.post<ConfigResponse>(
       `${plugin.endpoint.replace(/\/$/, '')}/config`,
       {
         deviceId: device.id,
         managementAddress: device.managementAddress,
+        apiKey: decryptedSecret.apiKey,
+        apiSecret: decryptedSecret.apiSecret,
         action: job.action,
         payload: JSON.parse(job.payload),
       },

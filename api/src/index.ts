@@ -8,6 +8,7 @@ import { initDb } from './db';
 import authRouter from './routes/auth';
 import devicesRouter from './routes/devices';
 import pluginsRouter from './routes/plugins';
+import { internalRouter } from './routes/internal';
 import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startConfigJobWorker } from './workers/configJob';
@@ -68,6 +69,7 @@ async function main(): Promise<void> {
   api.use(authRouter);
   api.use(devicesRouter);
   api.use(pluginsRouter);
+  api.use(internalRouter());
   api.use(configJobsRouter);
 
   // OpenAPI validation error handler.

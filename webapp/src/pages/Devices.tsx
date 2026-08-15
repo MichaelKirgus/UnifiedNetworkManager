@@ -12,7 +12,8 @@ const emptyForm = {
   deviceType: 'firewall',
   pluginId: '',
   managementAddress: '',
-  credentialsRef: 'default',
+  apiKey: '',
+  apiSecret: '',
   site: '',
 };
 
@@ -143,14 +144,33 @@ export default function Devices() {
               placeholder="https://10.0.0.1"
             />
           </div>
-          <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Site</label>
-            <input
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-              value={form.site}
-              onChange={(e) => setForm({ ...form, site: e.target.value })}
-            />
-          </div>
+           <div>
+             <label className="mb-1 block text-sm font-medium text-slate-700">API Key</label>
+             <input
+               required
+               className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+               value={form.apiKey}
+               onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
+             />
+           </div>
+           <div>
+             <label className="mb-1 block text-sm font-medium text-slate-700">API Secret</label>
+             <input
+               type="password"
+               required
+               className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+               value={form.apiSecret}
+               onChange={(e) => setForm({ ...form, apiSecret: e.target.value })}
+             />
+           </div>
+           <div>
+             <label className="mb-1 block text-sm font-medium text-slate-700">Site</label>
+             <input
+               className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+               value={form.site}
+               onChange={(e) => setForm({ ...form, site: e.target.value })}
+             />
+           </div>
           <div className="col-span-full">
             <button
               type="submit"

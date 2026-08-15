@@ -21,6 +21,8 @@ export interface Device {
   managementAddress: string;
   site?: string;
   status: string;
+  apiKey?: string;
+  apiSecret?: string;
 }
 
 export interface TelemetrySnapshot {

@@ -40,10 +40,10 @@ function extractMetrics(data: unknown, prefix = ''): Record<string, number> {
 }
 
 app.post('/monitoring', async (req, res) => {
-  const { deviceId } = req.body ?? {};
+  const { deviceId, apiKey, apiSecret, managementAddress } = req.body ?? {};
 
   try {
-    const status = await getSystemStatus();
+    const status = await getSystemStatus(managementAddress, apiKey, apiSecret);
 
     let health: Health = 'unknown';
     if (status.ok) {
@@ -74,10 +74,10 @@ app.post('/monitoring', async (req, res) => {
 });
 
 app.post('/config', async (req, res) => {
-  const { action, payload } = req.body ?? {};
+  const { action, payload, apiKey, apiSecret, managementAddress } = req.body ?? {};
 
   try {
-    const result = await applyConfig({ action, payload });
+    const result = await applyConfig({ action, payload }, managementAddress, apiKey, apiSecret);
     res.status(200).json({
       success: result.ok,
       result: { status: result.status, data: result.data },
@@ -90,9 +90,11 @@ app.post('/config', async (req, res) => {
   }
 });
 
-app.get('/inventory', async (_req, res) => {
+app.get('/inventory', async (req, res) => {
+  const { apiKey, apiSecret, managementAddress } = req.query ?? {};
+
   try {
-    const interfaces = await getInterfaces();
+    const interfaces = await getInterfaces(managementAddress, apiKey, apiSecret);
     const items = interfaces.data && typeof interfaces.data === 'object' ? interfaces.data : {};
 
     res.status(200).json({

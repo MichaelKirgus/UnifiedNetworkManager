@@ -43,6 +43,7 @@ export interface DeviceRow {
   managementAddress: string;
   site: string | null;
   status: string;
+  secretId: string;
   createdAt: string;
 }
 
@@ -85,7 +86,7 @@ export interface TelemetryRow {
  * property access throughout the codebase).
  */
 export async function initDb(): Promise<void> {
-  await query(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
@@ -97,7 +98,7 @@ export async function initDb(): Promise<void> {
     )
   `);
 
-  await query(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS devices (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -107,11 +108,20 @@ export async function initDb(): Promise<void> {
       "managementAddress" TEXT NOT NULL,
       site TEXT,
       status TEXT NOT NULL DEFAULT 'unknown',
+      "secretId" TEXT NOT NULL,
       "createdAt" TEXT NOT NULL
     )
   `);
 
-  await query(`
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS secrets (
+      id TEXT PRIMARY KEY,
+      encryptedValue TEXT NOT NULL,
+      createdAt TEXT NOT NULL
+    )
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS plugins (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -124,7 +134,7 @@ export async function initDb(): Promise<void> {
     )
   `);
 
-  await query(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS config_jobs (
       id TEXT PRIMARY KEY,
       "deviceId" TEXT NOT NULL,
@@ -137,7 +147,7 @@ export async function initDb(): Promise<void> {
     )
   `);
 
-  await query(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS telemetry (
       id TEXT PRIMARY KEY,
       "deviceId" TEXT NOT NULL,
@@ -147,21 +157,21 @@ export async function initDb(): Promise<void> {
     )
   `);
 
-  await query(`
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_telemetry_device_collected
       ON telemetry ("deviceId", "collectedAt" DESC)
   `);
 
-  await query(`
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_config_jobs_device
       ON config_jobs ("deviceId", "createdAt" DESC)
   `);
 
-  const existingAdmin = await query<Pick<UserRow, 'id'>>('SELECT id FROM users WHERE username = $1', ['admin']);
+  const existingAdmin = await pool.query<any>('SELECT id FROM users WHERE username = $1', ['admin']);
   if (existingAdmin.rows.length === 0) {
     const passwordHash = bcrypt.hashSync('admin', 10);
     const totpSecret = generateSecret();
-    await query(
+    await pool.query(
       `INSERT INTO users (id, username, "passwordHash", "totpSecret", roles, permissions, "createdAt")
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
