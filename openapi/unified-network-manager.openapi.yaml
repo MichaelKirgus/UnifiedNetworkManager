@@ -1,0 +1,315 @@
+openapi: 3.1.0
+info:
+  title: UnifiedNetworkManager API
+  version: 0.1.0
+  description: >-
+    Open, vendor-neutral API for monitoring and configuring mixed network
+    environments (OPNsense, OpenWrt/OpenLEDE, MikroTik) through a plugin model.
+servers:
+  - url: https://api.unified-network-manager.local/v1
+security:
+  - bearerAuth: []
+tags:
+  - name: Authentication
+  - name: Devices
+  - name: Monitoring
+  - name: Configuration
+  - name: Plugins
+paths:
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: Authenticate user and issue pre-2FA token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: Credentials accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [challengeToken, twoFactorRequired]
+                properties:
+                  challengeToken: { type: string }
+                  twoFactorRequired: { type: boolean }
+
+  /auth/2fa/verify:
+    post:
+      tags: [Authentication]
+      summary: Complete login using TOTP code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challengeToken, totpCode]
+              properties:
+                challengeToken: { type: string }
+                totpCode: { type: string, minLength: 6, maxLength: 8 }
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accessToken, expiresIn, roles, permissions]
+                properties:
+                  accessToken: { type: string }
+                  expiresIn: { type: integer }
+                  roles:
+                    type: array
+                    items: { type: string }
+                  permissions:
+                    type: array
+                    items: { type: string }
+
+  /devices:
+    get:
+      tags: [Devices]
+      summary: List managed devices
+      parameters:
+        - in: query
+          name: vendor
+          schema: { type: string }
+        - in: query
+          name: site
+          schema: { type: string }
+      responses:
+        '200':
+          description: Device list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Device'
+    post:
+      tags: [Devices]
+      summary: Register device
+      description: Requires permission `devices:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceCreateRequest'
+      responses:
+        '201':
+          description: Device created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+
+  /devices/{deviceId}/monitoring:
+    get:
+      tags: [Monitoring]
+      summary: Get normalized device telemetry
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Current telemetry snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TelemetrySnapshot'
+
+  /devices/{deviceId}/config-jobs:
+    post:
+      tags: [Configuration]
+      summary: Queue asynchronous configuration action
+      description: Requires 2FA-completed session and permission `configs:apply`.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigJobRequest'
+      responses:
+        '202':
+          description: Job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigJob'
+
+  /config-jobs/{jobId}:
+    get:
+      tags: [Configuration]
+      summary: Get configuration job status
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Job status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigJob'
+
+  /plugins:
+    get:
+      tags: [Plugins]
+      summary: List installed plugins
+      responses:
+        '200':
+          description: Plugin list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Plugin'
+    post:
+      tags: [Plugins]
+      summary: Register plugin
+      description: Requires permission `plugins:manage`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PluginCreateRequest'
+      responses:
+        '201':
+          description: Plugin registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plugin'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Device:
+      type: object
+      required: [id, name, vendor, deviceType, pluginId, managementAddress, status]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        vendor:
+          type: string
+          enum: [mikrotik, opnsense, openwrt, openlede, other]
+        deviceType: { type: string }
+        pluginId: { type: string }
+        managementAddress: { type: string }
+        site: { type: string }
+        status:
+          type: string
+          enum: [online, degraded, offline, unknown]
+
+    DeviceCreateRequest:
+      type: object
+      required: [name, vendor, deviceType, pluginId, managementAddress, credentialsRef]
+      properties:
+        name: { type: string }
+        vendor: { type: string }
+        deviceType: { type: string }
+        pluginId: { type: string }
+        managementAddress: { type: string }
+        credentialsRef: { type: string, description: Reference to secret store key }
+        site: { type: string }
+
+    TelemetrySnapshot:
+      type: object
+      required: [deviceId, collectedAt, health, metrics]
+      properties:
+        deviceId: { type: string }
+        collectedAt: { type: string, format: date-time }
+        health:
+          type: string
+          enum: [ok, warning, critical, unknown]
+        metrics:
+          type: object
+          additionalProperties:
+            type: number
+
+    ConfigJobRequest:
+      type: object
+      required: [action, payload]
+      properties:
+        action:
+          type: string
+          enum: [applyConfig, rollbackConfig, syncState]
+        payload:
+          type: object
+          additionalProperties: true
+
+    ConfigJob:
+      type: object
+      required: [id, deviceId, action, status, createdAt]
+      properties:
+        id: { type: string }
+        deviceId: { type: string }
+        action: { type: string }
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed]
+        result:
+          type: object
+          additionalProperties: true
+        createdAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+
+    Plugin:
+      type: object
+      required: [id, name, version, vendors, capabilities, endpoint]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        version: { type: string }
+        vendors:
+          type: array
+          items: { type: string }
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum: [monitoring, configuration, inventory]
+        endpoint: { type: string, format: uri }
+        authType:
+          type: string
+          enum: [none, token, mTLS]
+
+    PluginCreateRequest:
+      type: object
+      required: [name, version, vendors, capabilities, endpoint]
+      properties:
+        name: { type: string }
+        version: { type: string }
+        vendors:
+          type: array
+          items: { type: string }
+        capabilities:
+          type: array
+          items: { type: string }
+        endpoint: { type: string, format: uri }
+        authType: { type: string }
