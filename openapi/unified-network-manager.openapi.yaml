@@ -4,7 +4,7 @@ info:
   version: 0.1.0
   description: >-
     Open, vendor-neutral API for monitoring and configuring mixed network
-    environments (OPNsense, OpenWrt/OpenLEDE, MikroTik) through a plugin model.
+    environments (OPNsense, OpenWrt, MikroTik) through a plugin model.
 servers:
   - url: https://api.unified-network-manager.local/v1
 security:
@@ -41,6 +41,10 @@ paths:
                 properties:
                   challengeToken: { type: string }
                   twoFactorRequired: { type: boolean }
+        '401':
+          description: Invalid username or password
+        '429':
+          description: Too many login attempts
 
   /auth/2fa/verify:
     post:
@@ -73,6 +77,8 @@ paths:
                   permissions:
                     type: array
                     items: { type: string }
+        '401':
+          description: Invalid or expired 2FA challenge/token
 
   /devices:
     get:
@@ -217,7 +223,7 @@ components:
         name: { type: string }
         vendor:
           type: string
-          enum: [mikrotik, opnsense, openwrt, openlede, other]
+          enum: [mikrotik, opnsense, openwrt, other]
         deviceType: { type: string }
         pluginId: { type: string }
         managementAddress: { type: string }
@@ -231,7 +237,9 @@ components:
       required: [name, vendor, deviceType, pluginId, managementAddress, credentialsRef]
       properties:
         name: { type: string }
-        vendor: { type: string }
+        vendor:
+          type: string
+          enum: [mikrotik, opnsense, openwrt, other]
         deviceType: { type: string }
         pluginId: { type: string }
         managementAddress: { type: string }
@@ -310,6 +318,10 @@ components:
           items: { type: string }
         capabilities:
           type: array
-          items: { type: string }
+          items:
+            type: string
+            enum: [monitoring, configuration, inventory]
         endpoint: { type: string, format: uri }
-        authType: { type: string }
+        authType:
+          type: string
+          enum: [none, token, mTLS]
