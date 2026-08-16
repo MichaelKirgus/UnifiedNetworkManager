@@ -3,6 +3,7 @@ import clsx from 'clsx';
 
 const NAV_ITEMS = [
   { to: '/devices', label: 'Devices' },
+  { to: '/secrets', label: 'Secrets' },
   { to: '/config-jobs', label: 'Config Jobs' },
   { to: '/plugins', label: 'Plugins' },
 ];

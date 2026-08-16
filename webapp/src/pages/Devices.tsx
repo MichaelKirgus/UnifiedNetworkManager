@@ -8,14 +8,20 @@ import { api, Device, Plugin } from '../api/client';
 
 const emptyForm = {
   name: '',
-  vendor: 'opnsense',
+  vendor: '',
   deviceType: 'firewall',
   pluginId: '',
   managementAddress: '',
-  apiKey: '',
-  apiSecret: '',
+  credentialsRef: '',
   site: '',
 };
+
+// Derive the list of selectable vendors from the discovered plugins so that
+// adding/renaming a plugin is reflected in the GUI without code changes.
+function vendorOptions(plugins: Plugin[]): string[] {
+  const vendors = plugins.flatMap((p) => p.vendors ?? []);
+  return Array.from(new Set(vendors)).sort();
+}
 
 export default function Devices() {
   const navigate = useNavigate();
@@ -26,6 +32,7 @@ export default function Devices() {
 
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
+  const secretsQuery = useQuery({ queryKey: ['secrets'], queryFn: api.secrets });
 
   const createDevice = useMutation({
     mutationFn: api.createDevice,
@@ -41,6 +48,14 @@ export default function Devices() {
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
     createDevice.mutate(form);
+  }
+
+  // When a plugin is chosen, auto-select its first vendor so the vendor
+  // dropdown always reflects a valid plugin vendor.
+  function handlePluginChange(pluginId: string) {
+    const plugin = (pluginsQuery.data ?? []).find((p) => p.id === pluginId);
+    const vendor = plugin?.vendors?.[0] ?? '';
+    setForm({ ...form, pluginId, vendor });
   }
 
   const columns: DataTableColumn<Device>[] = [
@@ -97,14 +112,19 @@ export default function Devices() {
           <div>
             <label className="mb-1 block text-sm font-medium text-slate-700">Vendor</label>
             <select
+              required
               className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
               value={form.vendor}
               onChange={(e) => setForm({ ...form, vendor: e.target.value })}
             >
-              <option value="opnsense">opnsense</option>
-              <option value="mikrotik">mikrotik</option>
-              <option value="openwrt">openwrt</option>
-              <option value="other">other</option>
+              <option value="" disabled>
+                Select a vendor
+              </option>
+              {vendorOptions(pluginsQuery.data ?? []).map((vendor) => (
+                <option key={vendor} value={vendor}>
+                  {vendor}
+                </option>
+              ))}
             </select>
           </div>
           <div>
@@ -122,7 +142,7 @@ export default function Devices() {
               required
               className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
               value={form.pluginId}
-              onChange={(e) => setForm({ ...form, pluginId: e.target.value })}
+              onChange={(e) => handlePluginChange(e.target.value)}
             >
               <option value="" disabled>
                 Select a plugin
@@ -145,23 +165,22 @@ export default function Devices() {
             />
           </div>
            <div>
-             <label className="mb-1 block text-sm font-medium text-slate-700">API Key</label>
-             <input
+             <label className="mb-1 block text-sm font-medium text-slate-700">Credentials Reference</label>
+             <select
                required
                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-               value={form.apiKey}
-               onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
-             />
-           </div>
-           <div>
-             <label className="mb-1 block text-sm font-medium text-slate-700">API Secret</label>
-             <input
-               type="password"
-               required
-               className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-               value={form.apiSecret}
-               onChange={(e) => setForm({ ...form, apiSecret: e.target.value })}
-             />
+               value={form.credentialsRef}
+               onChange={(e) => setForm({ ...form, credentialsRef: e.target.value })}
+             >
+               <option value="" disabled>
+                 Select a saved secret
+               </option>
+               {(secretsQuery.data ?? []).map((secret) => (
+                 <option key={secret.id} value={secret.id}>
+                   {secret.label || secret.id} ({secret.id})
+                 </option>
+               ))}
+             </select>
            </div>
            <div>
              <label className="mb-1 block text-sm font-medium text-slate-700">Site</label>

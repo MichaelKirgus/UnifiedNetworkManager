@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
-import { query, UserRow } from '../db';
+import { db } from '../db';
+import { eq } from 'drizzle-orm';
 import { signToken } from '../auth/jwt';
 import { verifyTotp } from '../auth/totp';
 
@@ -29,8 +30,9 @@ function purgeExpiredChallenges(): void {
 router.post('/auth/login', async (req, res) => {
   const { username, password } = req.body ?? {};
 
-  const result = await query<UserRow>('SELECT * FROM users WHERE username = $1', [username]);
-  const user = result.rows[0];
+  const user = await db.query.users.findFirst({
+    where: (users, { eq }) => eq(users.username, username),
+  });
   if (!user || !bcrypt.compareSync(password ?? '', user.passwordHash)) {
     res.status(401).json({ error: 'Invalid username or password' });
     return;
@@ -53,9 +55,9 @@ router.post('/auth/2fa/verify', async (req, res) => {
     res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
     return;
   }
-
-  const result = await query<UserRow>('SELECT * FROM users WHERE id = $1', [entry.userId]);
-  const user = result.rows[0];
+  const user = await db.query.users.findFirst({
+    where: (users, { eq }) => eq(users.id, entry.userId),
+  });
   if (!user) {
     res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
     return;

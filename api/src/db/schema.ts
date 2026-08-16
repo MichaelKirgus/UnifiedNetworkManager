@@ -25,7 +25,10 @@ export const devices = pgTable('devices', {
 
 export const secrets = pgTable('secrets', {
   id: text('id').primaryKey(),
+  label: text('label'),
   encryptedValue: text('encryptedValue').notNull(),
+  userId: text('userId').notNull(),
+  expiresAt: text('expiresAt'),
   createdAt: text('createdAt').notNull(),
 });
 
@@ -38,6 +41,7 @@ export const plugins = pgTable('plugins', {
   endpoint: text('endpoint').notNull(),
   authType: text('authType').notNull().default('none'),
   createdAt: text('createdAt').notNull(),
+  lastSeenAt: text('lastSeenAt'),
 });
 
 export const configJobs = pgTable('config_jobs', {

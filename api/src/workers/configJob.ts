@@ -1,5 +1,7 @@
 import axios from 'axios';
-import { query, ConfigJobRow, DeviceRow, PluginRow } from '../db';
+import { db } from '../db';
+import { eq } from 'drizzle-orm';
+import * as schema from '../db/schema';
 import { configJobQueue } from '../queue';
 
 const PROCESS_INTERVAL_MS = 5_000;
@@ -10,40 +12,49 @@ interface ConfigResponse {
 }
 
 async function processJob(jobId: string): Promise<void> {
-  const jobResult = await query<ConfigJobRow>('SELECT * FROM config_jobs WHERE id = $1', [jobId]);
-  const job = jobResult.rows[0];
+  const job = await db.query.configJobs.findFirst({
+    where: (configJobs, { eq }) => eq(configJobs.id, jobId),
+  });
   if (!job || job.status !== 'queued') {
     return;
   }
 
-  await query('UPDATE config_jobs SET status = $1 WHERE id = $2', ['running', jobId]);
+  await db.update(schema.configJobs)
+    .set({ status: 'running' })
+    .where(eq(schema.configJobs.id, jobId));
 
-  const deviceResult = await query<DeviceRow>('SELECT * FROM devices WHERE id = $1', [job.deviceId]);
-  const device = deviceResult.rows[0];
+  const device = await db.query.devices.findFirst({
+    where: (devices, { eq }) => eq(devices.id, job.deviceId),
+  });
   if (!device) {
-    await query(
-      'UPDATE config_jobs SET status = $1, result = $2, "finishedAt" = $3 WHERE id = $4',
-      ['failed', JSON.stringify({ error: 'Device not found' }), new Date().toISOString(), jobId]
-    );
+    await db.update(schema.configJobs)
+      .set({ 
+        status: 'failed', 
+        result: JSON.stringify({ error: 'Device not found' }), 
+        finishedAt: new Date().toISOString() 
+      })
+      .where(eq(schema.configJobs.id, jobId));
     return;
   }
 
-  const pluginResult = await query<PluginRow>('SELECT * FROM plugins WHERE id = $1', [device.pluginId]);
-  const plugin = pluginResult.rows[0];
+  const plugin = await db.query.plugins.findFirst({
+    where: (plugins, { eq }) => eq(plugins.id, device.pluginId),
+  });
   if (!plugin) {
-    await query(
-      'UPDATE config_jobs SET status = $1, result = $2, "finishedAt" = $3 WHERE id = $4',
-      ['failed', JSON.stringify({ error: 'Plugin not found' }), new Date().toISOString(), jobId]
-    );
+    await db.update(schema.configJobs)
+      .set({ 
+        status: 'failed', 
+        result: JSON.stringify({ error: 'Plugin not found' }), 
+        finishedAt: new Date().toISOString() 
+      })
+      .where(eq(schema.configJobs.id, jobId));
     return;
   }
 
   try {
-    const secretResult = await query<any>(
-      `SELECT encryptedValue FROM secrets WHERE id = $1`,
-      [device.secretId]
-    );
-    const secret = secretResult.rows[0];
+    const secret = await db.query.secrets.findFirst({
+      where: (secrets, { eq }) => eq(secrets.id, device.secretId),
+    });
     if (!secret) {
       throw new Error(`Secret not found for device ${device.id}`);
     }
@@ -66,15 +77,21 @@ async function processJob(jobId: string): Promise<void> {
     );
 
     const status = response.data?.success === false ? 'failed' : 'succeeded';
-    await query(
-      'UPDATE config_jobs SET status = $1, result = $2, "finishedAt" = $3 WHERE id = $4',
-      [status, JSON.stringify(response.data?.result ?? response.data ?? {}), new Date().toISOString(), jobId]
-    );
+    await db.update(schema.configJobs)
+      .set({ 
+        status, 
+        result: JSON.stringify(response.data?.result ?? response.data ?? {}), 
+        finishedAt: new Date().toISOString() 
+      })
+      .where(eq(schema.configJobs.id, jobId));
   } catch (err) {
-    await query(
-      'UPDATE config_jobs SET status = $1, result = $2, "finishedAt" = $3 WHERE id = $4',
-      ['failed', JSON.stringify({ error: (err as Error).message }), new Date().toISOString(), jobId]
-    );
+    await db.update(schema.configJobs)
+      .set({ 
+        status: 'failed', 
+        result: JSON.stringify({ error: (err as Error).message }), 
+        finishedAt: new Date().toISOString() 
+      })
+      .where(eq(schema.configJobs.id, jobId));
   }
 }
 

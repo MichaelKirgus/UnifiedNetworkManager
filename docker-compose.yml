@@ -4,9 +4,9 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: unm
-      POSTGRES_PASSWORD: unm
-      POSTGRES_DB: unm
+      POSTGRES_USER: ${POSTGRES_USER:-unm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-unm}
+      POSTGRES_DB: ${POSTGRES_DB:-unm}
     ports:
       - "5432:5432"
     volumes:

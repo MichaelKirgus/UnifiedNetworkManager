@@ -1,194 +1,48 @@
-import { Pool, QueryResult, QueryResultRow } from 'pg';
+import { Pool } from 'pg';
+import { drizzle } from 'drizzle-orm/node-postgres';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { generateSecret, buildOtpAuthUri } from './auth/totp';
+import * as schema from './db/schema';
 
-// Built via string concatenation (rather than a single literal) so this
-// well-known default dev connection string - matching docker-compose.yml's
-// postgres service - doesn't get flagged as a hardcoded credential.
 const DEFAULT_DATABASE_URL = 'postgresql://' + 'unm' + ':' + 'unm' + '@localhost:5432/unm';
 const DATABASE_URL = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
 
 export const pool = new Pool({ connectionString: DATABASE_URL });
+export const db = drizzle(pool, { schema });
+
+export type User = typeof schema.users.$inferSelect;
+export type Device = typeof schema.devices.$inferSelect;
+export type Plugin = typeof schema.plugins.$inferSelect;
+export type ConfigJob = typeof schema.configJobs.$inferSelect;
+export type Telemetry = typeof schema.telemetry.$inferSelect;
+export type Secret = typeof schema.secrets.$inferSelect;
 
 /**
- * Thin wrapper around `pool.query` so route/worker modules don't need to
- * import the `pg` Pool directly. Accepts a parameterized query (`$1`, `$2`,
- * ...) and returns the standard `pg` `QueryResult`, whose rows are on
- * `.rows`.
- */
-export function query<T extends QueryResultRow = QueryResultRow>(
-  text: string,
-  params?: unknown[]
-): Promise<QueryResult<T>> {
-  return pool.query<T>(text, params);
-}
-
-export interface UserRow {
-  id: string;
-  username: string;
-  passwordHash: string;
-  totpSecret: string | null;
-  roles: string; // JSON string array
-  permissions: string; // JSON string array
-  createdAt: string;
-}
-
-export interface DeviceRow {
-  id: string;
-  name: string;
-  vendor: string;
-  deviceType: string;
-  pluginId: string;
-  managementAddress: string;
-  site: string | null;
-  status: string;
-  secretId: string;
-  createdAt: string;
-}
-
-export interface PluginRow {
-  id: string;
-  name: string;
-  version: string;
-  vendors: string; // JSON string array
-  capabilities: string; // JSON string array
-  endpoint: string;
-  authType: string;
-  createdAt: string;
-}
-
-export interface ConfigJobRow {
-  id: string;
-  deviceId: string;
-  action: string;
-  status: string;
-  payload: string; // JSON string
-  result: string | null; // JSON string
-  createdAt: string;
-  finishedAt: string | null;
-}
-
-export interface TelemetryRow {
-  id: string;
-  deviceId: string;
-  collectedAt: string;
-  health: string;
-  metrics: string; // JSON string
-}
-
-/**
- * Creates all tables (idempotent) and seeds a default admin user on first
- * run. Column names that aren't already lowercase are double-quoted so
- * Postgres preserves the exact camelCase used by the TypeScript row
- * interfaces above (unquoted identifiers are folded to lowercase by
- * Postgres, which would otherwise silently break `row.passwordHash`-style
- * property access throughout the codebase).
+ * Seeds a default admin user on first run.
+ * Note: Table creation is now handled by Drizzle migrations/push.
  */
 export async function initDb(): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      username TEXT UNIQUE NOT NULL,
-      "passwordHash" TEXT NOT NULL,
-      "totpSecret" TEXT,
-      roles TEXT NOT NULL DEFAULT '[]',
-      permissions TEXT NOT NULL DEFAULT '[]',
-      "createdAt" TEXT NOT NULL
-    )
-  `);
+  const existingAdmin = await db.query.users.findFirst({
+    where: (users, { eq }) => eq(users.username, 'admin'),
+  });
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS devices (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      vendor TEXT NOT NULL,
-      "deviceType" TEXT NOT NULL,
-      "pluginId" TEXT NOT NULL,
-      "managementAddress" TEXT NOT NULL,
-      site TEXT,
-      status TEXT NOT NULL DEFAULT 'unknown',
-      "secretId" TEXT NOT NULL,
-      "createdAt" TEXT NOT NULL
-    )
-  `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS secrets (
-      id TEXT PRIMARY KEY,
-      encryptedValue TEXT NOT NULL,
-      createdAt TEXT NOT NULL
-    )
-  `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS plugins (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      version TEXT NOT NULL,
-      vendors TEXT NOT NULL DEFAULT '[]',
-      capabilities TEXT NOT NULL DEFAULT '[]',
-      endpoint TEXT NOT NULL,
-      "authType" TEXT NOT NULL DEFAULT 'none',
-      "createdAt" TEXT NOT NULL
-    )
-  `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS config_jobs (
-      id TEXT PRIMARY KEY,
-      "deviceId" TEXT NOT NULL,
-      action TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'queued',
-      payload TEXT NOT NULL DEFAULT '{}',
-      result TEXT,
-      "createdAt" TEXT NOT NULL,
-      "finishedAt" TEXT
-    )
-  `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS telemetry (
-      id TEXT PRIMARY KEY,
-      "deviceId" TEXT NOT NULL,
-      "collectedAt" TEXT NOT NULL,
-      health TEXT NOT NULL DEFAULT 'unknown',
-      metrics TEXT NOT NULL DEFAULT '{}'
-    )
-  `);
-
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_telemetry_device_collected
-      ON telemetry ("deviceId", "collectedAt" DESC)
-  `);
-
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_config_jobs_device
-      ON config_jobs ("deviceId", "createdAt" DESC)
-  `);
-
-  const existingAdmin = await pool.query<any>('SELECT id FROM users WHERE username = $1', ['admin']);
-  if (existingAdmin.rows.length === 0) {
+  if (!existingAdmin) {
     const passwordHash = bcrypt.hashSync('admin', 10);
     const totpSecret = generateSecret();
-    await pool.query(
-      `INSERT INTO users (id, username, "passwordHash", "totpSecret", roles, permissions, "createdAt")
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        uuidv4(),
-        'admin',
-        passwordHash,
-        totpSecret,
-        JSON.stringify(['admin']),
-        JSON.stringify(['devices:read', 'devices:write', 'configs:apply', 'plugins:manage']),
-        new Date().toISOString(),
-      ]
-    );
-    // eslint-disable-next-line no-console
+    
+    await db.insert(schema.users).values({
+      id: uuidv4(),
+      username: 'admin',
+      passwordHash,
+      totpSecret,
+      roles: JSON.stringify(['admin']),
+      permissions: JSON.stringify(['devices:read', 'devices:write', 'configs:apply', 'plugins:manage', 'secrets:read', 'secrets:write', 'secrets:delete']),
+      createdAt: new Date().toISOString(),
+    });
+
     console.log('[db] seeded default admin user (username: admin, password: admin)');
-    // eslint-disable-next-line no-console
     console.log(`[db] admin TOTP secret (dev only): ${totpSecret}`);
-    // eslint-disable-next-line no-console
     console.log(`[db] admin otpauth URI (scan with an authenticator app): ${buildOtpAuthUri('admin', totpSecret)}`);
   }
 }

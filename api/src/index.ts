@@ -8,9 +8,11 @@ import { initDb } from './db';
 import authRouter from './routes/auth';
 import devicesRouter from './routes/devices';
 import pluginsRouter from './routes/plugins';
+import secretsRouter from './routes/secrets';
 import { internalRouter } from './routes/internal';
 import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import { startTelemetryWorker } from './workers/telemetry';
+import { startPluginDiscovery } from './plugins/discovery';
 import { startConfigJobWorker } from './workers/configJob';
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -69,6 +71,7 @@ async function main(): Promise<void> {
   api.use(authRouter);
   api.use(devicesRouter);
   api.use(pluginsRouter);
+  api.use('/secrets', secretsRouter);
   api.use(internalRouter());
   api.use(configJobsRouter);
 
@@ -99,6 +102,19 @@ async function main(): Promise<void> {
 
   startTelemetryWorker();
   startConfigJobWorker();
+
+  // Discover plugins via mDNS/DNS-SD, with HTTP polling as a fallback for
+  // Docker bridge networks where multicast is isolated.
+  const pollEndpoints = (process.env.PLUGIN_POLL_ENDPOINTS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const stopDiscovery = startPluginDiscovery({
+    pollEndpoints,
+    pollIntervalMs: Number(process.env.PLUGIN_POLL_INTERVAL_MS ?? 60_000),
+  });
+  process.on('SIGTERM', () => stopDiscovery());
+  process.on('SIGINT', () => stopDiscovery());
 }
 
 main().catch((err) => {

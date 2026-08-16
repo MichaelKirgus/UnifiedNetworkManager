@@ -1,5 +1,13 @@
 const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3000/v1';
 
+export interface Secret {
+  id: string;
+  label: string;
+  createdAt: string;
+  expiresAt?: string;
+  username: string;
+}
+
 export interface LoginResponse {
   challengeToken: string;
   twoFactorRequired: boolean;
@@ -40,6 +48,7 @@ export interface Plugin {
   capabilities: string[];
   endpoint: string;
   authType: string;
+  lastSeenAt?: string | null;
 }
 
 export interface ConfigJob {
@@ -92,10 +101,14 @@ export const api = {
     apiFetch<Device>('/devices', { method: 'POST', body: JSON.stringify(body) }),
   monitoring: (deviceId: string) => apiFetch<TelemetrySnapshot>(`/devices/${deviceId}/monitoring`),
   plugins: () => apiFetch<Plugin[]>('/plugins'),
-  createPlugin: (body: unknown) =>
-    apiFetch<Plugin>('/plugins', { method: 'POST', body: JSON.stringify(body) }),
   configJobs: (deviceId: string, body: unknown) =>
     apiFetch<ConfigJob>(`/devices/${deviceId}/config-jobs`, { method: 'POST', body: JSON.stringify(body) }),
   allConfigJobs: () => apiFetch<ConfigJob[]>('/config-jobs'),
-  getConfigJob: (jobId: string) => apiFetch<ConfigJob>(`/config-jobs/${jobId}`),
+  allConfigJobs: () => apiFetch<ConfigJob[]>('/config-jobs'),
+  getConfigJob: (jobId: string) => apiFetch<ConfigJob>('/config-jobs/${jobId}'),
+  secrets: () => apiFetch<Secret[]>('/secrets'),
+  createSecret: (body: { apiKey: string; apiSecret: string; label: string; expiresAt?: string }) =>
+    apiFetch<Secret>('/secrets', { method: 'POST', body: JSON.stringify(body) }),
+  deleteSecret: (id: string) =>
+    apiFetch<void>(`/secrets/${id}`, { method: 'DELETE' }),
 };

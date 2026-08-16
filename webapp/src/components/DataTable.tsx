@@ -13,8 +13,8 @@ interface DataTableProps<T> {
   rowKey: (row: T) => string;
 }
 
-export function DataTable<T>({ columns, rows, emptyMessage = 'No data available.', rowKey }: DataTableProps<T>) {
-  if (rows.length === 0) {
+export function DataTable<T>({ columns, rows = [], emptyMessage = 'No data available.', rowKey }: DataTableProps<T>) {
+  if (!rows || rows.length === 0) {
     return <div className="rounded-md border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">{emptyMessage}</div>;
   }
 

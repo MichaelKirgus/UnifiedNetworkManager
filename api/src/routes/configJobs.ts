@@ -1,10 +1,12 @@
 import { Router } from 'express';
-import { query, ConfigJobRow } from '../db';
+import { db } from '../db';
+import { eq, desc } from 'drizzle-orm';
+import * as schema from '../db/schema';
 import { requireAuth } from '../auth/middleware';
 
 const router = Router();
 
-function serializeConfigJob(row: ConfigJobRow) {
+function serializeConfigJob(row: any) {
   return {
     id: row.id,
     deviceId: row.deviceId,
@@ -18,8 +20,9 @@ function serializeConfigJob(row: ConfigJobRow) {
 
 router.get('/config-jobs/:jobId', requireAuth, async (req, res) => {
   const { jobId } = req.params;
-  const result = await query<ConfigJobRow>('SELECT * FROM config_jobs WHERE id = $1', [jobId]);
-  const job = result.rows[0];
+  const job = await db.query.configJobs.findFirst({
+    where: (configJobs, { eq }) => eq(configJobs.id, jobId),
+  });
   if (!job) {
     res.status(404).json({ error: 'Job not found' });
     return;
@@ -36,8 +39,11 @@ router.get('/config-jobs/:jobId', requireAuth, async (req, res) => {
  */
 export const configJobsListRouter = Router();
 configJobsListRouter.get('/config-jobs', requireAuth, async (_req, res) => {
-  const result = await query<ConfigJobRow>('SELECT * FROM config_jobs ORDER BY "createdAt" DESC LIMIT 100');
-  res.status(200).json(result.rows.map(serializeConfigJob));
+  const jobs = await db.query.configJobs.findMany({
+    orderBy: [desc(schema.configJobs.createdAt)],
+    limit: 100,
+  });
+  res.status(200).json(jobs.map(serializeConfigJob));
 });
 
 export default router;

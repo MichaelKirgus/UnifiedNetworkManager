@@ -209,7 +209,10 @@ paths:
   /plugins:
     get:
       tags: [Plugins]
-      summary: List installed plugins
+      summary: List discovered plugins
+      description: >-
+        Plugins are discovered automatically via mDNS/DNS-SD advertising and an
+        HTTP polling fallback, so no manual registration is required.
       responses:
         '200':
           description: Plugin list
@@ -221,27 +224,71 @@ paths:
                   $ref: '#/components/schemas/Plugin'
         '401':
           description: Authentication required
+
+  /secrets:
+    get:
+      tags: [Secrets]
+      summary: List stored secrets
+      description: Returns a list of stored secrets (metadata only).
+      responses:
+        '200':
+          description: Secret list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Secret'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
     post:
-      tags: [Plugins]
-      summary: Register plugin
-      description: Requires permission `plugins:manage`.
+      tags: [Secrets]
+      summary: Create a new secret
+      description: Encrypts and stores API credentials.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PluginCreateRequest'
+              type: object
+              required: [apiKey, apiSecret]
+              properties:
+                apiKey: { type: string }
+                apiSecret: { type: string, format: password }
+                label: { type: string, nullable: true }
+                expiresAt: { type: string, format: date-time, nullable: true }
       responses:
         '201':
-          description: Plugin registered
+          description: Secret created
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Plugin'
+                $ref: '#/components/schemas/Secret'
         '401':
           description: Authentication required
         '403':
           description: Missing required permission
+
+  /secrets/{id}:
+    delete:
+      tags: [Secrets]
+      summary: Delete a secret
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Secret deleted
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Secret not found
 
 components:
   securitySchemes:
@@ -255,15 +302,22 @@ components:
         completion claim (for example `amr` includes `totp`).
 
   schemas:
+    Secret:
+      type: object
+      required: [id, createdAt]
+      properties:
+        id: { type: string }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        username: { type: string }
+
     Device:
       type: object
       required: [id, name, vendor, deviceType, pluginId, managementAddress, status]
       properties:
         id: { type: string }
         name: { type: string }
-        vendor:
-          type: string
-          enum: [mikrotik, opnsense, openwrt, other]
+        vendor: { type: string }
         deviceType: { type: string }
         pluginId: { type: string }
         managementAddress: { type: string }
@@ -277,9 +331,7 @@ components:
       required: [name, vendor, deviceType, pluginId, managementAddress, credentialsRef]
       properties:
         name: { type: string }
-        vendor:
-          type: string
-          enum: [mikrotik, opnsense, openwrt, other]
+        vendor: { type: string }
         deviceType: { type: string }
         pluginId: { type: string }
         managementAddress: { type: string }

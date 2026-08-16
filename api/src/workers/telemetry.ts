@@ -1,6 +1,8 @@
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
-import { query, DeviceRow, PluginRow } from '../db';
+import { db } from '../db';
+import { eq } from 'drizzle-orm';
+import * as schema from '../db/schema';
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -9,20 +11,19 @@ interface MonitoringResponse {
   metrics?: Record<string, number>;
 }
 
-async function pollDevice(device: DeviceRow): Promise<void> {
-  const pluginResult = await query<PluginRow>('SELECT * FROM plugins WHERE id = $1', [device.pluginId]);
-  const plugin = pluginResult.rows[0];
+async function pollDevice(device: any): Promise<void> {
+  const plugin = await db.query.plugins.findFirst({
+    where: (plugins, { eq }) => eq(plugins.id, device.pluginId),
+  });
 
   if (!plugin) {
     return;
   }
 
   try {
-    const secretResult = await query<any>(
-      `SELECT encryptedValue FROM secrets WHERE id = $1`,
-      [device.secretId]
-    );
-    const secret = secretResult.rows[0];
+    const secret = await db.query.secrets.findFirst({
+      where: (secrets, { eq }) => eq(secrets.id, device.secretId),
+    });
     if (!secret) {
       throw new Error(`Secret not found for device ${device.id}`);
     }
@@ -46,24 +47,30 @@ async function pollDevice(device: DeviceRow): Promise<void> {
     const metrics = response.data?.metrics ?? {};
     const collectedAt = new Date().toISOString();
 
-    await query(
-      `INSERT INTO telemetry (id, "deviceId", "collectedAt", health, metrics)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [uuidv4(), device.id, collectedAt, health, JSON.stringify(metrics)]
-    );
+    await db.insert(schema.telemetry).values({
+      id: uuidv4(),
+      deviceId: device.id,
+      collectedAt,
+      health,
+      metrics: JSON.stringify(metrics),
+    });
 
     const status = health === 'ok' ? 'online' : health === 'critical' ? 'offline' : 'degraded';
-    await query('UPDATE devices SET status = $1 WHERE id = $2', [status, device.id]);
+    await db.update(schema.devices)
+      .set({ status })
+      .where(eq(schema.devices.id, device.id));
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error(`[telemetry] failed to poll device ${device.id}:`, (err as Error).message);
-    await query('UPDATE devices SET status = $1 WHERE id = $2', ['unknown', device.id]);
+    await db.update(schema.devices)
+      .set({ status: 'unknown' })
+      .where(eq(schema.devices.id, device.id));
   }
 }
 
 async function pollAllDevices(): Promise<void> {
-  const result = await query<DeviceRow>('SELECT * FROM devices');
-  await Promise.all(result.rows.map((device) => pollDevice(device)));
+  const devices = await db.query.devices.findMany();
+  await Promise.all(devices.map((device) => pollDevice(device)));
 }
 
 /**

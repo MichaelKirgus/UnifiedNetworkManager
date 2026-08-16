@@ -3,6 +3,7 @@ import { ReactNode } from 'react';
 import Login from './pages/Login';
 import Devices from './pages/Devices';
 import DeviceDetail from './pages/DeviceDetail';
+import Secrets from './pages/Secrets';
 import ConfigJobs from './pages/ConfigJobs';
 import Plugins from './pages/Plugins';
 
@@ -23,6 +24,14 @@ export default function App() {
         element={
           <RequireAuth>
             <Devices />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/secrets"
+        element={
+          <RequireAuth>
+            <Secrets />
           </RequireAuth>
         }
       />
