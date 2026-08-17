@@ -3,7 +3,87 @@
 # Exit on error
 set -e
 
-echo "🚀 Starting UnifiedNetworkManager Appliance Setup..."
+# --- Configuration -----------------------------------------------------------
+API_PORT=3000
+WEB_PORT=5173
+OPNSENSE_PORT=4001
+BASIC_AUTH_PORT=4002
+SECRETS_PORT=4003
+LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/unm-dev.XXXXXX")"
+DEV_PIDS=()
+
+# --- Helpers -----------------------------------------------------------------
+ok()   { echo "✅ $1"; }
+fail() { echo "❌ $1"; exit 1; }
+
+# Run a docker compose command (v2 plugin or legacy binary), with sudo.
+docker_compose() {
+  if command -v docker-compose &> /dev/null; then
+    sudo docker-compose "$@"
+  else
+    sudo docker compose "$@"
+  fi
+}
+
+# Wait until a TCP port accepts connections.
+wait_for_port() {
+  local port="$1" name="$2" retries="${3:-30}" i=0
+  until nc -z localhost "$port" 2>/dev/null; do
+    i=$((i+1))
+    if [ "$i" -ge "$retries" ]; then
+      fail "$name did not open port $port within ${retries}s."
+    fi
+    echo -n "."; sleep 1
+  done
+}
+
+# Wait until an HTTP endpoint responds successfully.
+wait_for_url() {
+  local url="$1" name="$2" retries="${3:-30}" i=0
+  until curl -fsS -o /dev/null "$url" 2>/dev/null; do
+    i=$((i+1))
+    if [ "$i" -ge "$retries" ]; then
+      fail "$name did not become ready at $url within ${retries}s."
+    fi
+    echo -n "."; sleep 1
+  done
+}
+
+# Start a dev server in its own session so the whole process tree can be killed
+# cleanly on exit (setsid makes the PID the session/process-group leader).
+start_dev_server() {
+  local dir="$1" name="$2"
+  if command -v setsid &> /dev/null; then
+    setsid bash -c "cd '$dir' && exec npm run dev" > "$LOG_DIR/$name.log" 2>&1 &
+  else
+    bash -c "cd '$dir' && exec npm run dev" > "$LOG_DIR/$name.log" 2>&1 &
+  fi
+  DEV_PIDS+=("$!")
+}
+
+# --- Cleanup (idempotent; stops dev servers + containers) --------------------
+cleanup() {
+  trap - EXIT INT TERM
+  echo ""
+  echo "🛑 Stopping dev servers and containers..."
+  for pid in "${DEV_PIDS[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+    fi
+  done
+  # Safety nets: free the dev ports and kill any respawn supervisors.
+  fuser -k "${API_PORT}/tcp" 2>/dev/null || true
+  fuser -k "${WEB_PORT}/tcp" 2>/dev/null || true
+  pkill -f "ts-node-dev" 2>/dev/null || true
+  pkill -f "vite" 2>/dev/null || true
+  sleep 1
+  docker_compose down || true
+  rm -rf "$LOG_DIR" 2>/dev/null || true
+  echo "✅ All services stopped. Goodbye!"
+}
+trap cleanup EXIT INT TERM
+
+echo "🚀 Starting UnifiedNetworkManager dev environment..."
 
 # 1. Environment Check
 echo "🔍 Checking environment..."
@@ -73,29 +153,52 @@ echo "🛠️  Syncing database schema..."
 cd api && npx drizzle-kit push && cd ..
 echo "✅ Database schema is up to date."
 
-# 6. Start remaining infrastructure
-echo "🌐 Starting remaining infrastructure (Plugins)..."
-if command -v docker-compose &> /dev/null; then
-    sudo docker-compose up -d opnsense-plugin
-else
-    sudo docker compose up -d opnsense-plugin
-fi
+# 6. Build the plugins (opnsense + basic-auth + secrets-provider)
+echo "🔨 Building plugins..."
+( cd plugins/opnsense && npm run build )
+( cd plugins/basic-auth && npm run build )
+( cd plugins/secrets-provider && npm run build )
+ok "Plugins built (opnsense + basic-auth + secrets-provider)."
+
+# 7. Start the plugin containers
+echo "🌐 Starting plugin containers..."
+docker_compose up -d opnsense-plugin basic-auth-plugin secrets-provider-plugin
+ok "Plugin containers started."
+
+# 8. Wait for the plugins to be reachable (basic-auth must be up before the
+#    API can verify credentials; secrets-provider before secret access;
+#    opnsense is needed for device telemetry).
+echo "⏳ Waiting for plugins to be ready..."
+wait_for_port "$OPNSENSE_PORT" "opnsense-plugin"
+wait_for_port "$BASIC_AUTH_PORT" "basic-auth-plugin"
+wait_for_port "$SECRETS_PORT" "secrets-provider-plugin"
+ok "Plugins are reachable."
+
+# 9. Start the API and webapp dev servers (hot reload) in the background.
+echo "🚦 Starting API and webapp dev servers..."
+start_dev_server "api" "api"
+start_dev_server "webapp" "web"
+
+echo "⏳ Waiting for the API to be ready on port ${API_PORT}..."
+wait_for_port "$API_PORT" "API"
+wait_for_url "http://localhost:${API_PORT}/healthz" "API"
+ok "API is up."
+
+echo "⏳ Waiting for the webapp to be ready on port ${WEB_PORT}..."
+wait_for_port "$WEB_PORT" "webapp"
+ok "Webapp is up."
 
 echo "--------------------------------------------------------------------------------"
-echo "✅ Appliance Setup Complete!"
+echo "✅ Dev environment is running!"
 echo "--------------------------------------------------------------------------------"
-echo "The database is running and healthy on port 5432."
+echo "  Webapp:  http://localhost:${WEB_PORT}"
+echo "  API:     http://localhost:${API_PORT}/v1"
+echo "  Logs:    $LOG_DIR"
 echo ""
-echo "To start the application, please open two new terminals and run:"
+echo "  • API dev log:   tail -f $LOG_DIR/api.log"
+echo "  • Web dev log:   tail -f $LOG_DIR/web.log"
 echo ""
-echo "Terminal 1 (API):   make api-dev"
-echo "Terminal 2 (Web):   make web-dev"
+echo "  Press [ENTER] (or Ctrl+C) to stop the dev servers and all containers."
 echo "--------------------------------------------------------------------------------"
-echo ""
-echo "Press [ENTER] to stop the infrastructure and all dev servers..."
 read -r
-echo "🛑 Stopping everything..."
-make stop-api
-make stop-web
-make down
-echo "✅ All services stopped. Goodbye!"
+# Teardown is handled by the cleanup() trap (EXIT/INT/TERM).

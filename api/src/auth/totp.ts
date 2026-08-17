@@ -1,15 +1,12 @@
 import { authenticator } from 'otplib';
 
 /**
- * Verifies a 6-digit TOTP code against the given base32 secret.
+ * TOTP helpers used by the API for user provisioning (admin seeding).
+ *
+ * Note: TOTP *verification* during login is performed by the active identity
+ * provider plugin (e.g. the basic-auth plugin), not here. The API only needs
+ * to generate a secret and build the enrollment URI when it seeds users.
  */
-export function verifyTotp(secret: string, code: string): boolean {
-  try {
-    return authenticator.verify({ token: code, secret });
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Generates a new base32 TOTP secret for enrolling a user's authenticator app.

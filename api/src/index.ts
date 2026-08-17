@@ -55,9 +55,10 @@ async function main(): Promise<void> {
   const api = express.Router();
   api.use(generalLimiter);
 
-  // Convenience endpoint (not defined in the OpenAPI spec) must be mounted
-  // ahead of the validator, since the validator 404s any undocumented path.
+  // Routes not defined in the OpenAPI spec must be mounted ahead of the
+  // validator, since the validator 404s any undocumented path.
   api.use(configJobsListRouter);
+  api.use(internalRouter());
 
   api.use(
     OpenApiValidator.middleware({
@@ -72,7 +73,6 @@ async function main(): Promise<void> {
   api.use(devicesRouter);
   api.use(pluginsRouter);
   api.use('/secrets', secretsRouter);
-  api.use(internalRouter());
   api.use(configJobsRouter);
 
   // OpenAPI validation error handler.

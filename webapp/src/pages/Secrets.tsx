@@ -134,11 +134,11 @@ export default function Secrets() {
       {!loading && !error && (
         <DataTable
           columns={[
-            { header: 'Label', key: 'label', accessor: (s: Secret) => s.label },
-            { header: 'User', key: 'username', accessor: (s: Secret) => s.username },
-            { header: 'ID', key: 'id', accessor: (s: Secret) => s.id },
-            { header: 'Created At', key: 'createdAt', accessor: (s: Secret) => new Date(s.createdAt).toLocaleString() },
-            { header: 'Expires At', key: 'expiresAt', accessor: (s: Secret) => s.expiresAt ? new Date(s.expiresAt).toLocaleString() : 'Never' },
+            { header: 'Label', key: 'label', render: (s: Secret) => s.label },
+            { header: 'User', key: 'username', render: (s: Secret) => s.username },
+            { header: 'ID', key: 'id', render: (s: Secret) => s.id },
+            { header: 'Created At', key: 'createdAt', render: (s: Secret) => new Date(s.createdAt).toLocaleString() },
+            { header: 'Expires At', key: 'expiresAt', render: (s: Secret) => (s.expiresAt ? new Date(s.expiresAt).toLocaleString() : 'Never') },
             { 
               header: 'Actions', 
               key: 'actions',

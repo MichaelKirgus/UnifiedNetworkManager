@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { db, Device, Plugin, Telemetry, ConfigJob } from '../db';
-import { encrypt } from '../utils/crypto';
 import { requireAuth, requirePermission, require2FA } from '../auth/middleware';
 import { configJobQueue } from '../queue';
 import { eq, and, desc } from 'drizzle-orm';

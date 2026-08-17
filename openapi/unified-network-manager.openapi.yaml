@@ -19,6 +19,56 @@ tags:
   - name: Configuration
   - name: Plugins
 paths:
+  /auth/flow:
+    get:
+      tags: [Authentication]
+      summary: Report the active identity provider's authentication flow
+      description: >
+        Returns the `flow` of the active identity provider (e.g. `password`,
+        `oauth2`, `ldap`, `saml`). The webapp uses this to adapt its login UI
+        before the user enters any credentials.
+      security: []
+      responses:
+        '200':
+          description: Auth flow
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [flow]
+                properties:
+                  flow:
+                    type: string
+                    enum: [password, oauth2, ldap, saml]
+        '503':
+          description: No identity provider available
+
+  /auth/redirect:
+    get:
+      tags: [Authentication]
+      summary: Get the URL to start an external authentication flow
+      description: >
+        Returns the URL the webapp should redirect the user to in order to
+        start an external authentication flow (OAuth2 / SAML / LDAP web login).
+        The provider declares this in its discovery response. Responds 501
+        when the active provider does not support redirect-based login (e.g.
+        the basic-auth password provider).
+      security: []
+      responses:
+        '200':
+          description: Redirect URL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [redirectUrl]
+                properties:
+                  redirectUrl: { type: string, format: uri }
+        '501':
+          description: Provider does not support redirect-based login
+        '503':
+          description: No identity provider available
+
   /auth/login:
     post:
       tags: [Authentication]
@@ -395,7 +445,7 @@ components:
           type: array
           items:
             type: string
-            enum: [monitoring, configuration, inventory]
+            enum: [monitoring, configuration, inventory, identityProvider, secretsProvider]
         endpoint: { type: string, format: uri }
         authType:
           type: string
@@ -414,7 +464,7 @@ components:
           type: array
           items:
             type: string
-            enum: [monitoring, configuration, inventory]
+            enum: [monitoring, configuration, inventory, identityProvider, secretsProvider]
         endpoint: { type: string, format: uri }
         authType:
           type: string

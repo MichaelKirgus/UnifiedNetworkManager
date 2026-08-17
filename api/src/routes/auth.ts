@@ -1,99 +1,96 @@
 import { Router } from 'express';
-import bcrypt from 'bcryptjs';
-import { v4 as uuidv4 } from 'uuid';
-import { db } from '../db';
-import { eq } from 'drizzle-orm';
 import { signToken } from '../auth/jwt';
-import { verifyTotp } from '../auth/totp';
+import { login, verify2fa, getFlow, getRedirectUrl } from '../auth/identityProvider';
 
 const router = Router();
 
-const CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const TOKEN_TTL_SECONDS = 3600;
 
-interface ChallengeEntry {
-  userId: string;
-  expiresAt: number;
-}
-
-// Simple in-memory challenge-token store (userId lookups) with a 5 minute TTL.
-const challenges = new Map<string, ChallengeEntry>();
-
-function purgeExpiredChallenges(): void {
-  const now = Date.now();
-  for (const [token, entry] of challenges.entries()) {
-    if (entry.expiresAt <= now) {
-      challenges.delete(token);
-    }
+/**
+ * Reports the authentication flow of the active identity provider so the
+ * webapp can adapt its login UI (e.g. password + TOTP vs. an OAuth2 redirect).
+ * Public endpoint — no credentials are involved.
+ */
+router.get('/auth/flow', async (_req, res) => {
+  try {
+    const flow = await getFlow();
+    res.status(200).json({ flow });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Unable to determine auth flow' });
   }
-}
+});
 
+/**
+ * Returns the URL to redirect the user to in order to start an external
+ * authentication flow (OAuth2 / SAML / LDAP web login). The webapp calls this
+ * for non-`password` flows and then navigates the browser to the returned URL.
+ * Responds 501 when the active provider does not support redirect-based login.
+ */
+router.get('/auth/redirect', async (_req, res) => {
+  try {
+    const redirectUrl = await getRedirectUrl();
+    res.status(200).json({ redirectUrl });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Unable to determine redirect URL' });
+  }
+});
+
+/**
+ * Authentication routes.
+ *
+ * The API is a pure identity broker: it does NOT verify credentials itself.
+ * It delegates to the active identity provider plugin (selected via
+ * `AUTH_PLUGIN_ID`, falling back to the built-in basic-auth plugin) and mints
+ * the platform JWT from the provider's verified identity assertion.
+ *
+ * The public contract is unchanged:
+ *   POST /auth/login      -> { challengeToken, twoFactorRequired }
+ *   POST /auth/2fa/verify -> { accessToken, expiresIn, roles, permissions }
+ */
 router.post('/auth/login', async (req, res) => {
   const { username, password } = req.body ?? {};
 
-  const user = await db.query.users.findFirst({
-    where: (users, { eq }) => eq(users.username, username),
-  });
-  if (!user || !bcrypt.compareSync(password ?? '', user.passwordHash)) {
-    res.status(401).json({ error: 'Invalid username or password' });
-    return;
+  try {
+    const result = await login(username ?? '', password ?? '');
+    res.status(200).json({
+      challengeToken: result.challengeToken,
+      twoFactorRequired: result.twoFactorRequired,
+    });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Authentication failed' });
   }
-
-  purgeExpiredChallenges();
-
-  const challengeToken = uuidv4();
-  challenges.set(challengeToken, { userId: user.id, expiresAt: Date.now() + CHALLENGE_TTL_MS });
-
-  res.status(200).json({ challengeToken, twoFactorRequired: true });
 });
 
 router.post('/auth/2fa/verify', async (req, res) => {
   const { challengeToken, totpCode } = req.body ?? {};
 
-  purgeExpiredChallenges();
-  const entry = challengeToken ? challenges.get(challengeToken) : undefined;
-  if (!entry) {
-    res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
-    return;
+  try {
+    const identity = await verify2fa(challengeToken ?? '', totpCode ?? '');
+
+    const accessToken = signToken(
+      {
+        sub: identity.userId,
+        username: identity.username,
+        roles: identity.roles,
+        permissions: identity.permissions,
+        amr: identity.amr,
+      },
+      TOKEN_TTL_SECONDS
+    );
+
+    res.status(200).json({
+      accessToken,
+      expiresIn: TOKEN_TTL_SECONDS,
+      roles: identity.roles,
+      permissions: identity.permissions,
+    });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Authentication failed' });
   }
-  const user = await db.query.users.findFirst({
-    where: (users, { eq }) => eq(users.id, entry.userId),
-  });
-  if (!user) {
-    res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
-    return;
-  }
-
-  let totpVerified = false;
-  if (user.totpSecret) {
-    const valid = verifyTotp(user.totpSecret, totpCode ?? '');
-    if (!valid) {
-      res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
-      return;
-    }
-    totpVerified = true;
-  }
-  // If no TOTP secret is configured for this user, allow completion in dev
-  // mode, but do NOT claim `totp` in `amr` since it was never verified -
-  // this keeps `require2FA`-gated endpoints locked down for such accounts.
-
-  challenges.delete(challengeToken);
-
-  const roles = JSON.parse(user.roles) as string[];
-  const permissions = JSON.parse(user.permissions) as string[];
-  const expiresIn = 3600;
-
-  const accessToken = signToken(
-    {
-      sub: user.id,
-      username: user.username,
-      roles,
-      permissions,
-      amr: totpVerified ? ['totp'] : ['pwd'],
-    },
-    expiresIn
-  );
-
-  res.status(200).json({ accessToken, expiresIn, roles, permissions });
 });
 
 export default router;

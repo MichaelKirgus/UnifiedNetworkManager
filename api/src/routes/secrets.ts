@@ -1,33 +1,51 @@
 import { Router } from 'express';
+import { inArray } from 'drizzle-orm';
 import { db } from '../db';
-import { eq } from 'drizzle-orm';
-import { encrypt } from '../utils/crypto';
-import { requireAuth, requirePermission } from '../auth/middleware';
 import * as schema from '../db/schema';
-import { v4 as uuidv4 } from 'uuid';
+import { requireAuth, requirePermission } from '../auth/middleware';
+import { createSecret, listSecrets, deleteSecret } from '../secretsProvider';
 
 const router = Router();
 
-// GET /secrets - List all secrets (metadata only)
-router.get('/', requireAuth, requirePermission('secrets:read'), async (req, res) => {
-  try {
-    const secrets = await db.query.secrets.findMany({
-      orderBy: (secrets, { desc }) => [desc(secrets.createdAt)],
-    });
-    
-    // Resolve userId to username
-    const userIds = [...new Set(secrets.map(s => s.userId))];
-    const userMap = new Map<string, string>();
+interface SecretMeta {
+  id: string;
+  label: string | null;
+  userId: string;
+  expiresAt: string | null;
+  createdAt: string;
+}
 
+/**
+ * Public secrets routes.
+ *
+ * The API is a pure broker: it does NOT encrypt/decrypt or manage secrets
+ * itself. It delegates to the active secrets provider plugin (selected via
+ * `SECRETS_PLUGIN_ID`, falling back to the built-in secrets-provider plugin).
+ * The plugin owns the crypto (MASTER_KEY) and the management logic; the API
+ * keeps the `secrets` table.
+ *
+ * The public contract is unchanged:
+ *   GET    /secrets      -> metadata list
+ *   POST   /secrets      -> { id, createdAt }
+ *   DELETE /secrets/:id  -> 204
+ */
+
+// GET /secrets - List all secrets (metadata only)
+router.get('/', requireAuth, requirePermission('secrets:read'), async (_req, res) => {
+  try {
+    const secrets = (await listSecrets()) as SecretMeta[];
+
+    // Resolve userId -> username (the API owns the users table).
+    const userIds = [...new Set(secrets.map((s) => s.userId))];
+    const userMap = new Map<string, string>();
     if (userIds.length > 0) {
       const users = await db.query.users.findMany({
         where: (users, { inArray }) => inArray(users.id, userIds),
       });
-      users.forEach(u => userMap.set(u.id, u.username));
+      users.forEach((u) => userMap.set(u.id, u.username));
     }
 
-    // We only return the ID, label, createdAt, expiresAt, and username, NEVER the encryptedValue
-    const sanitizedSecrets = secrets.map(s => ({
+    const sanitized = secrets.map((s) => ({
       id: s.id,
       label: s.label,
       createdAt: s.createdAt,
@@ -35,9 +53,10 @@ router.get('/', requireAuth, requirePermission('secrets:read'), async (req, res)
       username: userMap.get(s.userId) ?? 'Unknown',
     }));
 
-    res.status(200).json(sanitizedSecrets);
+    res.status(200).json(sanitized);
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
   }
 });
 
@@ -50,43 +69,30 @@ router.post('/', requireAuth, requirePermission('secrets:write'), async (req, re
     return;
   }
 
+  const userId = req.user?.sub;
+  if (!userId || typeof userId !== 'string') {
+    res.status(401).json({ error: 'User ID not found in token' });
+    return;
+  }
+
   try {
-    const secretValue = JSON.stringify({ apiKey, apiSecret, label });
-    const encryptedValue = encrypt(secretValue);
-    
-    const id = uuidv4();
-    const createdAt = new Date().toISOString();
-    const userId = req.user?.sub;
-
-    if (!userId || typeof userId !== 'string') {
-      res.status(401).json({ error: 'User ID not found in token' });
-      return;
-    }
-
-    await db.insert(schema.secrets).values({
-      label,
-      id,
-      encryptedValue,
-      userId,
-      expiresAt: expiresAt || null,
-      createdAt,
-    });
-
-    res.status(201).json({ id, createdAt });
+    const result = await createSecret({ apiKey, apiSecret, label, expiresAt, userId });
+    res.status(201).json(result);
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
   }
 });
 
 // DELETE /secrets/:id - Remove a secret
 router.delete('/:id', requireAuth, requirePermission('secrets:delete'), async (req, res) => {
   const { id } = req.params;
-
   try {
-    await db.delete(schema.secrets).where(eq(schema.secrets.id, id));
+    await deleteSecret(id);
     res.status(204).send();
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
   }
 });
 

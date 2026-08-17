@@ -23,6 +23,19 @@ services:
       - PORT=3000
       - JWT_SECRET=dev-secret
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
+      # Identity provider selection (the API is a pure auth broker).
+      # AUTH_PLUGIN_ID names the active identity provider plugin; if unset or
+      # offline the API falls back to the built-in basic-auth plugin.
+      - AUTH_PLUGIN_ID=${AUTH_PLUGIN_ID:-00000000-0000-4000-8000-000000000001}
+      # Shared key the API presents to plugins (x-plugin-api-key).
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+      # Secrets provider selection (the API is a pure secrets broker).
+      # SECRETS_PLUGIN_ID names the active secrets provider plugin; if unset or
+      # offline the API falls back to the built-in secrets-provider plugin.
+      - SECRETS_PLUGIN_ID=${SECRETS_PLUGIN_ID:-00000000-0000-4000-8000-000000000002}
+      # Poll these plugin endpoints for discovery (mDNS is often isolated on
+      # Docker bridge networks). Ensures the provider plugins are registered.
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001}
     depends_on:
       - postgres
     restart: unless-stopped
@@ -37,6 +50,50 @@ services:
       - OPNSENSE_HOST=${OPNSENSE_HOST:-https://opnsense.local}
       - OPNSENSE_KEY=${OPNSENSE_KEY:-}
       - OPNSENSE_SECRET=${OPNSENSE_SECRET:-}
+    restart: unless-stopped
+
+  # Identity provider plugin: local users + TOTP (2FA). Performs credential
+  # verification on behalf of the API. It does NOT own a database: the API
+  # owns the `users` table and this plugin reads/writes user records through
+  # the API's internal user-data endpoints (UNM_API_URL + x-plugin-api-key).
+  basic-auth-plugin:
+    build:
+      context: ./plugins/basic-auth
+    ports:
+      - "4002:4002"
+    environment:
+      - PORT=4002
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://basic-auth-plugin:4002
+      # Base URL of the API's internal user-data endpoints (plugin -> API).
+      - UNM_API_URL=http://api:3000/v1
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # Secrets provider plugin: encrypts/decrypts and manages device secrets.
+  # It is the crypto holder (owns MASTER_KEY) and the management logic. It does
+  # NOT own a database: the API owns the `secrets` table and this plugin
+  # stores/reads ciphertext through the API's internal endpoints
+  # (UNM_API_URL + x-plugin-api-key).
+  secrets-provider-plugin:
+    build:
+      context: ./plugins/secrets-provider
+    ports:
+      - "4003:4003"
+    environment:
+      - PORT=4003
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://secrets-provider-plugin:4003
+      # Base URL of the API's internal secrets-data endpoints (plugin -> API).
+      - UNM_API_URL=http://api:3000/v1
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+      # Crypto key material (the plugin is the crypto holder).
+      - MASTER_KEY=${MASTER_KEY:-default-master-key-must-be-changed-in-production}
+      - CRYPTO_SALT=${CRYPTO_SALT:-salt}
+    depends_on:
+      - api
     restart: unless-stopped
 
   webapp:

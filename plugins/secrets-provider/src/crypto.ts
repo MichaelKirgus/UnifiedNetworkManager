@@ -1,5 +1,16 @@
 import crypto from 'crypto';
 
+/**
+ * Secret encryption (AES-256-GCM).
+ *
+ * This plugin is the crypto holder for device secrets: it owns the MASTER_KEY
+ * and performs all encrypt/decrypt. The API stores only ciphertext (in the
+ * `secrets` table) and never sees the key material.
+ *
+ * The key is derived from `MASTER_KEY` + `CRYPTO_SALT` via scrypt so the raw
+ * key is not stored directly.
+ */
+
 const ALGORITHM = 'aes-256-gcm';
 const MASTER_KEY = process.env.MASTER_KEY ?? 'default-master-key-must-be-changed-in-production';
 if (process.env.NODE_ENV === 'production' && MASTER_KEY === 'default-master-key-must-be-changed-in-production') {
@@ -27,7 +38,8 @@ export function decrypt(encryptedData: string): string {
     const authTag = Buffer.from(authTagHex, 'hex');
     const cipher = crypto.createDecipheriv(ALGORITHM, key, iv);
     cipher.setAuthTag(authTag);
-    let decrypted = cipher.update(encryptedTextHex, 'utf8', 'hex');
+    // The ciphertext is a hex string, so read it as hex and emit utf8 text.
+    let decrypted = cipher.update(encryptedTextHex, 'hex', 'utf8');
     decrypted += cipher.final('utf8');
     return decrypted;
   }

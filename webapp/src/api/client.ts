@@ -13,6 +13,14 @@ export interface LoginResponse {
   twoFactorRequired: boolean;
 }
 
+export interface AuthFlow {
+  flow: string;
+}
+
+export interface AuthRedirect {
+  redirectUrl: string;
+}
+
 export interface VerifyResponse {
   accessToken: string;
   expiresIn: number;
@@ -92,6 +100,8 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  authFlow: () => apiFetch<AuthFlow>('/auth/flow'),
+  authRedirect: () => apiFetch<AuthRedirect>('/auth/redirect'),
   login: (body: { username: string; password: string }) =>
     apiFetch<LoginResponse>('/auth/login', { method: 'POST', body: JSON.stringify(body) }),
   verify2fa: (body: { challengeToken: string; totpCode: string }) =>
@@ -104,8 +114,7 @@ export const api = {
   configJobs: (deviceId: string, body: unknown) =>
     apiFetch<ConfigJob>(`/devices/${deviceId}/config-jobs`, { method: 'POST', body: JSON.stringify(body) }),
   allConfigJobs: () => apiFetch<ConfigJob[]>('/config-jobs'),
-  allConfigJobs: () => apiFetch<ConfigJob[]>('/config-jobs'),
-  getConfigJob: (jobId: string) => apiFetch<ConfigJob>('/config-jobs/${jobId}'),
+  getConfigJob: (jobId: string) => apiFetch<ConfigJob>(`/config-jobs/${jobId}`),
   secrets: () => apiFetch<Secret[]>('/secrets'),
   createSecret: (body: { apiKey: string; apiSecret: string; label: string; expiresAt?: string }) =>
     apiFetch<Secret>('/secrets', { method: 'POST', body: JSON.stringify(body) }),

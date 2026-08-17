@@ -3,6 +3,7 @@ import { db } from '../db';
 import { eq } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { configJobQueue } from '../queue';
+import { getSecret } from '../secretsProvider';
 
 const PROCESS_INTERVAL_MS = 5_000;
 
@@ -52,16 +53,9 @@ async function processJob(jobId: string): Promise<void> {
   }
 
   try {
-    const secret = await db.query.secrets.findFirst({
-      where: (secrets, { eq }) => eq(secrets.id, device.secretId),
-    });
-    if (!secret) {
-      throw new Error(`Secret not found for device ${device.id}`);
-    }
-
-    const decryptedSecret = JSON.parse(
-      await import('../utils/crypto').then(m => m.decrypt(secret.encryptedValue))
-    );
+    // The secrets provider plugin owns the crypto; the broker fetches the
+    // decrypted secret on our behalf.
+    const decryptedSecret = await getSecret(device.secretId);
 
     const response = await axios.post<ConfigResponse>(
       `${plugin.endpoint.replace(/\/$/, '')}/config`,

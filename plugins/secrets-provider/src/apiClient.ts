@@ -1,0 +1,86 @@
+import axios, { AxiosInstance } from 'axios';
+
+/**
+ * Client for the UnifiedNetworkManager API's internal secrets-data endpoints.
+ *
+ * The API owns the `secrets` table (the single source of truth). This plugin
+ * does NOT connect to Postgres directly; it stores ciphertext and reads it
+ * back through the API's internal routes (gated by the shared
+ * `x-plugin-api-key`). The plugin is the crypto holder: it encrypts before
+ * storing and decrypts after reading.
+ *
+ * Base URL: `UNM_API_URL` (defaults to `http://localhost:3000/v1` for local
+ * dev; set to `http://api:3000/v1` inside Docker).
+ */
+
+const BASE_URL = (process.env.UNM_API_URL ?? 'http://localhost:3000/v1').replace(/\/+$/, '');
+const API_KEY = process.env.PLUGIN_API_KEY;
+const TIMEOUT_MS = 5000;
+
+const http: AxiosInstance = axios.create({
+  baseURL: BASE_URL,
+  timeout: TIMEOUT_MS,
+  headers: API_KEY ? { 'x-plugin-api-key': API_KEY } : undefined,
+});
+
+/** A secret row as stored by the API (ciphertext). */
+export interface SecretRecord {
+  id: string;
+  label: string | null;
+  encryptedValue: string;
+  userId: string;
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+/** Secret metadata (no ciphertext) as returned by the list endpoint. */
+export interface SecretMeta {
+  id: string;
+  label: string | null;
+  userId: string;
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+/**
+ * Stores a new secret (ciphertext) via the API. Returns the created record.
+ */
+export async function storeSecret(input: {
+  label: string | null;
+  encryptedValue: string;
+  userId: string;
+  expiresAt: string | null;
+}): Promise<SecretRecord> {
+  const res = await http.post<SecretRecord>('/plugin/secrets', input);
+  return res.data;
+}
+
+/**
+ * Lists secret metadata (no ciphertext).
+ */
+export async function listSecrets(): Promise<SecretMeta[]> {
+  const res = await http.get<SecretMeta[]>('/plugin/secrets');
+  return res.data;
+}
+
+/**
+ * Fetches a single secret (ciphertext) by id. Returns `null` on 404.
+ */
+export async function getSecret(id: string): Promise<SecretRecord | null> {
+  try {
+    const res = await http.get<SecretRecord>(`/plugin/secrets/${encodeURIComponent(id)}`);
+    return res.data;
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.status === 404) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Deletes a secret by id.
+ */
+export async function deleteSecret(id: string): Promise<void> {
+  await http.delete(`/plugin/secrets/${encodeURIComponent(id)}`);
+}
