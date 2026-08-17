@@ -47,6 +47,10 @@ services:
       - "4001:4001"
     environment:
       - PORT=4001
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      # Without this the plugin advertises http://localhost:4001, which is
+      # unreachable from the API container.
+      - ADVERTISED_ENDPOINT=http://opnsense-plugin:4001
       - OPNSENSE_HOST=${OPNSENSE_HOST:-https://opnsense.local}
       - OPNSENSE_KEY=${OPNSENSE_KEY:-}
       - OPNSENSE_SECRET=${OPNSENSE_SECRET:-}

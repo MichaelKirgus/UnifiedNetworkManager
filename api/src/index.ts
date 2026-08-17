@@ -4,7 +4,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import * as OpenApiValidator from 'express-openapi-validator';
 import { loadOpenApiSpec, resolveOpenApiPath } from './openapi';
-import { initDb } from './db';
+import { initDb, backfillSecrets } from './db';
 import authRouter from './routes/auth';
 import devicesRouter from './routes/devices';
 import pluginsRouter from './routes/plugins';
@@ -39,6 +39,7 @@ const authLimiter = rateLimit({
 
 async function main(): Promise<void> {
   await initDb();
+  await backfillSecrets();
 
   const spec = loadOpenApiSpec();
   const specPath = resolveOpenApiPath();

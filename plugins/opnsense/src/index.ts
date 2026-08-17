@@ -35,6 +35,10 @@ app.get('/discover', (_req, res) => {
     capabilities: PLUGIN_CAPABILITIES,
     endpoint: ADVERTISED_ENDPOINT,
     authType: PLUGIN_AUTH_TYPE,
+    // The secret type this plugin expects for device credentials. The API
+    // broker reads this to filter which secrets/providers are applicable to
+    // devices managed by this plugin.
+    requiredSecretType: 'apiKey',
   });
 });
 

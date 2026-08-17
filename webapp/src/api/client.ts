@@ -3,9 +3,35 @@ const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3000/v1';
 export interface Secret {
   id: string;
   label: string;
+  type: string;
+  providerId?: string | null;
   createdAt: string;
   expiresAt?: string;
   username: string;
+}
+
+export interface SecretField {
+  name: string;
+  label: string;
+  input: 'text' | 'password' | 'select';
+  secret?: boolean;
+  required?: boolean;
+  options?: string[];
+}
+
+export interface SecretType {
+  type: string;
+  label: string;
+  fields: SecretField[];
+}
+
+export interface SecretProvider {
+  id: string;
+  name: string;
+  version: string;
+  endpoint: string;
+  online: boolean;
+  secretTypes: SecretType[];
 }
 
 export interface LoginResponse {
@@ -116,8 +142,16 @@ export const api = {
   allConfigJobs: () => apiFetch<ConfigJob[]>('/config-jobs'),
   getConfigJob: (jobId: string) => apiFetch<ConfigJob>(`/config-jobs/${jobId}`),
   secrets: () => apiFetch<Secret[]>('/secrets'),
-  createSecret: (body: { apiKey: string; apiSecret: string; label: string; expiresAt?: string }) =>
-    apiFetch<Secret>('/secrets', { method: 'POST', body: JSON.stringify(body) }),
+  secretProviders: () => apiFetch<SecretProvider[]>('/secrets/providers'),
+  createSecret: (body: {
+    type: string;
+    providerId?: string;
+    fields: Record<string, string>;
+    label: string;
+    expiresAt?: string;
+  }) => apiFetch<Secret>('/secrets', { method: 'POST', body: JSON.stringify(body) }),
   deleteSecret: (id: string) =>
     apiFetch<void>(`/secrets/${id}`, { method: 'DELETE' }),
+  requiredSecretType: (pluginId: string) =>
+    apiFetch<{ requiredSecretType: string | null }>(`/plugins/${pluginId}/required-secret-type`),
 };

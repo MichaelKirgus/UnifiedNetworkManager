@@ -26,6 +26,12 @@ export const devices = pgTable('devices', {
 export const secrets = pgTable('secrets', {
   id: text('id').primaryKey(),
   label: text('label'),
+  // The secret type (e.g. 'apiKey', 'usernamePassword', 'snmp'). Declared by
+  // the secrets provider that serves it; drives the field schema + UX.
+  type: text('type').notNull().default('apiKey'),
+  // The secrets provider plugin that serves (encrypts/decrypts) this secret.
+  // Per-secret binding so different providers (with different keys) can coexist.
+  providerId: text('providerId'),
   encryptedValue: text('encryptedValue').notNull(),
   userId: text('userId').notNull(),
   expiresAt: text('expiresAt'),

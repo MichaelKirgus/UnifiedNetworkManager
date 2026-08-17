@@ -7,15 +7,18 @@ import * as schema from './db/schema';
  * Secrets provider broker.
  *
  * The API no longer encrypts/decrypts or manages secrets itself. It delegates
- * to a secrets provider plugin (any plugin advertising the `secretsProvider`
- * capability). The plugin owns the crypto (MASTER_KEY) and the management
- * logic; the API keeps the `secrets` table and exposes it to the plugin via
- * the internal `/plugin/secrets/*` routes.
+ * to secrets provider plugins (any plugin advertising the `secretsProvider`
+ * capability). Each provider owns its own crypto (MASTER_KEY) and declares the
+ * secret types it serves (field schemas) via its `/discover` endpoint. The API
+ * keeps the `secrets` table (single source of truth) and exposes it to
+ * providers via the internal `/plugin/secrets/*` routes.
  *
- * Provider selection:
- *   - `SECRETS_PLUGIN_ID` env var names the active provider (its plugin UUID).
- *   - If unset, or the named provider is unknown/offline, we fall back to the
- *     reserved secrets-provider plugin.
+ * Multi-provider:
+ *   - Each secret row records the `type` and the `providerId` that created it,
+ *     so decryption is always routed back to the provider that owns the key.
+ *   - `SECRETS_PLUGIN_ID` names the *default* provider used for new secrets
+ *     when the caller doesn't specify one.
+ *   - `listSecretProviders()` exposes all registered providers + their types.
  */
 
 /** Reserved UUID for the built-in secrets provider plugin. */
@@ -25,11 +28,37 @@ const PROVIDER_TIMEOUT_MS = 5000;
 const PROVIDER_CACHE_TTL_MS = 5000;
 const ONLINE_WINDOW_MS = 5 * 60 * 1000;
 
-/** A decrypted device secret as returned by the provider. */
+/** A secret field as declared by a provider's secret type schema. */
+export interface SecretField {
+  name: string;
+  label: string;
+  input: 'text' | 'password' | 'select';
+  secret?: boolean;
+  required?: boolean;
+  options?: string[];
+}
+
+/** A secret type (e.g. `apiKey`, `usernamePassword`) with its field schema. */
+export interface SecretType {
+  type: string;
+  label: string;
+  fields: SecretField[];
+}
+
+/** A registered secrets provider + the secret types it serves. */
+export interface SecretProviderInfo {
+  id: string;
+  name: string;
+  version: string;
+  endpoint: string;
+  online: boolean;
+  secretTypes: SecretType[];
+}
+
+/** A decrypted secret: its type + the decrypted field values. */
 export interface DecryptedSecret {
-  apiKey: string;
-  apiSecret: string;
-  label?: string;
+  type: string;
+  fields: Record<string, string>;
 }
 
 interface ProviderRecord {
@@ -44,7 +73,10 @@ interface CachedProvider {
   cachedAt: number;
 }
 
-let cachedProvider: CachedProvider | null = null;
+let cachedDefaultProvider: CachedProvider | null = null;
+
+/** Per-provider cache of the secret types declared in /discover. */
+const secretTypesCache = new Map<string, { types: SecretType[]; cachedAt: number }>();
 
 function parseCapabilities(raw: string | null | undefined): string[] {
   if (!raw) return [];
@@ -90,14 +122,25 @@ async function findFirstSecretsProvider(): Promise<ProviderRecord | null> {
 }
 
 /**
- * Resolves the active secrets provider. Honors `SECRETS_PLUGIN_ID`; falls back
- * to the reserved secrets-provider plugin (or the first registered provider)
- * when the named one is missing or offline.
+ * Resolves a secrets provider. Honors an explicit `providerId`; otherwise
+ * honors `SECRETS_PLUGIN_ID`; falls back to the reserved secrets-provider
+ * plugin (or the first registered provider) when the named one is missing or
+ * offline.
  */
-export async function resolveActiveSecretsProvider(): Promise<ProviderRecord> {
+export async function resolveSecretsProvider(providerId?: string): Promise<ProviderRecord> {
   const now = Date.now();
-  if (cachedProvider && now - cachedProvider.cachedAt < PROVIDER_CACHE_TTL_MS) {
-    return cachedProvider.record;
+  const explicit = providerId?.trim();
+
+  if (explicit) {
+    const record = await findProviderById(explicit);
+    if (record && record.capabilities.includes('secretsProvider')) {
+      return record;
+    }
+    throw Object.assign(new Error(`Unknown secrets provider: ${explicit}`), { status: 400 });
+  }
+
+  if (cachedDefaultProvider && now - cachedDefaultProvider.cachedAt < PROVIDER_CACHE_TTL_MS) {
+    return cachedDefaultProvider.record;
   }
 
   const configuredId = process.env.SECRETS_PLUGIN_ID?.trim();
@@ -128,7 +171,7 @@ export async function resolveActiveSecretsProvider(): Promise<ProviderRecord> {
     );
   }
 
-  cachedProvider = { record, cachedAt: now };
+  cachedDefaultProvider = { record, cachedAt: now };
   return record;
 }
 
@@ -169,20 +212,74 @@ async function callProvider<T>(
 }
 
 /**
- * Creates a secret. The provider encrypts the payload and stores the
- * ciphertext; the API returns the new id + createdAt.
+ * Fetches the secret types a provider serves (from its `/discover` endpoint),
+ * cached briefly.
+ */
+export async function getProviderSecretTypes(provider: ProviderRecord): Promise<SecretType[]> {
+  const now = Date.now();
+  const cached = secretTypesCache.get(provider.id);
+  if (cached && now - cached.cachedAt < PROVIDER_CACHE_TTL_MS) {
+    return cached.types;
+  }
+  try {
+    const base = provider.endpoint.replace(/\/+$/, '');
+    const apiKey = process.env.PLUGIN_API_KEY;
+    const headers = apiKey ? { 'x-plugin-api-key': apiKey } : undefined;
+    const res = await axios.get<{ secretsProvider?: { secretTypes?: SecretType[] } }>(
+      `${base}/discover`,
+      { timeout: PROVIDER_TIMEOUT_MS, headers }
+    );
+    const types = res.data.secretsProvider?.secretTypes ?? [];
+    secretTypesCache.set(provider.id, { types, cachedAt: now });
+    return types;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Lists all registered secrets providers + the secret types each serves.
+ */
+export async function listSecretProviders(): Promise<SecretProviderInfo[]> {
+  const rows = await db.query.plugins.findMany();
+  const now = Date.now();
+  const providers = rows
+    .map(toRecord)
+    .filter((p) => p.capabilities.includes('secretsProvider'));
+  const infos = await Promise.all(
+    providers.map(async (p) => {
+      const row = rows.find((r) => r.id === p.id);
+      return {
+        id: p.id,
+        name: row?.name ?? p.id,
+        version: row?.version ?? '',
+        endpoint: p.endpoint,
+        online: isOnline(p, now),
+        secretTypes: await getProviderSecretTypes(p),
+      };
+    })
+  );
+  infos.sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+  return infos;
+}
+
+/**
+ * Creates a secret via the given (or default) provider. The provider encrypts
+ * the fields and stores the ciphertext tagged with the secret type + provider
+ * id; the API returns the new id + createdAt.
  */
 export async function createSecret(input: {
-  apiKey: string;
-  apiSecret: string;
+  type: string;
+  providerId?: string;
+  fields: Record<string, string>;
   label?: string;
   expiresAt?: string;
   userId: string;
 }): Promise<{ id: string; createdAt: string }> {
-  const provider = await resolveActiveSecretsProvider();
+  const provider = await resolveSecretsProvider(input.providerId);
   return callProvider(provider, '/secrets', 'POST', {
-    apiKey: input.apiKey,
-    apiSecret: input.apiSecret,
+    type: input.type,
+    fields: input.fields,
     label: input.label,
     expiresAt: input.expiresAt,
     userId: input.userId,
@@ -193,22 +290,62 @@ export async function createSecret(input: {
  * Lists secret metadata (no decrypted values).
  */
 export async function listSecrets(): Promise<unknown[]> {
-  const provider = await resolveActiveSecretsProvider();
+  const provider = await resolveSecretsProvider();
   return callProvider<unknown[]>(provider, '/secrets', 'GET');
 }
 
 /**
- * Retrieves a decrypted secret by id.
+ * Looks up the provider that owns a secret (from the row's providerId),
+ * falling back to the default provider.
+ */
+async function providerForSecret(secretId: string): Promise<ProviderRecord> {
+  const row = await db.query.secrets.findFirst({
+    where: (secrets, { eq }) => eq(secrets.id, secretId),
+  });
+  if (row?.providerId) {
+    const provider = await findProviderById(row.providerId);
+    if (provider) return provider;
+  }
+  return resolveSecretsProvider();
+}
+
+/**
+ * Retrieves a decrypted secret by id, routed to the provider that created it.
  */
 export async function getSecret(id: string): Promise<DecryptedSecret> {
-  const provider = await resolveActiveSecretsProvider();
+  const provider = await providerForSecret(id);
   return callProvider<DecryptedSecret>(provider, `/secrets/${encodeURIComponent(id)}`, 'GET');
 }
 
 /**
- * Deletes a secret by id.
+ * Deletes a secret by id, routed to the provider that created it.
  */
 export async function deleteSecret(id: string): Promise<void> {
-  const provider = await resolveActiveSecretsProvider();
+  const provider = await providerForSecret(id);
   await callProvider(provider, `/secrets/${encodeURIComponent(id)}`, 'DELETE');
+}
+
+/**
+ * Reads the secret type a device plugin requires (from its `/discover`
+ * `requiredSecretType`), if declared. Returns `null` when undeclared or the
+ * plugin is unreachable.
+ */
+export async function getRequiredSecretType(pluginId: string): Promise<string | null> {
+  const row = await db.query.plugins.findFirst({
+    where: (plugins, { eq }) => eq(plugins.id, pluginId),
+  });
+  if (!row) return null;
+  const provider = toRecord(row);
+  try {
+    const base = provider.endpoint.replace(/\/+$/, '');
+    const apiKey = process.env.PLUGIN_API_KEY;
+    const headers = apiKey ? { 'x-plugin-api-key': apiKey } : undefined;
+    const res = await axios.get<{ requiredSecretType?: string }>(`${base}/discover`, {
+      timeout: PROVIDER_TIMEOUT_MS,
+      headers,
+    });
+    return res.data.requiredSecretType ?? null;
+  } catch {
+    return null;
+  }
 }

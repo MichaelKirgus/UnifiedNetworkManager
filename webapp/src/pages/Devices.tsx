@@ -1,4 +1,4 @@
-import { FormEvent, useState } from 'react';
+import { FormEvent, useState, useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { Layout } from '../components/Layout';
@@ -33,6 +33,36 @@ export default function Devices() {
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
   const secretsQuery = useQuery({ queryKey: ['secrets'], queryFn: api.secrets });
+  const [requiredType, setRequiredType] = useState<string | null>(null);
+
+  // When a plugin is chosen, look up the secret type it expects so the
+  // credentials dropdown only offers compatible secrets.
+  useEffect(() => {
+    if (!form.pluginId) {
+      setRequiredType(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .requiredSecretType(form.pluginId)
+      .then((res) => {
+        if (!cancelled) setRequiredType(res.requiredSecretType);
+      })
+      .catch(() => {
+        if (!cancelled) setRequiredType(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [form.pluginId]);
+
+  // Secrets compatible with the selected plugin (by required type), or all
+  // secrets when the plugin declares no requirement.
+  const compatibleSecrets = useMemo(() => {
+    const all = secretsQuery.data ?? [];
+    if (!requiredType) return all;
+    return all.filter((s) => s.type === requiredType);
+  }, [secretsQuery.data, requiredType]);
 
   const createDevice = useMutation({
     mutationFn: api.createDevice,
@@ -165,7 +195,9 @@ export default function Devices() {
             />
           </div>
            <div>
-             <label className="mb-1 block text-sm font-medium text-slate-700">Credentials Reference</label>
+             <label className="mb-1 block text-sm font-medium text-slate-700">
+               Credentials Reference{requiredType ? ` (${requiredType})` : ''}
+             </label>
              <select
                required
                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
@@ -175,9 +207,9 @@ export default function Devices() {
                <option value="" disabled>
                  Select a saved secret
                </option>
-               {(secretsQuery.data ?? []).map((secret) => (
+               {compatibleSecrets.map((secret) => (
                  <option key={secret.id} value={secret.id}>
-                   {secret.label || secret.id} ({secret.id})
+                   {secret.label || secret.id} [{secret.type}]
                  </option>
                ))}
              </select>

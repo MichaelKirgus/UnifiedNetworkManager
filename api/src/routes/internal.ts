@@ -194,6 +194,8 @@ export function internalRouter() {
         rows.map((s) => ({
           id: s.id,
           label: s.label,
+          type: s.type,
+          providerId: s.providerId,
           userId: s.userId,
           expiresAt: s.expiresAt,
           createdAt: s.createdAt,
@@ -207,7 +209,7 @@ export function internalRouter() {
 
   // POST /plugin/secrets - store a secret (ciphertext).
   router.post('/plugin/secrets', pluginAuth, async (req: Request, res: Response) => {
-    const { label, encryptedValue, userId, expiresAt } = req.body ?? {};
+    const { type, providerId, label, encryptedValue, userId, expiresAt } = req.body ?? {};
     if (!encryptedValue || !userId) {
       return res.status(400).json({ error: 'encryptedValue and userId are required' });
     }
@@ -216,6 +218,8 @@ export function internalRouter() {
       const createdAt = new Date().toISOString();
       await db.insert(schema.secrets).values({
         id,
+        type: type ?? 'apiKey',
+        providerId: providerId ?? null,
         label: label ?? null,
         encryptedValue: String(encryptedValue),
         userId: String(userId),
@@ -242,6 +246,8 @@ export function internalRouter() {
       res.json({
         id: row.id,
         label: row.label,
+        type: row.type,
+        providerId: row.providerId,
         encryptedValue: row.encryptedValue,
         userId: row.userId,
         expiresAt: row.expiresAt,

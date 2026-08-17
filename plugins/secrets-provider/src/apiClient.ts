@@ -27,6 +27,8 @@ const http: AxiosInstance = axios.create({
 export interface SecretRecord {
   id: string;
   label: string | null;
+  type: string;
+  providerId: string | null;
   encryptedValue: string;
   userId: string;
   expiresAt: string | null;
@@ -37,6 +39,8 @@ export interface SecretRecord {
 export interface SecretMeta {
   id: string;
   label: string | null;
+  type: string;
+  providerId: string | null;
   userId: string;
   expiresAt: string | null;
   createdAt: string;
@@ -46,6 +50,8 @@ export interface SecretMeta {
  * Stores a new secret (ciphertext) via the API. Returns the created record.
  */
 export async function storeSecret(input: {
+  type: string;
+  providerId: string;
   label: string | null;
   encryptedValue: string;
   userId: string;

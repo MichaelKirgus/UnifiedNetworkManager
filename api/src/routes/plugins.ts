@@ -3,6 +3,7 @@ import { desc } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth } from '../auth/middleware';
+import { getRequiredSecretType } from '../secretsProvider';
 
 const router = Router();
 
@@ -24,6 +25,14 @@ router.get('/plugins', requireAuth, async (_req, res) => {
     orderBy: [desc(schema.plugins.createdAt)],
   });
   res.status(200).json(result.map(serializePlugin));
+});
+
+// GET /plugins/:id/required-secret-type - The secret type a device plugin
+// expects for its device credentials (read from the plugin's /discover).
+router.get('/plugins/:id/required-secret-type', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const requiredSecretType = await getRequiredSecretType(id);
+  res.status(200).json({ requiredSecretType });
 });
 
 export default router;

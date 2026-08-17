@@ -3,13 +3,15 @@ import { inArray } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
-import { createSecret, listSecrets, deleteSecret } from '../secretsProvider';
+import { createSecret, listSecrets, deleteSecret, listSecretProviders } from '../secretsProvider';
 
 const router = Router();
 
 interface SecretMeta {
   id: string;
   label: string | null;
+  type: string;
+  providerId: string | null;
   userId: string;
   expiresAt: string | null;
   createdAt: string;
@@ -24,11 +26,23 @@ interface SecretMeta {
  * The plugin owns the crypto (MASTER_KEY) and the management logic; the API
  * keeps the `secrets` table.
  *
- * The public contract is unchanged:
- *   GET    /secrets      -> metadata list
- *   POST   /secrets      -> { id, createdAt }
- *   DELETE /secrets/:id  -> 204
+ * The public contract:
+ *   GET    /secrets            -> metadata list (incl. type + providerId)
+ *   GET    /secrets/providers  -> registered providers + their secret types
+ *   POST   /secrets            -> { type, providerId?, fields, label?, expiresAt? } -> { id, createdAt }
+ *   DELETE /secrets/:id        -> 204
  */
+
+// GET /secrets/providers - List registered secrets providers + their secret types
+router.get('/providers', requireAuth, requirePermission('secrets:read'), async (_req, res) => {
+  try {
+    const providers = await listSecretProviders();
+    res.status(200).json(providers);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
 
 // GET /secrets - List all secrets (metadata only)
 router.get('/', requireAuth, requirePermission('secrets:read'), async (_req, res) => {
@@ -48,6 +62,8 @@ router.get('/', requireAuth, requirePermission('secrets:read'), async (_req, res
     const sanitized = secrets.map((s) => ({
       id: s.id,
       label: s.label,
+      type: s.type,
+      providerId: s.providerId,
       createdAt: s.createdAt,
       expiresAt: s.expiresAt,
       username: userMap.get(s.userId) ?? 'Unknown',
@@ -60,12 +76,16 @@ router.get('/', requireAuth, requirePermission('secrets:read'), async (_req, res
   }
 });
 
-// POST /secrets - Create a new secret
+// POST /secrets - Create a new secret (typed, provider-routed)
 router.post('/', requireAuth, requirePermission('secrets:write'), async (req, res) => {
-  const { apiKey, apiSecret, label, expiresAt } = req.body ?? {};
+  const { type, providerId, fields, label, expiresAt } = req.body ?? {};
 
-  if (!apiKey || !apiSecret) {
-    res.status(400).json({ error: 'apiKey and apiSecret are required' });
+  if (!type || typeof type !== 'string') {
+    res.status(400).json({ error: 'type is required' });
+    return;
+  }
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    res.status(400).json({ error: 'fields object is required' });
     return;
   }
 
@@ -76,7 +96,14 @@ router.post('/', requireAuth, requirePermission('secrets:write'), async (req, re
   }
 
   try {
-    const result = await createSecret({ apiKey, apiSecret, label, expiresAt, userId });
+    const result = await createSecret({
+      type,
+      providerId: typeof providerId === 'string' ? providerId : undefined,
+      fields,
+      label,
+      expiresAt,
+      userId,
+    });
     res.status(201).json(result);
   } catch (err) {
     const e = err as { status?: number; message?: string };

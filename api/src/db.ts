@@ -2,7 +2,7 @@ import { Pool } from 'pg';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
-import { eq } from 'drizzle-orm';
+import { eq, isNull } from 'drizzle-orm';
 import { generateSecret, buildOtpAuthUri } from './auth/totp';
 import * as schema from './db/schema';
 
@@ -63,4 +63,25 @@ export async function initDb(): Promise<void> {
   console.log(`[db] admin TOTP secret (dev only): ${totpSecret}`);
   // eslint-disable-next-line no-console
   console.log(`[db] admin otpauth URI (scan with an authenticator app): ${buildOtpAuthUri('admin', totpSecret)}`);
+}
+
+/**
+ * One-time backfill for the multi-provider secrets model: any secret rows that
+ * predate the `type`/`providerId` columns are bound to the built-in
+ * secrets-provider plugin and typed as `apiKey` (the legacy shape).
+ */
+export async function backfillSecrets(): Promise<void> {
+  const SECRETS_PROVIDER_UUID = '00000000-0000-4000-8000-000000000002';
+  const orphans = await db.query.secrets.findMany({
+    where: (secrets, { isNull }) => isNull(secrets.providerId),
+  });
+  if (orphans.length === 0) {
+    return;
+  }
+  await db
+    .update(schema.secrets)
+    .set({ providerId: SECRETS_PROVIDER_UUID, type: 'apiKey' })
+    .where(isNull(schema.secrets.providerId));
+  // eslint-disable-next-line no-console
+  console.log(`[db] backfilled ${orphans.length} secret(s) to the built-in secrets provider`);
 }

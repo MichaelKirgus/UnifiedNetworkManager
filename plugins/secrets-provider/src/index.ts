@@ -14,6 +14,54 @@ export const PLUGIN_AUTH_TYPE = 'token';
 const PORT = Number(process.env.PORT ?? 4003);
 const ADVERTISED_ENDPOINT = process.env.ADVERTISED_ENDPOINT ?? `http://localhost:${PORT}`;
 
+/**
+ * The secret types this provider serves, with a field schema for each. The
+ * webapp renders forms dynamically from this, and the API validates/relays the
+ * fields. This is the provider-declared contract (flexible: a provider can
+ * offer custom types).
+ */
+export interface SecretField {
+  name: string;
+  label: string;
+  input: 'text' | 'password' | 'select';
+  secret?: boolean;
+  required?: boolean;
+  options?: string[];
+}
+
+export interface SecretType {
+  type: string;
+  label: string;
+  fields: SecretField[];
+}
+
+export const SECRET_TYPES: SecretType[] = [
+  {
+    type: 'apiKey',
+    label: 'API Key / Secret',
+    fields: [
+      { name: 'apiKey', label: 'API Key', input: 'text', required: true },
+      { name: 'apiSecret', label: 'API Secret', input: 'password', secret: true, required: true },
+    ],
+  },
+  {
+    type: 'usernamePassword',
+    label: 'Username / Password',
+    fields: [
+      { name: 'username', label: 'Username', input: 'text', required: true },
+      { name: 'password', label: 'Password', input: 'password', secret: true, required: true },
+    ],
+  },
+  {
+    type: 'snmp',
+    label: 'SNMP Community',
+    fields: [
+      { name: 'community', label: 'Community String', input: 'text', secret: true, required: true },
+      { name: 'version', label: 'SNMP Version', input: 'select', options: ['v1', 'v2c', 'v3'], required: false },
+    ],
+  },
+];
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -51,18 +99,23 @@ app.get('/discover', (_req, res) => {
     capabilities: PLUGIN_CAPABILITIES,
     endpoint: ADVERTISED_ENDPOINT,
     authType: PLUGIN_AUTH_TYPE,
-    secretsProvider: { algorithm: 'aes-256-gcm' },
+    secretsProvider: { algorithm: 'aes-256-gcm', secretTypes: SECRET_TYPES },
   });
 });
 
 /**
- * Create a secret. The plugin encrypts the payload (it owns the key) and stores
- * the ciphertext via the API. Returns the new id + createdAt.
+ * Create a secret. The plugin encrypts the fields object (it owns the key) and
+ * stores the ciphertext via the API, tagged with the secret `type` and this
+ * provider's id. Returns the new id + createdAt.
  */
 app.post('/secrets', requirePluginKey, async (req, res) => {
-  const { apiKey, apiSecret, label, expiresAt, userId } = req.body ?? {};
-  if (!apiKey || !apiSecret) {
-    res.status(400).json({ error: 'apiKey and apiSecret are required' });
+  const { type, fields, label, expiresAt, userId } = req.body ?? {};
+  if (!type || typeof type !== 'string') {
+    res.status(400).json({ error: 'type is required' });
+    return;
+  }
+  if (!fields || typeof fields !== 'object') {
+    res.status(400).json({ error: 'fields object is required' });
     return;
   }
   if (!userId || typeof userId !== 'string') {
@@ -71,9 +124,10 @@ app.post('/secrets', requirePluginKey, async (req, res) => {
   }
 
   try {
-    const secretValue = JSON.stringify({ apiKey, apiSecret, label });
-    const encryptedValue = encrypt(secretValue);
+    const encryptedValue = encrypt(JSON.stringify(fields));
     const record = await storeSecret({
+      type,
+      providerId: PLUGIN_UUID,
       label: label ?? null,
       encryptedValue,
       userId,
@@ -109,8 +163,8 @@ app.get('/secrets/:id', requirePluginKey, async (req, res) => {
       res.status(404).json({ error: 'Secret not found' });
       return;
     }
-    const secret = JSON.parse(decrypt(record.encryptedValue));
-    res.status(200).json(secret);
+    const fields = JSON.parse(decrypt(record.encryptedValue));
+    res.status(200).json({ type: record.type, fields });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }

@@ -279,7 +279,7 @@ paths:
     get:
       tags: [Secrets]
       summary: List stored secrets
-      description: Returns a list of stored secrets (metadata only).
+      description: Returns a list of stored secrets (metadata only, including type and providerId).
       responses:
         '200':
           description: Secret list
@@ -296,17 +296,25 @@ paths:
     post:
       tags: [Secrets]
       summary: Create a new secret
-      description: Encrypts and stores API credentials.
+      description: >-
+        Creates a typed secret via the specified (or default) secrets provider.
+        The provider encrypts the fields and stores the ciphertext. The secret
+        type and provider id are recorded so decryption is always routed back
+        to the correct provider.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [apiKey, apiSecret]
+              required: [type, fields]
               properties:
-                apiKey: { type: string }
-                apiSecret: { type: string, format: password }
+                type: { type: string, description: "Secret type (e.g. apiKey, usernamePassword, snmp)" }
+                providerId: { type: string, nullable: true, description: "Provider plugin UUID (defaults to SECRETS_PLUGIN_ID)" }
+                fields:
+                  type: object
+                  additionalProperties: { type: string }
+                  description: "Decrypted field values as declared by the provider's secret type schema"
                 label: { type: string, nullable: true }
                 expiresAt: { type: string, format: date-time, nullable: true }
       responses:
@@ -316,10 +324,61 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Secret'
+        '400':
+          description: Invalid request (missing type or fields)
         '401':
           description: Authentication required
         '403':
           description: Missing required permission
+
+  /secrets/providers:
+    get:
+      tags: [Secrets]
+      summary: List registered secrets providers
+      description: >-
+        Returns all registered secrets provider plugins along with the secret
+        types each serves (field schemas). Use this to render dynamic secret
+        creation forms.
+      responses:
+        '200':
+          description: Provider list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SecretProvider'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+
+  /plugins/{id}/required-secret-type:
+    get:
+      tags: [Plugins]
+      summary: Get the secret type a device plugin requires
+      description: >-
+        Reads the `requiredSecretType` from the plugin's /discover endpoint.
+        Use this to filter which secrets are applicable to devices managed by
+        this plugin.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Required secret type
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requiredSecretType:
+                    type: string
+                    nullable: true
+        '401':
+          description: Authentication required
 
   /secrets/{id}:
     delete:
@@ -354,12 +413,55 @@ components:
   schemas:
     Secret:
       type: object
-      required: [id, createdAt]
+      required: [id, type, createdAt]
       properties:
         id: { type: string }
+        type: { type: string, description: "Secret type (e.g. apiKey, usernamePassword, snmp)" }
+        providerId: { type: string, nullable: true, description: "Provider plugin UUID that created this secret" }
+        label: { type: string, nullable: true }
         createdAt: { type: string, format: date-time }
         expiresAt: { type: string, format: date-time, nullable: true }
         username: { type: string }
+
+    SecretField:
+      type: object
+      required: [name, label, input]
+      properties:
+        name: { type: string }
+        label: { type: string }
+        input:
+          type: string
+          enum: [text, password, select]
+        secret: { type: boolean, default: false }
+        required: { type: boolean, default: false }
+        options:
+          type: array
+          items: { type: string }
+
+    SecretType:
+      type: object
+      required: [type, label, fields]
+      properties:
+        type: { type: string }
+        label: { type: string }
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/SecretField'
+
+    SecretProvider:
+      type: object
+      required: [id, name, online, secretTypes]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        version: { type: string }
+        endpoint: { type: string, format: uri }
+        online: { type: boolean }
+        secretTypes:
+          type: array
+          items:
+            $ref: '#/components/schemas/SecretType'
 
     Device:
       type: object

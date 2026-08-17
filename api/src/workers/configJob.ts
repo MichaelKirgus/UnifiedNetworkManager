@@ -54,16 +54,21 @@ async function processJob(jobId: string): Promise<void> {
 
   try {
     // The secrets provider plugin owns the crypto; the broker fetches the
-    // decrypted secret on our behalf.
+    // decrypted secret on our behalf. Secrets are typed: `fields` holds the
+    // decrypted values. For backward compatibility we also pass the legacy
+    // `apiKey`/`apiSecret` keys when the secret is of type `apiKey`.
     const decryptedSecret = await getSecret(device.secretId);
+    const credentials = decryptedSecret.fields;
 
     const response = await axios.post<ConfigResponse>(
       `${plugin.endpoint.replace(/\/$/, '')}/config`,
       {
         deviceId: device.id,
         managementAddress: device.managementAddress,
-        apiKey: decryptedSecret.apiKey,
-        apiSecret: decryptedSecret.apiSecret,
+        credentials,
+        ...(decryptedSecret.type === 'apiKey'
+          ? { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }
+          : {}),
         action: job.action,
         payload: JSON.parse(job.payload),
       },

@@ -1,20 +1,26 @@
-import { useState, useEffect } from 'react';
-import { api, Secret } from '../api/client';
+import { useState, useEffect, useMemo } from 'react';
+import { api, Secret, SecretProvider, SecretType } from '../api/client';
 import { DataTable } from '../components/DataTable';
 import { Layout } from '../components/Layout';
 
 export default function Secrets() {
   const [secrets, setSecrets] = useState<Secret[]>([]);
+  const [providers, setProviders] = useState<SecretProvider[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
-  const [newSecret, setNewSecret] = useState({ label: '', apiKey: '', apiSecret: '', expiresAt: '' });
+  const [providerId, setProviderId] = useState('');
+  const [type, setType] = useState('');
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const [label, setLabel] = useState('');
+  const [expiresAt, setExpiresAt] = useState('');
 
   async function loadSecrets() {
     setLoading(true);
     try {
-      const data = await api.secrets();
-      setSecrets(data);
+      const [secretData, providerData] = await Promise.all([api.secrets(), api.secretProviders()]);
+      setSecrets(secretData);
+      setProviders(providerData);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -27,22 +33,57 @@ export default function Secrets() {
     loadSecrets();
   }, []);
 
+  // Default to the first online provider + its first secret type.
+  useEffect(() => {
+    if (providers.length > 0 && !providerId) {
+      const first = providers.find((p) => p.online) ?? providers[0];
+      setProviderId(first.id);
+      if (first.secretTypes.length > 0) setType(first.secretTypes[0].type);
+    }
+  }, [providers, providerId]);
+
+  const activeProvider = useMemo(
+    () => providers.find((p) => p.id === providerId) ?? providers[0],
+    [providers, providerId]
+  );
+
+  const activeType: SecretType | undefined = useMemo(
+    () => activeProvider?.secretTypes.find((t) => t.type === type) ?? activeProvider?.secretTypes[0],
+    [activeProvider, type]
+  );
+
+  function handleProviderChange(id: string) {
+    setProviderId(id);
+    const provider = providers.find((p) => p.id === id);
+    setType(provider?.secretTypes[0]?.type ?? '');
+    setFields({});
+  }
+
+  function handleTypeChange(t: string) {
+    setType(t);
+    setFields({});
+  }
+
+  function handleFieldChange(name: string, value: string) {
+    setFields((prev) => ({ ...prev, [name]: value }));
+  }
+
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     try {
-      console.log('Sending secret request:', newSecret);
       const response = await api.createSecret({
-        apiKey: newSecret.apiKey,
-        apiSecret: newSecret.apiSecret,
-        label: newSecret.label,
-        expiresAt: newSecret.expiresAt || undefined,
+        type: activeType?.type ?? type,
+        providerId: activeProvider?.id,
+        fields,
+        label,
+        expiresAt: expiresAt || undefined,
       });
-      console.log('Secret created successfully:', response);
-      setNewSecret({ label: '', apiKey: '', apiSecret: '', expiresAt: '' });
+      setLabel('');
+      setFields({});
+      setExpiresAt('');
       setShowForm(false);
       await loadSecrets();
     } catch (err) {
-      console.error('Error creating secret:', err);
       alert(`Failed to save secret: ${(err as Error).message}`);
     }
   }
@@ -77,42 +118,81 @@ export default function Secrets() {
           <h2 className="mb-4 text-sm font-semibold text-slate-900">Create New Secret</h2>
           <form onSubmit={handleCreate} className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div>
+              <label className="mb-1 block text-xs font-medium text-slate-700">Provider</label>
+              <select
+                value={providerId}
+                onChange={(e) => handleProviderChange(e.target.value)}
+                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              >
+                {providers.map((p) => (
+                  <option key={p.id} value={p.id} disabled={!p.online}>
+                    {p.name} {p.online ? '' : '(offline)'}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-700">Secret Type</label>
+              <select
+                value={type}
+                onChange={(e) => handleTypeChange(e.target.value)}
+                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              >
+                {(activeProvider?.secretTypes ?? []).map((t) => (
+                  <option key={t.type} value={t.type}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
               <label className="mb-1 block text-xs font-medium text-slate-700">Label</label>
               <input
                 type="text"
-                value={newSecret.label}
-                onChange={(e) => setNewSecret({ ...newSecret, label: e.target.value })}
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
                 className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
                 placeholder="e.g. OPNsense Core"
                 required
               />
             </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-slate-700">API Key</label>
-              <input
-                type="text"
-                value={newSecret.apiKey}
-                onChange={(e) => setNewSecret({ ...newSecret, apiKey: e.target.value })}
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-                required
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium text-slate-700">API Secret</label>
-              <input
-                type="password"
-                value={newSecret.apiSecret}
-                onChange={(e) => setNewSecret({ ...newSecret, apiSecret: e.target.value })}
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-                required
-              />
-            </div>
+
+            {(activeType?.fields ?? []).map((f) => (
+              <div key={f.name}>
+                <label className="mb-1 block text-xs font-medium text-slate-700">
+                  {f.label} {f.required ? '*' : ''}
+                </label>
+                {f.input === 'select' ? (
+                  <select
+                    value={fields[f.name] ?? ''}
+                    onChange={(e) => handleFieldChange(f.name, e.target.value)}
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                  >
+                    <option value="">Select...</option>
+                    {(f.options ?? []).map((opt) => (
+                      <option key={opt} value={opt}>
+                        {opt}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type={f.input === 'password' ? 'password' : 'text'}
+                    value={fields[f.name] ?? ''}
+                    onChange={(e) => handleFieldChange(f.name, e.target.value)}
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                    required={f.required}
+                  />
+                )}
+              </div>
+            ))}
+
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-700">Expiration Date</label>
               <input
                 type="datetime-local"
-                value={newSecret.expiresAt}
-                onChange={(e) => setNewSecret({ ...newSecret, expiresAt: e.target.value })}
+                value={expiresAt}
+                onChange={(e) => setExpiresAt(e.target.value)}
                 className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
               />
             </div>
@@ -135,6 +215,7 @@ export default function Secrets() {
         <DataTable
           columns={[
             { header: 'Label', key: 'label', render: (s: Secret) => s.label },
+            { header: 'Type', key: 'type', render: (s: Secret) => s.type },
             { header: 'User', key: 'username', render: (s: Secret) => s.username },
             { header: 'ID', key: 'id', render: (s: Secret) => s.id },
             { header: 'Created At', key: 'createdAt', render: (s: Secret) => new Date(s.createdAt).toLocaleString() },
