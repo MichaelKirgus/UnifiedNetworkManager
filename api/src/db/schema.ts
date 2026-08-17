@@ -46,6 +46,10 @@ export const plugins = pgTable('plugins', {
   capabilities: text('capabilities').notNull().default('[]'),
   endpoint: text('endpoint').notNull(),
   authType: text('authType').notNull().default('none'),
+  // Metric descriptors declared by the plugin in /discover (JSON array).
+  // Drives the webapp's visualization (gauge/plot/text/table) without any
+  // webapp code changes per plugin.
+  metricDescriptors: text('metricDescriptors'),
   createdAt: text('createdAt').notNull(),
   lastSeenAt: text('lastSeenAt'),
 });
@@ -71,6 +75,7 @@ export const telemetry = pgTable('telemetry', {
   collectedAt: text('collectedAt').notNull(),
   health: text('health').notNull().default('unknown'),
   metrics: text('metrics').notNull().default('{}'),
+  metricDescriptors: text('metricDescriptors'),
 }, (table) => {
   return {
     idxTelemetryDeviceCollected: index('idx_telemetry_device_collected').on(table.deviceId, table.collectedAt),

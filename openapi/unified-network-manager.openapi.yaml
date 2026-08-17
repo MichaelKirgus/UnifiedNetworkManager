@@ -380,6 +380,79 @@ paths:
         '401':
           description: Authentication required
 
+  /plugins/{id}/metrics:
+    get:
+      tags: [Plugins]
+      summary: Get the metric descriptors a plugin serves
+      description: >-
+        Returns the metric descriptors the plugin declared in its /discover
+        endpoint. The webapp renders device metrics generically from these
+        (gauge/plot/text/table), so new plugins/metrics need no webapp changes.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Metric descriptors
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pluginId, metrics]
+                properties:
+                  pluginId: { type: string }
+                  metrics:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MetricDescriptor'
+        '401':
+          description: Authentication required
+        '404':
+          description: Plugin not found
+
+  /devices/{deviceId}/telemetry:
+    get:
+      tags: [Devices]
+      summary: Get recent telemetry history for a device
+      description: >-
+        Returns the most recent telemetry samples (oldest → newest) for a
+        device. Used to render 'plot' metrics over time.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 30, maximum: 200 }
+      responses:
+        '200':
+          description: Telemetry history
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deviceId, history]
+                properties:
+                  deviceId: { type: string }
+                  history:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        collectedAt: { type: string, format: date-time }
+                        health: { type: string }
+                        metrics:
+                          type: object
+                          additionalProperties: true
+        '401':
+          description: Authentication required
+        '404':
+          description: Device not found
+
   /secrets/{id}:
     delete:
       tags: [Secrets]
@@ -532,6 +605,42 @@ components:
           additionalProperties: true
         createdAt: { type: string, format: date-time }
         finishedAt: { type: string, format: date-time }
+
+    MetricDescriptor:
+      type: object
+      required: [key, label, type, visualization]
+      properties:
+        key: { type: string, description: "Metric id; matches a key in the telemetry metrics map" }
+        label: { type: string }
+        unit: { type: string, description: "Unit of measure (%, MB, bps, s, ...) — the raw unit, kept for machine comparison" }
+        format:
+          type: string
+          enum: [bytes, bits, duration, number, text]
+          description: "How the webapp should humanize the value (bytes → 1.2 GB, bits → 850 Mbps, duration → 3d 4h, ...). The extensible rendering hint."
+        type:
+          type: string
+          enum: [number, string, boolean, enum]
+        visualization:
+          type: string
+          enum: [gauge, plot, text, table]
+        group: { type: string, description: "Optional section grouping" }
+        min: { type: number }
+        max: { type: number }
+        color: { type: string }
+        rows:
+          type: array
+          items: { type: string }
+          description: "For 'table': the row keys (e.g. interface names)"
+        columns:
+          type: array
+          items: { type: string }
+          description: "For 'table': the column keys (e.g. rx, tx)"
+        summary:
+          type: boolean
+          description: "When true, this is a headline metric the webapp renders inline in the device overview table (not just the detail view)."
+        intervalMs:
+          type: integer
+          description: "How often this metric group should be re-fetched from the appliance (ms). The plugin caches slow data (inventory) and only re-polls when the interval elapses — the extensible refresh-cadence contract."
 
     Plugin:
       type: object

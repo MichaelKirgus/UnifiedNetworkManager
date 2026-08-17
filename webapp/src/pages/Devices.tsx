@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
+import { MetricCell } from '../components/MetricCell';
 import { api, Device, Plugin } from '../api/client';
 
 const emptyForm = {
@@ -94,6 +95,21 @@ export default function Devices() {
     { header: 'Type', key: 'deviceType' },
     { header: 'Site', key: 'site', render: (row) => row.site ?? '—' },
     { header: 'Status', key: 'status', render: (row) => <StatusBadge status={row.status} /> },
+    {
+      header: 'Metrics',
+      key: 'metrics',
+      render: (row) => {
+        const metrics = row.summaryMetrics ?? [];
+        if (metrics.length === 0) return <span className="text-slate-400">—</span>;
+        return (
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            {metrics.map((m) => (
+              <MetricCell key={m.key} metric={m} />
+            ))}
+          </div>
+        );
+      },
+    },
     {
       header: 'Actions',
       key: 'actions',

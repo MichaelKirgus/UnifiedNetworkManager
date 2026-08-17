@@ -18,6 +18,8 @@ export interface PluginIdentity {
   capabilities: string[];
   endpoint: string;
   authType: string;
+  /** Metric descriptors declared by the plugin (drives webapp visualization). */
+  metrics?: unknown[];
 }
 
 export interface DiscoveryOptions {
@@ -66,6 +68,7 @@ async function fetchIdentity(endpoint: string): Promise<PluginIdentity | null> {
       capabilities: Array.isArray(data.capabilities) ? data.capabilities : [],
       endpoint: data.endpoint ?? endpoint,
       authType: data.authType ?? 'none',
+      metrics: Array.isArray(data.metrics) ? data.metrics : undefined,
     };
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -80,6 +83,12 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
     where: (plugins, { eq }) => eq(plugins.id, identity.uuid),
   });
 
+  // Only overwrite the stored descriptors when this discovery source actually
+  // carries them (the mDNS TXT path does not), so a metrics-less upsert never
+  // wipes descriptors set by the HTTP polling path.
+  const hasMetrics = Array.isArray(identity.metrics) && identity.metrics.length > 0;
+  const metricDescriptors = hasMetrics ? JSON.stringify(identity.metrics) : null;
+
   if (existing) {
     await db
       .update(schema.plugins)
@@ -90,6 +99,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
         capabilities: JSON.stringify(identity.capabilities),
         endpoint: identity.endpoint,
         authType: identity.authType,
+        ...(hasMetrics ? { metricDescriptors } : {}),
         lastSeenAt: now,
       })
       .where(eq(schema.plugins.id, identity.uuid));
@@ -102,6 +112,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
       capabilities: JSON.stringify(identity.capabilities),
       endpoint: identity.endpoint,
       authType: identity.authType,
+      metricDescriptors,
       createdAt: now,
       lastSeenAt: now,
     });

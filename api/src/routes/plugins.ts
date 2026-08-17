@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { desc } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth } from '../auth/middleware';
@@ -33,6 +33,30 @@ router.get('/plugins/:id/required-secret-type', requireAuth, async (req, res) =>
   const { id } = req.params;
   const requiredSecretType = await getRequiredSecretType(id);
   res.status(200).json({ requiredSecretType });
+});
+
+// GET /plugins/:id/metrics - The metric descriptors a plugin declared in its
+// /discover endpoint. The webapp renders device metrics generically from these
+// (gauge/plot/text/table), so new plugins/metrics need no webapp changes.
+router.get('/plugins/:id/metrics', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const row = await db.query.plugins.findFirst({
+    where: (plugins, { eq }) => eq(plugins.id, id),
+  });
+  if (!row) {
+    res.status(404).json({ error: 'Plugin not found' });
+    return;
+  }
+  let metrics: unknown[] = [];
+  if (row.metricDescriptors) {
+    try {
+      const parsed = JSON.parse(row.metricDescriptors);
+      metrics = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      metrics = [];
+    }
+  }
+  res.status(200).json({ pluginId: id, metrics });
 });
 
 export default router;

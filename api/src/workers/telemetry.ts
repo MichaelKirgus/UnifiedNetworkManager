@@ -9,7 +9,8 @@ const POLL_INTERVAL_MS = 30_000;
 
 interface MonitoringResponse {
   health?: string;
-  metrics?: Record<string, number>;
+  metrics?: Record<string, unknown>;
+  metricDescriptors?: unknown[];
 }
 
 async function pollDevice(device: any): Promise<void> {
@@ -44,6 +45,7 @@ async function pollDevice(device: any): Promise<void> {
 
     const health = response.data?.health ?? 'unknown';
     const metrics = response.data?.metrics ?? {};
+    const metricDescriptors = response.data?.metricDescriptors;
     const collectedAt = new Date().toISOString();
 
     await db.insert(schema.telemetry).values({
@@ -52,6 +54,7 @@ async function pollDevice(device: any): Promise<void> {
       collectedAt,
       health,
       metrics: JSON.stringify(metrics),
+      metricDescriptors: metricDescriptors ? JSON.stringify(metricDescriptors) : null,
     });
 
     const status = health === 'ok' ? 'online' : health === 'critical' ? 'offline' : 'degraded';

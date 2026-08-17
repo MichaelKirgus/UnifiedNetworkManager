@@ -28,6 +28,12 @@ export type Secret = typeof schema.secrets.$inferSelect;
  * here so the API is always able to resolve usernames (e.g. for secrets).
  */
 export async function initDb(): Promise<void> {
+  // Defensive migration: ensure the telemetry.metricDescriptors column exists.
+  // (drizzle-kit push handles this on setup, but this covers hot-reload / dev.)
+  await pool.query(
+    `ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS "metricDescriptors" TEXT`
+  );
+
   const existingAdmin = await db.query.users.findFirst({
     where: (users, { eq }) => eq(users.username, 'admin'),
   });

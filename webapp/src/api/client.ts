@@ -65,14 +65,15 @@ export interface Device {
   status: string;
   apiKey?: string;
   apiSecret?: string;
+  /** Headline metrics (marked `summary` by the plugin) for inline table display. */
+  summaryMetrics?: SummaryMetric[];
 }
 
 export interface TelemetrySnapshot {
   deviceId: string;
   collectedAt: string;
   health: string;
-  metrics: Record<string, number>;
-}
+  metrics: Record<string, number>;  metricDescriptors?: MetricDescriptor[];}
 
 export interface Plugin {
   id: string;
@@ -83,6 +84,40 @@ export interface Plugin {
   endpoint: string;
   authType: string;
   lastSeenAt?: string | null;
+}
+
+export interface MetricDescriptor {
+  key: string;
+  label: string;
+  unit?: string;
+  format?: 'bytes' | 'bits' | 'duration' | 'number' | 'text';
+  type: 'number' | 'string' | 'boolean' | 'enum';
+  visualization: 'gauge' | 'plot' | 'text' | 'table';
+  group?: string;
+  min?: number;
+  max?: number;
+  color?: string;
+  rows?: string[];
+  summary?: boolean;
+  intervalMs?: number;
+}
+
+/** A headline metric shown inline in the device overview table. */
+export interface SummaryMetric {
+  key: string;
+  label: string;
+  value: unknown;
+  unit?: string;
+  format?: 'bytes' | 'bits' | 'duration' | 'number' | 'text';
+  visualization: 'gauge' | 'plot' | 'text' | 'table';
+  min?: number;
+  max?: number;
+  color?: string;
+}
+
+export interface PluginMetrics {
+  pluginId: string;
+  metrics: MetricDescriptor[];
 }
 
 export interface ConfigJob {
@@ -136,6 +171,10 @@ export const api = {
   createDevice: (body: unknown) =>
     apiFetch<Device>('/devices', { method: 'POST', body: JSON.stringify(body) }),
   monitoring: (deviceId: string) => apiFetch<TelemetrySnapshot>(`/devices/${deviceId}/monitoring`),
+  deviceTelemetry: (deviceId: string, limit = 30) =>
+    apiFetch<{ deviceId: string; history: { collectedAt: string; health: string; metrics: Record<string, unknown> }[] }>(
+      `/devices/${deviceId}/telemetry?limit=${limit}`
+    ),
   plugins: () => apiFetch<Plugin[]>('/plugins'),
   configJobs: (deviceId: string, body: unknown) =>
     apiFetch<ConfigJob>(`/devices/${deviceId}/config-jobs`, { method: 'POST', body: JSON.stringify(body) }),
@@ -154,4 +193,6 @@ export const api = {
     apiFetch<void>(`/secrets/${id}`, { method: 'DELETE' }),
   requiredSecretType: (pluginId: string) =>
     apiFetch<{ requiredSecretType: string | null }>(`/plugins/${pluginId}/required-secret-type`),
+  pluginMetrics: (pluginId: string) =>
+    apiFetch<PluginMetrics>(`/plugins/${pluginId}/metrics`),
 };
