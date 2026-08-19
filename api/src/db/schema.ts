@@ -1,4 +1,4 @@
-import { pgTable, text, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, text, boolean, index, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const users = pgTable('users', {
@@ -16,13 +16,35 @@ export const devices = pgTable('devices', {
   name: text('name').notNull(),
   vendor: text('vendor').notNull(),
   deviceType: text('deviceType').notNull(),
-  pluginId: text('pluginId').notNull(),
   managementAddress: text('managementAddress').notNull(),
   site: text('site'),
   status: text('status').notNull().default('unknown'),
-  secretId: text('secretId').notNull(),
   createdAt: text('createdAt').notNull(),
 });
+
+// Device ↔ plugin assignments (many-to-many). Each row binds one plugin to a
+// device with its own credential source (`secretId`), so a single device can
+// be served by several plugins at once (e.g. OPNsense API + SNMP + SSH), each
+// providing different data and using different secrets. Exactly one assignment
+// per device is marked primary — the default target for config jobs.
+export const devicePlugins = pgTable(
+  'device_plugins',
+  {
+    id: text('id').primaryKey(),
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Credential source for THIS assignment (each plugin may use a different
+    // secret). NULL = the plugin is called without credentials.
+    secretId: text('secretId'),
+    isPrimary: boolean('isPrimary').notNull().default(false),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => {
+    return {
+      uqDevicePlugins: uniqueIndex('uq_device_plugins').on(table.deviceId, table.pluginId),
+    };
+  }
+);
 
 export const secrets = pgTable('secrets', {
   id: text('id').primaryKey(),
@@ -89,6 +111,9 @@ export const pluginSettings = pgTable(
 export const configJobs = pgTable('config_jobs', {
   id: text('id').primaryKey(),
   deviceId: text('deviceId').notNull(),
+  // The specific plugin assignment that executes this job (a device can be
+  // served by several plugins; the caller picks which one applies the change).
+  pluginId: text('pluginId'),
   action: text('action').notNull(),
   status: text('status').notNull().default('queued'),
   payload: text('payload').notNull().default('{}'),
@@ -104,13 +129,17 @@ export const configJobs = pgTable('config_jobs', {
 export const telemetry = pgTable('telemetry', {
   id: text('id').primaryKey(),
   deviceId: text('deviceId').notNull(),
+  // Which plugin produced this snapshot (a device can have several plugins
+  // reporting independently; rows are attributed per assignment).
+  pluginId: text('pluginId'),
   collectedAt: text('collectedAt').notNull(),
   health: text('health').notNull().default('unknown'),
   metrics: text('metrics').notNull().default('{}'),
   metricDescriptors: text('metricDescriptors'),
 }, (table) => {
   return {
-    idxTelemetryDeviceCollected: index('idx_telemetry_device_collected').on(table.deviceId, table.collectedAt),
+    idxTelemetryDevicePluginCollected: index('idx_telemetry_device_plugin_collected')
+      .on(table.deviceId, table.pluginId, table.collectedAt),
   };
 });
 

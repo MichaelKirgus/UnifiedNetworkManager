@@ -10,6 +10,7 @@ function serializeConfigJob(row: any) {
   return {
     id: row.id,
     deviceId: row.deviceId,
+    pluginId: row.pluginId ?? undefined,
     action: row.action,
     status: row.status,
     result: row.result ? JSON.parse(row.result) : undefined,

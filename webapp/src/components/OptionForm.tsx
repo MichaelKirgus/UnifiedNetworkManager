@@ -6,6 +6,11 @@ import { api, ApiError, PluginOptionDescriptor, StringOption, IntegerOption } fr
 
 interface OptionFormProps {
   pluginId: string;
+  /**
+   * When set, the form edits THIS DEVICE's overrides for the plugin (which
+   * inherit from the global settings). Omit to edit the global settings.
+   */
+  deviceId?: string;
   /** Called after a successful save/reset so the parent can refresh if needed. */
   onSaved?: () => void;
 }
@@ -45,8 +50,12 @@ function validateLocal(descriptor: PluginOptionDescriptor, value: unknown): stri
   }
 }
 
-export function OptionForm({ pluginId, onSaved }: OptionFormProps) {
-  const optionsQuery = useQuery({ queryKey: ['plugin-options', pluginId], queryFn: () => api.pluginOptions(pluginId) });
+export function OptionForm({ pluginId, deviceId, onSaved }: OptionFormProps) {
+  const scoped = Boolean(deviceId);
+  const optionsQuery = useQuery({
+    queryKey: scoped ? ['device-plugin-options', deviceId, pluginId] : ['plugin-options', pluginId],
+    queryFn: () => (scoped ? api.devicePluginOptions(deviceId!, pluginId) : api.pluginOptions(pluginId)),
+  });
 
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -103,7 +112,11 @@ export function OptionForm({ pluginId, onSaved }: OptionFormProps) {
     }
     setSaving(true);
     try {
-      await api.savePluginSettings(pluginId, buildPayload());
+      if (scoped) {
+        await api.saveDevicePluginSettings(deviceId!, pluginId, buildPayload());
+      } else {
+        await api.savePluginSettings(pluginId, buildPayload());
+      }
       setSavedAt(Date.now());
       onSaved?.();
     } catch (err) {
@@ -119,10 +132,15 @@ export function OptionForm({ pluginId, onSaved }: OptionFormProps) {
   }
 
   async function handleReset() {
-    if (!window.confirm('Reset all settings for this plugin to their defaults?')) return;
+    const message = scoped
+      ? 'Reset this device\'s overrides? The options will fall back to the global settings (or their defaults).'
+      : 'Reset all settings for this plugin to their defaults?';
+    if (!window.confirm(message)) return;
     setSaving(true);
     try {
-      const view = await api.resetPluginSettings(pluginId);
+      const view = scoped
+        ? await api.resetDevicePluginSettings(deviceId!, pluginId)
+        : await api.resetPluginSettings(pluginId);
       setValues(view.effectiveValues ?? {});
       setFieldErrors({});
       setSavedAt(Date.now());
@@ -233,7 +251,7 @@ export function OptionForm({ pluginId, onSaved }: OptionFormProps) {
             className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"
           >
             <RotateCcw className="h-4 w-4" />
-            Reset to defaults
+            {scoped ? 'Reset to inherited' : 'Reset to defaults'}
           </button>
           <button
             type="submit"

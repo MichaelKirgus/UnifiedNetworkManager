@@ -181,7 +181,258 @@ paths:
         '404':
           description: Referenced plugin not found
         '422':
-          description: Referenced plugin ID is invalid
+          description: Plugin assignment payload is invalid
+
+  /devices/{deviceId}:
+    patch:
+      tags: [Devices]
+      summary: Update a device (rename, change management address, ...)
+      description: >-
+        Updates the identity fields of an existing device. Only the provided
+        fields are changed; plugin assignments and their settings are managed
+        via the /devices/{deviceId}/plugins endpoints. `site` may be set to
+        null to clear it.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                name: { type: string, minLength: 1 }
+                vendor: { type: string, minLength: 1 }
+                deviceType: { type: string, minLength: 1 }
+                managementAddress: { type: string, minLength: 1 }
+                # null clears the site (OpenAPI 3.1 / JSON Schema type array).
+                site: { type: [string, 'null'] }
+      responses:
+        '200':
+          description: Updated device (with its plugin assignments)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '400':
+          description: No updatable fields provided or a field is invalid
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing devices:write permission
+        '404':
+          description: Device not found
+
+  /devices/{deviceId}/plugins:
+    get:
+      tags: [Devices]
+      summary: List a device's plugin assignments
+      description: >-
+        Returns every plugin assigned to the device, each with its own
+        credential source and primary flag. A device can be served by several
+        plugins at once (e.g. OPNsense API + SNMP + SSH).
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Assignments
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deviceId, plugins]
+                properties:
+                  deviceId: { type: string }
+                  plugins:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DevicePluginAssignment'
+        '401':
+          description: Authentication required
+        '404':
+          description: Device not found
+    post:
+      tags: [Devices]
+      summary: Assign a plugin to a device
+      description: >-
+        Adds another plugin assignment. The first assignment on a device
+        becomes primary automatically; passing `isPrimary: true` demotes the
+        current primary (exactly one primary per device). Each assignment may
+        carry its own credential source (`secretId`).
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DevicePluginAssignmentInput'
+      responses:
+        '201':
+          description: Assignment created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DevicePluginAssignment'
+        '400':
+          description: Missing pluginId
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing devices:write permission
+        '404':
+          description: Device, plugin or credentials not found
+        '409':
+          description: Plugin is already assigned to this device
+
+  /devices/{deviceId}/plugins/{pluginId}:
+    delete:
+      tags: [Devices]
+      summary: Remove a plugin assignment from a device
+      description: >-
+        Removes the (device, plugin) binding. If it was the primary and other
+        assignments remain, the oldest remaining one is promoted to keep
+        exactly one primary.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: pluginId
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Assignment removed
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing devices:write permission
+        '404':
+          description: Device not found or plugin is not assigned to it
+
+  /devices/{deviceId}/plugins/{pluginId}/options:
+    get:
+      tags: [Devices]
+      summary: Get a device's settings for one of its plugins
+      description: >-
+        Same option descriptors as the global view, but `values` holds THIS
+        device's overrides and `effectiveValues` resolves in the order
+        device override → global override → descriptor default.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: pluginId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Option descriptors + device-scoped settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginOptions'
+        '401':
+          description: Authentication required
+        '404':
+          description: Device not found or plugin is not assigned to it
+
+  /devices/{deviceId}/plugins/{pluginId}/settings:
+    put:
+      tags: [Devices]
+      summary: Save a device's settings overrides for one of its plugins
+      description: >-
+        Persists per-device override values (validated against the plugin's
+        descriptors, all-or-nothing). Unchanged options keep inheriting the
+        global setting or descriptor default.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: pluginId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [settings]
+              properties:
+                settings:
+                  type: object
+                  additionalProperties: true
+                  description: "Map of option key -> value (string | integer | boolean)"
+      responses:
+        '200':
+          description: Saved; returns the updated device-scoped options view
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginOptions'
+        '400':
+          description: One or more values failed validation
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error: { type: string }
+                  fieldErrors:
+                    type: object
+                    additionalProperties: { type: string }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing plugins:manage permission
+        '404':
+          description: Device not found or plugin is not assigned to it
+    delete:
+      tags: [Devices]
+      summary: Reset a device's settings overrides for one of its plugins
+      description: >-
+        Deletes this device's override rows only — every option falls back to
+        the global setting (or descriptor default) instead of being wiped.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: pluginId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Reset; returns the options view (device values now empty)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginOptions'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing plugins:manage permission
+        '404':
+          description: Device not found or plugin is not assigned to it
 
   /devices/{deviceId}/monitoring:
     get:
@@ -549,6 +800,7 @@ paths:
                       properties:
                         collectedAt: { type: string, format: date-time }
                         health: { type: string }
+                        pluginId: { type: string, description: "Which plugin produced this sample" }
                         metrics:
                           type: object
                           additionalProperties: true
@@ -640,51 +892,111 @@ components:
           items:
             $ref: '#/components/schemas/SecretType'
 
+    # One row of the device ↔ plugin join table (a device can have several).
+    DevicePluginAssignment:
+      type: object
+      required: [id, deviceId, pluginId, isPrimary]
+      properties:
+        id: { type: string }
+        deviceId: { type: string }
+        pluginId: { type: string }
+        secretId: { type: string, description: "Credential source for this assignment (null = no credentials)" }
+        isPrimary: { type: boolean, description: "Exactly one primary per device; default target for config jobs" }
+        createdAt: { type: string, format: date-time }
+        # Enriched fields returned by the list endpoints:
+        pluginName: { type: string }
+        pluginVersion: { type: string }
+        pluginEndpoint: { type: string, format: uri }
+        pluginOnline: { type: boolean }
+        secretLabel: { type: string }
+
+    DevicePluginAssignmentInput:
+      type: object
+      required: [pluginId]
+      properties:
+        pluginId: { type: string }
+        secretId: { type: string, description: "Optional credential source for this assignment" }
+        isPrimary: { type: boolean, default: false }
+
     Device:
       type: object
-      required: [id, name, vendor, deviceType, pluginId, managementAddress, status]
+      required: [id, name, vendor, deviceType, managementAddress, status]
       properties:
         id: { type: string }
         name: { type: string }
         vendor: { type: string }
         deviceType: { type: string }
-        pluginId: { type: string }
         managementAddress: { type: string }
         site: { type: string }
         status:
           type: string
           enum: [online, degraded, offline, unknown]
+        plugins:
+          type: array
+          items:
+            $ref: '#/components/schemas/DevicePluginAssignment'
+          description: "Assigned plugins (list endpoints include this)"
+        summaryMetrics:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+          description: "Headline metrics from the latest telemetry of each assignment"
 
     DeviceCreateRequest:
       type: object
-      required: [name, vendor, deviceType, pluginId, managementAddress, credentialsRef]
+      required: [name, vendor, deviceType, managementAddress, plugins]
       properties:
         name: { type: string }
         vendor: { type: string }
         deviceType: { type: string }
-        pluginId: { type: string }
         managementAddress: { type: string }
-        credentialsRef: { type: string, description: "Reference to secret store key" }
         site: { type: string }
+        # At least one plugin assignment; the first becomes primary.
+        plugins:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/DevicePluginAssignmentInput'
+
+    # One plugin's monitoring snapshot for a device (a device can have several).
+    PluginTelemetrySnapshot:
+      type: object
+      required: [pluginId, health, metrics]
+      properties:
+        pluginId: { type: string }
+        collectedAt: { type: string, format: date-time, description: "null when the plugin has not reported yet" }
+        health:
+          type: string
+          enum: [ok, warning, degraded, critical, unknown]
+        metrics:
+          type: object
+          additionalProperties: true
+        metricDescriptors:
+          type: array
+          items:
+            $ref: '#/components/schemas/MetricDescriptor'
 
     TelemetrySnapshot:
       type: object
-      required: [deviceId, collectedAt, health, metrics]
+      required: [deviceId, health, snapshots]
       properties:
         deviceId: { type: string }
-        collectedAt: { type: string, format: date-time }
+        # Overall device health = worst-wins across all plugin assignments.
         health:
           type: string
-          enum: [ok, warning, critical, unknown]
-        metrics:
-          type: object
-          additionalProperties:
-            type: number
+          enum: [ok, warning, degraded, critical, unknown]
+        snapshots:
+          type: array
+          items:
+            $ref: '#/components/schemas/PluginTelemetrySnapshot'
 
     ConfigJobRequest:
       type: object
-      required: [action, payload]
+      required: [pluginId, action, payload]
       properties:
+        # Which assigned plugin applies the change (a device can have several).
+        pluginId: { type: string }
         action:
           type: string
           enum: [applyConfig, rollbackConfig, syncState]
@@ -698,6 +1010,7 @@ components:
       properties:
         id: { type: string }
         deviceId: { type: string }
+        pluginId: { type: string, description: "The assignment that executes this job" }
         action:
           type: string
           enum: [applyConfig, rollbackConfig, syncState]

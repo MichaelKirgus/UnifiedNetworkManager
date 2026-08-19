@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from './db';
 import * as schema from './db/schema';
@@ -107,14 +107,25 @@ async function loadPlugin(pluginId: string) {
   return row;
 }
 
-/** Loads stored global overrides for a plugin as key -> decoded value. */
-async function loadStoredValues(pluginId: string): Promise<Record<string, unknown>> {
+/**
+ * Loads stored override rows for one scope as key -> decoded value.
+ * `deviceId = null` selects global rows; a device id selects that device's
+ * override rows (partial unique indexes guarantee at most one row per key).
+ */
+async function loadScopedValues(
+  pluginId: string,
+  deviceId: string | null
+): Promise<Record<string, unknown>> {
   const rows = await db.query.pluginSettings.findMany({
-    where: (settings) => eq(settings.pluginId, pluginId),
+    where: and(
+      eq(schema.pluginSettings.pluginId, pluginId),
+      deviceId === null
+        ? isNull(schema.pluginSettings.deviceId)
+        : eq(schema.pluginSettings.deviceId, deviceId)
+    ),
   });
   const values: Record<string, unknown> = {};
   for (const row of rows) {
-    if (row.deviceId !== null) continue; // global scope only for now
     try {
       values[row.optionKey] = JSON.parse(row.value);
     } catch {
@@ -124,6 +135,21 @@ async function loadStoredValues(pluginId: string): Promise<Record<string, unknow
   return values;
 }
 
+/** 404-shaped error when a plugin is not assigned to a device. */
+function assignmentNotFound(): Error {
+  return Object.assign(new Error('Plugin is not assigned to this device'), { status: 404 });
+}
+
+async function assertAssignment(deviceId: string, pluginId: string): Promise<void> {
+  const row = await db.query.devicePlugins.findFirst({
+    where: and(
+      eq(schema.devicePlugins.deviceId, deviceId),
+      eq(schema.devicePlugins.pluginId, pluginId)
+    ),
+  });
+  if (!row) throw assignmentNotFound();
+}
+
 /**
  * Descriptors + current overrides + effective values (defaults ⊕ overrides).
  * Works even when the plugin is offline — everything comes from the DB cache.
@@ -131,7 +157,7 @@ async function loadStoredValues(pluginId: string): Promise<Record<string, unknow
 export async function getPluginOptions(pluginId: string): Promise<PluginOptionsView> {
   const row = await loadPlugin(pluginId);
   const options = parseDescriptors(row.optionDescriptors);
-  const values = await loadStoredValues(pluginId);
+  const values = await loadScopedValues(pluginId, null);
 
   const effectiveValues: Record<string, unknown> = {};
   for (const opt of options) {
@@ -146,11 +172,48 @@ export async function getPluginOptions(pluginId: string): Promise<PluginOptionsV
 }
 
 /**
+ * Device-scoped view: same descriptors, but `values` holds THIS device's
+ * overrides and `effectiveValues` resolves in the order
+ *   device override → global override → descriptor default.
+ */
+export async function getDevicePluginOptions(
+  deviceId: string,
+  pluginId: string
+): Promise<PluginOptionsView> {
+  const row = await loadPlugin(pluginId);
+  await assertAssignment(deviceId, pluginId);
+  const options = parseDescriptors(row.optionDescriptors);
+
+  const [globalValues, deviceValues] = await Promise.all([
+    loadScopedValues(pluginId, null),
+    loadScopedValues(pluginId, deviceId),
+  ]);
+
+  const effectiveValues: Record<string, unknown> = {};
+  for (const opt of options) {
+    if (opt.key in deviceValues) {
+      effectiveValues[opt.key] = deviceValues[opt.key];
+    } else if (opt.key in globalValues) {
+      effectiveValues[opt.key] = globalValues[opt.key];
+    } else if (opt.default !== undefined) {
+      effectiveValues[opt.key] = opt.default;
+    }
+  }
+
+  return { pluginId, options, values: deviceValues, effectiveValues };
+}
+
+/**
  * Validates ALL entries first and only then writes — a single invalid value
  * rejects the whole request with per-field errors (no partial saves).
  */
-export async function upsertPluginSettings(
+/**
+ * Core upsert for one scope. `deviceId = null` writes global rows; a device
+ * id writes per-device override rows (inherited from global, overridable).
+ */
+async function upsertScopedSettings(
   pluginId: string,
+  deviceId: string | null,
   settings: Record<string, unknown>
 ): Promise<void> {
   const row = await loadPlugin(pluginId);
@@ -177,7 +240,10 @@ export async function upsertPluginSettings(
     const existing = await db.query.pluginSettings.findFirst({
       where: and(
         eq(schema.pluginSettings.pluginId, pluginId),
-        eq(schema.pluginSettings.optionKey, key)
+        eq(schema.pluginSettings.optionKey, key),
+        deviceId === null
+          ? isNull(schema.pluginSettings.deviceId)
+          : eq(schema.pluginSettings.deviceId, deviceId)
       ),
     });
     if (existing) {
@@ -188,7 +254,7 @@ export async function upsertPluginSettings(
       await db.insert(schema.pluginSettings).values({
         id: uuidv4(),
         pluginId,
-        deviceId: null,
+        deviceId,
         optionKey: key,
         value: JSON.stringify(value),
         updatedAt: now,
@@ -199,17 +265,59 @@ export async function upsertPluginSettings(
   invalidateEffectiveCache(pluginId);
 }
 
-/** Resets a plugin's settings to defaults (deletes its global override rows). */
-export async function resetPluginSettings(pluginId: string): Promise<void> {
+/** Global-scope upsert (deviceId = NULL rows). */
+export async function upsertPluginSettings(
+  pluginId: string,
+  settings: Record<string, unknown>
+): Promise<void> {
+  await upsertScopedSettings(pluginId, null, settings);
+}
+
+/** Per-device override upsert; the plugin must be assigned to the device. */
+export async function upsertDevicePluginSettings(
+  deviceId: string,
+  pluginId: string,
+  settings: Record<string, unknown>
+): Promise<void> {
+  await assertAssignment(deviceId, pluginId);
+  await upsertScopedSettings(pluginId, deviceId, settings);
+}
+
+/** Core reset for one scope (deletes that scope's override rows). */
+async function resetScopedSettings(
+  pluginId: string,
+  deviceId: string | null
+): Promise<void> {
   await loadPlugin(pluginId); // 404 when unknown
   const rows = await db.query.pluginSettings.findMany({
-    where: (settings) => eq(settings.pluginId, pluginId),
+    where: and(
+      eq(schema.pluginSettings.pluginId, pluginId),
+      deviceId === null
+        ? isNull(schema.pluginSettings.deviceId)
+        : eq(schema.pluginSettings.deviceId, deviceId)
+    ),
   });
   for (const row of rows) {
-    if (row.deviceId !== null) continue;
     await db.delete(schema.pluginSettings).where(eq(schema.pluginSettings.id, row.id));
   }
   invalidateEffectiveCache(pluginId);
+}
+
+/** Resets a plugin's global settings to defaults. */
+export async function resetPluginSettings(pluginId: string): Promise<void> {
+  await resetScopedSettings(pluginId, null);
+}
+
+/**
+ * Resets ONE device's overrides — the values fall back to the global setting
+ * (or descriptor default) instead of being wiped entirely.
+ */
+export async function resetDevicePluginSettings(
+  deviceId: string,
+  pluginId: string
+): Promise<void> {
+  await assertAssignment(deviceId, pluginId);
+  await resetScopedSettings(pluginId, deviceId);
 }
 
 // --- Effective-values cache (for header injection on every plugin call) -----
@@ -220,43 +328,69 @@ export async function resetPluginSettings(pluginId: string): Promise<void> {
 const EFFECTIVE_CACHE_TTL_MS = 5_000;
 const effectiveCache = new Map<string, { values: Record<string, unknown>; cachedAt: number }>();
 
-export function invalidateEffectiveCache(pluginId?: string): void {
-  if (pluginId) effectiveCache.delete(pluginId);
-  else effectiveCache.clear();
+function cacheKey(pluginId: string, deviceId?: string | null): string {
+  return `${pluginId}:${deviceId ?? 'global'}`;
 }
 
 /**
- * Effective settings for a plugin (defaults ⊕ overrides), decoded and ready
- * to be serialized into the `x-unm-settings` header. Returns {} when the
- * plugin is unknown or declares no options — callers can always send it.
+ * Invalidates the effective-values cache for a plugin — ALL scopes (global +
+ * every device), since a write in one scope can change what another resolves.
  */
-export async function getEffectiveSettings(pluginId: string): Promise<Record<string, unknown>> {
+export function invalidateEffectiveCache(pluginId?: string): void {
+  if (!pluginId) {
+    effectiveCache.clear();
+    return;
+  }
+  for (const key of Array.from(effectiveCache.keys())) {
+    if (key === pluginId || key.startsWith(`${pluginId}:`)) {
+      effectiveCache.delete(key);
+    }
+  }
+}
+
+/**
+ * Effective settings for a plugin in one scope, decoded and ready to be
+ * serialized into the `x-unm-settings` header. With a `deviceId`, resolution
+ * is device override → global override → default. Returns {} when the plugin
+ * is unknown or declares no options — callers can always send it.
+ */
+export async function getEffectiveSettings(
+  pluginId: string,
+  deviceId?: string | null
+): Promise<Record<string, unknown>> {
+  const key = cacheKey(pluginId, deviceId);
   const now = Date.now();
-  const cached = effectiveCache.get(pluginId);
+  const cached = effectiveCache.get(key);
   if (cached && now - cached.cachedAt < EFFECTIVE_CACHE_TTL_MS) {
     return cached.values;
   }
 
   let values: Record<string, unknown> = {};
   try {
-    const view = await getPluginOptions(pluginId);
+    const view = deviceId
+      ? await getDevicePluginOptions(deviceId, pluginId)
+      : await getPluginOptions(pluginId);
     values = view.effectiveValues;
   } catch {
-    // Unknown plugin or DB hiccup: send no settings rather than fail the call.
+    // Unknown plugin/assignment or DB hiccup: send no settings rather than fail the call.
     return {};
   }
 
-  effectiveCache.set(pluginId, { values, cachedAt: now });
+  effectiveCache.set(key, { values, cachedAt: now });
   return values;
 }
 
 /**
  * Axios-ready headers carrying the plugin's effective settings as JSON.
  * Spread into any API→plugin call (`headers: await settingsHeaders(id)`).
- * Returns {} when there is nothing to send so callers can always include it.
+ * Pass `deviceId` to resolve per-device overrides. Returns {} when there is
+ * nothing to send so callers can always include it.
  */
-export async function settingsHeaders(pluginId: string): Promise<Record<string, string>> {
-  const values = await getEffectiveSettings(pluginId);
+export async function settingsHeaders(
+  pluginId: string,
+  deviceId?: string | null
+): Promise<Record<string, string>> {
+  const values = await getEffectiveSettings(pluginId, deviceId);
   if (Object.keys(values).length === 0) return {};
   return { 'x-unm-settings': JSON.stringify(values) };
 }

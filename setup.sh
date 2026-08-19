@@ -4,11 +4,13 @@
 set -e
 
 # --- Configuration -----------------------------------------------------------
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API_PORT=3000
 WEB_PORT=5173
 OPNSENSE_PORT=4001
 BASIC_AUTH_PORT=4002
 SECRETS_PORT=4003
+ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}")
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/unm-dev.XXXXXX")"
 DEV_PIDS=()
 
@@ -61,6 +63,60 @@ start_dev_server() {
   DEV_PIDS+=("$!")
 }
 
+# Kill every dev process belonging to this repo, using several independent
+# strategies and then VERIFYING nothing survived (retry loop).
+#
+# A single fire-and-forget pkill is not enough in practice:
+#   - ts-node-dev's respawn supervisor can re-spawn a worker between kills,
+#   - hard-killed setup.sh runs (double Ctrl+C / closed terminal) skip the
+#     EXIT trap entirely, so leftovers accumulate across sessions and keep
+#     polling Postgres even with no port bound (device status flapping).
+# Called both on cleanup (exit) and as pre-flight before starting.
+kill_dev_processes() {
+  local round=0 pid cwd p
+
+  while [ "$round" -lt 4 ]; do
+    # Strategy 1 (most precise): kill any node/npm process whose working
+    # directory is inside this repo — catches supervisors, workers and vite
+    # regardless of how their command line looks. Editor processes (VS Code
+    # extension host runs as `node` with the workspace as cwd) are excluded.
+    for pid in $(pgrep -x node 2>/dev/null; pgrep -x npm 2>/dev/null); do
+      cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+      case "$cwd" in
+        "$ROOT"/*)
+          cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+          case "$cmdline" in
+            *vscode*|*extensionHost*|*/Code/|*cursor*) : ;; # never kill the editor
+            *) kill -9 "$pid" 2>/dev/null || true ;;
+          esac
+          ;;
+      esac
+    done
+
+    # Strategy 2: free the dev ports (kills whatever is actually serving).
+    for p in "${ALL_PORTS[@]}"; do
+      fuser -k "${p}/tcp" >/dev/null 2>&1 || true
+    done
+
+    # Strategy 3: command-line patterns. Repo-scoped first, then unscoped
+    # fallbacks so no dev-server variant (vite, ts-node-dev) survives.
+    pkill -9 -f "UnifiedNetworkManager.*(ts-node-dev|vite)" >/dev/null 2>&1 || true
+    pkill -9 -f "ts-node-dev" >/dev/null 2>&1 || true
+    pkill -9 -f "[v]ite" >/dev/null 2>&1 || true
+
+    sleep 1
+
+    # Verify: nothing matching is left → done.
+    if ! pgrep -f "ts-node-dev|vite" >/dev/null 2>&1; then
+      return 0
+    fi
+    round=$((round + 1))
+  done
+
+  echo "⚠️  Some dev processes survived the cleanup — please kill them manually:"
+  pgrep -af "ts-node-dev|vite" | grep -v pgrep || true
+}
+
 # --- Cleanup (idempotent; stops dev servers + containers) --------------------
 cleanup() {
   trap - EXIT INT TERM
@@ -71,12 +127,7 @@ cleanup() {
       kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
     fi
   done
-  # Safety nets: free the dev ports and kill any respawn supervisors.
-  fuser -k "${API_PORT}/tcp" 2>/dev/null || true
-  fuser -k "${WEB_PORT}/tcp" 2>/dev/null || true
-  pkill -f "ts-node-dev" 2>/dev/null || true
-  pkill -f "vite" 2>/dev/null || true
-  sleep 1
+  kill_dev_processes
   docker_compose down || true
   rm -rf "$LOG_DIR" 2>/dev/null || true
   echo "✅ All services stopped. Goodbye!"
@@ -91,11 +142,7 @@ kill_lingering() {
   # Stale compose containers (e.g. an old api container publishing :3000)
   # must go first — they are root-owned and outlive any host-side pkill/fuser.
   docker_compose down || true
-  pkill -f "ts-node-dev" 2>/dev/null || true
-  pkill -f "vite" 2>/dev/null || true
-  fuser -k "${API_PORT}/tcp" 2>/dev/null || true
-  fuser -k "${WEB_PORT}/tcp" 2>/dev/null || true
-  sleep 1
+  kill_dev_processes
 }
 
 echo "🚀 Starting UnifiedNetworkManager dev environment..."

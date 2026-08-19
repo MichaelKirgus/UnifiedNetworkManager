@@ -14,34 +14,38 @@ interface MonitoringResponse {
   metricDescriptors?: unknown[];
 }
 
-async function pollDevice(device: any, settingsHeadersForPlugin?: Record<string, string>): Promise<void> {
-  const plugin = await db.query.plugins.findFirst({
-    where: (plugins, { eq }) => eq(plugins.id, device.pluginId),
-  });
+/** One plugin's view of a device (assignment + its plugin row). */
+interface AssignmentTarget {
+  deviceId: string;
+  managementAddress: string;
+  pluginId: string;
+  secretId: string | null;
+  endpoint: string;
+}
 
-  if (!plugin) {
-    return;
-  }
-
+async function pollAssignment(target: AssignmentTarget): Promise<string> {
   try {
     // The secrets provider plugin owns the crypto; the broker fetches the
     // decrypted secret on our behalf. Secrets are typed: `fields` holds the
     // decrypted values. For backward compatibility we also pass the legacy
     // `apiKey`/`apiSecret` keys when the secret is of type `apiKey`.
-    const decryptedSecret = await getSecret(device.secretId);
-    const credentials = decryptedSecret.fields;
+    const decrypted = target.secretId ? await getSecret(target.secretId) : null;
+    const credentials = decrypted?.fields ?? {};
+
+    // Per-device settings overrides are resolved for THIS assignment scope.
+    const headers = await settingsHeaders(target.pluginId, target.deviceId).catch(() => ({}));
 
     const response = await axios.post<MonitoringResponse>(
-      `${plugin.endpoint.replace(/\/$/, '')}/monitoring`,
-      { 
-        deviceId: device.id, 
-        managementAddress: device.managementAddress,
+      `${target.endpoint.replace(/\/$/, '')}/monitoring`,
+      {
+        deviceId: target.deviceId,
+        managementAddress: target.managementAddress,
         credentials,
-        ...(decryptedSecret.type === 'apiKey'
+        ...(decrypted?.type === 'apiKey'
           ? { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }
           : {})
       },
-      { timeout: 10_000, headers: settingsHeadersForPlugin }
+      { timeout: 10_000, headers }
     );
 
     const health = response.data?.health ?? 'unknown';
@@ -51,50 +55,77 @@ async function pollDevice(device: any, settingsHeadersForPlugin?: Record<string,
 
     await db.insert(schema.telemetry).values({
       id: uuidv4(),
-      deviceId: device.id,
+      deviceId: target.deviceId,
+      pluginId: target.pluginId,
       collectedAt,
       health,
       metrics: JSON.stringify(metrics),
       metricDescriptors: metricDescriptors ? JSON.stringify(metricDescriptors) : null,
     });
 
-    const status = health === 'ok' ? 'online' : health === 'critical' ? 'offline' : 'degraded';
-    await db.update(schema.devices)
-      .set({ status })
-      .where(eq(schema.devices.id, device.id));
+    return health;
   } catch (err) {
     // eslint-disable-next-line no-console
-    console.error(`[telemetry] failed to poll device ${device.id}:`, (err as Error).message);
-    await db.update(schema.devices)
-      .set({ status: 'unknown' })
-      .where(eq(schema.devices.id, device.id));
+    console.error(
+      `[telemetry] failed to poll device ${target.deviceId} via plugin ${target.pluginId}:`,
+      (err as Error).message
+    );
+    return 'unknown';
   }
+}
+
+/**
+ * Overall device status from per-assignment health — worst-wins:
+ *   any critical → offline; all ok → online; otherwise degraded.
+ */
+function deriveDeviceStatus(healths: string[]): string {
+  if (healths.length === 0) return 'unknown';
+  if (healths.some((h) => h === 'critical')) return 'offline';
+  if (healths.every((h) => h === 'ok')) return 'online';
+  return 'degraded';
 }
 
 async function pollAllDevices(): Promise<void> {
   const devices = await db.query.devices.findMany();
+  if (devices.length === 0) return;
 
-  // Resolve each plugin's effective settings once per cycle (cached in the
-  // broker for 5s) and share them across all of that plugin's devices.
-  const pluginIds = Array.from(new Set(devices.map((d: any) => d.pluginId)));
-  const headersByPlugin = new Map<string, Record<string, string>>();
-  await Promise.all(
-    pluginIds.map(async (id) => {
-      try {
-        headersByPlugin.set(id, await settingsHeaders(id));
-      } catch {
-        // No settings to send; the call proceeds without the header.
-      }
-    })
+  // Load every assignment with its plugin endpoint in one pass.
+  const assignments = await db.query.devicePlugins.findMany({});
+  const pluginsById = new Map(
+    (await db.query.plugins.findMany()).map((p) => [p.id, p] as const)
   );
 
-  await Promise.all(devices.map((device: any) => pollDevice(device, headersByPlugin.get(device.pluginId))));
+  const targetsByDevice = new Map<string, AssignmentTarget[]>();
+  for (const a of assignments) {
+    const device = devices.find((d) => d.id === a.deviceId);
+    const plugin = pluginsById.get(a.pluginId);
+    if (!device || !plugin) continue; // stale assignment or unknown plugin: skip
+    const list = targetsByDevice.get(device.id) ?? [];
+    list.push({
+      deviceId: device.id,
+      managementAddress: device.managementAddress,
+      pluginId: a.pluginId,
+      secretId: a.secretId,
+      endpoint: plugin.endpoint,
+    });
+    targetsByDevice.set(device.id, list);
+  }
+
+  // Poll every assignment independently — one dead plugin must not take the
+  // whole device down. Device status is derived worst-wins afterwards.
+  await Promise.all(
+    Array.from(targetsByDevice.entries()).map(async ([deviceId, targets]) => {
+      const healths = await Promise.all(targets.map((t) => pollAssignment(t)));
+      const status = deriveDeviceStatus(healths);
+      await db.update(schema.devices).set({ status }).where(eq(schema.devices.id, deviceId));
+    })
+  );
 }
 
 /**
- * Starts the telemetry polling loop. Every `POLL_INTERVAL_MS`, each known
- * device's plugin is asked for a monitoring snapshot which is normalized
- * and persisted to the `telemetry` table.
+ * Starts the telemetry polling loop. Every `POLL_INTERVAL_MS`, each device's
+ * assigned plugins are asked for a monitoring snapshot which is normalized and
+ * persisted to the `telemetry` table (one row per plugin per cycle).
  */
 export function startTelemetryWorker(): NodeJS.Timeout {
   // eslint-disable-next-line no-console

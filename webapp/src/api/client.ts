@@ -66,26 +66,69 @@ export interface VerifyResponse {
   permissions: string[];
 }
 
+/** One row of the device ↔ plugin join table (a device can have several). */
+export interface DevicePluginAssignment {
+  id: string;
+  deviceId: string;
+  pluginId: string;
+  /** Credential source for this assignment (null = no credentials). */
+  secretId?: string | null;
+  isPrimary: boolean;
+  createdAt: string;
+  // Enriched fields returned by the list endpoints:
+  pluginName?: string;
+  pluginVersion?: string;
+  pluginEndpoint?: string;
+  pluginOnline?: boolean;
+  secretLabel?: string | null;
+}
+
+export interface DevicePluginAssignmentInput {
+  pluginId: string;
+  secretId?: string | null;
+  isPrimary?: boolean;
+}
+
+export interface DeviceCreateRequest {
+  name: string;
+  vendor: string;
+  deviceType: string;
+  managementAddress: string;
+  site?: string;
+  /** At least one plugin assignment; the first becomes primary. */
+  plugins: DevicePluginAssignmentInput[];
+}
+
 export interface Device {
   id: string;
   name: string;
   vendor: string;
   deviceType: string;
-  pluginId: string;
   managementAddress: string;
   site?: string;
   status: string;
-  apiKey?: string;
-  apiSecret?: string;
+  /** Assigned plugins (list endpoints include this). */
+  plugins?: DevicePluginAssignment[];
   /** Headline metrics (marked `summary` by the plugin) for inline table display. */
   summaryMetrics?: SummaryMetric[];
 }
 
-export interface TelemetrySnapshot {
-  deviceId: string;
-  collectedAt: string;
+/** One plugin's monitoring snapshot for a device. */
+export interface PluginTelemetrySnapshot {
+  pluginId: string;
+  collectedAt?: string | null;
   health: string;
-  metrics: Record<string, number>;  metricDescriptors?: MetricDescriptor[];}
+  metrics: Record<string, unknown>;
+  metricDescriptors?: MetricDescriptor[];
+}
+
+/** GET /devices/:id/monitoring — one snapshot per assigned plugin. */
+export interface DeviceMonitoring {
+  deviceId: string;
+  /** Overall device health = worst-wins across all assignments. */
+  health: string;
+  snapshots: PluginTelemetrySnapshot[];
+}
 
 export interface Plugin {
   id: string;
@@ -182,6 +225,8 @@ export interface PluginSettingsError {
 export interface ConfigJob {
   id: string;
   deviceId: string;
+  /** The assignment that executes this job. */
+  pluginId?: string;
   action: string;
   status: string;
   result?: Record<string, unknown>;
@@ -229,11 +274,37 @@ export const api = {
   verify2fa: (body: { challengeToken: string; totpCode: string }) =>
     apiFetch<VerifyResponse>('/auth/2fa/verify', { method: 'POST', body: JSON.stringify(body) }),
   devices: () => apiFetch<Device[]>('/devices'),
-  createDevice: (body: unknown) =>
-    apiFetch<Device>('/devices', { method: 'POST', body: JSON.stringify(body) }),
-  monitoring: (deviceId: string) => apiFetch<TelemetrySnapshot>(`/devices/${deviceId}/monitoring`),
+  createDevice: (body: DeviceCreateRequest) =>
+    apiFetch<Device & { plugins?: DevicePluginAssignment[] }>('/devices', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** Update identity fields of an existing device (plugins are managed separately). */
+  updateDevice: (deviceId: string, body: Partial<Pick<Device, 'name' | 'vendor' | 'deviceType' | 'managementAddress'>> & { site?: string | null }) =>
+    apiFetch<Device>(`/devices/${deviceId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  // Device ↔ plugin assignments.
+  devicePlugins: (deviceId: string) =>
+    apiFetch<{ deviceId: string; plugins: DevicePluginAssignment[] }>(`/devices/${deviceId}/plugins`),
+  addDevicePlugin: (deviceId: string, body: DevicePluginAssignmentInput) =>
+    apiFetch<DevicePluginAssignment>(`/devices/${deviceId}/plugins`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  removeDevicePlugin: (deviceId: string, pluginId: string) =>
+    apiFetch<void>(`/devices/${deviceId}/plugins/${pluginId}`, { method: 'DELETE' }),
+  // Per-device settings overrides (inherit global → override per device).
+  devicePluginOptions: (deviceId: string, pluginId: string) =>
+    apiFetch<PluginOptionsResponse>(`/devices/${deviceId}/plugins/${pluginId}/options`),
+  saveDevicePluginSettings: (deviceId: string, pluginId: string, settings: Record<string, unknown>) =>
+    apiFetch<PluginOptionsResponse>(`/devices/${deviceId}/plugins/${pluginId}/settings`, {
+      method: 'PUT',
+      body: JSON.stringify({ settings }),
+    }),
+  resetDevicePluginSettings: (deviceId: string, pluginId: string) =>
+    apiFetch<PluginOptionsResponse>(`/devices/${deviceId}/plugins/${pluginId}/settings`, { method: 'DELETE' }),
+  monitoring: (deviceId: string) => apiFetch<DeviceMonitoring>(`/devices/${deviceId}/monitoring`),
   deviceTelemetry: (deviceId: string, limit = 30) =>
-    apiFetch<{ deviceId: string; history: { collectedAt: string; health: string; metrics: Record<string, unknown> }[] }>(
+    apiFetch<{ deviceId: string; history: { collectedAt: string; health: string; pluginId?: string; metrics: Record<string, unknown> }[] }>(
       `/devices/${deviceId}/telemetry?limit=${limit}`
     ),
   plugins: () => apiFetch<Plugin[]>('/plugins'),

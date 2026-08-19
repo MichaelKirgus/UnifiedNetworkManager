@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { db } from '../db';
-import { eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { configJobQueue } from '../queue';
 import { getSecret } from '../secretsProvider';
@@ -39,8 +39,38 @@ async function processJob(jobId: string): Promise<void> {
     return;
   }
 
+  // Resolve the assignment that executes this job. New jobs always carry an
+  // explicit pluginId; legacy rows (pre-multi-plugin) fall back to the device's
+  // primary assignment.
+  let assignment = null;
+  if (job.pluginId) {
+    assignment = await db.query.devicePlugins.findFirst({
+      where: and(
+        eq(schema.devicePlugins.deviceId, job.deviceId),
+        eq(schema.devicePlugins.pluginId, job.pluginId)
+      ),
+    });
+  }
+  if (!assignment) {
+    const all = await db.query.devicePlugins.findMany({
+      where: (rows) => eq(rows.deviceId, job.deviceId),
+      orderBy: [asc(schema.devicePlugins.createdAt)],
+    });
+    assignment = all.find((a) => a.isPrimary) ?? all[0] ?? null;
+  }
+  if (!assignment) {
+    await db.update(schema.configJobs)
+      .set({ 
+        status: 'failed', 
+        result: JSON.stringify({ error: 'No plugin assignment found for this device' }), 
+        finishedAt: new Date().toISOString() 
+      })
+      .where(eq(schema.configJobs.id, jobId));
+    return;
+  }
+
   const plugin = await db.query.plugins.findFirst({
-    where: (plugins, { eq }) => eq(plugins.id, device.pluginId),
+    where: (plugins, { eq }) => eq(plugins.id, assignment.pluginId),
   });
   if (!plugin) {
     await db.update(schema.configJobs)
@@ -58,12 +88,12 @@ async function processJob(jobId: string): Promise<void> {
     // decrypted secret on our behalf. Secrets are typed: `fields` holds the
     // decrypted values. For backward compatibility we also pass the legacy
     // `apiKey`/`apiSecret` keys when the secret is of type `apiKey`.
-    const decryptedSecret = await getSecret(device.secretId);
-    const credentials = decryptedSecret.fields;
+    const decrypted = assignment.secretId ? await getSecret(assignment.secretId) : null;
+    const credentials = decrypted?.fields ?? {};
 
-    // Inject the plugin's effective settings (defaults ⊕ user overrides) so
-    // the plugin can read its options without storing them itself.
-    const headers = await settingsHeaders(plugin.id).catch(() => ({}));
+    // Inject the plugin's effective settings (device override ⊕ global ⊕
+    // defaults) so the plugin can read its options without storing them itself.
+    const headers = await settingsHeaders(plugin.id, device.id).catch(() => ({}));
 
     const response = await axios.post<ConfigResponse>(
       `${plugin.endpoint.replace(/\/$/, '')}/config`,
@@ -71,7 +101,7 @@ async function processJob(jobId: string): Promise<void> {
         deviceId: device.id,
         managementAddress: device.managementAddress,
         credentials,
-        ...(decryptedSecret.type === 'apiKey'
+        ...(decrypted?.type === 'apiKey'
           ? { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }
           : {}),
         action: job.action,

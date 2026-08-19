@@ -56,6 +56,35 @@ export async function initDb(): Promise<void> {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_plugin_settings_device
       ON plugin_settings ("pluginId", "deviceId", "optionKey") WHERE "deviceId" IS NOT NULL`);
 
+  // Multi-plugin-per-device model: the device_plugins join table is the single
+  // source of truth for which plugins serve a device (each with its own secret).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_plugins (
+      id TEXT PRIMARY KEY,
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      "secretId" TEXT,
+      "isPrimary" BOOLEAN NOT NULL DEFAULT FALSE,
+      "createdAt" TEXT NOT NULL
+    )`);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_device_plugins
+      ON device_plugins ("deviceId", "pluginId")`);
+
+  // Attribute telemetry + config jobs to the plugin that produced/executed them.
+  await pool.query(
+    `ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS "pluginId" TEXT`
+  );
+  await pool.query(
+    `ALTER TABLE config_jobs ADD COLUMN IF NOT EXISTS "pluginId" TEXT`
+  );
+
+  // The legacy singular columns are superseded by device_plugins. There is no
+  // production data to migrate (confirmed), so drop them outright — any dev
+  // devices must be recreated via the new multi-plugin create flow.
+  await pool.query(`ALTER TABLE devices DROP COLUMN IF EXISTS "pluginId"`);
+  await pool.query(`ALTER TABLE devices DROP COLUMN IF EXISTS "secretId"`);
+
   const existingAdmin = await db.query.users.findFirst({
     where: (users, { eq }) => eq(users.username, 'admin'),
   });

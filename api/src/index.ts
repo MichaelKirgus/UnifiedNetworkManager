@@ -94,15 +94,19 @@ async function main(): Promise<void> {
 
   app.use(API_PREFIX, api);
 
+  // Start background workers ONLY after the port is bound. Starting them before
+  // (or regardless of) a successful listen lets orphaned instances that fail to
+  // bind (EADDRINUSE) keep polling and writing conflicting status updates —
+  // which manifests as device status flapping between online/degraded.
   app.listen(PORT, () => {
     // eslint-disable-next-line no-console
     console.log(`[api] UnifiedNetworkManager API listening on port ${PORT}`);
     // eslint-disable-next-line no-console
     console.log(`[api] OpenAPI spec loaded from ${specPath}`);
-  });
 
-  startTelemetryWorker();
-  startConfigJobWorker();
+    startTelemetryWorker();
+    startConfigJobWorker();
+  });
 
   // Discover plugins via mDNS/DNS-SD, with HTTP polling as a fallback for
   // Docker bridge networks where multicast is isolated.
