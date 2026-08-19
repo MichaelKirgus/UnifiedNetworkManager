@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { configJobQueue } from '../queue';
 import { getSecret } from '../secretsProvider';
+import { settingsHeaders } from '../pluginSettings';
 
 const PROCESS_INTERVAL_MS = 5_000;
 
@@ -60,6 +61,10 @@ async function processJob(jobId: string): Promise<void> {
     const decryptedSecret = await getSecret(device.secretId);
     const credentials = decryptedSecret.fields;
 
+    // Inject the plugin's effective settings (defaults ⊕ user overrides) so
+    // the plugin can read its options without storing them itself.
+    const headers = await settingsHeaders(plugin.id).catch(() => ({}));
+
     const response = await axios.post<ConfigResponse>(
       `${plugin.endpoint.replace(/\/$/, '')}/config`,
       {
@@ -72,7 +77,7 @@ async function processJob(jobId: string): Promise<void> {
         action: job.action,
         payload: JSON.parse(job.payload),
       },
-      { timeout: 15_000 }
+      { timeout: 15_000, headers }
     );
 
     const status = response.data?.success === false ? 'failed' : 'succeeded';

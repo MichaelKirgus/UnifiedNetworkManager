@@ -3,6 +3,7 @@ import { Bonjour } from 'bonjour-service';
 import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
+import type { PluginOptionDescriptor } from '../types/pluginOptions';
 
 /**
  * Self-describing identity that every plugin MUST expose, either via its
@@ -20,6 +21,8 @@ export interface PluginIdentity {
   authType: string;
   /** Metric descriptors declared by the plugin (drives webapp visualization). */
   metrics?: unknown[];
+  /** Option descriptors declared by the plugin (drives the settings form + API-side persistence/validation). */
+  options?: PluginOptionDescriptor[];
 }
 
 export interface DiscoveryOptions {
@@ -69,6 +72,7 @@ async function fetchIdentity(endpoint: string): Promise<PluginIdentity | null> {
       endpoint: data.endpoint ?? endpoint,
       authType: data.authType ?? 'none',
       metrics: Array.isArray(data.metrics) ? data.metrics : undefined,
+      options: Array.isArray(data.options) ? (data.options as PluginOptionDescriptor[]) : undefined,
     };
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -85,9 +89,11 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
 
   // Only overwrite the stored descriptors when this discovery source actually
   // carries them (the mDNS TXT path does not), so a metrics-less upsert never
-  // wipes descriptors set by the HTTP polling path.
+  // wipes descriptors set by the HTTP polling path. Same guard for options.
   const hasMetrics = Array.isArray(identity.metrics) && identity.metrics.length > 0;
   const metricDescriptors = hasMetrics ? JSON.stringify(identity.metrics) : null;
+  const hasOptions = Array.isArray(identity.options) && identity.options.length > 0;
+  const optionDescriptors = hasOptions ? JSON.stringify(identity.options) : null;
 
   if (existing) {
     await db
@@ -100,6 +106,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
         endpoint: identity.endpoint,
         authType: identity.authType,
         ...(hasMetrics ? { metricDescriptors } : {}),
+        ...(hasOptions ? { optionDescriptors } : {}),
         lastSeenAt: now,
       })
       .where(eq(schema.plugins.id, identity.uuid));
@@ -113,6 +120,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
       endpoint: identity.endpoint,
       authType: identity.authType,
       metricDescriptors,
+      optionDescriptors,
       createdAt: now,
       lastSeenAt: now,
     });

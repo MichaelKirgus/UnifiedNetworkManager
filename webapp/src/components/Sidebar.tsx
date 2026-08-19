@@ -1,0 +1,115 @@
+import { useEffect, useState } from 'react';
+import { NavLink } from 'react-router-dom';
+import clsx from 'clsx';
+import {
+  KeyRound,
+  ListChecks,
+  LogOut,
+  Network,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Puzzle,
+  Server,
+} from 'lucide-react';
+
+const NAV_ITEMS = [
+  { to: '/devices', label: 'Devices', icon: Server },
+  { to: '/secrets', label: 'Secrets', icon: KeyRound },
+  { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks },
+  { to: '/plugins', label: 'Plugins', icon: Puzzle },
+];
+
+const COLLAPSED_KEY = 'unm:sidebar-collapsed';
+
+/**
+ * Collapsible left sidebar. Expanded shows icons + labels; collapsed is an
+ * icon rail (tooltips via `title`). The user's choice persists in localStorage.
+ */
+export function Sidebar() {
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(COLLAPSED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(COLLAPSED_KEY, collapsed ? '1' : '0');
+    } catch {
+      // Storage unavailable (private mode); preference stays in memory.
+    }
+  }, [collapsed]);
+
+  return (
+    <aside
+      className={clsx(
+        'flex shrink-0 flex-col border-r border-slate-200 bg-white transition-[width] duration-200 ease-in-out',
+        collapsed ? 'w-16' : 'w-56'
+      )}
+    >
+      {/* Brand */}
+      <div className={clsx('flex h-14 items-center gap-2 border-b border-slate-200 px-3', collapsed && 'justify-center px-0')}>
+        <Network className="h-6 w-6 shrink-0 text-slate-900" />
+        {!collapsed && (
+          <span className="truncate text-sm font-bold text-slate-900">UnifiedNetworkManager</span>
+        )}
+      </div>
+
+      {/* Navigation */}
+      <nav className={clsx('flex flex-1 flex-col gap-1 p-2', collapsed && 'items-center')}>
+        {NAV_ITEMS.map((item) => (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            title={collapsed ? item.label : undefined}
+            className={({ isActive }) =>
+              clsx(
+                'flex items-center gap-3 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
+                collapsed && 'justify-center px-0',
+                isActive ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
+              )
+            }
+          >
+            <item.icon className="h-5 w-5 shrink-0" />
+            {!collapsed && <span className="truncate">{item.label}</span>}
+          </NavLink>
+        ))}
+      </nav>
+
+      {/* Footer: collapse toggle + sign out */}
+      <div className={clsx('flex gap-1 border-t border-slate-200 p-2', collapsed && 'flex-col items-center')}>
+        <button
+          type="button"
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          onClick={() => setCollapsed((v) => !v)}
+          className={clsx(
+            'flex items-center gap-2 rounded-md px-2.5 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100',
+            collapsed && 'justify-center px-0'
+          )}
+        >
+          {collapsed ? <PanelLeftOpen className="h-5 w-5 shrink-0" /> : <PanelLeftClose className="h-5 w-5 shrink-0" />}
+          {!collapsed && <span>Collapse</span>}
+        </button>
+        <button
+          type="button"
+          aria-label="Sign out"
+          title="Sign out"
+          onClick={() => {
+            localStorage.removeItem('accessToken');
+            window.location.href = '/login';
+          }}
+          className={clsx(
+            'flex items-center gap-2 rounded-md px-2.5 py-2 text-sm font-medium text-slate-600 hover:bg-red-50 hover:text-red-700',
+            collapsed && 'justify-center px-0'
+          )}
+        >
+          <LogOut className="h-5 w-5 shrink-0" />
+          {!collapsed && <span>Sign out</span>}
+        </button>
+      </div>
+    </aside>
+  );
+}

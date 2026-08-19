@@ -386,10 +386,59 @@ app.get('/discover', (_req, res) => {
     // is emitted dynamically from /monitoring (it needs the live interface
     // list, which is only available when polling a specific device).
     metrics: buildMetricDescriptors([]),
+    // Configurable options. The API persists user-set values for these and
+    // injects them back via the `x-unm-settings` header on every call.
+    options: PLUGIN_OPTIONS,
   });
 });
 
 type Health = 'ok' | 'warning' | 'critical' | 'unknown';
+
+/**
+ * The options this plugin exposes for configuration. Declared in /discover so
+ * the API can persist + validate user-set values and the webapp can render a
+ * generic form — this plugin never stores settings itself; it receives them
+ * on every call via the `x-unm-settings` header (see readSettings()).
+ */
+const PLUGIN_OPTIONS = [
+  {
+    key: 'pollIntervalSec',
+    label: 'Poll interval (seconds)',
+    type: 'integer' as const,
+    default: 30,
+    min: 5,
+    max: 600,
+    description: 'How often the plugin re-collects live metrics from the appliance. Slower values reduce load on busy firewalls.',
+    docsUrl: 'https://docs.opnsense.org/manual/how-tos/monitoring.html',
+  },
+  {
+    key: 'enableInventoryCache',
+    label: 'Enable inventory cache',
+    type: 'boolean' as const,
+    default: true,
+    description: 'Cache slow-changing data (ARP/NDP tables, hostname) in memory and only re-fetch when the TTL elapses.',
+  },
+];
+
+/**
+ * Reads the effective settings the API injects on every call (defaults ⊕ user
+ * overrides) from the `x-unm-settings` JSON header, merged over this plugin's
+ * declared defaults so a missing header still yields sane values.
+ */
+function readSettings(req: { headers?: Record<string, unknown> }): Record<string, unknown> {
+  const defaults: Record<string, unknown> = {};
+  for (const opt of PLUGIN_OPTIONS) defaults[opt.key] = opt.default;
+
+  const raw = req.headers?.['x-unm-settings'];
+  if (typeof raw !== 'string' || raw.trim() === '') return defaults;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') return { ...defaults, ...(parsed as Record<string, unknown>) };
+  } catch {
+    // Malformed header: fall back to defaults rather than failing the call.
+  }
+  return defaults;
+}
 
 /**
  * Reads a numeric value from an object, trying several candidate keys (OPNsense
@@ -527,6 +576,10 @@ async function collectMetrics(
 app.post('/monitoring', async (req, res) => {
   const { deviceId, apiKey, apiSecret, managementAddress } = req.body ?? {};
 
+  // Effective settings injected by the API (defaults ⊕ user overrides). The
+  // plugin reads its options from here — it never stores them itself.
+  const settings = readSettings(req);
+
   try {
     const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret);
 
@@ -551,6 +604,12 @@ app.post('/monitoring', async (req, res) => {
       // collected, so the UI always matches the data (works across OPNsense
       // versions and any plugin). The API persists these from /discover too.
       metricDescriptors: descriptorsFromMetrics(metrics),
+      // Echo back the effective settings we received — proof that the
+      // API→plugin settings injection loop works end to end.
+      activeSettings: {
+        pollIntervalSec: settings.pollIntervalSec,
+        enableInventoryCache: settings.enableInventoryCache,
+      },
     });
   } catch (err) {
     res.status(200).json({

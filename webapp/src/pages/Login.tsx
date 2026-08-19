@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ArrowLeft, ArrowRight, ExternalLink, Loader2, ShieldCheck } from 'lucide-react';
 import { api } from '../api/client';
 
 type Flow = 'password' | 'oauth2' | 'ldap' | 'saml' | 'unknown';
@@ -153,8 +154,9 @@ export default function Login() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                className="flex w-full items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
               >
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
                 {loading ? 'Signing in...' : 'Continue'}
               </button>
             </form>
@@ -179,15 +181,17 @@ export default function Login() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                className="flex w-full items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
               >
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
                 {loading ? 'Verifying...' : 'Verify & Sign in'}
               </button>
               <button
                 type="button"
-                className="w-full text-sm text-slate-500 hover:underline"
+                className="flex w-full items-center justify-center gap-1.5 text-sm text-slate-500 hover:underline"
                 onClick={() => setChallengeToken(null)}
               >
+                <ArrowLeft className="h-3.5 w-3.5" />
                 Back
               </button>
             </form>
@@ -203,8 +207,9 @@ export default function Login() {
               type="button"
               onClick={handleExternalSignIn}
               disabled={loading}
-              className="w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+              className="flex w-full items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
             >
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}
               {loading ? 'Redirecting…' : flowLabel(flow)}
             </button>
           </div>

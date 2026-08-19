@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { Plus, Save, Trash2, X } from 'lucide-react';
 import { api, Secret, SecretProvider, SecretType } from '../api/client';
 import { DataTable } from '../components/DataTable';
 import { Layout } from '../components/Layout';
@@ -107,8 +108,9 @@ export default function Secrets() {
         </div>
         <button
           onClick={() => setShowForm(!showForm)}
-          className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
+          className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
         >
+          {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
           {showForm ? 'Cancel' : 'Add Secret'}
         </button>
       </div>
@@ -199,8 +201,9 @@ export default function Secrets() {
             <div className="col-span-full flex justify-end">
               <button
                 type="submit"
-                className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                className="flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
               >
+                <Save className="h-4 w-4" />
                 Save Secret
               </button>
             </div>
@@ -217,24 +220,29 @@ export default function Secrets() {
             { header: 'Label', key: 'label', render: (s: Secret) => s.label },
             { header: 'Type', key: 'type', render: (s: Secret) => s.type },
             { header: 'User', key: 'username', render: (s: Secret) => s.username },
-            { header: 'ID', key: 'id', render: (s: Secret) => s.id },
-            { header: 'Created At', key: 'createdAt', render: (s: Secret) => new Date(s.createdAt).toLocaleString() },
-            { header: 'Expires At', key: 'expiresAt', render: (s: Secret) => (s.expiresAt ? new Date(s.expiresAt).toLocaleString() : 'Never') },
+            { header: 'ID', key: 'id', width: 240, render: (s: Secret) => s.id },
+            { header: 'Created At', key: 'createdAt', sortAccessor: (s: Secret) => new Date(s.createdAt).getTime(), render: (s: Secret) => new Date(s.createdAt).toLocaleString() },
+            { header: 'Expires At', key: 'expiresAt', width: 180, sortAccessor: (s: Secret) => (s.expiresAt ? new Date(s.expiresAt).getTime() : null), render: (s: Secret) => (s.expiresAt ? new Date(s.expiresAt).toLocaleString() : 'Never') },
             { 
               header: 'Actions', 
               key: 'actions',
+              width: 100,
+              sortable: false,
               render: (s: Secret) => (
-                <button 
+                <button
+                  aria-label={`Delete secret ${s.label ?? s.id}`}
+                  title="Delete secret"
                   onClick={() => handleDelete(s.id)}
-                  className="text-sm font-medium text-red-600 hover:text-red-800"
+                  className="rounded-md p-1.5 text-red-600 hover:bg-red-50 hover:text-red-800"
                 >
-                  Delete
+                  <Trash2 className="h-4 w-4" />
                 </button>
               ) 
             },
           ]}
           rows={secrets}
           rowKey={(s) => s.id}
+          storageKey="secrets"
         />
       )}
     </Layout>

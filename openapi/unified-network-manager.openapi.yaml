@@ -412,6 +412,110 @@ paths:
         '404':
           description: Plugin not found
 
+  /plugins/{id}/options:
+    get:
+      tags: [Plugins]
+      summary: Get a plugin's option descriptors and current settings
+      description: >-
+        Returns the typed option descriptors the plugin declared in its
+        /discover endpoint, plus the stored overrides (`values`) and the
+        effective values (defaults merged with overrides) that the webapp
+        should initialize its form to. Works even when the plugin is offline —
+        everything is served from the API's cache of the discovery response.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Option descriptors + settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginOptions'
+        '401':
+          description: Authentication required
+        '404':
+          description: Plugin not found
+
+  /plugins/{id}/settings:
+    put:
+      tags: [Plugins]
+      summary: Save a plugin's settings (validated against its descriptors)
+      description: >-
+        Persists user-set values for the named options. Every value is
+        validated by the API against the plugin's descriptor (type, regex
+        pattern, min/max). The request is all-or-nothing: if any value is
+        invalid nothing is written and a 400 with per-field errors is returned.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [settings]
+              properties:
+                settings:
+                  type: object
+                  additionalProperties: true
+                  description: "Map of option key -> value (string | integer | boolean)"
+      responses:
+        '200':
+          description: Saved; returns the updated options view
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginOptions'
+        '400':
+          description: One or more values failed validation
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error: { type: string }
+                  fieldErrors:
+                    type: object
+                    additionalProperties: { type: string }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing plugins:manage permission
+        '404':
+          description: Plugin not found
+
+    delete:
+      tags: [Plugins]
+      summary: Reset a plugin's settings to their defaults
+      description: >-
+        Deletes all stored overrides for the plugin so every option falls back
+        to its declared default value.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Reset; returns the options view (values now empty)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginOptions'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing plugins:manage permission
+        '404':
+          description: Plugin not found
+
   /devices/{deviceId}/telemetry:
     get:
       tags: [Devices]
@@ -641,6 +745,49 @@ components:
         intervalMs:
           type: integer
           description: "How often this metric group should be re-fetched from the appliance (ms). The plugin caches slow data (inventory) and only re-polls when the interval elapses — the extensible refresh-cadence contract."
+
+    # A typed option a plugin declares in /discover. Discriminated union on
+    # `type`; adding a new type = add one member + one webapp renderer branch.
+    PluginOptionDescriptor:
+      type: object
+      required: [key, label, type]
+      properties:
+        key: { type: string, description: "Short internal name; unique per plugin" }
+        label: { type: string, description: "Human-readable display name" }
+        type:
+          type: string
+          enum: [string, integer, boolean]
+        # No `type` on purpose: the default is string | integer | boolean
+        # depending on the option's own type (OpenAPI 3.0 "any" schema).
+        default:
+          description: "Default value used when the user has not set an override"
+        description: { type: string, description: "Longer help text for the option" }
+        docsUrl: { type: string, format: uri, description: "Optional URI with more information" }
+        # string-type extras
+        pattern: { type: string, description: "Regex the user input must match (type=string)" }
+        minLength: { type: integer, description: "Minimum length (type=string)" }
+        maxLength: { type: integer, description: "Maximum length (type=string)" }
+        # integer-type extras
+        min: { type: number, description: "Lower bound (type=integer)" }
+        max: { type: number, description: "Upper bound (type=integer)" }
+
+    PluginOptions:
+      type: object
+      required: [pluginId, options, values, effectiveValues]
+      properties:
+        pluginId: { type: string }
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/PluginOptionDescriptor'
+        values:
+          type: object
+          additionalProperties: true
+          description: "Stored overrides only (empty when nothing was set)"
+        effectiveValues:
+          type: object
+          additionalProperties: true
+          description: "Defaults merged with stored overrides — what the form initializes to"
 
     Plugin:
       type: object

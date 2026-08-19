@@ -16,10 +16,17 @@ export default function ConfigJobs() {
     { header: 'Device', key: 'deviceId', render: (row) => <span className="font-mono text-xs">{row.deviceId}</span> },
     { header: 'Action', key: 'action' },
     { header: 'Status', key: 'status', render: (row) => <StatusBadge status={row.status} /> },
-    { header: 'Created', key: 'createdAt', render: (row) => new Date(row.createdAt).toLocaleString() },
+    {
+      header: 'Created',
+      key: 'createdAt',
+      sortAccessor: (row) => new Date(row.createdAt).getTime(),
+      render: (row) => new Date(row.createdAt).toLocaleString(),
+    },
     {
       header: 'Finished',
       key: 'finishedAt',
+      width: 180,
+      sortAccessor: (row) => (row.finishedAt ? new Date(row.finishedAt).getTime() : null),
       render: (row) => (row.finishedAt ? new Date(row.finishedAt).toLocaleString() : '—'),
     },
   ];
@@ -33,7 +40,7 @@ export default function ConfigJobs() {
         <p className="text-sm text-red-600">Failed to load config jobs: {(jobsQuery.error as Error).message}</p>
       )}
       {jobsQuery.data && (
-        <DataTable columns={columns} rows={jobsQuery.data} rowKey={(row) => row.id} emptyMessage="No config jobs have been submitted yet." />
+        <DataTable columns={columns} rows={jobsQuery.data} rowKey={(row) => row.id} storageKey="config-jobs" emptyMessage="No config jobs have been submitted yet." />
       )}
     </Layout>
   );

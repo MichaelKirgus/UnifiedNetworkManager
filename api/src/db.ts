@@ -34,6 +34,28 @@ export async function initDb(): Promise<void> {
     `ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS "metricDescriptors" TEXT`
   );
 
+  // Defensive migrations for plugin options: descriptor cache column + the
+  // settings table. Same rationale as above — host-dev hot reload may run
+  // before drizzle-kit push has created them.
+  await pool.query(
+    `ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "optionDescriptors" TEXT`
+  );
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS plugin_settings (
+      id TEXT PRIMARY KEY,
+      "pluginId" TEXT NOT NULL,
+      "deviceId" TEXT,
+      "optionKey" TEXT NOT NULL,
+      value TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL
+    )`);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_plugin_settings_global
+      ON plugin_settings ("pluginId", "optionKey") WHERE "deviceId" IS NULL`);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_plugin_settings_device
+      ON plugin_settings ("pluginId", "deviceId", "optionKey") WHERE "deviceId" IS NOT NULL`);
+
   const existingAdmin = await db.query.users.findFirst({
     where: (users, { eq }) => eq(users.username, 'admin'),
   });

@@ -83,7 +83,23 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# --- Pre-flight: kill lingering processes from previous runs -----------------
+# An aborted/crashed setup.sh can leave orphaned dev servers holding ports
+# 3000/5173. Every subsequent run then fails with EADDRINUSE while the OLD
+# code keeps serving — so always start from a clean slate.
+kill_lingering() {
+  # Stale compose containers (e.g. an old api container publishing :3000)
+  # must go first — they are root-owned and outlive any host-side pkill/fuser.
+  docker_compose down || true
+  pkill -f "ts-node-dev" 2>/dev/null || true
+  pkill -f "vite" 2>/dev/null || true
+  fuser -k "${API_PORT}/tcp" 2>/dev/null || true
+  fuser -k "${WEB_PORT}/tcp" 2>/dev/null || true
+  sleep 1
+}
+
 echo "🚀 Starting UnifiedNetworkManager dev environment..."
+kill_lingering
 
 # 1. Environment Check
 echo "🔍 Checking environment..."
@@ -160,9 +176,10 @@ echo "🔨 Building plugins..."
 ( cd plugins/secrets-provider && npm run build )
 ok "Plugins built (opnsense + basic-auth + secrets-provider)."
 
-# 7. Start the plugin containers
+# 7. Start the plugin containers (--build: always reflect current source;
+#    reusing stale images silently serves old code — a past source of bugs)
 echo "🌐 Starting plugin containers..."
-docker_compose up -d opnsense-plugin basic-auth-plugin secrets-provider-plugin
+docker_compose up -d --build opnsense-plugin basic-auth-plugin secrets-provider-plugin
 ok "Plugin containers started."
 
 # 8. Wait for the plugins to be reachable (basic-auth must be up before the

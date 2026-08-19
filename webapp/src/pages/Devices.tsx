@@ -1,6 +1,7 @@
 import { FormEvent, useState, useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
+import { Eye, Plus, Save, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
@@ -98,6 +99,8 @@ export default function Devices() {
     {
       header: 'Metrics',
       key: 'metrics',
+      width: 320,
+      sortable: false,
       render: (row) => {
         const metrics = row.summaryMetrics ?? [];
         if (metrics.length === 0) return <span className="text-slate-400">—</span>;
@@ -113,12 +116,16 @@ export default function Devices() {
     {
       header: 'Actions',
       key: 'actions',
+      width: 100,
+      sortable: false,
       render: (row) => (
         <button
-          className="text-sm font-medium text-slate-700 hover:underline"
+          aria-label={`View ${row.name}`}
+          title="View details"
+          className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
           onClick={() => navigate(`/devices/${row.id}`)}
         >
-          View
+          <Eye className="h-4 w-4" />
         </button>
       ),
     },
@@ -129,9 +136,10 @@ export default function Devices() {
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-bold text-slate-900">Devices</h1>
         <button
-          className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
+          className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
           onClick={() => setShowForm((v) => !v)}
         >
+          {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
           {showForm ? 'Cancel' : 'Register Device'}
         </button>
       </div>
@@ -242,8 +250,9 @@ export default function Devices() {
             <button
               type="submit"
               disabled={createDevice.isPending}
-              className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
             >
+              <Save className="h-4 w-4" />
               {createDevice.isPending ? 'Saving...' : 'Save Device'}
             </button>
           </div>
@@ -255,7 +264,7 @@ export default function Devices() {
         <p className="text-sm text-red-600">Failed to load devices: {(devicesQuery.error as Error).message}</p>
       )}
       {devicesQuery.data && (
-        <DataTable columns={columns} rows={devicesQuery.data} rowKey={(row) => row.id} emptyMessage="No devices registered yet." />
+        <DataTable columns={columns} rows={devicesQuery.data} rowKey={(row) => row.id} storageKey="devices" emptyMessage="No devices registered yet." />
       )}
     </Layout>
   );

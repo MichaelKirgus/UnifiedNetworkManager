@@ -4,6 +4,7 @@ import { db } from '../db';
 import { eq } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { getSecret } from '../secretsProvider';
+import { settingsHeaders } from '../pluginSettings';
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -13,7 +14,7 @@ interface MonitoringResponse {
   metricDescriptors?: unknown[];
 }
 
-async function pollDevice(device: any): Promise<void> {
+async function pollDevice(device: any, settingsHeadersForPlugin?: Record<string, string>): Promise<void> {
   const plugin = await db.query.plugins.findFirst({
     where: (plugins, { eq }) => eq(plugins.id, device.pluginId),
   });
@@ -40,7 +41,7 @@ async function pollDevice(device: any): Promise<void> {
           ? { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }
           : {})
       },
-      { timeout: 10_000 }
+      { timeout: 10_000, headers: settingsHeadersForPlugin }
     );
 
     const health = response.data?.health ?? 'unknown';
@@ -72,7 +73,22 @@ async function pollDevice(device: any): Promise<void> {
 
 async function pollAllDevices(): Promise<void> {
   const devices = await db.query.devices.findMany();
-  await Promise.all(devices.map((device) => pollDevice(device)));
+
+  // Resolve each plugin's effective settings once per cycle (cached in the
+  // broker for 5s) and share them across all of that plugin's devices.
+  const pluginIds = Array.from(new Set(devices.map((d: any) => d.pluginId)));
+  const headersByPlugin = new Map<string, Record<string, string>>();
+  await Promise.all(
+    pluginIds.map(async (id) => {
+      try {
+        headersByPlugin.set(id, await settingsHeaders(id));
+      } catch {
+        // No settings to send; the call proceeds without the header.
+      }
+    })
+  );
+
+  await Promise.all(devices.map((device: any) => pollDevice(device, headersByPlugin.get(device.pluginId))));
 }
 
 /**

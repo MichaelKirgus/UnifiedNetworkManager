@@ -1,5 +1,17 @@
 const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3000/v1';
 
+/** API error that may carry per-field validation messages (e.g. plugin settings). */
+export class ApiError extends Error {
+  status: number;
+  fieldErrors?: Record<string, string>;
+  constructor(message: string, status: number, fieldErrors?: Record<string, string>) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.fieldErrors = fieldErrors;
+  }
+}
+
 export interface Secret {
   id: string;
   label: string;
@@ -98,6 +110,8 @@ export interface MetricDescriptor {
   max?: number;
   color?: string;
   rows?: string[];
+  /** Column field names for `table` visualizations (see MetricView). */
+  columns?: string[];
   summary?: boolean;
   intervalMs?: number;
 }
@@ -118,6 +132,51 @@ export interface SummaryMetric {
 export interface PluginMetrics {
   pluginId: string;
   metrics: MetricDescriptor[];
+}
+
+/** A single option a plugin declares in its /discover response. */
+export interface PluginOptionBase {
+  key: string;
+  label: string;
+  type: 'string' | 'integer' | 'boolean';
+  default?: unknown;
+  description?: string;
+  docsUrl?: string;
+}
+
+export interface StringOption extends PluginOptionBase {
+  type: 'string';
+  pattern?: string;
+  minLength?: number;
+  maxLength?: number;
+}
+
+export interface IntegerOption extends PluginOptionBase {
+  type: 'integer';
+  min?: number;
+  max?: number;
+}
+
+export interface BooleanOption extends PluginOptionBase {
+  type: 'boolean';
+}
+
+export type PluginOptionDescriptor = StringOption | IntegerOption | BooleanOption;
+
+/** GET /plugins/:id/options response. */
+export interface PluginOptionsResponse {
+  pluginId: string;
+  options: PluginOptionDescriptor[];
+  /** Stored overrides only (key -> value). Empty when nothing was set. */
+  values: Record<string, unknown>;
+  /** Defaults merged with stored overrides — what the form should initialize to. */
+  effectiveValues: Record<string, unknown>;
+}
+
+/** Per-field validation errors returned by PUT /plugins/:id/settings on failure. */
+export interface PluginSettingsError {
+  error: string;
+  fieldErrors?: Record<string, string>;
 }
 
 export interface ConfigJob {
@@ -146,13 +205,15 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     let message = `API error ${res.status}`;
+    let fieldErrors: Record<string, string> | undefined;
     try {
       const body = await res.json();
       if (body?.error) message = body.error;
+      if (body?.fieldErrors && typeof body.fieldErrors === 'object') fieldErrors = body.fieldErrors;
     } catch {
       // ignore body parse errors, fall back to generic message
     }
-    throw new Error(message);
+    throw new ApiError(message, res.status, fieldErrors);
   }
   if (res.status === 204) {
     return undefined as T;
@@ -195,4 +256,14 @@ export const api = {
     apiFetch<{ requiredSecretType: string | null }>(`/plugins/${pluginId}/required-secret-type`),
   pluginMetrics: (pluginId: string) =>
     apiFetch<PluginMetrics>(`/plugins/${pluginId}/metrics`),
+  // Plugin options & settings (descriptor-driven, API-validated).
+  pluginOptions: (pluginId: string) =>
+    apiFetch<PluginOptionsResponse>(`/plugins/${pluginId}/options`),
+  savePluginSettings: (pluginId: string, settings: Record<string, unknown>) =>
+    apiFetch<PluginOptionsResponse>(`/plugins/${pluginId}/settings`, {
+      method: 'PUT',
+      body: JSON.stringify({ settings }),
+    }),
+  resetPluginSettings: (pluginId: string) =>
+    apiFetch<PluginOptionsResponse>(`/plugins/${pluginId}/settings`, { method: 'DELETE' }),
 };

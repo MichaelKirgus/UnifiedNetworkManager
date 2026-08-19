@@ -1,4 +1,5 @@
-import { pgTable, text, index } from 'drizzle-orm/pg-core';
+import { pgTable, text, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 
 export const users = pgTable('users', {
   id: text('id').primaryKey(),
@@ -50,9 +51,40 @@ export const plugins = pgTable('plugins', {
   // Drives the webapp's visualization (gauge/plot/text/table) without any
   // webapp code changes per plugin.
   metricDescriptors: text('metricDescriptors'),
+  // Option descriptors declared by the plugin in /discover (JSON array of
+  // PluginOptionDescriptor). The API persists user-set values for these in
+  // `plugin_settings` and validates them; the webapp renders a generic form.
+  optionDescriptors: text('optionDescriptors'),
   createdAt: text('createdAt').notNull(),
   lastSeenAt: text('lastSeenAt'),
 });
+
+// User-set plugin option values, owned by the API (plugins never store their
+// own settings). `value` is JSON-encoded so any future option type fits.
+// Global rows have device_id = NULL; per-device override rows carry a
+// device_id (reserved for later — indexes already support both shapes).
+export const pluginSettings = pgTable(
+  'plugin_settings',
+  {
+    id: text('id').primaryKey(),
+    pluginId: text('pluginId').notNull(),
+    // NULL = global setting; set = per-device override (reserved for later).
+    deviceId: text('deviceId'),
+    optionKey: text('optionKey').notNull(),
+    value: text('value').notNull(),
+    updatedAt: text('updatedAt').notNull(),
+  },
+  (table) => {
+    return {
+      uqPluginSettingsGlobal: uniqueIndex('uq_plugin_settings_global')
+        .on(table.pluginId, table.optionKey)
+        .where(sql`${table.deviceId} IS NULL`),
+      uqPluginSettingsDevice: uniqueIndex('uq_plugin_settings_device')
+        .on(table.pluginId, table.deviceId, table.optionKey)
+        .where(sql`${table.deviceId} IS NOT NULL`),
+    };
+  }
+);
 
 export const configJobs = pgTable('config_jobs', {
   id: text('id').primaryKey(),

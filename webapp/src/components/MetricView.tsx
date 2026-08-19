@@ -129,7 +129,9 @@ function MetricTable({ descriptor, value }: { descriptor: MetricDescriptor; valu
   //  2. ARRAY form (ARP/NDP/interfaces): value = [{ mac, ip, intf, ... }],
   //     descriptor.columns = the object fields to show. No leading row-key col.
   const columns = descriptor.columns ?? [];
-  const isMap = !Array.isArray(value) && value && typeof value === 'object';
+  // Strict boolean: `value` may be ""/null/undefined, which would otherwise
+  // leak a non-boolean type into JSX (`{isMap && <th/>}`).
+  const isMap = !Array.isArray(value) && value !== null && typeof value === 'object';
   const map = isMap ? (value as Record<string, unknown>) : {};
   const mapRows = descriptor.rows ?? (isMap ? Object.keys(map) : []);
   const arrayRows = Array.isArray(value) ? (value as Record<string, unknown>[]) : [];
