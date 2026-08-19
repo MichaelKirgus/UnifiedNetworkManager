@@ -35,7 +35,7 @@ services:
       - SECRETS_PLUGIN_ID=${SECRETS_PLUGIN_ID:-00000000-0000-4000-8000-000000000002}
       # Poll these plugin endpoints for discovery (mDNS is often isolated on
       # Docker bridge networks). Ensures the provider plugins are registered.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://ping-plugin:4004}
     depends_on:
       - postgres
     restart: unless-stopped
@@ -54,6 +54,20 @@ services:
       - OPNSENSE_HOST=${OPNSENSE_HOST:-https://opnsense.local}
       - OPNSENSE_KEY=${OPNSENSE_KEY:-}
       - OPNSENSE_SECRET=${OPNSENSE_SECRET:-}
+    restart: unless-stopped
+
+  # Ping plugin: ICMP reachability / latency metrics plus IP+MAC inventory,
+  # measured from inside its own container via system ping. No credentials
+  # needed — it pings whatever host the device's settings point at.
+  ping-plugin:
+    build:
+      context: ./plugins/ping
+    ports:
+      - "4004:4004"
+    environment:
+      - PORT=4004
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://ping-plugin:4004
     restart: unless-stopped
 
   # Identity provider plugin: local users + TOTP (2FA). Performs credential
