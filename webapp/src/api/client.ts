@@ -292,6 +292,9 @@ export const api = {
     }),
   removeDevicePlugin: (deviceId: string, pluginId: string) =>
     apiFetch<void>(`/devices/${deviceId}/plugins/${pluginId}`, { method: 'DELETE' }),
+  /** Promote an assigned plugin to primary (demotes the current one). */
+  setPrimaryPlugin: (deviceId: string, pluginId: string) =>
+    apiFetch<DevicePluginAssignment>(`/devices/${deviceId}/plugins/${pluginId}`, { method: 'PATCH' }),
   // Per-device settings overrides (inherit global → override per device).
   devicePluginOptions: (deviceId: string, pluginId: string) =>
     apiFetch<PluginOptionsResponse>(`/devices/${deviceId}/plugins/${pluginId}/options`),

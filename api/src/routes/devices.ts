@@ -10,6 +10,7 @@ import {
   addAssignment,
   listAssignmentViews,
   removeAssignment,
+  setPrimary,
 } from '../devicePlugins';
 import {
   SettingsValidationError,
@@ -264,6 +265,18 @@ router.post('/devices/:deviceId/plugins', requireAuth, requirePermission('device
   try {
     const assignment = await addAssignment({ deviceId, pluginId, secretId: secretId ?? null, isPrimary: isPrimary === true });
     res.status(201).json(assignment);
+  } catch (err) {
+    if (sendAssignmentError(res, err)) return;
+    throw err;
+  }
+});
+
+// PATCH /devices/:deviceId/plugins/:pluginId - make this assignment the primary.
+router.patch('/devices/:deviceId/plugins/:pluginId', requireAuth, requirePermission('devices:write'), async (req, res) => {
+  const { deviceId, pluginId } = req.params;
+  try {
+    const assignment = await setPrimary(deviceId, pluginId);
+    res.status(200).json(assignment);
   } catch (err) {
     if (sendAssignmentError(res, err)) return;
     throw err;

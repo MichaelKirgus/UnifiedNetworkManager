@@ -13,8 +13,8 @@ const emptyRow = (): RowState => ({ pluginId: '', secretId: '', isPrimary: false
 /**
  * Multi-plugin assignment builder. Each row binds one plugin to a device with
  * its own credential source (filtered by the plugin's required secret type)
- * and an optional primary flag — exactly one row may be primary (the first
- * non-primary row is submitted as primary when none is marked).
+ * and an optional primary flag — exactly one row may be primary, but ONLY if
+ * the user explicitly marks it; adding plugins never auto-promotes them.
  */
 export function PluginAssignmentBuilder({
   plugins,
@@ -88,13 +88,13 @@ export function PluginAssignmentBuilder({
     e.preventDefault();
     const valid = rows.filter((r) => r.pluginId);
     if (valid.length === 0) return;
-    // First row becomes primary when the user marked none.
-    const anyPrimary = valid.some((r) => r.isPrimary);
+    // Primary is only set when the user explicitly marked a row — adding
+    // plugins must never silently steal primary from an existing one.
     onSubmit(
-      valid.map((r, i) => ({
+      valid.map((r) => ({
         pluginId: r.pluginId,
         secretId: r.secretId || null,
-        isPrimary: r.isPrimary || (!anyPrimary && i === 0),
+        isPrimary: r.isPrimary,
       }))
     );
   }

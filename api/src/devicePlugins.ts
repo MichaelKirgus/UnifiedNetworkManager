@@ -191,6 +191,35 @@ export async function removeAssignment(deviceId: string, pluginId: string): Prom
   }
 }
 
+/**
+ * Promotes the given assignment to primary (demoting any current one).
+ * No-op when it already is — safe to call idempotently.
+ */
+export async function setPrimary(deviceId: string, pluginId: string): Promise<DevicePluginAssignment> {
+  await assertDevice(deviceId);
+  const assignment = await findAssignment(deviceId, pluginId);
+  if (!assignment) throw new AssignmentError(404, 'Plugin is not assigned to this device');
+
+  if (!assignment.isPrimary) {
+    // Demote the current primary (if any), then promote this one.
+    const siblings = await db.query.devicePlugins.findMany({
+      where: (rows) => eq(rows.deviceId, deviceId),
+    });
+    for (const s of siblings) {
+      if (s.isPrimary) {
+        await db.update(schema.devicePlugins)
+          .set({ isPrimary: false })
+          .where(eq(schema.devicePlugins.id, s.id));
+      }
+    }
+    await db.update(schema.devicePlugins)
+      .set({ isPrimary: true })
+      .where(eq(schema.devicePlugins.id, assignment.id));
+  }
+
+  return (await findAssignment(deviceId, pluginId))!;
+}
+
 /** True when (device, plugin) has an assignment — used to validate config jobs. */
 export async function hasAssignment(deviceId: string, pluginId: string): Promise<boolean> {
   const row = await findAssignment(deviceId, pluginId);

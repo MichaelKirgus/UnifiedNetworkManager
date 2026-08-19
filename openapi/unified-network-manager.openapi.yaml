@@ -262,10 +262,11 @@ paths:
       tags: [Devices]
       summary: Assign a plugin to a device
       description: >-
-        Adds another plugin assignment. The first assignment on a device
-        becomes primary automatically; passing `isPrimary: true` demotes the
-        current primary (exactly one primary per device). Each assignment may
-        carry its own credential source (`secretId`).
+        Adds another plugin assignment. A new assignment is NOT made primary
+        automatically — only the very first assignment on a device becomes
+        primary; pass `isPrimary: true` (or use PATCH) to change it later.
+        Each assignment may carry its own credential source (`secretId`,
+        optional — plugins without credentials omit it).
       parameters:
         - in: path
           name: deviceId
@@ -296,6 +297,36 @@ paths:
           description: Plugin is already assigned to this device
 
   /devices/{deviceId}/plugins/{pluginId}:
+    patch:
+      tags: [Devices]
+      summary: Make an assigned plugin the primary for this device
+      description: >-
+        Promotes the (device, plugin) assignment to primary and demotes the
+        current one — exactly one primary per device. No request body needed;
+        idempotent when it already is the primary. The primary is the default
+        target for config jobs.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: pluginId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Assignment is now primary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DevicePluginAssignment'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing devices:write permission
+        '404':
+          description: Device not found or plugin is not assigned to it
     delete:
       tags: [Devices]
       summary: Remove a plugin assignment from a device

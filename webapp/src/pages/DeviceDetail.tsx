@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { Plus, Settings, Trash2, X } from 'lucide-react';
+import { Plus, Settings, Star, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { StatusBadge } from '../components/StatusBadge';
 import { MetricView } from '../components/MetricView';
@@ -79,6 +79,11 @@ export default function DeviceDetail() {
 
   const removeAssignment = useMutation({
     mutationFn: (pluginId: string) => api.removeDevicePlugin(deviceId as string, pluginId),
+    onSuccess: invalidateDevice,
+  });
+
+  const setPrimary = useMutation({
+    mutationFn: (pluginId: string) => api.setPrimaryPlugin(deviceId as string, pluginId),
     onSuccess: invalidateDevice,
   });
 
@@ -172,6 +177,17 @@ export default function DeviceDetail() {
                   <td className="py-2 pr-3 text-slate-600">{a.secretLabel ?? '—'}</td>
                   <td className="py-2 text-right">
                     <div className="inline-flex items-center gap-1">
+                      {!a.isPrimary && (
+                        <button
+                          aria-label={`Make ${a.pluginName ?? a.pluginId} primary`}
+                          title="Make primary plugin"
+                          disabled={setPrimary.isPending}
+                          onClick={() => setPrimary.mutate(a.pluginId)}
+                          className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50"
+                        >
+                          <Star className="h-4 w-4" />
+                        </button>
+                      )}
                       <button
                         aria-label={`Settings for ${a.pluginName ?? a.pluginId}`}
                         title="Device settings"
