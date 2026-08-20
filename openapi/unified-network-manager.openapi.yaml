@@ -1071,7 +1071,7 @@ components:
       required: [pluginId]
       properties:
         pluginId: { type: string }
-        secretId: { type: string, description: "Optional credential source for this assignment" }
+        secretId: { type: [string, 'null'], description: "Optional credential source for this assignment (null = no credentials)" }
         isPrimary: { type: boolean, default: false }
 
     # Optional body for PATCH /devices/{deviceId}/plugins/{pluginId}.
