@@ -18,6 +18,13 @@ import {
   resetDevicePluginSettings,
   upsertDevicePluginSettings,
 } from '../pluginSettings';
+import {
+  IpError,
+  addDeviceIp,
+  listDeviceAddresses,
+  removeDeviceIp,
+} from '../deviceIps';
+import { isValidAddress, addressError } from '../utils/address';
 
 const router = Router();
 
@@ -36,6 +43,15 @@ function serializeDevice(row: Device) {
 /** Maps AssignmentError (404/409) to an HTTP response; returns true when handled. */
 function sendAssignmentError(res: any, err: unknown): boolean {
   if (err instanceof AssignmentError) {
+    res.status(err.status).json({ error: err.message });
+    return true;
+  }
+  return false;
+}
+
+/** Maps IpError (400/404/409) to an HTTP response; returns true when handled. */
+function sendIpError(res: any, err: unknown): boolean {
+  if (err instanceof IpError) {
     res.status(err.status).json({ error: err.message });
     return true;
   }
@@ -117,7 +133,13 @@ router.get('/devices', requireAuth, async (req, res) => {
         )
       );
       const summaryMetrics = perPluginTelemetry.flatMap((t) => summaryMetricsFor(t));
-      return { ...serializeDevice(device), plugins, summaryMetrics };
+      let ips: { address: string; isPrimary: boolean }[] = [];
+      try {
+        ips = await listDeviceAddresses(device.id);
+      } catch {
+        /* device exists — treat as no secondaries */
+      }
+      return { ...serializeDevice(device), plugins, summaryMetrics, ips };
     })
   );
 
@@ -131,7 +153,7 @@ interface DevicePluginRef {
 }
 
 router.post('/devices', requireAuth, requirePermission('devices:write'), async (req, res) => {
-  const { name, vendor, deviceType, managementAddress, site, plugins } = req.body ?? {};
+  const { name, vendor, deviceType, managementAddress, site, plugins, ips } = req.body ?? {};
 
   if (!Array.isArray(plugins) || plugins.length === 0) {
     res.status(400).json({ error: 'At least one plugin assignment is required ("plugins": [{ "pluginId", ... }])' });
@@ -141,6 +163,29 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
     if (!ref || typeof ref.pluginId !== 'string') {
       res.status(400).json({ error: 'Each plugin assignment needs a "pluginId"' });
       return;
+    }
+  }
+
+  // The primary address must be a bare IPv4/IPv6 literal or DNS name — the
+  // transport scheme (https/http, self-signed) is each plugin's own decision.
+  if (!isValidAddress(managementAddress)) {
+    res.status(400).json({ error: `"managementAddress": ${addressError(managementAddress)}` });
+    return;
+  }
+
+  // Optional secondary IPs (validated here; addDeviceIp re-checks + dedupes).
+  const secondaryIps: string[] = [];
+  if (ips !== undefined) {
+    if (!Array.isArray(ips)) {
+      res.status(400).json({ error: '"ips" must be an array of address strings' });
+      return;
+    }
+    for (const ip of ips as unknown[]) {
+      if (!isValidAddress(ip)) {
+        res.status(400).json({ error: `Invalid secondary IP: ${addressError(ip)}` });
+        return;
+      }
+      secondaryIps.push((ip as string).trim());
     }
   }
 
@@ -157,7 +202,7 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
   });
 
   // First assignment becomes primary automatically; an explicit isPrimary
-  // demotes any earlier one (exactly-one invariant). If any assignment fails
+  // demotes any earlier one (exactly-one invariant). If anything fails
   // validation, roll the device back so no orphan rows are left behind.
   try {
     for (const ref of plugins as DevicePluginRef[]) {
@@ -168,10 +213,14 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
         isPrimary: ref.isPrimary === true,
       });
     }
+    for (const address of secondaryIps) {
+      await addDeviceIp({ deviceId: id, address });
+    }
   } catch (err) {
     await db.delete(schema.devicePlugins).where(eq(schema.devicePlugins.deviceId, id));
+    await db.delete(schema.deviceIps).where(eq(schema.deviceIps.deviceId, id));
     await db.delete(schema.devices).where(eq(schema.devices.id, id));
-    if (sendAssignmentError(res, err)) return;
+    if (sendAssignmentError(res, err) || sendIpError(res, err)) return;
     throw err;
   }
 
@@ -183,7 +232,13 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
     return;
   }
   const pluginsView = await listAssignmentViews(id);
-  res.status(201).json({ ...serializeDevice(created), plugins: pluginsView });
+  let ipsView: { address: string; isPrimary: boolean }[] = [];
+  try {
+    ipsView = await listDeviceAddresses(id);
+  } catch {
+    /* device exists — treat as no secondaries */
+  }
+  res.status(201).json({ ...serializeDevice(created), plugins: pluginsView, ips: ipsView });
 });
 
 /** Identity fields that can be changed after creation (plugins are managed separately). */
@@ -209,6 +264,12 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
     }
     if (typeof value !== 'string' || value.trim().length === 0) {
       res.status(400).json({ error: `"${field}" must be a non-empty string` });
+      return;
+    }
+    // The primary address is a bare IPv4/IPv6 literal or DNS name — plugins
+    // own the transport scheme, so stored values never carry one.
+    if (field === 'managementAddress' && !isValidAddress(value)) {
+      res.status(400).json({ error: `"${field}": ${addressError(value)}` });
       return;
     }
     updates[field] = field === 'site' ? value.trim() : (value as string);
@@ -237,7 +298,56 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
     return;
   }
   const plugins = await listAssignmentViews(deviceId);
-  res.status(200).json({ ...serializeDevice(updated), plugins });
+  let ips: { address: string; isPrimary: boolean }[] = [];
+  try {
+    ips = await listDeviceAddresses(deviceId);
+  } catch {
+    /* device exists — treat as no secondaries */
+  }
+  res.status(200).json({ ...serializeDevice(updated), plugins, ips });
+});
+
+// --- Device IP addresses (primary = managementAddress, secondaries here) --
+
+// GET /devices/:deviceId/ips - primary address first, then secondary IPs.
+router.get('/devices/:deviceId/ips', requireAuth, async (req, res) => {
+  const { deviceId } = req.params;
+  try {
+    const ips = await listDeviceAddresses(deviceId);
+    res.status(200).json({ deviceId, ips });
+  } catch (err) {
+    if (sendIpError(res, err)) return;
+    throw err;
+  }
+});
+
+// POST /devices/:deviceId/ips - add a secondary IP ({ "address": "10.0.0.5" }).
+router.post('/devices/:deviceId/ips', requireAuth, requirePermission('devices:write'), async (req, res) => {
+  const { deviceId } = req.params;
+  const { address } = req.body ?? {};
+  if (!isValidAddress(address)) {
+    res.status(400).json({ error: `"address": ${addressError(address)}` });
+    return;
+  }
+  try {
+    const row = await addDeviceIp({ deviceId, address });
+    res.status(201).json(row);
+  } catch (err) {
+    if (sendIpError(res, err)) return;
+    throw err;
+  }
+});
+
+// DELETE /devices/:deviceId/ips/:ipId - remove a secondary IP.
+router.delete('/devices/:deviceId/ips/:ipId', requireAuth, requirePermission('devices:write'), async (req, res) => {
+  const { deviceId, ipId } = req.params;
+  try {
+    await removeDeviceIp(deviceId, ipId);
+    res.status(204).send();
+  } catch (err) {
+    if (sendIpError(res, err)) return;
+    throw err;
+  }
 });
 
 // --- Device ↔ plugin assignments -------------------------------------------

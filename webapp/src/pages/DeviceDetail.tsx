@@ -7,7 +7,8 @@ import { StatusBadge } from '../components/StatusBadge';
 import { MetricView } from '../components/MetricView';
 import { OptionForm } from '../components/OptionForm';
 import { PluginAssignmentBuilder } from '../components/PluginAssignmentBuilder';
-import { api, DevicePluginAssignmentInput, MetricDescriptor } from '../api/client';
+import { api, DeviceAddress, DevicePluginAssignmentInput, MetricDescriptor } from '../api/client';
+import { isValidAddress, addressError } from '../utils/address';
 
 /** Resolves the current value for a metric descriptor from a metrics map. */
 function resolveValue(descriptor: MetricDescriptor, metrics: Record<string, unknown>): unknown {
@@ -21,6 +22,11 @@ export default function DeviceDetail() {
   // Which assignment's settings are being edited (null = closed).
   const [settingsPluginId, setSettingsPluginId] = useState<string | null>(null);
   const [showAddPlugin, setShowAddPlugin] = useState(false);
+
+  // Secondary IP management.
+  const [showAddIp, setShowAddIp] = useState(false);
+  const [newIpInput, setNewIpInput] = useState('');
+  const [ipError, setIpError] = useState<string | null>(null);
 
   const devicesQuery = useQuery({
     queryKey: ['devices'],
@@ -97,6 +103,21 @@ export default function DeviceDetail() {
       invalidateDevice();
       setShowAddPlugin(false);
     },
+  });
+
+  const addIp = useMutation({
+    mutationFn: (address: string) => api.addDeviceIp(deviceId as string, address),
+    onSuccess: () => {
+      invalidateDevice();
+      setShowAddIp(false);
+      setNewIpInput('');
+      setIpError(null);
+    },
+  });
+
+  const removeIp = useMutation({
+    mutationFn: (ipId: string) => api.removeDeviceIp(deviceId as string, ipId),
+    onSuccess: invalidateDevice,
   });
 
   const history = telemetryQuery.data?.history ?? [];
@@ -218,6 +239,65 @@ export default function DeviceDetail() {
         )}
       </section>
 
+      {/* --- IP addresses (primary + secondaries) -------------------------- */}
+      <section className="mb-8 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">IP addresses</h2>
+          <button
+            onClick={() => { setShowAddIp(true); setNewIpInput(''); setIpError(null); }}
+            className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+          >
+            <Plus className="h-4 w-4" />
+            Add IP
+          </button>
+        </div>
+
+        {device?.ips && device.ips.length > 0 ? (
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-400">
+                <th className="py-2 pr-3 font-medium">Address</th>
+                <th className="py-2 pr-3 font-medium">Role</th>
+                <th className="py-2 text-right font-medium">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {device.ips.map((ip: DeviceAddress) => (
+                <tr key={ip.id ?? ip.address} className="border-b border-slate-100 last:border-0">
+                  <td className="py-2 pr-3 font-mono text-xs">{ip.address}</td>
+                  <td className="py-2 pr-3">
+                    {ip.isPrimary ? (
+                      <span className="rounded-full bg-slate-900 px-2 py-0.5 text-xs font-medium text-white">primary</span>
+                    ) : (
+                      <span className="text-slate-500">secondary</span>
+                    )}
+                  </td>
+                  <td className="py-2 text-right">
+                    {!ip.isPrimary && ip.id && (
+                      <button
+                        aria-label={`Remove ${ip.address}`}
+                        title="Remove this IP"
+                        disabled={removeIp.isPending}
+                        onClick={() => {
+                          if (window.confirm(`Remove ${ip.address} from this device?`)) {
+                            removeIp.mutate(ip.id as string);
+                          }
+                        }}
+                        className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="text-sm text-slate-500">No IP addresses registered yet.</p>
+        )}
+      </section>
+
       {/* --- Per-plugin metrics ------------------------------------------- */}
       {monitoringQuery.isLoading && <p className="text-sm text-slate-500">Loading telemetry...</p>}
       {monitoringQuery.isError && (
@@ -314,6 +394,67 @@ export default function DeviceDetail() {
               />
             </div>
           </div>
+        </div>
+      )}
+
+      {/* --- Add IP modal -------------------------------------------------- */}
+      {showAddIp && (
+        <div
+          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-6"
+          onClick={() => setShowAddIp(false)}
+        >
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const v = newIpInput.trim();
+              if (!v) return;
+              if (!isValidAddress(v)) { setIpError(addressError(v)); return; }
+              addIp.mutate(v);
+            }}
+            className="mt-10 w-full max-w-md rounded-md border border-slate-200 bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+              <h3 className="text-sm font-semibold text-slate-800">Add IP to {device?.name ?? 'device'}</h3>
+              <button type="button" aria-label="Close" onClick={() => setShowAddIp(false)} className="rounded-md p-1 text-slate-400 hover:bg-slate-100">
+                <X className="h-4 w-4" />
+              </button>
+            </header>
+            <div className="space-y-3 p-4">
+              {addIp.isError && (
+                <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {(addIp.error as Error).message}
+                </div>
+              )}
+              <div>
+                <label className="mb-1 block text-sm font-medium text-slate-700">IP address</label>
+                <input
+                  autoFocus
+                  className={`w-full rounded-md border px-3 py-2 text-sm ${ipError ? 'border-red-400' : 'border-slate-300'}`}
+                  value={newIpInput}
+                  onChange={(e) => { setNewIpInput(e.target.value); setIpError(null); }}
+                  placeholder="10.0.0.2 or 2001:db8::1"
+                />
+                {ipError && <p className="mt-1 text-xs text-red-600">{ipError}</p>}
+              </div>
+            </div>
+            <footer className="flex items-center justify-end gap-2 border-t border-slate-200 px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setShowAddIp(false)}
+                className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={addIp.isPending}
+                className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+              >
+                Add IP
+              </button>
+            </footer>
+          </form>
         </div>
       )}
 

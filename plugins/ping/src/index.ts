@@ -105,7 +105,7 @@ const PLUGIN_OPTIONS = [
     pattern: '^[a-zA-Z0-9._:\\-\\[\\]]+$',
     maxLength: 253,
     description:
-      'Optional hostname or IP to ping instead of the device management address — e.g. a public DNS name when the management interface is on a different network. Leave empty to ping the management address.',
+      'Optional hostname or IP to ping instead of the device\'s primary IP — e.g. a secondary interface when the management one is on a different network. Leave empty to ping the primary IP.',
   },
   {
     key: 'pingCount',

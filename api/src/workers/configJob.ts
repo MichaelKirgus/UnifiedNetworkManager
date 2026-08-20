@@ -83,6 +83,15 @@ async function processJob(jobId: string): Promise<void> {
     return;
   }
 
+  // All device addresses (primary first) so the plugin can reach secondary IPs.
+  const secondaryIps = await db.query.deviceIps.findMany({
+    where: (rows) => eq(rows.deviceId, device.id),
+  });
+  const ipAddresses = [
+    { address: device.managementAddress, isPrimary: true },
+    ...secondaryIps.map((row) => ({ address: row.address, isPrimary: false })),
+  ];
+
   try {
     // The secrets provider plugin owns the crypto; the broker fetches the
     // decrypted secret on our behalf. Secrets are typed: `fields` holds the
@@ -100,6 +109,7 @@ async function processJob(jobId: string): Promise<void> {
       {
         deviceId: device.id,
         managementAddress: device.managementAddress,
+        ipAddresses,
         credentials,
         ...(decrypted?.type === 'apiKey'
           ? { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }

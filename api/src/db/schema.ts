@@ -46,6 +46,28 @@ export const devicePlugins = pgTable(
   }
 );
 
+// Secondary IP addresses for a device. The PRIMARY address is the device's
+// `managementAddress` column (validated to IPv4/IPv6/DNS name); these rows are
+// additional targets plugins may reach (e.g. a public interface, a second
+// management VLAN). Exactly one "primary" per device — always the
+// managementAddress itself, so no isPrimary flag is needed here.
+export const deviceIps = pgTable(
+  'device_ips',
+  {
+    id: text('id').primaryKey(),
+    deviceId: text('deviceId').notNull(),
+    // Bare address literal or DNS name (validated in api/src/utils/address.ts).
+    address: text('address').notNull(),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => {
+    return {
+      uqDeviceIps: uniqueIndex('uq_device_ips').on(table.deviceId, table.address),
+      idxDeviceIpsDevice: index('idx_device_ips_device').on(table.deviceId),
+    };
+  }
+);
+
 export const secrets = pgTable('secrets', {
   id: text('id').primaryKey(),
   label: text('label'),

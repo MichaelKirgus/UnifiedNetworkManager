@@ -8,6 +8,7 @@ import { StatusBadge } from '../components/StatusBadge';
 import { MetricCell } from '../components/MetricCell';
 import { PluginAssignmentBuilder } from '../components/PluginAssignmentBuilder';
 import { api, Device, DeviceCreateRequest, DevicePluginAssignmentInput, Plugin } from '../api/client';
+import { isValidAddress, addressError } from '../utils/address';
 
 // Derive the list of selectable vendors from the discovered plugins so that
 // adding/renaming a plugin is reflected in the GUI without code changes.
@@ -31,6 +32,11 @@ export default function Devices() {
   const emptyIdentity = { name: '', vendor: '', deviceType: 'firewall', managementAddress: '', site: '' };
   const [identity, setIdentity] = useState(emptyIdentity);
 
+  // Secondary IPs to register at creation time.
+  const [additionalIps, setAdditionalIps] = useState<string[]>([]);
+  const [newIpInput, setNewIpInput] = useState('');
+  const [ipError, setIpError] = useState<string | null>(null);
+
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
   const secretsQuery = useQuery({ queryKey: ['secrets'], queryFn: api.secrets });
@@ -41,13 +47,30 @@ export default function Devices() {
       queryClient.invalidateQueries({ queryKey: ['devices'] });
       setShowForm(false);
       setIdentity(emptyIdentity);
+      setAdditionalIps([]);
+      setNewIpInput('');
+      setIpError(null);
       setFormError(null);
     },
     onError: (err: unknown) => setFormError((err as Error).message),
   });
 
   function handleSubmit(assignments: DevicePluginAssignmentInput[]) {
-    createDevice.mutate({ ...identity, plugins: assignments });
+    createDevice.mutate({ ...identity, ips: additionalIps.length > 0 ? additionalIps : undefined, plugins: assignments });
+  }
+
+  /** Adds a secondary IP to the creation list (validated inline). */
+  function addSecondaryIp() {
+    const v = newIpInput.trim();
+    if (!v) return;
+    if (!isValidAddress(v)) { setIpError(addressError(v)); return; }
+    if (additionalIps.some((ip) => ip.toLowerCase() === v.toLowerCase())) {
+      setIpError('This address is already in the list.');
+      return;
+    }
+    setAdditionalIps([...additionalIps, v]);
+    setNewIpInput('');
+    setIpError(null);
   }
 
   const updateDevice = useMutation({
@@ -75,7 +98,11 @@ export default function Devices() {
   function handleEditSubmit(e: FormEvent) {
     e.preventDefault();
     if (!editForm.name.trim() || !editForm.vendor || !editForm.managementAddress.trim()) {
-      setEditError('Name, vendor and management address are required.');
+      setEditError('Name, vendor and primary IP are required.');
+      return;
+    }
+    if (!isValidAddress(editForm.managementAddress)) {
+      setEditError(`Primary IP: ${addressError(editForm.managementAddress)}`);
       return;
     }
     updateDevice.mutate({
@@ -92,6 +119,24 @@ export default function Devices() {
     { header: 'Vendor', key: 'vendor' },
     { header: 'Type', key: 'deviceType' },
     { header: 'Site', key: 'site', render: (row) => row.site ?? '—' },
+    {
+      header: 'IP',
+      key: 'managementAddress',
+      width: 160,
+      sortable: true,
+      sortAccessor: (row) => row.managementAddress,
+      render: (row) => {
+        const secondaryCount = (row.ips ?? []).filter((ip) => !ip.isPrimary).length;
+        return (
+          <span className="font-mono text-xs">
+            {row.managementAddress}
+            {secondaryCount > 0 && (
+              <span className="ml-1 rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">+{secondaryCount}</span>
+            )}
+          </span>
+        );
+      },
+    },
     {
       header: 'Plugins',
       key: 'plugins',
@@ -222,14 +267,21 @@ export default function Devices() {
             />
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Management Address</label>
+            <label className="mb-1 block text-sm font-medium text-slate-700">Primary IP / Address</label>
             <input
               required
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              className={`w-full rounded-md border px-3 py-2 text-sm ${
+                identity.managementAddress.trim() && !isValidAddress(identity.managementAddress)
+                  ? 'border-red-400'
+                  : 'border-slate-300'
+              }`}
               value={identity.managementAddress}
               onChange={(e) => setIdentity({ ...identity, managementAddress: e.target.value })}
-              placeholder="https://10.0.0.1"
+              placeholder="10.0.0.1 or gw.local"
             />
+            {identity.managementAddress.trim() && !isValidAddress(identity.managementAddress) && (
+              <p className="mt-1 text-xs text-red-600">{addressError(identity.managementAddress)}</p>
+            )}
           </div>
           <div>
             <label className="mb-1 block text-sm font-medium text-slate-700">Site</label>
@@ -241,6 +293,44 @@ export default function Devices() {
           </div>
 
           <div className="col-span-full">
+            <label className="mb-1 block text-sm font-medium text-slate-700">Additional IPs (optional)</label>
+            <div className="flex gap-2">
+              <input
+                className={`w-full rounded-md border px-3 py-2 text-sm ${ipError ? 'border-red-400' : 'border-slate-300'}`}
+                value={newIpInput}
+                onChange={(e) => { setNewIpInput(e.target.value); setIpError(null); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSecondaryIp(); } }}
+                placeholder="10.0.0.2 or 2001:db8::1"
+              />
+              <button
+                type="button"
+                onClick={addSecondaryIp}
+                className="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+              >
+                Add
+              </button>
+            </div>
+            {ipError && <p className="mt-1 text-xs text-red-600">{ipError}</p>}
+            {additionalIps.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {additionalIps.map((ip) => (
+                  <span key={ip} className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
+                    {ip}
+                    <button
+                      type="button"
+                      aria-label={`Remove ${ip}`}
+                      onClick={() => setAdditionalIps(additionalIps.filter((x) => x !== ip))}
+                      className="text-slate-400 hover:text-red-600"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="col-span-full">
             <label className="mb-1 block text-sm font-medium text-slate-700">
               Plugins (each with its own credentials — the first becomes primary)
             </label>
@@ -249,7 +339,11 @@ export default function Devices() {
               secrets={secretsQuery.data ?? []}
               onSubmit={(assignments) => {
                 if (!identity.name.trim() || !identity.vendor || !identity.managementAddress.trim()) {
-                  setFormError('Please fill in name, vendor and management address before saving.');
+                  setFormError('Please fill in name, vendor and primary IP before saving.');
+                  return;
+                }
+                if (!isValidAddress(identity.managementAddress)) {
+                  setFormError(`Primary IP: ${addressError(identity.managementAddress)}`);
                   return;
                 }
                 handleSubmit(assignments);
@@ -320,14 +414,21 @@ export default function Devices() {
                 </div>
               </div>
               <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700">Management Address</label>
+                <label className="mb-1 block text-sm font-medium text-slate-700">Primary IP / Address</label>
                 <input
                   required
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                  className={`w-full rounded-md border px-3 py-2 text-sm ${
+                    editForm.managementAddress.trim() && !isValidAddress(editForm.managementAddress)
+                      ? 'border-red-400'
+                      : 'border-slate-300'
+                  }`}
                   value={editForm.managementAddress}
                   onChange={(e) => setEditForm({ ...editForm, managementAddress: e.target.value })}
-                  placeholder="https://10.0.0.1"
+                  placeholder="10.0.0.1 or gw.local"
                 />
+                {editForm.managementAddress.trim() && !isValidAddress(editForm.managementAddress) && (
+                  <p className="mt-1 text-xs text-red-600">{addressError(editForm.managementAddress)}</p>
+                )}
               </div>
               <div>
                 <label className="mb-1 block text-sm font-medium text-slate-700">Site</label>

@@ -11,6 +11,7 @@ import {
   getArpTable,
   getNdpTable,
   applyConfig,
+  OpnsenseTransport,
 } from './opnsenseClient';
 
 export const PLUGIN_UUID = 'b0e6c8a2-4f1e-4a3d-9c7b-1a2b3c4d5e6f';
@@ -116,7 +117,8 @@ const inventoryCache = new Map<string, InventorySnapshot>();
 async function getInventory(
   host: string,
   apiKey: string,
-  apiSecret: string
+  apiSecret: string,
+  transport?: OpnsenseTransport
 ): Promise<InventorySnapshot> {
   const cached = inventoryCache.get(host);
   if (cached && Date.now() - cached.collectedAt < INVENTORY_INTERVAL_MS) {
@@ -124,9 +126,9 @@ async function getInventory(
   }
 
   const [info, arp, ndp] = await Promise.all([
-    getSystemInformation(host, apiKey, apiSecret).catch(() => undefined),
-    getArpTable(host, apiKey, apiSecret).catch(() => undefined),
-    getNdpTable(host, apiKey, apiSecret).catch(() => undefined),
+    getSystemInformation(host, apiKey, apiSecret, transport).catch(() => undefined),
+    getArpTable(host, apiKey, apiSecret, transport).catch(() => undefined),
+    getNdpTable(host, apiKey, apiSecret, transport).catch(() => undefined),
   ]);
 
   const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [] };
@@ -418,6 +420,15 @@ const PLUGIN_OPTIONS = [
     default: true,
     description: 'Cache slow-changing data (ARP/NDP tables, hostname) in memory and only re-fetch when the TTL elapses.',
   },
+  {
+    key: 'transport',
+    label: 'Transport',
+    type: 'string' as const,
+    default: 'auto',
+    pattern: '^(auto|http|https)$',
+    description:
+      'How to reach the appliance. auto = HTTPS with self-signed certificates accepted (default, matches historical behavior). https = force TLS. http = plaintext HTTP for appliances without a certificate.',
+  },
 ];
 
 /**
@@ -461,7 +472,8 @@ function pickNumber(obj: Record<string, unknown>, keys: string[]): number | unde
 async function collectMetrics(
   host: string,
   apiKey: string,
-  apiSecret: string
+  apiSecret: string,
+  transport?: OpnsenseTransport
 ): Promise<{ metrics: Record<string, unknown>; interfaces: string[] }> {
   const metrics: Record<string, unknown> = {};
   const interfaces: string[] = [];
@@ -469,7 +481,7 @@ async function collectMetrics(
 
   // System status (health + basic info). OPNsense returns
   // { metadata: { system: { status: 0|1|2 } } } — capture the status code.
-  const status = await getSystemStatus(host, apiKey, apiSecret);
+  const status = await getSystemStatus(host, apiKey, apiSecret, transport);
   if (status.ok && status.data && typeof status.data === 'object') {
     const d = status.data as Record<string, unknown>;
     const meta = d['metadata'] as Record<string, unknown> | undefined;
@@ -482,7 +494,7 @@ async function collectMetrics(
   // Emits { total, user, nice, sys, intr, idle } per second; `total` is the
   // percentage of CPU in use. Best-effort — older firmware may not expose it.
   try {
-    const cpu = await getCpuUsage(host, apiKey, apiSecret);
+    const cpu = await getCpuUsage(host, apiKey, apiSecret, transport);
     if (cpu && typeof cpu.total === 'number') {
       metrics['cpu.percent'] = cpu.total;
       metrics['cpu.user'] = cpu.user;
@@ -496,7 +508,7 @@ async function collectMetrics(
   // Memory usage (bytes) from /api/diagnostics/system/system_resources.
   // Shape: { memory: { total: "<bytes>", used: <bytes>, ... } }
   try {
-    const resources = await getSystemResources(host, apiKey, apiSecret);
+    const resources = await getSystemResources(host, apiKey, apiSecret, transport);
     if (resources.ok && resources.data && typeof resources.data === 'object') {
       const d = resources.data as Record<string, unknown>;
       const mem = d['memory'] as Record<string, unknown> | undefined;
@@ -517,7 +529,7 @@ async function collectMetrics(
   // Inventory (hostname, version, ARP + NDP neighbor tables) — slow-changing.
   // Served from the in-memory cache; the appliance is only re-polled when the
   // 15-min TTL elapses (see getInventory), so the API's 30s poll is cheap.
-  const inventory = await getInventory(host, apiKey, apiSecret);
+  const inventory = await getInventory(host, apiKey, apiSecret, transport);
   if (inventory.hostname) metrics['hostname'] = inventory.hostname;
   if (inventory.version) metrics['version'] = inventory.version;
   if (inventory.arp.length > 0) metrics['arp'] = inventory.arp;
@@ -525,7 +537,7 @@ async function collectMetrics(
 
   // Interface names (for the traffic table rows)
   try {
-    const ifaces = await getInterfaces(host, apiKey, apiSecret);
+    const ifaces = await getInterfaces(host, apiKey, apiSecret, transport);
     if (ifaces.ok && ifaces.data && typeof ifaces.data === 'object') {
       interfaces.push(...Object.keys(ifaces.data as Record<string, unknown>));
     }
@@ -539,7 +551,7 @@ async function collectMetrics(
   // Emitted as a nested object keyed by interface: { traffic: { igc0: { rx, tx } } }
   // so the webapp can render it as a table (rows = interfaces, columns = rx/tx).
   try {
-    const stats = await getInterfaceStats(host, apiKey, apiSecret);
+    const stats = await getInterfaceStats(host, apiKey, apiSecret, transport);
     if (stats.ok && stats.data && typeof stats.data === 'object') {
       const data = stats.data as Record<string, unknown>;
       const statistics = (data['statistics'] ?? data) as Record<string, unknown>;
@@ -579,9 +591,13 @@ app.post('/monitoring', async (req, res) => {
   // Effective settings injected by the API (defaults ⊕ user overrides). The
   // plugin reads its options from here — it never stores them itself.
   const settings = readSettings(req);
+  const transport: OpnsenseTransport =
+    typeof settings.transport === 'string' && ['auto', 'http', 'https'].includes(settings.transport)
+      ? (settings.transport as OpnsenseTransport)
+      : 'auto';
 
   try {
-    const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret);
+    const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret, transport);
 
     // Health: prefer the appliance's own status code (0=critical, 1=warning,
     // 2=ok); fall back to "did we collect anything at all".
@@ -609,6 +625,7 @@ app.post('/monitoring', async (req, res) => {
       activeSettings: {
         pollIntervalSec: settings.pollIntervalSec,
         enableInventoryCache: settings.enableInventoryCache,
+        transport,
       },
     });
   } catch (err) {
@@ -625,8 +642,15 @@ app.post('/monitoring', async (req, res) => {
 app.post('/config', async (req, res) => {
   const { action, payload, apiKey, apiSecret, managementAddress } = req.body ?? {};
 
+  // Transport is a plugin-owned decision — read it from the injected settings.
+  const settings = readSettings(req);
+  const transport: OpnsenseTransport =
+    typeof settings.transport === 'string' && ['auto', 'http', 'https'].includes(settings.transport)
+      ? (settings.transport as OpnsenseTransport)
+      : 'auto';
+
   try {
-    const result = await applyConfig({ action, payload }, managementAddress, apiKey, apiSecret);
+    const result = await applyConfig({ action, payload }, managementAddress, apiKey, apiSecret, transport);
     res.status(200).json({
       success: result.ok,
       result: { status: result.status, data: result.data },

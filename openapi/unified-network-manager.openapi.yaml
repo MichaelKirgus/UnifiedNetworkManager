@@ -465,6 +465,103 @@ paths:
         '404':
           description: Device not found or plugin is not assigned to it
 
+  /devices/{deviceId}/ips:
+    get:
+      tags: [Devices]
+      summary: List a device's IP addresses (primary first)
+      description: >-
+        Returns the device's primary address (its `managementAddress`) with
+        `isPrimary: true`, followed by any secondary IPs. The primary is the
+        default target plugins reach; secondaries are additional interfaces.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Addresses (primary first)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deviceId, ips]
+                properties:
+                  deviceId: { type: string }
+                  ips:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DeviceAddress'
+        '401':
+          description: Authentication required
+        '404':
+          description: Device not found
+    post:
+      tags: [Devices]
+      summary: Add a secondary IP to a device
+      description: >-
+        Registers an additional address (IPv4, IPv6, or DNS name) the plugins
+        may reach. The primary address is managed via PATCH /devices/{deviceId}
+        (`managementAddress`) and cannot be added here. Duplicate of the
+        primary or an existing secondary → 409.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address]
+              properties:
+                address: { type: string, minLength: 1 }
+      responses:
+        '201':
+          description: Address registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceIpRow'
+        '400':
+          description: address is not a valid IPv4/IPv6/DNS name
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing devices:write permission
+        '404':
+          description: Device not found
+        '409':
+          description: Address is already registered for this device
+
+  /devices/{deviceId}/ips/{ipId}:
+    delete:
+      tags: [Devices]
+      summary: Remove a secondary IP from a device
+      description: >-
+        Deletes the given secondary address. The primary (managementAddress)
+        cannot be removed here — change it via PATCH /devices/{deviceId}.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: ipId
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Address removed
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing devices:write permission
+        '404':
+          description: Device not found or address is not registered for it
+
   /devices/{deviceId}/monitoring:
     get:
       tags: [Monitoring]
@@ -941,6 +1038,25 @@ components:
         pluginOnline: { type: boolean }
         secretLabel: { type: string }
 
+    # A device address as presented to the UI and plugins (primary flag included).
+    DeviceAddress:
+      type: object
+      required: [address, isPrimary]
+      properties:
+        address: { type: string, description: "IPv4, IPv6 literal, or DNS name (no scheme)" }
+        isPrimary: { type: boolean, description: "True for the device's managementAddress" }
+        id: { type: [string, 'null'], description: "Row id of a secondary IP; null for the primary" }
+
+    # One row of the device_ips table (a secondary IP).
+    DeviceIpRow:
+      type: object
+      required: [id, deviceId, address]
+      properties:
+        id: { type: string }
+        deviceId: { type: string }
+        address: { type: string }
+        createdAt: { type: string, format: date-time }
+
     DevicePluginAssignmentInput:
       type: object
       required: [pluginId]
@@ -962,6 +1078,11 @@ components:
         status:
           type: string
           enum: [online, degraded, offline, unknown]
+        ips:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeviceAddress'
+          description: "All addresses, primary first (list endpoints include this)"
         plugins:
           type: array
           items:
@@ -981,8 +1102,13 @@ components:
         name: { type: string }
         vendor: { type: string }
         deviceType: { type: string }
-        managementAddress: { type: string }
+        managementAddress: { type: string, description: "Primary address — IPv4, IPv6 literal, or DNS name (no scheme)" }
         site: { type: string }
+        # Optional secondary IPs registered at creation time.
+        ips:
+          type: array
+          items: { type: string }
+          description: "Optional additional addresses (IPv4/IPv6/DNS names)"
         # At least one plugin assignment; the first becomes primary.
         plugins:
           type: array

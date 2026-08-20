@@ -89,12 +89,33 @@ export interface DevicePluginAssignmentInput {
   isPrimary?: boolean;
 }
 
+/** A device address as presented by the API (primary flag included). */
+export interface DeviceAddress {
+  /** IPv4, IPv6 literal, or DNS name (no scheme). */
+  address: string;
+  /** True for the device's managementAddress. */
+  isPrimary: boolean;
+  /** Row id of a secondary IP; null/undefined for the primary. */
+  id?: string | null;
+}
+
+/** One row of the device_ips table (a secondary IP). */
+export interface DeviceIpRow {
+  id: string;
+  deviceId: string;
+  address: string;
+  createdAt?: string;
+}
+
 export interface DeviceCreateRequest {
   name: string;
   vendor: string;
   deviceType: string;
+  /** Primary address — IPv4, IPv6 literal, or DNS name (no scheme). */
   managementAddress: string;
   site?: string;
+  /** Optional secondary IPs registered at creation time. */
+  ips?: string[];
   /** At least one plugin assignment; the first becomes primary. */
   plugins: DevicePluginAssignmentInput[];
 }
@@ -107,6 +128,8 @@ export interface Device {
   managementAddress: string;
   site?: string;
   status: string;
+  /** All addresses, primary first (list endpoints include this). */
+  ips?: DeviceAddress[];
   /** Assigned plugins (list endpoints include this). */
   plugins?: DevicePluginAssignment[];
   /** Headline metrics (marked `summary` by the plugin) for inline table display. */
@@ -294,8 +317,13 @@ export const api = {
     apiFetch<void>(`/devices/${deviceId}/plugins/${pluginId}`, { method: 'DELETE' }),
   /** Promote an assigned plugin to primary (demotes the current one). */
   setPrimaryPlugin: (deviceId: string, pluginId: string) =>
-    apiFetch<DevicePluginAssignment>(`/devices/${deviceId}/plugins/${pluginId}`, { method: 'PATCH' }),
-  // Per-device settings overrides (inherit global → override per device).
+    apiFetch<DevicePluginAssignment>(`/devices/${deviceId}/plugins/${pluginId}`, { method: 'PATCH' }),// Device IP addresses (primary = managementAddress; secondaries managed here).
+deviceIps: (deviceId: string) =>
+  apiFetch<{ deviceId: string; ips: DeviceAddress[] }>(`/devices/${deviceId}/ips`),
+addDeviceIp: (deviceId: string, address: string) =>
+  apiFetch<DeviceIpRow>(`/devices/${deviceId}/ips`, { method: 'POST', body: JSON.stringify({ address }) }),
+removeDeviceIp: (deviceId: string, ipId: string) =>
+  apiFetch<void>(`/devices/${deviceId}/ips/${ipId}`, { method: 'DELETE' }),  // Per-device settings overrides (inherit global → override per device).
   devicePluginOptions: (deviceId: string, pluginId: string) =>
     apiFetch<PluginOptionsResponse>(`/devices/${deviceId}/plugins/${pluginId}/options`),
   saveDevicePluginSettings: (deviceId: string, pluginId: string, settings: Record<string, unknown>) =>

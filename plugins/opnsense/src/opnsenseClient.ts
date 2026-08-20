@@ -12,17 +12,40 @@ export interface OpnsenseApiResult<T = unknown> {
 // certificate" and the device stays offline. Use an agent that accepts it.
 const httpsAgent = new HttpsAgent({ rejectUnauthorized: false });
 
+/** Transport choice owned by this plugin via its `transport` option. */
+export type OpnsenseTransport = 'auto' | 'http' | 'https';
+
+/**
+ * Resolves the absolute base URL for a device address given the transport
+ * option:
+ *  - host already carries a scheme (legacy full-URL managementAddress) → kept.
+ *  - `transport: 'http'` / `'https'` → that scheme is forced onto bare hosts.
+ *  - `auto` (default, preserves historical behavior) → https with self-signed
+ *    certificates accepted — OPNsense appliances almost always present one.
+ */
+export function resolveBase(host: string, transport?: OpnsenseTransport): string {
+  const h = (host ?? '').trim().replace(/\/$/, '');
+  if (!h) return '';
+  if (/^https?:\/\//i.test(h)) return h; // explicit scheme wins
+  const t = transport ?? 'auto';
+  const scheme = t === 'http' ? 'http://' : 'https://';
+  return `${scheme}${h}`;
+}
+
 async function request<T = unknown>(
   method: 'get' | 'post',
   url: string,
   host: string,
   apiKey: string,
   apiSecret: string,
-  body?: unknown
+  body?: unknown,
+  transport?: OpnsenseTransport
 ): Promise<OpnsenseApiResult<T>> {
+  const base = resolveBase(host, transport);
+  const useHttps = base.startsWith('https://');
   const response = await axios.request<T>({
     method,
-    url: `${host.replace(/\/$/, '')}${url}`,
+    url: `${base}${url}`,
     auth: {
       username: apiKey,
       password: apiSecret,
@@ -30,7 +53,8 @@ async function request<T = unknown>(
     data: body,
     timeout: 10_000,
     validateStatus: () => true,
-    httpsAgent,
+    // Only attach the self-signed-accepting agent for TLS calls.
+    ...(useHttps ? { httpsAgent } : {}),
   });
   return {
     ok: response.status >= 200 && response.status < 300,
@@ -43,40 +67,40 @@ async function request<T = unknown>(
  * Fetches high-level system status (uptime, version, load) from OPNsense.
  * GET /api/core/system/status
  */
-export function getSystemStatus(host: string, apiKey: string, apiSecret: string): Promise<OpnsenseApiResult> {
-  return request('get', '/api/core/system/status', host, apiKey, apiSecret);
+export function getSystemStatus(host: string, apiKey: string, apiSecret: string, transport?: OpnsenseTransport): Promise<OpnsenseApiResult> {
+  return request('get', '/api/core/system/status', host, apiKey, apiSecret, undefined, transport);
 }
 
 /**
  * Fetches system resource usage (memory total/used in bytes).
  * GET /api/diagnostics/system/system_resources
  */
-export function getSystemResources(host: string, apiKey: string, apiSecret: string): Promise<OpnsenseApiResult> {
-  return request('get', '/api/diagnostics/system/system_resources', host, apiKey, apiSecret);
+export function getSystemResources(host: string, apiKey: string, apiSecret: string, transport?: OpnsenseTransport): Promise<OpnsenseApiResult> {
+  return request('get', '/api/diagnostics/system/system_resources', host, apiKey, apiSecret, undefined, transport);
 }
 
 /**
  * Fetches system information (hostname, versions).
  * GET /api/diagnostics/system/system_information
  */
-export function getSystemInformation(host: string, apiKey: string, apiSecret: string): Promise<OpnsenseApiResult> {
-  return request('get', '/api/diagnostics/system/system_information', host, apiKey, apiSecret);
+export function getSystemInformation(host: string, apiKey: string, apiSecret: string, transport?: OpnsenseTransport): Promise<OpnsenseApiResult> {
+  return request('get', '/api/diagnostics/system/system_information', host, apiKey, apiSecret, undefined, transport);
 }
 
 /**
  * Fetches the configured interface names/details.
  * GET /api/diagnostics/interface/get_interface_names
  */
-export function getInterfaces(host: string, apiKey: string, apiSecret: string): Promise<OpnsenseApiResult> {
-  return request('get', '/api/diagnostics/interface/get_interface_names', host, apiKey, apiSecret);
+export function getInterfaces(host: string, apiKey: string, apiSecret: string, transport?: OpnsenseTransport): Promise<OpnsenseApiResult> {
+  return request('get', '/api/diagnostics/interface/get_interface_names', host, apiKey, apiSecret, undefined, transport);
 }
 
 /**
  * Fetches per-interface traffic statistics (byte counters).
  * GET /api/diagnostics/interface/get_interface_statistics
  */
-export function getInterfaceStats(host: string, apiKey: string, apiSecret: string): Promise<OpnsenseApiResult> {
-  return request('get', '/api/diagnostics/interface/get_interface_statistics', host, apiKey, apiSecret);
+export function getInterfaceStats(host: string, apiKey: string, apiSecret: string, transport?: OpnsenseTransport): Promise<OpnsenseApiResult> {
+  return request('get', '/api/diagnostics/interface/get_interface_statistics', host, apiKey, apiSecret, undefined, transport);
 }
 
 /**
@@ -85,8 +109,8 @@ export function getInterfaceStats(host: string, apiKey: string, apiSecret: strin
  *   { total, rowCount, current, rows: [{ mac, ip, intf, manufacturer, intf_description, ... }] }
  * POST /api/diagnostics/interface/search_arp/
  */
-export function getArpTable(host: string, apiKey: string, apiSecret: string): Promise<OpnsenseApiResult> {
-  return request('post', '/api/diagnostics/interface/search_arp/', host, apiKey, apiSecret, {});
+export function getArpTable(host: string, apiKey: string, apiSecret: string, transport?: OpnsenseTransport): Promise<OpnsenseApiResult> {
+  return request('post', '/api/diagnostics/interface/search_arp/', host, apiKey, apiSecret, {}, transport);
 }
 
 /**
@@ -94,8 +118,8 @@ export function getArpTable(host: string, apiKey: string, apiSecret: string): Pr
  *   { total, rowCount, current, rows: [{ mac, ip, intf, manufacturer, ... }] }
  * POST /api/diagnostics/interface/search_ndp/
  */
-export function getNdpTable(host: string, apiKey: string, apiSecret: string): Promise<OpnsenseApiResult> {
-  return request('post', '/api/diagnostics/interface/search_ndp/', host, apiKey, apiSecret, {});
+export function getNdpTable(host: string, apiKey: string, apiSecret: string, transport?: OpnsenseTransport): Promise<OpnsenseApiResult> {
+  return request('post', '/api/diagnostics/interface/search_ndp/', host, apiKey, apiSecret, {}, transport);
 }
 
 /**
@@ -113,11 +137,13 @@ export function getNdpTable(host: string, apiKey: string, apiSecret: string): Pr
 export async function getCpuUsage(
   host: string,
   apiKey: string,
-  apiSecret: string
+  apiSecret: string,
+  transport?: OpnsenseTransport
 ): Promise<{ total: number; user: number; sys: number; intr: number; idle: number } | undefined> {
   const https = require('https');
   const http = require('http');
-  const base = host.replace(/\/$/, '');
+  const base = resolveBase(host, transport);
+  if (!base) return undefined;
   const isHttps = base.startsWith('https://');
   const lib = isHttps ? https : http;
   const url = new URL(`${base}/api/diagnostics/cpu_usage/stream`);
@@ -182,6 +208,6 @@ export async function getCpuUsage(
  * interface settings, etc.).
  * POST /api/core/firmware/status
  */
-export function applyConfig(payload: unknown, host: string, apiKey: string, apiSecret: string): Promise<OpnsenseApiResult> {
-  return request('post', '/api/core/firmware/status', host, apiKey, apiSecret, payload);
+export function applyConfig(payload: unknown, host: string, apiKey: string, apiSecret: string, transport?: OpnsenseTransport): Promise<OpnsenseApiResult> {
+  return request('post', '/api/core/firmware/status', host, apiKey, apiSecret, payload, transport);
 }

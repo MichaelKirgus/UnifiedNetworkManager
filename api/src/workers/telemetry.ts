@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../db';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { getSecret } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
@@ -14,10 +14,18 @@ interface MonitoringResponse {
   metricDescriptors?: unknown[];
 }
 
+/** A device address as presented to plugins (primary flag included). */
+interface DeviceAddressView {
+  address: string;
+  isPrimary: boolean;
+}
+
 /** One plugin's view of a device (assignment + its plugin row). */
 interface AssignmentTarget {
   deviceId: string;
   managementAddress: string;
+  /** All device addresses, primary first. Lets plugins reach secondary IPs. */
+  ipAddresses: DeviceAddressView[];
   pluginId: string;
   secretId: string | null;
   endpoint: string;
@@ -40,6 +48,7 @@ async function pollAssignment(target: AssignmentTarget): Promise<string> {
       {
         deviceId: target.deviceId,
         managementAddress: target.managementAddress,
+        ipAddresses: target.ipAddresses,
         credentials,
         ...(decrypted?.type === 'apiKey'
           ? { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }
@@ -95,15 +104,33 @@ async function pollAllDevices(): Promise<void> {
     (await db.query.plugins.findMany()).map((p) => [p.id, p] as const)
   );
 
+  // Secondary IPs per device (primary is always managementAddress). Batched.
+  const deviceIds = devices.map((d) => d.id);
+  const secondaryIps =
+    deviceIds.length > 0
+      ? await db.query.deviceIps.findMany({ where: inArray(schema.deviceIps.deviceId, deviceIds) })
+      : [];
+  const ipsByDevice = new Map<string, string[]>();
+  for (const row of secondaryIps) {
+    const list = ipsByDevice.get(row.deviceId) ?? [];
+    list.push(row.address);
+    ipsByDevice.set(row.deviceId, list);
+  }
+
   const targetsByDevice = new Map<string, AssignmentTarget[]>();
   for (const a of assignments) {
     const device = devices.find((d) => d.id === a.deviceId);
     const plugin = pluginsById.get(a.pluginId);
     if (!device || !plugin) continue; // stale assignment or unknown plugin: skip
+    const ipAddresses: DeviceAddressView[] = [
+      { address: device.managementAddress, isPrimary: true },
+      ...(ipsByDevice.get(device.id) ?? []).map((address) => ({ address, isPrimary: false })),
+    ];
     const list = targetsByDevice.get(device.id) ?? [];
     list.push({
       deviceId: device.id,
       managementAddress: device.managementAddress,
+      ipAddresses,
       pluginId: a.pluginId,
       secretId: a.secretId,
       endpoint: plugin.endpoint,

@@ -71,6 +71,22 @@ export async function initDb(): Promise<void> {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_device_plugins
       ON device_plugins ("deviceId", "pluginId")`);
 
+  // Multi-IP-per-device model: secondary addresses live in device_ips; the
+  // primary is always devices.managementAddress (validated to IPv4/IPv6/DNS).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_ips (
+      id TEXT PRIMARY KEY,
+      "deviceId" TEXT NOT NULL,
+      address TEXT NOT NULL,
+      "createdAt" TEXT NOT NULL
+    )`);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_device_ips
+      ON device_ips ("deviceId", address)`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_ips_device
+      ON device_ips ("deviceId")`);
+
   // Attribute telemetry + config jobs to the plugin that produced/executed them.
   await pool.query(
     `ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS "pluginId" TEXT`
