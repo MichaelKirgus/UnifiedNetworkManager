@@ -11,7 +11,8 @@ OPNSENSE_PORT=4001
 BASIC_AUTH_PORT=4002
 SECRETS_PORT=4003
 PING_PORT=4004
-ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}" "${PING_PORT}")
+SNMP_PORT=4005
+ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}" "${PING_PORT}" "${SNMP_PORT}")
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/unm-dev.XXXXXX")"
 DEV_PIDS=()
 
@@ -217,18 +218,19 @@ echo "🛠️  Syncing database schema..."
 cd api && npx drizzle-kit push && cd ..
 echo "✅ Database schema is up to date."
 
-# 6. Build the plugins (opnsense + ping + basic-auth + secrets-provider)
+# 6. Build the plugins (opnsense + ping + snmp + basic-auth + secrets-provider)
 echo "🔨 Building plugins..."
 ( cd plugins/opnsense && npm run build )
 ( cd plugins/ping && npm run build )
+( cd plugins/snmp && npm run build )
 ( cd plugins/basic-auth && npm run build )
 ( cd plugins/secrets-provider && npm run build )
-ok "Plugins built (opnsense + ping + basic-auth + secrets-provider)."
+ok "Plugins built (opnsense + ping + snmp + basic-auth + secrets-provider)."
 
 # 7. Start the plugin containers (--build: always reflect current source;
 #    reusing stale images silently serves old code — a past source of bugs)
 echo "🌐 Starting plugin containers..."
-docker_compose up -d --build opnsense-plugin ping-plugin basic-auth-plugin secrets-provider-plugin
+docker_compose up -d --build opnsense-plugin ping-plugin snmp-plugin basic-auth-plugin secrets-provider-plugin
 ok "Plugin containers started."
 
 # 8. Wait for the plugins to be reachable (basic-auth must be up before the
@@ -237,6 +239,7 @@ ok "Plugin containers started."
 echo "⏳ Waiting for plugins to be ready..."
 wait_for_port "$OPNSENSE_PORT" "opnsense-plugin"
 wait_for_port "$PING_PORT" "ping-plugin"
+wait_for_port "$SNMP_PORT" "snmp-plugin"
 wait_for_port "$BASIC_AUTH_PORT" "basic-auth-plugin"
 wait_for_port "$SECRETS_PORT" "secrets-provider-plugin"
 ok "Plugins are reachable."

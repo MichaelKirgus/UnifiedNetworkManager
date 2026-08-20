@@ -35,7 +35,7 @@ services:
       - SECRETS_PLUGIN_ID=${SECRETS_PLUGIN_ID:-00000000-0000-4000-8000-000000000002}
       # Poll these plugin endpoints for discovery (mDNS is often isolated on
       # Docker bridge networks). Ensures the provider plugins are registered.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://ping-plugin:4004}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://ping-plugin:4004,http://snmp-plugin:4005}
     depends_on:
       - postgres
     restart: unless-stopped
@@ -68,6 +68,25 @@ services:
       - PORT=4004
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://ping-plugin:4004
+    restart: unless-stopped
+
+  # SNMP plugin: SNMPv1/v2c monitoring (system group + interface throughput)
+  # and inventory via the net-snmp CLI. Credentials come from an snmp-type
+  # secret assigned per device (community + version). Vendor MIB files can be
+  # dropped into ./plugins/snmp/mibs — mounted read-only at /app/mibs.
+  snmp-plugin:
+    build:
+      context: ./plugins/snmp
+    ports:
+      - "4005:4005"
+    environment:
+      - PORT=4005
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://snmp-plugin:4005
+      # Directory inside the container where extra MIB files are looked up.
+      - MIB_DIR=/app/mibs
+    volumes:
+      - ./plugins/snmp/mibs:/app/mibs:ro
     restart: unless-stopped
 
   # Identity provider plugin: local users + TOTP (2FA). Performs credential

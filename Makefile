@@ -8,15 +8,17 @@ setup:
 	cd plugins/opnsense && npm install
 	cd plugins/basic-auth && npm install
 	cd plugins/secrets-provider && npm install
+	cd plugins/ping && npm install
+	cd plugins/snmp && npm install
 	@echo "Dependencies installed successfully."
 
 # Start infrastructure (DB and Plugins)
 up:
 	@echo "Starting infrastructure..."
 	@if command -v docker-compose &> /dev/null; then \
-		sudo docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin; \
+		sudo docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin ping-plugin snmp-plugin; \
 	else \
-		sudo docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin; \
+		sudo docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin ping-plugin snmp-plugin; \
 	fi
 	@echo "Infrastructure is up."
 
@@ -64,5 +66,5 @@ clean:
 		echo "Error: No docker-compose or docker compose found"; \
 		exit 1; \
 	fi
-	rm -rf api/node_modules webapp/node_modules plugins/opnsense/node_modules plugins/basic-auth/node_modules plugins/secrets-provider/node_modules
+	rm -rf api/node_modules webapp/node_modules plugins/opnsense/node_modules plugins/basic-auth/node_modules plugins/secrets-provider/node_modules plugins/ping/node_modules plugins/snmp/node_modules
 	@echo "Cleanup complete."

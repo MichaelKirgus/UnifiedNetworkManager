@@ -48,6 +48,20 @@ Each device has exactly one **primary address** (`managementAddress`) plus any n
 - Every `/monitoring` and `/config` call to a plugin carries **all** addresses as `ipAddresses: [{ address, isPrimary }]`, so plugins can reach secondary interfaces when they need to.
 - Transport handling (TLS vs plaintext, self-signed certificates) lives in the **plugin**, not on the device — e.g. the OPNsense plugin's `transport` option (`auto` = HTTPS with self-signed accepted, `https`, or `http`).
 
+## SNMP plugin (monitoring + inventory)
+
+The `plugins/snmp/` service collects data over **SNMPv1/v2c** using the net-snmp CLI. It provides:
+
+- **Monitoring**: system group (description, object ID, name, location, contact, uptime), per-interface rx/tx throughput in bits/s (computed from counter deltas each poll cycle), and an aggregated total-throughput metric shown as a quick metric in the devices table.
+- **Inventory**: per-interface attributes (name, type, speed, MAC address, operational status) + system identity data, exposed both as "Inventory"-group metrics (visible in Device Detail) and via `GET /inventory?managementAddress=…&community=…`.
+
+**Setup:**
+1. Create an **snmp-type secret** (Secrets page): community string + version (`v1` or `v2c`). SNMPv3 is not supported by this plugin.
+2. Assign the SNMP Plugin to a device and attach that secret to the assignment.
+3. Optionally drop vendor `.mib` files into `plugins/snmp/mibs/` — they're mounted read-only at `/app/mibs` inside the container and added to snmpwalk's MIB search path.
+
+**Options** (Plugins page → Configure): `timeoutMs`, `retries`, `mibDir` (container-internal path), `inventoryTtlMs` (slow-path refresh cadence, default 15 min). Live throughput counters always refresh every poll cycle regardless of the inventory TTL.
+
 ## Next implementation steps
 
 1. Build the API service from the OpenAPI contract
