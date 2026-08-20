@@ -40,7 +40,7 @@ export function PluginAssignmentBuilder({
     [plugins, excludedPluginIds]
   );
   const [rows, setRows] = useState<RowState[]>(() =>
-    initial.length > 0 ? initial.map((a) => ({ pluginId: a.pluginId, secretId: a.secretId ?? '', isPrimary: false })) : [emptyRow()]
+    initial.length > 0 ? initial.map((a) => ({ pluginId: a.pluginId, secretId: a.secretId ?? '', isPrimary: a.isPrimary === true })) : [emptyRow()]
   );
 
   // Required secret type per chosen plugin (drives the credentials dropdown).

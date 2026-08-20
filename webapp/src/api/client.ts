@@ -317,13 +317,18 @@ export const api = {
     apiFetch<void>(`/devices/${deviceId}/plugins/${pluginId}`, { method: 'DELETE' }),
   /** Promote an assigned plugin to primary (demotes the current one). */
   setPrimaryPlugin: (deviceId: string, pluginId: string) =>
-    apiFetch<DevicePluginAssignment>(`/devices/${deviceId}/plugins/${pluginId}`, { method: 'PATCH' }),// Device IP addresses (primary = managementAddress; secondaries managed here).
-deviceIps: (deviceId: string) =>
-  apiFetch<{ deviceId: string; ips: DeviceAddress[] }>(`/devices/${deviceId}/ips`),
-addDeviceIp: (deviceId: string, address: string) =>
-  apiFetch<DeviceIpRow>(`/devices/${deviceId}/ips`, { method: 'POST', body: JSON.stringify({ address }) }),
-removeDeviceIp: (deviceId: string, ipId: string) =>
-  apiFetch<void>(`/devices/${deviceId}/ips/${ipId}`, { method: 'DELETE' }),  // Per-device settings overrides (inherit global → override per device).
+    apiFetch<DevicePluginAssignment>(`/devices/${deviceId}/plugins/${pluginId}`, { method: 'PATCH' }),
+  /** Update an existing assignment's credentials and/or primary flag. */
+  updateDevicePlugin: (deviceId: string, pluginId: string, body: { secretId?: string | null; isPrimary?: boolean }) =>
+    apiFetch<DevicePluginAssignment>(`/devices/${deviceId}/plugins/${pluginId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  // Device IP addresses (primary = managementAddress; secondaries managed here).
+  deviceIps: (deviceId: string) =>
+    apiFetch<{ deviceId: string; ips: DeviceAddress[] }>(`/devices/${deviceId}/ips`),
+  addDeviceIp: (deviceId: string, address: string) =>
+    apiFetch<DeviceIpRow>(`/devices/${deviceId}/ips`, { method: 'POST', body: JSON.stringify({ address }) }),
+  removeDeviceIp: (deviceId: string, ipId: string) =>
+    apiFetch<void>(`/devices/${deviceId}/ips/${ipId}`, { method: 'DELETE' }),
+  // Per-device settings overrides (inherit global → override per device).
   devicePluginOptions: (deviceId: string, pluginId: string) =>
     apiFetch<PluginOptionsResponse>(`/devices/${deviceId}/plugins/${pluginId}/options`),
   saveDevicePluginSettings: (deviceId: string, pluginId: string, settings: Record<string, unknown>) =>

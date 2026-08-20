@@ -220,6 +220,64 @@ export async function setPrimary(deviceId: string, pluginId: string): Promise<De
   return (await findAssignment(deviceId, pluginId))!;
 }
 
+/**
+ * Updates an existing assignment's credential source and/or primary flag.
+ * - `isPrimary: true` demotes the current primary (exactly-one invariant).
+ * - `secretId` may be set to a new value or null (clear credentials).
+ * At least one field must be provided; otherwise 400.
+ */
+export async function updateAssignment(
+  deviceId: string,
+  pluginId: string,
+  input: { secretId?: string | null; isPrimary?: boolean }
+): Promise<DevicePluginAssignment> {
+  await assertDevice(deviceId);
+  const assignment = await findAssignment(deviceId, pluginId);
+  if (!assignment) throw new AssignmentError(404, 'Plugin is not assigned to this device');
+
+  // Validate secret reference when provided.
+  let newSecretId: string | null | undefined;
+  if (input.secretId !== undefined) {
+    if (input.secretId === null || input.secretId === '') {
+      newSecretId = null;
+    } else {
+      // Capture to a local — closure over a narrowed prop loses narrowing.
+      const secretId: string = input.secretId;
+      const secret = await db.query.secrets.findFirst({
+        where: (secrets, { eq }) => eq(secrets.id, secretId),
+      });
+      if (!secret) throw new AssignmentError(404, 'Referenced credentials not found');
+      newSecretId = secretId;
+    }
+  }
+
+  // Promote to primary (demoting the current one) when requested.
+  if (input.isPrimary === true && !assignment.isPrimary) {
+    const siblings = await db.query.devicePlugins.findMany({
+      where: (rows) => eq(rows.deviceId, deviceId),
+    });
+    for (const s of siblings) {
+      if (s.isPrimary) {
+        await db.update(schema.devicePlugins)
+          .set({ isPrimary: false })
+          .where(eq(schema.devicePlugins.id, s.id));
+      }
+    }
+  }
+
+  const updates: Partial<typeof schema.devicePlugins.$inferInsert> = {};
+  if (newSecretId !== undefined) updates.secretId = newSecretId;
+  if (input.isPrimary === true) updates.isPrimary = true;
+
+  if (Object.keys(updates).length > 0) {
+    await db.update(schema.devicePlugins)
+      .set(updates)
+      .where(eq(schema.devicePlugins.id, assignment.id));
+  }
+
+  return (await findAssignment(deviceId, pluginId))!;
+}
+
 /** True when (device, plugin) has an assignment — used to validate config jobs. */
 export async function hasAssignment(deviceId: string, pluginId: string): Promise<boolean> {
   const row = await findAssignment(deviceId, pluginId);

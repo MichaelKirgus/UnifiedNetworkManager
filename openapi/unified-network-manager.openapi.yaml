@@ -299,12 +299,15 @@ paths:
   /devices/{deviceId}/plugins/{pluginId}:
     patch:
       tags: [Devices]
-      summary: Make an assigned plugin the primary for this device
+      summary: Update a plugin assignment (primary flag and/or credentials)
       description: >-
-        Promotes the (device, plugin) assignment to primary and demotes the
-        current one — exactly one primary per device. No request body needed;
-        idempotent when it already is the primary. The primary is the default
-        target for config jobs.
+        Updates an existing (device, plugin) assignment. The request body is
+        optional:
+          - omit the body → promote to primary (legacy behavior);
+          - `isPrimary: true` → promote to primary (demotes the current one);
+          - `secretId: "..." | null` → change the credential source (null clears it).
+        Both fields may be combined in a single call. Idempotent when nothing
+        changes.
       parameters:
         - in: path
           name: deviceId
@@ -314,6 +317,12 @@ paths:
           name: pluginId
           required: true
           schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DevicePluginAssignmentUpdate'
       responses:
         '200':
           description: Assignment is now primary
@@ -1064,6 +1073,14 @@ components:
         pluginId: { type: string }
         secretId: { type: string, description: "Optional credential source for this assignment" }
         isPrimary: { type: boolean, default: false }
+
+    # Optional body for PATCH /devices/{deviceId}/plugins/{pluginId}.
+    DevicePluginAssignmentUpdate:
+      type: object
+      maxProperties: 2
+      properties:
+        secretId: { type: [string, 'null'], description: "New credential source; null clears it" }
+        isPrimary: { type: boolean, description: "Set true to make this assignment the primary" }
 
     Device:
       type: object

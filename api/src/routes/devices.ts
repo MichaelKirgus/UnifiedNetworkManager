@@ -11,6 +11,7 @@ import {
   listAssignmentViews,
   removeAssignment,
   setPrimary,
+  updateAssignment,
 } from '../devicePlugins';
 import {
   SettingsValidationError,
@@ -381,11 +382,26 @@ router.post('/devices/:deviceId/plugins', requireAuth, requirePermission('device
   }
 });
 
-// PATCH /devices/:deviceId/plugins/:pluginId - make this assignment the primary.
+// PATCH /devices/:deviceId/plugins/:pluginId - update an assignment.
+// Body is optional:
+//   {}                          → promote to primary (legacy behavior)
+//   { "isPrimary": true }       → promote to primary
+//   { "secretId": "..." | null }→ change credential source (null clears it)
+//   both                        → apply both in one call
 router.patch('/devices/:deviceId/plugins/:pluginId', requireAuth, requirePermission('devices:write'), async (req, res) => {
   const { deviceId, pluginId } = req.params;
+  const body = (req.body ?? {}) as Record<string, unknown>;
   try {
-    const assignment = await setPrimary(deviceId, pluginId);
+    let assignment;
+    if ('secretId' in body || 'isPrimary' in body) {
+      assignment = await updateAssignment(deviceId, pluginId, {
+        secretId: body.secretId === undefined ? undefined : (body.secretId as string | null),
+        isPrimary: typeof body.isPrimary === 'boolean' ? body.isPrimary : undefined,
+      });
+    } else {
+      // No fields provided → legacy "make primary" semantics.
+      assignment = await setPrimary(deviceId, pluginId);
+    }
     res.status(200).json(assignment);
   } catch (err) {
     if (sendAssignmentError(res, err)) return;

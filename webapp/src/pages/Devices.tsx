@@ -1,13 +1,14 @@
-import { FormEvent, useState } from 'react';
+import { useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { Eye, Pencil, Plus, Save, X } from 'lucide-react';
+import { Eye, Pencil, Plus, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
 import { MetricCell } from '../components/MetricCell';
 import { PluginAssignmentBuilder } from '../components/PluginAssignmentBuilder';
-import { api, Device, DeviceCreateRequest, DevicePluginAssignmentInput, Plugin } from '../api/client';
+import { api, Device, DeviceCreateRequest, DevicePluginAssignmentInput, DevicePluginAssignment, Plugin } from '../api/client';
+import { OptionForm } from '../components/OptionForm';
 import { isValidAddress, addressError } from '../utils/address';
 
 // Derive the list of selectable vendors from the discovered plugins so that
@@ -23,19 +24,23 @@ export default function Devices() {
   const [showForm, setShowForm] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  // Edit (rename / change address) of an existing device.
-  const [editDevice, setEditDevice] = useState<Device | null>(null);
-  const [editForm, setEditForm] = useState({ name: '', vendor: '', deviceType: '', managementAddress: '', site: '' });
-  const [editError, setEditError] = useState<string | null>(null);
+  // When non-null the form is in EDIT mode for that device.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  // Original secondary IPs (with row ids) captured when entering edit mode,
+  // used to diff on save (add new / remove deleted).
+  const [originalSecondaryIps, setOriginalSecondaryIps] = useState<{ id: string; address: string }[]>([]);
 
-  // Device identity fields (plugins are managed by the assignment builder).
+  // Device identity fields (shared between create and edit modes).
   const emptyIdentity = { name: '', vendor: '', deviceType: 'firewall', managementAddress: '', site: '' };
   const [identity, setIdentity] = useState(emptyIdentity);
 
-  // Secondary IPs to register at creation time.
+  // Secondary IPs (creation list or existing secondaries in edit mode).
   const [additionalIps, setAdditionalIps] = useState<string[]>([]);
   const [newIpInput, setNewIpInput] = useState('');
   const [ipError, setIpError] = useState<string | null>(null);
+
+  // Existing plugin assignments captured when entering edit mode.
+  const [initialAssignments, setInitialAssignments] = useState<DevicePluginAssignment[]>([]);
 
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
@@ -43,20 +48,75 @@ export default function Devices() {
 
   const createDevice = useMutation({
     mutationFn: (body: DeviceCreateRequest) => api.createDevice(body),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['devices'] });
-      setShowForm(false);
-      setIdentity(emptyIdentity);
-      setAdditionalIps([]);
-      setNewIpInput('');
-      setIpError(null);
-      setFormError(null);
-    },
+    onSuccess: () => resetForm(),
     onError: (err: unknown) => setFormError((err as Error).message),
   });
 
+  const updateDevice = useMutation({
+    mutationFn: async (assignments?: DevicePluginAssignmentInput[]) => {
+      // PATCH identity fields.
+      await api.updateDevice(editingId!, {
+        name: identity.name.trim(),
+        vendor: identity.vendor,
+        deviceType: identity.deviceType.trim() || 'firewall',
+        managementAddress: identity.managementAddress.trim(),
+        site: identity.site.trim() || null,
+      });
+      // Diff secondary IPs: add new, remove deleted.
+      const toAdd = additionalIps.filter((ip) => !originalSecondaryIps.some((o) => o.address === ip));
+      const toRemove = originalSecondaryIps.filter((o) => !additionalIps.includes(o.address));
+      for (const ip of toAdd) await api.addDeviceIp(editingId!, ip);
+      for (const row of toRemove) await api.removeDeviceIp(editingId!, row.id);
+
+      // Diff plugin assignments: add new, remove deleted, update changed.
+      if (assignments) {
+        const desiredIds = new Set(assignments.map((a) => a.pluginId));
+        const removed = initialAssignments.filter((a) => !desiredIds.has(a.pluginId));
+        for (const r of removed) await api.removeDevicePlugin(editingId!, r.pluginId);
+
+        // Add plugins that weren't assigned before.
+        const existingById = new Map(initialAssignments.map((a) => [a.pluginId, a]));
+        for (const a of assignments) {
+          const prev = existingById.get(a.pluginId);
+          if (!prev) {
+            await api.addDevicePlugin(editingId!, a);
+          } else {
+            // Already assigned — persist credential / primary changes.
+            const secretChanged = (a.secretId ?? null) !== (prev.secretId ?? null);
+            const primaryChanged = a.isPrimary !== prev.isPrimary;
+            if (secretChanged || primaryChanged) {
+              await api.updateDevicePlugin(editingId!, a.pluginId, {
+                ...(secretChanged ? { secretId: a.secretId ?? null } : {}),
+                ...(primaryChanged ? { isPrimary: a.isPrimary } : {}),
+              });
+            }
+          }
+        }
+      }
+    },
+    onSuccess: () => resetForm(),
+    onError: (err: unknown) => setFormError((err as Error).message),
+  });
+
+  function resetForm() {
+    queryClient.invalidateQueries({ queryKey: ['devices'] });
+    setShowForm(false);
+    setEditingId(null);
+    setIdentity(emptyIdentity);
+    setAdditionalIps([]);
+    setOriginalSecondaryIps([]);
+    setInitialAssignments([]);
+    setNewIpInput('');
+    setIpError(null);
+    setFormError(null);
+  }
+
   function handleSubmit(assignments: DevicePluginAssignmentInput[]) {
-    createDevice.mutate({ ...identity, ips: additionalIps.length > 0 ? additionalIps : undefined, plugins: assignments });
+    if (editingId) {
+      updateDevice.mutate(assignments);
+    } else {
+      createDevice.mutate({ ...identity, ips: additionalIps.length > 0 ? additionalIps : undefined, plugins: assignments });
+    }
   }
 
   /** Adds a secondary IP to the creation list (validated inline). */
@@ -73,45 +133,26 @@ export default function Devices() {
     setIpError(null);
   }
 
-  const updateDevice = useMutation({
-    mutationFn: (body: Record<string, unknown>) => api.updateDevice(editDevice!.id, body),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['devices'] });
-      setEditDevice(null);
-      setEditError(null);
-    },
-    onError: (err: unknown) => setEditError((err as Error).message),
-  });
-
+  /** Prefills the inline form with a device's values and switches to edit mode. */
   function openEdit(device: Device) {
-    setEditForm({
+    setIdentity({
       name: device.name,
       vendor: device.vendor,
       deviceType: device.deviceType,
       managementAddress: device.managementAddress,
       site: device.site ?? '',
     });
-    setEditError(null);
-    setEditDevice(device);
-  }
-
-  function handleEditSubmit(e: FormEvent) {
-    e.preventDefault();
-    if (!editForm.name.trim() || !editForm.vendor || !editForm.managementAddress.trim()) {
-      setEditError('Name, vendor and primary IP are required.');
-      return;
-    }
-    if (!isValidAddress(editForm.managementAddress)) {
-      setEditError(`Primary IP: ${addressError(editForm.managementAddress)}`);
-      return;
-    }
-    updateDevice.mutate({
-      name: editForm.name.trim(),
-      vendor: editForm.vendor,
-      deviceType: editForm.deviceType.trim() || 'firewall',
-      managementAddress: editForm.managementAddress.trim(),
-      site: editForm.site.trim() || null,
-    });
+    const secondaries = (device.ips ?? []).filter((ip) => !ip.isPrimary);
+    setAdditionalIps(secondaries.map((s) => s.address));
+    setOriginalSecondaryIps(
+      secondaries.filter((s): s is typeof s & { id: string } => s.id != null).map((s) => ({ id: s.id as string, address: s.address }))
+    );
+    setInitialAssignments(device.plugins ?? []);
+    setNewIpInput('');
+    setIpError(null);
+    setFormError(null);
+    setEditingId(device.id);
+    setShowForm(true);
   }
 
   const columns: DataTableColumn<Device>[] = [
@@ -197,7 +238,7 @@ export default function Devices() {
           </button>
           <button
             aria-label={`Edit ${row.name}`}
-            title="Rename / change address"
+            title="Edit device"
             className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
             onClick={() => openEdit(row)}
           >
@@ -214,10 +255,10 @@ export default function Devices() {
         <h1 className="text-xl font-bold text-slate-900">Devices</h1>
         <button
           className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
-          onClick={() => setShowForm((v) => !v)}
+          onClick={() => { setShowForm((v) => !v); if (showForm) resetForm(); }}
         >
           {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-          {showForm ? 'Cancel' : 'Register Device'}
+          {showForm ? 'Cancel' : editingId ? 'Edit Device' : 'Register Device'}
         </button>
       </div>
 
@@ -225,6 +266,9 @@ export default function Devices() {
         <div
           className="mb-6 grid grid-cols-1 gap-3 rounded-md border border-slate-200 bg-white p-4 shadow-sm sm:grid-cols-2"
         >
+          <h2 className="col-span-full text-sm font-semibold uppercase tracking-wide text-slate-500">
+            {editingId ? `Edit device` : 'Register device'}
+          </h2>
           {formError && (
             <div className="col-span-full rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
               {formError}
@@ -337,6 +381,7 @@ export default function Devices() {
             <PluginAssignmentBuilder
               plugins={pluginsQuery.data ?? []}
               secrets={secretsQuery.data ?? []}
+              initial={editingId ? initialAssignments.map((a) => ({ pluginId: a.pluginId, secretId: a.secretId ?? null, isPrimary: a.isPrimary })) : undefined}
               onSubmit={(assignments) => {
                 if (!identity.name.trim() || !identity.vendor || !identity.managementAddress.trim()) {
                   setFormError('Please fill in name, vendor and primary IP before saving.');
@@ -348,10 +393,23 @@ export default function Devices() {
                 }
                 handleSubmit(assignments);
               }}
-              submitLabel="Save Device"
-              busy={createDevice.isPending}
+              submitLabel={editingId ? 'Save Changes' : 'Create Device'}
+              busy={createDevice.isPending || updateDevice.isPending}
             />
           </div>
+
+          {/* Per-plugin parameters — editable in edit mode only */}
+          {editingId && initialAssignments.length > 0 && (
+            <div className="col-span-full space-y-4">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-400">Plugin settings (per-device overrides)</h3>
+              {initialAssignments.map((a) => (
+                <div key={a.pluginId} className="rounded-md border border-slate-200 bg-white p-3">
+                  <p className="mb-2 text-sm font-medium text-slate-700">{a.pluginName ?? a.pluginId}</p>
+                  <OptionForm pluginId={a.pluginId} deviceId={editingId!} onSaved={() => queryClient.invalidateQueries({ queryKey: ['devices'] })} />
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -363,102 +421,6 @@ export default function Devices() {
         <DataTable columns={columns} rows={devicesQuery.data} rowKey={(row) => row.id} storageKey="devices" emptyMessage="No devices registered yet." />
       )}
 
-      {/* --- Edit device modal --------------------------------------------- */}
-      {editDevice && (
-        <div
-          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-6"
-          onClick={() => setEditDevice(null)}
-        >
-          <form
-            onSubmit={handleEditSubmit}
-            className="mt-10 w-full max-w-md rounded-md border border-slate-200 bg-white shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <header className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h3 className="text-sm font-semibold text-slate-800">Edit {editDevice.name}</h3>
-              <button type="button" aria-label="Close" onClick={() => setEditDevice(null)} className="rounded-md p-1 text-slate-400 hover:bg-slate-100">
-                <X className="h-4 w-4" />
-              </button>
-            </header>
-            <div className="space-y-3 p-4">
-              {editError && (
-                <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{editError}</div>
-              )}
-              <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700">Name</label>
-                <input
-                  required
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-                  value={editForm.name}
-                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1 block text-sm font-medium text-slate-700">Vendor</label>
-                  <input
-                    required
-                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-                    value={editForm.vendor}
-                    onChange={(e) => setEditForm({ ...editForm, vendor: e.target.value })}
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm font-medium text-slate-700">Device Type</label>
-                  <input
-                    required
-                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-                    value={editForm.deviceType}
-                    onChange={(e) => setEditForm({ ...editForm, deviceType: e.target.value })}
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700">Primary IP / Address</label>
-                <input
-                  required
-                  className={`w-full rounded-md border px-3 py-2 text-sm ${
-                    editForm.managementAddress.trim() && !isValidAddress(editForm.managementAddress)
-                      ? 'border-red-400'
-                      : 'border-slate-300'
-                  }`}
-                  value={editForm.managementAddress}
-                  onChange={(e) => setEditForm({ ...editForm, managementAddress: e.target.value })}
-                  placeholder="10.0.0.1 or gw.local"
-                />
-                {editForm.managementAddress.trim() && !isValidAddress(editForm.managementAddress) && (
-                  <p className="mt-1 text-xs text-red-600">{addressError(editForm.managementAddress)}</p>
-                )}
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700">Site</label>
-                <input
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-                  value={editForm.site}
-                  onChange={(e) => setEditForm({ ...editForm, site: e.target.value })}
-                />
-              </div>
-            </div>
-            <footer className="flex items-center justify-end gap-2 border-t border-slate-200 px-4 py-3">
-              <button
-                type="button"
-                onClick={() => setEditDevice(null)}
-                className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={updateDevice.isPending}
-                className="flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
-              >
-                <Save className="h-4 w-4" />
-                {updateDevice.isPending ? 'Saving…' : 'Save Changes'}
-              </button>
-            </footer>
-          </form>
-        </div>
-      )}
     </Layout>
   );
 }

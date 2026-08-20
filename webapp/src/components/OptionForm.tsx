@@ -13,6 +13,12 @@ interface OptionFormProps {
   deviceId?: string;
   /** Called after a successful save/reset so the parent can refresh if needed. */
   onSaved?: () => void;
+  /**
+   * When true, renders as a plain div (no <form> wrapper) with no footer
+   * buttons — safe to nest inside another form. The parent is responsible
+   * for submission; this component only manages field state + validation.
+   */
+  compact?: boolean;
 }
 
 /** Mirrors the API's validateOptionValue for instant client-side feedback. */
@@ -50,7 +56,7 @@ function validateLocal(descriptor: PluginOptionDescriptor, value: unknown): stri
   }
 }
 
-export function OptionForm({ pluginId, deviceId, onSaved }: OptionFormProps) {
+export function OptionForm({ pluginId, deviceId, onSaved, compact = false }: OptionFormProps) {
   const scoped = Boolean(deviceId);
   const optionsQuery = useQuery({
     queryKey: scoped ? ['device-plugin-options', deviceId, pluginId] : ['plugin-options', pluginId],
@@ -160,6 +166,57 @@ export function OptionForm({ pluginId, deviceId, onSaved }: OptionFormProps) {
   }
 
   const formError = fieldErrors.__form__;
+
+  // Compact mode: render as a div (no form wrapper, no footer) so it can be
+  // safely nested inside another form. Parent handles submission.
+  if (compact) {
+    return (
+      <div>
+        {options.length === 0 ? (
+          <p className="px-1 py-2 text-sm text-slate-500">This plugin does not declare any configurable options.</p>
+        ) : (
+          <div className="space-y-4 px-1 py-2">
+            {options.map((opt) => {
+              const error = fieldErrors[opt.key];
+              return (
+                <div key={opt.key}>
+                  <label className="mb-1 flex items-center gap-2 text-sm font-medium text-slate-700" htmlFor={`opt-${opt.key}`}>
+                    {opt.label}
+                    {opt.docsUrl && (
+                      <a href={opt.docsUrl} target="_blank" rel="noreferrer noopener"
+                        className="text-xs font-normal text-slate-400 hover:text-slate-600 hover:underline">More info ↗</a>
+                    )}
+                  </label>
+                  {opt.type === 'boolean' ? (
+                    <div className="flex items-center gap-2">
+                      <input id={`opt-${opt.key}`} type="checkbox" checked={values[opt.key] === true}
+                        onChange={(e) => setValue(opt.key, e.target.checked)}
+                        className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400" />
+                      <span className="text-sm text-slate-500">{values[opt.key] === true ? 'Enabled' : 'Disabled'}</span>
+                    </div>
+                  ) : opt.type === 'integer' ? (
+                    <input id={`opt-${opt.key}`} type="number" step={1} inputMode="numeric"
+                      value={values[opt.key] === null || values[opt.key] === undefined ? '' : String(values[opt.key])}
+                      placeholder={opt.default !== undefined ? `default: ${String(opt.default)}` : 'optional'}
+                      onChange={(e) => { const raw = e.target.value; setValue(opt.key, raw === '' ? null : Number(raw)); }}
+                      className={clsx('w-full rounded-md border px-3 py-2 text-sm', error ? 'border-red-400' : 'border-slate-300')} />
+                  ) : (
+                    <input id={`opt-${opt.key}`} type="text"
+                      value={(values[opt.key] as string | undefined) ?? ''}
+                      placeholder={opt.default !== undefined ? `default: ${String(opt.default)}` : 'optional'}
+                      onChange={(e) => setValue(opt.key, e.target.value)}
+                      className={clsx('w-full rounded-md border px-3 py-2 text-sm', error ? 'border-red-400' : 'border-slate-300')} />
+                  )}
+                  {opt.description && <p className="mt-1 text-xs text-slate-500">{opt.description}</p>}
+                  {error && <p className="mt-1 text-xs text-red-600">{error}</p>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <form onSubmit={handleSubmit} noValidate>
