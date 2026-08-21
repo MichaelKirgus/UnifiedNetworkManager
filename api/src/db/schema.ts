@@ -1,4 +1,4 @@
-import { pgTable, text, boolean, doublePrecision, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, text, boolean, integer, doublePrecision, index, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const users = pgTable('users', {
@@ -132,6 +132,12 @@ export const plugins = pgTable('plugins', {
   // PluginOptionDescriptor). The API persists user-set values for these in
   // `plugin_settings` and validates them; the webapp renders a generic form.
   optionDescriptors: text('optionDescriptors'),
+  // Action catalog declared by the plugin in /discover (JSON array of
+  // CatalogEntry: { id, label, description?, module, riskLevel,
+  // deviceCount: number|'N', beOnly?, inputSchema }). Drives plan creation:
+  // the webapp renders intent/step forms from it and the API validates
+  // plan step inputs against it.
+  actionDescriptors: text('actionDescriptors'),
   createdAt: text('createdAt').notNull(),
   lastSeenAt: text('lastSeenAt'),
 });
@@ -173,6 +179,8 @@ export const configJobs = pgTable('config_jobs', {
   status: text('status').notNull().default('queued'),
   payload: text('payload').notNull().default('{}'),
   result: text('result'),
+  // Traceability: set when this job was dispatched as part of a plan step.
+  planId: text('planId'),
   createdAt: text('createdAt').notNull(),
   finishedAt: text('finishedAt'),
 }, (table) => {
@@ -197,6 +205,72 @@ export const telemetry = pgTable('telemetry', {
       .on(table.deviceId, table.pluginId, table.collectedAt),
   };
 });
+
+// Execution plans produced by a plugin's /plan endpoint (e.g. an OPNsense
+// WireGuard tunnel spanning two firewalls). The API persists the plan and its
+// steps, fulfils the plan's provisionRequests via the secrets provider at
+// creation time, and executes the steps in dependency order through the
+// plugin's /config endpoint (see workers/planExecutor.ts).
+export const plans = pgTable(
+  'plans',
+  {
+    id: text('id').primaryKey(),
+    // The plugin whose action catalog produced this plan.
+    pluginId: text('pluginId').notNull(),
+    // Catalog entry the user started from (e.g. wireguard.tunnel.create).
+    intentActionId: text('intentActionId').notNull(),
+    // draft | ready | executing | succeeded | failed | cancelled
+    status: text('status').notNull().default('ready'),
+    // JSON object mapping provisionRequest ref -> created secret id.
+    provisionedSecrets: text('provisionedSecrets').notNull().default('{}'),
+    error: text('error'),
+    // JWT sub of the user who created the plan (also owns its secrets).
+    createdBy: text('createdBy').notNull(),
+    // Set when a cancel is requested; the executor checks it between steps.
+    cancelledAt: text('cancelledAt'),
+    createdAt: text('createdAt').notNull(),
+    updatedAt: text('updatedAt').notNull(),
+    finishedAt: text('finishedAt'),
+  },
+  (table) => {
+    return {
+      idxPlansPluginCreated: index('idx_plans_plugin_created').on(table.pluginId, table.createdAt),
+    };
+  }
+);
+
+// One executable step of a plan. `stepIndex` is the final ordering (the
+// plugin's planner already accounts for auto-prepended snapshot steps) and
+// doubles as the topological order; `dependsOn` holds stepIndex values that
+// must succeed first, and `secretRefs` names provisioned secrets whose
+// decrypted fields are merged into this step's credentials under the ref key.
+export const planSteps = pgTable(
+  'plan_steps',
+  {
+    id: text('id').primaryKey(),
+    planId: text('planId').notNull(),
+    stepIndex: integer('stepIndex').notNull(),
+    deviceId: text('deviceId').notNull(),
+    actionId: text('actionId').notNull(),
+    // JSON object — the action's input (may contain ${steps[N].result...} tokens).
+    input: text('input').notNull().default('{}'),
+    // JSON array of stepIndex numbers.
+    dependsOn: text('dependsOn').notNull().default('[]'),
+    // JSON array of provisionRequest refs.
+    secretRefs: text('secretRefs').notNull().default('[]'),
+    bestEffort: boolean('bestEffort').notNull().default(false),
+    // pending | running | succeeded | failed | skipped
+    status: text('status').notNull().default('pending'),
+    result: text('result'),
+    startedAt: text('startedAt'),
+    finishedAt: text('finishedAt'),
+  },
+  (table) => {
+    return {
+      idxPlanStepsPlanIndex: index('idx_plan_steps_plan_index').on(table.planId, table.stepIndex),
+    };
+  }
+);
 
 // Add index for config_jobs
 // Note: Drizzle's index definition inside the table definition is 

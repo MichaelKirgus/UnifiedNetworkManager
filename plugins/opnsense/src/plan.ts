@@ -303,7 +303,8 @@ export interface CatalogEntry {
   description?: string;
   module: string;
   riskLevel: RiskLevel;
-  deviceCount: 1 | 'N';
+  /** Exact device count (1 = single-device action, 2 = tunnel intent...). */
+  deviceCount: number | 'N';
   beOnly?: boolean;
   inputSchema: InputSchema;
 }
@@ -326,7 +327,9 @@ export function listCatalog(): CatalogEntry[] {
     description: i.description,
     module: i.module,
     riskLevel: i.riskLevel,
-    deviceCount: 'N' as const,
+    // Report the intent's TRUE device count (e.g. 2 for tunnels) so callers
+    // can enforce it — 'N' would hide the requirement from API/webapp.
+    deviceCount: i.deviceCount,
     inputSchema: i.inputSchema,
   }));
   return [...fromActions, ...fromIntents];
@@ -387,6 +390,26 @@ export async function buildPlan(req: PlanRequest): Promise<Plan> {
   return finalizePlan(actionId, devices, [], rawSteps, req);
 }
 
+/** Shifts every ${steps[N]...} token in a step input by `offset` indices. */
+function shiftStepTokens(input: Record<string, unknown>, offset: number): Record<string, unknown> {
+  if (offset === 0) return input;
+  const shift = (v: unknown): unknown => {
+    if (typeof v === 'string') {
+      return v.replace(/\$\{steps\[(\d+)\]\./g, (_m, n: string) => `\${steps[${Number(n) + offset}].`);
+    }
+    if (Array.isArray(v)) return v.map(shift);
+    if (v !== null && typeof v === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = shift(val);
+      return out;
+    }
+    return v;
+  };
+  const result: Record<string, unknown> = {};
+  for (const [k, val] of Object.entries(input)) result[k] = shift(val);
+  return result;
+}
+
 /**
  * Post-processes raw steps: assigns indices, prepends a best-effort snapshot
  * rollback point per device that has any non-read step (so the plan is undoable
@@ -413,13 +436,15 @@ function finalizePlan(
     steps.push({ stepIndex: nextIndex++, deviceId: device.deviceId, actionId: 'snapshot.create', input: {}, bestEffort: true });
   }
 
-  // Re-index dependencies: raw dependsOn refer positions within rawSteps. The
-  // offset is the number of prepended snapshot steps (FIXED before we append
-  // raw steps — using a live steps.length here would drift as we push).
+  // Re-index dependencies AND ${steps[N].result...} substitution tokens: raw
+  // steps refer to positions within rawSteps. The offset is the number of
+  // prepended snapshot steps (FIXED before we append raw steps — using a live
+  // steps.length here would drift as we push). The emitted plan must carry
+  // FINAL indices everywhere, so both are shifted by the same amount.
   const snapshotCount = steps.length;
   for (const s of rawSteps) {
     const deps = s.dependsOn?.map((d) => d + snapshotCount);
-    steps.push({ ...s, stepIndex: nextIndex++, ...(deps && deps.length > 0 ? { dependsOn: deps } : {}) });
+    steps.push({ ...s, stepIndex: nextIndex++, input: shiftStepTokens(s.input, snapshotCount), ...(deps && deps.length > 0 ? { dependsOn: deps } : {}) });
   }
 
   return {

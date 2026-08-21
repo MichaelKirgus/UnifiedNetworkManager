@@ -126,6 +126,56 @@ export async function initDb(): Promise<void> {
     `ALTER TABLE config_jobs ADD COLUMN IF NOT EXISTS "pluginId" TEXT`
   );
 
+  // Action catalog cache: plugins advertise their executable actions in
+  // /discover; the API persists them so plan creation is data-driven.
+  await pool.query(
+    `ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "actionDescriptors" TEXT`
+  );
+
+  // Execution plans (see workers/planExecutor.ts). Plans persist a plugin's
+  // /plan output + its provisioned secrets; steps run in dependency order.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS plans (
+      id TEXT PRIMARY KEY,
+      "pluginId" TEXT NOT NULL,
+      "intentActionId" TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ready',
+      "provisionedSecrets" TEXT NOT NULL DEFAULT '{}',
+      error TEXT,
+      "createdBy" TEXT NOT NULL,
+      "cancelledAt" TEXT,
+      "createdAt" TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL,
+      "finishedAt" TEXT
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_plans_plugin_created
+      ON plans ("pluginId", "createdAt")`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS plan_steps (
+      id TEXT PRIMARY KEY,
+      "planId" TEXT NOT NULL,
+      "stepIndex" INTEGER NOT NULL,
+      "deviceId" TEXT NOT NULL,
+      "actionId" TEXT NOT NULL,
+      input TEXT NOT NULL DEFAULT '{}',
+      "dependsOn" TEXT NOT NULL DEFAULT '[]',
+      "secretRefs" TEXT NOT NULL DEFAULT '[]',
+      "bestEffort" BOOLEAN NOT NULL DEFAULT FALSE,
+      status TEXT NOT NULL DEFAULT 'pending',
+      result TEXT,
+      "startedAt" TEXT,
+      "finishedAt" TEXT
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_plan_steps_plan_index
+      ON plan_steps ("planId", "stepIndex")`);
+
+  // Traceability: config jobs dispatched as part of a plan step.
+  await pool.query(
+    `ALTER TABLE config_jobs ADD COLUMN IF NOT EXISTS "planId" TEXT`
+  );
+
   // The legacy singular columns are superseded by device_plugins. There is no
   // production data to migrate (confirmed), so drop them outright — any dev
   // devices must be recreated via the new multi-plugin create flow.

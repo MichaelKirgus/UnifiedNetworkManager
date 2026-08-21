@@ -257,6 +257,31 @@ paths:
           description: Missing devices:write permission
         '404':
           description: Device not found
+    delete:
+      tags: [Devices]
+      summary: Delete a device
+      description: >-
+        Removes the device and everything that hangs off it (plugin assignments,
+        per-device plugin settings, secondary IP addresses, telemetry history
+        and config-job rows). Refused with 409 while any plan still references
+        the device — delete those plans first. The credential secrets assigned
+        to the device are NOT deleted; they remain available for reuse.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Device deleted
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing devices:write permission
+        '404':
+          description: Device not found
+        '409':
+          description: Device is still referenced by plan steps
 
   /devices/{deviceId}/plugins:
     get:
@@ -675,6 +700,316 @@ paths:
         '404':
           description: Job not found
 
+  # --- Execution plans -------------------------------------------------------
+  # A plan is the persisted output of a plugin's /plan endpoint (e.g. an
+  # OPNsense WireGuard tunnel spanning two firewalls). Creation asks the
+  # plugin to plan an intent across selected devices, fulfils every
+  # provisionRequest via the secrets provider (secrets are created at plan
+  # creation time), and persists each step. Execution walks the steps in
+  # dependency order through the plugin's /config endpoint.
+
+  /plans:
+    get:
+      tags: [Plans]
+      summary: List recent execution plans
+      responses:
+        '200':
+          description: Plans (most recent first, with step progress)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Plan'
+        '401':
+          description: Authentication required
+    post:
+      tags: [Plans]
+      summary: Create an execution plan from a plugin intent
+      description: >-
+        Requires 2FA-completed session and permission `configs:apply`. Asks the
+        plugin to build a plan for the given intent across the selected devices,
+        creates every provisioned secret immediately (ref -> secret id map is
+        returned on the plan), and persists all steps. Multi-device intents
+        require exactly their declared device count.
+      x-2fa-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanCreateRequest'
+      responses:
+        '201':
+          description: Plan created (status ready) with steps + provisioned secrets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '400':
+          description: Invalid request, unknown intent/action, or plugin rejected the plan
+        '401':
+          description: Authentication required (or 2FA-completed session missing)
+        '403':
+          description: Missing required permission
+        '404':
+          description: Plugin or device not found
+        '502':
+          description: Plugin unreachable or secret provisioning failed
+
+  /plans/{id}:
+    get:
+      tags: [Plans]
+      summary: Get plan detail (steps + provisioned secrets)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Plan with ordered steps and secret metadata (never material)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '401':
+          description: Authentication required
+        '404':
+          description: Plan not found
+    delete:
+      tags: [Plans]
+      summary: Delete a plan and its provisioned secrets
+      description: >-
+        Requires permission `configs:apply`. Only non-executing plans can be
+        deleted; the steps and every secret created for this plan are removed.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Plan deleted
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Plan not found
+        '409':
+          description: Plan is executing — cancel it first
+
+  /plans/{id}/execute:
+    post:
+      tags: [Plans]
+      summary: Start plan execution
+      description: >-
+        Requires 2FA-completed session and permission `configs:apply`. Only
+        draft/ready plans can be executed. Steps run sequentially in dependency
+        order; best-effort steps (e.g. snapshot.create) do not abort the plan on
+        failure, any other step failure fails the plan and skips its dependents.
+      x-2fa-required: true
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '202':
+          description: Execution started (status executing)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '401':
+          description: Authentication required (or 2FA-completed session missing)
+        '403':
+          description: Missing required permission
+        '404':
+          description: Plan not found
+        '409':
+          description: Plan is not in a startable state
+
+  /plans/{id}/cancel:
+    post:
+      tags: [Plans]
+      summary: Cancel an executing plan (cooperative, between steps)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Cancel requested; the executor honors it before the next step
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Plan not found
+        '409':
+          description: Plan is not executing
+
+  /plans/{id}/steps:
+    post:
+      tags: [Plans]
+      summary: Append a single-device step to a draft/ready plan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanStepCreateRequest'
+      responses:
+        '201':
+          description: Step added (step indices + dependsOn re-indexed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '400':
+          description: Invalid request or input fails the action's schema
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Plan, device, or plugin assignment not found
+        '409':
+          description: Plan is not editable (not draft/ready)
+
+  /plans/{id}/steps/reorder:
+    patch:
+      tags: [Plans]
+      summary: Move a step within a draft/ready plan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, to]
+              properties:
+                from: { type: integer, description: "Current stepIndex" }
+                to: { type: integer, description: "Target stepIndex" }
+      responses:
+        '200':
+          description: Steps re-indexed (dependsOn remapped)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '400':
+          description: Index out of range or dependency cycle introduced
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Plan not found
+        '409':
+          description: Plan is not editable (not draft/ready)
+
+  /plans/{id}/steps/{stepId}:
+    patch:
+      tags: [Plans]
+      summary: Edit a step of a draft/ready plan
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: stepId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanStepUpdateRequest'
+      responses:
+        '200':
+          description: Step updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '400':
+          description: Invalid request or input fails the action's schema
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Plan or step not found
+        '409':
+          description: Plan is not editable (not draft/ready)
+    delete:
+      tags: [Plans]
+      summary: Remove a step from a draft/ready plan
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: stepId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Step removed (step indices + dependsOn re-indexed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Plan or step not found
+        '409':
+          description: Plan is not editable (not draft/ready)
+
+  /plans/{id}/secrets/{ref}/regenerate:
+    post:
+      tags: [Plans]
+      summary: Re-roll a plan's provisioned secret in place (same id preserved)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: ref
+          required: true
+          schema: { type: string, description: "ProvisionRequest ref (e.g. keyA)" }
+      responses:
+        '200':
+          description: Secret regenerated under the same id
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  type: { type: string }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission (secrets:write)
+        '404':
+          description: Plan or provisioned secret not found
+
   /plugins:
     get:
       tags: [Plugins]
@@ -896,6 +1231,39 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/MetricDescriptor'
+        '401':
+          description: Authentication required
+        '404':
+          description: Plugin not found
+
+  /plugins/{id}/actions:
+    get:
+      tags: [Plugins]
+      summary: Get the action catalog a plugin serves
+      description: >-
+        Returns the executable actions (single-device actions + multi-device
+        intents, each with an input schema) the plugin declared in its /discover
+        endpoint. Drives plan creation: the webapp renders intent/step forms
+        from this catalog and the API validates plan step inputs against it.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Action catalog entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pluginId, actions]
+                properties:
+                  pluginId: { type: string }
+                  actions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CatalogEntry'
         '401':
           description: Authentication required
         '404':
@@ -1861,6 +2229,191 @@ components:
           additionalProperties: true
         createdAt: { type: string, format: date-time }
         finishedAt: { type: string, format: date-time }
+
+    # --- Execution plans -----------------------------------------------------
+
+    PlanCreateRequest:
+      type: object
+      required: [pluginId, intentActionId, devices]
+      properties:
+        pluginId: { type: string, description: "Plugin whose action catalog provides the intent" }
+        intentActionId: { type: string, description: "Catalog entry id (e.g. wireguard.tunnel.create)" }
+        inputs:
+          type: object
+          additionalProperties: true
+          description: "Intent input values, validated against the catalog entry's inputSchema by the plugin"
+        devices:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [deviceId]
+            properties:
+              deviceId: { type: string }
+
+    PlanStepCreateRequest:
+      type: object
+      required: [deviceId, actionId]
+      properties:
+        deviceId: { type: string }
+        actionId: { type: string, description: "Single-device catalog entry id" }
+        input:
+          type: object
+          additionalProperties: true
+        secretRefs:
+          type: array
+          items: { type: string }
+          description: "ProvisionRequest refs whose decrypted fields merge into this step's credentials"
+        bestEffort: { type: boolean, default: false }
+
+    PlanStepUpdateRequest:
+      type: object
+      properties:
+        actionId: { type: string, description: "Single-device catalog entry id" }
+        input:
+          type: object
+          additionalProperties: true
+        secretRefs:
+          type: array
+          items: { type: string }
+        dependsOn:
+          type: array
+          items: { type: integer }
+          description: "stepIndex values that must succeed first (cycles rejected)"
+        bestEffort: { type: boolean }
+
+    PlanProvisionedSecret:
+      type: object
+      required: [ref, secretId]
+      properties:
+        ref: { type: string, description: "The provisionRequest ref (e.g. keyA)" }
+        secretId: { type: string }
+        label: { type: string, nullable: true }
+        type: { type: string, description: "Secret type (e.g. wireguardKeyPair)" }
+
+    PlanStep:
+      type: object
+      required: [id, planId, stepIndex, deviceId, actionId, input, status]
+      properties:
+        id: { type: string }
+        planId: { type: string }
+        stepIndex: { type: integer, description: "Final ordering; doubles as topological order" }
+        deviceId: { type: string }
+        actionId: { type: string }
+        input:
+          type: object
+          additionalProperties: true
+          description: "May contain ${steps[N].result.details.<key>} tokens resolved at execution time"
+        dependsOn:
+          type: array
+          items: { type: integer }
+          description: "stepIndex values that must succeed first"
+        secretRefs:
+          type: array
+          items: { type: string }
+        bestEffort:
+          type: boolean
+          description: "True for steps whose failure does not abort the plan (e.g. snapshot.create)"
+        status:
+          type: string
+          enum: [pending, running, succeeded, failed, skipped]
+        result:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: "The plugin's ActionResult ({ success, applied?, verified?, details?, error? })"
+        startedAt: { type: string, format: date-time, nullable: true }
+        finishedAt: { type: string, format: date-time, nullable: true }
+
+    Plan:
+      type: object
+      required: [id, pluginId, intentActionId, status, provisionedSecrets, createdAt]
+      properties:
+        id: { type: string }
+        pluginId: { type: string }
+        intentActionId: { type: string }
+        status:
+          type: string
+          enum: [draft, ready, executing, succeeded, failed, cancelled]
+        provisionedSecrets:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlanProvisionedSecret'
+        error: { type: string, nullable: true }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time, nullable: true }
+        stepCount: { type: integer, description: "Present on list responses" }
+        stepsDone: { type: integer, description: "Present on list responses" }
+
+    PlanDetail:
+      allOf:
+        - $ref: '#/components/schemas/Plan'
+        - type: object
+          properties:
+            steps:
+              type: array
+              items:
+                $ref: '#/components/schemas/PlanStep'
+
+    # A single entry of a plugin's action catalog (from /discover `actions`).
+    CatalogEntry:
+      type: object
+      required: [id, label]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        description: { type: string }
+        module: { type: string, description: "Grouping for display (e.g. WireGuard)" }
+        riskLevel:
+          type: string
+          enum: [read, write, dangerous]
+        deviceCount:
+          oneOf:
+            - type: integer
+              description: "Exact number of devices the intent spans"
+            - type: string
+              enum: ['N']
+              description: "Any number of devices (fan-out)"
+        beOnly: { type: boolean, description: "Only executable on Business Edition appliances" }
+        timeoutMs: { type: integer, description: "Per-action dispatch timeout override" }
+        inputSchema:
+          $ref: '#/components/schemas/InputSchema'
+
+    # The JSON-Schema subset a plugin declares for an action's inputs.
+    InputSchemaProperty:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [string, number, boolean, array, object]
+        label: { type: string }
+        description: { type: string }
+        required: { type: boolean }
+        default:
+          description: "Default value (type depends on the property's own type)"
+        pattern: { type: string, description: "Regex for string values" }
+        min: { type: number }
+        max: { type: number }
+        enum:
+          type: array
+          items:
+            oneOf:
+              - type: string
+              - type: number
+        items:
+          $ref: '#/components/schemas/InputSchemaProperty'
+        properties:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/InputSchemaProperty'
+
+    InputSchema:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/InputSchemaProperty'
 
     MetricDescriptor:
       type: object

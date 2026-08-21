@@ -14,9 +14,11 @@ import usersRouter from './routes/users';
 import rolesRouter from './routes/roles';
 import { internalRouter } from './routes/internal';
 import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
+import plansRouter from './routes/plans';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startPluginDiscovery } from './plugins/discovery';
 import { startConfigJobWorker } from './workers/configJob';
+import { startPlanExecutorWorker } from './workers/planExecutor';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const API_PREFIX = '/v1';
@@ -84,6 +86,9 @@ async function main(): Promise<void> {
   api.use(usersRouter);
   api.use(rolesRouter);
   api.use(configJobsRouter);
+  // The plans router defines its own /plans/... paths (like the devices router),
+  // so it is mounted without an extra prefix.
+  api.use(plansRouter);
 
   // OpenAPI validation error handler.
   api.use(
@@ -115,6 +120,7 @@ async function main(): Promise<void> {
 
     startTelemetryWorker();
     startConfigJobWorker();
+    startPlanExecutorWorker();
   });
 
   // Discover plugins via mDNS/DNS-SD, with HTTP polling as a fallback for

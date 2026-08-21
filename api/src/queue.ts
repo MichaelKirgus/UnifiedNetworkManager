@@ -34,3 +34,10 @@ export interface ConfigJobMessage {
 }
 
 export const configJobQueue = new InProcessQueue<ConfigJobMessage>();
+
+/** One message per plan execution request (see workers/planExecutor.ts). */
+export interface PlanExecutionMessage {
+  planId: string;
+}
+
+export const planQueue = new InProcessQueue<PlanExecutionMessage>();

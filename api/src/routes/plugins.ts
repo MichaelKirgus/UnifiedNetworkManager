@@ -65,6 +65,30 @@ router.get('/plugins/:id/metrics', requireAuth, async (req, res) => {
   res.status(200).json({ pluginId: id, metrics });
 });
 
+// GET /plugins/:id/actions - The action catalog a plugin declared in its
+// /discover endpoint (single-device actions + multi-device intents with input
+// schemas). Drives plan creation: the webapp renders intent/step forms from it.
+router.get('/plugins/:id/actions', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const row = await db.query.plugins.findFirst({
+    where: (plugins, { eq }) => eq(plugins.id, id),
+  });
+  if (!row) {
+    res.status(404).json({ error: 'Plugin not found' });
+    return;
+  }
+  let actions: unknown[] = [];
+  if (row.actionDescriptors) {
+    try {
+      const parsed = JSON.parse(row.actionDescriptors);
+      actions = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      actions = [];
+    }
+  }
+  res.status(200).json({ pluginId: id, actions });
+});
+
 // --- Plugin options & settings ---------------------------------------------
 // Plugins declare typed option descriptors in /discover (cached on the
 // plugins row). The API is the single authority for validation + persistence;

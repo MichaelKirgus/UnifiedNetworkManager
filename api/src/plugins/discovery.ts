@@ -23,6 +23,8 @@ export interface PluginIdentity {
   metrics?: unknown[];
   /** Option descriptors declared by the plugin (drives the settings form + API-side persistence/validation). */
   options?: PluginOptionDescriptor[];
+  /** Action catalog declared by the plugin (drives plan creation in the webapp). */
+  actions?: unknown[];
 }
 
 export interface DiscoveryOptions {
@@ -73,6 +75,7 @@ async function fetchIdentity(endpoint: string): Promise<PluginIdentity | null> {
       authType: data.authType ?? 'none',
       metrics: Array.isArray(data.metrics) ? data.metrics : undefined,
       options: Array.isArray(data.options) ? (data.options as PluginOptionDescriptor[]) : undefined,
+      actions: Array.isArray(data.actions) ? data.actions : undefined,
     };
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -94,6 +97,10 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
   const metricDescriptors = hasMetrics ? JSON.stringify(identity.metrics) : null;
   const hasOptions = Array.isArray(identity.options) && identity.options.length > 0;
   const optionDescriptors = hasOptions ? JSON.stringify(identity.options) : null;
+  // Same guard: only overwrite the stored catalog when this discovery source
+  // actually carries one, so a catalog-less upsert never wipes it.
+  const hasActions = Array.isArray(identity.actions) && identity.actions.length > 0;
+  const actionDescriptors = hasActions ? JSON.stringify(identity.actions) : null;
 
   if (existing) {
     await db
@@ -107,6 +114,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
         authType: identity.authType,
         ...(hasMetrics ? { metricDescriptors } : {}),
         ...(hasOptions ? { optionDescriptors } : {}),
+        ...(hasActions ? { actionDescriptors } : {}),
         lastSeenAt: now,
       })
       .where(eq(schema.plugins.id, identity.uuid));
@@ -121,6 +129,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
       authType: identity.authType,
       metricDescriptors,
       optionDescriptors,
+      actionDescriptors,
       createdAt: now,
       lastSeenAt: now,
     });

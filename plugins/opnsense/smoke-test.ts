@@ -106,7 +106,8 @@ async function main(): Promise<void> {
   const actions = (disc.actions ?? []) as { id: string; deviceCount: number | 'N' }[];
   console.log('\n== /discover ==');
   check('actions catalog non-empty', Array.isArray(actions) && actions.length > 20, `count=${actions.length}`);
-  check('multi-device intent present', actions.some((a) => a.id === 'wireguard.tunnel.create' && a.deviceCount === 'N'));
+  // Intents report their TRUE device count (2 for tunnels), not 'N'.
+  check('multi-device intent present with exact count', actions.some((a) => a.id === 'wireguard.tunnel.create' && a.deviceCount === 2));
   const opts = (disc.options ?? []) as { key: string }[];
   check('new options advertised', ['editionOverride', 'dnsBackend', 'dhcpBackend'].every((k) => opts.some((o) => o.key === k)));
 

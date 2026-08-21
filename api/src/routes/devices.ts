@@ -353,6 +353,41 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
   });
 });
 
+// DELETE /devices/:deviceId - remove a device and everything that hangs off it.
+// Refused (409) while any plan still references the device: plans are explicit
+// multi-device intents and deleting one of their targets out from under them
+// would leave dangling steps, so those must be deleted first.
+router.delete('/devices/:deviceId', requireAuth, requirePermission('devices:write'), async (req, res) => {
+  const { deviceId } = req.params;
+  try {
+    const existing = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+    if (!existing) {
+      res.status(404).json({ error: 'Device not found' });
+      return;
+    }
+
+    // Plans referencing this device block deletion (plan_steps.deviceId has no FK).
+    const planRefs = await db.query.planSteps.findMany({ where: eq(schema.planSteps.deviceId, deviceId) });
+    if (planRefs.length > 0) {
+      res.status(409).json({ error: `Device is referenced by ${planRefs.length} plan step(s); delete those plans first` });
+      return;
+    }
+
+    // No FK constraints in this schema — cascade manually, children first.
+    await db.delete(schema.telemetry).where(eq(schema.telemetry.deviceId, deviceId));
+    await db.delete(schema.configJobs).where(eq(schema.configJobs.deviceId, deviceId));
+    await db.delete(schema.pluginSettings).where(eq(schema.pluginSettings.deviceId, deviceId));
+    await db.delete(schema.deviceIps).where(eq(schema.deviceIps.deviceId, deviceId));
+    await db.delete(schema.devicePlugins).where(eq(schema.devicePlugins.deviceId, deviceId));
+    await db.delete(schema.devices).where(eq(schema.devices.id, deviceId));
+
+    res.status(204).send();
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 // --- Device IP addresses (primary = managementAddress, secondaries here) --
 
 // GET /devices/:deviceId/ips - primary address first, then secondary IPs.

@@ -322,6 +322,88 @@ export interface ConfigJob {
   finishedAt?: string;
 }
 
+// --- Execution plans ---------------------------------------------------------
+
+/** One property of an action's input schema (JSON-Schema subset from the plugin). */
+export interface InputSchemaProperty {
+  type: 'string' | 'number' | 'boolean' | 'array' | 'object';
+  label?: string;
+  description?: string;
+  required?: boolean;
+  default?: unknown;
+  pattern?: string;
+  min?: number;
+  max?: number;
+  enum?: (string | number)[];
+  items?: InputSchemaProperty;
+  properties?: Record<string, InputSchemaProperty>;
+}
+
+/** A map of property name → schema (the catalog's `inputSchema`). */
+export type InputSchema = Record<string, InputSchemaProperty>;
+
+/** One entry of a plugin's action catalog (from /discover `actions`). */
+export interface CatalogEntry {
+  id: string;
+  label: string;
+  description?: string;
+  module?: string;
+  riskLevel?: 'read' | 'write' | 'dangerous';
+  /** Exact device count for multi-device intents, or 'N' for fan-out. */
+  deviceCount?: number | 'N';
+  beOnly?: boolean;
+  timeoutMs?: number;
+  inputSchema?: InputSchema;
+}
+
+/** A provisioned secret attached to a plan (metadata only — never material). */
+export interface PlanProvisionedSecret {
+  ref: string;
+  secretId: string;
+  label?: string | null;
+  type?: string;
+}
+
+/** One executable step of a plan. */
+export interface PlanStep {
+  id: string;
+  planId: string;
+  /** Final ordering; doubles as topological order. */
+  stepIndex: number;
+  deviceId: string;
+  actionId: string;
+  input: Record<string, unknown>;
+  dependsOn?: number[];
+  secretRefs?: string[];
+  bestEffort?: boolean;
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped';
+  result?: Record<string, unknown> | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+}
+
+/** A persisted execution plan (list shape; detail adds `steps`). */
+export interface Plan {
+  id: string;
+  pluginId: string;
+  intentActionId: string;
+  status: 'draft' | 'ready' | 'executing' | 'succeeded' | 'failed' | 'cancelled';
+  provisionedSecrets: PlanProvisionedSecret[];
+  error?: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string | null;
+  /** Present on list responses. */
+  stepCount?: number;
+  stepsDone?: number;
+}
+
+/** GET /plans/:id response — plan + ordered steps. */
+export interface PlanDetail extends Plan {
+  steps: PlanStep[];
+}
+
 function getToken(): string | null {
   return localStorage.getItem('accessToken');
 }
@@ -468,4 +550,39 @@ export const api = {
     }),
   resetPluginSettings: (pluginId: string) =>
     apiFetch<PluginOptionsResponse>(`/plugins/${pluginId}/settings`, { method: 'DELETE' }),
+  // Action catalog (drives plan creation).
+  pluginActions: (pluginId: string) =>
+    apiFetch<{ pluginId: string; actions: CatalogEntry[] }>(`/plugins/${pluginId}/actions`),
+  // Execution plans.
+  plans: () => apiFetch<Plan[]>('/plans'),
+  createPlan: (body: {
+    pluginId: string;
+    intentActionId: string;
+    inputs?: Record<string, unknown>;
+    devices: { deviceId: string }[];
+  }) => apiFetch<PlanDetail>('/plans', { method: 'POST', body: JSON.stringify(body) }),
+  getPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}`),
+  deletePlan: (id: string) => apiFetch<void>(`/plans/${id}`, { method: 'DELETE' }),
+  executePlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/execute`, { method: 'POST' }),
+  cancelPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/cancel`, { method: 'POST' }),
+  addPlanStep: (planId: string, body: {
+    deviceId: string;
+    actionId: string;
+    input?: Record<string, unknown>;
+    secretRefs?: string[];
+    bestEffort?: boolean;
+  }) => apiFetch<PlanDetail>(`/plans/${planId}/steps`, { method: 'POST', body: JSON.stringify(body) }),
+  updatePlanStep: (planId: string, stepId: string, body: {
+    actionId?: string;
+    input?: Record<string, unknown>;
+    secretRefs?: string[];
+    dependsOn?: number[];
+    bestEffort?: boolean;
+  }) => apiFetch<PlanDetail>(`/plans/${planId}/steps/${stepId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  removePlanStep: (planId: string, stepId: string) =>
+    apiFetch<PlanDetail>(`/plans/${planId}/steps/${stepId}`, { method: 'DELETE' }),
+  reorderPlanSteps: (planId: string, from: number, to: number) =>
+    apiFetch<PlanDetail>(`/plans/${planId}/steps/reorder`, { method: 'PATCH', body: JSON.stringify({ from, to }) }),
+  regeneratePlanSecret: (planId: string, ref: string) =>
+    apiFetch<{ id: string; type?: string }>(`/plans/${planId}/secrets/${encodeURIComponent(ref)}/regenerate`, { method: 'POST' }),
 };

@@ -5,6 +5,8 @@ import Devices from './pages/Devices';
 import DeviceDetail from './pages/DeviceDetail';
 import Secrets from './pages/Secrets';
 import ConfigJobs from './pages/ConfigJobs';
+import Plans from './pages/Plans';
+import PlanDetail from './pages/PlanDetail';
 import Plugins from './pages/Plugins';
 import Sites from './pages/Sites';
 import Users from './pages/Users';
@@ -52,6 +54,22 @@ export default function App() {
         element={
           <RequireAuth>
             <ConfigJobs />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/plans"
+        element={
+          <RequireAuth>
+            <Plans />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/plans/:id"
+        element={
+          <RequireAuth>
+            <PlanDetail />
           </RequireAuth>
         }
       />

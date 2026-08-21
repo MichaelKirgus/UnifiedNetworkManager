@@ -10,6 +10,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Puzzle,
+  Route as RouteIcon,
   Server,
   Shield,
   UserRound,
@@ -22,6 +23,8 @@ const NAV_ITEMS = [
   { to: '/sites', label: 'Sites', icon: MapPin },
   { to: '/secrets', label: 'Secrets', icon: KeyRound },
   { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks },
+  // Multi-device execution plans (create/execute require configs:apply + 2FA).
+  { to: '/plans', label: 'Plans', icon: RouteIcon, requiresPermission: 'configs:apply' },
   { to: '/plugins', label: 'Plugins', icon: Puzzle },
   // Only visible to users who may read user accounts/permissions.
   { to: '/users', label: 'Users', icon: UsersIcon, requiresPermission: 'users:read' },
