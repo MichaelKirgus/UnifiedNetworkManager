@@ -1,10 +1,31 @@
 import { Router } from 'express';
+import { eq } from 'drizzle-orm';
+import { db } from '../db';
+import * as schema from '../db/schema';
 import { signToken } from '../auth/jwt';
+import { requireAuth } from '../auth/middleware';
 import { login, verify2fa, getFlow, getRedirectUrl } from '../auth/identityProvider';
+import { expandRolePermissions } from './roles';
+import { serializeUser } from './users';
 
 const router = Router();
 
 const TOKEN_TTL_SECONDS = 3600;
+
+/**
+ * Returns the authenticated user's own profile (no users:read needed).
+ * Powers the self-service "My Account" page. `effectivePermissions` is the
+ * session's JWT claim (explicit grants + role-derived); `permissions` are the
+ * explicit grants stored on the account.
+ */
+router.get('/auth/me', requireAuth, async (req, res) => {
+  const row = await db.query.users.findFirst({ where: eq(schema.users.id, req.user!.sub) });
+  if (!row) {
+    res.status(401).json({ error: 'User no longer exists' });
+    return;
+  }
+  res.status(200).json({ ...serializeUser(row), effectivePermissions: req.user?.permissions ?? [] });
+});
 
 /**
  * Reports the authentication flow of the active identity provider so the
@@ -70,12 +91,20 @@ router.post('/auth/2fa/verify', async (req, res) => {
   try {
     const identity = await verify2fa(challengeToken ?? '', totpCode ?? '');
 
+    // Effective permissions = explicit grants + every permission of the user's
+    // roles (roles are bundles; enforcement stays on this flat claim). Role
+    // changes therefore take effect at the next login.
+    const effectivePermissions = await expandRolePermissions(
+      identity.roles,
+      Array.isArray(identity.permissions) ? identity.permissions : []
+    );
+
     const accessToken = signToken(
       {
         sub: identity.userId,
         username: identity.username,
         roles: identity.roles,
-        permissions: identity.permissions,
+        permissions: effectivePermissions,
         amr: identity.amr,
       },
       TOKEN_TTL_SECONDS
@@ -84,8 +113,9 @@ router.post('/auth/2fa/verify', async (req, res) => {
     res.status(200).json({
       accessToken,
       expiresIn: TOKEN_TTL_SECONDS,
+      username: identity.username,
       roles: identity.roles,
-      permissions: identity.permissions,
+      permissions: effectivePermissions,
     });
   } catch (err) {
     const e = err as { status?: number; message?: string };

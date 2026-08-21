@@ -5,8 +5,11 @@ import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { api, Site, SiteCreateRequest } from '../api/client';
 import { can } from '../auth/permissions';
+import { COUNTRIES, countryName } from '../utils/countries';
 
-const emptySite = { name: '', description: '', address: '', country: '', timezone: '' };
+// Latitude/longitude are kept as strings in form state (number inputs) and
+// parsed on submit; empty string = not set.
+const emptySite = { name: '', description: '', address: '', country: '', timezone: '', latitude: '', longitude: '' };
 
 /** IANA timezones for the picker (Node 18+/modern browsers support this). */
 function timezoneOptions(): string[] {
@@ -70,15 +73,37 @@ export default function Sites() {
   }
 
   function handleSubmit() {
-    const body = {
+    // GPS location is all-or-nothing — reject a single coordinate client-side.
+    if (Boolean(site.latitude.trim()) !== Boolean(site.longitude.trim())) {
+      setFormError('Provide both latitude and longitude, or neither.');
+      return;
+    }
+
+    const body: SiteCreateRequest = {
       name: site.name.trim(),
       description: site.description.trim() || undefined,
       address: site.address.trim() || undefined,
-      country: site.country.trim() || undefined,
+      country: site.country || undefined,
       timezone: site.timezone || undefined,
     };
+    // GPS location is all-or-nothing (the API rejects a single coordinate).
+    const lat = site.latitude.trim();
+    const lng = site.longitude.trim();
+    if (lat && lng) {
+      body.latitude = Number(lat);
+      body.longitude = Number(lng);
+    } else if (editingId && rowHasLocation()) {
+      // Location was cleared in the form → send explicit nulls to remove it.
+      body.latitude = null;
+      body.longitude = null;
+    }
     if (editingId) updateSite.mutate(body);
     else createSite.mutate(body);
+  }
+
+  function rowHasLocation(): boolean {
+    const row = sitesQuery.data?.find((s) => s.id === editingId);
+    return Boolean(row && (row.latitude != null || row.longitude != null));
   }
 
   function openEdit(row: Site) {
@@ -88,6 +113,8 @@ export default function Sites() {
       address: row.address ?? '',
       country: row.country ?? '',
       timezone: row.timezone ?? '',
+      latitude: row.latitude != null ? String(row.latitude) : '',
+      longitude: row.longitude != null ? String(row.longitude) : '',
     });
     setEditingId(row.id);
     setShowForm(true);
@@ -103,8 +130,25 @@ export default function Sites() {
     { header: 'Name', key: 'name' },
     { header: 'Description', key: 'description', render: (row) => row.description || <span className="text-slate-400">—</span> },
     { header: 'Address', key: 'address', render: (row) => row.address || <span className="text-slate-400">—</span> },
-    { header: 'Country', key: 'country', render: (row) => row.country || <span className="text-slate-400">—</span> },
+    {
+      header: 'Country',
+      key: 'country',
+      render: (row) => (row.country ? countryName(row.country) : <span className="text-slate-400">—</span>),
+    },
     { header: 'Timezone', key: 'timezone', render: (row) => row.timezone ?? <span className="text-slate-400">—</span> },
+    {
+      header: 'GPS',
+      key: 'gps',
+      sortable: false as const,
+      render: (row) =>
+        row.latitude != null && row.longitude != null ? (
+          <span className="font-mono text-xs text-slate-500">
+            {row.latitude.toFixed(4)}, {row.longitude.toFixed(4)}
+          </span>
+        ) : (
+          <span className="text-slate-400">—</span>
+        ),
+    },
     ...(canWrite
       ? [
           {
@@ -186,11 +230,18 @@ export default function Sites() {
             </div>
             <div>
               <label className="mb-1 block text-sm font-medium text-slate-700">Country</label>
-              <input
+              <select
                 className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
                 value={site.country}
                 onChange={(e) => setSite({ ...site, country: e.target.value })}
-              />
+              >
+                <option value="">— none —</option>
+                {COUNTRIES.map((c) => (
+                  <option key={c.code} value={c.code}>
+                    {c.name} ({c.code})
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="sm:col-span-2">
               <label className="mb-1 block text-sm font-medium text-slate-700">Address</label>
@@ -224,6 +275,39 @@ export default function Sites() {
                 ))}
               </select>
             </div>
+
+            {/* GPS location (all-or-nothing; stored for a future map view). */}
+            <fieldset className="rounded-md border border-slate-200 p-3 sm:col-span-2">
+              <legend className="px-1 text-sm font-medium text-slate-700">GPS location</legend>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-500">Latitude (−90…90)</label>
+                  <input
+                    type="number"
+                    step="0.000001"
+                    min={-90}
+                    max={90}
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                    value={site.latitude}
+                    onChange={(e) => setSite({ ...site, latitude: e.target.value })}
+                    placeholder="51.165691"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-500">Longitude (−180…180)</label>
+                  <input
+                    type="number"
+                    step="0.000001"
+                    min={-180}
+                    max={180}
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                    value={site.longitude}
+                    onChange={(e) => setSite({ ...site, longitude: e.target.value })}
+                    placeholder="10.451526"
+                  />
+                </div>
+              </div>
+            </fieldset>
 
             <div className="flex items-center gap-2 sm:col-span-2">
               <button

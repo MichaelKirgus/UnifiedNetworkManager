@@ -98,11 +98,25 @@ export async function initDb(): Promise<void> {
       address TEXT,
       country TEXT,
       timezone TEXT,
+      latitude DOUBLE PRECISION,
+      longitude DOUBLE PRECISION,
       "createdAt" TEXT NOT NULL
     )`);
+  // GPS columns for sites created before they existed (dev DBs).
+  await pool.query(`ALTER TABLE sites ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION`);
+  await pool.query(`ALTER TABLE sites ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION`);
   await pool.query(
     `ALTER TABLE devices ADD COLUMN IF NOT EXISTS "siteId" TEXT`
   );
+
+  // Roles: named bundles of permissions (see backfillAdminRole for the seed).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS roles (
+      name TEXT PRIMARY KEY,
+      description TEXT,
+      permissions TEXT NOT NULL DEFAULT '[]',
+      "createdAt" TEXT NOT NULL
+    )`);
 
   // Attribute telemetry + config jobs to the plugin that produced/executed them.
   await pool.query(
@@ -180,6 +194,44 @@ export async function backfillAdminPermissions(): Promise<void> {
     // eslint-disable-next-line no-console
     console.log(`[db] backfilled ${missing.length} permission(s) for admin user "${user.username}"`);
   }
+}
+
+/**
+ * Idempotent: ensures the built-in `admin` role exists in the roles table and
+ * carries every catalog permission. Mirrors backfillAdminPermissions() — new
+ * permissions added to the catalog flow into the admin role on next API start,
+ * so users holding the role pick them up at their next login.
+ */
+export async function backfillAdminRole(): Promise<void> {
+  const existing = await db.query.roles.findFirst({ where: eq(schema.roles.name, 'admin') });
+
+  if (!existing) {
+    await db.insert(schema.roles).values({
+      name: 'admin',
+      description: 'Full access to all platform features (built-in role)',
+      permissions: JSON.stringify(ADMIN_PERMISSIONS),
+      createdAt: new Date().toISOString(),
+    });
+    // eslint-disable-next-line no-console
+    console.log('[db] seeded built-in admin role');
+    return;
+  }
+
+  let perms: string[] = [];
+  try {
+    perms = JSON.parse(existing.permissions);
+  } catch {
+    /* treat as empty */
+  }
+  const missing = ADMIN_PERMISSIONS.filter((p) => !(Array.isArray(perms) && perms.includes(p)));
+  if (missing.length === 0) return;
+
+  await db
+    .update(schema.roles)
+    .set({ permissions: JSON.stringify([...(Array.isArray(perms) ? perms : []), ...missing]) })
+    .where(eq(schema.roles.name, 'admin'));
+  // eslint-disable-next-line no-console
+  console.log(`[db] backfilled ${missing.length} permission(s) into the admin role`);
 }
 
 /**

@@ -9,6 +9,7 @@
  */
 
 const PERMISSIONS_KEY = 'unm:permissions';
+const USERNAME_KEY = 'unm:username';
 
 /** Reads the persisted permission list for the current session. */
 export function getPermissions(): string[] {
@@ -43,4 +44,36 @@ export function clearPermissions(): void {
 /** True when the current session carries the given permission. */
 export function can(permission: string): boolean {
   return getPermissions().includes(permission);
+}
+
+// --- Current-user identity -------------------------------------------------
+// The signed-in username is persisted at login so pages (e.g. My Account,
+// Users) know who "self" is without an extra API round-trip. Same staleness
+// caveat as permissions: it only changes on re-login.
+
+/** Reads the persisted username of the current session (null when unknown). */
+export function getUsername(): string | null {
+  try {
+    return localStorage.getItem(USERNAME_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** Persists the username returned by a successful login. */
+export function setUsername(username: string): void {
+  try {
+    localStorage.setItem(USERNAME_KEY, username);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Clears the persisted username on sign-out. */
+export function clearUsername(): void {
+  try {
+    localStorage.removeItem(USERNAME_KEY);
+  } catch {
+    /* ignore */
+  }
 }

@@ -1,4 +1,4 @@
-import { pgTable, text, boolean, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, text, boolean, doublePrecision, index, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const users = pgTable('users', {
@@ -11,6 +11,19 @@ export const users = pgTable('users', {
   createdAt: text('createdAt').notNull(),
 });
 
+// Named bundles of permissions. Roles are NOT evaluated at enforcement time —
+// a user's effective permission set is the union of their explicit `users.permissions`
+// and the permissions of every role they carry, computed when the JWT is minted
+// (see expandRolePermissions() in routes/roles.ts). The built-in `admin` role
+// carries all catalog permissions and cannot be deleted.
+export const roles = pgTable('roles', {
+  name: text('name').primaryKey(),
+  description: text('description'),
+  // JSON string array of permission ids (validated against the catalog).
+  permissions: text('permissions').notNull().default('[]'),
+  createdAt: text('createdAt').notNull(),
+});
+
 // Sites are first-class objects (name + description + address/country/timezone)
 // that devices reference via `devices.siteId`. Replaces the old free-text
 // `site` column — see backfillDeviceSites() in db.ts for the one-time migration.
@@ -19,9 +32,14 @@ export const sites = pgTable('sites', {
   name: text('name').notNull(),
   description: text('description'),
   address: text('address'),
+  // ISO-3166-1 alpha-2 country code (e.g. "DE"), validated server-side.
   country: text('country'),
   // IANA timezone identifier (e.g. "Europe/Berlin"), validated server-side.
   timezone: text('timezone'),
+  // GPS location of the site (WGS84 decimal degrees) — stored for a future
+  // map view; both must be set together or both stay null.
+  latitude: doublePrecision('latitude'),
+  longitude: doublePrecision('longitude'),
   createdAt: text('createdAt').notNull(),
 });
 

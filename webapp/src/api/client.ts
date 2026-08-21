@@ -62,7 +62,9 @@ export interface AuthRedirect {
 export interface VerifyResponse {
   accessToken: string;
   expiresIn: number;
+  username: string;
   roles: string[];
+  /** Effective permission set (explicit grants + role-derived). */
   permissions: string[];
 }
 
@@ -107,15 +109,19 @@ export interface DeviceIpRow {
   createdAt?: string;
 }
 
-/** A managed site (name + description + address/country/timezone). */
+/** A managed site (name + description + address/country/timezone/GPS). */
 export interface Site {
   id: string;
   name: string;
   description?: string | null;
   address?: string | null;
+  /** ISO-3166-1 alpha-2 country code, e.g. "DE". */
   country?: string | null;
   /** IANA timezone identifier, e.g. "Europe/Berlin". */
   timezone?: string | null;
+  /** GPS location (WGS84 decimal degrees) — set together or both absent. */
+  latitude?: number | null;
+  longitude?: number | null;
   createdAt?: string;
 }
 
@@ -123,8 +129,12 @@ export interface SiteCreateRequest {
   name: string;
   description?: string;
   address?: string;
+  /** ISO-3166-1 alpha-2 country code, e.g. "DE". */
   country?: string;
   timezone?: string;
+  /** GPS location — all-or-nothing (both set or both omitted/null). */
+  latitude?: number | null;
+  longitude?: number | null;
 }
 
 /** A user account (never includes password hashes or TOTP secrets). */
@@ -132,13 +142,31 @@ export interface User {
   id: string;
   username: string;
   roles: string[];
+  /** Explicit permission grants only (role-derived ones are added at login). */
+  permissions: string[];
+  twoFactorEnabled: boolean;
+  createdAt?: string;
+}
+
+/** TOTP enrollment payload returned by user-create / totp-enroll. */
+export interface TotpEnrollment {
+  /** Base32 TOTP secret (shown as text + QR code). */
+  secret: string;
+  /** otpauth:// URI for authenticator-app setup. */
+  otpauthUri: string;
+}
+
+/** A named bundle of permissions (roles are expanded at login time). */
+export interface Role {
+  name: string;
+  description?: string | null;
   permissions: string[];
   createdAt?: string;
 }
 
 export interface PermissionCatalog {
   permissions: { id: string; description: string }[];
-  roles: string[];
+  roles: { name: string; description?: string | null; permissions: string[] }[];
 }
 
 export interface DeviceCreateRequest {
@@ -333,6 +361,8 @@ export const api = {
     apiFetch<LoginResponse>('/auth/login', { method: 'POST', body: JSON.stringify(body) }),
   verify2fa: (body: { challengeToken: string; totpCode: string }) =>
     apiFetch<VerifyResponse>('/auth/2fa/verify', { method: 'POST', body: JSON.stringify(body) }),
+  /** The caller's own profile (no users:read needed). */
+  me: () => apiFetch<User & { effectivePermissions: string[] }>('/auth/me'),
   devices: () => apiFetch<Device[]>('/devices'),
   createDevice: (body: DeviceCreateRequest) =>
     apiFetch<Device & { plugins?: DevicePluginAssignment[] }>('/devices', {
@@ -405,10 +435,25 @@ export const api = {
   deleteSite: (id: string) => apiFetch<void>(`/sites/${id}`, { method: 'DELETE' }),
   // Users + permission catalog.
   users: () => apiFetch<User[]>('/users'),
+  createUser: (body: { username: string; password: string; roles?: string[]; permissions?: string[] }) =>
+    apiFetch<{ user: User; enrollment: TotpEnrollment }>('/users', { method: 'POST', body: JSON.stringify(body) }),
   updateUser: (id: string, body: { roles?: string[]; permissions?: string[] }) =>
     apiFetch<User>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteUser: (id: string) => apiFetch<void>(`/users/${id}`, { method: 'DELETE' }),
+  // Credential management (self needs users:self-credentials, others need users:manage-credentials).
+  resetUserPassword: (id: string, body: { newPassword: string; currentPassword?: string }) =>
+    apiFetch<User>(`/users/${id}/password`, { method: 'POST', body: JSON.stringify(body) }),
+  enrollTotp: (id: string) =>
+    apiFetch<{ user: User; enrollment: TotpEnrollment }>(`/users/${id}/totp/enroll`, { method: 'POST' }),
+  disableTotp: (id: string) => apiFetch<void>(`/users/${id}/totp`, { method: 'DELETE' }),
   permissionCatalog: () => apiFetch<PermissionCatalog>('/permissions'),
+  // Roles.
+  roles: () => apiFetch<Role[]>('/roles'),
+  createRole: (body: { name: string; description?: string; permissions: string[] }) =>
+    apiFetch<Role>('/roles', { method: 'POST', body: JSON.stringify(body) }),
+  updateRole: (name: string, body: { description?: string | null; permissions?: string[] }) =>
+    apiFetch<Role>(`/roles/${encodeURIComponent(name)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteRole: (name: string) => apiFetch<void>(`/roles/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   requiredSecretType: (pluginId: string) =>
     apiFetch<{ requiredSecretType: string | null }>(`/plugins/${pluginId}/required-secret-type`),
   pluginMetrics: (pluginId: string) =>

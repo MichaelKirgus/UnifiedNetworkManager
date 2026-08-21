@@ -11,9 +11,11 @@ import {
   PanelLeftOpen,
   Puzzle,
   Server,
+  Shield,
+  UserRound,
   Users as UsersIcon,
 } from 'lucide-react';
-import { can, clearPermissions } from '../auth/permissions';
+import { can, clearPermissions, clearUsername } from '../auth/permissions';
 
 const NAV_ITEMS = [
   { to: '/devices', label: 'Devices', icon: Server },
@@ -23,7 +25,13 @@ const NAV_ITEMS = [
   { to: '/plugins', label: 'Plugins', icon: Puzzle },
   // Only visible to users who may read user accounts/permissions.
   { to: '/users', label: 'Users', icon: UsersIcon, requiresPermission: 'users:read' },
+  // Role management (create/edit/delete roles + permission bundles).
+  { to: '/roles', label: 'Roles', icon: Shield, requiresPermission: 'users:write' },
 ];
+
+// Self-service portal — visible to every signed-in user; credential sections
+// inside are gated on `users:self-credentials`.
+const MY_ACCOUNT_ITEM = { to: '/my-account', label: 'My Account', icon: UserRound };
 
 const COLLAPSED_KEY = 'unm:sidebar-collapsed';
 
@@ -65,23 +73,25 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className={clsx('flex flex-1 flex-col gap-1 p-2', collapsed && 'items-center')}>
-        {NAV_ITEMS.filter((item) => !item.requiresPermission || can(item.requiresPermission)).map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            title={collapsed ? item.label : undefined}
-            className={({ isActive }) =>
-              clsx(
-                'flex items-center gap-3 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
-                collapsed && 'justify-center px-0',
-                isActive ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
-              )
-            }
-          >
-            <item.icon className="h-5 w-5 shrink-0" />
-            {!collapsed && <span className="truncate">{item.label}</span>}
-          </NavLink>
-        ))}
+        {[...NAV_ITEMS.filter((item) => !item.requiresPermission || can(item.requiresPermission)), MY_ACCOUNT_ITEM].map(
+          (item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              title={collapsed ? item.label : undefined}
+              className={({ isActive }) =>
+                clsx(
+                  'flex items-center gap-3 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
+                  collapsed && 'justify-center px-0',
+                  isActive ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
+                )
+              }
+            >
+              <item.icon className="h-5 w-5 shrink-0" />
+              {!collapsed && <span className="truncate">{item.label}</span>}
+            </NavLink>
+          )
+        )}
       </nav>
 
       {/* Footer: collapse toggle + sign out */}
@@ -106,6 +116,7 @@ export function Sidebar() {
           onClick={() => {
             localStorage.removeItem('accessToken');
             clearPermissions();
+            clearUsername();
             window.location.href = '/login';
           }}
           className={clsx(

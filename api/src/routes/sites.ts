@@ -17,12 +17,19 @@ function isValidTimezone(value: string): boolean {
   }
 }
 
+/** ISO-3166-1 alpha-2 country codes (e.g. "DE"). */
+function isValidCountryCode(value: string): boolean {
+  return /^[A-Z]{2}$/.test(value);
+}
+
 interface SiteInput {
   name?: unknown;
   description?: unknown;
   address?: unknown;
   country?: unknown;
   timezone?: unknown;
+  latitude?: unknown;
+  longitude?: unknown;
 }
 
 export interface SiteValues {
@@ -32,6 +39,25 @@ export interface SiteValues {
   address?: string | null;
   country?: string | null;
   timezone?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+}
+
+/** Validates a GPS coordinate value: finite number within WGS84 ranges, or null. */
+function parseCoordinate(
+  value: unknown,
+  field: 'latitude' | 'longitude'
+): { ok: true; value: number | null } | { ok: false; error: string } {
+  if (value === null) return { ok: true, value: null };
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) {
+    return { ok: false, error: `"${field}" must be a finite number or null` };
+  }
+  const limit = field === 'latitude' ? 90 : 180;
+  if (n < -limit || n > limit) {
+    return { ok: false, error: `"${field}" must be between ${-limit} and ${limit}` };
+  }
+  return { ok: true, value: n };
 }
 
 /**
@@ -49,7 +75,7 @@ function validateSite(input: SiteInput, { partial = false }: { partial?: boolean
     values.name = input.name.trim();
   }
 
-  for (const field of ['description', 'address', 'country'] as const) {
+  for (const field of ['description', 'address'] as const) {
     if (input[field] === undefined) continue;
     if (input[field] === null) {
       values[field] = null;
@@ -59,6 +85,17 @@ function validateSite(input: SiteInput, { partial = false }: { partial?: boolean
       return { error: `"${field}" must be a string or null` };
     }
     values[field] = input[field].trim();
+  }
+
+  // Country is an ISO-3166-1 alpha-2 code (e.g. "DE"), not free text.
+  if (input.country !== undefined) {
+    if (input.country === null) {
+      values.country = null;
+    } else if (typeof input.country !== 'string' || !isValidCountryCode(input.country.trim().toUpperCase())) {
+      return { error: '"country" must be an ISO-3166-1 alpha-2 code (e.g. "DE") or null' };
+    } else {
+      values.country = input.country.trim().toUpperCase();
+    }
   }
 
   if (input.timezone !== undefined) {
@@ -71,8 +108,27 @@ function validateSite(input: SiteInput, { partial = false }: { partial?: boolean
     }
   }
 
+  // GPS location: all-or-nothing — both coordinates must be provided together
+  // (or both omitted / both null to clear). Prevents accidentally clearing a
+  // single coordinate. Values must be finite numbers within WGS84 ranges.
+  if (input.latitude !== undefined || input.longitude !== undefined) {
+    if (input.latitude === undefined || input.longitude === undefined) {
+      return { error: 'Provide both latitude and longitude, or neither' };
+    }
+    const lat = parseCoordinate(input.latitude, 'latitude');
+    if (!lat.ok) {
+      return { error: lat.error };
+    }
+    const lng = parseCoordinate(input.longitude, 'longitude');
+    if (!lng.ok) {
+      return { error: lng.error };
+    }
+    values.latitude = lat.value;
+    values.longitude = lng.value;
+  }
+
   if (partial && Object.keys(values).length === 0) {
-    return { error: 'Provide at least one of: name, description, address, country, timezone' };
+    return { error: 'Provide at least one of: name, description, address, country, timezone, latitude, longitude' };
   }
   return { values };
 }
@@ -85,6 +141,8 @@ function serializeSite(row: typeof schema.sites.$inferSelect) {
     address: row.address ?? undefined,
     country: row.country ?? undefined,
     timezone: row.timezone ?? undefined,
+    latitude: row.latitude ?? undefined,
+    longitude: row.longitude ?? undefined,
     createdAt: row.createdAt,
   };
 }
@@ -110,10 +168,12 @@ router.post('/sites', requireAuth, requirePermission('sites:write'), async (req:
   await db.insert(schema.sites).values({
     id,
     name: check.values.name as string,
-    description: check.values.description,
-    address: check.values.address,
-    country: check.values.country,
-    timezone: check.values.timezone,
+    description: check.values.description ?? null,
+    address: check.values.address ?? null,
+    country: check.values.country ?? null,
+    timezone: check.values.timezone ?? null,
+    latitude: check.values.latitude ?? null,
+    longitude: check.values.longitude ?? null,
     createdAt: new Date().toISOString(),
   });
 

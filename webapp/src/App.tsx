@@ -8,6 +8,8 @@ import ConfigJobs from './pages/ConfigJobs';
 import Plugins from './pages/Plugins';
 import Sites from './pages/Sites';
 import Users from './pages/Users';
+import Roles from './pages/Roles';
+import MyAccount from './pages/MyAccount';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const token = localStorage.getItem('accessToken');
@@ -74,6 +76,22 @@ export default function App() {
         element={
           <RequireAuth>
             <Users />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/roles"
+        element={
+          <RequireAuth>
+            <Roles />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/my-account"
+        element={
+          <RequireAuth>
+            <MyAccount />
           </RequireAuth>
         }
       />
