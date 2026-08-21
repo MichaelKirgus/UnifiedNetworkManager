@@ -477,6 +477,9 @@ export const api = {
     apiFetch<DeviceIpRow>(`/devices/${deviceId}/ips`, { method: 'POST', body: JSON.stringify({ address }) }),
   removeDeviceIp: (deviceId: string, ipId: string) =>
     apiFetch<void>(`/devices/${deviceId}/ips/${ipId}`, { method: 'DELETE' }),
+  /** Delete a device and everything that hangs off it. 409 while plans reference it. */
+  deleteDevice: (deviceId: string) =>
+    apiFetch<void>(`/devices/${deviceId}`, { method: 'DELETE' }),
   // Per-device settings overrides (inherit global → override per device).
   devicePluginOptions: (deviceId: string, pluginId: string) =>
     apiFetch<PluginOptionsResponse>(`/devices/${deviceId}/plugins/${pluginId}/options`),

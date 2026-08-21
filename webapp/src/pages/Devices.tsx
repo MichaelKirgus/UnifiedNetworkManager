@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { Eye, Pencil, Plus, X } from 'lucide-react';
+import { Eye, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
@@ -52,6 +52,52 @@ export default function Devices() {
     mutationFn: (body: DeviceCreateRequest) => api.createDevice(body),
     onSuccess: () => resetForm(),
     onError: (err: unknown) => setFormError((err as Error).message),
+  });
+
+  const deleteDevice = useMutation({
+    mutationFn: (id: string) => api.deleteDevice(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['devices'] });
+      // The device's config-job history is deleted server-side too.
+      queryClient.invalidateQueries({ queryKey: ['configJobs'] });
+    },
+    onError: (err: Error) => setFormError(err.message),
+  });
+
+  function handleDelete(row: Device) {
+    if (!window.confirm(`Delete device "${row.name}"?\nIts plugin assignments, secondary IPs and telemetry history are removed. Plans referencing it must be deleted first.`)) return;
+    deleteDevice.mutate(row.id);
+  }
+
+  // Bulk delete (selection bar). Devices referenced by plans fail with 409 —
+  // the rest still go through, so report per-device outcomes.
+  const bulkDeleteDevices = useMutation({
+    mutationFn: async (rows: Device[]) => {
+      const blockedByPlans: string[] = [];
+      const otherErrors: string[] = [];
+      for (const row of rows) {
+        try {
+          await api.deleteDevice(row.id);
+        } catch (err) {
+          if ((err as { status?: number }).status === 409) blockedByPlans.push(row.name);
+          else otherErrors.push(`${row.name}: ${(err as Error).message}`);
+        }
+      }
+      return { total: rows.length, blockedByPlans, otherErrors };
+    },
+    onSuccess: ({ total, blockedByPlans, otherErrors }) => {
+      queryClient.invalidateQueries({ queryKey: ['devices'] });
+      // Deleted devices' config-job history is removed server-side too.
+      queryClient.invalidateQueries({ queryKey: ['configJobs'] });
+      if (blockedByPlans.length > 0 || otherErrors.length > 0) {
+        const parts = [
+          `Deleted ${total - blockedByPlans.length - otherErrors.length} of ${total} device(s).`,
+          ...blockedByPlans.length > 0 ? [`Not deleted — still referenced by plans (delete those plans first):\n${blockedByPlans.join(', ')}`] : [],
+          ...otherErrors.length > 0 ? [`Other errors:\n${otherErrors.join('\n')}`] : [],
+        ];
+        window.alert(parts.filter(Boolean).join('\n\n'));
+      }
+    },
   });
 
   const updateDevice = useMutation({
@@ -232,7 +278,7 @@ export default function Devices() {
       header: 'Actions',
       key: 'actions',
       excludeFromExport: true,
-      width: 120,
+      width: 150,
       sortable: false,
       render: (row) => (
         <div className="flex items-center gap-1">
@@ -252,6 +298,14 @@ export default function Devices() {
           >
             <Pencil className="h-4 w-4" />
           </button>
+          <button
+            aria-label={`Delete ${row.name}`}
+            title="Delete device"
+            className="rounded-md p-1.5 text-slate-600 hover:bg-red-50 hover:text-red-600"
+            onClick={() => handleDelete(row)}
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
         </div>
       ),
     },
@@ -269,6 +323,12 @@ export default function Devices() {
           {showForm ? 'Cancel' : editingId ? 'Edit Device' : 'Register Device'}
         </button>
       </div>
+
+      {deleteDevice.error && (
+        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {(deleteDevice.error as Error).message}
+        </div>
+      )}
 
       {showForm && (
         <div
@@ -434,7 +494,22 @@ export default function Devices() {
         <p className="text-sm text-red-600">Failed to load devices: {(devicesQuery.error as Error).message}</p>
       )}
       {devicesQuery.data && (
-        <DataTable columns={columns} rows={devicesQuery.data} rowKey={(row) => row.id} storageKey="devices" emptyMessage="No devices registered yet." />
+        <DataTable
+          columns={columns}
+          rows={devicesQuery.data}
+          rowKey={(row) => row.id}
+          storageKey="devices"
+          emptyMessage="No devices registered yet."
+          selectable
+          bulkActions={[
+            {
+              label: 'Delete selected',
+              confirm: (count) =>
+                `Delete ${count} device(s)?\nTheir plugin assignments, secondary IPs and telemetry history are removed. Devices referenced by plans cannot be deleted — delete those plans first.`,
+              onClick: (rows) => bulkDeleteDevices.mutate(rows),
+            },
+          ]}
+        />
       )}
 
     </Layout>

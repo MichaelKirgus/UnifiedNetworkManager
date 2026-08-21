@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Plus, Settings, Star, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
@@ -17,6 +17,7 @@ function resolveValue(descriptor: MetricDescriptor, metrics: Record<string, unkn
 
 export default function DeviceDetail() {
   const { deviceId } = useParams<{ deviceId: string }>();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   // Which assignment's settings are being edited (null = closed).
@@ -27,6 +28,15 @@ export default function DeviceDetail() {
   const [showAddIp, setShowAddIp] = useState(false);
   const [newIpInput, setNewIpInput] = useState('');
   const [ipError, setIpError] = useState<string | null>(null);
+
+  // Device deletion (409 while plans reference the device).
+  const deleteDevice = useMutation({
+    mutationFn: (id: string) => api.deleteDevice(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['devices'] });
+      navigate('/devices');
+    },
+  });
 
   const devicesQuery = useQuery({
     queryKey: ['devices'],
@@ -146,7 +156,27 @@ export default function DeviceDetail() {
       <div className="mb-6 flex items-center gap-3">
         <h1 className="text-xl font-bold text-slate-900">{device?.name ?? deviceId}</h1>
         {monitoringQuery.data && <StatusBadge status={monitoringQuery.data.health} />}
+        {device && (
+          <button
+            onClick={() => {
+              if (window.confirm(`Delete device "${device.name}"?\nIts plugin assignments, secondary IPs and telemetry history are removed. Plans referencing it must be deleted first.`)) {
+                deleteDevice.mutate(device.id);
+              }
+            }}
+            disabled={deleteDevice.isPending}
+            className="ml-auto flex items-center gap-1.5 rounded-md border border-red-200 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+          >
+            <Trash2 className="h-4 w-4" />
+            Delete device
+          </button>
+        )}
       </div>
+
+      {deleteDevice.error && (
+        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {(deleteDevice.error as Error).message}
+        </div>
+      )}
 
       {/* --- Plugin assignments ------------------------------------------- */}
       <section className="mb-8 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
