@@ -3,6 +3,7 @@ import cors from 'cors';
 import { Bonjour } from 'bonjour-service';
 import {
   SnmpCredentials,
+  SystemInfo,
   WalkOptions,
   getInventory,
   walkCounters,
@@ -24,7 +25,9 @@ const INSTANCE_ID = process.env.PLUGIN_INSTANCE_ID?.trim() ?? '';
 export const EFFECTIVE_UUID = INSTANCE_ID ? `${PLUGIN_UUID}:${INSTANCE_ID}` : PLUGIN_UUID;
 export const DISPLAY_NAME =
   process.env.PLUGIN_DISPLAY_NAME?.trim() || (INSTANCE_ID ? `${PLUGIN_NAME} (${INSTANCE_ID})` : PLUGIN_NAME);
-export const PLUGIN_VERSION = '0.1.0';
+// 0.2.0 — SNMPv3 (USM) support: v3 credentials from the snmp secret type,
+// security-level-aware validation, and -l/-u/-a/-A/-x/-X snmpwalk args.
+export const PLUGIN_VERSION = '0.2.0';
 export const PLUGIN_VENDORS = ['generic'];
 export const PLUGIN_CAPABILITIES = ['monitoring', 'inventory'];
 export const PLUGIN_AUTH_TYPE = 'none';
@@ -95,7 +98,7 @@ app.get('/discover', (_req, res) => {
     capabilities: PLUGIN_CAPABILITIES,
     endpoint: ADVERTISED_ENDPOINT,
     authType: PLUGIN_AUTH_TYPE,
-    // Credentials come from the existing 'snmp' secret type (community + version).
+    // Credentials come from the existing 'snmp' secret type (version + community for v1/v2c, USM fields for v3).
     requiredSecretType: 'snmp',
     metrics: DISCOVER_METRICS,
     options: PLUGIN_OPTIONS,
@@ -152,17 +155,86 @@ function resolveOptions(settings: Record<string, unknown>): WalkOptions {
   };
 }
 
+/** Reads a trimmed string field from the decrypted secret fields. */
+function strField(fields: Record<string, unknown>, key: string): string {
+  const v = fields[key];
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+const V3_SECURITY_LEVELS = ['noAuthNoPriv', 'authNoPriv', 'authPriv'] as const;
+const V3_AUTH_PROTOCOLS = ['MD5', 'SHA'] as const;
+const V3_PRIV_PROTOCOLS = ['DES', 'AES'] as const;
+
+/**
+ * Builds + validates SNMP credentials from a flat field map. Shared by all
+ * credential sources so the rules are identical everywhere:
+ *   - /monitoring  → fields come from the decrypted `snmp` secret (API body)
+ *   - POST /inventory → same JSON body contract as /monitoring (v3-capable)
+ *   - GET  /inventory → query params, v1/v2c only (community strings are fine
+ *                       in URLs; USM passwords must not be — see the routes)
+ *
+ * Per-version required set: v1/v2c need a community string; v3 needs a USM
+ * username + security level, with auth/priv protocol+password pairs added per
+ * security level. Error messages are source-neutral (no "secret"/"query param"
+ * wording) since the same builder serves both paths.
+ */
+function buildSnmpCredentials(fields: Record<string, unknown>): { creds?: SnmpCredentials; error?: string } {
+  const versionRaw = strField(fields, 'version') || 'v2c';
+  if (versionRaw !== 'v1' && versionRaw !== 'v2c' && versionRaw !== 'v3') {
+    return { error: `SNMP version "${versionRaw}" is not supported — this plugin supports v1, v2c and v3.` };
+  }
+
+  // v1/v2c — community string based.
+  if (versionRaw === 'v1' || versionRaw === 'v2c') {
+    const community = strField(fields, 'community');
+    if (!community) return { error: `No SNMP community configured for ${versionRaw} devices.` };
+    return { creds: { version: versionRaw, community } };
+  }
+
+  // v3 (USM) — username + security level; auth/priv pairs per level.
+  const username = strField(fields, 'username');
+  if (!username) return { error: 'SNMPv3 requires a USM username.' };
+
+  const securityLevel = strField(fields, 'securityLevel') || 'noAuthNoPriv';
+  if (!(V3_SECURITY_LEVELS as readonly string[]).includes(securityLevel)) {
+    return { error: `SNMPv3 security level "${securityLevel}" is invalid — use noAuthNoPriv, authNoPriv or authPriv.` };
+  }
+
+  const creds: SnmpCredentials = { version: 'v3', username, securityLevel: securityLevel as SnmpCredentials['securityLevel'] };
+
+  if (securityLevel !== 'noAuthNoPriv') {
+    const authProtocol = strField(fields, 'authProtocol');
+    const authPassword = strField(fields, 'authPassword');
+    if (!authProtocol || !authPassword) {
+      return { error: `SNMPv3 security level "${securityLevel}" requires an auth protocol and auth password.` };
+    }
+    if (!(V3_AUTH_PROTOCOLS as readonly string[]).includes(authProtocol)) {
+      return { error: `SNMPv3 auth protocol "${authProtocol}" is invalid — use MD5 or SHA.` };
+    }
+    creds.authProtocol = authProtocol as 'MD5' | 'SHA';
+    creds.authPassword = authPassword;
+  }
+
+  if (securityLevel === 'authPriv') {
+    const privProtocol = strField(fields, 'privProtocol');
+    const privPassword = strField(fields, 'privPassword');
+    if (!privProtocol || !privPassword) {
+      return { error: 'SNMPv3 security level "authPriv" requires a privacy protocol and privacy password.' };
+    }
+    if (!(V3_PRIV_PROTOCOLS as readonly string[]).includes(privProtocol)) {
+      return { error: `SNMPv3 privacy protocol "${privProtocol}" is invalid — use DES or AES.` };
+    }
+    creds.privProtocol = privProtocol as 'DES' | 'AES';
+    creds.privPassword = privPassword;
+  }
+
+  return { creds };
+}
+
 /** Extracts SNMP credentials from the monitoring body (decrypted by the API). */
 function resolveCredentials(body: Record<string, unknown>): { creds?: SnmpCredentials; error?: string } {
   const credentials = (body.credentials ?? {}) as Record<string, unknown>;
-  const community = typeof credentials.community === 'string' ? credentials.community.trim() : '';
-  if (!community) return { error: 'No SNMP community configured — assign an snmp-type secret to this plugin on the device.' };
-
-  const versionRaw = typeof credentials.version === 'string' && credentials.version.trim() ? credentials.version.trim() : 'v2c';
-  if (versionRaw !== 'v1' && versionRaw !== 'v2c') {
-    return { error: `SNMP version "${versionRaw}" is not supported — this plugin supports v1 and v2c only.` };
-  }
-  return { creds: { community, version: versionRaw as 'v1' | 'v2c' } };
+  return buildSnmpCredentials(credentials);
 }
 
 /** Builds the per-interface rate map keyed by unique display name. */
@@ -299,32 +371,30 @@ app.post('/monitoring', async (req, res) => {
   }
 });
 
-/**
- * Dedicated inventory endpoint (opnsense parity): full system + interface
- * facts on demand. Credentials are passed via query params so the endpoint is
- * usable by external/programmatic consumers without a device assignment.
- */
-app.get('/inventory', async (req, res) => {
-  const q = req.query ?? {};
-  const host = typeof q.managementAddress === 'string' ? hostFromAddress(q.managementAddress) : '';
-  const community = typeof q.community === 'string' ? q.community.trim() : '';
-  const versionRaw = typeof q.version === 'string' && q.version.trim() ? q.version.trim() : 'v2c';
+/** Shared inventory response shape + the walk/serialize core. */
+interface InventoryResponse {
+  capability: 'inventory';
+  collectedAt: string;
+  system: SystemInfo | null;
+  interfaces: Array<{
+    name: string;
+    ifIndex: number;
+    type: string;
+    speedBps: number | null;
+    mac: string;
+    status: string;
+  }>;
+  error?: string;
+}
 
-  if (!host || !community || (versionRaw !== 'v1' && versionRaw !== 'v2c')) {
-    res.status(200).json({
-      capability: 'inventory',
-      collectedAt: new Date().toISOString(),
-      system: null,
-      interfaces: [],
-      error: 'Provide managementAddress + community (and optionally version v1|v2c) as query params.',
-    });
-    return;
-  }
+function inventoryError(message: string): InventoryResponse {
+  return { capability: 'inventory', collectedAt: new Date().toISOString(), system: null, interfaces: [], error: message };
+}
 
-  const opts = resolveOptions(readSettings(req));
+async function runInventory(host: string, creds: SnmpCredentials, opts: WalkOptions): Promise<InventoryResponse> {
   try {
-    const inventory = await getInventory(host, { community, version: versionRaw as 'v1' | 'v2c' }, opts);
-    res.status(200).json({
+    const inventory = await getInventory(host, creds, opts);
+    return {
       capability: 'inventory',
       collectedAt: new Date().toISOString(),
       system: inventory.snapshot?.system ?? null,
@@ -337,16 +407,67 @@ app.get('/inventory', async (req, res) => {
         status: i.status,
       })),
       ...(inventory.error ? { error: inventory.error } : {}),
-    });
+    };
   } catch (err) {
-    res.status(200).json({
-      capability: 'inventory',
-      collectedAt: new Date().toISOString(),
-      system: null,
-      interfaces: [],
-      error: (err as Error).message,
-    });
+    return inventoryError((err as Error).message);
   }
+}
+
+/**
+ * Dedicated inventory endpoint (opnsense parity): full system + interface
+ * facts on demand, usable by external/programmatic consumers without a device
+ * assignment. Two routes share the same core:
+ *
+ *   GET  /inventory?managementAddress=…&community=…[&version=v1|v2c]
+ *        Convenience form for community-based credentials — low-sensitivity
+ *        shared strings that are acceptable in URLs (and shell history).
+ *
+ *   POST /inventory  { managementAddress, credentials: { version, … } }
+ *        Same body contract as /monitoring. REQUIRED for SNMPv3: USM auth/priv
+ *        passwords must not travel in query strings (URLs end up in caller
+ *        history, proxy/firewall logs, and any future access logging).
+ */
+app.get('/inventory', async (req, res) => {
+  const q = req.query ?? {};
+  const host = typeof q.managementAddress === 'string' ? hostFromAddress(q.managementAddress) : '';
+
+  if (!host) {
+    return res.status(200).json(inventoryError('Provide managementAddress as a query param.'));
+  }
+
+  // v3 via GET is rejected: USM passwords must not appear in URLs.
+  const versionRaw = typeof q.version === 'string' && q.version.trim() ? q.version.trim() : 'v2c';
+  if (versionRaw === 'v3') {
+    return res.status(200).json(
+      inventoryError('SNMPv3 is not supported via GET query params — POST /inventory with a JSON body: { managementAddress, credentials: { version: "v3", username, securityLevel, … } }.')
+    );
+  }
+
+  const { creds, error } = buildSnmpCredentials(q);
+  if (error || !creds) {
+    return res.status(200).json(inventoryError(error ?? 'Missing SNMP credentials.'));
+  }
+
+  res.status(200).json(await runInventory(host, creds, resolveOptions(readSettings(req))));
+});
+
+app.post('/inventory', async (req, res) => {
+  const body = req.body ?? {};
+  const managementAddress = typeof body.managementAddress === 'string' ? body.managementAddress : '';
+  const host = hostFromAddress(managementAddress);
+
+  if (!host) {
+    return res.status(200).json(inventoryError('Provide managementAddress in the JSON body.'));
+  }
+
+  // Same credential contract as /monitoring: decrypted `snmp` secret fields.
+  const credentials = (body.credentials ?? {}) as Record<string, unknown>;
+  const { creds, error } = buildSnmpCredentials(credentials);
+  if (error || !creds) {
+    return res.status(200).json(inventoryError(error ?? 'Missing SNMP credentials.'));
+  }
+
+  res.status(200).json(await runInventory(host, creds, resolveOptions(readSettings(req))));
 });
 
 /**

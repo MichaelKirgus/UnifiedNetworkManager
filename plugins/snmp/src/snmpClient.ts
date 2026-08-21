@@ -9,9 +9,25 @@ const DEFAULT_MIB_DIR = '/usr/share/snmp/mibs';
 /** Hard cap so a single walk can never exceed the API's 10s poll budget. */
 const WALK_BUDGET_MS = 9_500;
 
+/**
+ * SNMP credentials as stored in the `snmp` secret type.
+ *
+ * v1/v2c use a community string; v3 uses USM (username + security level,
+ * with optional auth/priv protocol+password pairs). The fields for the other
+ * version family are simply absent — callers validate per-version before
+ * constructing credentials (see resolveCredentials in index.ts).
+ */
 export interface SnmpCredentials {
-  community: string;
-  version: 'v1' | 'v2c'; // v3 is NOT supported by this plugin
+  version: 'v1' | 'v2c' | 'v3';
+  /** v1/v2c only. */
+  community?: string;
+  // v3 (USM) only — present when version === 'v3'.
+  username?: string;
+  securityLevel?: 'noAuthNoPriv' | 'authNoPriv' | 'authPriv';
+  authProtocol?: 'MD5' | 'SHA';
+  authPassword?: string;
+  privProtocol?: 'DES' | 'AES';
+  privPassword?: string;
 }
 
 export interface WalkOptions {
@@ -103,6 +119,27 @@ const OPER_STATUS_NAMES: Record<number, string> = { 1: 'up', 2: 'down', 3: 'test
  * ------------------------------------------------------------------ */
 
 /**
+ * Builds the version/authentication CLI args for snmpwalk from credentials.
+ * v1/v2c use a community string; v3 uses USM (security level + username, with
+ * auth/priv protocol+password pairs added per security level).
+ */
+function buildVersionArgs(creds: SnmpCredentials): string[] {
+  if (creds.version === 'v3') {
+    const level = creds.securityLevel ?? 'noAuthNoPriv';
+    const args = ['-v', '3', '-l', level, '-u', creds.username ?? ''];
+    if (level !== 'noAuthNoPriv' && creds.authProtocol) {
+      args.push('-a', creds.authProtocol, '-A', creds.authPassword ?? '');
+    }
+    if (level === 'authPriv' && creds.privProtocol) {
+      args.push('-x', creds.privProtocol, '-X', creds.privPassword ?? '');
+    }
+    return args;
+  }
+  // snmpwalk expects `-v 1` / `-v 2c` (no "v" prefix); the secret stores 'v1'/'v2c'.
+  return ['-v', creds.version.replace(/^v/, ''), '-c', creds.community ?? ''];
+}
+
+/**
  * Runs `snmpwalk` for the given OID(s) and returns a map of full OID → value.
  * Throws on non-zero exit / timeout — callers decide how to degrade.
  */
@@ -112,8 +149,7 @@ async function snmpWalk(
   oids: string[],
   opts: WalkOptions
 ): Promise<Map<string, string>> {
-  // snmpwalk expects `-v 1` / `-v 2c` (no "v" prefix); the secret stores 'v1'/'v2c'.
-  const args = ['-v', creds.version.replace(/^v/, ''), '-c', creds.community];
+  const args = buildVersionArgs(creds);
   // Force numeric OIDs in the output — without this, net-snmp resolves them to
   // MIB names (e.g. SNMPv2-MIB::sysDescr.0) which depends on loaded MIBs and
   // would break our numeric-OID parsing below.

@@ -50,13 +50,13 @@ Each device has exactly one **primary address** (`managementAddress`) plus any n
 
 ## SNMP plugin (monitoring + inventory)
 
-The `plugins/snmp/` service collects data over **SNMPv1/v2c** using the net-snmp CLI. It provides:
+The `plugins/snmp/` service collects data over **SNMPv1/v2c and SNMPv3 (USM)** using the net-snmp CLI. It provides:
 
 - **Monitoring**: system group (description, object ID, name, location, contact, uptime), per-interface rx/tx throughput in bits/s (computed from counter deltas each poll cycle), and an aggregated total-throughput metric shown as a quick metric in the devices table.
-- **Inventory**: per-interface attributes (name, type, speed, MAC address, operational status) + system identity data, exposed both as "Inventory"-group metrics (visible in Device Detail) and via `GET /inventory?managementAddress=…&community=…`.
+- **Inventory**: per-interface attributes (name, type, speed, MAC address, operational status) + system identity data, exposed both as "Inventory"-group metrics (visible in Device Detail) and via dedicated endpoints: `GET /inventory?managementAddress=…&community=…` for v1/v2c, and `POST /inventory` with a JSON body (`{ managementAddress, credentials: { version, … } }`, same contract as `/monitoring`) — required for SNMPv3 so USM passwords never travel in URLs.
 
 **Setup:**
-1. Create an **snmp-type secret** (Secrets page): community string + version (`v1` or `v2c`). SNMPv3 is not supported by this plugin.
+1. Create an **snmp-type secret** (Secrets page): version + community string for `v1`/`v2c`, or USM username / security level / auth+priv protocols and passwords for `v3`.
 2. Assign the SNMP Plugin to a device and attach that secret to the assignment.
 3. Optionally drop vendor `.mib` files into `plugins/snmp/mibs/` — they're mounted read-only at `/app/mibs` inside the container and added to snmpwalk's MIB search path.
 

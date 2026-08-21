@@ -66,10 +66,27 @@ export const SECRET_TYPES: SecretType[] = [
   },
   {
     type: 'snmp',
-    label: 'SNMP Community',
+    label: 'SNMP Credentials (Community / v3 USM)',
     fields: [
-      { name: 'community', label: 'Community String', input: 'text', secret: true, required: true },
       { name: 'version', label: 'SNMP Version', input: 'select', options: ['v1', 'v2c', 'v3'], required: false },
+      // v1/v2c — community string. Optional in the schema because it is not
+      // used for v3; the SNMP plugin enforces it at runtime with a clear error.
+      { name: 'community', label: 'Community String (v1/v2c)', input: 'text', secret: true, required: false },
+      // v3 (USM) — only needed when version is v3. All optional here so the
+      // form stays usable for community-based secrets; the SNMP plugin
+      // validates the per-security-level field set at runtime.
+      { name: 'username', label: 'USM Username (v3)', input: 'text', required: false },
+      {
+        name: 'securityLevel',
+        label: 'Security Level (v3)',
+        input: 'select',
+        options: ['noAuthNoPriv', 'authNoPriv', 'authPriv'],
+        required: false,
+      },
+      { name: 'authProtocol', label: 'Auth Protocol (v3)', input: 'select', options: ['MD5', 'SHA'], required: false },
+      { name: 'authPassword', label: 'Auth Password (v3)', input: 'password', secret: true, required: false },
+      { name: 'privProtocol', label: 'Priv Protocol (v3)', input: 'select', options: ['DES', 'AES'], required: false },
+      { name: 'privPassword', label: 'Priv Password (v3)', input: 'password', secret: true, required: false },
     ],
   },
 ];
