@@ -43,6 +43,8 @@ export interface SecretType {
   type: string;
   label: string;
   fields: SecretField[];
+  /** True when the provider can create/rotate this type's material itself. */
+  generatable?: boolean;
 }
 
 /** A registered secrets provider + the secret types it serves. */
@@ -323,6 +325,39 @@ export async function getSecret(id: string): Promise<DecryptedSecret> {
 export async function deleteSecret(id: string): Promise<void> {
   const provider = await providerForSecret(id);
   await callProvider(provider, `/secrets/${encodeURIComponent(id)}`, 'DELETE');
+}
+
+/**
+ * Asks a provider to GENERATE a new secret of a generatable type (the provider
+ * creates the key material itself). Returns the new id + createdAt. The API is
+ * a pure broker — it never sees or stores the plaintext material.
+ */
+export async function generateSecret(input: {
+  type: string;
+  providerId?: string;
+  fields?: Record<string, unknown>;
+  label?: string;
+  expiresAt?: string;
+  userId: string;
+}): Promise<{ id: string; createdAt: string; type?: string }> {
+  const provider = await resolveSecretsProvider(input.providerId);
+  return callProvider(provider, '/generate', 'POST', {
+    type: input.type,
+    fields: input.fields ?? {},
+    label: input.label,
+    expiresAt: input.expiresAt,
+    userId: input.userId,
+  });
+}
+
+/**
+ * Asks the owning provider to REGENERATE a secret's key material in place (same
+ * id preserved). Used for rotation and by plan provisioning when a referenced
+ * secret must be re-rolled.
+ */
+export async function regenerateSecret(id: string): Promise<{ id: string; type?: string }> {
+  const provider = await providerForSecret(id);
+  return callProvider(provider, '/regenerate', 'POST', { id });
 }
 
 /**

@@ -772,6 +772,76 @@ paths:
         '403':
           description: Missing required permission
 
+  /secrets/generate:
+    post:
+      tags: [Secrets]
+      summary: Generate a new secret of a generatable type
+      description: >-
+        Asks the secrets provider to CREATE the key material itself (e.g. a
+        WireGuard X25519 pair, an IPsec PSK, or an OpenVPN CA+cert bundle) and
+        store it — no human types any keys. Only works for secret types the
+        provider marks `generatable`. Non-material context fields (e.g. an
+        OpenVPN commonName) may be supplied in `fields` and are preserved.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: { type: string, description: "Generatable secret type (e.g. wireguardKeyPair, tunnelPsk, openvpnProfile)" }
+                providerId: { type: string, nullable: true, description: "Provider plugin UUID (defaults to SECRETS_PLUGIN_ID)" }
+                fields:
+                  type: object
+                  additionalProperties: true
+                  description: "Optional non-material context (e.g. commonName); generated material overwrites same-named keys"
+                label: { type: string, nullable: true }
+                expiresAt: { type: string, format: date-time, nullable: true }
+      responses:
+        '201':
+          description: Secret generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Secret'
+        '400':
+          description: Type is not generatable or missing type
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+
+  /secrets/{id}/regenerate:
+    post:
+      tags: [Secrets]
+      summary: Regenerate a secret's key material in place
+      description: >-
+        Asks the owning provider to RE-ROLL a generatable secret's key material
+        while preserving its id (so assignments and plans referencing it keep
+        working). Non-material context fields are carried over. Only works for
+        `generatable` types.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Secret regenerated (same id)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Secret'
+        '400':
+          description: Type is not generatable
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Secret not found
+
   /plugins/{id}/required-secret-type:
     get:
       tags: [Plugins]
@@ -1437,6 +1507,7 @@ components:
       properties:
         type: { type: string }
         label: { type: string }
+        generatable: { type: boolean, default: false, description: "True when the provider can create/rotate this type's key material itself (POST /secrets/generate, POST /secrets/{id}/regenerate)" }
         fields:
           type: array
           items:

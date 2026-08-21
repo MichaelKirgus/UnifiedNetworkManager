@@ -85,6 +85,14 @@ export async function getSecret(id: string): Promise<SecretRecord | null> {
 }
 
 /**
+ * Updates an existing secret's ciphertext IN PLACE (same id). Used for key
+ * rotation / regeneration so references to the id keep working.
+ */
+export async function updateSecret(id: string, encryptedValue: string): Promise<void> {
+  await http.patch(`/plugin/secrets/${encodeURIComponent(id)}`, { encryptedValue });
+}
+
+/**
  * Deletes a secret by id.
  */
 export async function deleteSecret(id: string): Promise<void> {

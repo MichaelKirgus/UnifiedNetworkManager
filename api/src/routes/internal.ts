@@ -259,6 +259,34 @@ export function internalRouter() {
     }
   });
 
+  // PATCH /plugin/secrets/:id - update a secret IN PLACE (same id). Used for key
+  // rotation/regeneration so assignments + plans referencing the id keep working.
+  // The provider re-encrypts and sends the new ciphertext; only encryptedValue
+  // (and optionally label) are updatable — type/providerId/userId are immutable.
+  router.patch('/plugin/secrets/:id', pluginAuth, async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { encryptedValue, label } = req.body ?? {};
+    if (!encryptedValue || typeof encryptedValue !== 'string') {
+      return res.status(400).json({ error: 'encryptedValue (string) is required' });
+    }
+    try {
+      const existing = await db.query.secrets.findFirst({
+        where: (secrets, { eq }) => eq(secrets.id, id),
+      });
+      if (!existing) {
+        return res.status(404).json({ error: 'Secret not found' });
+      }
+
+      const patch: Record<string, unknown> = { encryptedValue };
+      if (typeof label === 'string') patch.label = label;
+      await db.update(schema.secrets).set(patch).where(eq(schema.secrets.id, id));
+      res.status(200).json({ id });
+    } catch (error) {
+      console.error('Error updating secret:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   // DELETE /plugin/secrets/:id - remove a secret.
   router.delete('/plugin/secrets/:id', pluginAuth, async (req: Request, res: Response) => {
     const { id } = req.params;

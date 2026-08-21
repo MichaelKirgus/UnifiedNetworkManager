@@ -10,9 +10,15 @@ import {
   getCpuUsage,
   getArpTable,
   getNdpTable,
-  applyConfig,
   OpnsenseTransport,
 } from './opnsenseClient';
+import { createClient, OpnsenseCredentials } from './client/http';
+import { resolveEdition } from './client/editions';
+import { detectDnsBackend, DnsBackend } from './client/dns';
+import { detectDhcpBackend, DhcpBackend } from './client/dhcp';
+import { getAction, listModules } from './actions/registry';
+import { ActionContext, ActionResult, StepCredentials, validateInput } from './actions/types';
+import { buildPlan, PlanningError, PlanRequest, listCatalog } from './plan';
 
 export const PLUGIN_UUID = 'b0e6c8a2-4f1e-4a3d-9c7b-1a2b3c4d5e6f';
 export const PLUGIN_NAME = 'OPNsense Plugin';
@@ -28,9 +34,11 @@ const INSTANCE_ID = process.env.PLUGIN_INSTANCE_ID?.trim() ?? '';
 export const EFFECTIVE_UUID = INSTANCE_ID ? `${PLUGIN_UUID}:${INSTANCE_ID}` : PLUGIN_UUID;
 export const DISPLAY_NAME =
   process.env.PLUGIN_DISPLAY_NAME?.trim() || (INSTANCE_ID ? `${PLUGIN_NAME} (${INSTANCE_ID})` : PLUGIN_NAME);
-export const PLUGIN_VERSION = '0.1.0';
+export const PLUGIN_VERSION = '0.2.0';
 export const PLUGIN_VENDORS = ['opnsense'];
-export const PLUGIN_CAPABILITIES = ['monitoring', 'configuration', 'inventory'];
+// 'planning' advertises the /plan endpoint (multi-device intents) so the API
+// can offer bulk rollout + tunnel provisioning flows in the webapp.
+export const PLUGIN_CAPABILITIES = ['monitoring', 'configuration', 'inventory', 'planning'];
 export const PLUGIN_AUTH_TYPE = 'none';
 
 const PORT = Number(process.env.PORT ?? 4001);
@@ -403,6 +411,12 @@ app.get('/discover', (_req, res) => {
     // Configurable options. The API persists user-set values for these and
     // injects them back via the `x-unm-settings` header on every call.
     options: PLUGIN_OPTIONS,
+    // The full action catalog (single-device actions + multi-device intents).
+    // The API persists this and validates job/plan actionIds against it; the
+    // webapp renders only what exists. One registry serves /discover, /plan
+    // and /config — see src/actions/registry.ts.
+    actions: listCatalog(),
+    modules: listModules(),
   });
 });
 
@@ -441,6 +455,33 @@ const PLUGIN_OPTIONS = [
     description:
       'How to reach the appliance. auto = HTTPS with self-signed certificates accepted (default, matches historical behavior). https = force TLS. http = plaintext HTTP for appliances without a certificate.',
   },
+  {
+    key: 'editionOverride',
+    label: 'Edition override',
+    type: 'string' as const,
+    default: 'auto',
+    pattern: '^(auto|ce|be)$',
+    description:
+      'Force the detected OPNsense edition. auto = probe /api/opncentral/sync/listClasses (200 = Business Edition, else Community). Use ce/be when probing is blocked by ACLs.',
+  },
+  {
+    key: 'dnsBackend',
+    label: 'DNS backend override',
+    type: 'string' as const,
+    default: 'auto',
+    pattern: '^(auto|dnsmasq|unbound)$',
+    description:
+      'Force the DNS backend. auto = probe (Unbound on newer installs, dnsmasq on older). Affects which host-record endpoints /config uses.',
+  },
+  {
+    key: 'dhcpBackend',
+    label: 'DHCP backend override',
+    type: 'string' as const,
+    default: 'auto',
+    pattern: '^(auto|dnsmasq|kea)$',
+    description:
+      'Force the DHCP backend. auto = probe (Kea on newer installs, dnsmasq on older). Affects which static-mapping endpoints /config uses.',
+  },
 ];
 
 /**
@@ -461,6 +502,42 @@ function readSettings(req: { headers?: Record<string, unknown> }): Record<string
     // Malformed header: fall back to defaults rather than failing the call.
   }
   return defaults;
+}
+
+/** Extracts the effective transport option from injected settings. */
+function transportOf(settings: Record<string, unknown>): OpnsenseTransport {
+  return typeof settings.transport === 'string' && ['auto', 'http', 'https'].includes(settings.transport)
+    ? (settings.transport as OpnsenseTransport)
+    : 'auto';
+}
+
+/** Reads an optional string setting. */
+function strSetting(settings: Record<string, unknown>, key: string): string | undefined {
+  const v = settings[key];
+  return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
+/**
+ * Resolves the runtime context for one device (edition + DNS/DHCP backends).
+ * Probes are read-only and best-effort — failures fall back to CE / dnsmasq.
+ */
+async function resolveRuntimeContext(
+  host: string,
+  credentials: OpnsenseCredentials,
+  transport: OpnsenseTransport,
+  settings: Record<string, unknown>
+): Promise<{ edition: 'ce' | 'be'; syncClasses: unknown[]; dnsBackend: DnsBackend; dhcpBackend: DhcpBackend }> {
+  const client = createClient(host, credentials, transport);
+  const [editionInfo, dnsBackend, dhcpBackend] = await Promise.all([
+    resolveEdition(client, host, strSetting(settings, 'editionOverride')).catch(() => ({ edition: 'ce' as const, classes: [] })),
+    (strSetting(settings, 'dnsBackend') && strSetting(settings, 'dnsBackend') !== 'auto'
+      ? Promise.resolve(strSetting(settings, 'dnsBackend') as DnsBackend)
+      : detectDnsBackend(client).catch(() => 'dnsmasq' as DnsBackend)),
+    (strSetting(settings, 'dhcpBackend') && strSetting(settings, 'dhcpBackend') !== 'auto'
+      ? Promise.resolve(strSetting(settings, 'dhcpBackend') as DhcpBackend)
+      : detectDhcpBackend(client).catch(() => 'dnsmasq' as DhcpBackend)),
+  ]);
+  return { edition: editionInfo.edition, syncClasses: editionInfo.classes ?? [], dnsBackend, dhcpBackend };
 }
 
 /**
@@ -651,27 +728,166 @@ app.post('/monitoring', async (req, res) => {
   }
 });
 
+/**
+ * Executes ONE action step against one appliance. This is the unit of work the
+ * API's config-job worker dispatches — either a single-device job (legacy shape:
+ * `{action, payload}`) or one step of a multi-device plan (registry shape:
+ * `{actionId, input, credentials}`). The plugin owns ALL logic: it validates
+ * the input against the action's schema, resolves the appliance's runtime
+ * context (edition + DNS/DHCP backends), and runs the executor. The API only
+ * propagates — it never interprets payloads.
+ *
+ * Body:
+ *   deviceId            device id (echoed in results)
+ *   managementAddress   appliance address to reach
+ *   ipAddresses         all known addresses (primary first) — informational
+ *   credentials         decrypted secret fields for the assignment; for plan
+ *                       steps this ALSO carries provisioned material namespaced
+ *                       by secretRef (e.g. { keyA: { publicKey, privateKey } })
+ *   apiKey/apiSecret    legacy top-level keys (secret type `apiKey`)
+ *   actionId + input    registry shape (preferred)
+ *   action + payload    legacy shape — mapped to actionId=action, input=payload
+ */
 app.post('/config', async (req, res) => {
-  const { action, payload, apiKey, apiSecret, managementAddress } = req.body ?? {};
+  const body = req.body ?? {};
+  const { deviceId, managementAddress } = body;
+  // Registry shape preferred; legacy `{action, payload}` maps onto it.
+  const actionId: string | undefined = typeof body.actionId === 'string' ? body.actionId : (typeof body.action === 'string' ? body.action : undefined);
+  const input: Record<string, unknown> =
+    body.input && typeof body.input === 'object'
+      ? (body.input as Record<string, unknown>)
+      : body.payload && typeof body.payload === 'object'
+        ? (body.payload as Record<string, unknown>)
+        : {};
 
-  // Transport is a plugin-owned decision — read it from the injected settings.
   const settings = readSettings(req);
-  const transport: OpnsenseTransport =
-    typeof settings.transport === 'string' && ['auto', 'http', 'https'].includes(settings.transport)
-      ? (settings.transport as OpnsenseTransport)
-      : 'auto';
+  const transport = transportOf(settings);
+
+  if (!actionId) {
+    res.status(400).json({ success: false, result: { error: 'Missing actionId (or legacy "action")' } });
+    return;
+  }
+  if (typeof managementAddress !== 'string' || !managementAddress) {
+    res.status(400).json({ success: false, result: { error: 'Missing managementAddress' } });
+    return;
+  }
+
+  const action = getAction(actionId);
+  if (!action) {
+    res.status(400).json({ success: false, result: { error: `Unknown action "${actionId}"` } });
+    return;
+  }
+
+  // Credentials: the assignment's decrypted fields are the base; legacy jobs
+  // pass apiKey/apiSecret at top level. Provisioned plan material arrives in
+  // `credentials` namespaced by secretRef and is merged through as-is.
+  const creds = (body.credentials && typeof body.credentials === 'object' ? body.credentials : {}) as Record<string, unknown>;
+  const stepCredentials: StepCredentials = {
+    apiKey: typeof body.apiKey === 'string' ? body.apiKey : (typeof creds['apiKey'] === 'string' ? (creds['apiKey'] as string) : ''),
+    apiSecret: typeof body.apiSecret === 'string' ? body.apiSecret : (typeof creds['apiSecret'] === 'string' ? (creds['apiSecret'] as string) : ''),
+    ...creds,
+  };
 
   try {
-    const result = await applyConfig({ action, payload }, managementAddress, apiKey, apiSecret, transport);
-    res.status(200).json({
-      success: result.ok,
-      result: { status: result.status, data: result.data },
+    const ctx = await buildActionContext({
+      host: managementAddress,
+      deviceId: typeof deviceId === 'string' ? deviceId : undefined,
+      credentials: stepCredentials,
+      transport,
+      settings,
     });
+
+    // Validate input against the action's declared schema — the plugin is the
+    // authority on what it accepts; the API only checks that the id exists.
+    const issues = validateInput(action.inputSchema, input);
+    if (issues.length > 0) {
+      res.status(200).json({
+        success: false,
+        result: { error: `Invalid input for ${actionId}: ${issues.map((i) => `${i.path}: ${i.message}`).join('; ')}` },
+      });
+      return;
+    }
+
+    const result: ActionResult = await action.execute(ctx, input);
+    res.status(200).json({ success: result.success, result: { ...result } });
   } catch (err) {
-    res.status(200).json({
-      success: false,
-      result: { error: (err as Error).message },
-    });
+    res.status(200).json({ success: false, result: { error: (err as Error).message } });
+  }
+});
+
+/** Builds the ActionContext for a /config call (client + runtime context). */
+async function buildActionContext(args: {
+  host: string;
+  deviceId?: string;
+  credentials: StepCredentials;
+  transport: OpnsenseTransport;
+  settings: Record<string, unknown>;
+}): Promise<ActionContext> {
+  const { host, deviceId, credentials, transport, settings } = args;
+  const client = createClient(host, { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }, transport);
+  const runtime = await resolveRuntimeContext(
+    host,
+    { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret },
+    transport,
+    settings
+  );
+  return {
+    client,
+    host,
+    deviceId,
+    credentials,
+    transport,
+    edition: runtime.edition,
+    syncClasses: runtime.syncClasses as ActionContext['syncClasses'],
+    dnsBackend: runtime.dnsBackend,
+    dhcpBackend: runtime.dhcpBackend,
+  };
+}
+
+/**
+ * Plans a multi-device intent (or fans out a single action across a batch).
+ * The plugin does ALL the planning — cross-device references, dependency
+ * ordering, credential provisioning requests. It never generates key material:
+ * provisionRequests are non-secret descriptors the API persists with the plan;
+ * the secrets provider owns crypto.
+ *
+ * Body: { intent: { actionId, inputs }, devices: [{ deviceId, managementAddress,
+ * credentials }], transport?, editionOverride?, dnsBackend?, dhcpBackend? }
+ */
+app.post('/plan', async (req, res) => {
+  const body = req.body ?? {};
+  const settings = readSettings(req);
+
+  const planReq: PlanRequest = {
+    intent: {
+      actionId: typeof body.intent?.actionId === 'string' ? body.intent.actionId : '',
+      inputs: (body.intent?.inputs && typeof body.intent.inputs === 'object' ? body.intent.inputs : {}) as Record<string, unknown>,
+    },
+    devices: Array.isArray(body.devices)
+      ? (body.devices as PlanRequest['devices']).map((d) => ({
+          deviceId: String(d.deviceId),
+          managementAddress: String(d.managementAddress ?? ''),
+          credentials: {
+            apiKey: typeof d.credentials?.apiKey === 'string' ? d.credentials.apiKey : '',
+            apiSecret: typeof d.credentials?.apiSecret === 'string' ? d.credentials.apiSecret : '',
+          },
+        }))
+      : [],
+    transport: transportOf(settings),
+    editionOverride: strSetting(settings, 'editionOverride'),
+    dnsBackend: (strSetting(settings, 'dnsBackend') ?? 'auto') as PlanRequest['dnsBackend'],
+    dhcpBackend: (strSetting(settings, 'dhcpBackend') ?? 'auto') as PlanRequest['dhcpBackend'],
+  };
+
+  try {
+    const plan = await buildPlan(planReq);
+    res.status(200).json({ plan });
+  } catch (err) {
+    if (err instanceof PlanningError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: (err as Error).message });
   }
 });
 

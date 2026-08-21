@@ -3,7 +3,14 @@ import { inArray } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
-import { createSecret, listSecrets, deleteSecret, listSecretProviders } from '../secretsProvider';
+import {
+  createSecret,
+  listSecrets,
+  deleteSecret,
+  listSecretProviders,
+  generateSecret,
+  regenerateSecret,
+} from '../secretsProvider';
 
 const router = Router();
 
@@ -105,6 +112,53 @@ router.post('/', requireAuth, requirePermission('secrets:write'), async (req, re
       userId,
     });
     res.status(201).json(result);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// POST /secrets/generate - Generate a new secret of a generatable type.
+// The provider creates the key material itself (X25519 pair, PSK, CA+cert
+// bundle) and stores it — no human types any keys. Registered before the
+// `/:id` routes so "generate" is not treated as an id.
+router.post('/generate', requireAuth, requirePermission('secrets:write'), async (req, res) => {
+  const { type, providerId, fields, label, expiresAt } = req.body ?? {};
+
+  if (!type || typeof type !== 'string') {
+    res.status(400).json({ error: 'type is required' });
+    return;
+  }
+
+  const userId = req.user?.sub;
+  if (!userId || typeof userId !== 'string') {
+    res.status(401).json({ error: 'User ID not found in token' });
+    return;
+  }
+
+  try {
+    const result = await generateSecret({
+      type,
+      providerId: typeof providerId === 'string' ? providerId : undefined,
+      fields: (fields && typeof fields === 'object' ? fields : {}) as Record<string, unknown>,
+      label,
+      expiresAt,
+      userId,
+    });
+    res.status(201).json(result);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// POST /secrets/:id/regenerate - Re-roll a generatable secret's key material in
+// place (same id preserved) so references keep working.
+router.post('/:id/regenerate', requireAuth, requirePermission('secrets:write'), async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await regenerateSecret(id);
+    res.status(200).json(result);
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
