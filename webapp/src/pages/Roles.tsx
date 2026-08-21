@@ -95,6 +95,7 @@ export default function Roles() {
           {
             header: 'Actions',
             key: 'actions',
+            excludeFromExport: true,
             width: 110,
             sortable: false as const,
             render: (row: Role) => (

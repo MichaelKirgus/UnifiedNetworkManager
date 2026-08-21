@@ -44,6 +44,7 @@ export default function Plugins() {
     {
       header: 'Actions',
       key: 'actions',
+      excludeFromExport: true,
       width: 110,
       sortable: false,
       render: (row) => (

@@ -198,6 +198,7 @@ export default function Users() {
           {
             header: 'Actions',
             key: 'actions',
+            excludeFromExport: true,
             width: 130,
             sortable: false as const,
             render: (row: User) => (

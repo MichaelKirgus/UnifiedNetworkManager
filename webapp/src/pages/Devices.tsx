@@ -231,6 +231,7 @@ export default function Devices() {
     {
       header: 'Actions',
       key: 'actions',
+      excludeFromExport: true,
       width: 120,
       sortable: false,
       render: (row) => (

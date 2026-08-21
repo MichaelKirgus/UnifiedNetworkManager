@@ -156,6 +156,7 @@ export default function Sites() {
             key: 'actions',
             width: 110,
             sortable: false as const,
+            excludeFromExport: true,
             render: (row: Site) => (
               <div className="flex gap-1">
                 <button
@@ -330,7 +331,36 @@ export default function Sites() {
         <p className="text-sm text-red-600">Failed to load sites: {(sitesQuery.error as Error).message}</p>
       )}
       {sitesQuery.data && (
-        <DataTable columns={columns} rows={sitesQuery.data} rowKey={(row) => row.id} storageKey="sites" emptyMessage="No sites yet." />
+        <DataTable
+          columns={columns}
+          rows={sitesQuery.data}
+          rowKey={(row) => row.id}
+          storageKey="sites"
+          emptyMessage="No sites yet."
+          selectable={canWrite}
+          bulkActions={
+            canWrite
+              ? [
+                  {
+                    label: 'Delete selected',
+                    confirm: (count) => `Delete ${count} site${count === 1 ? '' : 's'}? Devices referencing them must be unassigned first.`,
+                    onClick: async (selected: Site[]) => {
+                      const errors: string[] = [];
+                      for (const s of selected) {
+                        try {
+                          await api.deleteSite(s.id);
+                        } catch (err) {
+                          errors.push(`${s.name}: ${(err as Error).message}`);
+                        }
+                      }
+                      queryClient.invalidateQueries({ queryKey: ['sites'] });
+                      if (errors.length > 0) setFormError(`Deleted ${selected.length - errors.length} of ${selected.length}. ${errors.join(' | ')}`);
+                    },
+                  },
+                ]
+              : undefined
+          }
+        />
       )}
     </Layout>
   );

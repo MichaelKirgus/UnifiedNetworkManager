@@ -226,6 +226,7 @@ export default function Secrets() {
             { 
               header: 'Actions', 
               key: 'actions',
+              excludeFromExport: true,
               width: 100,
               sortable: false,
               render: (s: Secret) => (
