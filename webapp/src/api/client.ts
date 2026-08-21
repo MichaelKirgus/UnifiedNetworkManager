@@ -107,13 +107,48 @@ export interface DeviceIpRow {
   createdAt?: string;
 }
 
+/** A managed site (name + description + address/country/timezone). */
+export interface Site {
+  id: string;
+  name: string;
+  description?: string | null;
+  address?: string | null;
+  country?: string | null;
+  /** IANA timezone identifier, e.g. "Europe/Berlin". */
+  timezone?: string | null;
+  createdAt?: string;
+}
+
+export interface SiteCreateRequest {
+  name: string;
+  description?: string;
+  address?: string;
+  country?: string;
+  timezone?: string;
+}
+
+/** A user account (never includes password hashes or TOTP secrets). */
+export interface User {
+  id: string;
+  username: string;
+  roles: string[];
+  permissions: string[];
+  createdAt?: string;
+}
+
+export interface PermissionCatalog {
+  permissions: { id: string; description: string }[];
+  roles: string[];
+}
+
 export interface DeviceCreateRequest {
   name: string;
   vendor: string;
   deviceType: string;
   /** Primary address — IPv4, IPv6 literal, or DNS name (no scheme). */
   managementAddress: string;
-  site?: string;
+  /** Optional assigned site. */
+  siteId?: string | null;
   /** Optional secondary IPs registered at creation time. */
   ips?: string[];
   /** At least one plugin assignment; the first becomes primary. */
@@ -126,7 +161,9 @@ export interface Device {
   vendor: string;
   deviceType: string;
   managementAddress: string;
-  site?: string;
+  siteId?: string | null;
+  /** Display name of the assigned site (null = unassigned). */
+  siteName?: string | null;
   status: string;
   /** All addresses, primary first (list endpoints include this). */
   ips?: DeviceAddress[];
@@ -303,7 +340,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   /** Update identity fields of an existing device (plugins are managed separately). */
-  updateDevice: (deviceId: string, body: Partial<Pick<Device, 'name' | 'vendor' | 'deviceType' | 'managementAddress'>> & { site?: string | null }) =>
+  updateDevice: (deviceId: string, body: Partial<Pick<Device, 'name' | 'vendor' | 'deviceType' | 'managementAddress'>> & { siteId?: string | null }) =>
     apiFetch<Device>(`/devices/${deviceId}`, { method: 'PATCH', body: JSON.stringify(body) }),
   // Device ↔ plugin assignments.
   devicePlugins: (deviceId: string) =>
@@ -359,6 +396,19 @@ export const api = {
   }) => apiFetch<Secret>('/secrets', { method: 'POST', body: JSON.stringify(body) }),
   deleteSecret: (id: string) =>
     apiFetch<void>(`/secrets/${id}`, { method: 'DELETE' }),
+  // Sites.
+  sites: () => apiFetch<Site[]>('/sites'),
+  createSite: (body: SiteCreateRequest) =>
+    apiFetch<Site>('/sites', { method: 'POST', body: JSON.stringify(body) }),
+  updateSite: (id: string, body: Partial<SiteCreateRequest>) =>
+    apiFetch<Site>(`/sites/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteSite: (id: string) => apiFetch<void>(`/sites/${id}`, { method: 'DELETE' }),
+  // Users + permission catalog.
+  users: () => apiFetch<User[]>('/users'),
+  updateUser: (id: string, body: { roles?: string[]; permissions?: string[] }) =>
+    apiFetch<User>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteUser: (id: string) => apiFetch<void>(`/users/${id}`, { method: 'DELETE' }),
+  permissionCatalog: () => apiFetch<PermissionCatalog>('/permissions'),
   requiredSecretType: (pluginId: string) =>
     apiFetch<{ requiredSecretType: string | null }>(`/plugins/${pluginId}/required-secret-type`),
   pluginMetrics: (pluginId: string) =>

@@ -5,18 +5,24 @@ import {
   KeyRound,
   ListChecks,
   LogOut,
+  MapPin,
   Network,
   PanelLeftClose,
   PanelLeftOpen,
   Puzzle,
   Server,
+  Users as UsersIcon,
 } from 'lucide-react';
+import { can, clearPermissions } from '../auth/permissions';
 
 const NAV_ITEMS = [
   { to: '/devices', label: 'Devices', icon: Server },
+  { to: '/sites', label: 'Sites', icon: MapPin },
   { to: '/secrets', label: 'Secrets', icon: KeyRound },
   { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks },
   { to: '/plugins', label: 'Plugins', icon: Puzzle },
+  // Only visible to users who may read user accounts/permissions.
+  { to: '/users', label: 'Users', icon: UsersIcon, requiresPermission: 'users:read' },
 ];
 
 const COLLAPSED_KEY = 'unm:sidebar-collapsed';
@@ -59,7 +65,7 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className={clsx('flex flex-1 flex-col gap-1 p-2', collapsed && 'items-center')}>
-        {NAV_ITEMS.map((item) => (
+        {NAV_ITEMS.filter((item) => !item.requiresPermission || can(item.requiresPermission)).map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
@@ -99,6 +105,7 @@ export function Sidebar() {
           title="Sign out"
           onClick={() => {
             localStorage.removeItem('accessToken');
+            clearPermissions();
             window.location.href = '/login';
           }}
           className={clsx(

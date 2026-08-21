@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { db, Device, Plugin, Telemetry, ConfigJob } from '../db';
 import { requireAuth, requirePermission, require2FA } from '../auth/middleware';
 import { configJobQueue } from '../queue';
-import { eq, and, desc } from 'drizzle-orm';
+import { eq, and, desc, inArray } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import {
   AssignmentError,
@@ -29,16 +29,36 @@ import { isValidAddress, addressError } from '../utils/address';
 
 const router = Router();
 
-function serializeDevice(row: Device) {
+function serializeDevice(row: Device, siteName?: string | null) {
   return {
     id: row.id,
     name: row.name,
     vendor: row.vendor,
     deviceType: row.deviceType,
     managementAddress: row.managementAddress,
-    site: row.site ?? undefined,
+    siteId: row.siteId ?? undefined,
+    siteName: siteName ?? null,
     status: row.status,
   };
+}
+
+/** Batch-loads the names of the sites referenced by a set of devices. */
+async function siteNamesFor(devices: Device[]): Promise<Map<string, string>> {
+  const ids = [...new Set(devices.map((d) => d.siteId).filter((v): v is string => !!v))];
+  if (ids.length === 0) return new Map();
+  const rows = await db.query.sites.findMany({ where: inArray(schema.sites.id, ids) });
+  return new Map(rows.map((s) => [s.id, s.name]));
+}
+
+/** Validates a siteId reference; returns the id or an error message. */
+async function validateSiteRef(siteId: unknown): Promise<{ value?: string | null; error?: string }> {
+  if (siteId === undefined || siteId === null) return { value: null };
+  if (typeof siteId !== 'string' || siteId.trim().length === 0) {
+    return { error: '"siteId" must be a non-empty string or null' };
+  }
+  const found = await db.query.sites.findFirst({ where: eq(schema.sites.id, siteId.trim()) });
+  if (!found) return { error: `Unknown site: ${siteId}` };
+  return { value: siteId.trim() };
 }
 
 /** Maps AssignmentError (404/409) to an HTTP response; returns true when handled. */
@@ -103,20 +123,21 @@ function summaryMetricsFor(telemetry: { metrics: unknown; metricDescriptors: unk
 }
 
 router.get('/devices', requireAuth, async (req, res) => {
-  const { vendor, site } = req.query;
+  const { vendor, siteId } = req.query;
 
   const filters = [];
   if (typeof vendor === 'string' && vendor.length > 0) {
     filters.push(eq(schema.devices.vendor, vendor));
   }
-  if (typeof site === 'string' && site.length > 0) {
-    filters.push(eq(schema.devices.site, site));
+  if (typeof siteId === 'string' && siteId.length > 0) {
+    filters.push(eq(schema.devices.siteId, siteId));
   }
 
   const result = await db.query.devices.findMany({
     where: filters.length > 0 ? and(...filters) : undefined,
     orderBy: [desc(schema.devices.createdAt)],
   });
+  const siteNames = await siteNamesFor(result);
 
   // Attach the plugin assignments + each assignment's latest summary metrics
   // so the overview table can render headline values (CPU, memory, ...) inline.
@@ -140,7 +161,12 @@ router.get('/devices', requireAuth, async (req, res) => {
       } catch {
         /* device exists — treat as no secondaries */
       }
-      return { ...serializeDevice(device), plugins, summaryMetrics, ips };
+      return {
+        ...serializeDevice(device, siteNames.get(device.siteId ?? '') ?? null),
+        plugins,
+        summaryMetrics,
+        ips,
+      };
     })
   );
 
@@ -154,7 +180,7 @@ interface DevicePluginRef {
 }
 
 router.post('/devices', requireAuth, requirePermission('devices:write'), async (req, res) => {
-  const { name, vendor, deviceType, managementAddress, site, plugins, ips } = req.body ?? {};
+  const { name, vendor, deviceType, managementAddress, siteId, plugins, ips } = req.body ?? {};
 
   if (!Array.isArray(plugins) || plugins.length === 0) {
     res.status(400).json({ error: 'At least one plugin assignment is required ("plugins": [{ "pluginId", ... }])' });
@@ -171,6 +197,13 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
   // transport scheme (https/http, self-signed) is each plugin's own decision.
   if (!isValidAddress(managementAddress)) {
     res.status(400).json({ error: `"managementAddress": ${addressError(managementAddress)}` });
+    return;
+  }
+
+  // Optional site reference (must point at an existing site, or null/omitted).
+  const siteRef = await validateSiteRef(siteId);
+  if (siteRef.error) {
+    res.status(400).json({ error: siteRef.error });
     return;
   }
 
@@ -197,7 +230,7 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
     vendor,
     deviceType,
     managementAddress,
-    site: site ?? null,
+    siteId: siteRef.value ?? null,
     status: 'unknown',
     createdAt: new Date().toISOString(),
   });
@@ -239,13 +272,18 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
   } catch {
     /* device exists — treat as no secondaries */
   }
-  res.status(201).json({ ...serializeDevice(created), plugins: pluginsView, ips: ipsView });
+  const createdSiteNames = await siteNamesFor([created]);
+  res.status(201).json({
+    ...serializeDevice(created, createdSiteNames.get(created.siteId ?? '') ?? null),
+    plugins: pluginsView,
+    ips: ipsView,
+  });
 });
 
 /** Identity fields that can be changed after creation (plugins are managed separately). */
-const UPDATABLE_FIELDS = ['name', 'vendor', 'deviceType', 'managementAddress', 'site'] as const;
+const UPDATABLE_FIELDS = ['name', 'vendor', 'deviceType', 'managementAddress'] as const;
 
-// PATCH /devices/:deviceId - rename a device or change its management address.
+// PATCH /devices/:deviceId - rename a device, change its management address or site.
 router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write'), async (req, res) => {
   const { deviceId } = req.params;
   const body = (req.body ?? {}) as Record<string, unknown>;
@@ -254,17 +292,8 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
   for (const field of UPDATABLE_FIELDS) {
     if (!(field in body)) continue;
     const value = body[field];
-    if (value === null || value === undefined) {
-      // Only `site` may be cleared.
-      if (field !== 'site') {
-        res.status(400).json({ error: `"${field}" must be a non-empty string (omit it to keep the current value)` });
-        return;
-      }
-      updates.site = null;
-      continue;
-    }
-    if (typeof value !== 'string' || value.trim().length === 0) {
-      res.status(400).json({ error: `"${field}" must be a non-empty string` });
+    if (value === null || value === undefined || typeof value !== 'string' || value.trim().length === 0) {
+      res.status(400).json({ error: `"${field}" must be a non-empty string (omit it to keep the current value)` });
       return;
     }
     // The primary address is a bare IPv4/IPv6 literal or DNS name — plugins
@@ -273,11 +302,22 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
       res.status(400).json({ error: `"${field}": ${addressError(value)}` });
       return;
     }
-    updates[field] = field === 'site' ? value.trim() : (value as string);
+    updates[field] = value.trim();
+  }
+
+  // siteId is handled separately: null clears the assignment, a string must
+  // reference an existing site.
+  if ('siteId' in body) {
+    const ref = await validateSiteRef(body.siteId);
+    if (ref.error) {
+      res.status(400).json({ error: ref.error });
+      return;
+    }
+    updates.siteId = ref.value ?? null;
   }
 
   if (Object.keys(updates).length === 0) {
-    res.status(400).json({ error: `Provide at least one of: ${UPDATABLE_FIELDS.join(', ')}` });
+    res.status(400).json({ error: `Provide at least one of: ${UPDATABLE_FIELDS.join(', ')}, siteId` });
     return;
   }
 
@@ -305,7 +345,12 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
   } catch {
     /* device exists — treat as no secondaries */
   }
-  res.status(200).json({ ...serializeDevice(updated), plugins, ips });
+  const updatedSiteNames = await siteNamesFor([updated]);
+  res.status(200).json({
+    ...serializeDevice(updated, updatedSiteNames.get(updated.siteId ?? '') ?? null),
+    plugins,
+    ips,
+  });
 });
 
 // --- Device IP addresses (primary = managementAddress, secondaries here) --

@@ -31,7 +31,7 @@ export default function Devices() {
   const [originalSecondaryIps, setOriginalSecondaryIps] = useState<{ id: string; address: string }[]>([]);
 
   // Device identity fields (shared between create and edit modes).
-  const emptyIdentity = { name: '', vendor: '', deviceType: 'firewall', managementAddress: '', site: '' };
+  const emptyIdentity = { name: '', vendor: '', deviceType: 'firewall', managementAddress: '', siteId: '' };
   const [identity, setIdentity] = useState(emptyIdentity);
 
   // Secondary IPs (creation list or existing secondaries in edit mode).
@@ -45,6 +45,8 @@ export default function Devices() {
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
   const secretsQuery = useQuery({ queryKey: ['secrets'], queryFn: api.secrets });
+  // Site picker options (the Sites page owns creation; this is read-only here).
+  const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: api.sites });
 
   const createDevice = useMutation({
     mutationFn: (body: DeviceCreateRequest) => api.createDevice(body),
@@ -60,7 +62,7 @@ export default function Devices() {
         vendor: identity.vendor,
         deviceType: identity.deviceType.trim() || 'firewall',
         managementAddress: identity.managementAddress.trim(),
-        site: identity.site.trim() || null,
+        siteId: identity.siteId || null,
       });
       // Diff secondary IPs: add new, remove deleted.
       const toAdd = additionalIps.filter((ip) => !originalSecondaryIps.some((o) => o.address === ip));
@@ -115,7 +117,12 @@ export default function Devices() {
     if (editingId) {
       updateDevice.mutate(assignments);
     } else {
-      createDevice.mutate({ ...identity, ips: additionalIps.length > 0 ? additionalIps : undefined, plugins: assignments });
+      createDevice.mutate({
+        ...identity,
+        siteId: identity.siteId || null,
+        ips: additionalIps.length > 0 ? additionalIps : undefined,
+        plugins: assignments,
+      });
     }
   }
 
@@ -140,7 +147,7 @@ export default function Devices() {
       vendor: device.vendor,
       deviceType: device.deviceType,
       managementAddress: device.managementAddress,
-      site: device.site ?? '',
+      siteId: device.siteId ?? '',
     });
     const secondaries = (device.ips ?? []).filter((ip) => !ip.isPrimary);
     setAdditionalIps(secondaries.map((s) => s.address));
@@ -159,7 +166,7 @@ export default function Devices() {
     { header: 'Name', key: 'name' },
     { header: 'Vendor', key: 'vendor' },
     { header: 'Type', key: 'deviceType' },
-    { header: 'Site', key: 'site', render: (row) => row.site ?? '—' },
+    { header: 'Site', key: 'siteName', render: (row) => row.siteName ?? <span className="text-slate-400">—</span> },
     {
       header: 'IP',
       key: 'managementAddress',
@@ -329,11 +336,19 @@ export default function Devices() {
           </div>
           <div>
             <label className="mb-1 block text-sm font-medium text-slate-700">Site</label>
-            <input
+            <select
               className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-              value={identity.site}
-              onChange={(e) => setIdentity({ ...identity, site: e.target.value })}
-            />
+              value={identity.siteId}
+              onChange={(e) => setIdentity({ ...identity, siteId: e.target.value })}
+            >
+              <option value="">— unassigned —</option>
+              {(sitesQuery.data ?? []).map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                  {s.country ? ` (${s.country})` : ''}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div className="col-span-full">

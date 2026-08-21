@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { eq, isNull } from 'drizzle-orm';
 import { generateSecret, buildOtpAuthUri } from './auth/totp';
+import { ADMIN_PERMISSIONS } from './auth/permissions';
 import * as schema from './db/schema';
 
 const DEFAULT_DATABASE_URL = 'postgresql://' + 'unm' + ':' + 'unm' + '@localhost:5432/unm';
@@ -87,6 +88,22 @@ export async function initDb(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_device_ips_device
       ON device_ips ("deviceId")`);
 
+  // Sites: first-class site objects; devices reference one via siteId.
+  // Replaces the legacy free-text `devices.site` column (see backfillDeviceSites).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sites (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      address TEXT,
+      country TEXT,
+      timezone TEXT,
+      "createdAt" TEXT NOT NULL
+    )`);
+  await pool.query(
+    `ALTER TABLE devices ADD COLUMN IF NOT EXISTS "siteId" TEXT`
+  );
+
   // Attribute telemetry + config jobs to the plugin that produced/executed them.
   await pool.query(
     `ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS "pluginId" TEXT`
@@ -118,15 +135,7 @@ export async function initDb(): Promise<void> {
     passwordHash,
     totpSecret,
     roles: JSON.stringify(['admin']),
-    permissions: JSON.stringify([
-      'devices:read',
-      'devices:write',
-      'configs:apply',
-      'plugins:manage',
-      'secrets:read',
-      'secrets:write',
-      'secrets:delete',
-    ]),
+    permissions: JSON.stringify(ADMIN_PERMISSIONS),
     createdAt: new Date().toISOString(),
   });
 
@@ -136,6 +145,72 @@ export async function initDb(): Promise<void> {
   console.log(`[db] admin TOTP secret (dev only): ${totpSecret}`);
   // eslint-disable-next-line no-console
   console.log(`[db] admin otpauth URI (scan with an authenticator app): ${buildOtpAuthUri('admin', totpSecret)}`);
+}
+
+/**
+ * Idempotent backfill: users whose roles include `admin` get every permission
+ * from the canonical catalog. Needed because the admin seed only runs when no
+ * admin exists — dev databases created before new permissions were added would
+ * otherwise lack them (e.g. sites:write, users:read/write).
+ */
+export async function backfillAdminPermissions(): Promise<void> {
+  const users = await db.query.users.findMany();
+  for (const user of users) {
+    let roles: string[] = [];
+    try {
+      roles = JSON.parse(user.roles);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(roles) || !roles.includes('admin')) continue;
+
+    let perms: string[] = [];
+    try {
+      perms = JSON.parse(user.permissions);
+    } catch {
+      /* treat as empty */
+    }
+    const missing = ADMIN_PERMISSIONS.filter((p) => !(Array.isArray(perms) && perms.includes(p)));
+    if (missing.length === 0) continue;
+
+    await db
+      .update(schema.users)
+      .set({ permissions: JSON.stringify([...(Array.isArray(perms) ? perms : []), ...missing]) })
+      .where(eq(schema.users.id, user.id));
+    // eslint-disable-next-line no-console
+    console.log(`[db] backfilled ${missing.length} permission(s) for admin user "${user.username}"`);
+  }
+}
+
+/**
+ * One-time migration from the legacy free-text `devices.site` column to the
+ * sites table: each distinct non-empty site text becomes a Site row (named by
+ * that text), devices are re-pointed at it, and the legacy column is dropped.
+ * Idempotent — no-ops once the `site` column is gone.
+ */
+export async function backfillDeviceSites(): Promise<void> {
+  const hasSiteCol = await pool.query(
+    `SELECT 1 FROM information_schema.columns WHERE table_name = 'devices' AND column_name = 'site'`
+  );
+  if ((hasSiteCol.rowCount ?? 0) === 0) return;
+
+  const distinct = await pool.query(
+    `SELECT DISTINCT "site" AS s FROM devices WHERE "site" IS NOT NULL AND btrim("site") <> ''`
+  );
+  const now = new Date().toISOString();
+  for (const { s } of distinct.rows as Array<{ s: string }>) {
+    const name = String(s).trim();
+    let siteId = (await db.query.sites.findFirst({ where: eq(schema.sites.name, name) }))?.id;
+    if (!siteId) {
+      siteId = uuidv4();
+      await db.insert(schema.sites).values({ id: siteId, name, createdAt: now });
+    }
+    await pool.query(`UPDATE devices SET "siteId" = $1 WHERE btrim("site") = $2`, [siteId, String(s)]);
+  }
+
+  await pool.query(`ALTER TABLE devices DROP COLUMN IF EXISTS "site"`);
+  // eslint-disable-next-line no-console
+  console.log('[db] migrated legacy devices.site text values into sites and dropped the column');
 }
 
 /**

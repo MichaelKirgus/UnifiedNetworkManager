@@ -4,11 +4,13 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import * as OpenApiValidator from 'express-openapi-validator';
 import { loadOpenApiSpec, resolveOpenApiPath } from './openapi';
-import { initDb, backfillSecrets } from './db';
+import { initDb, backfillSecrets, backfillAdminPermissions, backfillDeviceSites } from './db';
 import authRouter from './routes/auth';
 import devicesRouter from './routes/devices';
 import pluginsRouter from './routes/plugins';
 import secretsRouter from './routes/secrets';
+import sitesRouter from './routes/sites';
+import usersRouter from './routes/users';
 import { internalRouter } from './routes/internal';
 import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import { startTelemetryWorker } from './workers/telemetry';
@@ -39,6 +41,8 @@ const authLimiter = rateLimit({
 
 async function main(): Promise<void> {
   await initDb();
+  await backfillAdminPermissions();
+  await backfillDeviceSites();
   await backfillSecrets();
 
   const spec = loadOpenApiSpec();
@@ -74,6 +78,8 @@ async function main(): Promise<void> {
   api.use(devicesRouter);
   api.use(pluginsRouter);
   api.use('/secrets', secretsRouter);
+  api.use(sitesRouter);
+  api.use(usersRouter);
   api.use(configJobsRouter);
 
   // OpenAPI validation error handler.

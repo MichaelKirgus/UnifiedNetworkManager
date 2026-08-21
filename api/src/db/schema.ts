@@ -11,13 +11,28 @@ export const users = pgTable('users', {
   createdAt: text('createdAt').notNull(),
 });
 
+// Sites are first-class objects (name + description + address/country/timezone)
+// that devices reference via `devices.siteId`. Replaces the old free-text
+// `site` column — see backfillDeviceSites() in db.ts for the one-time migration.
+export const sites = pgTable('sites', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  description: text('description'),
+  address: text('address'),
+  country: text('country'),
+  // IANA timezone identifier (e.g. "Europe/Berlin"), validated server-side.
+  timezone: text('timezone'),
+  createdAt: text('createdAt').notNull(),
+});
+
 export const devices = pgTable('devices', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
   vendor: text('vendor').notNull(),
   deviceType: text('deviceType').notNull(),
   managementAddress: text('managementAddress').notNull(),
-  site: text('site'),
+  // Reference to the site this device lives at (NULL = unassigned).
+  siteId: text('siteId'),
   status: text('status').notNull().default('unknown'),
   createdAt: text('createdAt').notNull(),
 });

@@ -6,6 +6,8 @@ import DeviceDetail from './pages/DeviceDetail';
 import Secrets from './pages/Secrets';
 import ConfigJobs from './pages/ConfigJobs';
 import Plugins from './pages/Plugins';
+import Sites from './pages/Sites';
+import Users from './pages/Users';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const token = localStorage.getItem('accessToken');
@@ -56,6 +58,22 @@ export default function App() {
         element={
           <RequireAuth>
             <Plugins />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/sites"
+        element={
+          <RequireAuth>
+            <Sites />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/users"
+        element={
+          <RequireAuth>
+            <Users />
           </RequireAuth>
         }
       />

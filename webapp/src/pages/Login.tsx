@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, ArrowRight, ExternalLink, Loader2, ShieldCheck } from 'lucide-react';
 import { api } from '../api/client';
+import { setPermissions } from '../auth/permissions';
 
 type Flow = 'password' | 'oauth2' | 'ldap' | 'saml' | 'unknown';
 
@@ -77,6 +78,7 @@ export default function Login() {
     try {
       const res = await api.verify2fa({ challengeToken, totpCode });
       localStorage.setItem('accessToken', res.accessToken);
+      setPermissions(res.permissions ?? []);
       navigate('/devices');
     } catch (err) {
       setError((err as Error).message);

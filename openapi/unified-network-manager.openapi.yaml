@@ -144,8 +144,8 @@ paths:
           name: vendor
           schema: { type: string }
         - in: query
-          name: site
-          schema: { type: string }
+          name: siteId
+          schema: { type: string, description: "Filter by the device's assigned site" }
       responses:
         '200':
           description: Device list
@@ -186,12 +186,12 @@ paths:
   /devices/{deviceId}:
     patch:
       tags: [Devices]
-      summary: Update a device (rename, change management address, ...)
+      summary: Update a device (rename, change management address or site, ...)
       description: >-
         Updates the identity fields of an existing device. Only the provided
         fields are changed; plugin assignments and their settings are managed
-        via the /devices/{deviceId}/plugins endpoints. `site` may be set to
-        null to clear it.
+        via the /devices/{deviceId}/plugins endpoints. `siteId` may be set to
+        null to unassign the site.
       parameters:
         - in: path
           name: deviceId
@@ -209,8 +209,8 @@ paths:
                 vendor: { type: string, minLength: 1 }
                 deviceType: { type: string, minLength: 1 }
                 managementAddress: { type: string, minLength: 1 }
-                # null clears the site (OpenAPI 3.1 / JSON Schema type array).
-                site: { type: [string, 'null'] }
+                # null unassigns the site (OpenAPI 3.1 / JSON Schema type array).
+                siteId: { type: [string, 'null'] }
       responses:
         '200':
           description: Updated device (with its plugin assignments)
@@ -965,6 +965,193 @@ paths:
         '404':
           description: Secret not found
 
+  /sites:
+    get:
+      tags: [Sites]
+      summary: List all sites
+      responses:
+        '200':
+          description: Site list (sorted by name)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Site'
+        '401':
+          description: Authentication required
+    post:
+      tags: [Sites]
+      summary: Create a site
+      description: Requires permission `sites:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SiteCreateRequest'
+      responses:
+        '201':
+          description: Site created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Site'
+        '400':
+          description: Invalid payload (missing name or bad timezone)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing sites:write permission
+
+  /sites/{id}:
+    patch:
+      tags: [Sites]
+      summary: Update a site
+      description: Requires permission `sites:write`. Only the provided fields are changed.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SiteUpdateRequest'
+      responses:
+        '200':
+          description: Updated site
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Site'
+        '400':
+          description: No updatable fields provided or a field is invalid
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing sites:write permission
+        '404':
+          description: Site not found
+    delete:
+      tags: [Sites]
+      summary: Delete a site
+      description: >-
+        Requires permission `sites:write`. Refused with 409 while any device
+        still references the site.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Site deleted
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing sites:write permission
+        '404':
+          description: Site not found
+        '409':
+          description: Devices still reference this site
+
+  /users:
+    get:
+      tags: [Users]
+      summary: List all users
+      description: Requires permission `users:read`. Never exposes password hashes or TOTP secrets.
+      responses:
+        '200':
+          description: User list (sorted by username)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing users:read permission
+
+  /users/{id}:
+    patch:
+      tags: [Users]
+      summary: Update a user's roles and permissions
+      description: >-
+        Requires permission `users:write`. Only the provided fields are changed.
+        Refused with 409 when it would remove the admin role from the last admin.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdateRequest'
+      responses:
+        '200':
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: No updatable fields provided or a field is invalid
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing users:write permission
+        '404':
+          description: User not found
+        '409':
+          description: Would remove the last admin
+    delete:
+      tags: [Users]
+      summary: Delete a user
+      description: >-
+        Requires permission `users:write`. Refused with 409 for self-delete or
+        when deleting the last admin.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: User deleted
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing users:write permission
+        '404':
+          description: User not found
+        '409':
+          description: Self-delete or last admin
+
+  /permissions:
+    get:
+      tags: [Users]
+      summary: Permission catalog
+      description: >-
+        The canonical list of permission ids (with descriptions) and known
+        roles. Drives the role/permission checkboxes on the Users page.
+      responses:
+        '200':
+          description: Permission catalog
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermissionCatalog'
+        '401':
+          description: Authentication required
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1091,7 +1278,8 @@ components:
         vendor: { type: string }
         deviceType: { type: string }
         managementAddress: { type: string }
-        site: { type: string }
+        siteId: { type: [string, 'null'], description: "Assigned site (null = unassigned)" }
+        siteName: { type: [string, 'null'], description: "Display name of the assigned site" }
         status:
           type: string
           enum: [online, degraded, offline, unknown]
@@ -1120,7 +1308,7 @@ components:
         vendor: { type: string }
         deviceType: { type: string }
         managementAddress: { type: string, description: "Primary address — IPv4, IPv6 literal, or DNS name (no scheme)" }
-        site: { type: string }
+        siteId: { type: [string, 'null'], description: "Optional assigned site" }
         # Optional secondary IPs registered at creation time.
         ips:
           type: array
@@ -1132,6 +1320,79 @@ components:
           minItems: 1
           items:
             $ref: '#/components/schemas/DevicePluginAssignmentInput'
+
+    Site:
+      type: object
+      required: [id, name, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: [string, 'null'] }
+        address: { type: [string, 'null'], description: "Free-form street/city address" }
+        country: { type: [string, 'null'] }
+        timezone: { type: [string, 'null'], description: "IANA timezone identifier (e.g. Europe/Berlin)" }
+        createdAt: { type: string, format: date-time }
+
+    SiteCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1 }
+        description: { type: string }
+        address: { type: string }
+        country: { type: string }
+        timezone: { type: string, description: "IANA timezone identifier (e.g. Europe/Berlin)" }
+
+    SiteUpdateRequest:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1 }
+        description: { type: [string, 'null'] }
+        address: { type: [string, 'null'] }
+        country: { type: [string, 'null'] }
+        timezone: { type: [string, 'null'] }
+
+    User:
+      type: object
+      required: [id, username, roles, permissions, createdAt]
+      properties:
+        id: { type: string }
+        username: { type: string }
+        roles:
+          type: array
+          items: { type: string }
+        permissions:
+          type: array
+          items: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    UserUpdateRequest:
+      type: object
+      minProperties: 1
+      properties:
+        roles:
+          type: array
+          items: { type: string }
+        permissions:
+          type: array
+          items: { type: string }
+
+    PermissionCatalog:
+      type: object
+      required: [permissions, roles]
+      properties:
+        permissions:
+          type: array
+          items:
+            type: object
+            required: [id, description]
+            properties:
+              id: { type: string }
+              description: { type: string }
+        roles:
+          type: array
+          items: { type: string }
 
     # One plugin's monitoring snapshot for a device (a device can have several).
     PluginTelemetrySnapshot:
