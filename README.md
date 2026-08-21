@@ -64,30 +64,30 @@ The `plugins/snmp/` service collects data over **SNMPv1/v2c and SNMPv3 (USM)** u
 
 ## Multi-instance plugins (remote sites)
 
-Every plugin supports running **multiple instances of the same type** — e.g. one ping or SNMP plugin at each remote site, all reporting into a single UnifiedNetworkManager instance. Each instance registers as its own plugin row and can be assigned to devices independently.
+Every plugin supports running **multiple instances of the same type** — e.g. one ICMP or SNMP plugin at each remote site, all reporting into a single UnifiedNetworkManager instance. Each instance registers as its own plugin row and can be assigned to devices independently.
 
 Two optional environment variables control this:
 
 | Variable | Effect |
 |----------|--------|
 | `PLUGIN_INSTANCE_ID` (e.g. `site-a`) | Makes the advertised identity unique (`<plugin-uuid>:site-a`). Without it, two instances of the same plugin type would collide into one registration. |
-| `PLUGIN_DISPLAY_NAME` (optional) | Overrides the displayed name. If unset, the instance id is appended automatically: `Ping Plugin (site-a)`. |
+| `PLUGIN_DISPLAY_NAME` (optional) | Overrides the displayed name. If unset, the instance id is appended automatically: `ICMP Plugin (site-a)`. |
 
 With neither set, behavior is exactly as before — single-instance deployments are unaffected.
 
-**Example** (`docker-compose.yml`) — a second ping plugin for site A:
+**Example** (`docker-compose.yml`) — a second ICMP plugin for site A:
 
 ```yaml
-  ping-site-a:
+  icmp-site-a:
     build:
-      context: ./plugins/ping
+      context: ./plugins/icmp
     ports:
       - "4010:4004"
     environment:
       - PORT=4004
-      - ADVERTISED_ENDPOINT=http://ping-site-a:4010   # must be unique per instance
+      - ADVERTISED_ENDPOINT=http://icmp-site-a:4010   # must be unique per instance
       - PLUGIN_INSTANCE_ID=site-a                     # required for multi-instance
-      # - PLUGIN_DISPLAY_NAME=HQ Ping                 # optional display name
+      # - PLUGIN_DISPLAY_NAME=HQ ICMP                 # optional display name
     restart: unless-stopped
 ```
 
@@ -95,7 +95,7 @@ Also append the new endpoint to the API's `PLUGIN_POLL_ENDPOINTS` list (or rely 
 
 Notes:
 - Each instance needs a unique `ADVERTISED_ENDPOINT` (different container name or published port) — that's how the API routes telemetry to the right one.
-- Settings are per-instance: configuring "Ping Plugin (site-a)" does not affect "Ping Plugin".
+- Settings are per-instance: configuring "ICMP Plugin (site-a)" does not affect "ICMP Plugin".
 - If you change an instance's id/name, restart it; the old registration simply goes offline like any stopped plugin.
 
 ## Next implementation steps

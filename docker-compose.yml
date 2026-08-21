@@ -35,7 +35,7 @@ services:
       - SECRETS_PLUGIN_ID=${SECRETS_PLUGIN_ID:-00000000-0000-4000-8000-000000000002}
       # Poll these plugin endpoints for discovery (mDNS is often isolated on
       # Docker bridge networks). Ensures the provider plugins are registered.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://ping-plugin:4004,http://snmp-plugin:4005}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005}
     depends_on:
       - postgres
     restart: unless-stopped
@@ -56,37 +56,37 @@ services:
       - OPNSENSE_SECRET=${OPNSENSE_SECRET:-}
     restart: unless-stopped
 
-  # Ping plugin: ICMP reachability / latency metrics plus IP+MAC inventory,
-  # measured from inside its own container via system ping. No credentials
-  # needed — it pings whatever host the device's settings point at.
-  ping-plugin:
+  # ICMP plugin: reachability / latency metrics plus IP+MAC inventory,
+  # measured from inside its own container via system ping (ICMP echo). No
+  # credentials needed — it probes whatever host the device's settings point at.
+  icmp-plugin:
     build:
-      context: ./plugins/ping
+      context: ./plugins/icmp
     ports:
       - "4004:4004"
     environment:
       - PORT=4004
       # Endpoint the API (in its own container) uses to reach this plugin.
-      - ADVERTISED_ENDPOINT=http://ping-plugin:4004
+      - ADVERTISED_ENDPOINT=http://icmp-plugin:4004
     restart: unless-stopped
 
   # ── Multi-instance example ────────────────────────────────────────────────
   # Every plugin supports running multiple instances of the same type (e.g. one
-  # ping plugin per remote site). Each instance needs a unique
+  # ICMP plugin per remote site). Each instance needs a unique
   # PLUGIN_INSTANCE_ID and its own ADVERTISED_ENDPOINT; it then registers as a
-  # separate plugin ("Ping Plugin (site-a)") that can be assigned independently.
+  # separate plugin ("ICMP Plugin (site-a)") that can be assigned independently.
   # PLUGIN_DISPLAY_NAME optionally overrides the auto-generated name.
   # Also append the endpoint to the api service's PLUGIN_POLL_ENDPOINTS list.
-  # ping-site-a:
+  # icmp-site-a:
   #   build:
-  #     context: ./plugins/ping
+  #     context: ./plugins/icmp
   #   ports:
   #     - "4010:4004"
   #   environment:
   #     - PORT=4004
-  #     - ADVERTISED_ENDPOINT=http://ping-site-a:4010
+  #     - ADVERTISED_ENDPOINT=http://icmp-site-a:4010
   #     - PLUGIN_INSTANCE_ID=site-a
-  #     # - PLUGIN_DISPLAY_NAME=HQ Ping
+  #     # - PLUGIN_DISPLAY_NAME=HQ ICMP
   #   restart: unless-stopped
 
   # SNMP plugin: SNMPv1/v2c monitoring (system group + interface throughput)

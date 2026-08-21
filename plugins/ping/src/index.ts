@@ -1,18 +1,18 @@
 import express from 'express';
 import cors from 'cors';
 import { Bonjour } from 'bonjour-service';
-import { pingHost, PingResult } from './pinger';
+import { pingHost, PingResult } from './icmpping';
 import { collectInventory, TargetInventory } from './inventory';
 
 export const PLUGIN_UUID = 'c9d5e7f8-2a3b-4c5d-8e6f-0a1b2c3d4e5f';
-export const PLUGIN_NAME = 'Ping Plugin';
+export const PLUGIN_NAME = 'ICMP Plugin';
 
 /**
  * Multi-instance support: set `PLUGIN_INSTANCE_ID` (e.g. "site-a") to run several
  * instances of the same plugin type — each advertises a distinct identity
  * (`<uuid>:<instanceId>`) so the API registers them as separate plugins.
  * `PLUGIN_DISPLAY_NAME` optionally overrides the advertised name; without it,
- * the instance id is appended: "Ping Plugin (site-a)". Unset = single-instance behavior.
+ * the instance id is appended: "ICMP Plugin (site-a)". Unset = single-instance behavior.
  */
 const INSTANCE_ID = process.env.PLUGIN_INSTANCE_ID?.trim() ?? '';
 export const EFFECTIVE_UUID = INSTANCE_ID ? `${PLUGIN_UUID}:${INSTANCE_ID}` : PLUGIN_UUID;
@@ -48,7 +48,7 @@ const METRIC_DESCRIPTORS = [
     format: 'number' as const,
     type: 'number' as const,
     visualization: 'plot' as const,
-    group: 'Ping',
+    group: 'ICMP',
     color: '#3b82f6',
     summary: true, // headline metric in the device overview table
   },
@@ -59,7 +59,7 @@ const METRIC_DESCRIPTORS = [
     format: 'number' as const,
     type: 'number' as const,
     visualization: 'gauge' as const,
-    group: 'Ping',
+    group: 'ICMP',
     min: 0,
     max: 100,
     color: '#ef4444',
@@ -71,18 +71,18 @@ const METRIC_DESCRIPTORS = [
     format: 'number' as const,
     type: 'number' as const,
     visualization: 'text' as const,
-    group: 'Ping',
+    group: 'ICMP',
   },
   {
     key: 'ping.reachable',
     label: 'Reachable',
     type: 'boolean' as const,
     visualization: 'text' as const,
-    group: 'Ping',
+    group: 'ICMP',
   },
   {
     key: 'inventory.target',
-    label: 'Pinged target',
+    label: 'Target host',
     type: 'string' as const,
     visualization: 'text' as const,
     group: 'Inventory',
@@ -111,17 +111,17 @@ const METRIC_DESCRIPTORS = [
 const PLUGIN_OPTIONS = [
   {
     key: 'pingHost',
-    label: 'Ping host override',
+    label: 'Target host override',
     type: 'string' as const,
     // Characters valid in hostnames / IPv4 / IPv6 literals (incl. brackets).
     pattern: '^[a-zA-Z0-9._:\\-\\[\\]]+$',
     maxLength: 253,
     description:
-      'Optional hostname or IP to ping instead of the device\'s primary IP — e.g. a secondary interface when the management one is on a different network. Leave empty to ping the primary IP.',
+      "Optional hostname or IP to probe with ICMP echo instead of the device's primary IP — e.g. a secondary interface when the management one is on a different network. Leave empty to use the primary IP.",
   },
   {
     key: 'pingCount',
-    label: 'Ping count',
+    label: 'Echo request count',
     type: 'integer' as const,
     default: 4,
     min: 1,
@@ -304,15 +304,15 @@ function startMdnsAdvertising(): void {
       },
     });
     // eslint-disable-next-line no-console
-    console.log(`[ping-plugin] advertising via mDNS as "${DISPLAY_NAME}" (${EFFECTIVE_UUID})`);
+        console.log(`[icmp-plugin] advertising via mDNS as "${DISPLAY_NAME}" (${EFFECTIVE_UUID})`);
   } catch (err) {
     // eslint-disable-next-line no-console
-    console.warn('[ping-plugin] mDNS advertising unavailable, falling back to polling discovery only:', (err as Error).message);
+      console.warn('[icmp-plugin] mDNS advertising unavailable, falling back to polling discovery only:', (err as Error).message);
   }
 }
 
 app.listen(PORT, () => {
   // eslint-disable-next-line no-console
-  console.log(`[ping-plugin] listening on port ${PORT}`);
+  console.log(`[icmp-plugin] listening on port ${PORT}`);
   startMdnsAdvertising();
 });

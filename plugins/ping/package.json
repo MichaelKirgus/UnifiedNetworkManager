@@ -1,8 +1,8 @@
 {
-  "name": "unm-plugin-ping",
+  "name": "unm-plugin-icmp",
   "version": "0.1.0",
   "private": true,
-  "description": "UnifiedNetworkManager plugin: ICMP reachability + latency metrics and IP/MAC inventory via system ping.",
+  "description": "UnifiedNetworkManager plugin: ICMP echo reachability + latency metrics and IP/MAC inventory.",
   "main": "dist/src/index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn src/index.ts",
