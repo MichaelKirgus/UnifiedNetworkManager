@@ -16,6 +16,18 @@ import {
 
 export const PLUGIN_UUID = 'b0e6c8a2-4f1e-4a3d-9c7b-1a2b3c4d5e6f';
 export const PLUGIN_NAME = 'OPNsense Plugin';
+
+/**
+ * Multi-instance support: set `PLUGIN_INSTANCE_ID` (e.g. "site-a") to run several
+ * instances of the same plugin type — each advertises a distinct identity
+ * (`<uuid>:<instanceId>`) so the API registers them as separate plugins.
+ * `PLUGIN_DISPLAY_NAME` optionally overrides the advertised name; without it,
+ * the instance id is appended: "OPNsense Plugin (site-a)". Unset = single-instance behavior.
+ */
+const INSTANCE_ID = process.env.PLUGIN_INSTANCE_ID?.trim() ?? '';
+export const EFFECTIVE_UUID = INSTANCE_ID ? `${PLUGIN_UUID}:${INSTANCE_ID}` : PLUGIN_UUID;
+export const DISPLAY_NAME =
+  process.env.PLUGIN_DISPLAY_NAME?.trim() || (INSTANCE_ID ? `${PLUGIN_NAME} (${INSTANCE_ID})` : PLUGIN_NAME);
 export const PLUGIN_VERSION = '0.1.0';
 export const PLUGIN_VENDORS = ['opnsense'];
 export const PLUGIN_CAPABILITIES = ['monitoring', 'configuration', 'inventory'];
@@ -373,8 +385,8 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
  */
 app.get('/discover', (_req, res) => {
   res.status(200).json({
-    uuid: PLUGIN_UUID,
-    name: PLUGIN_NAME,
+    uuid: EFFECTIVE_UUID,
+    name: DISPLAY_NAME,
     version: PLUGIN_VERSION,
     vendors: PLUGIN_VENDORS,
     capabilities: PLUGIN_CAPABILITIES,
@@ -704,12 +716,12 @@ function startMdnsAdvertising(): void {
   try {
     const bonjour = new Bonjour();
     bonjour.publish({
-      name: PLUGIN_NAME,
+      name: DISPLAY_NAME,
       type: 'unm-plugin',
       port: PORT,
       txt: {
-        uuid: PLUGIN_UUID,
-        name: PLUGIN_NAME,
+        uuid: EFFECTIVE_UUID,
+        name: DISPLAY_NAME,
         version: PLUGIN_VERSION,
         vendors: PLUGIN_VENDORS.join(','),
         capabilities: PLUGIN_CAPABILITIES.join(','),
@@ -718,7 +730,7 @@ function startMdnsAdvertising(): void {
       },
     });
     // eslint-disable-next-line no-console
-    console.log(`[opnsense-plugin] advertising via mDNS as "${PLUGIN_NAME}" (${PLUGIN_UUID})`);
+    console.log(`[opnsense-plugin] advertising via mDNS as "${DISPLAY_NAME}" (${EFFECTIVE_UUID})`);
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn('[opnsense-plugin] mDNS advertising unavailable, falling back to polling discovery only:', (err as Error).message);

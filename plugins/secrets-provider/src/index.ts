@@ -6,6 +6,18 @@ import { storeSecret, listSecrets, getSecret, deleteSecret } from './apiClient';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000002';
 export const PLUGIN_NAME = 'Secrets Provider (Device Credentials)';
+
+/**
+ * Multi-instance support: set `PLUGIN_INSTANCE_ID` (e.g. "site-a") to run several
+ * instances of the same plugin type — each advertises a distinct identity
+ * (`<uuid>:<instanceId>`) so the API registers them as separate plugins.
+ * `PLUGIN_DISPLAY_NAME` optionally overrides the advertised name; without it,
+ * the instance id is appended. Unset = single-instance behavior.
+ */
+const INSTANCE_ID = process.env.PLUGIN_INSTANCE_ID?.trim() ?? '';
+export const EFFECTIVE_UUID = INSTANCE_ID ? `${PLUGIN_UUID}:${INSTANCE_ID}` : PLUGIN_UUID;
+export const DISPLAY_NAME =
+  process.env.PLUGIN_DISPLAY_NAME?.trim() || (INSTANCE_ID ? `${PLUGIN_NAME} (${INSTANCE_ID})` : PLUGIN_NAME);
 export const PLUGIN_VERSION = '0.1.0';
 export const PLUGIN_VENDORS = ['unm'];
 export const PLUGIN_CAPABILITIES = ['secretsProvider'];
@@ -92,8 +104,8 @@ app.get('/healthz', (_req, res) => {
  */
 app.get('/discover', (_req, res) => {
   res.status(200).json({
-    uuid: PLUGIN_UUID,
-    name: PLUGIN_NAME,
+    uuid: EFFECTIVE_UUID,
+    name: DISPLAY_NAME,
     version: PLUGIN_VERSION,
     vendors: PLUGIN_VENDORS,
     capabilities: PLUGIN_CAPABILITIES,
@@ -127,7 +139,7 @@ app.post('/secrets', requirePluginKey, async (req, res) => {
     const encryptedValue = encrypt(JSON.stringify(fields));
     const record = await storeSecret({
       type,
-      providerId: PLUGIN_UUID,
+      providerId: EFFECTIVE_UUID,
       label: label ?? null,
       encryptedValue,
       userId,
@@ -192,12 +204,12 @@ function startMdnsAdvertising(): void {
   try {
     const bonjour = new Bonjour();
     bonjour.publish({
-      name: PLUGIN_NAME,
+      name: DISPLAY_NAME,
       type: 'unm-plugin',
       port: PORT,
       txt: {
-        uuid: PLUGIN_UUID,
-        name: PLUGIN_NAME,
+        uuid: EFFECTIVE_UUID,
+        name: DISPLAY_NAME,
         version: PLUGIN_VERSION,
         vendors: PLUGIN_VENDORS.join(','),
         capabilities: PLUGIN_CAPABILITIES.join(','),
@@ -206,7 +218,7 @@ function startMdnsAdvertising(): void {
       },
     });
     // eslint-disable-next-line no-console
-    console.log(`[secrets-provider] advertising via mDNS as "${PLUGIN_NAME}" (${PLUGIN_UUID})`);
+    console.log(`[secrets-provider] advertising via mDNS as "${DISPLAY_NAME}" (${EFFECTIVE_UUID})`);
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn('[secrets-provider] mDNS advertising unavailable:', (err as Error).message);
