@@ -59,13 +59,22 @@ const mock = http.createServer((req, res) => {
       return json(res, 200, { rows: [{ mac: 'aa:bb:cc:dd:ee:01', ip: '192.168.1.10', intf: 'lan' }] });
     case '/api/diagnostics/interface/search_ndp/':
       return json(res, 200, { rows: [] });
-    // Inventory collection (Networks page): interface config with IPs.
+    // Inventory collection (Networks page): the REAL recordset shape from
+    // searchRecordsetBase — assigned interfaces carry `config` + `identifier`,
+    // addresses are CIDR strings, VLAN tags ride on the row. Unassigned
+    // interfaces (no config) must NOT produce network rows.
     case '/api/interfaces/overview/interfaces_info':
       return json(res, 200, {
-        lan: { name: 'lan', mac: 'aa:bb:cc:dd:ee:ff', status: 'up', ipv4: { address: '192.168.1.1', subnet: 24 } },
-        wan: { name: 'wan', mac: 'aa:bb:cc:dd:ee:0f', status: 'up', ipv4: { address: '10.0.0.2', netmask: '255.255.255.0' } },
-        vlan100: { name: 'vlan100', mac: 'aa:bb:cc:dd:ee:10', status: 'up', ipv4: { address: '192.168.100.1', subnet: 24 } },
-        vmac0: { name: 'vmac0', mac: '', status: 'down' }, // no IP — topology-only row
+        total: 5,
+        rows: [
+          { identifier: 'lan', description: 'LAN', device: 'igb0', macaddr: 'aa:bb:cc:dd:ee:ff', status: 'up', ipv4: [{ ipaddr: '192.168.1.1/24' }], vlan_tag: null, config: { if: 'igb0', descr: 'LAN', enable: '1' } },
+          { identifier: 'wan', description: 'WAN', device: 'igc0', macaddr: 'aa:bb:cc:dd:ee:0f', status: 'up', ipv4: [{ ipaddr: '10.0.0.2/24' }], vlan_tag: null, config: { if: 'igc0', descr: 'WAN', enable: '1' } },
+          { identifier: 'opt1', description: 'Guests', device: 'vlan0.100', macaddr: 'aa:bb:cc:dd:ee:10', status: 'up', ipv4: [{ ipaddr: '192.168.100.1/24' }], vlan_tag: 100, config: { if: 'vlan0.100', descr: 'Guests', enable: '1' } },
+          // Legacy entry shape (older firmware): separate address + dotted netmask.
+          { name: 'legacy0', mac: 'aa:bb:cc:dd:ee:30', status: 'up', ipv4: { address: '172.16.5.1', netmask: '255.255.0.0' } },
+          // Unassigned physical interface — must be skipped by the parser.
+          { identifier: '', description: 'Unassigned Interface', device: 'igb1', macaddr: 'aa:bb:cc:dd:ee:20', status: 'down' },
+        ],
       });
     case '/api/interfaces/vlan_settings/get':
       return json(res, 200, [{ interface: 'igb0', vlanid: 100, description: 'guests' }]);
@@ -185,15 +194,18 @@ async function main(): Promise<void> {
 
   // --- /monitoring inventory (networks + dhcpLeases) ------------------------------------
   const networks = (monJson.metrics?.['networks'] ?? []) as Record<string, unknown>[];
-  check('networks collected', Array.isArray(networks) && networks.length >= 4, `count=${networks.length}`);
+  // lan + wan + opt1 (assigned recordset rows) + legacy0 (legacy shape).
+  // The unassigned interface must NOT produce a row.
+  check('networks collected (assigned interfaces only)', Array.isArray(networks) && networks.length === 4, `count=${networks.length}`);
   const lanRow = networks.find((r) => r.name === 'lan');
-  check('lan row has ip+prefix v4', lanRow?.ip === '192.168.1.1' && lanRow.prefix === 24 && lanRow.version === 'v4', lanRow);
+  check('lan row parsed from CIDR string', lanRow?.ip === '192.168.1.1' && lanRow.prefix === 24 && lanRow.version === 'v4', lanRow);
   const wanRow = networks.find((r) => r.name === 'wan');
-  check('wan netmask converted to prefix /24', wanRow?.ip === '10.0.0.2' && wanRow.prefix === 24, wanRow);
-  const vlanRow = networks.find((r) => r.name === 'vlan100');
-  check('vlan100 row carries vlanId 100', vlanRow?.vlanId === 100, vlanRow);
-  const noIpRow = networks.find((r) => r.name === 'vmac0');
-  check('interface without IP kept (ip null)', noIpRow !== undefined && noIpRow.ip === null, noIpRow);
+  check('wan row parsed from CIDR string', wanRow?.ip === '10.0.0.2' && wanRow.prefix === 24, wanRow);
+  const vlanRow = networks.find((r) => r.name === 'opt1');
+  check('vlan_tag carried as vlanId', vlanRow?.vlanId === 100, vlanRow);
+  const legacyRow = networks.find((r) => r.name === 'legacy0');
+  check('legacy shape (address+netmask) still parsed', legacyRow?.ip === '172.16.5.1' && legacyRow.prefix === 16, legacyRow);
+  check('unassigned interface produces no row', !networks.some((r) => r.mac === 'aa:bb:cc:dd:ee:20'), networks.map((r) => r.name));
 
   const leases = (monJson.metrics?.['dhcpLeases'] ?? []) as Record<string, unknown>[];
   check('dhcpLeases collected', Array.isArray(leases) && leases.length >= 1, `count=${leases.length}`);

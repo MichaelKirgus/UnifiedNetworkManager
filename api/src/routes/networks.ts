@@ -119,6 +119,66 @@ function mergeHostRows(rows: typeof schema.hosts.$inferSelect[]): MergedHost[] {
   });
 }
 
+/** One network as presented by GET /networks — possibly merged from several stored rows. */
+interface MergedNetwork {
+  deviceId: string;
+  pluginId: string;
+  name: string;
+  /** All addresses of this interface, IPv4 first (a dual-stack interface has both). */
+  cidrs: string[];
+  /** Address families present on the interface (e.g. ["v4","v6"] for dual-stack). */
+  versions: ('v4' | 'v6')[];
+  vlanId: number | null;
+  mac: string | null;
+  status: string | null;
+  collectedAt: string;
+}
+
+/**
+ * Merges stored network rows into one row per interface: an interface with a
+ * dual-stack assignment (IPv4 + IPv6) is stored as two rows (the PK includes
+ * the IP — topology detection needs that granularity), but it is ONE network.
+ * This merge only shapes the GET /networks response, mirroring mergeHostRows.
+ */
+function mergeNetworkRows(rows: typeof schema.networks.$inferSelect[]): MergedNetwork[] {
+  const groups = new Map<string, typeof rows>();
+  for (const r of rows) {
+    // Same interface on the same device + plugin instance = one network.
+    const key = `${r.deviceId}|${r.pluginId}|${r.name}`;
+    const list = groups.get(key);
+    if (list) list.push(r);
+    else groups.set(key, [r]);
+  }
+
+  return Array.from(groups.values()).map((group) => {
+    // IPv4 first, then IPv6 — the usual reading order for a dual-stack interface.
+    const cidrs = group
+      .filter((r) => r.ip !== '')
+      .map((r) => (r.prefix !== null ? `${r.ip}/${r.prefix}` : r.ip))
+      .sort((a, b) => {
+        const av = a.includes(':') ? 1 : 0;
+        const bv = b.includes(':') ? 1 : 0;
+        return av !== bv ? av - bv : a.localeCompare(b);
+      });
+    const versions: ('v4' | 'v6')[] = [];
+    for (const v of group.map((r) => r.version)) {
+      if ((v === 'v4' || v === 'v6') && !versions.includes(v)) versions.push(v);
+    }
+    return {
+      deviceId: group[0].deviceId,
+      pluginId: group[0].pluginId,
+      name: group[0].name,
+      cidrs,
+      versions,
+      vlanId: group.find((r) => r.vlanId !== null)?.vlanId ?? null,
+      mac: group.find((r) => r.mac)?.mac ?? null,
+      status: group.find((r) => r.status)?.status ?? null,
+      // Latest observation across the interface's rows (ISO strings compare lexicographically).
+      collectedAt: group.reduce((max, r) => (r.collectedAt > max ? r.collectedAt : max), group[0].collectedAt),
+    };
+  });
+}
+
 // GET /networks - All configured networks across devices.
 // Query params: deviceId (exact), siteId (filter by device's site).
 router.get('/networks', requireAuth, async (_req, res: Response) => {
@@ -151,29 +211,23 @@ router.get('/networks', requireAuth, async (_req, res: Response) => {
       orderBy: [asc(schema.networks.deviceId), asc(schema.networks.name)],
     });
 
+    // Merge per-address rows into one row per interface (dual-stack appears once).
+    const merged = mergeNetworkRows(rows);
+
     const [deviceViews, pluginNames] = await Promise.all([
-      loadDeviceViews(Array.from(new Set(rows.map((r) => r.deviceId)))),
-      loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId)))),
+      loadDeviceViews(Array.from(new Set(merged.map((m) => m.deviceId)))),
+      loadPluginNames(Array.from(new Set(merged.map((m) => m.pluginId)))),
     ]);
 
     res.status(200).json(
-      rows.map((r) => {
-        const device = deviceViews.get(r.deviceId);
+      merged.map((m) => {
+        const device = deviceViews.get(m.deviceId);
         return {
-          deviceId: r.deviceId,
+          ...m,
           deviceName: device?.name ?? null,
           managementAddress: device?.managementAddress ?? null,
           siteName: device?.siteName ?? null,
-          pluginId: r.pluginId,
-          pluginName: pluginNames.get(r.pluginId) ?? null,
-          name: r.name,
-          ip: r.ip || null,
-          prefix: r.prefix,
-          version: r.version,
-          vlanId: r.vlanId,
-          mac: r.mac,
-          status: r.status,
-          collectedAt: r.collectedAt,
+          pluginName: pluginNames.get(m.pluginId) ?? null,
         };
       })
     );

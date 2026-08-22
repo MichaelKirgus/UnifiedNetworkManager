@@ -113,13 +113,17 @@ function handleOpnsense(req, res, user, body) {
           { mac: 'aa:bb:cc:dd:ee:03', ip: 'fd00::50', intf: 'lan', manufacturer: '' },
         ],
       });
-    // Inventory collection (Networks page): interface config with IPs.
+    // Inventory collection (Networks page): the REAL recordset shape from
+    // searchRecordsetBase — assigned interfaces carry `config` + `identifier`,
+    // addresses are CIDR strings, VLAN tags ride on the row.
     case '/api/interfaces/overview/interfaces_info':
       return json(200, {
-        lan: { name: 'lan', mac: 'aa:bb:cc:dd:ee:ff', status: 'up', ipv4: { address: '192.168.1.1', subnet: 24 } },
-        wan: { name: 'wan', mac: 'aa:bb:cc:dd:ee:0f', status: 'up', ipv4: { address: '10.0.0.2', netmask: '255.255.255.0' } },
-        vlan100: { name: 'vlan100', mac: 'aa:bb:cc:dd:ee:10', status: 'up', ipv4: { address: '192.168.100.1', subnet: 24 } },
-        vmac0: { name: 'vmac0', mac: '', status: 'down' }, // no IP — topology-only row
+        total: 3,
+        rows: [
+          { identifier: 'lan', description: 'LAN', device: 'igb0', macaddr: 'aa:bb:cc:dd:ee:ff', status: 'up', ipv4: [{ ipaddr: '192.168.1.1/24' }], vlan_tag: null, config: { if: 'igb0', descr: 'LAN', enable: '1' } },
+          { identifier: 'wan', description: 'WAN', device: 'igc0', macaddr: 'aa:bb:cc:dd:ee:0f', status: 'up', ipv4: [{ ipaddr: '10.0.0.2/24' }], vlan_tag: null, config: { if: 'igc0', descr: 'WAN', enable: '1' } },
+          { identifier: 'opt1', description: 'Guests', device: 'vlan0.100', macaddr: 'aa:bb:cc:dd:ee:10', status: 'up', ipv4: [{ ipaddr: '192.168.100.1/24' }], vlan_tag: 100, config: { if: 'vlan0.100', descr: 'Guests', enable: '1' } },
+        ],
       });
     case '/api/interfaces/vlan_settings/get':
       return json(200, [

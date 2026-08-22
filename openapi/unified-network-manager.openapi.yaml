@@ -2253,9 +2253,18 @@ components:
         pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
         pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that produced this row" }
         name: { type: string, description: "Interface name on the device (e.g. lan, vlan100)" }
-        ip: { type: [string, 'null'], description: "IP address; null when the interface has no IP configured" }
-        prefix: { type: [integer, 'null'], description: "CIDR prefix length (IPv4 or IPv6)" }
-        version: { type: [string, 'null'], enum: [v4, v6], description: "Address family (v4 or v6)" }
+        # One row per interface: a dual-stack assignment (IPv4 + IPv6) is stored
+        # as two rows but merged here — both CIDRs appear in one network.
+        cidrs:
+          type: array
+          items: { type: string }
+          description: "All addresses of this interface with their prefix when known (e.g. 192.168.1.0/24, fd00::/64), IPv4 first; empty when the interface has no IP configured"
+        versions:
+          type: array
+          items:
+            type: string
+            enum: [v4, v6]
+          description: "Address families present on the interface (e.g. [v4, v6] for dual-stack)"
         vlanId: { type: [integer, 'null'], description: "VLAN id when the interface is a VLAN" }
         mac: { type: [string, 'null'] }
         status: { type: [string, 'null'] }

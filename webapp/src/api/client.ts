@@ -137,7 +137,9 @@ export interface SiteCreateRequest {
   longitude?: number | null;
 }
 
-/** One configured network row from the cross-device inventory view. */
+/** One configured network row from the cross-device inventory view.
+ * Rows for the same interface on one device+plugin are merged into a single
+ * row — a dual-stack interface appears once with both its IPv4 and IPv6 CIDRs. */
 export interface NetworkRow {
   deviceId: string;
   deviceName?: string | null;
@@ -148,10 +150,10 @@ export interface NetworkRow {
   pluginName?: string | null;
   /** Interface name on the device (e.g. lan, vlan100). */
   name: string;
-  /** IP address; null when the interface has no IP configured. */
-  ip?: string | null;
-  prefix?: number | null;
-  version?: 'v4' | 'v6' | null;
+  /** All addresses with their prefix when known (e.g. "192.168.1.0/24", "fd00::/64"), IPv4 first; empty when the interface has no IP. */
+  cidrs: string[];
+  /** Address families present on the interface (e.g. ["v4","v6"] for dual-stack). */
+  versions: ('v4' | 'v6')[];
   vlanId?: number | null;
   mac?: string | null;
   status?: string | null;

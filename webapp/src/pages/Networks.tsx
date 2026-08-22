@@ -17,11 +17,23 @@ function VersionBadge({ version }: { version?: string | null }) {
   );
 }
 
-/** CIDR cell: `ip/prefix` when both are known, bare IP otherwise. */
+/** CIDR cell: one chip per address (a dual-stack interface shows both), IPv6 tinted. */
 function CidrCell({ row }: { row: NetworkRow }) {
-  if (!row.ip) return <span className="text-slate-400">—</span>;
-  const cidr = row.prefix !== null && row.prefix !== undefined ? `${row.ip}/${row.prefix}` : row.ip;
-  return <span className="font-mono text-xs">{cidr}</span>;
+  if (!row.cidrs || row.cidrs.length === 0) return <span className="text-slate-400">—</span>;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {row.cidrs.map((cidr) => (
+        <span
+          key={cidr}
+          className={`rounded px-1.5 py-0.5 font-mono text-xs ${
+            cidr.includes(':') ? 'bg-purple-50 text-purple-700' : 'bg-slate-100 text-slate-700'
+          }`}
+        >
+          {cidr}
+        </span>
+      ))}
+    </div>
+  );
 }
 
 export default function Networks() {
@@ -68,8 +80,18 @@ export default function Networks() {
           <span className="text-slate-400">—</span>
         ),
     },
-    { header: 'CIDR', key: 'ip', width: 180, render: (row) => <CidrCell row={row} /> },
-    { header: 'Version', key: 'version', width: 90, render: (row) => <VersionBadge version={row.version} /> },
+    { header: 'CIDR', key: 'cidrs', width: 220, exportValue: (row) => row.cidrs.join(', '), render: (row) => <CidrCell row={row} /> },
+    {
+      header: 'Version',
+      key: 'versions',
+      width: 90,
+      exportValue: (row) => row.versions.join(','),
+      render: (row) => (
+        <span className="inline-flex gap-1">
+          {row.versions.length > 0 ? row.versions.map((v) => <VersionBadge key={v} version={v} />) : <VersionBadge version={null} />}
+        </span>
+      ),
+    },
     {
       header: 'MAC',
       key: 'mac',
@@ -109,7 +131,7 @@ export default function Networks() {
         <DataTable
           columns={columns}
           rows={networksQuery.data}
-          rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.name}|${row.ip ?? ''}`}
+          rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.name}`}
           storageKey="networks"
           searchPlaceholder="Search networks…"
           emptyMessage="No networks collected yet — assign a plugin (e.g. OPNsense) to a device and wait for the next poll."

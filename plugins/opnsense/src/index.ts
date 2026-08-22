@@ -136,65 +136,104 @@ const inventoryCache = new Map<string, InventorySnapshot>();
 
 /**
  * Normalizes one interface entry from `interfaces_info?details=true` into zero
- * or more network rows (one per configured IP address). OPNsense field names
- * vary by version, so several common shapes are accepted defensively; an
- * unrecognized shape yields a warning log and no row rather than a crash.
+ * or more network rows (one per configured IP address). OPNsense has no explicit
+ * "network" object — a network is IMPLICIT in an interface assignment's IP +
+ * prefix, so this converts each assigned address into a CIDR row.
+ *
+ * Two shape families are accepted defensively:
+ *   - recordset rows (the real /api/interfaces/overview/interfaces_info via
+ *     searchRecordsetBase): `identifier` (lan/wan/opt1), `macaddr`, `status`,
+ *     `vlan_tag`, and ipv4/ipv6 arrays of { ipaddr: "192.168.1.1/24" } entries.
+ *     Unassigned interfaces (no `config`) are skipped — they aren't networks.
+ *   - legacy shapes keyed by `name` with separate address/subnet/netmask fields.
  */
 function parseNetworkRows(raw: Record<string, unknown>): Record<string, unknown>[] {
   const rows: Record<string, unknown>[] = [];
-  const name = typeof raw['name'] === 'string' ? (raw['name'] as string) : undefined;
+
+  // Recordset rows carry a `config` object only when the interface is ASSIGNED,
+  // plus its logical identifier (lan/wan/opt1). Unassigned interfaces (no
+  // config, no identifier, no name) are not networks — they yield no row at
+  // all. Legacy shapes are keyed by `name`. The identifier wins over any other
+  // name field so rows stay joinable with ARP/NDP/DHCP interface names.
+  const hasConfig = raw['config'] !== undefined;
+  const id = typeof raw['identifier'] === 'string' ? (raw['identifier'] as string).trim() : '';
+  const legacyName = typeof raw['name'] === 'string' ? (raw['name'] as string).trim() : '';
+  if (!hasConfig && !id && !legacyName) return rows;
+
+  let name: string | undefined;
+  if (hasConfig || id !== '') {
+    const desc = typeof raw['description'] === 'string' ? (raw['description'] as string).trim() : '';
+    name = id || desc;
+  } else {
+    name = legacyName;
+  }
   if (!name) return rows;
 
-  const mac = typeof raw['mac'] === 'string' ? (raw['mac'] as string) : undefined;
+  const mac = pickString(raw, ['mac', 'macaddr']);
   const status = typeof raw['status'] === 'string' ? (raw['status'] as string) : undefined;
+  // VLAN: recordset rows carry the tag directly (`vlan_tag`); the vlan_settings
+  // cross-match in getInventory fills in what this can't see.
+  const vlanTag = pickNumber(raw, ['vlan_tag', 'vlanId']);
 
-  // Collect candidate address entries from the shapes seen across versions:
-  //   ipv4/ipv6 objects with `address` + `subnet` (or `netmask`) fields, or
-  //   arrays of { ip|address, netmask|prefix } entries.
-  const candidates: Record<string, unknown>[] = [];
-  for (const versionKey of ['ipv4', 'ipv6']) {
+  // Collect candidate address entries per protocol family so the version is
+  // known from the key itself (ipv4/ipv6), not guessed from the address text.
+  const candidates: { entry: Record<string, unknown>; version: 'v4' | 'v6' }[] = [];
+  for (const versionKey of ['ipv4', 'ipv6'] as const) {
     const v = raw[versionKey];
     if (!v || typeof v !== 'object') continue;
+    const version: 'v4' | 'v6' = versionKey === 'ipv6' ? 'v6' : 'v4';
     if (Array.isArray(v)) {
       for (const item of v) {
-        if (item && typeof item === 'object') candidates.push(item as Record<string, unknown>);
+        if (item && typeof item === 'object') candidates.push({ entry: item as Record<string, unknown>, version });
       }
     } else {
       const obj = v as Record<string, unknown>;
       // Some versions nest the address list under `addresses`.
       if (Array.isArray(obj['addresses'])) {
         for (const item of obj['addresses'] as unknown[]) {
-          if (item && typeof item === 'object') candidates.push(item as Record<string, unknown>);
+          if (item && typeof item === 'object') candidates.push({ entry: item as Record<string, unknown>, version });
         }
       } else if (obj['address'] !== undefined || obj['ip'] !== undefined) {
-        candidates.push(obj);
+        candidates.push({ entry: obj, version });
       }
     }
   }
 
-  for (const c of candidates) {
-    const ip = typeof c['ip'] === 'string' ? c['ip'] : typeof c['address'] === 'string' ? (c['address'] as string) : undefined;
-    if (!ip || !ip.trim()) continue;
-    // Prefix: explicit `prefix`/`subnet`, or derived from a dotted netmask.
-    let prefix = pickNumber(c, ['prefix', 'subnet']);
-    const netmask = typeof c['netmask'] === 'string' ? (c['netmask'] as string) : undefined;
-    if (prefix === undefined && netmask) {
-      const bits = netmask.split('.').reduce((sum, octet) => sum + ((Number(octet) | 0).toString(2).match(/1/g)?.length ?? 0), 0);
-      prefix = bits;
+  for (const { entry: c, version } of candidates) {
+    let ip: string | undefined;
+    let prefix: number | undefined;
+    // Real recordset entries pack the address as a CIDR string ("192.168.1.1/24").
+    const cidr = typeof c['ipaddr'] === 'string' ? (c['ipaddr'] as string) : undefined;
+    if (cidr && cidr.includes('/')) {
+      const [addr, bits] = cidr.split('/');
+      ip = addr.trim();
+      const p = Number(bits);
+      prefix = Number.isFinite(p) ? Math.round(p) : undefined;
+    } else {
+      // Legacy entries: separate fields — explicit `prefix`/`subnet`, or a
+      // dotted netmask converted to its bit count.
+      ip = typeof c['ip'] === 'string' ? (c['ip'] as string) : typeof c['address'] === 'string' ? (c['address'] as string) : undefined;
+      prefix = pickNumber(c, ['prefix', 'subnet']);
+      const netmask = typeof c['netmask'] === 'string' ? (c['netmask'] as string) : undefined;
+      if (prefix === undefined && netmask) {
+        prefix = netmask.split('.').reduce((sum, octet) => sum + ((Number(octet) | 0).toString(2).match(/1/g)?.length ?? 0), 0);
+      }
     }
+    if (!ip || !ip.trim()) continue;
     rows.push({
       name,
       ...(mac ? { mac } : {}),
       ip: ip.trim(),
       prefix: prefix !== undefined && Number.isFinite(prefix) ? Math.round(prefix) : null,
-      version: c['version'] === 6 || (typeof c['ip'] === 'string' && (c['ip'] as string).includes(':')) ? 'v6' : 'v4',
+      version,
       ...(status ? { status } : {}),
+      ...(vlanTag !== undefined ? { vlanId: vlanTag } : {}),
     });
   }
 
-  // Interfaces without any IP still appear (useful for topology detection):
+  // Assigned interfaces without any IP still appear (useful for topology detection):
   if (rows.length === 0) {
-    rows.push({ name, ...(mac ? { mac } : {}), ip: null, prefix: null, version: null, ...(status ? { status } : {}) });
+    rows.push({ name, ...(mac ? { mac } : {}), ip: null, prefix: null, version: null, ...(status ? { status } : {}), ...(vlanTag !== undefined ? { vlanId: vlanTag } : {}) });
   }
   return rows;
 }
@@ -279,8 +318,12 @@ async function getInventory(
   if (ifInfo?.ok && ifInfo.data && typeof ifInfo.data === 'object') {
     const data = ifInfo.data as Record<string, unknown>;
     const entries: Record<string, unknown>[] = [];
-    // Common shapes: a direct array, or an object keyed by interface name.
-    if (Array.isArray(data)) {
+    // Real OPNsense shape: searchRecordsetBase wraps the interface list in a
+    // recordset ({ rows: [...], total }). Fallbacks for other shapes: a direct
+    // array, or an object keyed by interface name.
+    if (Array.isArray(data['rows'])) {
+      for (const e of data['rows'] as unknown[]) if (e && typeof e === 'object') entries.push(e as Record<string, unknown>);
+    } else if (Array.isArray(data)) {
       for (const e of data) if (e && typeof e === 'object') entries.push(e as Record<string, unknown>);
     } else {
       for (const v of Object.values(data)) {
@@ -310,6 +353,7 @@ async function getInventory(
         vlanByName.set(`vlan${v}`, v);
       }
       for (const row of snap.networks) {
+        if (row['vlanId'] !== undefined) continue; // recordset rows carry vlan_tag directly
         const n = typeof row['name'] === 'string' ? (row['name'] as string) : undefined;
         if (!n) continue;
         const vid = vlanByName.get(n);
@@ -720,6 +764,18 @@ function pickNumber(obj: Record<string, unknown>, keys: string[]): number | unde
     const v = obj[k];
     if (typeof v === 'number' && Number.isFinite(v)) return v;
     if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) return Number(v);
+  }
+  return undefined;
+}
+
+/**
+ * Reads the first non-empty string value from an object, trying several
+ * candidate keys (OPNsense field names vary by version).
+ */
+function pickString(obj: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === 'string' && v.trim() !== '') return v;
   }
   return undefined;
 }
