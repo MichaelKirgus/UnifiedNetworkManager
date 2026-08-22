@@ -23,7 +23,8 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
 }
 
 const mock = http.createServer((req, res) => {
-  const url = req.url ?? '/';
+  // Strip query strings — some endpoints are called with params (e.g. interfaces_info?details=true).
+  const url = (req.url ?? '/').split('?')[0];
   console.log(`[mock] ${req.method} ${url}`);
 
   // Edition probe: CE → 403 (no opncentral/sync).
@@ -58,6 +59,23 @@ const mock = http.createServer((req, res) => {
       return json(res, 200, { rows: [{ mac: 'aa:bb:cc:dd:ee:01', ip: '192.168.1.10', intf: 'lan' }] });
     case '/api/diagnostics/interface/search_ndp/':
       return json(res, 200, { rows: [] });
+    // Inventory collection (Networks page): interface config with IPs.
+    case '/api/interfaces/overview/interfaces_info':
+      return json(res, 200, {
+        lan: { name: 'lan', mac: 'aa:bb:cc:dd:ee:ff', status: 'up', ipv4: { address: '192.168.1.1', subnet: 24 } },
+        wan: { name: 'wan', mac: 'aa:bb:cc:dd:ee:0f', status: 'up', ipv4: { address: '10.0.0.2', netmask: '255.255.255.0' } },
+        vlan100: { name: 'vlan100', mac: 'aa:bb:cc:dd:ee:10', status: 'up', ipv4: { address: '192.168.100.1', subnet: 24 } },
+        vmac0: { name: 'vmac0', mac: '', status: 'down' }, // no IP — topology-only row
+      });
+    case '/api/interfaces/vlan_settings/get':
+      return json(res, 200, [{ interface: 'igb0', vlanid: 100, description: 'guests' }]);
+    // Inventory collection (Hosts page): dnsmasq leases (mock runs dnsmasq backend).
+    case '/api/dnsmasq/leases/search':
+      return json(res, 200, {
+        rows: [
+          { mac: 'aa:bb:cc:dd:ee:01', ipaddress: '192.168.1.10', hostname: 'laptop-1', interface: 'lan', expires: Math.floor(Date.now() / 1000) + 3600 },
+        ],
+      });
     // Snapshots (rollback point).
     case '/api/core/snapshots/is_supported':
       return json(res, 200, true);
@@ -164,6 +182,27 @@ async function main(): Promise<void> {
   check('health ok', monJson.health === 'ok', monJson.health);
   check('cpu.percent collected', typeof monJson.metrics?.['cpu.percent'] === 'number', monJson.metrics?.['cpu.percent']);
   check('memory.percent computed', typeof monJson.metrics?.['memory.percent'] === 'number');
+
+  // --- /monitoring inventory (networks + dhcpLeases) ------------------------------------
+  const networks = (monJson.metrics?.['networks'] ?? []) as Record<string, unknown>[];
+  check('networks collected', Array.isArray(networks) && networks.length >= 4, `count=${networks.length}`);
+  const lanRow = networks.find((r) => r.name === 'lan');
+  check('lan row has ip+prefix v4', lanRow?.ip === '192.168.1.1' && lanRow.prefix === 24 && lanRow.version === 'v4', lanRow);
+  const wanRow = networks.find((r) => r.name === 'wan');
+  check('wan netmask converted to prefix /24', wanRow?.ip === '10.0.0.2' && wanRow.prefix === 24, wanRow);
+  const vlanRow = networks.find((r) => r.name === 'vlan100');
+  check('vlan100 row carries vlanId 100', vlanRow?.vlanId === 100, vlanRow);
+  const noIpRow = networks.find((r) => r.name === 'vmac0');
+  check('interface without IP kept (ip null)', noIpRow !== undefined && noIpRow.ip === null, noIpRow);
+
+  const leases = (monJson.metrics?.['dhcpLeases'] ?? []) as Record<string, unknown>[];
+  check('dhcpLeases collected', Array.isArray(leases) && leases.length >= 1, `count=${leases.length}`);
+  const lease = leases[0];
+  check('lease normalized (mac/ip/hostname/expiry ISO)', lease?.mac === 'aa:bb:cc:dd:ee:01' && lease.ip === '192.168.1.10' && lease.hostname === 'laptop-1' && typeof lease.expiry === 'string' && !Number.isNaN(Date.parse(lease.expiry as string)), lease);
+
+  const descriptors = (monJson.metricDescriptors ?? []) as { key: string }[];
+  check('networks descriptor present', descriptors.some((d) => d.key === 'networks'));
+  check('dhcpLeases descriptor present', descriptors.some((d) => d.key === 'dhcpLeases'));
 
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);

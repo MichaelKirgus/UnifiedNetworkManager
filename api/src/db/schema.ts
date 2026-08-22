@@ -206,6 +206,72 @@ export const telemetry = pgTable('telemetry', {
   };
 });
 
+// Normalized inventory tables — populated by the telemetry worker from the
+// plugin's /monitoring metrics (see workers/telemetry.ts ingestInventory).
+// They power the cross-device Networks and Hosts pages in the webapp. Rows are
+// upserted per poll; a periodic sweep drops rows not refreshed within 24h so
+// offline devices don't accumulate stale data.
+
+// One row per configured network (interface IP address) as reported by a
+// plugin's `networks` metric: { name, ip, prefix, version ('v4'|'v6'), vlanId?,
+// mac?, status? }. Interfaces without an IP are stored with ip = '' so their
+// MAC/name stay available for topology detection.
+export const networks = pgTable(
+  'networks',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Interface name on the device (e.g. "lan", "vlan100").
+    name: text('name').notNull(),
+    // IP address; '' = interface without an IP (kept for topology detection).
+    ip: text('ip').notNull().default(''),
+    prefix: integer('prefix'),
+    version: text('version'),
+    vlanId: integer('vlanId'),
+    mac: text('mac'),
+    status: text('status'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkNetworks: uniqueIndex('uq_networks')
+        .on(table.deviceId, table.pluginId, table.name, table.ip),
+      idxNetworksDevice: index('idx_networks_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per discovered host (neighbor/lease) as reported by a plugin's
+// `arp` / `ndp` / `dhcpLeases` metrics. A host seen via several sources gets
+// one row per source (the DHCP row carries hostname/expiry, ARP rows carry
+// manufacturer). `lastSeenAt` drives the 24h stale sweep.
+export const hosts = pgTable(
+  'hosts',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    mac: text('mac').notNull(),
+    ip: text('ip').notNull(),
+    // arp | ndp | dhcp — which table/lease source reported this host.
+    source: text('source').notNull(),
+    hostname: text('hostname'),
+    manufacturer: text('manufacturer'),
+    intf: text('intf'),
+    expiry: text('expiry'),
+    lastSeenAt: text('lastSeenAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkHosts: uniqueIndex('uq_hosts')
+        .on(table.deviceId, table.pluginId, table.mac, table.ip, table.source),
+      idxHostsDevice: index('idx_hosts_device').on(table.deviceId),
+      // For the future topology view: "which devices see this MAC / IP".
+      idxHostsMac: index('idx_hosts_mac').on(table.mac),
+      idxHostsIp: index('idx_hosts_ip').on(table.ip),
+    };
+  }
+);
+
 // Execution plans produced by a plugin's /plan endpoint (e.g. an OPNsense
 // WireGuard tunnel spanning two firewalls). The API persists the plan and its
 // steps, fulfils the plan's provisionRequests via the secrets provider at

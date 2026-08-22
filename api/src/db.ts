@@ -176,6 +176,46 @@ export async function initDb(): Promise<void> {
     `ALTER TABLE config_jobs ADD COLUMN IF NOT EXISTS "planId" TEXT`
   );
 
+  // Normalized inventory tables (Networks + Hosts pages). Populated by the
+  // telemetry worker from plugin /monitoring metrics — see workers/telemetry.ts.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS networks (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      ip TEXT NOT NULL DEFAULT '',
+      prefix INTEGER,
+      version TEXT,
+      "vlanId" INTEGER,
+      mac TEXT,
+      status TEXT,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name, ip)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_networks_device ON networks ("deviceId")`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS hosts (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      mac TEXT NOT NULL,
+      ip TEXT NOT NULL,
+      source TEXT NOT NULL,
+      hostname TEXT,
+      manufacturer TEXT,
+      intf TEXT,
+      expiry TEXT,
+      "lastSeenAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", mac, ip, source)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_hosts_device ON hosts ("deviceId")`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_hosts_mac ON hosts (mac)`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_hosts_ip ON hosts (ip)`);
+
   // The legacy singular columns are superseded by device_plugins. There is no
   // production data to migrate (confirmed), so drop them outright — any dev
   // devices must be recreated via the new multi-plugin create flow.

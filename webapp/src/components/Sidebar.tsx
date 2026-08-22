@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom';
 import clsx from 'clsx';
 import {
   KeyRound,
+  Laptop,
   ListChecks,
   LogOut,
   MapPin,
@@ -20,6 +21,9 @@ import { can, clearPermissions, clearUsername } from '../auth/permissions';
 
 const NAV_ITEMS = [
   { to: '/devices', label: 'Devices', icon: Server },
+  // Cross-device inventory views (populated by the telemetry worker).
+  { to: '/networks', label: 'Networks', icon: Network },
+  { to: '/hosts', label: 'Hosts', icon: Laptop },
   { to: '/sites', label: 'Sites', icon: MapPin },
   { to: '/secrets', label: 'Secrets', icon: KeyRound },
   { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks },

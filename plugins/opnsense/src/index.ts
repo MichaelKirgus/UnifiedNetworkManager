@@ -15,7 +15,8 @@ import {
 import { createClient, OpnsenseCredentials } from './client/http';
 import { resolveEdition } from './client/editions';
 import { detectDnsBackend, DnsBackend } from './client/dns';
-import { detectDhcpBackend, DhcpBackend } from './client/dhcp';
+import { detectDhcpBackend, DhcpBackend, searchKeaLeases, searchDnsmasqLeases } from './client/dhcp';
+import { getInterfacesInfo, vlans } from './client/interfaces';
 import { getAction, listModules } from './actions/registry';
 import { ActionContext, ActionResult, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest, listCatalog } from './plan';
@@ -115,8 +116,9 @@ const INVENTORY_INTERVAL_MS = 15 * 60 * 1000;
 
 /**
  * In-memory inventory cache, keyed by management host. Holds the slow-changing
- * data (hostname, version, ARP table, NDP table) so repeated /monitoring polls
- * within the TTL don't re-fetch it from the appliance.
+ * data (hostname, version, ARP table, NDP table, configured networks with
+ * CIDR/VLAN info, DHCP leases) so repeated /monitoring polls within the TTL
+ * don't re-fetch it from the appliance.
  */
 interface InventorySnapshot {
   collectedAt: number;
@@ -124,13 +126,112 @@ interface InventorySnapshot {
   version?: string;
   arp: Record<string, unknown>[];
   ndp: Record<string, unknown>[];
+  /** Configured networks: one row per interface IP address (see parseNetworkRows). */
+  networks: Record<string, unknown>[];
+  /** Active DHCP leases normalized across Kea/dnsmasq backends. */
+  dhcpLeases: Record<string, unknown>[];
 }
 
 const inventoryCache = new Map<string, InventorySnapshot>();
 
 /**
+ * Normalizes one interface entry from `interfaces_info?details=true` into zero
+ * or more network rows (one per configured IP address). OPNsense field names
+ * vary by version, so several common shapes are accepted defensively; an
+ * unrecognized shape yields a warning log and no row rather than a crash.
+ */
+function parseNetworkRows(raw: Record<string, unknown>): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = [];
+  const name = typeof raw['name'] === 'string' ? (raw['name'] as string) : undefined;
+  if (!name) return rows;
+
+  const mac = typeof raw['mac'] === 'string' ? (raw['mac'] as string) : undefined;
+  const status = typeof raw['status'] === 'string' ? (raw['status'] as string) : undefined;
+
+  // Collect candidate address entries from the shapes seen across versions:
+  //   ipv4/ipv6 objects with `address` + `subnet` (or `netmask`) fields, or
+  //   arrays of { ip|address, netmask|prefix } entries.
+  const candidates: Record<string, unknown>[] = [];
+  for (const versionKey of ['ipv4', 'ipv6']) {
+    const v = raw[versionKey];
+    if (!v || typeof v !== 'object') continue;
+    if (Array.isArray(v)) {
+      for (const item of v) {
+        if (item && typeof item === 'object') candidates.push(item as Record<string, unknown>);
+      }
+    } else {
+      const obj = v as Record<string, unknown>;
+      // Some versions nest the address list under `addresses`.
+      if (Array.isArray(obj['addresses'])) {
+        for (const item of obj['addresses'] as unknown[]) {
+          if (item && typeof item === 'object') candidates.push(item as Record<string, unknown>);
+        }
+      } else if (obj['address'] !== undefined || obj['ip'] !== undefined) {
+        candidates.push(obj);
+      }
+    }
+  }
+
+  for (const c of candidates) {
+    const ip = typeof c['ip'] === 'string' ? c['ip'] : typeof c['address'] === 'string' ? (c['address'] as string) : undefined;
+    if (!ip || !ip.trim()) continue;
+    // Prefix: explicit `prefix`/`subnet`, or derived from a dotted netmask.
+    let prefix = pickNumber(c, ['prefix', 'subnet']);
+    const netmask = typeof c['netmask'] === 'string' ? (c['netmask'] as string) : undefined;
+    if (prefix === undefined && netmask) {
+      const bits = netmask.split('.').reduce((sum, octet) => sum + ((Number(octet) | 0).toString(2).match(/1/g)?.length ?? 0), 0);
+      prefix = bits;
+    }
+    rows.push({
+      name,
+      ...(mac ? { mac } : {}),
+      ip: ip.trim(),
+      prefix: prefix !== undefined && Number.isFinite(prefix) ? Math.round(prefix) : null,
+      version: c['version'] === 6 || (typeof c['ip'] === 'string' && (c['ip'] as string).includes(':')) ? 'v6' : 'v4',
+      ...(status ? { status } : {}),
+    });
+  }
+
+  // Interfaces without any IP still appear (useful for topology detection):
+  if (rows.length === 0) {
+    rows.push({ name, ...(mac ? { mac } : {}), ip: null, prefix: null, version: null, ...(status ? { status } : {}) });
+  }
+  return rows;
+}
+
+/**
+ * Normalizes DHCP lease rows across the two backends. Kea and dnsmasq expose
+ * different field names (and dnsmasq's expiry is a unix timestamp); this maps
+ * them onto one shape: { mac, ip, hostname?, expiry? (ISO), intf? }. Rows
+ * without both a MAC and an IP are dropped — they can't be joined to anything.
+ */
+function parseDhcpLeaseRows(rows: unknown[]): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const raw of rows) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    const mac = typeof r['mac'] === 'string' ? (r['mac'] as string).toLowerCase() : undefined;
+    const ip = typeof r['ipaddress'] === 'string' ? (r['ipaddress'] as string) : typeof r['ip'] === 'string' ? (r['ip'] as string) : undefined;
+    if (!mac || !ip) continue;
+    const hostname = typeof r['hostname'] === 'string' && r['hostname'].trim() !== '' ? (r['hostname'] as string) : undefined;
+    const intf = typeof r['interface'] === 'string' ? (r['interface'] as string) : typeof r['intf'] === 'string' ? (r['intf'] as string) : undefined;
+    // Kea: `expiry` is an ISO-ish string or epoch; dnsmasq: `expires` unix seconds.
+    let expiry: string | undefined;
+    const rawExpiry = r['expiry'] ?? r['expires'];
+    if (typeof rawExpiry === 'number' && rawExpiry > 0) {
+      expiry = new Date(rawExpiry * 1000).toISOString();
+    } else if (typeof rawExpiry === 'string' && rawExpiry.trim() !== '') {
+      const t = Date.parse(rawExpiry);
+      expiry = Number.isNaN(t) ? undefined : new Date(t).toISOString();
+    }
+    out.push({ mac, ip, ...(hostname ? { hostname } : {}), ...(expiry ? { expiry } : {}), ...(intf ? { intf } : {}) });
+  }
+  return out;
+}
+
+/**
  * Returns the inventory snapshot for a host, fetching from the appliance only
- * when the cache is older than INVENTORY_INTERVAL_MS. All three calls run in
+ * when the cache is older than INVENTORY_INTERVAL_MS. All calls run in
  * parallel and are best-effort — a failing endpoint yields an empty field, not
  * an error.
  */
@@ -145,13 +246,18 @@ async function getInventory(
     return cached;
   }
 
-  const [info, arp, ndp] = await Promise.all([
+  // The client-lib calls need a bound axios instance for this appliance.
+  const client = createClient(host, { apiKey, apiSecret }, transport);
+
+  const [info, arp, ndp, ifInfo, vlanRes] = await Promise.all([
     getSystemInformation(host, apiKey, apiSecret, transport).catch(() => undefined),
     getArpTable(host, apiKey, apiSecret, transport).catch(() => undefined),
     getNdpTable(host, apiKey, apiSecret, transport).catch(() => undefined),
+    getInterfacesInfo(client).catch(() => undefined),
+    vlans.get(client).catch(() => undefined),
   ]);
 
-  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [] };
+  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [] };
   if (info?.ok && info.data && typeof info.data === 'object') {
     const d = info.data as Record<string, unknown>;
     if (d['name'] !== undefined) snap.hostname = String(d['name']);
@@ -165,6 +271,63 @@ async function getInventory(
   if (ndp?.ok && ndp.data && typeof ndp.data === 'object') {
     const rows = (ndp.data as Record<string, unknown>)['rows'];
     if (Array.isArray(rows)) snap.ndp = rows as Record<string, unknown>[];
+  }
+
+  // Configured networks: one row per interface IP address. Field names in the
+  // interfaces_info response vary by OPNsense version — parseNetworkRows is
+  // defensive and logs a warning when it can't recognize an entry's shape.
+  if (ifInfo?.ok && ifInfo.data && typeof ifInfo.data === 'object') {
+    const data = ifInfo.data as Record<string, unknown>;
+    const entries: Record<string, unknown>[] = [];
+    // Common shapes: a direct array, or an object keyed by interface name.
+    if (Array.isArray(data)) {
+      for (const e of data) if (e && typeof e === 'object') entries.push(e as Record<string, unknown>);
+    } else {
+      for (const v of Object.values(data)) {
+        if (v && typeof v === 'object' && !Array.isArray(v)) entries.push(v as Record<string, unknown>);
+      }
+    }
+    const rows = entries.flatMap((e) => parseNetworkRows(e));
+    if (rows.length > 0) snap.networks = rows;
+
+    // VLAN IDs: vlan_settings rows carry the parent interface + vlanid. Attach
+    // them to network rows whose name matches `<parent>.<vlanid>` or equals a
+    // VLAN interface name reported by the appliance.
+    if (vlanRes?.ok && vlanRes.data && typeof vlanRes.data === 'object') {
+      const vdata = vlanRes.data as Record<string, unknown>;
+      const vlanRows: Record<string, unknown>[] = Array.isArray(vdata)
+        ? (vdata as unknown[]).filter((r): r is Record<string, unknown> => !!r && typeof r === 'object')
+        : Object.values(vdata).filter((v): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v));
+      // A VLAN interface may be named `<parent>.<vlanid>` or `vlan<vlanid>` —
+      // index both candidate names so either convention matches.
+      const vlanByName = new Map<string, number>();
+      for (const vr of vlanRows) {
+        const parent = typeof vr['interface'] === 'string' ? (vr['interface'] as string) : undefined;
+        const vid = pickNumber(vr, ['vlanid', 'vlan_id', 'vid']);
+        if (!parent || vid === undefined) continue;
+        const v = Math.round(vid);
+        vlanByName.set(`${parent}.${v}`, v);
+        vlanByName.set(`vlan${v}`, v);
+      }
+      for (const row of snap.networks) {
+        const n = typeof row['name'] === 'string' ? (row['name'] as string) : undefined;
+        if (!n) continue;
+        const vid = vlanByName.get(n);
+        if (vid !== undefined) row['vlanId'] = vid;
+      }
+    }
+  }
+
+  // DHCP leases: backend auto-detected per appliance, then normalized.
+  try {
+    const backend = await detectDhcpBackend(client);
+    const leaseRes = backend === 'kea' ? await searchKeaLeases(client) : await searchDnsmasqLeases(client);
+    if (leaseRes?.ok && leaseRes.data && typeof leaseRes.data === 'object') {
+      const rows = (leaseRes.data as Record<string, unknown>)['rows'];
+      snap.dhcpLeases = Array.isArray(rows) ? parseDhcpLeaseRows(rows) : [];
+    }
+  } catch {
+    // best-effort — a failing lease endpoint must not sink the inventory cache
   }
 
   inventoryCache.set(host, snap);
@@ -368,6 +531,14 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
   }
   if (Array.isArray(metrics['ndp']) && (metrics['ndp'] as unknown[]).length > 0) {
     push({ key: 'ndp', label: 'NDP Table', type: 'string', visualization: 'table', group: 'Inventory', columns: ['mac', 'ip', 'intf', 'manufacturer'], intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  // Configured networks (interface IPs with CIDR + VLAN) — inventory, slow refresh.
+  if (Array.isArray(metrics['networks']) && (metrics['networks'] as unknown[]).length > 0) {
+    push({ key: 'networks', label: 'Networks', type: 'string', visualization: 'table', group: 'Inventory', columns: ['name', 'ip', 'prefix', 'version', 'vlanId', 'mac'], intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  // Active DHCP leases — inventory, slow refresh.
+  if (Array.isArray(metrics['dhcpLeases']) && (metrics['dhcpLeases'] as unknown[]).length > 0) {
+    push({ key: 'dhcpLeases', label: 'DHCP Leases', type: 'string', visualization: 'table', group: 'Inventory', columns: ['mac', 'ip', 'hostname', 'intf', 'expiry'], intervalMs: INVENTORY_INTERVAL_MS });
   }
   // Interface MACs (name + mac per interface).
   if (Array.isArray(metrics['interfaces']) && (metrics['interfaces'] as unknown[]).length > 0) {
@@ -623,6 +794,11 @@ async function collectMetrics(
   if (inventory.version) metrics['version'] = inventory.version;
   if (inventory.arp.length > 0) metrics['arp'] = inventory.arp;
   if (inventory.ndp.length > 0) metrics['ndp'] = inventory.ndp;
+  // Configured networks (interface IPs with CIDR + VLAN id) and active DHCP
+  // leases — consumed by the API's normalized inventory tables (Networks/Hosts
+  // pages) in addition to being rendered as generic tables in the device view.
+  if (inventory.networks.length > 0) metrics['networks'] = inventory.networks;
+  if (inventory.dhcpLeases.length > 0) metrics['dhcpLeases'] = inventory.dhcpLeases;
 
   // Interface names (for the traffic table rows)
   try {

@@ -137,6 +137,52 @@ export interface SiteCreateRequest {
   longitude?: number | null;
 }
 
+/** One configured network row from the cross-device inventory view. */
+export interface NetworkRow {
+  deviceId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginId: string;
+  /** Display name of the plugin instance that collected this row (e.g. "OPNsense Plugin (site-a)"). */
+  pluginName?: string | null;
+  /** Interface name on the device (e.g. lan, vlan100). */
+  name: string;
+  /** IP address; null when the interface has no IP configured. */
+  ip?: string | null;
+  prefix?: number | null;
+  version?: 'v4' | 'v6' | null;
+  vlanId?: number | null;
+  mac?: string | null;
+  status?: string | null;
+  collectedAt: string;
+}
+
+/** One discovered host from the cross-device inventory view.
+ * Rows with the same MAC on one device+plugin are merged into a single row —
+ * a dual-stack device appears once with both its IPv4 and IPv6 addresses. */
+export interface HostRow {
+  deviceId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginId: string;
+  /** Display name of the plugin instance that observed this host. */
+  pluginName?: string | null;
+  mac: string;
+  /** All known addresses of this host, IPv4 first. */
+  ips: string[];
+  /** Discovery sources that reported this MAC (e.g. arp + ndp for a dual-stack host). */
+  sources: ('arp' | 'ndp' | 'dhcp')[];
+  hostname?: string | null;
+  manufacturer?: string | null;
+  /** Interface(s) on the observing device where the host was seen (comma-joined when several). */
+  intf?: string | null;
+  /** Lease expiry (when a DHCP lease is known for this MAC). */
+  expiry?: string | null;
+  lastSeenAt: string;
+}
+
 /** A user account (never includes password hashes or TOTP secrets). */
 export interface User {
   id: string;
@@ -518,6 +564,22 @@ export const api = {
   updateSite: (id: string, body: Partial<SiteCreateRequest>) =>
     apiFetch<Site>(`/sites/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteSite: (id: string) => apiFetch<void>(`/sites/${id}`, { method: 'DELETE' }),
+  // Cross-device inventory views (Networks + Hosts pages).
+  networks: (params?: { deviceId?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<NetworkRow[]>(`/networks${suffix}`);
+  },
+  hosts: (params?: { deviceId?: string; siteId?: string; source?: 'arp' | 'ndp' | 'dhcp' }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.source) qs.set('source', params.source);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<HostRow[]>(`/hosts${suffix}`);
+  },
   // Users + permission catalog.
   users: () => apiFetch<User[]>('/users'),
   createUser: (body: { username: string; password: string; roles?: string[]; permissions?: string[] }) =>

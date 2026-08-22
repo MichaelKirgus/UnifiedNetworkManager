@@ -100,9 +100,39 @@ function handleOpnsense(req, res, user, body) {
     case '/api/diagnostics/interface/get_interface_statistics':
       return json(200, { statistics: { 'igc0 / aa:bb:cc:dd:ee:ff': { name: 'wan', 'received-bytes': 1, 'sent-bytes': 2, address: 'aa:bb:cc:dd:ee:ff' } } });
     case '/api/diagnostics/interface/search_arp/':
-      return json(200, { rows: [] });
+      // Deterministic neighbors so the API's normalized `hosts` table gets data.
+      return json(200, {
+        rows: [
+          { mac: 'aa:bb:cc:dd:ee:01', ip: '192.168.1.50', intf: 'lan', manufacturer: 'Intel' },
+          { mac: 'aa:bb:cc:dd:ee:02', ip: '192.168.100.10', intf: 'vlan100', manufacturer: 'Apple' },
+        ],
+      });
     case '/api/diagnostics/interface/search_ndp/':
-      return json(200, { rows: [] });
+      return json(200, {
+        rows: [
+          { mac: 'aa:bb:cc:dd:ee:03', ip: 'fd00::50', intf: 'lan', manufacturer: '' },
+        ],
+      });
+    // Inventory collection (Networks page): interface config with IPs.
+    case '/api/interfaces/overview/interfaces_info':
+      return json(200, {
+        lan: { name: 'lan', mac: 'aa:bb:cc:dd:ee:ff', status: 'up', ipv4: { address: '192.168.1.1', subnet: 24 } },
+        wan: { name: 'wan', mac: 'aa:bb:cc:dd:ee:0f', status: 'up', ipv4: { address: '10.0.0.2', netmask: '255.255.255.0' } },
+        vlan100: { name: 'vlan100', mac: 'aa:bb:cc:dd:ee:10', status: 'up', ipv4: { address: '192.168.100.1', subnet: 24 } },
+        vmac0: { name: 'vmac0', mac: '', status: 'down' }, // no IP — topology-only row
+      });
+    case '/api/interfaces/vlan_settings/get':
+      return json(200, [
+        { interface: 'igb0', vlanid: 100, description: 'guests' },
+      ]);
+    // Inventory collection (Hosts page): dnsmasq leases (mock runs dnsmasq backend).
+    case '/api/dnsmasq/leases/search':
+      return json(200, {
+        rows: [
+          { mac: 'aa:bb:cc:dd:ee:01', ipaddress: '192.168.1.50', hostname: 'laptop-1', interface: 'lan', expires: Math.floor(Date.now() / 1000) + 3600 },
+          { mac: 'aa:bb:cc:dd:ee:04', ipaddress: '192.168.1.77', hostname: '', interface: 'lan', expires: Math.floor(Date.now() / 1000) + 7200 },
+        ],
+      });
     // Snapshots (rollback points) — supported on this mock.
     case '/api/core/snapshots/is_supported':
       return json(200, true);

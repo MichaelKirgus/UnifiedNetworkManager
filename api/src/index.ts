@@ -15,6 +15,7 @@ import rolesRouter from './routes/roles';
 import { internalRouter } from './routes/internal';
 import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import plansRouter from './routes/plans';
+import networksRouter from './routes/networks';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startPluginDiscovery } from './plugins/discovery';
 import { startConfigJobWorker } from './workers/configJob';
@@ -86,6 +87,8 @@ async function main(): Promise<void> {
   api.use(usersRouter);
   api.use(rolesRouter);
   api.use(configJobsRouter);
+  // Cross-device inventory views (/networks, /hosts) — self-defining paths.
+  api.use(networksRouter);
   // The plans router defines its own /plans/... paths (like the devices router),
   // so it is mounted without an extra prefix.
   api.use(plansRouter);

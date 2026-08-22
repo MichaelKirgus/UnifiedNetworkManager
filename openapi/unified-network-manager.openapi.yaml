@@ -20,6 +20,7 @@ tags:
   - name: Plugins
   - name: Secrets
   - name: Sites
+  - name: Inventory
   - name: Users
 paths:
   /auth/flow:
@@ -1527,6 +1528,79 @@ paths:
         '409':
           description: Devices still reference this site
 
+  /networks:
+    get:
+      tags: [Inventory]
+      summary: List all configured networks across devices
+      description: >-
+        Cross-device view of the normalized `networks` inventory table, populated
+        by the telemetry worker from each plugin's /monitoring metrics (e.g.
+        OPNsense interface IPs with CIDR + VLAN id). Every row is joined with
+        the device it was collected on and the plugin instance that produced it.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+      responses:
+        '200':
+          description: Network rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NetworkRow'
+        '401':
+          description: Authentication required
+
+  /hosts:
+    get:
+      tags: [Inventory]
+      summary: List all discovered hosts across devices
+      description: >-
+        Cross-device view of the normalized `hosts` inventory table, populated
+        by the telemetry worker from each plugin's ARP/NDP neighbor tables and
+        DHCP leases. Rows are upserted per poll; entries not refreshed within
+        24h are swept away.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: source
+          required: false
+          schema:
+            type: string
+            enum: [arp, ndp, dhcp]
+          description: Filter by discovery source
+      responses:
+        '200':
+          description: Host rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/HostRow'
+        '400':
+          description: Invalid source filter value
+        '401':
+          description: Authentication required
+
   /users:
     get:
       tags: [Users]
@@ -2165,6 +2239,58 @@ components:
               permissions:
                 type: array
                 items: { type: string }
+
+    # --- Cross-device inventory views (Networks + Hosts pages) --------------
+
+    NetworkRow:
+      type: object
+      required: [deviceId, pluginId, name, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device the data was collected on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
+        pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that produced this row" }
+        name: { type: string, description: "Interface name on the device (e.g. lan, vlan100)" }
+        ip: { type: [string, 'null'], description: "IP address; null when the interface has no IP configured" }
+        prefix: { type: [integer, 'null'], description: "CIDR prefix length (IPv4 or IPv6)" }
+        version: { type: [string, 'null'], enum: [v4, v6], description: "Address family (v4 or v6)" }
+        vlanId: { type: [integer, 'null'], description: "VLAN id when the interface is a VLAN" }
+        mac: { type: [string, 'null'] }
+        status: { type: [string, 'null'] }
+        collectedAt: { type: string, format: date-time }
+
+    HostRow:
+      type: object
+      required: [deviceId, pluginId, mac, ips, sources, lastSeenAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device that observed this host" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
+        pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that produced this row" }
+        mac: { type: string }
+        # One row per physical host: rows with the same MAC on one device+plugin
+        # are merged (a dual-stack device appears once with both addresses).
+        ips:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: "All known addresses of this host, IPv4 first"
+        sources:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [arp, ndp, dhcp]
+          description: "Discovery sources that reported this MAC (e.g. arp + ndp for a dual-stack host)"
+        hostname: { type: [string, 'null'], description: "Hostname (DHCP leases and some ARP entries)" }
+        manufacturer: { type: [string, 'null'], description: "MAC vendor (OPNsense neighbor tables)" }
+        intf: { type: [string, 'null'], description: "Interface on the observing device where the host was seen" }
+        expiry: { type: [string, 'null'], format: date-time, description: "Lease expiry (DHCP rows only)" }
+        lastSeenAt: { type: string, format: date-time }
 
     # One plugin's monitoring snapshot for a device (a device can have several).
     PluginTelemetrySnapshot:

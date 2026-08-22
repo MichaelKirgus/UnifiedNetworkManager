@@ -377,6 +377,8 @@ router.delete('/devices/:deviceId', requireAuth, requirePermission('devices:writ
     await db.delete(schema.telemetry).where(eq(schema.telemetry.deviceId, deviceId));
     await db.delete(schema.configJobs).where(eq(schema.configJobs.deviceId, deviceId));
     await db.delete(schema.pluginSettings).where(eq(schema.pluginSettings.deviceId, deviceId));
+    await db.delete(schema.networks).where(eq(schema.networks.deviceId, deviceId));
+    await db.delete(schema.hosts).where(eq(schema.hosts.deviceId, deviceId));
     await db.delete(schema.deviceIps).where(eq(schema.deviceIps.deviceId, deviceId));
     await db.delete(schema.devicePlugins).where(eq(schema.devicePlugins.deviceId, deviceId));
     await db.delete(schema.devices).where(eq(schema.devices.id, deviceId));

@@ -1,12 +1,16 @@
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../db';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, lt, sql } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { getSecret } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
 
 const POLL_INTERVAL_MS = 30_000;
+// Inventory rows not refreshed within this window are swept away (offline
+// devices must not accumulate stale networks/hosts in the cross-device views).
+const INVENTORY_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+const INVENTORY_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 
 interface MonitoringResponse {
   health?: string;
@@ -72,6 +76,11 @@ async function pollAssignment(target: AssignmentTarget): Promise<string> {
       metricDescriptors: metricDescriptors ? JSON.stringify(metricDescriptors) : null,
     });
 
+    // Normalize the inventory parts of this snapshot into the cross-device
+    // tables (Networks + Hosts pages). Best-effort — a parse failure must
+    // never break the telemetry cycle.
+    ingestInventory(target.deviceId, target.pluginId, metrics, collectedAt);
+
     return health;
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -81,6 +90,131 @@ async function pollAssignment(target: AssignmentTarget): Promise<string> {
     );
     return 'unknown';
   }
+}
+
+/**
+ * Normalizes the inventory parts of one monitoring snapshot into the
+ * cross-device `networks` and `hosts` tables (Networks + Hosts pages). The
+ * metric keys are generic — any plugin may emit them:
+ *   - networks[]    { name, ip?, prefix?, version?, vlanId?, mac?, status? }
+ *   - arp[] / ndp[] { mac, ip, intf?, manufacturer? }
+ *   - dhcpLeases[]  { mac, ip, hostname?, expiry?, intf? }
+ * Rows are upserted on their natural key; a host seen again simply refreshes
+ * lastSeenAt. Unknown/missing fields are tolerated — plugins evolve
+ * independently of the API. Never throws: an inventory parse failure must not
+ * break the telemetry cycle.
+ */
+async function ingestInventory(
+  deviceId: string,
+  pluginId: string,
+  metrics: Record<string, unknown>,
+  collectedAt: string
+): Promise<void> {
+  try {
+    // --- networks ---------------------------------------------------------
+    const rawNetworks = Array.isArray(metrics['networks']) ? (metrics['networks'] as unknown[]) : [];
+    if (rawNetworks.length > 0) {
+      const values: {
+        deviceId: string; pluginId: string; name: string; ip: string; prefix: number | null;
+        version: string | null; vlanId: number | null; mac: string | null; status: string | null;
+        collectedAt: string;
+      }[] = [];
+      for (const raw of rawNetworks) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        if (!name) continue;
+        values.push({
+          deviceId,
+          pluginId,
+          name,
+          // '' = interface without an IP (kept for topology detection).
+          ip: typeof r['ip'] === 'string' && (r['ip'] as string).trim() !== '' ? (r['ip'] as string).trim() : '',
+          prefix: typeof r['prefix'] === 'number' && Number.isFinite(r['prefix']) ? Math.round(r['prefix']) : null,
+          version: typeof r['version'] === 'string' ? (r['version'] as string) : null,
+          vlanId: typeof r['vlanId'] === 'number' && Number.isFinite(r['vlanId']) ? Math.round(r['vlanId']) : null,
+          mac: typeof r['mac'] === 'string' ? (r['mac'] as string).toLowerCase() : null,
+          status: typeof r['status'] === 'string' ? (r['status'] as string) : null,
+          collectedAt,
+        });
+      }
+      if (values.length > 0) {
+        await db.insert(schema.networks).values(values).onConflictDoUpdate({
+          target: [schema.networks.deviceId, schema.networks.pluginId, schema.networks.name, schema.networks.ip],
+          set: {
+            prefix: sql`excluded."prefix"`,
+            version: sql`excluded."version"`,
+            vlanId: sql`excluded."vlanId"`,
+            mac: sql`excluded.mac`,
+            status: sql`excluded.status`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+    }
+
+    // --- hosts (ARP / NDP neighbors + DHCP leases) -------------------------
+    const hostValues: {
+      deviceId: string; pluginId: string; mac: string; ip: string; source: string;
+      hostname: string | null; manufacturer: string | null; intf: string | null;
+      expiry: string | null; lastSeenAt: string;
+    }[] = [];
+    const pushHostRow = (source: string, raw: unknown): void => {
+      if (!raw || typeof raw !== 'object') return;
+      const r = raw as Record<string, unknown>;
+      const mac = typeof r['mac'] === 'string' ? (r['mac'] as string).trim().toLowerCase() : '';
+      const ip = typeof r['ip'] === 'string' ? (r['ip'] as string).trim() : '';
+      if (!mac || !ip) return; // unjoinable without both — skip defensively
+      hostValues.push({
+        deviceId,
+        pluginId,
+        mac,
+        ip,
+        source,
+        hostname: typeof r['hostname'] === 'string' && (r['hostname'] as string).trim() !== '' ? (r['hostname'] as string) : null,
+        manufacturer: typeof r['manufacturer'] === 'string' && (r['manufacturer'] as string).trim() !== '' ? (r['manufacturer'] as string) : null,
+        intf: typeof r['intf'] === 'string' ? (r['intf'] as string) : null,
+        expiry: typeof r['expiry'] === 'string' && (r['expiry'] as string).trim() !== '' ? (r['expiry'] as string) : null,
+        lastSeenAt: collectedAt,
+      });
+    };
+    for (const source of ['arp', 'ndp'] as const) {
+      const rows = Array.isArray(metrics[source]) ? (metrics[source] as unknown[]) : [];
+      for (const raw of rows) pushHostRow(source, raw);
+    }
+    const leases = Array.isArray(metrics['dhcpLeases']) ? (metrics['dhcpLeases'] as unknown[]) : [];
+    for (const raw of leases) pushHostRow('dhcp', raw);
+
+    if (hostValues.length > 0) {
+      await db.insert(schema.hosts).values(hostValues).onConflictDoUpdate({
+        target: [schema.hosts.deviceId, schema.hosts.pluginId, schema.hosts.mac, schema.hosts.ip, schema.hosts.source],
+        set: {
+          hostname: sql`excluded.hostname`,
+          manufacturer: sql`excluded.manufacturer`,
+          intf: sql`excluded.intf`,
+          expiry: sql`excluded.expiry`,
+          lastSeenAt: sql`excluded."lastSeenAt"`,
+        },
+      });
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[telemetry] inventory ingestion failed for device ${deviceId} via plugin ${pluginId}:`,
+      (err as Error).message
+    );
+  }
+}
+
+/**
+ * Drops inventory rows not refreshed within INVENTORY_STALE_AFTER_MS so
+ * offline devices don't accumulate stale networks/hosts in the cross-device
+ * views. ISO-8601 strings compare correctly lexicographically.
+ */
+async function sweepStaleInventory(): Promise<void> {
+  const cutoff = new Date(Date.now() - INVENTORY_STALE_AFTER_MS).toISOString();
+  await db.delete(schema.hosts).where(lt(schema.hosts.lastSeenAt, cutoff));
+  await db.delete(schema.networks).where(lt(schema.networks.collectedAt, cutoff));
 }
 
 /**
@@ -157,7 +291,20 @@ async function pollAllDevices(): Promise<void> {
 export function startTelemetryWorker(): NodeJS.Timeout {
   // eslint-disable-next-line no-console
   console.log(`[telemetry] worker started, polling every ${POLL_INTERVAL_MS / 1000}s`);
+
+  // Stale-inventory sweep runs on its own cadence (cheap DELETEs) — counted in
+  // poll cycles so the worker keeps a single timer.
+  const sweepsPerCycle = Math.max(1, Math.round(INVENTORY_SWEEP_INTERVAL_MS / POLL_INTERVAL_MS));
+  let cycle = 0;
+
   return setInterval(() => {
+    cycle += 1;
+    if (cycle % sweepsPerCycle === 0) {
+      sweepStaleInventory().catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error('[telemetry] inventory sweep failed:', err);
+      });
+    }
     pollAllDevices().catch((err) => {
       // eslint-disable-next-line no-console
       console.error('[telemetry] poll cycle failed:', err);

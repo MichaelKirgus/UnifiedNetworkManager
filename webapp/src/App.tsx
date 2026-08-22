@@ -9,6 +9,8 @@ import Plans from './pages/Plans';
 import PlanDetail from './pages/PlanDetail';
 import Plugins from './pages/Plugins';
 import Sites from './pages/Sites';
+import Networks from './pages/Networks';
+import Hosts from './pages/Hosts';
 import Users from './pages/Users';
 import Roles from './pages/Roles';
 import MyAccount from './pages/MyAccount';
@@ -86,6 +88,22 @@ export default function App() {
         element={
           <RequireAuth>
             <Sites />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/networks"
+        element={
+          <RequireAuth>
+            <Networks />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/hosts"
+        element={
+          <RequireAuth>
+            <Hosts />
           </RequireAuth>
         }
       />
