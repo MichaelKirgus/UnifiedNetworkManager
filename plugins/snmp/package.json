@@ -1,8 +1,8 @@
 {
   "name": "unm-plugin-snmp",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "UnifiedNetworkManager plugin: SNMPv1/v2c monitoring (system group + interface throughput) and inventory via net-snmp CLI.",
+  "description": "UnifiedNetworkManager plugin: SNMPv1/v2c/v3 monitoring (system group + interface throughput), WiFi (802.11 MIB) collection and inventory via net-snmp CLI.",
   "main": "dist/src/index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn src/index.ts",

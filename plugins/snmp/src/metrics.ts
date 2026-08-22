@@ -33,9 +33,14 @@ export const INVENTORY_INTERVAL_MS = 15 * 60 * 1000;
  * Builds the full descriptor set for a monitoring response. `ifaceNames` are
  * the display names of the interfaces seen on this device (drives the table
  * rows so the UI always matches real data — opnsense's descriptorsFromMetrics
- * pattern).
+ * pattern). `hasWifi` adds the WiFi group only when WLAN data was actually
+ * collected for this snapshot — non-AP devices get no WiFi descriptors at all.
  */
-export function buildDescriptors(ifaceNames: string[], inventoryTtlMs: number): MetricDescriptor[] {
+export function buildDescriptors(
+  ifaceNames: string[],
+  inventoryTtlMs: number,
+  hasWifi = false
+): MetricDescriptor[] {
   const d: MetricDescriptor[] = [
     // --- System group (SNMPv2-MIB) -------------------------------------
     { key: 'system.description', label: 'Description', type: 'string', visualization: 'text', group: 'System' },
@@ -87,6 +92,30 @@ export function buildDescriptors(ifaceNames: string[], inventoryTtlMs: number): 
       columns: ['name', 'type', 'speed', 'mac', 'status'],
       intervalMs: inventoryTtlMs,
     },
+
+    // --- WiFi (IEEE 802.11 MIBs — only when WLAN data was collected) -----
+    ...(hasWifi
+      ? [
+          {
+            key: 'wifi.accessPoints',
+            label: 'Access points',
+            type: 'string' as const,
+            visualization: 'table' as const,
+            group: 'WiFi',
+            columns: ['ssid', 'bssid', 'channel', 'security'],
+            intervalMs: inventoryTtlMs,
+          },
+          {
+            key: 'wifi.clients',
+            label: 'Connected clients',
+            type: 'string' as const,
+            visualization: 'table' as const,
+            group: 'WiFi',
+            columns: ['mac', 'ssid', 'rate'],
+            intervalMs: inventoryTtlMs,
+          },
+        ]
+      : []),
   ];
 
   return d;

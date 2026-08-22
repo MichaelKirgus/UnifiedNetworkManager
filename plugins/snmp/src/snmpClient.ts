@@ -37,6 +37,8 @@ export interface WalkOptions {
   mibDir?: string;
   /** How long the slow-path inventory snapshot stays fresh. */
   inventoryTtlMs: number;
+  /** Collect 802.11 WLAN data (IEEE 802.11 MIBs). Default true — opt-out per device. */
+  collectWifi?: boolean;
 }
 
 export interface SystemInfo {
@@ -62,6 +64,28 @@ export interface Counters {
   [ifIndex: string]: { inOctets: number; outOctets: number };
 }
 
+/** One access point / BSS as seen via the IEEE 802.11 MIBs. */
+export interface WifiAccessPoint {
+  ssid: string; // '' when the device doesn't expose one
+  bssid: string; // normalized aa:bb:cc:dd:ee:ff, '' when unavailable
+  channel: number | null;
+  security: string; // 'open' | 'wep' | 'tkip' | 'ccmp' | numeric fallback, '' when unknown
+}
+
+/** One associated client (station) as seen via the IEEE 802.11 MIBs. */
+export interface WifiClient {
+  mac: string; // normalized aa:bb:cc:dd:ee:ff
+  ssid: string; // '' when unavailable
+  rateMbps: number | null; // best-effort — many devices don't expose per-station rates
+}
+
+/** WiFi facts for a host. `source` says which MIB revision supplied the data. */
+export interface WifiInfo {
+  accessPoints: WifiAccessPoint[];
+  clients: WifiClient[];
+  source: 'ieee802dot11-2' | 'legacy';
+}
+
 export interface InventorySnapshot {
   collectedAt: number;
   system: SystemInfo | null;
@@ -69,6 +93,12 @@ export interface InventorySnapshot {
   counters: Counters;
   /** True when the device exposes ifHC* (64-bit) counters. */
   useHc: boolean;
+  /**
+   * WiFi facts (IEEE 802.11 MIBs). `undefined` = collection was disabled for
+   * this snapshot (collectWifi off); `null` = collected but the device exposes
+   * no 802.11 data (normal on non-AP devices).
+   */
+  wifi?: WifiInfo | null;
 }
 
 export interface InventoryResult {
@@ -113,6 +143,44 @@ const IF_TYPE_NAMES: Record<number, string> = {
 };
 
 const OPER_STATUS_NAMES: Record<number, string> = { 1: 'up', 2: 'down', 3: 'testing' };
+
+/* ------------------------------------------------------------------ *
+ * IEEE 802.11 WLAN OIDs — two revisions, both numeric so we never depend
+ * on MIB name resolution (see the OID map note above).
+ *
+ * Primary: newer AP-oriented revision under .1.3.6.1.2.1.105. The station
+ * table base is confirmed; the BSS table base and column numbers below are
+ * ASSUMED — verify against a live AP walk (`snmpwalk -O n <ap> 1.3.6.1.2.1.105`)
+ * and adjust if a device disagrees (parsing degrades to '' per missing col).
+ *
+ * Fallback: legacy IEEE802dot11-MIB under .1.2.840.10036 (verified on LANCOM
+ * LCOS APs): SSID + BSSID per wireless ifIndex and DSSS channel — but no
+ * association table, so client enumeration is not possible from this revision.
+ * ------------------------------------------------------------------ */
+
+const WLAN_BASE = '.1.3.6.1.2.1.105'; // newer AP-oriented revision
+const BSS_TABLE = `${WLAN_BASE}.1.2`; // ASSUMED base for the BSS table — verify on device
+const STATION_TABLE = `${WLAN_BASE}.1.3`; // dot11StationTable (confirmed)
+
+// Assumed column layout under each table row: <table>.<rowIndex>.<column>
+const BSS_COLS = { bssid: 1, ssid: 2, channel: 3, security: 4 } as const;
+const STATION_COLS = { mac: 1, ssid: 2, status: 3, rateMbps: 4 } as const;
+
+// Legacy IEEE802dot11-MIB (.1.2.840.10036). Layouts verified by full walk on
+// LANCOM LCOS APs (LX-6500), which address the station-config table as
+// <table>.<column>.<ifIndex> — column before index, unlike usual SNMP tables:
+const LEGACY_BASE = '.1.2.840.10036';
+const LEGACY_STATION_CFG_LANCOM = `${LEGACY_BASE}.1.1.1`; // col 1 = BSSID (MAC), col 9 = dot11DesiredSSID
+const LEGACY_STATION_CFG_STD = `${LEGACY_BASE}.1.1`; // standard layout <ifIndex>.<column> — best-effort fallback
+const LEGACY_PHY_DSSS = `${LEGACY_BASE}.4.5`; // dot11CurrentChannel: 4.5.1.1.<ifIdx> (LANCOM) / 4.5.<ifIdx>.<col> (standard)
+
+/** IEEE 802.11 security algorithm enum → short label (best-effort map). */
+const WIFI_SECURITY_NAMES: Record<number, string> = {
+  1: 'open',
+  2: 'wep',
+  3: 'tkip',
+  4: 'ccmp',
+};
 
 /* ------------------------------------------------------------------ *
  * snmpwalk wrapper + output parsing
@@ -188,7 +256,9 @@ function parseWalkOutput(stdout: string): Map<string, string> {
 
   for (const line of stdout.split('\n')) {
     if (!line.trim()) continue;
-    const m = line.match(/^(\S+)\s*=\s*(\w+):\s?(.*)$/);
+    // Type names may contain hyphens ("Hex-STRING") — \w alone would drop those
+    // lines and smear their values onto the previous entry.
+    const m = line.match(/^(\S+)\s*=\s*([\w-]+):\s?(.*)$/);
     if (m) {
       lastOid = m[1];
       entries.set(lastOid, extractValue(m[2], m[3]));
@@ -214,8 +284,12 @@ function extractValue(type: string, raw: string): string {
     }
     case 'OBJECT IDENTIFIER':
       return text; // dotted OID or resolved name — keep as-is
-    default:
+    default: {
+      // net-snmp wraps DisplayStrings in double quotes when they need escaping
+      // (some builds quote all strings) — strip the outer pair.
+      if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) return text.slice(1, -1);
       return text; // STRING, OCTET STRING, MAC ADDRESS, IpAddress, ...
+    }
   }
 }
 
@@ -386,6 +460,191 @@ function normalizeMac(raw: string): string {
 }
 
 /* ------------------------------------------------------------------ *
+ * WiFi / WLAN tables (IEEE 802.11 MIBs) — slow path, TTL-cached
+ * ------------------------------------------------------------------ */
+
+/**
+ * Walks the IEEE 802.11 MIB trees for access-point + client facts. Tries the
+ * newer AP-oriented revision first (.1.3.6.1.2.1.105); when it yields nothing,
+ * falls back to the legacy IEEE802dot11-MIB (.1.2.840.10036) which provides
+ * SSID/BSSID/channel per wireless ifIndex but no client (association) table.
+ * Returns null when neither tree yields rows — normal for non-AP devices,
+ * never an error. One broad subtree walk per revision: snmpwalk only processes
+ * the FIRST OID given several.
+ */
+export async function walkWifi(
+  host: string,
+  creds: SnmpCredentials,
+  opts: WalkOptions
+): Promise<WifiInfo | null> {
+  try {
+    const out = await snmpWalk(host, creds, [WLAN_BASE], opts);
+    if (out.size > 0) {
+      const info = parseNewerWlan(out);
+      if (info.accessPoints.length > 0 || info.clients.length > 0) return info;
+    }
+  } catch {
+    // Newer tree absent or walk failed — try the legacy revision below.
+  }
+
+  try {
+    const out = await snmpWalk(host, creds, [LEGACY_BASE], opts);
+    if (out.size > 0) {
+      const info = parseLegacyWlan(out);
+      if (info.accessPoints.length > 0 || info.clients.length > 0) return info;
+    }
+  } catch {
+    // No 802.11 MIB data at all — this device is not an AP (or hides it).
+  }
+
+  return null;
+}
+
+/** Parses the newer revision's BSS + station tables from one broad walk. */
+function parseNewerWlan(out: Map<string, string>): WifiInfo {
+  const bssRows = new Map<string, Record<number, string>>();
+  const stationRows = new Map<string, Record<number, string>>();
+
+  for (const [oid, value] of out) {
+    let tableBase = '';
+    if (suffixOf(oid, BSS_TABLE)) tableBase = BSS_TABLE;
+    else if (suffixOf(oid, STATION_TABLE)) tableBase = STATION_TABLE;
+    else continue;
+
+    const suffix = suffixOf(oid, tableBase); // "<rowIndex>.<column>"
+    const dot = suffix.indexOf('.');
+    if (dot < 0) continue;
+    const idx = suffix.slice(0, dot);
+    const col = Number(suffix.slice(dot + 1));
+    if (!Number.isInteger(col)) continue;
+
+    const rows = tableBase === BSS_TABLE ? bssRows : stationRows;
+    let row = rows.get(idx);
+    if (!row) {
+      row = {};
+      rows.set(idx, row);
+    }
+    row[col] = value;
+  }
+
+  const accessPoints: WifiAccessPoint[] = [...bssRows.entries()]
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([, cols]) => ({
+      ssid: cols[BSS_COLS.ssid] ?? '',
+      bssid: normalizeMac(cols[BSS_COLS.bssid] ?? ''), // '' when not MAC-shaped (layout differs)
+      channel: toIntOrNull(cols[BSS_COLS.channel]),
+      security: wifiSecurityLabel(cols[BSS_COLS.security]),
+    }));
+
+  const clients: WifiClient[] = [...stationRows.entries()]
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([, cols]) => {
+      // MAC is assumed at STATION_COLS.mac; when that value isn't MAC-shaped
+      // (column layout differs on this device), scan the row for one.
+      let mac = normalizeMac(cols[STATION_COLS.mac] ?? '');
+      if (!mac) {
+        for (const v of Object.values(cols)) {
+          mac = normalizeMac(v);
+          if (mac) break;
+        }
+      }
+      return { mac, ssid: cols[STATION_COLS.ssid] ?? '', rateMbps: toIntOrNull(cols[STATION_COLS.rateMbps]) };
+    })
+    .filter((c) => c.mac !== ''); // a station row without a MAC is useless for display
+
+  return { accessPoints, clients, source: 'ieee802dot11-2' };
+}
+
+/**
+ * Parses the legacy IEEE802dot11-MIB (.1.2.840.10036): AP rows per wireless
+ * ifIndex with SSID + BSSID from the station-config table and channel from
+ * the DSSS PHY table. Verified layout (LANCOM LCOS, full walk on LX-6500s):
+ *   .1.2.840.10036.1.1.1.<column>.<ifIdx>  col 1 = BSSID, col 9 = SSID
+ *   .1.2.840.10036.4.5.1.1.<ifIdx>         dot11CurrentChannel
+ * A standard-layout config table (<table>.<ifIdx>.<column> under ...1.1) is
+ * also accepted best-effort for other vendors. This revision has no
+ * association/station table, so clients are always empty here — per-client
+ * data needs the newer .1.3.6.1.2.1.105 tree or a vendor MIB. (Subtree 2.x on
+ * LANCOM holds the AP's own radio MACs, not client stations.)
+ */
+function parseLegacyWlan(out: Map<string, string>): WifiInfo {
+  const aps = new Map<string, { ssid: string; bssid: string }>();
+  const channels = new Map<string, number>();
+
+  const apRow = (ifIndex: string) => {
+    let r = aps.get(ifIndex);
+    if (!r) {
+      r = { ssid: '', bssid: '' };
+      aps.set(ifIndex, r);
+    }
+    return r;
+  };
+
+  for (const [oid, value] of out) {
+    // Station-config table — LANCOM layout <column>.<ifIndex> under ...1.1.1.
+    let suffix = suffixOf(oid, LEGACY_STATION_CFG_LANCOM);
+    if (suffix) {
+      const dot = suffix.indexOf('.');
+      const idxPart = suffix.slice(dot + 1);
+      if (dot > 0 && !idxPart.includes('.')) {
+        const col = Number(suffix.slice(0, dot));
+        if (col === 1) apRow(idxPart).bssid ||= normalizeMac(value); // BSSID
+        else if (col === 9 && value) apRow(idxPart).ssid = value; // dot11DesiredSSID
+      }
+      continue;
+    }
+
+    // Station-config table — standard layout <ifIndex>.<column> under ...1.1
+    // (only rows that don't extend the LANCOM base reach here with 2 parts).
+    suffix = suffixOf(oid, LEGACY_STATION_CFG_STD);
+    const dot = suffix.indexOf('.');
+    if (dot > 0 && !suffix.slice(dot + 1).includes('.')) {
+      const col = Number(suffix.slice(dot + 1));
+      if (col === 1) apRow(suffix.slice(0, dot)).bssid ||= normalizeMac(value);
+      else if (col === 2 && value) apRow(suffix.slice(0, dot)).ssid = value; // best-effort column guess
+    }
+
+    // DSSS PHY table — current channel per ifIndex.
+    suffix = suffixOf(oid, LEGACY_PHY_DSSS);
+    const parts = suffix.split('.');
+    let chIdx: string | null = null;
+    if (parts.length === 3 && parts[0] === '1' && parts[1] === '1') chIdx = parts[2]; // LANCOM: 4.5.1.1.<ifIdx>
+    else if (parts.length === 2) chIdx = parts[0]; // standard: 4.5.<ifIdx>.<col>
+    if (chIdx !== null) {
+      const n = Number(value);
+      if (Number.isFinite(n) && n > 0) channels.set(chIdx, n);
+    }
+  }
+
+  const accessPoints: WifiAccessPoint[] = [...aps.entries()]
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .filter(([ifIndex, r]) => r.ssid !== '' || r.bssid !== '' || channels.has(ifIndex))
+    .map(([ifIndex, r]) => ({
+      ssid: r.ssid,
+      bssid: r.bssid,
+      channel: channels.get(ifIndex) ?? null,
+      security: '', // not exposed by this MIB revision
+    }));
+
+  return { accessPoints, clients: [], source: 'legacy' };
+}
+
+/** Integer or null when absent/non-numeric. */
+function toIntOrNull(v: string | undefined): number | null {
+  if (v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Security enum → label, numeric fallback for unknown values, '' when absent. */
+function wifiSecurityLabel(raw: string | undefined): string {
+  if (raw === undefined || raw === '') return '';
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return raw; // already a text value — keep as-is
+  return WIFI_SECURITY_NAMES[n] ?? String(n);
+}
+
+/* ------------------------------------------------------------------ *
  * Inventory cache (slow path, TTL-based — opnsense LIVE/INVENTORY split)
  * ------------------------------------------------------------------ */
 
@@ -401,15 +660,22 @@ export async function getInventory(
   creds: SnmpCredentials,
   opts: WalkOptions
 ): Promise<InventoryResult> {
+  // WiFi collection is ON by default — only an explicit false disables it.
+  const collectWifi = opts.collectWifi !== false;
+
   const cached = inventoryCache.get(host);
   if (cached && Date.now() - cached.collectedAt < opts.inventoryTtlMs) {
-    return { snapshot: cached, fromCache: true };
+    // A cache hit is only fresh enough when the WiFi state matches: toggling
+    // collectWifi on must not wait for TTL expiry to get first data.
+    const wifiStale = collectWifi && cached.wifi === undefined;
+    if (!wifiStale) return { snapshot: cached, fromCache: true };
   }
 
-  // System group and interface tables are independent — walk in parallel.
-  const [system, tables] = await Promise.all([
+  // System group, interface tables and (optionally) WLAN tables are independent — walk in parallel.
+  const [system, tables, wifi] = await Promise.all([
     walkSystem(host, creds, opts).catch(() => null),
     walkTables(host, creds, opts).catch(() => null),
+    collectWifi ? walkWifi(host, creds, opts).catch(() => null) : Promise.resolve(undefined as WifiInfo | undefined),
   ]);
 
   if (!system && !tables) {
@@ -426,6 +692,8 @@ export async function getInventory(
     interfaces: tables && tables.interfaces.length > 0 ? tables.interfaces : (cached?.interfaces ?? []),
     counters: tables?.counters ?? {},
     useHc: tables?.useHc ?? false,
+    // undefined = collection disabled; null = collected but no 802.11 data.
+    wifi: collectWifi ? (wifi ?? cached?.wifi ?? null) : undefined,
   };
   inventoryCache.set(host, snapshot);
 

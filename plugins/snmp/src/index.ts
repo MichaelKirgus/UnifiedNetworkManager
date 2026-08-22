@@ -4,6 +4,8 @@ import { Bonjour } from 'bonjour-service';
 import {
   SnmpCredentials,
   SystemInfo,
+  WifiAccessPoint,
+  WifiClient,
   WalkOptions,
   getInventory,
   walkCounters,
@@ -25,9 +27,9 @@ const INSTANCE_ID = process.env.PLUGIN_INSTANCE_ID?.trim() ?? '';
 export const EFFECTIVE_UUID = INSTANCE_ID ? `${PLUGIN_UUID}:${INSTANCE_ID}` : PLUGIN_UUID;
 export const DISPLAY_NAME =
   process.env.PLUGIN_DISPLAY_NAME?.trim() || (INSTANCE_ID ? `${PLUGIN_NAME} (${INSTANCE_ID})` : PLUGIN_NAME);
-// 0.2.0 — SNMPv3 (USM) support: v3 credentials from the snmp secret type,
-// security-level-aware validation, and -l/-u/-a/-A/-x/-X snmpwalk args.
-export const PLUGIN_VERSION = '0.2.0';
+// 0.3.0 — WiFi (802.11) collection: IEEE 802.11 MIB walks for access-point
+// and client facts, gated by the boolean `collectWifi` option (default on).
+export const PLUGIN_VERSION = '0.3.0';
 export const PLUGIN_VENDORS = ['generic'];
 export const PLUGIN_CAPABILITIES = ['monitoring', 'inventory'];
 export const PLUGIN_AUTH_TYPE = 'none';
@@ -78,6 +80,14 @@ const PLUGIN_OPTIONS = [
     max: 86_400_000,
     description:
       'How often the slow-changing inventory walks (system group + interface table) are re-run. Live throughput counters still refresh every poll cycle.',
+  },
+  {
+    key: 'collectWifi',
+    label: 'Collect WiFi data (802.11 MIBs)',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Walk IEEE 802.11 MIB tables for access-point and client info (SSID, BSSID, channel, security + connected client MACs). Refreshes with the inventory interval. Turn off per-device when a dedicated WiFi plugin covers the device.',
   },
 ];
 
@@ -152,6 +162,8 @@ function resolveOptions(settings: Record<string, unknown>): WalkOptions {
     retries: clampInt(settings.retries, 0, 10, 2),
     mibDir: settingMib || (process.env.MIB_DIR ? process.env.MIB_DIR : undefined),
     inventoryTtlMs: clampInt(settings.inventoryTtlMs, 60_000, 86_400_000, INVENTORY_INTERVAL_MS),
+    // WiFi collection is ON by default — only an explicit false disables it.
+    collectWifi: settings.collectWifi !== false,
   };
 }
 
@@ -336,6 +348,24 @@ app.post('/monitoring', async (req, res) => {
       status: i.status,
     }));
 
+    // WiFi (IEEE 802.11 MIBs): emitted only when collection is enabled AND the
+    // device actually exposed WLAN data — absence on non-AP devices is normal
+    // and must not degrade health or add descriptors.
+    const wifi = snapshot.wifi;
+    if (wifi && (wifi.accessPoints.length > 0 || wifi.clients.length > 0)) {
+      metrics['wifi.accessPoints'] = wifi.accessPoints.map((ap) => ({
+        ssid: ap.ssid || '—',
+        bssid: ap.bssid || '—',
+        channel: ap.channel !== null ? String(ap.channel) : '—',
+        security: ap.security || '—',
+      }));
+      metrics['wifi.clients'] = wifi.clients.map((c) => ({
+        mac: c.mac,
+        ssid: c.ssid || '—',
+        rate: c.rateMbps !== null ? `${c.rateMbps} Mbit` : '—',
+      }));
+    }
+
     // Health: partial data (or a failed counter walk) degrades to warning.
     let health: Health = 'ok';
     const warnings: string[] = [];
@@ -347,7 +377,8 @@ app.post('/monitoring', async (req, res) => {
       metrics['system.error'] = warnings.join('; ');
     }
 
-    const descriptors: MetricDescriptor[] = buildDescriptors(names, opts.inventoryTtlMs);
+    const hasWifi = !!wifi && (wifi.accessPoints.length > 0 || wifi.clients.length > 0);
+    const descriptors: MetricDescriptor[] = buildDescriptors(names, opts.inventoryTtlMs, hasWifi);
     if (metrics['system.error']) {
       descriptors.push({ key: 'system.error', label: 'Error', type: 'string', visualization: 'text', group: 'System' });
     }
@@ -364,6 +395,7 @@ app.post('/monitoring', async (req, res) => {
         retries: opts.retries,
         mibDir: opts.mibDir ?? null,
         inventoryTtlMs: opts.inventoryTtlMs,
+        collectWifi: opts.collectWifi !== false,
       },
     });
   } catch (err) {
@@ -384,6 +416,12 @@ interface InventoryResponse {
     mac: string;
     status: string;
   }>;
+  /** WiFi facts when collectWifi is enabled (null = no 802.11 data on device). */
+  wifi?: {
+    accessPoints: WifiAccessPoint[];
+    clients: WifiClient[];
+    source: 'ieee802dot11-2' | 'legacy';
+  } | null;
   error?: string;
 }
 
@@ -406,6 +444,8 @@ async function runInventory(host: string, creds: SnmpCredentials, opts: WalkOpti
         mac: i.mac,
         status: i.status,
       })),
+      // WiFi rides the same TTL-cached snapshot — no extra walks here.
+      ...(inventory.snapshot?.wifi !== undefined ? { wifi: inventory.snapshot.wifi } : {}),
       ...(inventory.error ? { error: inventory.error } : {}),
     };
   } catch (err) {
