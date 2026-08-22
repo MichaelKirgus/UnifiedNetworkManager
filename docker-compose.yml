@@ -98,8 +98,10 @@ services:
   # secret assigned per device (community + version). Vendor MIB files can be
   # dropped into ./plugins/snmp/mibs — mounted read-only at /app/mibs.
   snmp-plugin:
+    # Root context — the image also builds the shared @unm/snmp-client package.
     build:
-      context: ./plugins/snmp
+      context: .
+      dockerfile: plugins/snmp/Dockerfile
     ports:
       - "4005:4005"
     environment:

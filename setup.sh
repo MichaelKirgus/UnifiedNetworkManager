@@ -218,8 +218,9 @@ echo "🛠️  Syncing database schema..."
 cd api && npx drizzle-kit push && cd ..
 echo "✅ Database schema is up to date."
 
-# 6. Build the plugins (opnsense + icmp + snmp + basic-auth + secrets-provider)
+# 6. Build the shared packages + plugins (opnsense + icmp + snmp + basic-auth + secrets-provider)
 echo "🔨 Building plugins..."
+( cd packages/snmp-client && npm install --no-audit --no-fund >/dev/null && npm run build )
 ( cd plugins/opnsense && npm run build )
 ( cd plugins/icmp && npm run build )
 ( cd plugins/snmp && npm run build )

@@ -1,3 +1,5 @@
+# Build context is the REPO ROOT (see docker-compose.yml `context: .`) so the
+# shared @unm/snmp-client package can be copied in alongside this plugin.
 FROM node:20-alpine
 
 # net-snmp provides the daemon + standard MIBs (SNMPv2-MIB, IF-MIB under
@@ -8,11 +10,23 @@ RUN apk add --no-cache net-snmp net-snmp-tools
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm install --legacy-peer-deps
+# Shared transport package (no runtime deps — only its dist/ is needed at run
+# time; the plugin's tsc build follows the file: symlink to compile against it).
+COPY packages/snmp-client/package.json packages/snmp-client/tsconfig.json packages/snmp-client/
+COPY packages/snmp-client/src/index.ts packages/snmp-client/src/
+RUN cd packages/snmp-client && npm install --legacy-peer-deps && npm run build
 
-COPY . .
-RUN npm run build
+# Plugin: `npm install` links @unm/snmp-client → ../../packages/snmp-client.
+COPY plugins/snmp/package*.json plugins/snmp/tsconfig.json plugins/snmp/
+RUN cd plugins/snmp && npm install --legacy-peer-deps
+
+COPY plugins/snmp/src/index.ts plugins/snmp/src/metrics.ts plugins/snmp/src/snmpClient.ts plugins/snmp/src/
+RUN cd plugins/snmp && npm run build \
+    && node -e "require('/app/plugins/snmp/node_modules/@unm/snmp-client')"
+
+# Run from the plugin dir so `main` (dist/src/index.js) and the file: symlink
+# in node_modules resolve exactly like in local development.
+WORKDIR /app/plugins/snmp
 
 EXPOSE 4005
 

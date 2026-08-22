@@ -1,40 +1,13 @@
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+// SNMP transport (snmpwalk, v1/v2c + v3 USM args, output parsing, MAC
+// normalization) lives in the shared @unm/snmp-client package so every
+// SNMP-based plugin uses one implementation.
+import { SnmpCredentials, TransportOptions, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
 
-const execFileAsync = promisify(execFile);
+// Re-exported so existing imports (index.ts) keep working unchanged.
+export type { SnmpCredentials } from '@unm/snmp-client';
 
-/** Default location of net-snmp's standard MIBs on alpine. */
-const DEFAULT_MIB_DIR = '/usr/share/snmp/mibs';
-
-/** Hard cap so a single walk can never exceed the API's 10s poll budget. */
-const WALK_BUDGET_MS = 9_500;
-
-/**
- * SNMP credentials as stored in the `snmp` secret type.
- *
- * v1/v2c use a community string; v3 uses USM (username + security level,
- * with optional auth/priv protocol+password pairs). The fields for the other
- * version family are simply absent — callers validate per-version before
- * constructing credentials (see resolveCredentials in index.ts).
- */
-export interface SnmpCredentials {
-  version: 'v1' | 'v2c' | 'v3';
-  /** v1/v2c only. */
-  community?: string;
-  // v3 (USM) only — present when version === 'v3'.
-  username?: string;
-  securityLevel?: 'noAuthNoPriv' | 'authNoPriv' | 'authPriv';
-  authProtocol?: 'MD5' | 'SHA';
-  authPassword?: string;
-  privProtocol?: 'DES' | 'AES';
-  privPassword?: string;
-}
-
-export interface WalkOptions {
-  timeoutMs: number;
-  retries: number;
-  /** Container-internal directory holding extra (vendor) MIB files. */
-  mibDir?: string;
+/** Plugin-level walk options on top of the shared transport knobs. */
+export interface WalkOptions extends TransportOptions {
   /** How long the slow-path inventory snapshot stays fresh. */
   inventoryTtlMs: number;
   /** Collect 802.11 WLAN data (IEEE 802.11 MIBs). Default true — opt-out per device. */
@@ -186,117 +159,6 @@ const WIFI_SECURITY_NAMES: Record<number, string> = {
  * snmpwalk wrapper + output parsing
  * ------------------------------------------------------------------ */
 
-/**
- * Builds the version/authentication CLI args for snmpwalk from credentials.
- * v1/v2c use a community string; v3 uses USM (security level + username, with
- * auth/priv protocol+password pairs added per security level).
- */
-function buildVersionArgs(creds: SnmpCredentials): string[] {
-  if (creds.version === 'v3') {
-    const level = creds.securityLevel ?? 'noAuthNoPriv';
-    const args = ['-v', '3', '-l', level, '-u', creds.username ?? ''];
-    if (level !== 'noAuthNoPriv' && creds.authProtocol) {
-      args.push('-a', creds.authProtocol, '-A', creds.authPassword ?? '');
-    }
-    if (level === 'authPriv' && creds.privProtocol) {
-      args.push('-x', creds.privProtocol, '-X', creds.privPassword ?? '');
-    }
-    return args;
-  }
-  // snmpwalk expects `-v 1` / `-v 2c` (no "v" prefix); the secret stores 'v1'/'v2c'.
-  return ['-v', creds.version.replace(/^v/, ''), '-c', creds.community ?? ''];
-}
-
-/**
- * Runs `snmpwalk` for the given OID(s) and returns a map of full OID → value.
- * Throws on non-zero exit / timeout — callers decide how to degrade.
- */
-async function snmpWalk(
-  host: string,
-  creds: SnmpCredentials,
-  oids: string[],
-  opts: WalkOptions
-): Promise<Map<string, string>> {
-  const args = buildVersionArgs(creds);
-  // Force numeric OIDs in the output — without this, net-snmp resolves them to
-  // MIB names (e.g. SNMPv2-MIB::sysDescr.0) which depends on loaded MIBs and
-  // would break our numeric-OID parsing below.
-  args.push('-O', 'n');
-  args.push('-t', String(Math.max(1, Math.round(opts.timeoutMs / 1000))));
-  args.push('-r', String(opts.retries));
-  if (opts.mibDir) args.push('-M', opts.mibDir); // extra MIB search dir (volume mount)
-  args.push(host, ...oids);
-
-  const mibdirs = [opts.mibDir, DEFAULT_MIB_DIR].filter(Boolean).join(':');
-  const budgetMs = Math.min(opts.timeoutMs * (opts.retries + 1) + 2_000, WALK_BUDGET_MS);
-
-  try {
-    const { stdout } = await execFileAsync('snmpwalk', args, {
-      timeout: budgetMs,
-      maxBuffer: 16 * 1024 * 1024,
-      env: { ...process.env, MIBDIRS: mibdirs },
-    });
-    return parseWalkOutput(stdout);
-  } catch (err) {
-    const e = err as Error & { stderr?: string };
-    const detail = ((e.stderr ?? '') || e.message).trim().split('\n')[0];
-    throw new Error(`snmpwalk failed for ${host}: ${detail}`);
-  }
-}
-
-/**
- * Parses `snmpwalk` output lines of the form:
- *   .1.3.6.1.2.1.1.1.0 = STRING: Linux host 6.1 ...
- * Long values wrap onto continuation lines (no "OID =" prefix) — those are
- * appended to the previous entry.
- */
-function parseWalkOutput(stdout: string): Map<string, string> {
-  const entries = new Map<string, string>();
-  let lastOid: string | null = null;
-
-  for (const line of stdout.split('\n')) {
-    if (!line.trim()) continue;
-    // Type names may contain hyphens ("Hex-STRING") — \w alone would drop those
-    // lines and smear their values onto the previous entry.
-    const m = line.match(/^(\S+)\s*=\s*([\w-]+):\s?(.*)$/);
-    if (m) {
-      lastOid = m[1];
-      entries.set(lastOid, extractValue(m[2], m[3]));
-    } else if (lastOid) {
-      entries.set(lastOid, `${entries.get(lastOid)} ${line.trim()}`);
-    }
-  }
-  return entries;
-}
-
-/** Normalizes a typed value to its machine-readable form. */
-function extractValue(type: string, raw: string): string {
-  const text = (raw ?? '').trim();
-  switch (type) {
-    case 'INTEGER':
-    case 'Gauge32':
-    case 'Counter32':
-    case 'Counter64':
-    case 'Unsigned32':
-    case 'Timeticks': {
-      const m = text.match(/(\d+)/); // "up(1)", "12345 (2 min, 3 sec)" → number
-      return m ? m[1] : '';
-    }
-    case 'OBJECT IDENTIFIER':
-      return text; // dotted OID or resolved name — keep as-is
-    default: {
-      // net-snmp wraps DisplayStrings in double quotes when they need escaping
-      // (some builds quote all strings) — strip the outer pair.
-      if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) return text.slice(1, -1);
-      return text; // STRING, OCTET STRING, MAC ADDRESS, IpAddress, ...
-    }
-  }
-}
-
-/** Suffix of `oid` after `base.`, or '' when it doesn't extend base. */
-function suffixOf(oid: string, base: string): string {
-  return oid.startsWith(base + '.') ? oid.slice(base.length + 1) : '';
-}
 
 /* ------------------------------------------------------------------ *
  * System group (SNMPv2-MIB) — slow path
@@ -450,13 +312,6 @@ async function walkTables(host: string, creds: SnmpCredentials, opts: WalkOption
   } catch {
     return null;
   }
-}
-
-/** Normalizes MAC representations ("00-1A-2B..", "001a.2b3c.4d5e") to aa:bb:cc:dd:ee:ff. */
-function normalizeMac(raw: string): string {
-  const hex = (raw ?? '').replace(/[^0-9a-f]/gi, '').toLowerCase();
-  if (hex.length !== 12) return ''; // non-Ethernet MAC length — don't guess
-  return hex.replace(/(.{2})(?=.)/g, '$1:');
 }
 
 /* ------------------------------------------------------------------ *

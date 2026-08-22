@@ -1,0 +1,15 @@
+{
+  "name": "@unm/snmp-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared SNMP transport for UnifiedNetworkManager plugins: snmpwalk/snmpget via the net-snmp CLI with v1/v2c community and v3 USM credentials, numeric-OID output parsing, MAC normalization.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.2"
+  }
+}
