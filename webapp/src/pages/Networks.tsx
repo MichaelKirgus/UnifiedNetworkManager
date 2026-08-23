@@ -44,11 +44,20 @@ export default function Networks() {
     {
       header: 'Network',
       key: 'name',
-      width: 200,
+      width: 260,
+      // Search/export must see ALL subnets of the group — a dual-stack row's
+      // name is only its canonical (often v6) subnet.
+      exportValue: (row) => [row.name, ...(row.subnets ?? [])].join(', '),
       render: (row) => (
-        <span className="font-medium text-slate-800" title={row.subnet ?? undefined}>
-          {row.name}
-        </span>
+        <div className="flex flex-wrap items-center gap-1">
+          {/* Dual-stack groups carry both CIDRs — show every real subnet of the
+              group, IPv4 first; fall back to the label for VLAN/name rows. */}
+          {(row.subnets ?? []).length > 0 ? (
+            (row.subnets ?? []).map((s) => <CidrChip key={s} cidr={s} />)
+          ) : (
+            <span className="font-medium text-slate-800">{row.name}</span>
+          )}
+        </div>
       ),
     },
     {

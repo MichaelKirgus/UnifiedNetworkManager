@@ -158,6 +158,8 @@ interface MergedNetwork {
   name: string;
   /** Subnet (network address + prefix) when any member row carries an IP — null for pure SSID/VLAN rows. */
   subnet: string | null;
+  /** ALL real subnets of this logical network, IPv4 first (dual-stack groups carry both). Empty for pure SSID/VLAN rows. */
+  subnets: string[];
   vlanId: number | null;
   versions: ('v4' | 'v6')[];
   /** Every device/interface that reports this network (one entry per device+plugin). */
@@ -278,7 +280,7 @@ export function mergeNetworkRows(rows: StoredNetwork[]): MergedNetwork[] {
 
   // Pass 3: assign every interface to a logical network group. The map key is
   // the row's canonical identity — unique per group by construction.
-  const groups = new Map<string, { id: string; label: string; subnet: string | null; vlans: Set<number>; versions: Set<'v4' | 'v6'>; latestAt: string; members: InterfaceMember[] }>();
+  const groups = new Map<string, { id: string; label: string; subnet: string | null; subnets: Set<string>; vlans: Set<number>; versions: Set<'v4' | 'v6'>; latestAt: string; members: InterfaceMember[] }>();
   for (const m of members.values()) {
     let key: string;
     const own = networkSubnet(m.subnets);
@@ -295,8 +297,13 @@ export function mergeNetworkRows(rows: StoredNetwork[]): MergedNetwork[] {
     if (!g) {
       const subnet = key.startsWith('subnet:') ? key.slice('subnet:'.length) : null;
       const vlanId = key.startsWith('vlan:') ? Number(key.slice('vlan:'.length)) : null;
-      g = { id: key, label: subnet ?? (vlanId !== null ? `VLAN ${vlanId}` : m.name || 'unknown'), subnet, vlans: new Set(), versions: new Set(), latestAt: '', members: [] };
+      g = { id: key, label: subnet ?? (vlanId !== null ? `VLAN ${vlanId}` : m.name || 'unknown'), subnet, subnets: new Set(), vlans: new Set(), versions: new Set(), latestAt: '', members: [] };
       groups.set(key, g);
+    }
+    // Every REAL subnet of every member (loopback/link-local excluded) — a
+    // dual-stack group thus carries both its v4 and v6 CIDRs.
+    for (const s of m.subnets) {
+      if (!isNonNetworkSubnet(s)) g.subnets.add(s);
     }
     if (m.vlanId !== null) g.vlans.add(m.vlanId);
     for (const v of m.versions) g.versions.add(v);
@@ -325,10 +332,17 @@ export function mergeNetworkRows(rows: StoredNetwork[]): MergedNetwork[] {
     const versions: ('v4' | 'v6')[] = [];
     if (g.versions.has('v4')) versions.push('v4');
     if (g.versions.has('v6')) versions.push('v6');
+    // IPv4 first, then lexicographic — the usual reading order for dual-stack.
+    const subnets = Array.from(g.subnets).sort((a, b) => {
+      const av = a.includes(':') ? 1 : 0;
+      const bv = b.includes(':') ? 1 : 0;
+      return av !== bv ? av - bv : a.localeCompare(b);
+    });
     return {
       key: g.id,
       name: g.label,
       subnet: g.subnet,
+      subnets,
       vlanId: g.vlans.size === 1 ? Array.from(g.vlans)[0] : null,
       versions,
       devices: Array.from(byDevice.values()).sort((a, b) => a.deviceId.localeCompare(b.deviceId)),

@@ -167,6 +167,8 @@ export interface NetworkRow {
   name: string;
   /** Subnet (network address + prefix) when any member carries an IP — null for pure SSID/VLAN rows. */
   subnet: string | null;
+  /** ALL real subnets of this logical network, IPv4 first (dual-stack groups carry both). Empty for pure SSID/VLAN rows. */
+  subnets?: string[];
   vlanId?: number | null;
   /** Address families present across all members (e.g. ["v4","v6"] for dual-stack). */
   versions: ('v4' | 'v6')[];
