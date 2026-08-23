@@ -464,6 +464,14 @@ async function main(): Promise<void> {
   check('port rates computed on second sample', psSecond.length === 5 && /^\d+(\.\d+)? Kbps$/.test(String(psSecond[0]?.rxRate)) && /^\d+(\.\d+)? Kbps$/.test(String(psSecond[0]?.txRate)), psSecond[0]);
   check('aggregate throughput gauges > 0', typeof ms2['switch.rxThroughput'] === 'number' && (ms2['switch.rxThroughput'] as number) > 0 && (ms2['switch.txThroughput'] as number) > 0, [ms2['switch.rxThroughput'], ms2['switch.txThroughput']]);
 
+  // Gauge ceiling = total link capacity of the mock (3×1G + 2×10G = 23 Gbps), not the
+  // default max:100 — otherwise raw bits/s pin the bar at 100%.
+  const descs2 = ((await (
+    await fetch(`${BASE}/monitoring`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ deviceId: 'dev-swos', managementAddress: `localhost:${SWOS_PORT}`, credentials: creds }) })
+  ).json()) as { metricDescriptors?: { key: string; max?: number }[] }).metricDescriptors ?? [];
+  const rxDesc = descs2.find((d) => d.key === 'switch.rxThroughput');
+  check('throughput gauge max = link capacity (23 Gbps)', rxDesc?.max === 23e9, rxDesc);
+
   // --- /monitoring (bad credentials → critical) ------------------------------------------------------
   const monBad = (await (
     await fetch(`${BASE}/monitoring`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ deviceId: 'dev-lite', managementAddress: `localhost:${LITE_PORT}`, credentials: { username: 'admin', password: 'wrong' } }) })

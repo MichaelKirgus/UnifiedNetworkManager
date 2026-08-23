@@ -33,6 +33,8 @@ export interface PortInfo {
   enabled: boolean;
   linkUp: boolean;
   speedLabel: string;
+  /** Raw wire speed code (SPEED_LABELS key) — drives the gauge capacity ceiling. */
+  speedCode: number;
   duplex: 'full' | 'half' | 'unknown';
   autoNegotiation: boolean;
 }
@@ -126,6 +128,26 @@ const SPEED_LABELS: Record<number, string> = {
   10: '50G',
   11: '100G',
 };
+
+/** Nominal bits/s per speed code — the gauge ceiling is the sum over all ports. */
+const SPEED_BITS_PER_SEC: Record<number, number> = {
+  1: 10e6,
+  2: 100e6,
+  3: 1e9,
+  4: 5e9,
+  5: 2.5e9,
+  6: 10e9,
+  7: 10e9,
+  8: 25e9,
+  9: 40e9,
+  10: 50e9,
+  11: 100e9,
+};
+
+/** Total nominal link capacity of the switch (sum over ports; unknown codes count as 0). */
+export function totalLinkCapacityBitsPerSec(ports: PortInfo[]): number {
+  return ports.reduce((sum, p) => sum + (SPEED_BITS_PER_SEC[p.speedCode] ?? 0), 0);
+}
 
 const POE_MODES = ['off', 'on', 'auto'];
 const POE_STATUS: Record<number, string> = { 0: 'disabled', 2: 'waiting for load', 3: 'powered on', 5: 'short circuit', 6: 'overload' };
@@ -258,6 +280,7 @@ export async function collectSnapshot(client: SwosClient): Promise<SwosSnapshot>
         enabled: !!(enabledMask & (1 << i)),
         linkUp,
         speedLabel: SPEED_LABELS[speedCode] ?? (speedCode >= 0 ? String(speedCode) : 'unknown'),
+        speedCode,
         duplex,
         autoNegotiation: !!(autoNegMask & (1 << i)),
       });
@@ -662,9 +685,13 @@ export function buildDescriptors(s: SwosSnapshot): MetricDescriptor[] {
   }
 
   if (s.portStats && s.portStats.length > 0) {
+    // Gauge ceiling = the switch's total nominal link capacity (sum of port speeds),
+    // so the bar shows real utilization instead of pinning at 100% (raw bits/s vs
+    // the default max:100). Falls back to 1 Gbps when no speed codes are known.
+    const capacity = totalLinkCapacityBitsPerSec(s.ports) || 1e9;
     d.push(
-      { key: 'switch.rxThroughput', label: 'Total RX throughput', unit: 'bps', format: 'bits', type: 'number', visualization: 'gauge', group: 'Traffic', color: '#3b82f6', summary: true },
-      { key: 'switch.txThroughput', label: 'Total TX throughput', unit: 'bps', format: 'bits', type: 'number', visualization: 'gauge', group: 'Traffic', color: '#10b981', summary: true },
+      { key: 'switch.rxThroughput', label: 'Total RX throughput', unit: 'bps', format: 'bits', type: 'number', visualization: 'gauge', group: 'Traffic', color: '#3b82f6', summary: true, min: 0, max: capacity },
+      { key: 'switch.txThroughput', label: 'Total TX throughput', unit: 'bps', format: 'bits', type: 'number', visualization: 'gauge', group: 'Traffic', color: '#10b981', summary: true, min: 0, max: capacity },
       { key: 'switch.portStats', label: 'Port traffic (current rate)', type: 'string', visualization: 'table', group: 'Traffic', columns: ['port', 'name', 'rxRate', 'txRate'] }
     );
   }

@@ -18,6 +18,9 @@
  *  - IP addresses are LITTLE-ENDIAN (192.168.88.1 → 0x0158a8c0).
  */
 
+import http from 'http';
+import https from 'https';
+import { URL } from 'url';
 import { createHash } from 'crypto';
 
 // --- Wire codec -----------------------------------------------------------------
@@ -209,6 +212,22 @@ export class SwosClient {
   private readonly timeoutMs: number;
 
   /**
+   * Per-client request queue. The embedded web server cannot handle CONCURRENT
+   * digest exchanges — parallel requests get ECONNRESET or a spurious 401 even
+   * though the same requests succeed one after another (verified live on a
+   * CRS309: 10 parallel GETs → resets/401, sequential → all OK). Every request
+   * still uses its own fresh connection; this only serializes them.
+   */
+  private requestChain: Promise<unknown> = Promise.resolve();
+
+  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.requestChain.then(fn, fn);
+    // Keep the chain alive even if a request fails — later requests must not be rejected.
+    this.requestChain = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
    * @param address bare host ("192.168.88.1") or full URL ("http://…"). SwOS Lite
    *                is HTTP-only; an explicit https:// scheme is honored when given.
    */
@@ -228,8 +247,8 @@ export class SwosClient {
   /** GET a `.b` endpoint and parse the response. */
   async get(endpoint: string): Promise<SwosData> {
     const res = await this.rawRequest('GET', `/${endpoint}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status} from ${endpoint}`);
-    const text = await res.text();
+    if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status} from ${endpoint}`);
+    const text = res.body.toString('utf8');
     if (!text || !text.trim()) throw new Error(`Empty response from ${endpoint} (feature may be unsupported)`);
     return parseSwos(text);
   }
@@ -237,20 +256,86 @@ export class SwosClient {
   /** GET an endpoint as raw bytes (backup.swb). */
   async getRaw(endpoint: string): Promise<Buffer> {
     const res = await this.rawRequest('GET', `/${endpoint}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status} from ${endpoint}`);
-    return Buffer.from(await res.arrayBuffer());
+    if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status} from ${endpoint}`);
+    return res.body;
   }
 
   /** POST a pre-built wire body (text/plain). Returns the response text. */
   async post(endpoint: string, body: string): Promise<string> {
     const res = await this.rawRequest('POST', `/${endpoint}`, body);
-    if (!res.ok) throw new Error(`HTTP ${res.status} from POST ${endpoint}`);
-    return (await res.text()).trim();
+    if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status} from POST ${endpoint}`);
+    return res.body.toString('utf8').trim();
   }
 
   // --- internals -----------------------------------------------------------------
 
-  private async rawRequest(method: 'GET' | 'POST', path: string, body?: string): Promise<Response> {
+  /**
+   * One HTTP request over a FRESH connection. Deliberately NOT global fetch:
+   * undici pools connections and injects extra headers (accept-language,
+   * sec-fetch-mode, user-agent: node, …) — the SwOS embedded web server rejects
+   * digest responses on reused/pooled sockets with 401 even when the response
+   * hash is correct (verified live against a CRS309: identical header via raw
+   * node:http → 200, via fetch → 401). `Connection: close` forces one socket per
+   * request; only the minimal header set is sent.
+   */
+  private httpRequest(method: 'GET' | 'POST', path: string, headers: Record<string, string>, body?: string): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
+    return new Promise((resolve, reject) => {
+      let u: URL;
+      try {
+        u = new URL(this.baseUrl + path);
+      } catch (err) {
+        reject(new Error(`SwOS request failed (${method} ${path}): bad URL`));
+        return;
+      }
+      const lib = u.protocol === 'https:' ? https : http;
+      const reqHeaders: Record<string, string> = { ...headers };
+      if (body !== undefined) {
+        reqHeaders['Content-Length'] = String(Buffer.byteLength(body, 'utf8'));
+      }
+      reqHeaders.Connection = 'close';
+
+      let settled = false;
+      const finish = (fn: () => void) => {
+        if (!settled) {
+          settled = true;
+          fn();
+        }
+      };
+
+      const req = lib.request(
+        u,
+        { method, headers: reqHeaders },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => finish(() => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) })));
+        }
+      );
+      req.setTimeout(this.timeoutMs, () => {
+        finish(() => {
+          req.destroy();
+          reject(new Error(`SwOS request timed out after ${this.timeoutMs} ms (${method} ${path})`));
+        });
+      });
+      req.on('error', (err) => finish(() => reject(new Error(`SwOS request failed (${method} ${path}): ${err.message}`))));
+      if (body !== undefined) req.write(body);
+      req.end();
+    });
+  }
+
+  private rawRequest(
+    method: 'GET' | 'POST',
+    path: string,
+    body?: string
+  ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
+    return this.enqueue(() => this.rawRequestOnce(method, path, body));
+  }
+
+  private async rawRequestOnce(
+    method: 'GET' | 'POST',
+    path: string,
+    body?: string
+  ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
     let challenge: DigestChallenge | null = null;
     let attempts = 0;
     for (;;) {
@@ -259,15 +344,15 @@ export class SwosClient {
       if (challenge) {
         headers.Authorization = this.buildDigestHeader(method, path, challenge, body ?? '');
       }
-      let res: Response;
+      let res: { status: number; headers: http.IncomingHttpHeaders; body: Buffer };
       try {
-        res = await fetch(`${this.baseUrl}${path}`, { method, headers, body, signal: AbortSignal.timeout(this.timeoutMs) });
+        res = await this.httpRequest(method, path, headers, body);
       } catch (err) {
-        throw new Error(`SwOS request failed (${method} ${path}): ${(err as Error).message}`);
+        throw err instanceof Error ? err : new Error(String(err));
       }
 
       if (res.status === 401) {
-        const www = res.headers.get('www-authenticate');
+        const www = String(res.headers['www-authenticate'] ?? '');
         attempts++;
         if (!www || !www.toLowerCase().startsWith('digest')) throw new SwosAuthError();
         challenge = parseDigestChallenge(www);
