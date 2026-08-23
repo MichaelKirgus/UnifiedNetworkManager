@@ -108,6 +108,8 @@ async function pollAssignment(target: AssignmentTarget): Promise<string> {
  *   - arp[] / ndp[] { mac, ip, intf?, manufacturer? }
  *   - dhcpLeases[]  { mac, ip, hostname?, expiry?, intf? }
  *   - wlanClients[] { mac, ip, hostname?, intf? } — associated WLAN clients
+ *   - macTable[]    { mac, intf? } — switch MAC tables (e.g. SwOS !dhost.b):
+ *                     learned MAC + port only, no IP → stored with source 'mac'
  * Rows are upserted on their natural key; a host seen again simply refreshes
  * lastSeenAt. Unknown/missing fields are tolerated — plugins evolve
  * independently of the API. Never throws: an inventory parse failure must not
@@ -180,9 +182,13 @@ async function ingestInventory(
       const r = raw as Record<string, unknown>;
       const mac = typeof r['mac'] === 'string' ? (r['mac'] as string).trim().toLowerCase() : '';
       const ip = typeof r['ip'] === 'string' ? (r['ip'] as string).trim() : '';
-      // Skip empty AND placeholder addresses ("0.0.0.0" / "::") — some plugins
-      // report them for hosts without an address yet; they are not joinable IPs.
-      if (!mac || !ip || ip === '0.0.0.0' || ip === '::') return;
+      // Skip placeholder addresses ("0.0.0.0" / "::") — some plugins report them
+      // for hosts without an address yet; they are not joinable IPs.
+      if (!mac) return;
+      if (ip === '0.0.0.0' || ip === '::') return;
+      // IP-less rows are allowed ONLY for source 'mac' — switch MAC tables
+      // (e.g. SwOS !dhost.b) report learned MAC + port with no address.
+      if (!ip && source !== 'mac') return;
       hostValues.push({
         deviceId,
         pluginId,
@@ -205,6 +211,9 @@ async function ingestInventory(
     // WLAN clients (e.g. LANCOM station table) — source 'wlan'.
     const wlanClients = Array.isArray(metrics['wlanClients']) ? (metrics['wlanClients'] as unknown[]) : [];
     for (const raw of wlanClients) pushHostRow('wlan', raw);
+    // Switch MAC tables (e.g. SwOS !dhost.b) — learned MAC + port, no IP.
+    const macRows = Array.isArray(metrics['macTable']) ? (metrics['macTable'] as unknown[]) : [];
+    for (const raw of macRows) pushHostRow('mac', raw);
 
     // Same guard as above — one snapshot must not repeat a (mac, ip, source) row.
     const hostByKey = new Map<string, typeof hostValues[number]>();

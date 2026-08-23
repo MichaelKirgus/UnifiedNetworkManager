@@ -13,7 +13,8 @@ SECRETS_PORT=4003
 ICMP_PORT=4004
 SNMP_PORT=4005
 LANCOM_PORT=4006
-ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}" "${ICMP_PORT}" "${SNMP_PORT}" "${LANCOM_PORT}")
+SWOS_PORT=4007
+ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}" "${ICMP_PORT}" "${SNMP_PORT}" "${LANCOM_PORT}" "${SWOS_PORT}")
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/unm-dev.XXXXXX")"
 DEV_PIDS=()
 
@@ -228,12 +229,13 @@ echo "🔨 Building plugins..."
 ( cd plugins/lancom && npm run build )
 ( cd plugins/basic-auth && npm run build )
 ( cd plugins/secrets-provider && npm run build )
-ok "Plugins built (opnsense + icmp + snmp + lancom + basic-auth + secrets-provider)."
+( cd plugins/swos && npm run build )
+ok "Plugins built (opnsense + icmp + snmp + lancom + swos + basic-auth + secrets-provider)."
 
 # 7. Start the plugin containers (--build: always reflect current source;
 #    reusing stale images silently serves old code — a past source of bugs)
 echo "🌐 Starting plugin containers..."
-docker_compose up -d --build opnsense-plugin icmp-plugin snmp-plugin lancom-plugin basic-auth-plugin secrets-provider-plugin
+docker_compose up -d --build opnsense-plugin icmp-plugin snmp-plugin lancom-plugin swos-plugin basic-auth-plugin secrets-provider-plugin
 ok "Plugin containers started."
 
 # 8. Wait for the plugins to be reachable (basic-auth must be up before the
@@ -244,6 +246,7 @@ wait_for_port "$OPNSENSE_PORT" "opnsense-plugin"
 wait_for_port "$ICMP_PORT" "icmp-plugin"
 wait_for_port "$SNMP_PORT" "snmp-plugin"
 wait_for_port "$LANCOM_PORT" "lancom-plugin"
+wait_for_port "$SWOS_PORT" "swos-plugin"
 wait_for_port "$BASIC_AUTH_PORT" "basic-auth-plugin"
 wait_for_port "$SECRETS_PORT" "secrets-provider-plugin"
 ok "Plugins are reachable."

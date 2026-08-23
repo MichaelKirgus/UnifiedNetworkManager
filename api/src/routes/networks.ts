@@ -103,7 +103,8 @@ export function mergeHostRows(rows: typeof schema.hosts.$inferSelect[]): MergedH
 
   return Array.from(groups.values()).map((group) => {
     // IPv4 first, then IPv6 — the usual reading order for a dual-stack host.
-    const ips = Array.from(new Set(group.map((r) => r.ip))).sort((a, b) => {
+    // IP-less rows (source 'mac' — switch MAC tables) contribute no address.
+    const ips = Array.from(new Set(group.map((r) => r.ip).filter((ip) => ip !== ''))).sort((a, b) => {
       const av = a.includes(':') ? 1 : 0;
       const bv = b.includes(':') ? 1 : 0;
       return av !== bv ? av - bv : a.localeCompare(b);

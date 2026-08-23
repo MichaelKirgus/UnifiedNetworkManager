@@ -268,7 +268,8 @@ export const hosts = pgTable(
     pluginId: text('pluginId').notNull(),
     mac: text('mac').notNull(),
     ip: text('ip').notNull(),
-    // arp | ndp | dhcp — which table/lease source reported this host.
+    // arp | ndp | dhcp | wlan | mac — which table/lease source reported this
+    // host ('mac' = switch MAC table, IP-less rows).
     source: text('source').notNull(),
     hostname: text('hostname'),
     manufacturer: text('manufacturer'),

@@ -35,7 +35,7 @@ services:
       - SECRETS_PLUGIN_ID=${SECRETS_PLUGIN_ID:-00000000-0000-4000-8000-000000000002}
       # Poll these plugin endpoints for discovery (mDNS is often isolated on
       # Docker bridge networks). Ensures the provider plugins are registered.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005,http://lancom-plugin:4006}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005,http://lancom-plugin:4006,http://swos-plugin:4007}
     depends_on:
       - postgres
     restart: unless-stopped
@@ -134,6 +134,21 @@ services:
     volumes:
       - ./plugins/lancom/mibs:/app/mibs:ro
     restart: unless-stopped
+  # SwOS plugin: MikroTik SwOS / SwOS Lite switch monitoring (system, ports,
+  # PoE, LAG/LACP, VLANs, SFP, SNMP) via the .b-file HTTP API with Digest auth,
+  # plus plan/config actions and network/MAC inventory propagation. SwOS only —
+  # RouterOS devices get their own plugin later.
+  swos-plugin:
+    build:
+      context: ./plugins/swos
+    ports:
+      - "4007:4007"
+    environment:
+      - PORT=4007
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://swos-plugin:4007
+    restart: unless-stopped
+
   # Mock OPNsense appliance for end-to-end plan-execution tests. Host network
   # so it can bind :80/:443 directly; reachable from the plugin containers as
   # http(s)://host.docker.internal (bare hostname — device managementAddress

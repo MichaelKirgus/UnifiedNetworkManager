@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- CSS desktop switch: compact box with front port strip -->
+  <rect x="8" y="16" width="48" height="32" rx="4" fill="#1e293b"/>
+  <rect x="8" y="16" width="48" height="32" rx="4" fill="none" stroke="#475569" stroke-width="1.5"/>
+  <!-- front port strip -->
+  <g fill="#0f172a" stroke="#475569" stroke-width="0.7">
+    <rect x="13" y="28" width="7" height="10" rx="1.2"/>
+    <rect x="22" y="28" width="7" height="10" rx="1.2"/>
+    <rect x="31" y="28" width="7" height="10" rx="1.2"/>
+  </g>
+  <!-- SFP slots -->
+  <g fill="#0b1220" stroke="#475569" stroke-width="0.7">
+    <rect x="41" y="28" width="10" height="4" rx="1"/>
+    <rect x="41" y="34" width="10" height="4" rx="1"/>
+  </g>
+  <!-- LEDs -->
+  <circle cx="16.5" cy="23" r="1.5" fill="#22c55e"/>
+  <circle cx="25.5" cy="23" r="1.5" fill="#22c55e"/>
+  <circle cx="34.5" cy="23" r="1.5" fill="#f59e0b"/>
+  <!-- red accent -->
+  <rect x="8" y="51" width="48" height="3.5" rx="1.75" fill="#d93a2f"/>
+</svg>

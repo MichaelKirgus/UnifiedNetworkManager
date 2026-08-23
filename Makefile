@@ -10,15 +10,16 @@ setup:
 	cd plugins/secrets-provider && npm install
 	cd plugins/icmp && npm install
 	cd plugins/snmp && npm install
+	cd plugins/swos && npm install
 	@echo "Dependencies installed successfully."
 
 # Start infrastructure (DB and Plugins)
 up:
 	@echo "Starting infrastructure..."
 	@if command -v docker-compose &> /dev/null; then \
-		sudo docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin; \
+		sudo docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin swos-plugin; \
 	else \
-		sudo docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin; \
+		sudo docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin swos-plugin; \
 	fi
 	@echo "Infrastructure is up."
 
