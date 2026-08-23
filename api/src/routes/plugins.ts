@@ -87,6 +87,10 @@ router.get('/plugins/:id/icon', async (req, res) => {
     // Icons are static per plugin version — let the browser cache them.
     res.set('Content-Type', contentType);
     res.set('Cache-Control', 'public, max-age=300');
+    // The webapp loads these via plain <img> tags from a different origin/port
+    // (Vite dev :5173 → API :3000). Without CORP, Chrome blocks the cross-site
+    // subresource load even though the route is unauthenticated.
+    res.set('Cross-Origin-Resource-Policy', 'cross-origin');
     res.status(200).send(Buffer.from(data));
   } catch (err) {
     const e = err as { status?: number; message?: string };
