@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="12" fill="#172554"/>
+  <!-- shield -->
+  <path d="M32 9 L51 16.5 V31 C51 43.5 43 51.5 32 56 C21 51.5 13 43.5 13 31 V16.5 Z" fill="#bfdbfe"/>
+  <!-- firewall rule bars -->
+  <rect x="20" y="22" width="24" height="4" rx="2" fill="#172554"/>
+  <rect x="20" y="30" width="24" height="4" rx="2" fill="#172554"/>
+  <rect x="20" y="38" width="16" height="4" rx="2" fill="#172554"/>
+</svg>

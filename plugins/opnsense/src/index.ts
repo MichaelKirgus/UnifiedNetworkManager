@@ -1,3 +1,4 @@
+import path from 'path';
 import express from 'express';
 import cors from 'cors';
 import { Bonjour } from 'bonjour-service';
@@ -12,6 +13,7 @@ import {
   getNdpTable,
   OpnsenseTransport,
 } from './opnsenseClient';
+import { DEVICE_MODELS } from './deviceModels';
 import { createClient, OpnsenseCredentials } from './client/http';
 import { resolveEdition } from './client/editions';
 import { detectDnsBackend, DnsBackend } from './client/dns';
@@ -48,6 +50,10 @@ const ADVERTISED_ENDPOINT = process.env.ADVERTISED_ENDPOINT ?? `http://localhost
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Static icon assets (plugin + per-model icons), advertised in /discover and
+// fetched by the API's icon proxy. dist/src/../../icons = <plugin root>/icons.
+app.use('/icons', express.static(path.join(__dirname, '../../icons')));
 
 app.get('/healthz', (_req, res) => {
   res.status(200).json({ status: 'ok' });
@@ -559,6 +565,13 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
   if (metrics['version'] !== undefined) {
     push({ key: 'version', label: 'Version', type: 'string', visualization: 'text', group: 'Inventory', intervalMs: INVENTORY_INTERVAL_MS });
   }
+  // Selected model/firmware echoed from the device form (see /monitoring).
+  if (metrics['system.model'] !== undefined) {
+    push({ key: 'system.model', label: 'Selected Model', type: 'string', visualization: 'text', group: 'System' });
+  }
+  if (metrics['system.firmwareVersion'] !== undefined) {
+    push({ key: 'system.firmwareVersion', label: 'Selected Firmware', type: 'string', visualization: 'text', group: 'System' });
+  }
 
   // Traffic table (rows = interfaces present in the data).
   if (metrics['traffic'] && typeof metrics['traffic'] === 'object') {
@@ -632,6 +645,11 @@ app.get('/discover', (_req, res) => {
     // and /config — see src/actions/registry.ts.
     actions: listCatalog(),
     modules: listModules(),
+    // Icon + supported device model catalog — drives the webapp's Model/Firmware
+    // dropdowns and the icon shown on the Devices pages. The user's selection is
+    // forwarded to /monitoring (model/firmwareVersion) for future per-model logic.
+    iconUrl: '/icons/opnsense.svg',
+    deviceModels: DEVICE_MODELS,
   });
 });
 
@@ -907,7 +925,12 @@ async function collectMetrics(
 }
 
 app.post('/monitoring', async (req, res) => {
-  const { deviceId, apiKey, apiSecret, managementAddress } = req.body ?? {};
+  const body = req.body ?? {};
+  const { deviceId, apiKey, apiSecret, managementAddress } = body;
+  // Model/firmware selected in the webapp device form — forwarded by the API's
+  // telemetry worker on every poll. Echoed back as system.* metrics (informational).
+  const selectedModel = typeof body.model === 'string' && body.model ? body.model : null;
+  const selectedFirmware = typeof body.firmwareVersion === 'string' && body.firmwareVersion ? body.firmwareVersion : null;
 
   // Effective settings injected by the API (defaults ⊕ user overrides). The
   // plugin reads its options from here — it never stores them itself.
@@ -919,6 +942,11 @@ app.post('/monitoring', async (req, res) => {
 
   try {
     const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret, transport);
+
+    // Echo of the user-selected model/firmware (mirrors the LANCOM plugin) —
+    // informational only; shown as text cards in the device detail view.
+    if (selectedModel) metrics['system.model'] = selectedModel;
+    if (selectedFirmware) metrics['system.firmwareVersion'] = selectedFirmware;
 
     // Health: prefer the appliance's own status code (0=critical, 1=warning,
     // 2=ok); fall back to "did we collect anything at all".
@@ -947,6 +975,8 @@ app.post('/monitoring', async (req, res) => {
         pollIntervalSec: settings.pollIntervalSec,
         enableInventoryCache: settings.enableInventoryCache,
         transport,
+        model: selectedModel,
+        firmwareVersion: selectedFirmware,
       },
     });
   } catch (err) {
