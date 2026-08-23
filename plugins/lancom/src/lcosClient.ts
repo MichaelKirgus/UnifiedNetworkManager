@@ -556,7 +556,9 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
       case 3: c.ifc = value; // plain text value ("WLAN-1")
       // Verified live: connectTime is in CENTISECONDS (delta 75s → +750).
       case 18: { const n = toInt(value); if (n !== null) c.sessionSeconds = Math.round(n / 100); } break;
-      case 27: c.ip4 = value; break;
+      // LCOS reports "0.0.0.0" for stations without an IPv4 address — treat as absent,
+      // otherwise it masks the station's real IPv6 in the merged host view.
+      case 27: c.ip4 = value === '0.0.0.0' ? '' : value; break;
       case 28: c.ip6 = value === '::' ? '' : value; break; // link-local/none → absent
       case 33: { const w = label(WPA_VERSIONS, value); if (w) c.wpa = w; } break;
       case 38: c.vlanId = toInt(value); break;

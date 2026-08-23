@@ -172,7 +172,9 @@ async function ingestInventory(
       const r = raw as Record<string, unknown>;
       const mac = typeof r['mac'] === 'string' ? (r['mac'] as string).trim().toLowerCase() : '';
       const ip = typeof r['ip'] === 'string' ? (r['ip'] as string).trim() : '';
-      if (!mac || !ip) return; // unjoinable without both — skip defensively
+      // Skip empty AND placeholder addresses ("0.0.0.0" / "::") — some plugins
+      // report them for hosts without an address yet; they are not joinable IPs.
+      if (!mac || !ip || ip === '0.0.0.0' || ip === '::') return;
       hostValues.push({
         deviceId,
         pluginId,

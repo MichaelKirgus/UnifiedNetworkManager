@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { DeviceChip } from '../components/DeviceChip';
 import { api, HostRow } from '../api/client';
 
 /** Color-coded pill for one discovery source; a merged host shows all of its sources. */
@@ -74,10 +75,25 @@ export default function Hosts() {
       render: (row) => row.manufacturer ?? <span className="text-slate-400">—</span>,
     },
     {
-      header: 'Interface',
-      key: 'intf',
-      width: 120,
-      render: (row) => row.intf ?? <span className="text-slate-400">—</span>,
+      // Every device+plugin that observed this MAC, with the interface(s) seen on.
+      header: 'Devices',
+      key: 'devices',
+      width: 320,
+      exportValue: (row) => row.devices.map((d) => `${d.deviceName ?? '?'}[${d.interfaces.join(',')}]`).join('; '),
+      render: (row) => (
+        <div className="flex flex-wrap gap-1">
+          {row.devices.map((d) => (
+            <DeviceChip
+              key={`${d.deviceId}|${d.pluginId}`}
+              deviceName={d.deviceName}
+              managementAddress={d.managementAddress}
+              pluginName={d.pluginName}
+              siteName={d.siteName}
+              interfaces={d.interfaces}
+            />
+          ))}
+        </div>
+      ),
     },
     {
       header: 'Lease expiry',
@@ -93,26 +109,6 @@ export default function Hosts() {
       sortAccessor: (row) => new Date(row.lastSeenAt).getTime(),
       render: (row) => new Date(row.lastSeenAt).toLocaleString(),
     },
-    {
-      header: 'Device',
-      key: 'deviceName',
-      width: 180,
-      render: (row) =>
-        row.deviceName ? (
-          <span title={row.managementAddress ?? undefined}>
-            {row.deviceName}
-            {row.siteName && <span className="ml-1 text-xs text-slate-400">({row.siteName})</span>}
-          </span>
-        ) : (
-          <span className="text-slate-400">—</span>
-        ),
-    },
-    {
-      header: 'Plugin',
-      key: 'pluginName',
-      width: 180,
-      render: (row) => row.pluginName ?? <span className="text-slate-400">—</span>,
-    },
   ];
 
   return (
@@ -120,7 +116,9 @@ export default function Hosts() {
       <div className="mb-4">
         <h1 className="text-xl font-bold text-slate-900">Hosts</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Discovered hosts from all devices — ARP/NDP neighbor tables, DHCP leases and WLAN clients. Entries not seen for 24h are removed automatically.
+          Discovered hosts from all devices — ARP/NDP neighbor tables, DHCP leases and WLAN clients. The same MAC seen on several
+          devices (e.g. a WLAN client that is also in the router's ARP table) is merged into one row; hostname and manufacturer are
+          taken from whichever source reported them. Entries not seen for 24h are removed automatically.
         </p>
       </div>
 
@@ -132,7 +130,7 @@ export default function Hosts() {
         <DataTable
           columns={columns}
           rows={hostsQuery.data}
-          rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.mac}`}
+          rowKey={(row) => row.mac}
           storageKey="hosts"
           searchPlaceholder="Search hosts…"
           emptyMessage="No hosts discovered yet — assign a plugin (e.g. OPNsense) to a device and wait for the next poll."

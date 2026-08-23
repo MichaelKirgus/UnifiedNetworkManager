@@ -1585,7 +1585,7 @@ paths:
           required: false
           schema:
             type: string
-            enum: [arp, ndp, dhcp]
+            enum: [arp, ndp, dhcp, wlan]
           description: Filter by discovery source
       responses:
         '200':
@@ -2244,45 +2244,56 @@ components:
 
     NetworkRow:
       type: object
-      required: [deviceId, pluginId, name, collectedAt]
+      description: >-
+        One LOGICAL network across devices. Stored rows are per device+plugin;
+        the API merges them — interfaces sharing a subnet or VLAN become one row
+        (e.g. the same SSID/VLAN broadcast by many APs appears once with all
+        reporting devices listed in `devices`).
+      required: [key, name, subnet, versions, devices, collectedAt]
       properties:
-        deviceId: { type: string }
-        deviceName: { type: [string, 'null'], description: "Display name of the device the data was collected on" }
-        managementAddress: { type: [string, 'null'] }
-        siteName: { type: [string, 'null'] }
-        pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
-        pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that produced this row" }
-        name: { type: string, description: "Interface name on the device (e.g. lan, vlan100)" }
-        # One row per interface: a dual-stack assignment (IPv4 + IPv6) is stored
-        # as two rows but merged here — both CIDRs appear in one network.
-        cidrs:
-          type: array
-          items: { type: string }
-          description: "All addresses of this interface with their prefix when known (e.g. 192.168.1.0/24, fd00::/64), IPv4 first; empty when the interface has no IP configured"
+        key: { type: string, description: "Canonical identity of the logical network (subnet:<cidr>, vlan:<id> or name:<interface>)" }
+        name: { type: string, description: "Display label: subnet when known (e.g. 192.168.1.0/24), else 'VLAN <id>', else the interface name" }
+        subnet: { type: [string, 'null'], description: "Network address + prefix when any member carries an IP; null for pure SSID/VLAN rows" }
+        vlanId: { type: [integer, 'null'], description: "VLAN id when all members of the network are VLAN-tagged (or it is a VLAN-only group)" }
         versions:
           type: array
           items:
             type: string
             enum: [v4, v6]
-          description: "Address families present on the interface (e.g. [v4, v6] for dual-stack)"
-        vlanId: { type: [integer, 'null'], description: "VLAN id when the interface is a VLAN" }
-        mac: { type: [string, 'null'] }
-        status: { type: [string, 'null'] }
-        collectedAt: { type: string, format: date-time }
+          description: "Address families present across all members (e.g. [v4, v6] for dual-stack)"
+        devices:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [deviceId, pluginId, interfaces, cidrs]
+            properties:
+              deviceId: { type: string }
+              deviceName: { type: [string, 'null'], description: "Display name of the device reporting this network" }
+              managementAddress: { type: [string, 'null'] }
+              siteName: { type: [string, 'null'] }
+              pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
+              pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that produced this member" }
+              interfaces:
+                type: array
+                items: { type: string }
+                description: "Interface name(s) carrying this network on the device (e.g. [lan], [WLAN-1, WLAN-2])"
+              cidrs:
+                type: array
+                items: { type: string }
+                description: "Addresses configured on those interfaces with their prefix when known, IPv4 first; empty for IP-less rows (SSIDs)"
+              mac: { type: [string, 'null'] }
+              status: { type: [string, 'null'] }
+        collectedAt: { type: string, format: date-time, description: "Latest observation across all members" }
 
     HostRow:
       type: object
-      required: [deviceId, pluginId, mac, ips, sources, lastSeenAt]
+      required: [mac, ips, sources, devices, lastSeenAt]
       properties:
-        deviceId: { type: string }
-        deviceName: { type: [string, 'null'], description: "Display name of the device that observed this host" }
-        managementAddress: { type: [string, 'null'] }
-        siteName: { type: [string, 'null'] }
-        pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
-        pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that produced this row" }
         mac: { type: string }
-        # One row per physical host: rows with the same MAC on one device+plugin
-        # are merged (a dual-stack device appears once with both addresses).
+        # One row per physical host ACROSS all devices and plugins: rows with the
+        # same MAC are merged (a WLAN client on an AP that is also in the router's
+        # ARP table appears once, with both addresses and all observing devices).
         ips:
           type: array
           minItems: 1
@@ -2293,13 +2304,29 @@ components:
           minItems: 1
           items:
             type: string
-            enum: [arp, ndp, dhcp]
-          description: "Discovery sources that reported this MAC (e.g. arp + ndp for a dual-stack host)"
-        hostname: { type: [string, 'null'], description: "Hostname (DHCP leases and some ARP entries)" }
-        manufacturer: { type: [string, 'null'], description: "MAC vendor (OPNsense neighbor tables)" }
-        intf: { type: [string, 'null'], description: "Interface on the observing device where the host was seen" }
-        expiry: { type: [string, 'null'], format: date-time, description: "Lease expiry (DHCP rows only)" }
-        lastSeenAt: { type: string, format: date-time }
+            enum: [arp, ndp, dhcp, wlan]
+          description: "Discovery sources that reported this MAC anywhere on the network (e.g. arp + wlan)"
+        hostname: { type: [string, 'null'], description: "Best-known hostname across all sources (DHCP leases first, then any reporter)" }
+        manufacturer: { type: [string, 'null'], description: "Best-known MAC vendor across all sources" }
+        expiry: { type: [string, 'null'], format: date-time, description: "Lease expiry (when a DHCP lease is known for this MAC)" }
+        lastSeenAt: { type: string, format: date-time, description: "Latest observation across all devices/sources" }
+        devices:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [deviceId, pluginId, interfaces]
+            properties:
+              deviceId: { type: string }
+              deviceName: { type: [string, 'null'], description: "Display name of the device that observed this host" }
+              managementAddress: { type: [string, 'null'] }
+              siteName: { type: [string, 'null'] }
+              pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
+              pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that observed this host" }
+              interfaces:
+                type: array
+                items: { type: string }
+                description: "Interface(s) on the observing device where the host was seen (e.g. [lan], [wlan0])"
 
     # One plugin's monitoring snapshot for a device (a device can have several).
     PluginTelemetrySnapshot:

@@ -326,7 +326,9 @@ app.post('/monitoring', async (req, res) => {
     const networks: Array<Record<string, unknown>> = snapshot.ips.map((ip) => ({
       name: ip.ifname,
       ip: ip.address,
-      version: ip.version === '4' ? 'ipv4' : 'ipv6',
+      // Canonical values are 'v4'/'v6' (what the OPNsense plugin emits); the API
+      // also tolerates 'ipv4'/'ipv6', but stay consistent with the other plugins.
+      version: ip.version === '4' ? 'v4' : 'v6',
       status: null,
     }));
     for (const p of snapshot.ports) {

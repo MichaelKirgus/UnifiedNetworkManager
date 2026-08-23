@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { DeviceChip } from '../components/DeviceChip';
 import { api, NetworkRow } from '../api/client';
 
 /** Small colored pill for the address family. */
@@ -17,22 +18,16 @@ function VersionBadge({ version }: { version?: string | null }) {
   );
 }
 
-/** CIDR cell: one chip per address (a dual-stack interface shows both), IPv6 tinted. */
-function CidrCell({ row }: { row: NetworkRow }) {
-  if (!row.cidrs || row.cidrs.length === 0) return <span className="text-slate-400">—</span>;
+/** CIDR chip, IPv6 tinted. */
+function CidrChip({ cidr }: { cidr: string }) {
   return (
-    <div className="flex flex-wrap gap-1">
-      {row.cidrs.map((cidr) => (
-        <span
-          key={cidr}
-          className={`rounded px-1.5 py-0.5 font-mono text-xs ${
-            cidr.includes(':') ? 'bg-purple-50 text-purple-700' : 'bg-slate-100 text-slate-700'
-          }`}
-        >
-          {cidr}
-        </span>
-      ))}
-    </div>
+    <span
+      className={`rounded px-1.5 py-0.5 font-mono text-xs ${
+        cidr.includes(':') ? 'bg-purple-50 text-purple-700' : 'bg-slate-100 text-slate-700'
+      }`}
+    >
+      {cidr}
+    </span>
   );
 }
 
@@ -47,26 +42,15 @@ export default function Networks() {
 
   const columns: DataTableColumn<NetworkRow>[] = [
     {
-      header: 'Device',
-      key: 'deviceName',
-      width: 180,
-      render: (row) =>
-        row.deviceName ? (
-          <span title={row.managementAddress ?? undefined}>
-            {row.deviceName}
-            {row.siteName && <span className="ml-1 text-xs text-slate-400">({row.siteName})</span>}
-          </span>
-        ) : (
-          <span className="text-slate-400">—</span>
-        ),
+      header: 'Network',
+      key: 'name',
+      width: 200,
+      render: (row) => (
+        <span className="font-medium text-slate-800" title={row.subnet ?? undefined}>
+          {row.name}
+        </span>
+      ),
     },
-    {
-      header: 'Plugin',
-      key: 'pluginName',
-      width: 180,
-      render: (row) => row.pluginName ?? <span className="text-slate-400">—</span>,
-    },
-    { header: 'Interface', key: 'name' },
     {
       header: 'VLAN ID',
       key: 'vlanId',
@@ -80,7 +64,6 @@ export default function Networks() {
           <span className="text-slate-400">—</span>
         ),
     },
-    { header: 'CIDR', key: 'cidrs', width: 220, exportValue: (row) => row.cidrs.join(', '), render: (row) => <CidrCell row={row} /> },
     {
       header: 'Version',
       key: 'versions',
@@ -93,17 +76,42 @@ export default function Networks() {
       ),
     },
     {
-      header: 'MAC',
-      key: 'mac',
-      width: 150,
-      render: (row) =>
-        row.mac ? <span className="font-mono text-xs">{row.mac}</span> : <span className="text-slate-400">—</span>,
+      header: 'Devices',
+      key: 'devices',
+      width: 320,
+      exportValue: (row) => row.devices.map((d) => `${d.deviceName ?? '?'}[${d.interfaces.join(',')}]`).join('; '),
+      render: (row) => (
+        <div className="flex flex-wrap gap-1">
+          {row.devices.map((d) => (
+            <DeviceChip
+              key={`${d.deviceId}|${d.pluginId}`}
+              deviceName={d.deviceName}
+              managementAddress={d.managementAddress}
+              pluginName={d.pluginName}
+              siteName={d.siteName}
+              extraTooltip={[d.mac ? `MAC ${d.mac}` : '', d.status ? `status: ${d.status}` : '']}
+              interfaces={d.interfaces}
+            />
+          ))}
+        </div>
+      ),
     },
     {
-      header: 'Status',
-      key: 'status',
-      width: 100,
-      render: (row) => row.status ?? <span className="text-slate-400">—</span>,
+      header: 'Addresses',
+      key: 'cidrs',
+      width: 240,
+      exportValue: (row) => row.devices.flatMap((d) => d.cidrs).join(', '),
+      render: (row) => {
+        const cidrs = Array.from(new Set(row.devices.flatMap((d) => d.cidrs)));
+        if (cidrs.length === 0) return <span className="text-slate-400">—</span>;
+        return (
+          <div className="flex flex-wrap gap-1">
+            {cidrs.map((c) => (
+              <CidrChip key={c} cidr={c} />
+            ))}
+          </div>
+        );
+      },
     },
     {
       header: 'Collected',
@@ -119,7 +127,7 @@ export default function Networks() {
       <div className="mb-4">
         <h1 className="text-xl font-bold text-slate-900">Networks</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Configured networks (interface IPs with CIDR and VLAN id) collected from all devices.
+          Logical networks across all devices — interfaces sharing a subnet or VLAN are merged into one row (e.g. the same SSID on many APs).
         </p>
       </div>
 
@@ -131,7 +139,7 @@ export default function Networks() {
         <DataTable
           columns={columns}
           rows={networksQuery.data}
-          rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.name}`}
+          rowKey={(row) => row.key}
           storageKey="networks"
           searchPlaceholder="Search networks…"
           emptyMessage="No networks collected yet — assign a plugin (e.g. OPNsense) to a device and wait for the next poll."

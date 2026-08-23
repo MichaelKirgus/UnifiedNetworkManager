@@ -140,49 +140,71 @@ export interface SiteCreateRequest {
 /** One configured network row from the cross-device inventory view.
  * Rows for the same interface on one device+plugin are merged into a single
  * row — a dual-stack interface appears once with both its IPv4 and IPv6 CIDRs. */
-export interface NetworkRow {
+/** One device/interface that reports a logical network (a member of NetworkRow.devices). */
+export interface NetworkDeviceMember {
   deviceId: string;
+  pluginId: string;
   deviceName?: string | null;
   managementAddress?: string | null;
   siteName?: string | null;
-  pluginId: string;
   /** Display name of the plugin instance that collected this row (e.g. "OPNsense Plugin (site-a)"). */
   pluginName?: string | null;
-  /** Interface name on the device (e.g. lan, vlan100). */
-  name: string;
-  /** All addresses with their prefix when known (e.g. "192.168.1.0/24", "fd00::/64"), IPv4 first; empty when the interface has no IP. */
+  /** Interface name(s) carrying this network on the device (e.g. ["lan"], ["WLAN-1","WLAN-2"]). */
+  interfaces: string[];
+  /** Addresses configured on those interfaces with their prefix when known, IPv4 first; empty for IP-less rows (SSIDs). */
   cidrs: string[];
-  /** Address families present on the interface (e.g. ["v4","v6"] for dual-stack). */
-  versions: ('v4' | 'v6')[];
-  vlanId?: number | null;
   mac?: string | null;
   status?: string | null;
+}
+
+/** One LOGICAL network across devices. Several device interfaces that share a
+ * subnet or VLAN are merged into one row — e.g. the same SSID/VLAN broadcast by
+ * many APs appears once with all reporting devices listed. */
+export interface NetworkRow {
+  /** Canonical identity (subnet:<cidr>, vlan:<id> or name:<interface>). Stable for table keys. */
+  key: string;
+  /** Display label: subnet when known ("192.168.1.0/24"), else "VLAN <id>", else the interface name. */
+  name: string;
+  /** Subnet (network address + prefix) when any member carries an IP — null for pure SSID/VLAN rows. */
+  subnet: string | null;
+  vlanId?: number | null;
+  /** Address families present across all members (e.g. ["v4","v6"] for dual-stack). */
+  versions: ('v4' | 'v6')[];
+  devices: NetworkDeviceMember[];
   collectedAt: string;
 }
 
-/** One discovered host from the cross-device inventory view.
- * Rows with the same MAC on one device+plugin are merged into a single row —
- * a dual-stack device appears once with both its IPv4 and IPv6 addresses. */
-export interface HostRow {
+/** One device+plugin instance that observed a host. */
+export interface HostDeviceMember {
   deviceId: string;
+  pluginId: string;
   deviceName?: string | null;
   managementAddress?: string | null;
   siteName?: string | null;
-  pluginId: string;
   /** Display name of the plugin instance that observed this host. */
   pluginName?: string | null;
+  /** Interface(s) on the observing device where the host was seen (e.g. ["lan"], ["wlan0"]). */
+  interfaces: string[];
+}
+
+/** One physical host from the cross-device inventory view.
+ * Rows with the same MAC are merged into a single row ACROSS devices and
+ * plugins — e.g. a WLAN client on an AP that also appears in the router's ARP
+ * table shows once, with all observing devices listed and hostname/manufacturer
+ * taken from whichever source reported them. */
+export interface HostRow {
   mac: string;
   /** All known addresses of this host, IPv4 first. */
   ips: string[];
-  /** Discovery sources that reported this MAC (e.g. arp + ndp for a dual-stack host, wlan for WLAN clients). */
+  /** Discovery sources that reported this MAC anywhere on the network (e.g. arp + wlan). */
   sources: ('arp' | 'ndp' | 'dhcp' | 'wlan')[];
   hostname?: string | null;
   manufacturer?: string | null;
-  /** Interface(s) on the observing device where the host was seen (comma-joined when several). */
-  intf?: string | null;
   /** Lease expiry (when a DHCP lease is known for this MAC). */
   expiry?: string | null;
   lastSeenAt: string;
+  /** Every device+plugin instance that observed this host (one entry each). */
+  devices: HostDeviceMember[];
 }
 
 /** A user account (never includes password hashes or TOTP secrets). */

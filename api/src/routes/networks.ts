@@ -3,6 +3,10 @@ import { and, asc, eq, inArray } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth } from '../auth/middleware';
+import { subnetOf } from '../utils/address';
+
+/** One stored row of the `networks` table (per device + plugin instance). */
+type StoredNetwork = typeof schema.networks.$inferSelect;
 
 const router = Router();
 
@@ -53,20 +57,27 @@ async function loadPluginNames(pluginIds: string[]): Promise<Map<string, string>
   return map;
 }
 
-/** One host as presented by GET /hosts — possibly merged from several stored rows. */
-interface MergedHost {
+/** One device+plugin instance that observed a merged host. */
+interface HostDeviceMember {
   deviceId: string;
   pluginId: string;
+  /** Interface(s) on the observing device where the host was seen (e.g. "lan", "wlan0"). */
+  interfaces: string[];
+}
+
+/** One physical host as presented by GET /hosts — merged across devices and plugins. */
+interface MergedHost {
   mac: string;
   /** All addresses of this host, IPv4 first (a dual-stack device has both). */
   ips: string[];
-  /** Discovery sources that reported this MAC (e.g. arp + ndp for a dual-stack host). */
+  /** Discovery sources that reported this MAC anywhere on the network. */
   sources: string[];
   hostname: string | null;
   manufacturer: string | null;
-  intf: string | null;
   expiry: string | null;
   lastSeenAt: string;
+  /** Every device+plugin instance that observed this host (one entry each). */
+  devices: HostDeviceMember[];
 }
 
 /** Canonical display order for discovery sources. */
@@ -74,16 +85,17 @@ const SOURCE_ORDER: Record<string, number> = { arp: 0, ndp: 1, dhcp: 2, wlan: 3 
 
 /**
  * Merges stored host rows into one row per physical host: the same MAC seen
- * via several sources (e.g. its IPv4 in ARP + its IPv6 in NDP) is almost
- * certainly a single dual-stack device. Storage keeps the per-source
- * granularity (needed for topology detection); this merge only shapes the
- * GET /hosts response.
+ * anywhere on the network is a single machine — e.g. its IPv4 in the router's
+ * ARP table AND as a WLAN client on an AP are merged into one row, with all
+ * observing devices listed. Storage keeps the per-device granularity (needed
+ * for topology detection); this merge only shapes the GET /hosts response.
  */
-function mergeHostRows(rows: typeof schema.hosts.$inferSelect[]): MergedHost[] {
+export function mergeHostRows(rows: typeof schema.hosts.$inferSelect[]): MergedHost[] {
   const groups = new Map<string, typeof rows>();
   for (const r of rows) {
-    // Same MAC on the same device + plugin instance = one physical host.
-    const key = `${r.deviceId}|${r.pluginId}|${r.mac}`;
+    // Same MAC on ANY device + plugin instance = one physical host. Ingestion
+    // lowercases MACs; normalize again defensively so mixed-case rows merge too.
+    const key = r.mac.toLowerCase();
     const list = groups.get(key);
     if (list) list.push(r);
     else groups.set(key, [r]);
@@ -101,80 +113,226 @@ function mergeHostRows(rows: typeof schema.hosts.$inferSelect[]): MergedHost[] {
     );
     // DHCP rows carry the richest metadata — prefer their hostname/expiry.
     const dhcp = group.find((r) => r.source === 'dhcp');
+    // Consolidate per device+plugin: one member entry with all its interfaces.
+    const byDevice = new Map<string, HostDeviceMember>();
+    for (const r of group) {
+      const dkey = `${r.deviceId}|${r.pluginId}`;
+      let d = byDevice.get(dkey);
+      if (!d) {
+        d = { deviceId: r.deviceId, pluginId: r.pluginId, interfaces: [] };
+        byDevice.set(dkey, d);
+      }
+      if (r.intf && !d.interfaces.includes(r.intf)) d.interfaces.push(r.intf);
+    }
     return {
-      deviceId: group[0].deviceId,
-      pluginId: group[0].pluginId,
       mac: group[0].mac,
       ips,
       sources,
       hostname: dhcp?.hostname ?? group.find((r) => r.hostname)?.hostname ?? null,
       manufacturer: group.find((r) => r.manufacturer)?.manufacturer ?? null,
-      intf:
-        Array.from(new Set(group.map((r) => r.intf).filter((v): v is string => !!v))).join(', ') ||
-        null,
       expiry: dhcp?.expiry ?? null,
-      // Latest observation across all sources (ISO strings compare lexicographically).
+      // Latest observation across all devices/sources (ISO strings compare lexicographically).
       lastSeenAt: group.reduce((max, r) => (r.lastSeenAt > max ? r.lastSeenAt : max), group[0].lastSeenAt),
+      devices: Array.from(byDevice.values()).sort((a, b) => a.deviceId.localeCompare(b.deviceId)),
     };
   });
 }
 
-/** One network as presented by GET /networks — possibly merged from several stored rows. */
+/** One interface as seen on one device — a member of a logical network. */
+interface NetworkDeviceMember {
+  deviceId: string;
+  pluginId: string;
+  /** Interface name(s) carrying this network on the device (e.g. "lan", "WLAN-1"). */
+  interfaces: string[];
+  /** Addresses configured on those interfaces, IPv4 first. */
+  cidrs: string[];
+  mac: string | null;
+  status: string | null;
+}
+
+/** One LOGICAL network as presented by GET /networks — merged across devices. */
 interface MergedNetwork {
+  /** Canonical identity of the logical network (subnet, vlan:<id>, or name). */
+  key: string;
+  /** Display label: subnet when known ("192.168.1.0/24"), else "VLAN <id>", else the interface name. */
+  name: string;
+  /** Subnet (network address + prefix) when any member row carries an IP — null for pure SSID/VLAN rows. */
+  subnet: string | null;
+  vlanId: number | null;
+  versions: ('v4' | 'v6')[];
+  /** Every device/interface that reports this network (one entry per device+plugin). */
+  devices: NetworkDeviceMember[];
+  collectedAt: string;
+}
+
+/** Normalizes the free-form `version` values plugins emit to v4/v6. */
+function normalizeVersion(v: string | null): 'v4' | 'v6' | null {
+  if (v === 'v4' || v === 'ipv4') return 'v4';
+  if (v === 'v6' || v === 'ipv6') return 'v6';
+  return null;
+}
+
+/** Sorts address strings IPv4-first, then lexicographically. */
+function sortAddresses(addrs: string[]): string[] {
+  return [...addrs].sort((a, b) => {
+    const av = a.includes(':') ? 1 : 0;
+    const bv = b.includes(':') ? 1 : 0;
+    return av !== bv ? av - bv : a.localeCompare(b);
+  });
+}
+
+/** One interface as seen on one device — the grouping unit. */
+interface InterfaceMember {
   deviceId: string;
   pluginId: string;
   name: string;
-  /** All addresses of this interface, IPv4 first (a dual-stack interface has both). */
   cidrs: string[];
-  /** Address families present on the interface (e.g. ["v4","v6"] for dual-stack). */
-  versions: ('v4' | 'v6')[];
+  subnets: Set<string>;
   vlanId: number | null;
+  versions: Set<'v4' | 'v6'>;
   mac: string | null;
   status: string | null;
   collectedAt: string;
 }
 
+/** Most specific (longest prefix) subnet of a set, or null when empty. */
+function bestSubnet(subnets: Set<string>): string | null {
+  if (subnets.size === 0) return null;
+  return Array.from(subnets).sort((a, b) => Number(b.split('/')[1]) - Number(a.split('/')[1]))[0];
+}
+
+/** Best subnet that identifies a real network (loopback/link-local excluded). */
+function networkSubnet(subnets: Set<string>): string | null {
+  const net = new Set(Array.from(subnets).filter((s) => !isNonNetworkSubnet(s)));
+  return bestSubnet(net);
+}
+
 /**
- * Merges stored network rows into one row per interface: an interface with a
- * dual-stack assignment (IPv4 + IPv6) is stored as two rows (the PK includes
- * the IP — topology detection needs that granularity), but it is ONE network.
- * This merge only shapes the GET /networks response, mirroring mergeHostRows.
+ * True for subnets that do NOT identify a real network — loopback and
+ * link-local addresses exist on (almost) every interface and would merge
+ * unrelated interfaces into one bogus group. Such rows fall back to VLAN/name
+ * grouping instead; the address is still shown in the member's cidrs.
  */
-function mergeNetworkRows(rows: typeof schema.networks.$inferSelect[]): MergedNetwork[] {
-  const groups = new Map<string, typeof rows>();
+function isNonNetworkSubnet(subnet: string): boolean {
+  const [addr, prefix] = subnet.split('/');
+  if (prefix === undefined) return false;
+  // IPv4: 127/8 loopback, 169.254/16 link-local (APIPA).
+  if (!addr.includes(':')) {
+    const o = addr.split('.').map(Number);
+    return o[0] === 127 || (o[0] === 169 && o[1] === 254);
+  }
+  // IPv6: ::1 loopback, fe80::/10 link-local (first group fe80..febf).
+  if (addr === '::1') return true;
+  const firstGroup = addr.split(':')[0];
+  return /^fe[89ab][0-9a-f]$/i.test(firstGroup);
+}
+
+/**
+ * Groups stored network rows into LOGICAL networks across devices. Storage
+ * stays per-device (topology detection needs that granularity); this only
+ * shapes the GET /networks response, mirroring mergeHostRows.
+ *
+ * Grouping keys, in priority order:
+ *   1. subnet:<cidr> — an interface with an IP + prefix defines its network
+ *      address; all interfaces whose addresses fall in that subnet join it
+ *      (several interfaces in the same range are ONE network).
+ *   2. VLAN bridge — an interface carrying BOTH a VLAN id and an IP teaches us
+ *      "VLAN <id> = <subnet>"; IP-less members with that VLAN id then join the
+ *      subnet group (e.g. AP SSIDs merging with the router's tagged port).
+ *   3. vlan:<id> — shared VLAN without any known subnet (pure SSID groups).
+ *   4. name:<interface> — unmergeable rows stay per device+interface.
+ */
+export function mergeNetworkRows(rows: StoredNetwork[]): MergedNetwork[] {
+  // Pass 1: one member per interface (dual-stack interfaces stored as two
+  // rows collapse into a single member with both addresses).
+  const members = new Map<string, InterfaceMember>();
   for (const r of rows) {
-    // Same interface on the same device + plugin instance = one network.
     const key = `${r.deviceId}|${r.pluginId}|${r.name}`;
-    const list = groups.get(key);
-    if (list) list.push(r);
-    else groups.set(key, [r]);
+    let m = members.get(key);
+    if (!m) {
+      m = { deviceId: r.deviceId, pluginId: r.pluginId, name: r.name, cidrs: [], subnets: new Set(), vlanId: null, versions: new Set(), mac: null, status: null, collectedAt: '' };
+      members.set(key, m);
+    }
+    if (r.collectedAt > m.collectedAt) m.collectedAt = r.collectedAt;
+    if (r.ip !== '') {
+      const addr = r.prefix !== null ? `${r.ip}/${r.prefix}` : r.ip;
+      if (!m.cidrs.includes(addr)) m.cidrs.push(addr);
+      const subnet = subnetOf(r.ip, r.prefix);
+      if (subnet) m.subnets.add(subnet);
+    }
+    if (r.vlanId !== null && m.vlanId === null) m.vlanId = r.vlanId;
+    const v = normalizeVersion(r.version);
+    if (v) m.versions.add(v);
+    if (!m.mac && r.mac) m.mac = r.mac;
+    if (!m.status && r.status) m.status = r.status;
   }
 
-  return Array.from(groups.values()).map((group) => {
-    // IPv4 first, then IPv6 — the usual reading order for a dual-stack interface.
-    const cidrs = group
-      .filter((r) => r.ip !== '')
-      .map((r) => (r.prefix !== null ? `${r.ip}/${r.prefix}` : r.ip))
-      .sort((a, b) => {
-        const av = a.includes(':') ? 1 : 0;
-        const bv = b.includes(':') ? 1 : 0;
-        return av !== bv ? av - bv : a.localeCompare(b);
-      });
-    const versions: ('v4' | 'v6')[] = [];
-    for (const v of group.map((r) => r.version)) {
-      if ((v === 'v4' || v === 'v6') && !versions.includes(v)) versions.push(v);
+  // Pass 2: VLAN → subnet bridge from members that carry both.
+  const vlanToSubnet = new Map<number, string>();
+  for (const m of members.values()) {
+    if (m.vlanId !== null) {
+      const s = networkSubnet(m.subnets);
+      if (s && !vlanToSubnet.has(m.vlanId)) vlanToSubnet.set(m.vlanId, s);
     }
+  }
+
+  // Pass 3: assign every interface to a logical network group. The map key is
+  // the row's canonical identity — unique per group by construction.
+  const groups = new Map<string, { id: string; label: string; subnet: string | null; vlans: Set<number>; versions: Set<'v4' | 'v6'>; latestAt: string; members: InterfaceMember[] }>();
+  for (const m of members.values()) {
+    let key: string;
+    const own = networkSubnet(m.subnets);
+    if (own) {
+      key = `subnet:${own}`;
+    } else if (m.vlanId !== null && vlanToSubnet.has(m.vlanId)) {
+      key = `subnet:${vlanToSubnet.get(m.vlanId)}`; // VLAN bridge into the subnet group
+    } else if (m.vlanId !== null) {
+      key = `vlan:${m.vlanId}`;
+    } else {
+      key = `name:${m.name || 'unknown'}`;
+    }
+    let g = groups.get(key);
+    if (!g) {
+      const subnet = key.startsWith('subnet:') ? key.slice('subnet:'.length) : null;
+      const vlanId = key.startsWith('vlan:') ? Number(key.slice('vlan:'.length)) : null;
+      g = { id: key, label: subnet ?? (vlanId !== null ? `VLAN ${vlanId}` : m.name || 'unknown'), subnet, vlans: new Set(), versions: new Set(), latestAt: '', members: [] };
+      groups.set(key, g);
+    }
+    if (m.vlanId !== null) g.vlans.add(m.vlanId);
+    for (const v of m.versions) g.versions.add(v);
+    if (m.collectedAt > g.latestAt) g.latestAt = m.collectedAt;
+    g.members.push(m);
+  }
+
+  // Pass 4: shape the response — one row per logical network, consolidating a
+  // device's several interfaces in the same group into one member entry.
+  return Array.from(groups.values()).map((g): MergedNetwork => {
+    const byDevice = new Map<string, NetworkDeviceMember>();
+    for (const m of g.members) {
+      const dkey = `${m.deviceId}|${m.pluginId}`;
+      let d = byDevice.get(dkey);
+      if (!d) {
+        d = { deviceId: m.deviceId, pluginId: m.pluginId, interfaces: [], cidrs: [], mac: null, status: null };
+        byDevice.set(dkey, d);
+      }
+      if (m.name && !d.interfaces.includes(m.name)) d.interfaces.push(m.name);
+      for (const c of sortAddresses(m.cidrs)) {
+        if (!d.cidrs.includes(c)) d.cidrs.push(c);
+      }
+      if (!d.mac && m.mac) d.mac = m.mac;
+      if (!d.status && m.status) d.status = m.status;
+    }
+    const versions: ('v4' | 'v6')[] = [];
+    if (g.versions.has('v4')) versions.push('v4');
+    if (g.versions.has('v6')) versions.push('v6');
     return {
-      deviceId: group[0].deviceId,
-      pluginId: group[0].pluginId,
-      name: group[0].name,
-      cidrs,
+      key: g.id,
+      name: g.label,
+      subnet: g.subnet,
+      vlanId: g.vlans.size === 1 ? Array.from(g.vlans)[0] : null,
       versions,
-      vlanId: group.find((r) => r.vlanId !== null)?.vlanId ?? null,
-      mac: group.find((r) => r.mac)?.mac ?? null,
-      status: group.find((r) => r.status)?.status ?? null,
-      // Latest observation across the interface's rows (ISO strings compare lexicographically).
-      collectedAt: group.reduce((max, r) => (r.collectedAt > max ? r.collectedAt : max), group[0].collectedAt),
+      devices: Array.from(byDevice.values()).sort((a, b) => a.deviceId.localeCompare(b.deviceId)),
+      collectedAt: g.latestAt,
     };
   });
 }
@@ -211,25 +369,28 @@ router.get('/networks', requireAuth, async (_req, res: Response) => {
       orderBy: [asc(schema.networks.deviceId), asc(schema.networks.name)],
     });
 
-    // Merge per-address rows into one row per interface (dual-stack appears once).
+    // Group per-device rows into logical networks (subnet/VLAN/name).
     const merged = mergeNetworkRows(rows);
 
     const [deviceViews, pluginNames] = await Promise.all([
-      loadDeviceViews(Array.from(new Set(merged.map((m) => m.deviceId)))),
-      loadPluginNames(Array.from(new Set(merged.map((m) => m.pluginId)))),
+      loadDeviceViews(Array.from(new Set(merged.flatMap((m) => m.devices.map((d) => d.deviceId))))),
+      loadPluginNames(Array.from(new Set(merged.flatMap((m) => m.devices.map((d) => d.pluginId))))),
     ]);
 
     res.status(200).json(
-      merged.map((m) => {
-        const device = deviceViews.get(m.deviceId);
-        return {
-          ...m,
-          deviceName: device?.name ?? null,
-          managementAddress: device?.managementAddress ?? null,
-          siteName: device?.siteName ?? null,
-          pluginName: pluginNames.get(m.pluginId) ?? null,
-        };
-      })
+      merged.map((m) => ({
+        ...m,
+        devices: m.devices.map((d) => {
+          const device = deviceViews.get(d.deviceId);
+          return {
+            ...d,
+            deviceName: device?.name ?? null,
+            managementAddress: device?.managementAddress ?? null,
+            siteName: device?.siteName ?? null,
+            pluginName: pluginNames.get(d.pluginId) ?? null,
+          };
+        }),
+      }))
     );
   } catch (err) {
     const e = err as { status?: number; message?: string };
@@ -281,21 +442,24 @@ router.get('/hosts', requireAuth, async (_req, res: Response) => {
     const merged = mergeHostRows(rows);
 
     const [deviceViews, pluginNames] = await Promise.all([
-      loadDeviceViews(Array.from(new Set(merged.map((m) => m.deviceId)))),
-      loadPluginNames(Array.from(new Set(merged.map((m) => m.pluginId)))),
+      loadDeviceViews(Array.from(new Set(merged.flatMap((m) => m.devices.map((d) => d.deviceId))))),
+      loadPluginNames(Array.from(new Set(merged.flatMap((m) => m.devices.map((d) => d.pluginId))))),
     ]);
 
     res.status(200).json(
-      merged.map((m) => {
-        const device = deviceViews.get(m.deviceId);
-        return {
-          ...m,
-          deviceName: device?.name ?? null,
-          managementAddress: device?.managementAddress ?? null,
-          siteName: device?.siteName ?? null,
-          pluginName: pluginNames.get(m.pluginId) ?? null,
-        };
-      })
+      merged.map((m) => ({
+        ...m,
+        devices: m.devices.map((d) => {
+          const device = deviceViews.get(d.deviceId);
+          return {
+            ...d,
+            deviceName: device?.name ?? null,
+            managementAddress: device?.managementAddress ?? null,
+            siteName: device?.siteName ?? null,
+            pluginName: pluginNames.get(d.pluginId) ?? null,
+          };
+        }),
+      }))
     );
   } catch (err) {
     const e = err as { status?: number; message?: string };
