@@ -62,6 +62,15 @@ export function buildDescriptors(inventoryTtlMs: number, hasWifi = true): Metric
             columns: ['band', 'channel', 'mode', 'txPowerDbm', 'noiseFloorDbm', 'modemLoadPct', 'stations', 'temperatureC'],
             intervalMs: inventoryTtlMs,
           },
+          // Scalar summaries for the device overview table (summary: true) —
+          // one channel + airtime-utilization metric per band, derived from
+          // the radio/channel-utilization tables below.
+          { key: 'wifi.channel2g', label: 'Channel 2.4 GHz', type: 'string' as const, visualization: 'text' as const, group: 'WiFi', summary: true },
+          { key: 'wifi.channel5g', label: 'Channel 5 GHz', type: 'string' as const, visualization: 'text' as const, group: 'WiFi', summary: true },
+          { key: 'wifi.channel6g', label: 'Channel 6 GHz', type: 'string' as const, visualization: 'text' as const, group: 'WiFi', summary: true },
+          { key: 'wifi.utilization2g', label: 'Airtime 2.4 GHz', unit: '%', min: 0, max: 100, color: '#f59e0b', type: 'number' as const, visualization: 'gauge' as const, group: 'WiFi', summary: true },
+          { key: 'wifi.utilization5g', label: 'Airtime 5 GHz', unit: '%', min: 0, max: 100, color: '#0ea5e9', type: 'number' as const, visualization: 'gauge' as const, group: 'WiFi', summary: true },
+          { key: 'wifi.utilization6g', label: 'Airtime 6 GHz', unit: '%', min: 0, max: 100, color: '#8b5cf6', type: 'number' as const, visualization: 'gauge' as const, group: 'WiFi', summary: true },
           {
             key: 'wifi.ssids',
             label: 'Networks (SSIDs)',

@@ -197,8 +197,10 @@ app.post('/monitoring', async (req, res) => {
       collectedAt: new Date().toISOString(),
       health,
       metrics: { 'system.error': error },
+      // hasWifi=false — a failed probe carries no WLAN data, so don't advertise
+      // the WiFi groups (their summary cells would render empty).
       metricDescriptors: [
-        ...buildDescriptors(opts.inventoryTtlMs),
+        ...buildDescriptors(opts.inventoryTtlMs, false),
         { key: 'system.error', label: 'Error', type: 'string' as const, visualization: 'text' as const, group: 'System' },
       ],
       error,
@@ -265,6 +267,30 @@ app.post('/monitoring', async (req, res) => {
         stations: r.stations ?? '—',
         temperatureC: r.temperatureC !== null ? `${r.temperatureC} °C` : '—',
       }));
+
+      // Scalar summaries for the device overview table (summary: true) — one
+      // channel + airtime-utilization metric PER BAND, derived from the radio
+      // and channel-utilization tables above. The utilization table is indexed
+      // by plain channel number with no band column (verified against the
+      // LC-LX-6500 MIB), so bands are inferred: 1–14 = 2.4 GHz, 36–165 =
+      // 5 GHz, >165 = 6 GHz. The agent currently only reports 2.4/5 GHz rows —
+      // the 6 GHz metrics stay null until it starts reporting them.
+      const radioChannelOf = (bandRe: RegExp): string | null => {
+        const r = snapshot.radios.find((x) => bandRe.test(x.band || '') && x.channel !== null);
+        return r ? String(r.channel) : null;
+      };
+      metrics['wifi.channel2g'] = radioChannelOf(/^2\.4/);
+      metrics['wifi.channel5g'] = radioChannelOf(/^5 /);
+      metrics['wifi.channel6g'] = radioChannelOf(/^6 /);
+      const worstUtilInBand = (pred: (ch: number) => boolean): number | null => {
+        const vals = snapshot.channelUtilization.filter((c) => pred(c.channel)).map((c) => c.utilizationPct ?? -1);
+        if (!vals.length) return null;
+        const worst = Math.max(...vals);
+        return worst >= 0 ? worst : null;
+      };
+      metrics['wifi.utilization2g'] = worstUtilInBand((ch) => ch >= 1 && ch <= 14);
+      metrics['wifi.utilization5g'] = worstUtilInBand((ch) => ch >= 36 && ch <= 165);
+      metrics['wifi.utilization6g'] = worstUtilInBand((ch) => ch > 165);
 
       metrics['wifi.ssids'] = snapshot.ssids.map((s) => ({
         ssid: s.ssid || s.name,
