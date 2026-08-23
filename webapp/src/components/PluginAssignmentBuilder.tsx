@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, X } from 'lucide-react';
 import { api, DevicePluginAssignmentInput, Plugin, Secret } from '../api/client';
 
@@ -24,6 +24,7 @@ export function PluginAssignmentBuilder({
   onSubmit,
   submitLabel = 'Save',
   busy = false,
+  onRowsChange,
 }: {
   plugins: Plugin[];
   secrets: Secret[];
@@ -34,6 +35,10 @@ export function PluginAssignmentBuilder({
   onSubmit: (assignments: DevicePluginAssignmentInput[]) => void;
   submitLabel?: string;
   busy?: boolean;
+  /** Reports the currently selected plugin ids as rows change (incl. initial).
+   * Lets the parent derive vendor-specific form fields (e.g. model catalogs)
+   * from exactly the plugins assigned to this device. */
+  onRowsChange?: (pluginIds: string[]) => void;
 }) {
   const availablePlugins = useMemo(
     () => plugins.filter((p) => !excludedPluginIds.includes(p.id)),
@@ -83,6 +88,16 @@ export function PluginAssignmentBuilder({
     () => new Set(rows.map((r) => r.pluginId).filter(Boolean)),
     [rows]
   );
+
+  // Report the selected plugin ids to the parent (initial rows included) so it
+  // can derive vendor-specific fields — e.g. model catalogs — from exactly the
+  // plugins assigned here. The callback is kept in a ref: only `rows` should
+  // retrigger this, not a new closure on every parent render.
+  const onRowsChangeRef = useRef(onRowsChange);
+  onRowsChangeRef.current = onRowsChange;
+  useEffect(() => {
+    onRowsChangeRef.current?.(Array.from(new Set(rows.map((r) => r.pluginId).filter(Boolean))));
+  }, [rows]);
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();

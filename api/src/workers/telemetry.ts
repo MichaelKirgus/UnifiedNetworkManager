@@ -33,6 +33,11 @@ interface AssignmentTarget {
   pluginId: string;
   secretId: string | null;
   endpoint: string;
+  // User-selected hardware model / firmware version (from a plugin's advertised
+  // catalog). Forwarded to /monitoring so vendor plugins can adapt their data
+  // gathering to the specific device. Null when unset.
+  model: string | null;
+  firmwareVersion: string | null;
 }
 
 async function pollAssignment(target: AssignmentTarget): Promise<string> {
@@ -53,6 +58,9 @@ async function pollAssignment(target: AssignmentTarget): Promise<string> {
         deviceId: target.deviceId,
         managementAddress: target.managementAddress,
         ipAddresses: target.ipAddresses,
+        // Hardware model / firmware version selected by the user (may be null).
+        model: target.model,
+        firmwareVersion: target.firmwareVersion,
         credentials,
         ...(decrypted?.type === 'apiKey'
           ? { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }
@@ -286,6 +294,8 @@ async function pollAllDevices(): Promise<void> {
       pluginId: a.pluginId,
       secretId: a.secretId,
       endpoint: plugin.endpoint,
+      model: device.model ?? null,
+      firmwareVersion: device.firmwareVersion ?? null,
     });
     targetsByDevice.set(device.id, list);
   }

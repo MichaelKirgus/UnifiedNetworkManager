@@ -52,6 +52,12 @@ export const devices = pgTable('devices', {
   // Reference to the site this device lives at (NULL = unassigned).
   siteId: text('siteId'),
   status: text('status').notNull().default('unknown'),
+  // User-selected hardware model, chosen from a plugin's advertised catalog
+  // (/discover `deviceModels`). NULL when no catalog applies or the user skipped it.
+  // Forwarded to every /monitoring call so vendor plugins can adapt their data gathering.
+  model: text('model'),
+  // Firmware version for this device (from the selected model's firmwareVersions list).
+  firmwareVersion: text('firmwareVersion'),
   createdAt: text('createdAt').notNull(),
 });
 
@@ -138,6 +144,15 @@ export const plugins = pgTable('plugins', {
   // the webapp renders intent/step forms from it and the API validates
   // plan step inputs against it.
   actionDescriptors: text('actionDescriptors'),
+  // Icon path relative to the plugin root (e.g. "/icons/lancom.svg"), declared
+  // in /discover. Served to the webapp via GET /plugins/:pluginId/icon, which
+  // proxies the bytes from the plugin — no icon data is stored here or in the DB.
+  iconUrl: text('iconUrl'),
+  // Supported device model catalog (JSON array of { vendor, model, iconPath?,
+  // firmwareVersions? }), declared in /discover. Drives the Model/Firmware
+  // dropdowns in the webapp's device create/edit form. NULL = no catalog
+  // (e.g. generic plugins like ICMP where a model list makes no sense).
+  deviceModels: text('deviceModels'),
   createdAt: text('createdAt').notNull(),
   lastSeenAt: text('lastSeenAt'),
 });

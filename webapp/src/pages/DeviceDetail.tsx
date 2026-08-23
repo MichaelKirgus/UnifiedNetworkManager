@@ -6,8 +6,9 @@ import { Layout } from '../components/Layout';
 import { StatusBadge } from '../components/StatusBadge';
 import { MetricView } from '../components/MetricView';
 import { OptionForm } from '../components/OptionForm';
+import { DeviceIcon } from '../components/DeviceIcon';
 import { PluginAssignmentBuilder } from '../components/PluginAssignmentBuilder';
-import { api, DeviceAddress, DevicePluginAssignmentInput, MetricDescriptor } from '../api/client';
+import { api, DeviceAddress, DevicePluginAssignmentInput, MetricDescriptor, Plugin } from '../api/client';
 import { isValidAddress, addressError } from '../utils/address';
 
 /** Resolves the current value for a metric descriptor from a metrics map. */
@@ -66,6 +67,13 @@ export default function DeviceDetail() {
     () => [...(device?.plugins ?? [])].sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary)),
     [device]
   );
+
+  // Primary plugin (first after the sort above) as a full Plugin row — needed
+  // for its icon + model catalog in the header.
+  const primaryPlugin: Plugin | null = useMemo(() => {
+    if (assignments.length === 0) return null;
+    return (pluginsQuery.data ?? []).find((p) => p.id === assignments[0].pluginId) ?? null;
+  }, [assignments, pluginsQuery.data]);
 
   // Static descriptors (from /discover) as a fallback for plugins that have
   // not reported live descriptors yet.
@@ -154,7 +162,15 @@ export default function DeviceDetail() {
       </div>
 
       <div className="mb-6 flex items-center gap-3">
-        <h1 className="text-xl font-bold text-slate-900">{device?.name ?? deviceId}</h1>
+        <DeviceIcon plugin={primaryPlugin} model={device?.model} size="lg" />
+        <div>
+          <h1 className="text-xl font-bold text-slate-900">{device?.name ?? deviceId}</h1>
+          {device && (device.model || device.firmwareVersion) && (
+            <p className="mt-0.5 text-xs text-slate-400">
+              {[device.vendor, device.deviceType, device.model, device.firmwareVersion].filter(Boolean).join(' · ')}
+            </p>
+          )}
+        </div>
         {monitoringQuery.data && <StatusBadge status={monitoringQuery.data.health} />}
         {device && (
           <button

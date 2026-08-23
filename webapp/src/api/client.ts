@@ -251,6 +251,10 @@ export interface DeviceCreateRequest {
   ips?: string[];
   /** At least one plugin assignment; the first becomes primary. */
   plugins: DevicePluginAssignmentInput[];
+  /** Optional hardware model (from a plugin's advertised catalog). */
+  model?: string | null;
+  /** Optional firmware version for the selected model. */
+  firmwareVersion?: string | null;
 }
 
 export interface Device {
@@ -269,6 +273,30 @@ export interface Device {
   plugins?: DevicePluginAssignment[];
   /** Headline metrics (marked `summary` by the plugin) for inline table display. */
   summaryMetrics?: SummaryMetric[];
+  /** Hardware model selected from a plugin's advertised catalog (null = unset). */
+  model?: string | null;
+  /** Firmware version for the selected model (null = unset). */
+  firmwareVersion?: string | null;
+}
+
+/** One supported device model as advertised by a plugin in /discover.
+ * Drives the Model + Firmware dropdowns in the device create/edit form. */
+export interface DeviceModelEntry {
+  /** Vendor this entry applies to (matches one of the plugin's `vendors`). */
+  vendor: string;
+  /** Display name of the hardware model, e.g. "LX45". */
+  model: string;
+  /** Optional icon path relative to the plugin root (served via the API icon proxy). */
+  iconPath?: string;
+  /** Optional list of firmware versions for this model (plain strings). */
+  firmwareVersions?: string[];
+}
+
+/** Builds the URL of a plugin's icon through the API proxy.
+ * `path` overrides the plugin's default iconUrl (used for per-model icons). */
+export function pluginIconUrl(pluginId: string, path?: string | null): string {
+  const p = path ? encodeURIComponent(path) : '';
+  return `${BASE}/plugins/${encodeURIComponent(pluginId)}/icon${p ? `?path=${p}` : ''}`;
 }
 
 /** One plugin's monitoring snapshot for a device. */
@@ -296,6 +324,10 @@ export interface Plugin {
   capabilities: string[];
   endpoint: string;
   authType: string;
+  /** Icon path relative to the plugin root (null = no icon advertised). */
+  iconUrl?: string | null;
+  /** Supported device model catalog (null/absent = no catalog, e.g. ICMP). */
+  deviceModels?: DeviceModelEntry[] | null;
   lastSeenAt?: string | null;
 }
 
@@ -522,7 +554,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   /** Update identity fields of an existing device (plugins are managed separately). */
-  updateDevice: (deviceId: string, body: Partial<Pick<Device, 'name' | 'vendor' | 'deviceType' | 'managementAddress'>> & { siteId?: string | null }) =>
+  updateDevice: (deviceId: string, body: Partial<Pick<Device, 'name' | 'vendor' | 'deviceType' | 'managementAddress' | 'model' | 'firmwareVersion'>> & { siteId?: string | null }) =>
     apiFetch<Device>(`/devices/${deviceId}`, { method: 'PATCH', body: JSON.stringify(body) }),
   // Device ↔ plugin assignments.
   devicePlugins: (deviceId: string) =>

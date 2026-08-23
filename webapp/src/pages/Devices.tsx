@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { Eye, Pencil, Plus, Trash2, X } from 'lucide-react';
@@ -6,8 +6,9 @@ import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
 import { MetricCell } from '../components/MetricCell';
+import { DeviceIcon } from '../components/DeviceIcon';
 import { PluginAssignmentBuilder } from '../components/PluginAssignmentBuilder';
-import { api, Device, DeviceCreateRequest, DevicePluginAssignmentInput, DevicePluginAssignment, Plugin } from '../api/client';
+import { api, Device, DeviceCreateRequest, DeviceModelEntry, DevicePluginAssignmentInput, DevicePluginAssignment, Plugin } from '../api/client';
 import { OptionForm } from '../components/OptionForm';
 import { isValidAddress, addressError } from '../utils/address';
 
@@ -30,9 +31,14 @@ export default function Devices() {
   // used to diff on save (add new / remove deleted).
   const [originalSecondaryIps, setOriginalSecondaryIps] = useState<{ id: string; address: string }[]>([]);
 
-  // Device identity fields (shared between create and edit modes).
-  const emptyIdentity = { name: '', vendor: '', deviceType: 'firewall', managementAddress: '', siteId: '' };
+  // Device identity fields (shared between create and edit modes). Model +
+  // firmwareVersion are optional — chosen from the assigned plugins' catalogs.
+  const emptyIdentity = { name: '', vendor: '', deviceType: 'firewall', managementAddress: '', siteId: '', model: '', firmwareVersion: '' };
   const [identity, setIdentity] = useState(emptyIdentity);
+
+  // Plugin ids currently selected in the assignment builder (reported via
+  // onRowsChange) — drives which model catalogs are offered for the vendor.
+  const [selectedPluginIds, setSelectedPluginIds] = useState<string[]>([]);
 
   // Secondary IPs (creation list or existing secondaries in edit mode).
   const [additionalIps, setAdditionalIps] = useState<string[]>([]);
@@ -47,6 +53,44 @@ export default function Devices() {
   const secretsQuery = useQuery({ queryKey: ['secrets'], queryFn: api.secrets });
   // Site picker options (the Sites page owns creation; this is read-only here).
   const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: api.sites });
+
+  // Model catalog for the selected vendor, merged across ALL plugins currently
+  // assigned in the form (a device can have several — e.g. LANCOM + SNMP).
+  // Empty when no assigned plugin advertises models for this vendor (e.g. ICMP),
+  // in which case the form shows no model fields at all.
+  const modelEntries = useMemo<DeviceModelEntry[]>(() => {
+    if (!identity.vendor) return [];
+    const byKey = new Map<string, DeviceModelEntry>();
+    for (const id of selectedPluginIds) {
+      const plugin = (pluginsQuery.data ?? []).find((p) => p.id === id);
+      for (const entry of plugin?.deviceModels ?? []) {
+        if (entry.vendor !== identity.vendor) continue;
+        // First catalog wins per model name — firmware lists are merged.
+        const existing = byKey.get(entry.model.toLowerCase());
+        if (!existing) byKey.set(entry.model.toLowerCase(), { ...entry });
+        else if (entry.firmwareVersions?.length) {
+          const merged = new Set([...(existing.firmwareVersions ?? []), ...entry.firmwareVersions]);
+          existing.firmwareVersions = Array.from(merged);
+        }
+      }
+    }
+    return Array.from(byKey.values()).sort((a, b) => a.model.localeCompare(b.model));
+  }, [identity.vendor, selectedPluginIds, pluginsQuery.data]);
+
+  // Firmware options for the currently selected model (empty = no dropdown).
+  const firmwareOptions = useMemo(() => {
+    if (!identity.model) return [];
+    return modelEntries.find((m) => m.model === identity.model)?.firmwareVersions ?? [];
+  }, [identity.model, modelEntries]);
+
+  // The device's primary plugin as a full Plugin row (icon + model catalog).
+  // Assignments only carry the id — resolve against the plugins list.
+  function primaryPluginOf(device: Device): Plugin | null {
+    const assignments = device.plugins ?? [];
+    const primary = assignments.find((a) => a.isPrimary) ?? assignments[0];
+    if (!primary) return null;
+    return (pluginsQuery.data ?? []).find((p) => p.id === primary.pluginId) ?? null;
+  }
 
   const createDevice = useMutation({
     mutationFn: (body: DeviceCreateRequest) => api.createDevice(body),
@@ -102,13 +146,15 @@ export default function Devices() {
 
   const updateDevice = useMutation({
     mutationFn: async (assignments?: DevicePluginAssignmentInput[]) => {
-      // PATCH identity fields.
+      // PATCH identity fields (model/firmwareVersion may be cleared with null).
       await api.updateDevice(editingId!, {
         name: identity.name.trim(),
         vendor: identity.vendor,
         deviceType: identity.deviceType.trim() || 'firewall',
         managementAddress: identity.managementAddress.trim(),
         siteId: identity.siteId || null,
+        model: identity.model.trim() || null,
+        firmwareVersion: identity.firmwareVersion.trim() || null,
       });
       // Diff secondary IPs: add new, remove deleted.
       const toAdd = additionalIps.filter((ip) => !originalSecondaryIps.some((o) => o.address === ip));
@@ -151,6 +197,7 @@ export default function Devices() {
     setShowForm(false);
     setEditingId(null);
     setIdentity(emptyIdentity);
+    setSelectedPluginIds([]);
     setAdditionalIps([]);
     setOriginalSecondaryIps([]);
     setInitialAssignments([]);
@@ -168,6 +215,8 @@ export default function Devices() {
         siteId: identity.siteId || null,
         ips: additionalIps.length > 0 ? additionalIps : undefined,
         plugins: assignments,
+        model: identity.model.trim() || null,
+        firmwareVersion: identity.firmwareVersion.trim() || null,
       });
     }
   }
@@ -194,6 +243,8 @@ export default function Devices() {
       deviceType: device.deviceType,
       managementAddress: device.managementAddress,
       siteId: device.siteId ?? '',
+      model: device.model ?? '',
+      firmwareVersion: device.firmwareVersion ?? '',
     });
     const secondaries = (device.ips ?? []).filter((ip) => !ip.isPrimary);
     setAdditionalIps(secondaries.map((s) => s.address));
@@ -209,6 +260,15 @@ export default function Devices() {
   }
 
   const columns: DataTableColumn<Device>[] = [
+    {
+      // Icon from the primary plugin (or the selected model's icon) — quick visual recognition.
+      header: '',
+      key: 'icon',
+      width: 36,
+      sortable: false,
+      excludeFromExport: true,
+      render: (row) => <DeviceIcon plugin={primaryPluginOf(row)} model={row.model} />,
+    },
     { header: 'Name', key: 'name' },
     { header: 'Vendor', key: 'vendor' },
     { header: 'Type', key: 'deviceType' },
@@ -357,7 +417,8 @@ export default function Devices() {
               required
               className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
               value={identity.vendor}
-              onChange={(e) => setIdentity({ ...identity, vendor: e.target.value })}
+              // Changing the vendor invalidates any model/firmware selection.
+              onChange={(e) => setIdentity({ ...identity, vendor: e.target.value, model: '', firmwareVersion: '' })}
             >
               <option value="" disabled>
                 Select a vendor
@@ -378,6 +439,47 @@ export default function Devices() {
               onChange={(e) => setIdentity({ ...identity, deviceType: e.target.value })}
             />
           </div>
+
+          {/* Model + Firmware — only offered when an assigned plugin advertises a
+              catalog for the selected vendor (vendor-specific plugins do; generic
+              ones like ICMP don't). Both optional. */}
+          {modelEntries.length > 0 && (
+            <>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-slate-700">Model</label>
+                <select
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                  value={identity.model}
+                  onChange={(e) => setIdentity({ ...identity, model: e.target.value, firmwareVersion: '' })}
+                >
+                  <option value="">— not specified —</option>
+                  {modelEntries.map((m) => (
+                    <option key={m.model} value={m.model}>
+                      {m.model}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-slate-400">Optional — enables firmware-specific data collection.</p>
+              </div>
+              {firmwareOptions.length > 0 && (
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-slate-700">Firmware version</label>
+                  <select
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                    value={identity.firmwareVersion}
+                    onChange={(e) => setIdentity({ ...identity, firmwareVersion: e.target.value })}
+                  >
+                    <option value="">— not specified —</option>
+                    {firmwareOptions.map((v) => (
+                      <option key={v} value={v}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </>
+          )}
           <div>
             <label className="mb-1 block text-sm font-medium text-slate-700">Primary IP / Address</label>
             <input
@@ -458,6 +560,7 @@ export default function Devices() {
               plugins={pluginsQuery.data ?? []}
               secrets={secretsQuery.data ?? []}
               initial={editingId ? initialAssignments.map((a) => ({ pluginId: a.pluginId, secretId: a.secretId ?? null, isPrimary: a.isPrimary })) : undefined}
+              onRowsChange={setSelectedPluginIds}
               onSubmit={(assignments) => {
                 if (!identity.name.trim() || !identity.vendor || !identity.managementAddress.trim()) {
                   setFormError('Please fill in name, vendor and primary IP before saving.');

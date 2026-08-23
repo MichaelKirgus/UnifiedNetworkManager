@@ -1,9 +1,12 @@
 import { Router } from 'express';
+import axios from 'axios';
 import { desc, eq } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { getRequiredSecretType } from '../secretsProvider';
+import { resolvePluginEndpoint } from '../utils/pluginEndpoint';
+import type { DeviceModelEntry } from '../types/deviceModels';
 import {
   SettingsValidationError,
   getPluginOptions,
@@ -14,6 +17,15 @@ import {
 const router = Router();
 
 function serializePlugin(row: any) {
+  let deviceModels: DeviceModelEntry[] | null = null;
+  if (typeof row.deviceModels === 'string' && row.deviceModels.length > 0) {
+    try {
+      const parsed = JSON.parse(row.deviceModels);
+      deviceModels = Array.isArray(parsed) ? parsed : null;
+    } catch {
+      deviceModels = null;
+    }
+  }
   return {
     id: row.id,
     name: row.name,
@@ -22,9 +34,72 @@ function serializePlugin(row: any) {
     capabilities: typeof row.capabilities === 'string' ? JSON.parse(row.capabilities) : row.capabilities,
     endpoint: row.endpoint,
     authType: row.authType,
+    iconUrl: row.iconUrl ?? null,
+    deviceModels,
     lastSeenAt: row.lastSeenAt ?? null,
   };
 }
+
+/** Validates an icon path coming from the webapp (query param) or /discover. */
+function safeIconPath(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw.trim() === '') return null;
+  const p = raw.trim();
+  // Reject absolute URLs (scheme), protocol-relative, and path traversal.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(p) || p.startsWith('//') || p.includes('..')) return null;
+  return p.startsWith('/') ? p : `/${p}`;
+}
+
+// GET /plugins/:id/icon - Proxies an icon served by the plugin itself.
+// The plugin advertises its icon path in /discover (`iconUrl`); per-model icons
+// are requested via the optional `path` query param (from the deviceModels
+// catalog). Deliberately UNAUTHENTICATED so plain <img> tags work without a
+// token; the path is validated to stay within the plugin's own origin.
+router.get('/plugins/:id/icon', async (req, res) => {
+  const { id } = req.params;
+  const row = await db.query.plugins.findFirst({
+    where: (plugins, { eq }) => eq(plugins.id, id),
+  });
+  if (!row) {
+    res.status(404).json({ error: 'Plugin not found' });
+    return;
+  }
+
+  const requested = typeof req.query.path === 'string' ? req.query.path : '';
+  const path = safeIconPath(requested || row.iconUrl);
+  if (!path) {
+    res.status(404).json({ error: 'Plugin has no icon (and the requested path is invalid)' });
+    return;
+  }
+
+  try {
+    const endpoint = resolvePluginEndpoint(row.endpoint).replace(/\/+$/, '');
+    const upstream = await axios.get(`${endpoint}${path}`, {
+      timeout: 5_000,
+      responseType: 'arraybuffer',
+      maxContentLength: 1_024 * 1_024, // icons are small; cap at 1 MiB
+    });
+    const data = upstream.data as ArrayBuffer;
+    if (!data || data.byteLength === 0) {
+      res.status(404).json({ error: 'Plugin returned an empty icon' });
+      return;
+    }
+    const contentType = (upstream.headers['content-type'] as string | undefined) ?? 'application/octet-stream';
+    // Icons are static per plugin version — let the browser cache them.
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', 'public, max-age=300');
+    res.status(200).send(Buffer.from(data));
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    // Upstream 404/403 → the icon simply doesn't exist there.
+    if (e.status === 404 || e.status === 403) {
+      res.status(404).json({ error: 'Icon not found on plugin' });
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.warn(`[plugins] icon proxy failed for ${id} (${path}):`, e.message);
+    res.status(502).json({ error: 'Failed to fetch icon from plugin' });
+  }
+});
 
 router.get('/plugins', requireAuth, async (_req, res) => {
   const result = await db.query.plugins.findMany({

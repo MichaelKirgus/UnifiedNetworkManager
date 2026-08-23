@@ -132,6 +132,15 @@ export async function initDb(): Promise<void> {
     `ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "actionDescriptors" TEXT`
   );
 
+  // Plugin icon + device model catalog (see schema.plugins.iconUrl/deviceModels).
+  await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "iconUrl" TEXT`);
+  await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "deviceModels" TEXT`);
+
+  // User-selected hardware model / firmware version on devices — chosen from a
+  // plugin's advertised catalog, forwarded to every /monitoring call.
+  await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS "model" TEXT`);
+  await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS "firmwareVersion" TEXT`);
+
   // Execution plans (see workers/planExecutor.ts). Plans persist a plugin's
   // /plan output + its provisioned secrets; steps run in dependency order.
   await pool.query(`

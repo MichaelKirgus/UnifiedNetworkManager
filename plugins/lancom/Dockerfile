@@ -19,9 +19,12 @@ RUN cd packages/snmp-client && npm install --legacy-peer-deps && npm run build
 COPY plugins/lancom/package*.json plugins/lancom/tsconfig.json plugins/lancom/
 RUN cd plugins/lancom && npm install --legacy-peer-deps
 
-COPY plugins/lancom/src/index.ts plugins/lancom/src/lcosOids.ts plugins/lancom/src/lcosClient.ts plugins/lancom/src/metrics.ts plugins/lancom/src/
+COPY plugins/lancom/src/index.ts plugins/lancom/src/lcosOids.ts plugins/lancom/src/lcosClient.ts plugins/lancom/src/metrics.ts plugins/lancom/src/deviceModels.ts plugins/lancom/src/
 RUN cd plugins/lancom && npm run build \
     && node -e "require('/app/plugins/lancom/node_modules/@unm/snmp-client')"
+
+# Static icon assets served at /icons (proxied by the API's GET /plugins/:id/icon).
+COPY plugins/lancom/icons/ plugins/lancom/icons/
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: symlink
 # in node_modules resolve exactly like in local development.

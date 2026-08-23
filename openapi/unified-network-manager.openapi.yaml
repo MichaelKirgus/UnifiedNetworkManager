@@ -243,6 +243,9 @@ paths:
                 managementAddress: { type: string, minLength: 1 }
                 # null unassigns the site (OpenAPI 3.1 / JSON Schema type array).
                 siteId: { type: [string, 'null'] }
+                # Hardware model / firmware version — null clears the selection.
+                model: { type: [string, 'null'], description: "Hardware model from a plugin's catalog; null clears" }
+                firmwareVersion: { type: [string, 'null'], description: "Firmware version for the selected model; null clears" }
       responses:
         '200':
           description: Updated device (with its plugin assignments)
@@ -1178,6 +1181,39 @@ paths:
         '404':
           description: Secret not found
 
+  /plugins/{id}/icon:
+    get:
+      tags: [Plugins]
+      summary: Fetch a plugin's icon (proxied from the plugin itself)
+      description: >-
+        Proxies an icon served by the plugin. The default is the plugin's
+        advertised `iconUrl`; pass `path` to fetch another asset from the same
+        plugin (e.g. a per-model icon from its deviceModels catalog). Deliberately
+        UNAUTHENTICATED so plain <img> tags work without a token; the path must be
+        relative and cannot traverse outside the plugin's own origin.
+      security: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: path
+          required: false
+          allowReserved: true
+          schema: { type: string }
+          description: "Icon path relative to the plugin root (defaults to the plugin's iconUrl)"
+      responses:
+        '200':
+          description: Icon bytes (content-type from the plugin, e.g. image/svg+xml)
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '404':
+          description: Plugin not found, or it has no icon / does not serve the requested path
+        '502':
+          description: The plugin could not be reached for the icon
+
   /plugins/{id}/required-secret-type:
     get:
       tags: [Plugins]
@@ -2036,6 +2072,8 @@ components:
         status:
           type: string
           enum: [online, degraded, offline, unknown]
+        model: { type: [string, 'null'], description: "Hardware model selected from a plugin's advertised catalog (null = unset)" }
+        firmwareVersion: { type: [string, 'null'], description: "Firmware version for the selected model (null = unset)" }
         ips:
           type: array
           items:
@@ -2073,6 +2111,8 @@ components:
           minItems: 1
           items:
             $ref: '#/components/schemas/DevicePluginAssignmentInput'
+        model: { type: [string, 'null'], description: "Optional hardware model (from a plugin's advertised catalog)" }
+        firmwareVersion: { type: [string, 'null'], description: "Optional firmware version for the selected model" }
 
     Site:
       type: object
@@ -2675,6 +2715,24 @@ components:
         authType:
           type: string
           enum: [none, token, mTLS]
+        iconUrl: { type: [string, 'null'], description: "Icon path relative to the plugin root (e.g. /icons/lancom.svg); served via GET /plugins/{id}/icon" }
+        deviceModels:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeviceModelEntry'
+          description: "Supported device model catalog advertised in /discover; null when the plugin has no catalog (e.g. ICMP)"
+
+    DeviceModelEntry:
+      type: object
+      required: [vendor, model]
+      properties:
+        vendor: { type: string, description: "Vendor this entry applies to (matches one of the plugin's vendors)" }
+        model: { type: string, description: "Display name of the hardware model, e.g. LX45" }
+        iconPath: { type: [string, 'null'], description: "Optional per-model icon path relative to the plugin root" }
+        firmwareVersions:
+          type: array
+          items: { type: string }
+          description: "Optional list of firmware versions for this model (plain strings)"
 
     PluginCreateRequest:
       type: object

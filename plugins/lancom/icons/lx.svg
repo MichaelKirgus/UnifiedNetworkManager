@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="12" fill="#155e75"/>
+  <!-- antenna -->
+  <line x1="32" y1="8" x2="32" y2="20" stroke="#a5f3fc" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="32" cy="7" r="3" fill="#a5f3fc"/>
+  <!-- AP body -->
+  <rect x="12" y="24" width="40" height="26" rx="6" fill="#e0f2fe"/>
+  <text x="32" y="42" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#155e75">LX</text>
+  <!-- status LED -->
+  <circle cx="46" cy="44" r="2.5" fill="#0ea5e9"/>
+</svg>

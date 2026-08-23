@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import type { PluginOptionDescriptor } from '../types/pluginOptions';
+import type { DeviceModelEntry } from '../types/deviceModels';
 
 /**
  * Self-describing identity that every plugin MUST expose, either via its
@@ -25,6 +26,43 @@ export interface PluginIdentity {
   options?: PluginOptionDescriptor[];
   /** Action catalog declared by the plugin (drives plan creation in the webapp). */
   actions?: unknown[];
+  /** Icon path relative to the plugin root (e.g. "/icons/lancom.svg"); proxied via GET /plugins/:id/icon. */
+  iconUrl?: string | null;
+  /** Supported device model catalog (drives Model/Firmware dropdowns in the webapp). Absent = no catalog. */
+  deviceModels?: DeviceModelEntry[];
+}
+
+/**
+ * Defensively normalizes a raw `deviceModels` array from /discover: keeps only
+ * entries with non-empty string vendor + model, coerces iconPath/firmwareVersions
+ * to the expected shapes, and drops malformed items instead of failing discovery.
+ */
+function normalizeDeviceModels(raw: unknown): DeviceModelEntry[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: DeviceModelEntry[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const e = item as Record<string, unknown>;
+    if (typeof e.vendor !== 'string' || e.vendor.trim() === '') continue;
+    if (typeof e.model !== 'string' || e.model.trim() === '') continue;
+    const entry: DeviceModelEntry = { vendor: e.vendor.trim(), model: e.model.trim() };
+    if (typeof e.iconPath === 'string' && e.iconPath.trim() !== '') entry.iconPath = e.iconPath.trim();
+    if (Array.isArray(e.firmwareVersions)) {
+      const versions = e.firmwareVersions.filter((v): v is string => typeof v === 'string' && v.trim() !== '').map((v) => v.trim());
+      if (versions.length > 0) entry.firmwareVersions = versions;
+    }
+    out.push(entry);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/** Normalizes a raw icon path: must be a relative path (no scheme, no ".."). */
+function normalizeIconPath(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw.trim() === '') return null;
+  const p = raw.trim();
+  if (/^[a-z][a-z0-9+.-]*:/i.test(p)) return null; // scheme like http: — reject
+  if (p.includes('..')) return null; // path traversal — reject
+  return p.startsWith('/') ? p : `/${p}`;
 }
 
 export interface DiscoveryOptions {
@@ -76,6 +114,8 @@ async function fetchIdentity(endpoint: string): Promise<PluginIdentity | null> {
       metrics: Array.isArray(data.metrics) ? data.metrics : undefined,
       options: Array.isArray(data.options) ? (data.options as PluginOptionDescriptor[]) : undefined,
       actions: Array.isArray(data.actions) ? data.actions : undefined,
+      iconUrl: normalizeIconPath(data.iconUrl),
+      deviceModels: normalizeDeviceModels(data.deviceModels),
     };
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -101,6 +141,12 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
   // actually carries one, so a catalog-less upsert never wipes it.
   const hasActions = Array.isArray(identity.actions) && identity.actions.length > 0;
   const actionDescriptors = hasActions ? JSON.stringify(identity.actions) : null;
+  // Icon + device model catalog: same guard — the mDNS TXT path carries neither,
+  // so a TXT upsert must never wipe values set by the HTTP polling path.
+  const iconUrl = identity.iconUrl ?? null;
+  const hasIcon = iconUrl !== null;
+  const hasModels = Array.isArray(identity.deviceModels) && identity.deviceModels.length > 0;
+  const deviceModelsJson = hasModels ? JSON.stringify(identity.deviceModels) : null;
 
   if (existing) {
     await db
@@ -115,6 +161,8 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
         ...(hasMetrics ? { metricDescriptors } : {}),
         ...(hasOptions ? { optionDescriptors } : {}),
         ...(hasActions ? { actionDescriptors } : {}),
+        ...(hasIcon ? { iconUrl } : {}),
+        ...(hasModels ? { deviceModels: deviceModelsJson } : {}),
         lastSeenAt: now,
       })
       .where(eq(schema.plugins.id, identity.uuid));
@@ -130,6 +178,8 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
       metricDescriptors,
       optionDescriptors,
       actionDescriptors,
+      iconUrl,
+      deviceModels: deviceModelsJson,
       createdAt: now,
       lastSeenAt: now,
     });

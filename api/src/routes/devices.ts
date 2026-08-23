@@ -39,7 +39,25 @@ function serializeDevice(row: Device, siteName?: string | null) {
     siteId: row.siteId ?? undefined,
     siteName: siteName ?? null,
     status: row.status,
+    model: row.model ?? null,
+    firmwareVersion: row.firmwareVersion ?? null,
   };
+}
+
+/**
+ * Normalizes an optional device-model field from a request body.
+ * `undefined` = not provided (keep current value); `null`/empty string = clear;
+ * anything else must be a non-empty string. Returns { error } or { value }.
+ */
+function normalizeOptionalModelField(field: 'model' | 'firmwareVersion', raw: unknown): { value?: string | null; error?: string } {
+  if (raw === undefined) return {}; // omit → keep current value
+  if (raw === null || raw === '') return { value: null };
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    return { error: `"${field}" must be a string or null` };
+  }
+  const v = raw.trim();
+  if (v.length > 200) return { error: `"${field}" is too long (max 200 chars)` };
+  return { value: v };
 }
 
 /** Batch-loads the names of the sites referenced by a set of devices. */
@@ -207,6 +225,21 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
     return;
   }
 
+  // Optional hardware model / firmware version — chosen from a plugin's
+  // advertised catalog in the webapp form. Free-form here on purpose: the API
+  // does not validate against catalogs (a device can outlive its plugin).
+  const body = req.body ?? {};
+  const modelRef = normalizeOptionalModelField('model', body.model);
+  if (modelRef.error) {
+    res.status(400).json({ error: modelRef.error });
+    return;
+  }
+  const firmwareRef = normalizeOptionalModelField('firmwareVersion', body.firmwareVersion);
+  if (firmwareRef.error) {
+    res.status(400).json({ error: firmwareRef.error });
+    return;
+  }
+
   // Optional secondary IPs (validated here; addDeviceIp re-checks + dedupes).
   const secondaryIps: string[] = [];
   if (ips !== undefined) {
@@ -232,6 +265,8 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
     managementAddress,
     siteId: siteRef.value ?? null,
     status: 'unknown',
+    model: modelRef.value ?? null,
+    firmwareVersion: firmwareRef.value ?? null,
     createdAt: new Date().toISOString(),
   });
 
@@ -316,8 +351,21 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
     updates.siteId = ref.value ?? null;
   }
 
+  // model / firmwareVersion are handled separately too: unlike the identity
+  // fields above, they may be CLEARED with null (the device no longer matches
+  // a plugin catalog) — omitting them keeps the current value.
+  for (const field of ['model', 'firmwareVersion'] as const) {
+    if (!(field in body)) continue;
+    const ref = normalizeOptionalModelField(field, body[field]);
+    if (ref.error) {
+      res.status(400).json({ error: ref.error });
+      return;
+    }
+    updates[field] = ref.value ?? null;
+  }
+
   if (Object.keys(updates).length === 0) {
-    res.status(400).json({ error: `Provide at least one of: ${UPDATABLE_FIELDS.join(', ')}, siteId` });
+    res.status(400).json({ error: `Provide at least one of: ${UPDATABLE_FIELDS.join(', ')}, siteId, model, firmwareVersion` });
     return;
   }
 

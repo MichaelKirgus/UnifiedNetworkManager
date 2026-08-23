@@ -1,9 +1,11 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
 import { Bonjour } from 'bonjour-service';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 import { LcosOptions, getLcosInventory, walkLcosCounters } from './lcosClient';
 import { buildDescriptors, DISCOVER_METRICS, INVENTORY_INTERVAL_MS, MetricDescriptor } from './metrics';
+import { DEVICE_MODELS } from './deviceModels';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000004';
 export const PLUGIN_NAME = 'LANCOM LX-Series Plugin';
@@ -90,6 +92,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Static icon assets (plugin + per-model icons), advertised in /discover and
+// fetched by the API's icon proxy. dist/src/../../icons = <plugin root>/icons.
+app.use('/icons', express.static(path.join(__dirname, '../../icons')));
+
 app.get('/healthz', (_req, res) => {
   res.status(200).json({ status: 'ok' });
 });
@@ -107,6 +113,11 @@ app.get('/discover', (_req, res) => {
     requiredSecretType: 'snmp',
     metrics: DISCOVER_METRICS,
     options: PLUGIN_OPTIONS,
+    // Icon + supported device model catalog — drives the webapp's Model/Firmware
+    // dropdowns and the icon shown on the Devices pages. The user's selection is
+    // forwarded to /monitoring (model/firmwareVersion) for future per-model logic.
+    iconUrl: '/icons/lancom.svg',
+    deviceModels: DEVICE_MODELS,
   });
 });
 
@@ -170,6 +181,12 @@ app.post('/monitoring', async (req, res) => {
   const deviceId = typeof body.deviceId === 'string' ? body.deviceId : null;
   const managementAddress = typeof body.managementAddress === 'string' ? body.managementAddress : '';
 
+  // User-selected hardware model / firmware version (forwarded by the API from
+  // the device row). Surfaced as System metrics so the selection is visible in
+  // the webapp's monitoring view; available for future per-model data gathering.
+  const selectedModel = typeof body.model === 'string' && body.model ? body.model : null;
+  const selectedFirmware = typeof body.firmwareVersion === 'string' && body.firmwareVersion ? body.firmwareVersion : null;
+
   const settings = readSettings(req);
   const opts = resolveOptions(settings);
   const host = hostFromAddress(managementAddress);
@@ -223,6 +240,10 @@ app.post('/monitoring', async (req, res) => {
       metrics['system.memoryUsedPct'] = null;
     }
     metrics['system.bootcount'] = sys.bootcount;
+    // User-selected hardware model / firmware (from the device form) — shown in
+    // the System group so the selection is visible next to the live data.
+    if (selectedModel) metrics['system.model'] = selectedModel;
+    if (selectedFirmware) metrics['system.firmwareVersion'] = selectedFirmware;
 
     // Management mode: CAPWAP-managed APs have their config owned by the WLC —
     // surface this prominently so users don't expect local changes to stick.
@@ -398,6 +419,13 @@ app.post('/monitoring', async (req, res) => {
     if (metrics['system.error']) {
       descriptors.push({ key: 'system.error', label: 'Error', type: 'string', visualization: 'text', group: 'System' });
     }
+    // Descriptors for the user-selected model/firmware metrics (only when set).
+    if (selectedModel) {
+      descriptors.push({ key: 'system.model', label: 'Selected Model', type: 'string', visualization: 'text', group: 'System' });
+    }
+    if (selectedFirmware) {
+      descriptors.push({ key: 'system.firmwareVersion', label: 'Selected Firmware', type: 'string', visualization: 'text', group: 'System' });
+    }
 
     res.status(200).json({
       deviceId,
@@ -412,6 +440,10 @@ app.post('/monitoring', async (req, res) => {
         mibDir: opts.mibDir ?? null,
         inventoryTtlMs: opts.inventoryTtlMs,
         maxClientRows: opts.maxClientRows,
+        // User-selected hardware model / firmware version (forwarded by the API).
+        // Available for future per-model data gathering; echoed here as well.
+        model: selectedModel,
+        firmwareVersion: selectedFirmware,
       },
     });
   } catch (err) {
