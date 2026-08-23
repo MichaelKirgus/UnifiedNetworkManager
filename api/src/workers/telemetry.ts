@@ -99,6 +99,7 @@ async function pollAssignment(target: AssignmentTarget): Promise<string> {
  *   - networks[]    { name, ip?, prefix?, version?, vlanId?, mac?, status? }
  *   - arp[] / ndp[] { mac, ip, intf?, manufacturer? }
  *   - dhcpLeases[]  { mac, ip, hostname?, expiry?, intf? }
+ *   - wlanClients[] { mac, ip, hostname?, intf? } — associated WLAN clients
  * Rows are upserted on their natural key; a host seen again simply refreshes
  * lastSeenAt. Unknown/missing fields are tolerated — plugins evolve
  * independently of the API. Never throws: an inventory parse failure must not
@@ -138,8 +139,15 @@ async function ingestInventory(
           collectedAt,
         });
       }
-      if (values.length > 0) {
-        await db.insert(schema.networks).values(values).onConflictDoUpdate({
+      // De-duplicate on the upsert conflict key — two rows with the same
+      // (name, ip) in one snapshot make Postgres reject the whole batch
+      // ("ON CONFLICT DO UPDATE command cannot affect row a second time").
+      const netByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        netByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}|${v.ip}`, v);
+      }
+      if (netByKey.size > 0) {
+        await db.insert(schema.networks).values(Array.from(netByKey.values())).onConflictDoUpdate({
           target: [schema.networks.deviceId, schema.networks.pluginId, schema.networks.name, schema.networks.ip],
           set: {
             prefix: sql`excluded."prefix"`,
@@ -184,9 +192,17 @@ async function ingestInventory(
     }
     const leases = Array.isArray(metrics['dhcpLeases']) ? (metrics['dhcpLeases'] as unknown[]) : [];
     for (const raw of leases) pushHostRow('dhcp', raw);
+    // WLAN clients (e.g. LANCOM station table) — source 'wlan'.
+    const wlanClients = Array.isArray(metrics['wlanClients']) ? (metrics['wlanClients'] as unknown[]) : [];
+    for (const raw of wlanClients) pushHostRow('wlan', raw);
 
-    if (hostValues.length > 0) {
-      await db.insert(schema.hosts).values(hostValues).onConflictDoUpdate({
+    // Same guard as above — one snapshot must not repeat a (mac, ip, source) row.
+    const hostByKey = new Map<string, typeof hostValues[number]>();
+    for (const v of hostValues) {
+      hostByKey.set(`${v.deviceId}|${v.pluginId}|${v.mac}|${v.ip}|${v.source}`, v);
+    }
+    if (hostByKey.size > 0) {
+      await db.insert(schema.hosts).values(Array.from(hostByKey.values())).onConflictDoUpdate({
         target: [schema.hosts.deviceId, schema.hosts.pluginId, schema.hosts.mac, schema.hosts.ip, schema.hosts.source],
         set: {
           hostname: sql`excluded.hostname`,

@@ -11,6 +11,9 @@ import {
   walkCounters,
   computeRates,
 } from './snmpClient';
+// Per-version credential validation (v1/v2c community + v3 USM) is shared by
+// all SNMP-based plugins — one implementation in @unm/snmp-client.
+import { buildSnmpCredentials } from '@unm/snmp-client';
 import { buildDescriptors, DISCOVER_METRICS, INVENTORY_INTERVAL_MS, MetricDescriptor } from './metrics';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000003';
@@ -165,82 +168,6 @@ function resolveOptions(settings: Record<string, unknown>): WalkOptions {
     // WiFi collection is ON by default — only an explicit false disables it.
     collectWifi: settings.collectWifi !== false,
   };
-}
-
-/** Reads a trimmed string field from the decrypted secret fields. */
-function strField(fields: Record<string, unknown>, key: string): string {
-  const v = fields[key];
-  return typeof v === 'string' ? v.trim() : '';
-}
-
-const V3_SECURITY_LEVELS = ['noAuthNoPriv', 'authNoPriv', 'authPriv'] as const;
-const V3_AUTH_PROTOCOLS = ['MD5', 'SHA'] as const;
-const V3_PRIV_PROTOCOLS = ['DES', 'AES'] as const;
-
-/**
- * Builds + validates SNMP credentials from a flat field map. Shared by all
- * credential sources so the rules are identical everywhere:
- *   - /monitoring  → fields come from the decrypted `snmp` secret (API body)
- *   - POST /inventory → same JSON body contract as /monitoring (v3-capable)
- *   - GET  /inventory → query params, v1/v2c only (community strings are fine
- *                       in URLs; USM passwords must not be — see the routes)
- *
- * Per-version required set: v1/v2c need a community string; v3 needs a USM
- * username + security level, with auth/priv protocol+password pairs added per
- * security level. Error messages are source-neutral (no "secret"/"query param"
- * wording) since the same builder serves both paths.
- */
-function buildSnmpCredentials(fields: Record<string, unknown>): { creds?: SnmpCredentials; error?: string } {
-  const versionRaw = strField(fields, 'version') || 'v2c';
-  if (versionRaw !== 'v1' && versionRaw !== 'v2c' && versionRaw !== 'v3') {
-    return { error: `SNMP version "${versionRaw}" is not supported — this plugin supports v1, v2c and v3.` };
-  }
-
-  // v1/v2c — community string based.
-  if (versionRaw === 'v1' || versionRaw === 'v2c') {
-    const community = strField(fields, 'community');
-    if (!community) return { error: `No SNMP community configured for ${versionRaw} devices.` };
-    return { creds: { version: versionRaw, community } };
-  }
-
-  // v3 (USM) — username + security level; auth/priv pairs per level.
-  const username = strField(fields, 'username');
-  if (!username) return { error: 'SNMPv3 requires a USM username.' };
-
-  const securityLevel = strField(fields, 'securityLevel') || 'noAuthNoPriv';
-  if (!(V3_SECURITY_LEVELS as readonly string[]).includes(securityLevel)) {
-    return { error: `SNMPv3 security level "${securityLevel}" is invalid — use noAuthNoPriv, authNoPriv or authPriv.` };
-  }
-
-  const creds: SnmpCredentials = { version: 'v3', username, securityLevel: securityLevel as SnmpCredentials['securityLevel'] };
-
-  if (securityLevel !== 'noAuthNoPriv') {
-    const authProtocol = strField(fields, 'authProtocol');
-    const authPassword = strField(fields, 'authPassword');
-    if (!authProtocol || !authPassword) {
-      return { error: `SNMPv3 security level "${securityLevel}" requires an auth protocol and auth password.` };
-    }
-    if (!(V3_AUTH_PROTOCOLS as readonly string[]).includes(authProtocol)) {
-      return { error: `SNMPv3 auth protocol "${authProtocol}" is invalid — use MD5 or SHA.` };
-    }
-    creds.authProtocol = authProtocol as 'MD5' | 'SHA';
-    creds.authPassword = authPassword;
-  }
-
-  if (securityLevel === 'authPriv') {
-    const privProtocol = strField(fields, 'privProtocol');
-    const privPassword = strField(fields, 'privPassword');
-    if (!privProtocol || !privPassword) {
-      return { error: 'SNMPv3 security level "authPriv" requires a privacy protocol and privacy password.' };
-    }
-    if (!(V3_PRIV_PROTOCOLS as readonly string[]).includes(privProtocol)) {
-      return { error: `SNMPv3 privacy protocol "${privProtocol}" is invalid — use DES or AES.` };
-    }
-    creds.privProtocol = privProtocol as 'DES' | 'AES';
-    creds.privPassword = privPassword;
-  }
-
-  return { creds };
 }
 
 /** Extracts SNMP credentials from the monitoring body (decrypted by the API). */

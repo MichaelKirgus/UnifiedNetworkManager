@@ -174,8 +174,8 @@ export interface HostRow {
   mac: string;
   /** All known addresses of this host, IPv4 first. */
   ips: string[];
-  /** Discovery sources that reported this MAC (e.g. arp + ndp for a dual-stack host). */
-  sources: ('arp' | 'ndp' | 'dhcp')[];
+  /** Discovery sources that reported this MAC (e.g. arp + ndp for a dual-stack host, wlan for WLAN clients). */
+  sources: ('arp' | 'ndp' | 'dhcp' | 'wlan')[];
   hostname?: string | null;
   manufacturer?: string | null;
   /** Interface(s) on the observing device where the host was seen (comma-joined when several). */
@@ -574,7 +574,7 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<NetworkRow[]>(`/networks${suffix}`);
   },
-  hosts: (params?: { deviceId?: string; siteId?: string; source?: 'arp' | 'ndp' | 'dhcp' }) => {
+  hosts: (params?: { deviceId?: string; siteId?: string; source?: 'arp' | 'ndp' | 'dhcp' | 'wlan' }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);
     if (params?.siteId) qs.set('siteId', params.siteId);

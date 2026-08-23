@@ -241,10 +241,11 @@ export const networks = pgTable(
   }
 );
 
-// One row per discovered host (neighbor/lease) as reported by a plugin's
-// `arp` / `ndp` / `dhcpLeases` metrics. A host seen via several sources gets
-// one row per source (the DHCP row carries hostname/expiry, ARP rows carry
-// manufacturer). `lastSeenAt` drives the 24h stale sweep.
+// One row per discovered host (neighbor/lease/client) as reported by a
+// plugin's `arp` / `ndp` / `dhcpLeases` / `wlanClients` metrics. A host seen
+// via several sources gets one row per source (the DHCP row carries
+// hostname/expiry, ARP rows carry manufacturer). `lastSeenAt` drives the 24h
+// stale sweep.
 export const hosts = pgTable(
   'hosts',
   {

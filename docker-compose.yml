@@ -35,7 +35,7 @@ services:
       - SECRETS_PLUGIN_ID=${SECRETS_PLUGIN_ID:-00000000-0000-4000-8000-000000000002}
       # Poll these plugin endpoints for discovery (mDNS is often isolated on
       # Docker bridge networks). Ensures the provider plugins are registered.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005,http://lancom-plugin:4006}
     depends_on:
       - postgres
     restart: unless-stopped
@@ -112,6 +112,27 @@ services:
       - MIB_DIR=/app/mibs
     volumes:
       - ./plugins/snmp/mibs:/app/mibs:ro
+    restart: unless-stopped
+
+  # LANCOM plugin: vendor-specific monitoring for LX-Series access points via
+  # the LCOS-LX-MIB (radios, SSIDs, stations/clients, RF environment, WDS,
+  # CAPWAP/LMC) plus network + WLAN-client inventory propagation. Intended to
+  # be assigned IN ADDITION TO the generic SNMP plugin on the same devices.
+  lancom-plugin:
+    # Root context — the image also builds the shared @unm/snmp-client package.
+    build:
+      context: .
+      dockerfile: plugins/lancom/Dockerfile
+    ports:
+      - "4006:4006"
+    environment:
+      - PORT=4006
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://lancom-plugin:4006
+      # Directory inside the container where extra MIB files are looked up.
+      - MIB_DIR=/app/mibs
+    volumes:
+      - ./plugins/lancom/mibs:/app/mibs:ro
     restart: unless-stopped
   # Mock OPNsense appliance for end-to-end plan-execution tests. Host network
   # so it can bind :80/:443 directly; reachable from the plugin containers as

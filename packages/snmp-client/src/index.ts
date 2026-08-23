@@ -81,7 +81,10 @@ function buildCommonArgs(creds: SnmpCredentials, opts: TransportOptions): string
   args.push('-O', 'n');
   args.push('-t', String(Math.max(1, Math.round(opts.timeoutMs / 1000))));
   args.push('-r', String(opts.retries));
-  if (opts.mibDir) args.push('-M', opts.mibDir); // extra MIB search dir (volume mount)
+  // `-M` REPLACES the MIB search path (it does not extend it) — so always
+  // include the standard net-snmp dir alongside any vendor volume. Without
+  // this, a configured mibDir silently breaks resolution of SNMPv2-MIB & co.
+  if (opts.mibDir) args.push('-M', [opts.mibDir, DEFAULT_MIB_DIR].filter(Boolean).join(':'));
   return args;
 }
 
@@ -154,11 +157,13 @@ export async function snmpGet(
 /**
  * Parses `snmpwalk`/`snmpget` output lines of the form:
  *   .1.3.6.1.2.1.1.1.0 = STRING: Linux host 6.1 ...
- * Long values wrap onto continuation lines (no "OID =" prefix) — those are
- * appended to the previous entry.
+ * Long values wrap onto continuation lines (no "OID =" prefix) at net-snmp's
+ * display width — those are appended to the previous entry WITHOUT a space
+ * while the value's opening quote is still open, so wrapped strings reassemble
+ * exactly (a naive space-join corrupts every value longer than ~35 chars).
  */
 export function parseWalkOutput(stdout: string): Map<string, string> {
-  const entries = new Map<string, string>();
+  const raw = new Map<string, { type: string; text: string }>();
   let lastOid: string | null = null;
 
   for (const line of stdout.split('\n')) {
@@ -168,11 +173,26 @@ export function parseWalkOutput(stdout: string): Map<string, string> {
     const m = line.match(/^(\S+)\s*=\s*([\w-]+):\s?(.*)$/);
     if (m) {
       lastOid = m[1];
-      entries.set(lastOid, extractValue(m[2], m[3]));
-    } else if (lastOid) {
-      entries.set(lastOid, `${entries.get(lastOid)} ${line.trim()}`);
+      raw.set(lastOid, { type: m[2], text: m[3] });
+    } else {
+      // net-snmp prints EMPTY string values WITHOUT a type prefix (`OID = ""`).
+      // Without this branch they'd be treated as continuation lines and smeared
+      // onto the previous entry's value (corrupting long hostnames).
+      const empty = line.match(/^(\S+)\s*=\s*""\s*$/);
+      if (empty) {
+        lastOid = empty[1];
+        raw.set(lastOid, { type: 'STRING', text: '""' });
+      } else if (lastOid && raw.has(lastOid)) {
+        const e = raw.get(lastOid)!;
+        // Continuation of a wrapped quoted value? Append verbatim — no space.
+        const quoteOpen = e.text.startsWith('"') && !e.text.endsWith('"');
+        e.text += quoteOpen ? line.trim() : ` ${line.trim()}`;
+      }
     }
   }
+
+  const entries = new Map<string, string>();
+  for (const [oid, { type, text }] of raw) entries.set(oid, extractValue(type, text));
   return entries;
 }
 
@@ -210,4 +230,81 @@ export function normalizeMac(raw: string): string {
   const hex = (raw ?? '').replace(/[^0-9a-f]/gi, '').toLowerCase();
   if (hex.length !== 12) return ''; // non-Ethernet MAC length — don't guess
   return hex.replace(/(.{2})(?=.)/g, '$1:');
+}
+
+/* ------------------------------------------------------------------ *
+ * Credential resolution from the flat `snmp` secret field map.
+ * Shared by every SNMP-based plugin so per-version validation rules live in
+ * exactly one place (v1/v2c need a community; v3 needs USM username + level,
+ * with auth/priv pairs added per security level).
+ * ------------------------------------------------------------------ */
+
+/** Reads a trimmed string field from the decrypted secret fields. */
+export function strField(fields: Record<string, unknown>, key: string): string {
+  const v = fields[key];
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+const V3_SECURITY_LEVELS = ['noAuthNoPriv', 'authNoPriv', 'authPriv'] as const;
+const V3_AUTH_PROTOCOLS = ['MD5', 'SHA'] as const;
+const V3_PRIV_PROTOCOLS = ['DES', 'AES'] as const;
+
+/**
+ * Builds + validates SNMP credentials from a flat field map. Error messages are
+ * source-neutral (no "secret"/"query param" wording) since the same builder
+ * serves /monitoring bodies and query-param routes alike.
+ */
+export function buildSnmpCredentials(
+  fields: Record<string, unknown>
+): { creds?: SnmpCredentials; error?: string } {
+  const versionRaw = strField(fields, 'version') || 'v2c';
+  if (versionRaw !== 'v1' && versionRaw !== 'v2c' && versionRaw !== 'v3') {
+    return { error: `SNMP version "${versionRaw}" is not supported — this plugin supports v1, v2c and v3.` };
+  }
+
+  // v1/v2c — community string based.
+  if (versionRaw === 'v1' || versionRaw === 'v2c') {
+    const community = strField(fields, 'community');
+    if (!community) return { error: `No SNMP community configured for ${versionRaw} devices.` };
+    return { creds: { version: versionRaw, community } };
+  }
+
+  // v3 (USM) — username + security level; auth/priv pairs per level.
+  const username = strField(fields, 'username');
+  if (!username) return { error: 'SNMPv3 requires a USM username.' };
+
+  const securityLevel = strField(fields, 'securityLevel') || 'noAuthNoPriv';
+  if (!(V3_SECURITY_LEVELS as readonly string[]).includes(securityLevel)) {
+    return { error: `SNMPv3 security level "${securityLevel}" is invalid — use noAuthNoPriv, authNoPriv or authPriv.` };
+  }
+
+  const creds: SnmpCredentials = { version: 'v3', username, securityLevel: securityLevel as SnmpCredentials['securityLevel'] };
+
+  if (securityLevel !== 'noAuthNoPriv') {
+    const authProtocol = strField(fields, 'authProtocol');
+    const authPassword = strField(fields, 'authPassword');
+    if (!authProtocol || !authPassword) {
+      return { error: `SNMPv3 security level "${securityLevel}" requires an auth protocol and auth password.` };
+    }
+    if (!(V3_AUTH_PROTOCOLS as readonly string[]).includes(authProtocol)) {
+      return { error: `SNMPv3 auth protocol "${authProtocol}" is invalid — use MD5 or SHA.` };
+    }
+    creds.authProtocol = authProtocol as 'MD5' | 'SHA';
+    creds.authPassword = authPassword;
+  }
+
+  if (securityLevel === 'authPriv') {
+    const privProtocol = strField(fields, 'privProtocol');
+    const privPassword = strField(fields, 'privPassword');
+    if (!privProtocol || !privPassword) {
+      return { error: 'SNMPv3 security level "authPriv" requires a privacy protocol and privacy password.' };
+    }
+    if (!(V3_PRIV_PROTOCOLS as readonly string[]).includes(privProtocol)) {
+      return { error: `SNMPv3 privacy protocol "${privProtocol}" is invalid — use DES or AES.` };
+    }
+    creds.privProtocol = privProtocol as 'DES' | 'AES';
+    creds.privPassword = privPassword;
+  }
+
+  return { creds };
 }

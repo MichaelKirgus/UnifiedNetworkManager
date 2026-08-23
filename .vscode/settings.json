@@ -3,6 +3,12 @@
     "chat.tools.terminal.autoApprove": {
         "awk": true,
         "uniq": true,
-        "npx ts-node": true
+        "npx ts-node": true,
+        "/^node extract-enums\\.cjs 2>&1$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "npm install": true,
+        "npx tsc": true
     }
 }

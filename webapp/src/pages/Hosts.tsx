@@ -10,7 +10,9 @@ function SourceBadges({ sources }: { sources: HostRow['sources'] }) {
       ? 'bg-emerald-100 text-emerald-700'
       : s === 'ndp'
         ? 'bg-purple-100 text-purple-700'
-        : 'bg-blue-100 text-blue-700';
+        : s === 'wlan'
+          ? 'bg-amber-100 text-amber-700'
+          : 'bg-blue-100 text-blue-700';
   return (
     <span className="flex flex-wrap gap-1">
       {sources.map((s) => (
@@ -118,7 +120,7 @@ export default function Hosts() {
       <div className="mb-4">
         <h1 className="text-xl font-bold text-slate-900">Hosts</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Discovered hosts from all devices — ARP/NDP neighbor tables and DHCP leases. Entries not seen for 24h are removed automatically.
+          Discovered hosts from all devices — ARP/NDP neighbor tables, DHCP leases and WLAN clients. Entries not seen for 24h are removed automatically.
         </p>
       </div>
 

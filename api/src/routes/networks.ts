@@ -70,7 +70,7 @@ interface MergedHost {
 }
 
 /** Canonical display order for discovery sources. */
-const SOURCE_ORDER: Record<string, number> = { arp: 0, ndp: 1, dhcp: 2 };
+const SOURCE_ORDER: Record<string, number> = { arp: 0, ndp: 1, dhcp: 2, wlan: 3 };
 
 /**
  * Merges stored host rows into one row per physical host: the same MAC seen
@@ -238,13 +238,13 @@ router.get('/networks', requireAuth, async (_req, res: Response) => {
 });
 
 // GET /hosts - All discovered hosts across devices (ARP/NDP neighbors + DHCP leases).
-// Query params: deviceId, siteId, source ('arp'|'ndp'|'dhcp').
+// Query params: deviceId, siteId, source ('arp'|'ndp'|'dhcp'|'wlan').
 router.get('/hosts', requireAuth, async (_req, res: Response) => {
   try {
     const { deviceId, siteId, source } = _req.query as Record<string, string | undefined>;
 
-    if (source && !['arp', 'ndp', 'dhcp'].includes(source)) {
-      res.status(400).json({ error: '"source" must be one of: arp, ndp, dhcp' });
+    if (source && !['arp', 'ndp', 'dhcp', 'wlan'].includes(source)) {
+      res.status(400).json({ error: '"source" must be one of: arp, ndp, dhcp, wlan' });
       return;
     }
 
