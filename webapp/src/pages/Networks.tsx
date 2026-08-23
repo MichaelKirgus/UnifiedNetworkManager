@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
+import { IpGroupChips } from '../components/IpGroups';
 import { api, NetworkRow } from '../api/client';
 
 /** Small colored pill for the address family. */
@@ -14,19 +15,6 @@ function VersionBadge({ version }: { version?: string | null }) {
   return (
     <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${cls}`}>
       {version}
-    </span>
-  );
-}
-
-/** CIDR chip, IPv6 tinted. */
-function CidrChip({ cidr }: { cidr: string }) {
-  return (
-    <span
-      className={`rounded px-1.5 py-0.5 font-mono text-xs ${
-        cidr.includes(':') ? 'bg-purple-50 text-purple-700' : 'bg-slate-100 text-slate-700'
-      }`}
-    >
-      {cidr}
     </span>
   );
 }
@@ -48,17 +36,13 @@ export default function Networks() {
       // Search/export must see ALL subnets of the group — a dual-stack row's
       // name is only its canonical (often v6) subnet.
       exportValue: (row) => [row.name, ...(row.subnets ?? [])].join(', '),
-      render: (row) => (
-        <div className="flex flex-wrap items-center gap-1">
-          {/* Dual-stack groups carry both CIDRs — show every real subnet of the
-              group, IPv4 first; fall back to the label for VLAN/name rows. */}
-          {(row.subnets ?? []).length > 0 ? (
-            (row.subnets ?? []).map((s) => <CidrChip key={s} cidr={s} />)
-          ) : (
-            <span className="font-medium text-slate-800">{row.name}</span>
-          )}
-        </div>
-      ),
+      render: (row) => {
+        // Dual-stack groups carry both CIDRs — show every real subnet of the
+        // group, merged into one chip per scope type; fall back to the label
+        // for VLAN/name rows.
+        if ((row.subnets ?? []).length > 0) return <IpGroupChips ips={row.subnets ?? []} />;
+        return <span className="font-medium text-slate-800">{row.name}</span>;
+      },
     },
     {
       header: 'VLAN ID',
@@ -112,14 +96,9 @@ export default function Networks() {
       exportValue: (row) => row.devices.flatMap((d) => d.cidrs).join(', '),
       render: (row) => {
         const cidrs = Array.from(new Set(row.devices.flatMap((d) => d.cidrs)));
-        if (cidrs.length === 0) return <span className="text-slate-400">—</span>;
-        return (
-          <div className="flex flex-wrap gap-1">
-            {cidrs.map((c) => (
-              <CidrChip key={c} cidr={c} />
-            ))}
-          </div>
-        );
+        // One chip per scope type — a dual-stack network with several members
+        // collapses to at most three chips instead of one per address.
+        return <IpGroupChips ips={cidrs} />;
       },
     },
     {

@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
+import { IpGroupChips } from '../components/IpGroups';
 import { api, HostRow } from '../api/client';
 
 /** Color-coded pill for one discovery source; a merged host shows all of its sources. */
@@ -47,15 +48,7 @@ export default function Hosts() {
       key: 'ips',
       width: 200,
       exportValue: (row) => row.ips.join(' '),
-      render: (row) => (
-        <span className="flex flex-wrap gap-1">
-          {row.ips.map((ip) => (
-            <span key={ip} className={`font-mono text-xs ${ip.includes(':') ? 'text-purple-700' : ''}`}>
-              {ip}
-            </span>
-          ))}
-        </span>
-      ),
+      render: (row) => <IpGroupChips ips={row.ips} />,
     },
     {
       header: 'Hostname',
