@@ -42,6 +42,7 @@ export const DEVICE_MODELS: LancomDeviceModel[] = [
   { vendor: 'lancom', model: 'LC-1650E', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_LEGACY },
 
   // --- LC-17xx business routers -------------------------------------------
+  { vendor: 'lancom', model: 'LC-1781VA', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_LEGACY },
   { vendor: 'lancom', model: 'LC-1780EF', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
   { vendor: 'lancom', model: 'LC-1790EF', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
   { vendor: 'lancom', model: 'LC-1793VA', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
@@ -49,6 +50,8 @@ export const DEVICE_MODELS: LancomDeviceModel[] = [
   // --- LC-18xx routers (EF / VA / W+4G / 5G variants) ----------------------
   { vendor: 'lancom', model: 'LC-1800EF', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
   { vendor: 'lancom', model: 'LC-1803VA', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
+  { vendor: 'lancom', model: 'LC-1803VAW', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
+  { vendor: 'lancom', model: 'LC-1803VAW-5G', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
 
   // --- LC-19xx routers ------------------------------------------------------
   { vendor: 'lancom', model: 'LC-1900EF', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
@@ -63,12 +66,16 @@ export const DEVICE_MODELS: LancomDeviceModel[] = [
   // --- LTE / cellular routers -----------------------------------------------
   { vendor: 'lancom', model: 'LC-IAP-821', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_LEGACY },
   { vendor: 'lancom', model: 'LC-IAP-822', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
+  { vendor: 'lancom', model: 'LC-OAP-5G', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
 
   // --- Industrial routers -----------------------------------------------------
   { vendor: 'lancom', model: 'LC-ISG-1000', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_LEGACY },
   { vendor: 'lancom', model: 'LC-ISG-4000', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
   { vendor: 'lancom', model: 'LC-ISG-5000', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
   { vendor: 'lancom', model: 'LC-ISG-8000', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
+
+  // --- vRouter -----------------------------------------------------
+  { vendor: 'lancom', model: 'vRouter', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_CURRENT },
 
   // --- Generic fallback ---------------------------------------------------------
   // Any other LCOS router (older or unlisted model) — the unified MIB surface is
