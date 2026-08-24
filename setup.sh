@@ -12,9 +12,9 @@ BASIC_AUTH_PORT=4002
 SECRETS_PORT=4003
 ICMP_PORT=4004
 SNMP_PORT=4005
-LANCOM_PORT=4006
+LANCOM_LX_PORT=4006
 SWOS_PORT=4007
-ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}" "${ICMP_PORT}" "${SNMP_PORT}" "${LANCOM_PORT}" "${SWOS_PORT}")
+ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}" "${ICMP_PORT}" "${SNMP_PORT}" "${LANCOM_LX_PORT}" "${SWOS_PORT}")
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/unm-dev.XXXXXX")"
 DEV_PIDS=()
 
@@ -22,13 +22,55 @@ DEV_PIDS=()
 ok()   { echo "✅ $1"; }
 fail() { echo "❌ $1"; exit 1; }
 
-# Run a docker compose command (v2 plugin or legacy binary), with sudo.
+# --- Docker privilege handling ------------------------------------------------
+# Prefer running Docker WITHOUT sudo — `sudo` may prompt for a password and block
+# this unattended script, so we only escalate when we genuinely cannot reach the
+# daemon otherwise. The decision is made once at startup.
+if ! command -v docker &> /dev/null; then
+  fail "Docker is not installed."
+fi
+
+# Empty prefix = no sudo (we can talk to Docker directly). We get direct access
+# when we're in the `docker` group or already have daemon access.
+if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx docker || docker info &> /dev/null 2>&1; then
+  DOCKER_SUDO=""
+else
+  DOCKER_SUDO="sudo"
+fi
+
+# Run a docker compose command (v2 plugin or legacy binary) with the chosen prefix.
 docker_compose() {
+  if [ -n "$DOCKER_SUDO" ]; then S="$DOCKER_SUDO"; else S=""; fi
   if command -v docker-compose &> /dev/null; then
-    sudo docker-compose "$@"
+    $S docker-compose "$@"
   else
-    sudo docker compose "$@"
+    $S docker compose "$@"
   fi
+}
+
+# Start the Docker daemon if it is down. Starting a system service needs root,
+# so this may use sudo even when routine compose commands don't — but only in that
+# (rare) case, never for everyday operations.
+ensure_docker_daemon() {
+  if docker info &> /dev/null 2>&1; then return 0; fi   # already up + reachable
+  echo "⚠️  Docker daemon is not running. Attempting to start it..."
+  local started=0
+  if [ -n "$DOCKER_SUDO" ]; then
+    $DOCKER_SUDO systemctl start docker && started=1 || true
+  else
+    sudo systemctl start docker && started=1 || true   # group member still needs root for this
+  fi
+  if [ "$started" -ne 1 ]; then
+    echo "❌ Could not start Docker automatically. Start it manually (e.g. 'sudo systemctl start docker') and re-run."
+    exit 1
+  fi
+  local i=0
+  until docker info &> /dev/null 2>&1; do
+    i=$((i + 1))
+    if [ $i -ge 15 ]; then echo "❌ Docker daemon took too long to respond."; exit 1; fi
+    echo -n "."; sleep 1
+  done
+  ok "Docker daemon is now responsive."
 }
 
 # Wait until a TCP port accepts connections.
@@ -154,39 +196,12 @@ kill_lingering
 
 # 1. Environment Check
 echo "🔍 Checking environment..."
-if ! command -v docker &> /dev/null; then
-    echo "❌ Error: Docker is not installed. Please install Docker to continue."
-    exit 1
-fi
-
 if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
     echo "❌ Error: docker-compose is not installed. Please install it to continue."
     exit 1
 fi
 
-if ! sudo docker info &> /dev/null; then
-    echo "⚠️  Docker daemon is not running. Attempting to start it..."
-    if sudo systemctl start docker; then
-        echo "✅ Start command sent. Waiting for daemon to initialize..."
-        
-        # Wait for Docker to actually be ready
-        MAX_DOCKER_RETRIES=15
-        DOCKER_COUNT=0
-        until sudo docker info &> /dev/null; do
-          DOCKER_COUNT=$((DOCKER_COUNT + 1))
-          if [ $DOCKER_COUNT -ge $MAX_DOCKER_RETRIES ]; then
-            echo "❌ Error: Docker daemon took too long to respond."
-            exit 1
-          fi
-          echo -n "."
-          sleep 1
-        done
-        echo "✅ Docker daemon is now responsive."
-    else
-        echo "❌ Error: Failed to start Docker daemon. Please start it manually (e.g., 'sudo systemctl start docker')."
-        exit 1
-    fi
-fi
+ensure_docker_daemon
 
 # 2. Install dependencies
 echo "📦 Installing dependencies..."
@@ -194,11 +209,7 @@ make setup
 
 # 3. Spin up the Database Instance
 echo "🗄️  Spinning up PostgreSQL database instance..."
-if command -v docker-compose &> /dev/null; then
-    sudo docker-compose up -d postgres
-else
-    sudo docker compose up -d postgres
-fi
+docker_compose up -d postgres
 
 # 4. Database Health Check
 echo "⏳ Waiting for Postgres to be ready on port 5432..."
@@ -220,23 +231,16 @@ echo "🛠️  Syncing database schema..."
 cd api && npx drizzle-kit push && cd ..
 echo "✅ Database schema is up to date."
 
-# 6. Build the shared packages + plugins (opnsense + icmp + snmp + lancom + basic-auth + secrets-provider)
+# 6. Build shared package + plugins in parallel (see the `build` make target).
 echo "🔨 Building plugins..."
-( cd packages/snmp-client && npm install --no-audit --no-fund >/dev/null && npm run build )
-( cd plugins/opnsense && npm run build )
-( cd plugins/icmp && npm run build )
-( cd plugins/snmp && npm run build )
-( cd plugins/lancom && npm run build )
-( cd plugins/basic-auth && npm run build )
-( cd plugins/secrets-provider && npm run build )
-( cd plugins/swos && npm run build )
-ok "Plugins built (opnsense + icmp + snmp + lancom + swos + basic-auth + secrets-provider)."
+make build
+ok "Plugins + MCP server built (in parallel)."
 
 # 7. Start the plugin containers (--build: always reflect current source;
 #    reusing stale images silently serves old code — a past source of bugs)
 echo "🌐 Starting plugin containers..."
-docker_compose up -d --build opnsense-plugin icmp-plugin snmp-plugin lancom-plugin swos-plugin basic-auth-plugin secrets-provider-plugin
-ok "Plugin containers started."
+docker_compose up -d --build opnsense-plugin icmp-plugin snmp-plugin lancom-lx-plugin swos-plugin basic-auth-plugin secrets-provider-plugin mcp
+ok "Plugin + MCP containers started."
 
 # 8. Wait for the plugins to be reachable (basic-auth must be up before the
 #    API can verify credentials; secrets-provider before secret access;
@@ -245,11 +249,16 @@ echo "⏳ Waiting for plugins to be ready..."
 wait_for_port "$OPNSENSE_PORT" "opnsense-plugin"
 wait_for_port "$ICMP_PORT" "icmp-plugin"
 wait_for_port "$SNMP_PORT" "snmp-plugin"
-wait_for_port "$LANCOM_PORT" "lancom-plugin"
+wait_for_port "$LANCOM_LX_PORT" "lancom-lx-plugin"
 wait_for_port "$SWOS_PORT" "swos-plugin"
 wait_for_port "$BASIC_AUTH_PORT" "basic-auth-plugin"
 wait_for_port "$SECRETS_PORT" "secrets-provider-plugin"
 ok "Plugins are reachable."
+
+# 8b. Wait for the MCP server (diagnostic endpoints for AI agents).
+echo "⏳ Waiting for the MCP server to be ready on port 3901..."
+wait_for_port 3901 "mcp"
+ok "MCP server is up (POST :3901/mcp, POST :3901/debug/mcp)."
 
 # 9. Start the API and webapp dev servers (hot reload) in the background.
 echo "🚦 Starting API and webapp dev servers..."
@@ -270,6 +279,7 @@ echo "✅ Dev environment is running!"
 echo "--------------------------------------------------------------------------------"
 echo "  Webapp:  http://localhost:${WEB_PORT}"
 echo "  API:     http://localhost:${API_PORT}/v1"
+echo "  MCP:     http://localhost:3901/mcp (debug: /debug/mcp, key: dev-mcp-debug-key)"
 echo "  Logs:    $LOG_DIR"
 echo ""
 echo "  • API dev log:   tail -f $LOG_DIR/api.log"

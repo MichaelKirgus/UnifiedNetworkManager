@@ -35,7 +35,7 @@ services:
       - SECRETS_PLUGIN_ID=${SECRETS_PLUGIN_ID:-00000000-0000-4000-8000-000000000002}
       # Poll these plugin endpoints for discovery (mDNS is often isolated on
       # Docker bridge networks). Ensures the provider plugins are registered.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005,http://lancom-plugin:4006,http://swos-plugin:4007}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005,http://lancom-lx-plugin:4006,http://swos-plugin:4007}
     depends_on:
       - postgres
     restart: unless-stopped
@@ -114,25 +114,25 @@ services:
       - ./plugins/snmp/mibs:/app/mibs:ro
     restart: unless-stopped
 
-  # LANCOM plugin: vendor-specific monitoring for LX-Series access points via
+  # LANCOM LX plugin: vendor-specific monitoring for LCOS-LX access points via
   # the LCOS-LX-MIB (radios, SSIDs, stations/clients, RF environment, WDS,
   # CAPWAP/LMC) plus network + WLAN-client inventory propagation. Intended to
   # be assigned IN ADDITION TO the generic SNMP plugin on the same devices.
-  lancom-plugin:
+  lancom-lx-plugin:
     # Root context — the image also builds the shared @unm/snmp-client package.
     build:
       context: .
-      dockerfile: plugins/lancom/Dockerfile
+      dockerfile: plugins/lancom-lx/Dockerfile
     ports:
       - "4006:4006"
     environment:
       - PORT=4006
       # Endpoint the API (in its own container) uses to reach this plugin.
-      - ADVERTISED_ENDPOINT=http://lancom-plugin:4006
+      - ADVERTISED_ENDPOINT=http://lancom-lx-plugin:4006
       # Directory inside the container where extra MIB files are looked up.
       - MIB_DIR=/app/mibs
     volumes:
-      - ./plugins/lancom/mibs:/app/mibs:ro
+      - ./plugins/lancom-lx/mibs:/app/mibs:ro
     restart: unless-stopped
   # SwOS plugin: MikroTik SwOS / SwOS Lite switch monitoring (system, ports,
   # PoE, LAG/LACP, VLANs, SFP, SNMP) via the .b-file HTTP API with Digest auth,
@@ -147,6 +147,38 @@ services:
       - PORT=4007
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://swos-plugin:4007
+    restart: unless-stopped
+
+  # MCP server for AI agents: exposes the API's OpenAPI operations as MCP tools
+  # over Streamable HTTP. Two endpoints:
+  #   POST :3901/mcp        — production-safe (OpenAPI tools only; scope the
+  #                           UNM_API_TOKEN to control what an agent can do)
+  #   POST :3901/debug/mcp  — extended debug: + read-only SQL against Postgres
+  #                           and live plugin probes. Requires Authorization:
+  #                           Bearer <MCP_DEBUG_KEY>.
+  # Create the UNM_API_TOKEN in the webapp (Tokens page) or via POST /v1/tokens.
+  mcp:
+    build:
+      context: .
+      dockerfile: mcp/Dockerfile
+    ports:
+      - "3901:3901"
+    environment:
+      - MCP_PORT=3901
+      # Base URL the OpenAPI tools call (container-to-container).
+      - UNM_API_BASE=http://api:3000/v1
+      # Long-lived API token for the OpenAPI tools — REQUIRED.
+      - UNM_API_TOKEN=${UNM_API_TOKEN:-}
+      # Bearer key gating /debug/mcp (read-only SQL + plugin probes).
+      - MCP_DEBUG_KEY=${MCP_DEBUG_KEY:-dev-mcp-debug-key}
+      # Optional: also gate the plain /mcp endpoint with a bearer key.
+      - MCP_KEY=${MCP_KEY:-}
+      # Same database as the API — used by the debug SQL tool only.
+      - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
+      # Endpoints probed by the plugin_probe debug tool (same list as the api).
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005,http://lancom-lx-plugin:4006,http://swos-plugin:4007}
+    depends_on:
+      - api
     restart: unless-stopped
 
   # Mock OPNsense appliance for end-to-end plan-execution tests. Host network

@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "unm": {
+      "type": "http",
+      "url": "http://localhost:3901/mcp"
+    },
+    "unm-debug": {
+      "type": "http",
+      "url": "http://localhost:3901/debug/mcp",
+      "headers": {
+        "Authorization": "Bearer dev-mcp-debug-key"
+      }
+    }
+  }
+}

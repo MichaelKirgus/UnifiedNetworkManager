@@ -1,34 +1,70 @@
-.PHONY: setup up down stop-api stop-web restart api-dev web-dev clean
+.PHONY: setup build up down stop-api stop-web restart api-dev web-dev clean
 
-# Install all dependencies across the monorepo
+# Install all dependencies across the monorepo (in parallel — each folder has
+# its own node_modules, so there are no cross-folder races).
 setup:
 	@echo "Installing dependencies..."
-	cd api && npm install
-	cd webapp && npm install
-	cd plugins/opnsense && npm install
-	cd plugins/basic-auth && npm install
-	cd plugins/secrets-provider && npm install
-	cd plugins/icmp && npm install
-	cd plugins/snmp && npm install
-	cd plugins/swos && npm install
+	@( \
+	  (cd packages/snmp-client && npm install) & \
+	  (cd api && npm install) & \
+	  (cd webapp && npm install) & \
+	  (cd plugins/opnsense && npm install) & \
+	  (cd plugins/basic-auth && npm install) & \
+	  (cd plugins/secrets-provider && npm install) & \
+	  (cd plugins/icmp && npm install) & \
+	  (cd plugins/snmp && npm install) & \
+	  (cd plugins/lancom-lx && npm install) & \
+	  (cd plugins/swos && npm install) & \
+	  (cd mcp && npm install) & \
+	  wait )
 	@echo "Dependencies installed successfully."
 
-# Start infrastructure (DB and Plugins)
+# Build the shared package + all plugins + the MCP server.
+#
+# Ordering: @unm/snmp-client must build FIRST — the snmp and lancom-lx plugins
+# depend on it via `file:` links, which npm COPIES into their node_modules at
+# install time. We refresh those copies from the fresh dist before building the
+# plugins so they compile against current shared code; everything else then runs
+# concurrently (tsc builds are CPU-bound and independent of each other).
+build:
+	@echo "Building @unm/snmp-client..."
+	cd packages/snmp-client && npm run build
+	@echo "Refreshing file:-linked copies in dependent plugins..."
+	for p in snmp lancom-lx; do \
+	  rm -rf plugins/$$p/node_modules/@unm/snmp-client; \
+	  cp -r packages/snmp-client plugins/$$p/node_modules/@unm/snmp-client; \
+	done
+	@echo "Building plugins + MCP server in parallel..."
+	@( \
+	  (cd plugins/opnsense && npm run build) & \
+	  (cd plugins/icmp && npm run build) & \
+	  (cd plugins/snmp && npm run build) & \
+	  (cd plugins/lancom-lx && npm run build) & \
+	  (cd plugins/basic-auth && npm run build) & \
+	  (cd plugins/secrets-provider && npm run build) & \
+	  (cd plugins/swos && npm run build) & \
+	  (cd mcp && npm run build) & \
+	  wait )
+	@echo "Build complete."
+
+# Start infrastructure (DB and Plugins).
+# NOTE: no sudo here — setup.sh detects whether the current user can reach the
+# Docker daemon directly (docker group) and only escalates when truly needed.
 up:
 	@echo "Starting infrastructure..."
 	@if command -v docker-compose &> /dev/null; then \
-		sudo docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin swos-plugin; \
+		docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin lancom-lx-plugin swos-plugin mcp; \
 	else \
-		sudo docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin swos-plugin; \
+		docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin lancom-lx-plugin swos-plugin mcp; \
 	fi
 	@echo "Infrastructure is up."
 
 down:
 	@echo "Stopping infrastructure..."
 	@if docker compose version &> /dev/null; then \
-		sudo docker compose down; \
+		docker compose down; \
 	elif command -v docker-compose &> /dev/null; then \
-		sudo docker-compose down; \
+		docker-compose down; \
 	else \
 		echo "Error: No docker-compose or docker compose found"; \
 		exit 1; \
@@ -60,12 +96,12 @@ web-dev:
 clean:
 	@echo "Cleaning up..."
 	@if docker compose version &> /dev/null; then \
-		sudo docker compose down -v; \
+		docker compose down -v; \
 	elif command -v docker-compose &> /dev/null; then \
-		sudo docker-compose down -v; \
+		docker-compose down -v; \
 	else \
 		echo "Error: No docker-compose or docker compose found"; \
 		exit 1; \
 	fi
-	rm -rf api/node_modules webapp/node_modules plugins/opnsense/node_modules plugins/basic-auth/node_modules plugins/secrets-provider/node_modules plugins/icmp/node_modules plugins/snmp/node_modules
+	rm -rf api/node_modules webapp/node_modules mcp/node_modules plugins/opnsense/node_modules plugins/basic-auth/node_modules plugins/secrets-provider/node_modules plugins/icmp/node_modules plugins/snmp/node_modules plugins/lancom-lx/node_modules
 	@echo "Cleanup complete."
