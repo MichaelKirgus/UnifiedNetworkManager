@@ -1,5 +1,5 @@
 {
-  "name": "unm-plugin-lancom",
+  "name": "unm-plugin-lancom-lx",
   "version": "0.1.0",
   "private": true,
   "description": "UnifiedNetworkManager plugin: LANCOM LX-Series access point monitoring via LCOS-LX-MIB (radios, SSIDs, stations, RF environment, WDS, CAPWAP/LMC) plus network/WLAN-client inventory propagation.",

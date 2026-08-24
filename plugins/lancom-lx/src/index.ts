@@ -64,7 +64,7 @@ const PLUGIN_OPTIONS = [
     type: 'string' as const,
     maxLength: 512,
     description:
-      'Container-internal directory holding extra MIB files. Defaults to the MIB_DIR env var (the mounted ./plugins/lancom/mibs volume at /app/mibs). Parsing uses numeric OIDs — MIBs are for debugging only.',
+      'Container-internal directory holding extra MIB files. Defaults to the MIB_DIR env var (the mounted ./plugins/lancom-lx/mibs volume at /app/mibs). Parsing uses numeric OIDs — MIBs are for debugging only.',
   },
   {
     key: 'inventoryTtlMs',
@@ -116,7 +116,7 @@ app.get('/discover', (_req, res) => {
     // Icon + supported device model catalog — drives the webapp's Model/Firmware
     // dropdowns and the icon shown on the Devices pages. The user's selection is
     // forwarded to /monitoring (model/firmwareVersion) for future per-model logic.
-    iconUrl: '/icons/lancom.svg',
+    iconUrl: '/icons/lancom-lx.svg',
     deviceModels: DEVICE_MODELS,
   });
 });
@@ -499,15 +499,15 @@ function startMdnsAdvertising(): void {
       },
     });
     // eslint-disable-next-line no-console
-    console.log(`[lancom-plugin] advertising via mDNS as "${DISPLAY_NAME}" (${EFFECTIVE_UUID})`);
+    console.log(`[lancom-lx-plugin] advertising via mDNS as "${DISPLAY_NAME}" (${EFFECTIVE_UUID})`);
   } catch (err) {
     // eslint-disable-next-line no-console
-    console.warn('[lancom-plugin] mDNS advertising unavailable, falling back to polling discovery only:', (err as Error).message);
+    console.warn('[lancom-lx-plugin] mDNS advertising unavailable, falling back to polling discovery only:', (err as Error).message);
   }
 }
 
 app.listen(PORT, () => {
   // eslint-disable-next-line no-console
-  console.log(`[lancom-plugin] listening on port ${PORT}`);
+  console.log(`[lancom-lx-plugin] listening on port ${PORT}`);
   startMdnsAdvertising();
 });

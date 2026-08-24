@@ -16,19 +16,19 @@ COPY packages/snmp-client/src/index.ts packages/snmp-client/src/
 RUN cd packages/snmp-client && npm install --legacy-peer-deps && npm run build
 
 # Plugin: `npm install` links @unm/snmp-client → ../../packages/snmp-client.
-COPY plugins/lancom/package*.json plugins/lancom/tsconfig.json plugins/lancom/
-RUN cd plugins/lancom && npm install --legacy-peer-deps
+COPY plugins/lancom-lx/package*.json plugins/lancom-lx/tsconfig.json plugins/lancom-lx/
+RUN cd plugins/lancom-lx && npm install --legacy-peer-deps
 
-COPY plugins/lancom/src/index.ts plugins/lancom/src/lcosOids.ts plugins/lancom/src/lcosClient.ts plugins/lancom/src/metrics.ts plugins/lancom/src/deviceModels.ts plugins/lancom/src/
-RUN cd plugins/lancom && npm run build \
-    && node -e "require('/app/plugins/lancom/node_modules/@unm/snmp-client')"
+COPY plugins/lancom-lx/src/index.ts plugins/lancom-lx/src/lcosOids.ts plugins/lancom-lx/src/lcosClient.ts plugins/lancom-lx/src/metrics.ts plugins/lancom-lx/src/deviceModels.ts plugins/lancom-lx/src/
+RUN cd plugins/lancom-lx && npm run build \
+    && node -e "require('/app/plugins/lancom-lx/node_modules/@unm/snmp-client')"
 
 # Static icon assets served at /icons (proxied by the API's GET /plugins/:id/icon).
-COPY plugins/lancom/icons/ plugins/lancom/icons/
+COPY plugins/lancom-lx/icons/ plugins/lancom-lx/icons/
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: symlink
 # in node_modules resolve exactly like in local development.
-WORKDIR /app/plugins/lancom
+WORKDIR /app/plugins/lancom-lx
 
 EXPOSE 4006
 
