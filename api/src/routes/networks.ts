@@ -198,6 +198,18 @@ interface InterfaceMember {
   collectedAt: string;
 }
 
+/** One logical network group while it is being built (pre-response shape). */
+interface NetworkGroup {
+  id: string;
+  label: string;
+  subnet: string | null;
+  subnets: Set<string>;
+  vlans: Set<number>;
+  versions: Set<'v4' | 'v6'>;
+  latestAt: string;
+  members: InterfaceMember[];
+}
+
 /** Most specific (longest prefix) subnet of a set, or null when empty. */
 function bestSubnet(subnets: Set<string>): string | null {
   if (subnets.size === 0) return null;
@@ -281,7 +293,8 @@ export function mergeNetworkRows(rows: StoredNetwork[]): MergedNetwork[] {
 
   // Pass 3: assign every interface to a logical network group. The map key is
   // the row's canonical identity — unique per group by construction.
-  const groups = new Map<string, { id: string; label: string; subnet: string | null; subnets: Set<string>; vlans: Set<number>; versions: Set<'v4' | 'v6'>; latestAt: string; members: InterfaceMember[] }>();
+  const groups = new Map<string, NetworkGroup>();
+  const memberGroupKey = new Map<InterfaceMember, string>();
   for (const m of members.values()) {
     let key: string;
     const own = networkSubnet(m.subnets);
@@ -310,11 +323,70 @@ export function mergeNetworkRows(rows: StoredNetwork[]): MergedNetwork[] {
     for (const v of m.versions) g.versions.add(v);
     if (m.collectedAt > g.latestAt) g.latestAt = m.collectedAt;
     g.members.push(m);
+    memberGroupKey.set(m, key);
+  }
+
+  // Pass 3b: merge subnet groups that a single interface carries together. One
+  // interface with several real subnets (dual-stack LAN, multi-address port)
+  // proves those CIDRs are ONE logical network — so a v4-only row from another
+  // device in any of them joins the group instead of forming its own. Only
+  // groups that actually exist (have members) can merge; union-find keeps it
+  // transitive (A∩B and B∩C ⇒ A, B, C together).
+  const parent = new Map<string, string>();
+  const findRoot = (key: string): string => {
+    if (!parent.has(key)) parent.set(key, key);
+    let root = key;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    let cur = key; // path compression
+    while (cur !== root) {
+      const next = parent.get(cur)!;
+      parent.set(cur, root);
+      cur = next;
+    }
+    return root;
+  };
+  for (const m of members.values()) {
+    const ownKey = memberGroupKey.get(m)!;
+    for (const s of m.subnets) {
+      if (isNonNetworkSubnet(s)) continue; // loopback/link-local never bridge groups
+      const sk = `subnet:${s}`;
+      if (groups.has(sk) && sk !== ownKey) {
+        const ra = findRoot(ownKey);
+        const rb = findRoot(sk);
+        if (ra !== rb) parent.set(ra, rb);
+      }
+    }
+  }
+
+  // Consolidate each union into one group; the canonical identity is the most
+  // specific subnet of the merged set (identical to before for unmerged groups).
+  const consolidated = new Map<string, NetworkGroup>();
+  for (const [key, g] of groups) {
+    const root = findRoot(key);
+    let c = consolidated.get(root);
+    if (!c) {
+      c = { id: key, label: g.label, subnet: g.subnet, subnets: new Set(g.subnets), vlans: new Set(g.vlans), versions: new Set(g.versions), latestAt: g.latestAt, members: [...g.members] };
+      consolidated.set(root, c);
+    } else {
+      for (const s of g.subnets) c.subnets.add(s);
+      for (const v of g.vlans) c.vlans.add(v);
+      for (const v of g.versions) c.versions.add(v);
+      if (g.latestAt > c.latestAt) c.latestAt = g.latestAt;
+      c.members.push(...g.members);
+    }
+  }
+  for (const c of consolidated.values()) {
+    const canon = networkSubnet(c.subnets);
+    if (canon) {
+      c.id = `subnet:${canon}`;
+      c.label = canon;
+      c.subnet = canon;
+    }
   }
 
   // Pass 4: shape the response — one row per logical network, consolidating a
   // device's several interfaces in the same group into one member entry.
-  return Array.from(groups.values()).map((g): MergedNetwork => {
+  return Array.from(consolidated.values()).map((g): MergedNetwork => {
     const byDevice = new Map<string, NetworkDeviceMember>();
     for (const m of g.members) {
       const dkey = `${m.deviceId}|${m.pluginId}`;

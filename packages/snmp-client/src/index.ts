@@ -1,7 +1,7 @@
 /**
  * @unm/snmp-client — shared SNMP transport for UnifiedNetworkManager plugins.
  *
- * Wraps the net-snmp CLI (`snmpwalk` / `snmpget`) with:
+ * Wraps the net-snmp CLI (`snmpwalk` / `snmpget` / `snmpset`) with:
  *  - v1/v2c community and v3 USM credential handling (one place, one contract)
  *  - forced numeric OIDs in output (-O n) so parsing never depends on loaded MIBs
  *  - timeout/retry budgeting that fits the API's poll window
@@ -52,7 +52,7 @@ export interface TransportOptions {
 }
 
 /**
- * Builds the version/authentication CLI args for snmpwalk/snmpget from credentials.
+ * Builds the version/authentication CLI args for snmpwalk/snmpget/snmpset from credentials.
  * v1/v2c use a community string; v3 uses USM (security level + username, with
  * auth/priv protocol+password pairs added per security level).
  */
@@ -151,6 +151,47 @@ export async function snmpGet(
     const e = err as Error & { stderr?: string };
     const detail = ((e.stderr ?? '') || e.message).trim().split('\n')[0];
     throw new Error(`snmpget failed for ${host}: ${detail}`);
+  }
+}
+
+/**
+ * Runs `snmpset` for a single OID and returns the value the agent echoed back
+ * in its response PDU (the new value, as printed by net-snmp). Throws on
+ * non-zero exit / timeout like snmpWalk — callers treat that as "SET rejected".
+ *
+ * `syntax` is the SNMP type tag net-snmp expects for the value:
+ *   s = DisplayString/STRING, i = INTEGER, t = TimeTicks, x = OCTET STRING (hex),
+ *   a = IpAddress. Counter/Gauge objects are never SET in practice.
+ */
+export async function snmpSet(
+  host: string,
+  creds: SnmpCredentials,
+  oid: string,
+  syntax: 's' | 'i' | 't' | 'x' | 'a',
+  value: string,
+  opts: TransportOptions
+): Promise<string> {
+  const args = buildCommonArgs(creds, opts);
+  // snmpset takes exactly one OID + its type/value pair.
+  args.push(host, oid, `${syntax}:${value}`);
+
+  const budgetMs = Math.min(opts.timeoutMs * (opts.retries + 1) + 2_000, WALK_BUDGET_MS);
+
+  try {
+    const { stdout } = await execFileAsync('snmpset', args, {
+      timeout: budgetMs,
+      maxBuffer: 4 * 1024 * 1024,
+      env: mibDirsEnv(opts.mibDir),
+    });
+    // snmpset prints the response PDU in walk format ("OID = TYPE: value") —
+    // reuse the shared parser and return whatever the agent confirmed.
+    const parsed = parseWalkOutput(stdout);
+    for (const v of parsed.values()) return v;
+    return '';
+  } catch (err) {
+    const e = err as Error & { stderr?: string };
+    const detail = ((e.stderr ?? '') || e.message).trim().split('\n')[0];
+    throw new Error(`snmpset failed for ${host} (${oid}): ${detail}`);
   }
 }
 

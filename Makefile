@@ -14,6 +14,7 @@ setup:
 	  (cd plugins/icmp && npm install) & \
 	  (cd plugins/snmp && npm install) & \
 	  (cd plugins/lancom-lx && npm install) & \
+	  (cd plugins/lancom-lcos && npm install) & \
 	  (cd plugins/swos && npm install) & \
 	  (cd mcp && npm install) & \
 	  wait )
@@ -30,7 +31,7 @@ build:
 	@echo "Building @unm/snmp-client..."
 	cd packages/snmp-client && npm run build
 	@echo "Refreshing file:-linked copies in dependent plugins..."
-	for p in snmp lancom-lx; do \
+	for p in snmp lancom-lx lancom-lcos; do \
 	  rm -rf plugins/$$p/node_modules/@unm/snmp-client; \
 	  cp -r packages/snmp-client plugins/$$p/node_modules/@unm/snmp-client; \
 	done
@@ -40,6 +41,7 @@ build:
 	  (cd plugins/icmp && npm run build) & \
 	  (cd plugins/snmp && npm run build) & \
 	  (cd plugins/lancom-lx && npm run build) & \
+	  (cd plugins/lancom-lcos && npm run build) & \
 	  (cd plugins/basic-auth && npm run build) & \
 	  (cd plugins/secrets-provider && npm run build) & \
 	  (cd plugins/swos && npm run build) & \
@@ -53,9 +55,9 @@ build:
 up:
 	@echo "Starting infrastructure..."
 	@if command -v docker-compose &> /dev/null; then \
-		docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin lancom-lx-plugin swos-plugin mcp; \
+		docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin lancom-lx-plugin lancom-lcos-plugin swos-plugin mcp; \
 	else \
-		docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin lancom-lx-plugin swos-plugin mcp; \
+		docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin lancom-lx-plugin lancom-lcos-plugin swos-plugin mcp; \
 	fi
 	@echo "Infrastructure is up."
 
@@ -103,5 +105,5 @@ clean:
 		echo "Error: No docker-compose or docker compose found"; \
 		exit 1; \
 	fi
-	rm -rf api/node_modules webapp/node_modules mcp/node_modules plugins/opnsense/node_modules plugins/basic-auth/node_modules plugins/secrets-provider/node_modules plugins/icmp/node_modules plugins/snmp/node_modules plugins/lancom-lx/node_modules
+	rm -rf api/node_modules webapp/node_modules mcp/node_modules plugins/opnsense/node_modules plugins/basic-auth/node_modules plugins/secrets-provider/node_modules plugins/icmp/node_modules plugins/snmp/node_modules plugins/lancom-lx/node_modules plugins/lancom-lcos/node_modules
 	@echo "Cleanup complete."

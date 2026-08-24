@@ -35,7 +35,7 @@ services:
       - SECRETS_PLUGIN_ID=${SECRETS_PLUGIN_ID:-00000000-0000-4000-8000-000000000002}
       # Poll these plugin endpoints for discovery (mDNS is often isolated on
       # Docker bridge networks). Ensures the provider plugins are registered.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005,http://lancom-lx-plugin:4006,http://swos-plugin:4007}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005,http://lancom-lx-plugin:4006,http://lancom-lcos-plugin:4008,http://swos-plugin:4007}
     depends_on:
       - postgres
     restart: unless-stopped
@@ -134,6 +134,29 @@ services:
     volumes:
       - ./plugins/lancom-lx/mibs:/app/mibs:ro
     restart: unless-stopped
+  # LANCOM LCOS router plugin: vendor-specific monitoring for Lancom LCOS
+  # routers via the unified LCOS MIB (system/hardware, LAN/WAN throughput,
+  # VPN connections, firewall counters, temperature) plus network/ARP/DHCP
+  # inventory propagation. Config + plan actions run over SNMP SET against the
+  # lcsSetup tree; config backup/restore goes through the router's web UI via
+  # a separate username/password credential slot ("web"). Intended to be
+  # assigned IN ADDITION TO the generic SNMP plugin on the same devices.
+  lancom-lcos-plugin:
+    # Root context — the image also builds the shared @unm/snmp-client package.
+    build:
+      context: .
+      dockerfile: plugins/lancom-lcos/Dockerfile
+    ports:
+      - "4008:4008"
+    environment:
+      - PORT=4008
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://lancom-lcos-plugin:4008
+      # Directory inside the container where extra MIB files are looked up.
+      - MIB_DIR=/app/mibs
+    volumes:
+      - ./plugins/lancom-lcos/mibs:/app/mibs:ro
+    restart: unless-stopped
   # SwOS plugin: MikroTik SwOS / SwOS Lite switch monitoring (system, ports,
   # PoE, LAG/LACP, VLANs, SFP, SNMP) via the .b-file HTTP API with Digest auth,
   # plus plan/config actions and network/MAC inventory propagation. SwOS only —
@@ -176,7 +199,7 @@ services:
       # Same database as the API — used by the debug SQL tool only.
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
       # Endpoints probed by the plugin_probe debug tool (same list as the api).
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005,http://lancom-lx-plugin:4006,http://swos-plugin:4007}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005,http://lancom-lx-plugin:4006,http://lancom-lcos-plugin:4008,http://swos-plugin:4007}
     depends_on:
       - api
     restart: unless-stopped

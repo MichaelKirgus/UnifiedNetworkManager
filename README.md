@@ -62,6 +62,22 @@ The `plugins/snmp/` service collects data over **SNMPv1/v2c and SNMPv3 (USM)** u
 
 **Options** (Plugins page → Configure): `timeoutMs`, `retries`, `mibDir` (container-internal path), `inventoryTtlMs` (slow-path refresh cadence, default 15 min). Live throughput counters always refresh every poll cycle regardless of the inventory TTL.
 
+## LANCOM LCOS plugin (routers — monitoring + config)
+
+The `plugins/lancom-lcos/` service manages **Lancom LCOS routers** over the unified LCOS MIB (`LC-UNIFIED-LCOS`, base OID `.1.3.6.1.4.1.2356.11`). It is a full-capability plugin:
+
+- **Monitoring**: system/hardware (CPU load, memory, model/serial/SW version), per-interface LAN + WAN throughput in bits/s (counter deltas each poll cycle), VPN connection counts, firewall counters, temperature — plus the user-selected model/firmware from the device form.
+- **Inventory**: interface IP rows, ARP table and DHCP leases are propagated into the Networks/Hosts pages on every slow-path refresh.
+- **Configuration + plans** over **SNMP SET** against the writable `lcsSetup` tree (e.g. NTP servers, DNS servers, LAN interface enable/disable) — each action reads current state, applies via `snmpset`, and re-reads to verify. Plans automatically prepend a best-effort config-backup step before any write so they are undoable.
+- **Config backup** over the router's web UI (HTTP + Basic auth) using a separate **`web` credential slot** (`usernamePassword`) — this is exactly what the plugin credential-slot system was designed for: one device, two distinct credentials (SNMP primary + web UI).
+
+**Setup:**
+1. Create an **snmp-type secret** and assign it as the plugin's primary credential on the device.
+2. Optionally create a **usernamePassword secret** for the router's web UI and bind it to the `web` slot in the device's plugin assignment (needed only for backup/restore actions).
+3. The vendor MIB ships in `plugins/lancom-lcos/mibs/` (mounted read-only at `/app/mibs`) — parsing uses numeric OIDs, so it is for debugging only.
+
+**Options** (Plugins page → Configure): `timeoutMs`, `retries`, `mibDir`, `inventoryTtlMs`, plus `webTransport` (`auto` = HTTPS with self-signed accepted | `http` | `https`) and `backupPath` (the web-UI backup endpoint, configurable while the exact LCOS URL is being probed on real hardware).
+
 ## Multi-instance plugins (remote sites)
 
 Every plugin supports running **multiple instances of the same type** — e.g. one ICMP or SNMP plugin at each remote site, all reporting into a single UnifiedNetworkManager instance. Each instance registers as its own plugin row and can be assigned to devices independently.
