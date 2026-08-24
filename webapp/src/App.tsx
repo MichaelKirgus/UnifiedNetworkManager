@@ -13,6 +13,7 @@ import Networks from './pages/Networks';
 import Hosts from './pages/Hosts';
 import Users from './pages/Users';
 import Roles from './pages/Roles';
+import Tokens from './pages/Tokens';
 import MyAccount from './pages/MyAccount';
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -120,6 +121,14 @@ export default function App() {
         element={
           <RequireAuth>
             <Roles />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/tokens"
+        element={
+          <RequireAuth>
+            <Tokens />
           </RequireAuth>
         }
       />

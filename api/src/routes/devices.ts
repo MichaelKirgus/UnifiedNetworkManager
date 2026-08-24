@@ -195,6 +195,8 @@ interface DevicePluginRef {
   pluginId?: string;
   secretId?: string | null;
   isPrimary?: boolean;
+  /** Extra credential slots to bind (slot name → secrets.id). */
+  extraCredentials?: Record<string, string | null>;
 }
 
 router.post('/devices', requireAuth, requirePermission('devices:write'), async (req, res) => {
@@ -280,6 +282,7 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
         pluginId: ref.pluginId!,
         secretId: ref.secretId ?? null,
         isPrimary: ref.isPrimary === true,
+        extraCredentials: ref.extraCredentials,
       });
     }
     for (const address of secondaryIps) {
@@ -498,13 +501,19 @@ router.get('/devices/:deviceId/plugins', requireAuth, async (req, res) => {
 // POST /devices/:deviceId/plugins - assign another plugin to this device.
 router.post('/devices/:deviceId/plugins', requireAuth, requirePermission('devices:write'), async (req, res) => {
   const { deviceId } = req.params;
-  const { pluginId, secretId, isPrimary } = req.body ?? {};
+  const { pluginId, secretId, isPrimary, extraCredentials } = req.body ?? {};
   if (!pluginId || typeof pluginId !== 'string') {
     res.status(400).json({ error: '"pluginId" is required' });
     return;
   }
   try {
-    const assignment = await addAssignment({ deviceId, pluginId, secretId: secretId ?? null, isPrimary: isPrimary === true });
+    const assignment = await addAssignment({
+      deviceId,
+      pluginId,
+      secretId: secretId ?? null,
+      isPrimary: isPrimary === true,
+      extraCredentials,
+    });
     res.status(201).json(assignment);
   } catch (err) {
     if (sendAssignmentError(res, err)) return;
@@ -517,16 +526,21 @@ router.post('/devices/:deviceId/plugins', requireAuth, requirePermission('device
 //   {}                          → promote to primary (legacy behavior)
 //   { "isPrimary": true }       → promote to primary
 //   { "secretId": "..." | null }→ change credential source (null clears it)
-//   both                        → apply both in one call
+//   { "extraCredentials": {...} }→ replace bound slot secrets (validated per slot type)
+//   any combination             → applied in one call
 router.patch('/devices/:deviceId/plugins/:pluginId', requireAuth, requirePermission('devices:write'), async (req, res) => {
   const { deviceId, pluginId } = req.params;
   const body = (req.body ?? {}) as Record<string, unknown>;
   try {
     let assignment;
-    if ('secretId' in body || 'isPrimary' in body) {
+    if ('secretId' in body || 'isPrimary' in body || 'extraCredentials' in body) {
       assignment = await updateAssignment(deviceId, pluginId, {
         secretId: body.secretId === undefined ? undefined : (body.secretId as string | null),
         isPrimary: typeof body.isPrimary === 'boolean' ? body.isPrimary : undefined,
+        extraCredentials:
+          body.extraCredentials === undefined
+            ? undefined
+            : (body.extraCredentials as Record<string, string | null>),
       });
     } else {
       // No fields provided → legacy "make primary" semantics.

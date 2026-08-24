@@ -36,7 +36,7 @@ Plugins are discovered and registered through API endpoints and validated agains
 
 ## Security model
 
-- **RBAC** with explicit permissions (e.g., `devices:read`, `configs:apply`, `plugins:manage`)
+- **RBAC** with explicit permissions (e.g., `devices:read`, `configs:apply`, `tokens:manage`) — the admin role carries every permission automatically; new permissions are backfilled into existing admins on API start
 - **2FA (TOTP)** required for privileged operations
 - **Audit trail** for login, device changes, and plugin actions
 
@@ -97,6 +97,43 @@ Notes:
 - Each instance needs a unique `ADVERTISED_ENDPOINT` (different container name or published port) — that's how the API routes telemetry to the right one.
 - Settings are per-instance: configuring "ICMP Plugin (site-a)" does not affect "ICMP Plugin".
 - If you change an instance's id/name, restart it; the old registration simply goes offline like any stopped plugin.
+
+## MCP server (AI agent access)
+
+The `mcp/` service exposes the UNM API to AI agents via the [Model Context Protocol](https://modelcontextprotocol.io). It reads the OpenAPI spec at startup and turns every operation into a tool — new API endpoints appear automatically. The container serves two Streamable-HTTP endpoints on port **3901**:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /mcp` | Production-safe: OpenAPI operations only. What an agent can do is controlled entirely by the permissions of its API token — create a scoped token (e.g. read-only) on the **Tokens** page and pass it as `UNM_API_TOKEN`. |
+| `POST /debug/mcp` | Extended debug for diagnosing UNM itself: adds `query_database` (single read-only SELECT/WITH statement, max 200 rows) and `plugin_probe` (live `/healthz` + `/discover` of every plugin endpoint). Requires `Authorization: Bearer <MCP_DEBUG_KEY>`. |
+
+**Environment variables:**
+
+| Variable | Effect |
+|----------|--------|
+| `UNM_API_TOKEN` | Long-lived API token for the OpenAPI tools — **required**. Create it on the Tokens page (or `POST /v1/tokens`). |
+| `UNM_API_BASE` | Base URL of the API. Defaults to `http://localhost:3000/v1`; the container uses `http://api:3000/v1`. |
+| `MCP_DEBUG_KEY` | Bearer key gating `/debug/mcp` (default in compose: `dev-mcp-debug-key`). |
+| `MCP_KEY` | Optional — when set, also gates the plain `/mcp` endpoint. |
+| `DATABASE_URL` | Postgres connection used by the debug SQL tool only (same DB as the API). |
+
+**VS Code MCP client config** (remote/HTTP transport):
+
+```jsonc
+{
+  "mcpServers": {
+    "unm": {
+      "url": "http://localhost:3901/mcp"
+    },
+    "unm-debug": {
+      "url": "http://localhost:3901/debug/mcp",
+      "headers": { "Authorization": "Bearer dev-mcp-debug-key" }
+    }
+  }
+}
+```
+
+The same server also runs in **stdio mode** without Docker (client-launched, production-safe tools only): `node mcp/dist/index.js` with `UNM_API_TOKEN` set — no `MCP_PORT` needed.
 
 ## Next implementation steps
 

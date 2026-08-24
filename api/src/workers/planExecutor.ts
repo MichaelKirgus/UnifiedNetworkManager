@@ -5,6 +5,8 @@ import * as schema from '../db/schema';
 import { planQueue } from '../queue';
 import { getSecret } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
+import { parseExtraCredentials } from '../types/credentialSlots';
+import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
 
 const PROCESS_INTERVAL_MS = 5_000;
 /** Default per-step dispatch timeout (ms); catalog entries may override via timeoutMs. */
@@ -208,6 +210,12 @@ async function processPlan(planId: string): Promise<void> {
         const material = await getSecret(secretId);
         credentials[ref] = material.fields;
       }
+      // The assignment's bound credential slots (e.g. a web-UI login distinct
+      // from the primary SNMP secret) are passed under credentials.slots.<name>.
+      credentials = withSlots(
+        credentials,
+        await decryptCredentialSlots(parseExtraCredentials(assignment.extraCredentials))
+      );
     } catch (err) {
       await markStep(step.id, 'failed', { success: false, result: { error: `Credential resolution failed: ${(err as Error).message}` } });
       if (step.bestEffort) continue;

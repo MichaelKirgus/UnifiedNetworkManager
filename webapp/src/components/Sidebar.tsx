@@ -13,6 +13,7 @@ import {
   Puzzle,
   Route as RouteIcon,
   Server,
+  KeySquare,
   Shield,
   UserRound,
   Users as UsersIcon,
@@ -34,6 +35,8 @@ const NAV_ITEMS = [
   { to: '/users', label: 'Users', icon: UsersIcon, requiresPermission: 'users:read' },
   // Role management (create/edit/delete roles + permission bundles).
   { to: '/roles', label: 'Roles', icon: Shield, requiresPermission: 'users:write' },
+  // Long-lived API tokens for agents/scripts (MCP server).
+  { to: '/tokens', label: 'Tokens', icon: KeySquare, requiresPermission: 'tokens:manage' },
 ];
 
 // Self-service portal — visible to every signed-in user; credential sections

@@ -45,7 +45,8 @@ export interface UserRecord {
  */
 export async function getUserByUsername(username: string): Promise<UserRecord | null> {
   try {
-    const res = await http.get<UserRecord>(`/users/username/${encodeURIComponent(username)}`);
+    // Internal plugin routes are namespaced under /plugin/* (see api/src/routes/internal.ts).
+    const res = await http.get<UserRecord>(`/plugin/users/username/${encodeURIComponent(username)}`);
     return res.data;
   } catch (err) {
     if (isNotFound(err)) {
@@ -60,7 +61,7 @@ export async function getUserByUsername(username: string): Promise<UserRecord | 
  */
 export async function getUserById(id: string): Promise<UserRecord | null> {
   try {
-    const res = await http.get<UserRecord>(`/users/${encodeURIComponent(id)}`);
+    const res = await http.get<UserRecord>(`/plugin/users/${encodeURIComponent(id)}`);
     return res.data;
   } catch (err) {
     if (isNotFound(err)) {
@@ -81,7 +82,7 @@ export async function createUser(input: {
   roles?: string[];
   permissions?: string[];
 }): Promise<UserRecord> {
-  const res = await http.post<UserRecord>('/users', input);
+  const res = await http.post<UserRecord>('/plugin/users', input);
   return res.data;
 }
 
@@ -97,7 +98,7 @@ export async function updateUser(
     permissions?: string[];
   }
 ): Promise<UserRecord> {
-  const res = await http.patch<UserRecord>(`/users/${encodeURIComponent(id)}`, patch);
+  const res = await http.patch<UserRecord>(`/plugin/users/${encodeURIComponent(id)}`, patch);
   return res.data;
 }
 
@@ -105,5 +106,5 @@ export async function updateUser(
  * Deletes a user.
  */
 export async function deleteUser(id: string): Promise<void> {
-  await http.delete(`/users/${encodeURIComponent(id)}`);
+  await http.delete(`/plugin/users/${encodeURIComponent(id)}`);
 }

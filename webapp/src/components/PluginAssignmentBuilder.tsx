@@ -1,14 +1,16 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, X } from 'lucide-react';
-import { api, DevicePluginAssignmentInput, Plugin, Secret } from '../api/client';
+import { api, CredentialSlotDescriptor, DevicePluginAssignmentInput, Plugin, Secret } from '../api/client';
 
 interface RowState {
   pluginId: string;
   secretId: string;
+  /** Bound extra credential slots (slot name → secrets.id). */
+  slotSecrets: Record<string, string>;
   isPrimary: boolean;
 }
 
-const emptyRow = (): RowState => ({ pluginId: '', secretId: '', isPrimary: false });
+const emptyRow = (): RowState => ({ pluginId: '', secretId: '', slotSecrets: {}, isPrimary: false });
 
 /**
  * Multi-plugin assignment builder. Each row binds one plugin to a device with
@@ -45,38 +47,63 @@ export function PluginAssignmentBuilder({
     [plugins, excludedPluginIds]
   );
   const [rows, setRows] = useState<RowState[]>(() =>
-    initial.length > 0 ? initial.map((a) => ({ pluginId: a.pluginId, secretId: a.secretId ?? '', isPrimary: a.isPrimary === true })) : [emptyRow()]
+    initial.length > 0
+      ? initial.map((a) => ({
+          pluginId: a.pluginId,
+          secretId: a.secretId ?? '',
+          slotSecrets: Object.fromEntries(
+            Object.entries(a.extraCredentials ?? {}).filter(
+              (entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1] !== ''
+            )
+          ),
+          isPrimary: a.isPrimary === true,
+        }))
+      : [emptyRow()]
   );
 
-  // Required secret type per chosen plugin (drives the credentials dropdown).
-  const [requiredTypes, setRequiredTypes] = useState<Record<string, string | null>>({});
+  // Required secret type + declared credential slots per chosen plugin (drive
+  // the credentials dropdown and any per-slot pickers).
+  const [pluginMeta, setPluginMeta] = useState<Record<string, { requiredType: string | null; slots: CredentialSlotDescriptor[] }>>({});
   useEffect(() => {
     const ids = Array.from(new Set(rows.map((r) => r.pluginId).filter(Boolean)));
     let cancelled = false;
     Promise.all(
       ids.map(async (id) => {
         try {
-          return [id, (await api.requiredSecretType(id)).requiredSecretType] as const;
+          const res = await api.requiredSecretType(id);
+          return [id, { requiredType: res.requiredSecretType, slots: res.credentialSlots ?? [] }] as const;
         } catch {
-          return [id, null] as const;
+          return [id, { requiredType: null, slots: [] }] as const;
         }
       })
     ).then((entries) => {
-      if (!cancelled) setRequiredTypes(Object.fromEntries(entries));
+      if (!cancelled) setPluginMeta(Object.fromEntries(entries));
     });
     return () => {
       cancelled = true;
     };
   }, [rows]);
 
-  function compatibleSecrets(pluginId: string): Secret[] {
-    const required = pluginId ? requiredTypes[pluginId] : undefined;
-    if (!required) return secrets;
-    return secrets.filter((s) => s.type === required);
+  /** Secrets compatible with a given secret type ('' = any). */
+  function secretsOfType(type: string): Secret[] {
+    if (!type) return secrets;
+    return secrets.filter((s) => s.type === type);
   }
 
   function updateRow(index: number, patch: Partial<RowState>) {
     setRows((rs) => rs.map((r, i) => (i === index ? { ...r, ...patch } : r)));
+  }
+
+  function updateSlotSecret(index: number, slotName: string, secretId: string) {
+    setRows((rs) =>
+      rs.map((r, i) => {
+        if (i !== index) return r;
+        const next = { ...r.slotSecrets };
+        if (secretId) next[slotName] = secretId;
+        else delete next[slotName];
+        return { ...r, slotSecrets: next };
+      })
+    );
   }
 
   /** Exactly one primary: picking a row demotes the others. */
@@ -110,6 +137,8 @@ export function PluginAssignmentBuilder({
         pluginId: r.pluginId,
         secretId: r.secretId || null,
         isPrimary: r.isPrimary,
+        extraCredentials:
+          Object.keys(r.slotSecrets).length > 0 ? { ...r.slotSecrets } : undefined,
       }))
     );
   }
@@ -118,7 +147,9 @@ export function PluginAssignmentBuilder({
     <form onSubmit={handleSubmit} noValidate>
       <div className="space-y-3">
       {rows.map((row, index) => {
-        const required = row.pluginId ? requiredTypes[row.pluginId] : undefined;
+        const meta = row.pluginId ? pluginMeta[row.pluginId] : undefined;
+        const required = meta?.requiredType ?? null;
+        const slots = meta?.slots ?? [];
         return (
           <div key={index} className="grid grid-cols-1 gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 sm:grid-cols-[1fr_1fr_auto_auto]">
             <div>
@@ -127,7 +158,7 @@ export function PluginAssignmentBuilder({
                 required
                 className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
                 value={row.pluginId}
-                onChange={(e) => updateRow(index, { pluginId: e.target.value, secretId: '' })}
+                onChange={(e) => updateRow(index, { pluginId: e.target.value, secretId: '', slotSecrets: {} })}
               >
                 <option value="" disabled>
                   Select a plugin
@@ -149,13 +180,36 @@ export function PluginAssignmentBuilder({
                 onChange={(e) => updateRow(index, { secretId: e.target.value })}
               >
                 <option value="">No credentials</option>
-                {(compatibleSecrets(row.pluginId) ?? []).map((s) => (
+                {secretsOfType(required ?? '').map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.label || s.id} [{s.type}]
                   </option>
                 ))}
               </select>
             </div>
+            {slots.map((slot) => (
+              <div key={slot.name} className="sm:col-span-2">
+                <label
+                  className="mb-1 block text-xs font-medium text-slate-600"
+                  title={slot.description}
+                >
+                  {slot.description || `Credential slot "${slot.name}"`} ({slot.secretType})
+                  {!slot.required && <span className="ml-1 font-normal text-slate-400">optional</span>}
+                </label>
+                <select
+                  className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
+                  value={row.slotSecrets[slot.name] ?? ''}
+                  onChange={(e) => updateSlotSecret(index, slot.name, e.target.value)}
+                >
+                  <option value="">Not set</option>
+                  {secretsOfType(slot.secretType).map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.label || s.id} [{s.type}]
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
             <label className="flex items-center gap-1.5 self-end pb-1 text-sm text-slate-600">
               <input
                 type="radio"

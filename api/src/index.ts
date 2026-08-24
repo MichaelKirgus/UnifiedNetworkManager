@@ -12,6 +12,7 @@ import secretsRouter from './routes/secrets';
 import sitesRouter from './routes/sites';
 import usersRouter from './routes/users';
 import rolesRouter from './routes/roles';
+import tokensRouter from './routes/tokens';
 import { internalRouter } from './routes/internal';
 import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import plansRouter from './routes/plans';
@@ -66,7 +67,9 @@ async function main(): Promise<void> {
   api.use(generalLimiter);
 
   // Routes not defined in the OpenAPI spec must be mounted ahead of the
-  // validator, since the validator 404s any undocumented path.
+  // validator, since the validator 404s any undocumented path. The internal
+  // plugin routes are namespaced under /plugin/* (user data included) so they
+  // never shadow public paths like POST /users — see routes/internal.ts.
   api.use(configJobsListRouter);
   api.use(internalRouter());
 
@@ -86,6 +89,8 @@ async function main(): Promise<void> {
   api.use(sitesRouter);
   api.use(usersRouter);
   api.use(rolesRouter);
+  // API tokens (self-service + admin) — long-lived bearer credentials for agents.
+  api.use(tokensRouter);
   api.use(configJobsRouter);
   // Cross-device inventory views (/networks, /hosts) — self-defining paths.
   api.use(networksRouter);

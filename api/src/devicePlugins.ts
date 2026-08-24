@@ -2,6 +2,11 @@ import { and, asc, eq, inArray } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from './db';
 import * as schema from './db/schema';
+import {
+  CredentialSlotDescriptor,
+  ExtraCredentials,
+  parseExtraCredentials,
+} from './types/credentialSlots';
 
 /**
  * Device ↔ plugin assignment broker.
@@ -13,12 +18,26 @@ import * as schema from './db/schema';
  * "main" plugin.
  */
 
+/** One bound credential slot: descriptor + resolved label for UI display. */
+export interface BoundCredentialSlot {
+  name: string;
+  secretType: string;
+  required?: boolean;
+  description?: string;
+  /** secrets.id bound to this slot (null = unbound). */
+  secretId: string | null;
+  /** Label of the bound secret, when resolvable. */
+  secretLabel?: string | null;
+}
+
 export interface DevicePluginAssignment {
   id: string;
   deviceId: string;
   pluginId: string;
   /** Credential source for this assignment (null = no credentials). */
   secretId: string | null;
+  /** Bound extra credential slots: slot name → secrets.id. */
+  extraCredentials: ExtraCredentials;
   isPrimary: boolean;
   createdAt: string;
 }
@@ -31,6 +50,8 @@ export interface DevicePluginAssignmentView extends DevicePluginAssignment {
   /** True when the plugin was seen within the last 5 minutes. */
   pluginOnline?: boolean;
   secretLabel?: string | null;
+  /** The plugin's declared slots with their bound secrets resolved for display. */
+  credentialSlots?: BoundCredentialSlot[];
 }
 
 /** Error carrying an HTTP status so routes can map it directly. */
@@ -67,13 +88,73 @@ async function findAssignment(deviceId: string, pluginId: string) {
   });
 }
 
+/** Maps a raw row to the public assignment shape (parses extraCredentials). */
+function toAssignment(row: typeof schema.devicePlugins.$inferSelect): DevicePluginAssignment {
+  return {
+    id: row.id,
+    deviceId: row.deviceId,
+    pluginId: row.pluginId,
+    secretId: row.secretId,
+    extraCredentials: parseExtraCredentials(row.extraCredentials),
+    isPrimary: row.isPrimary,
+    createdAt: row.createdAt,
+  };
+}
+
+/**
+ * Validates a proposed extra-credentials map against the plugin's declared
+ * slots. Throws AssignmentError(400) on unknown slot names or secret-type
+ * mismatches; returns the validated map (empty object when nothing bound).
+ */
+async function validateExtraCredentials(
+  pluginId: string,
+  input: Record<string, string | null> | undefined
+): Promise<ExtraCredentials> {
+  if (!input || Object.keys(input).length === 0) return {};
+
+  const plugin = await db.query.plugins.findFirst({
+    where: (plugins, { eq }) => eq(plugins.id, pluginId),
+  });
+  let slots: CredentialSlotDescriptor[] = [];
+  if (plugin?.credentialSlots) {
+    try {
+      const parsed = JSON.parse(plugin.credentialSlots);
+      if (Array.isArray(parsed)) slots = parsed as CredentialSlotDescriptor[];
+    } catch {
+      /* malformed cache — treat as no slots */
+    }
+  }
+
+  const out: ExtraCredentials = {};
+  for (const [name, secretId] of Object.entries(input)) {
+    if (!secretId) continue; // explicit null/empty clears the slot
+    const slot = slots.find((s) => s.name === name);
+    if (!slot) {
+      throw new AssignmentError(400, `Plugin does not declare a credential slot named "${name}"`);
+    }
+    const secret = await db.query.secrets.findFirst({
+      where: (secrets, { eq }) => eq(secrets.id, secretId),
+    });
+    if (!secret) throw new AssignmentError(404, `Referenced credentials for slot "${name}" not found`);
+    if (secret.type !== slot.secretType) {
+      throw new AssignmentError(
+        400,
+        `Credential slot "${name}" requires secret type "${slot.secretType}", but the selected secret is of type "${secret.type}"`
+      );
+    }
+    out[name] = secretId;
+  }
+  return out;
+}
+
 /** All assignments for a device (oldest first). */
 export async function listAssignments(deviceId: string): Promise<DevicePluginAssignment[]> {
   await assertDevice(deviceId);
-  return db.query.devicePlugins.findMany({
+  const rows = await db.query.devicePlugins.findMany({
     where: (rows) => eq(rows.deviceId, deviceId),
     orderBy: [asc(schema.devicePlugins.createdAt)],
   });
+  return rows.map(toAssignment);
 }
 
 /** Assignments enriched with plugin identity + online state for the UI. */
@@ -82,14 +163,17 @@ export async function listAssignmentViews(deviceId: string): Promise<DevicePlugi
   if (assignments.length === 0) return [];
 
   const pluginIds = Array.from(new Set(assignments.map((a) => a.pluginId)));
-  const secretIds = Array.from(
-    new Set(assignments.map((a) => a.secretId).filter((s): s is string => s !== null))
-  );
+  // Primary + every bound slot secret, resolved in one query.
+  const secretIds = new Set<string>();
+  for (const a of assignments) {
+    if (a.secretId) secretIds.add(a.secretId);
+    for (const id of Object.values(a.extraCredentials)) secretIds.add(id);
+  }
 
   const [plugins, secrets] = await Promise.all([
     db.query.plugins.findMany({ where: inArray(schema.plugins.id, pluginIds) }),
-    secretIds.length > 0
-      ? db.query.secrets.findMany({ where: inArray(schema.secrets.id, secretIds) })
+    secretIds.size > 0
+      ? db.query.secrets.findMany({ where: inArray(schema.secrets.id, Array.from(secretIds)) })
       : [],
   ]);
 
@@ -97,6 +181,28 @@ export async function listAssignmentViews(deviceId: string): Promise<DevicePlugi
   return assignments.map((a) => {
     const plugin = plugins.find((p) => p.id === a.pluginId);
     const secret = secrets.find((s) => s.id === a.secretId);
+    let credentialSlots: BoundCredentialSlot[] | undefined;
+    if (plugin?.credentialSlots) {
+      try {
+        const declared = JSON.parse(plugin.credentialSlots) as CredentialSlotDescriptor[];
+        if (Array.isArray(declared)) {
+          credentialSlots = declared.map((slot) => {
+            const boundId = a.extraCredentials[slot.name] ?? null;
+            const boundSecret = secrets.find((s) => s.id === boundId);
+            return {
+              name: slot.name,
+              secretType: slot.secretType,
+              required: slot.required,
+              description: slot.description,
+              secretId: boundId,
+              secretLabel: boundSecret ? (boundSecret.label ?? null) : null,
+            };
+          });
+        }
+      } catch {
+        /* malformed cache — skip slot display */
+      }
+    }
     return {
       ...a,
       pluginName: plugin?.name,
@@ -107,6 +213,7 @@ export async function listAssignmentViews(deviceId: string): Promise<DevicePlugi
         plugin?.lastSeenAt !== undefined &&
         now - Date.parse(plugin.lastSeenAt) < ONLINE_WINDOW_MS,
       secretLabel: secret ? (secret.label ?? null) : null,
+      credentialSlots,
     };
   });
 }
@@ -122,6 +229,8 @@ export async function addAssignment(input: {
   pluginId: string;
   secretId?: string | null;
   isPrimary?: boolean;
+  /** Extra credential slots to bind (slot name → secrets.id). Validated against the plugin's declared slots. */
+  extraCredentials?: Record<string, string | null>;
 }): Promise<DevicePluginAssignment> {
   const { deviceId, pluginId } = input;
   await assertDevice(deviceId);
@@ -134,6 +243,8 @@ export async function addAssignment(input: {
     });
     if (!secret) throw new AssignmentError(404, 'Referenced credentials not found');
   }
+
+  const extraCredentials = await validateExtraCredentials(pluginId, input.extraCredentials);
 
   const existing = await findAssignment(deviceId, pluginId);
   if (existing) throw new AssignmentError(409, 'Plugin is already assigned to this device');
@@ -159,11 +270,13 @@ export async function addAssignment(input: {
     deviceId,
     pluginId,
     secretId,
+    extraCredentials:
+      Object.keys(extraCredentials).length > 0 ? JSON.stringify(extraCredentials) : null,
     isPrimary: input.isPrimary === true || siblings.length === 0,
     createdAt: now,
   });
 
-  return (await findAssignment(deviceId, pluginId))!;
+  return toAssignment((await findAssignment(deviceId, pluginId))!);
 }
 
 /**
@@ -217,7 +330,7 @@ export async function setPrimary(deviceId: string, pluginId: string): Promise<De
       .where(eq(schema.devicePlugins.id, assignment.id));
   }
 
-  return (await findAssignment(deviceId, pluginId))!;
+  return toAssignment((await findAssignment(deviceId, pluginId))!);
 }
 
 /**
@@ -229,7 +342,7 @@ export async function setPrimary(deviceId: string, pluginId: string): Promise<De
 export async function updateAssignment(
   deviceId: string,
   pluginId: string,
-  input: { secretId?: string | null; isPrimary?: boolean }
+  input: { secretId?: string | null; isPrimary?: boolean; extraCredentials?: Record<string, string | null> }
 ): Promise<DevicePluginAssignment> {
   await assertDevice(deviceId);
   const assignment = await findAssignment(deviceId, pluginId);
@@ -265,9 +378,18 @@ export async function updateAssignment(
     }
   }
 
+  // Extra credential slots: validated against the plugin's declared slots.
+  // Omitted = unchanged; provided = full replacement of the slot map.
+  let newExtraJson: string | null | undefined;
+  if (input.extraCredentials !== undefined) {
+    const extra = await validateExtraCredentials(pluginId, input.extraCredentials);
+    newExtraJson = Object.keys(extra).length > 0 ? JSON.stringify(extra) : null;
+  }
+
   const updates: Partial<typeof schema.devicePlugins.$inferInsert> = {};
   if (newSecretId !== undefined) updates.secretId = newSecretId;
   if (input.isPrimary === true) updates.isPrimary = true;
+  if (newExtraJson !== undefined) updates.extraCredentials = newExtraJson;
 
   if (Object.keys(updates).length > 0) {
     await db.update(schema.devicePlugins)
@@ -275,7 +397,7 @@ export async function updateAssignment(
       .where(eq(schema.devicePlugins.id, assignment.id));
   }
 
-  return (await findAssignment(deviceId, pluginId))!;
+  return toAssignment((await findAssignment(deviceId, pluginId))!);
 }
 
 /** True when (device, plugin) has an assignment — used to validate config jobs. */

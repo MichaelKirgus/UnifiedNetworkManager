@@ -5,6 +5,8 @@ import * as schema from '../db/schema';
 import { configJobQueue } from '../queue';
 import { getSecret } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
+import { parseExtraCredentials } from '../types/credentialSlots';
+import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
 
 const PROCESS_INTERVAL_MS = 5_000;
 
@@ -98,7 +100,10 @@ async function processJob(jobId: string): Promise<void> {
     // decrypted values. For backward compatibility we also pass the legacy
     // `apiKey`/`apiSecret` keys when the secret is of type `apiKey`.
     const decrypted = assignment.secretId ? await getSecret(assignment.secretId) : null;
-    const credentials = decrypted?.fields ?? {};
+    const credentials = withSlots(
+      decrypted?.fields ?? {},
+      await decryptCredentialSlots(parseExtraCredentials(assignment.extraCredentials))
+    );
 
     // Inject the plugin's effective settings (device override ⊕ global ⊕
     // defaults) so the plugin can read its options without storing them itself.

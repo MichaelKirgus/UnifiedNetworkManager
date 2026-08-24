@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express';
 import { verifyToken, AccessTokenPayload } from './jwt';
+import { resolveApiTokenPayload } from './apiTokens';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -13,8 +14,15 @@ declare global {
 /**
  * Validates the bearer token on the Authorization header and attaches the
  * decoded payload to `req.user`. Responds 401 when missing/invalid/expired.
+ *
+ * Accepts TWO credential kinds:
+ *   1. Short-lived JWTs minted by /auth/login (may carry a TOTP `amr` claim).
+ *   2. Long-lived API tokens (`unm_…`) for agents/scripts — resolved against
+ *      the api_tokens table; their permission set is re-intersected with the
+ *      user's CURRENT effective permissions on every request, and they can
+ *      never satisfy a 2FA requirement (no TOTP claim).
  */
-export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Authentication required' });
@@ -26,9 +34,18 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
     const payload = verifyToken(token);
     req.user = payload;
     next();
+    return;
   } catch {
-    res.status(401).json({ error: 'Invalid or expired token' });
+    // Not a valid JWT — fall through to the API-token lookup.
   }
+
+  const tokenPayload = await resolveApiTokenPayload(token).catch(() => null);
+  if (tokenPayload) {
+    req.user = tokenPayload as unknown as AccessTokenPayload;
+    next();
+    return;
+  }
+  res.status(401).json({ error: 'Invalid or expired token' });
 }
 
 /**

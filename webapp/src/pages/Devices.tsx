@@ -175,13 +175,15 @@ export default function Devices() {
           if (!prev) {
             await api.addDevicePlugin(editingId!, a);
           } else {
-            // Already assigned — persist credential / primary changes.
+            // Already assigned — persist credential / slot / primary changes.
             const secretChanged = (a.secretId ?? null) !== (prev.secretId ?? null);
             const primaryChanged = a.isPrimary !== prev.isPrimary;
-            if (secretChanged || primaryChanged) {
+            const slotsChanged = JSON.stringify(a.extraCredentials ?? {}) !== JSON.stringify(prev.extraCredentials ?? {});
+            if (secretChanged || primaryChanged || slotsChanged) {
               await api.updateDevicePlugin(editingId!, a.pluginId, {
                 ...(secretChanged ? { secretId: a.secretId ?? null } : {}),
                 ...(primaryChanged ? { isPrimary: a.isPrimary } : {}),
+                ...(slotsChanged ? { extraCredentials: a.extraCredentials ?? {} } : {}),
               });
             }
           }

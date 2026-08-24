@@ -68,6 +68,41 @@ export interface VerifyResponse {
   permissions: string[];
 }
 
+/** A long-lived API token for agents/scripts (MCP server, CI). */
+export interface ApiToken {
+  id: string;
+  userId: string;
+  username?: string | null;
+  label: string | null;
+  /** First characters of the raw value, for display. */
+  tokenPrefix: string | null;
+  permissions: string[];
+  /** True when permissions is empty (inherit the owner's full effective set). */
+  inheritsAllPermissions?: boolean;
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  createdAt: string;
+}
+
+/** POST /tokens response — carries the raw value exactly once. */
+export interface ApiTokenCreated extends ApiToken {
+  rawToken: string;
+}
+
+/** One named credential slot a plugin declares in /discover (beyond its primary secret). */
+export interface CredentialSlotDescriptor {
+  name: string;
+  secretType: string;
+  required?: boolean;
+  description?: string;
+}
+
+/** A declared slot with the secret bound to it on an assignment (list views). */
+export interface BoundCredentialSlot extends CredentialSlotDescriptor {
+  secretId: string | null;
+  secretLabel?: string | null;
+}
+
 /** One row of the device ↔ plugin join table (a device can have several). */
 export interface DevicePluginAssignment {
   id: string;
@@ -75,6 +110,8 @@ export interface DevicePluginAssignment {
   pluginId: string;
   /** Credential source for this assignment (null = no credentials). */
   secretId?: string | null;
+  /** Bound extra credential slots: slot name → secrets.id. */
+  extraCredentials?: Record<string, string>;
   isPrimary: boolean;
   createdAt: string;
   // Enriched fields returned by the list endpoints:
@@ -83,12 +120,16 @@ export interface DevicePluginAssignment {
   pluginEndpoint?: string;
   pluginOnline?: boolean;
   secretLabel?: string | null;
+  /** The plugin's declared slots with their bound secrets resolved. */
+  credentialSlots?: BoundCredentialSlot[];
 }
 
 export interface DevicePluginAssignmentInput {
   pluginId: string;
   secretId?: string | null;
   isPrimary?: boolean;
+  /** Extra credential slots to bind (slot name → secrets.id; null clears). */
+  extraCredentials?: Record<string, string | null>;
 }
 
 /** A device address as presented by the API (primary flag included). */
@@ -330,6 +371,8 @@ export interface Plugin {
   iconUrl?: string | null;
   /** Supported device model catalog (null/absent = no catalog, e.g. ICMP). */
   deviceModels?: DeviceModelEntry[] | null;
+  /** Additional named credential slots beyond the primary secret (null = none). */
+  credentialSlots?: CredentialSlotDescriptor[] | null;
   lastSeenAt?: string | null;
 }
 
@@ -571,8 +614,8 @@ export const api = {
   /** Promote an assigned plugin to primary (demotes the current one). */
   setPrimaryPlugin: (deviceId: string, pluginId: string) =>
     apiFetch<DevicePluginAssignment>(`/devices/${deviceId}/plugins/${pluginId}`, { method: 'PATCH' }),
-  /** Update an existing assignment's credentials and/or primary flag. */
-  updateDevicePlugin: (deviceId: string, pluginId: string, body: { secretId?: string | null; isPrimary?: boolean }) =>
+  /** Update an existing assignment's credentials, slot bindings and/or primary flag. */
+  updateDevicePlugin: (deviceId: string, pluginId: string, body: { secretId?: string | null; isPrimary?: boolean; extraCredentials?: Record<string, string | null> }) =>
     apiFetch<DevicePluginAssignment>(`/devices/${deviceId}/plugins/${pluginId}`, { method: 'PATCH', body: JSON.stringify(body) }),
   // Device IP addresses (primary = managementAddress; secondaries managed here).
   deviceIps: (deviceId: string) =>
@@ -652,6 +695,12 @@ export const api = {
     apiFetch<{ user: User; enrollment: TotpEnrollment }>(`/users/${id}/totp/enroll`, { method: 'POST' }),
   disableTotp: (id: string) => apiFetch<void>(`/users/${id}/totp`, { method: 'DELETE' }),
   permissionCatalog: () => apiFetch<PermissionCatalog>('/permissions'),
+  // API tokens (self-service; ?all=true needs users:read).
+  tokens: (all = false) =>
+    apiFetch<ApiToken[]>(`/tokens${all ? '?all=true' : ''}`),
+  createToken: (body: { label?: string; permissions?: string[]; expiresAt?: string | null }) =>
+    apiFetch<ApiTokenCreated>('/tokens', { method: 'POST', body: JSON.stringify(body) }),
+  deleteToken: (id: string) => apiFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
   // Roles.
   roles: () => apiFetch<Role[]>('/roles'),
   createRole: (body: { name: string; description?: string; permissions: string[] }) =>
@@ -659,8 +708,11 @@ export const api = {
   updateRole: (name: string, body: { description?: string | null; permissions?: string[] }) =>
     apiFetch<Role>(`/roles/${encodeURIComponent(name)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteRole: (name: string) => apiFetch<void>(`/roles/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  /** Primary secret type + any additional named credential slots the plugin declares. */
   requiredSecretType: (pluginId: string) =>
-    apiFetch<{ requiredSecretType: string | null }>(`/plugins/${pluginId}/required-secret-type`),
+    apiFetch<{ requiredSecretType: string | null; credentialSlots?: CredentialSlotDescriptor[] | null }>(
+      `/plugins/${pluginId}/required-secret-type`
+    ),
   pluginMetrics: (pluginId: string) =>
     apiFetch<PluginMetrics>(`/plugins/${pluginId}/metrics`),
   // Plugin options & settings (descriptor-driven, API-validated).

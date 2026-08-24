@@ -22,6 +22,7 @@ tags:
   - name: Sites
   - name: Inventory
   - name: Users
+  - name: Tokens
 paths:
   /auth/flow:
     get:
@@ -365,8 +366,10 @@ paths:
         optional:
           - omit the body → promote to primary (legacy behavior);
           - `isPrimary: true` → promote to primary (demotes the current one);
-          - `secretId: "..." | null` → change the credential source (null clears it).
-        Both fields may be combined in a single call. Idempotent when nothing
+          - `secretId: "..." | null` → change the credential source (null clears it);
+          - `extraCredentials: { slotName: secretId }` → replace bound credential
+            slots (validated against the plugin's declared slots; 400 on type mismatch).
+        Any combination may be sent in a single call. Idempotent when nothing
         changes.
       parameters:
         - in: path
@@ -1219,9 +1222,10 @@ paths:
       tags: [Plugins]
       summary: Get the secret type a device plugin requires
       description: >-
-        Reads the `requiredSecretType` from the plugin's /discover endpoint.
-        Use this to filter which secrets are applicable to devices managed by
-        this plugin.
+        Reads the `requiredSecretType` and any additional named credential
+        slots (`credentialSlots`) from the plugin's /discover endpoint. Use
+        this to filter which secrets are applicable to devices managed by this
+        plugin and to render per-slot credential pickers.
       parameters:
         - in: path
           name: id
@@ -1238,6 +1242,11 @@ paths:
                   requiredSecretType:
                     type: string
                     nullable: true
+                  credentialSlots:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CredentialSlotDescriptor'
+                    description: "Additional named credential slots declared by the plugin (null = none)"
         '401':
           description: Authentication required
 
@@ -1940,6 +1949,87 @@ paths:
         '401':
           description: Authentication required
 
+  /tokens:
+    get:
+      tags: [Tokens]
+      summary: List API tokens
+      description: >-
+        Lists the caller's own long-lived API tokens (requires permission
+        `tokens:manage`). Pass `?all=true` to list every user's tokens
+        (additionally requires permission `users:read`). Token values are never
+        returned — only a display prefix.
+      parameters:
+        - in: query
+          name: all
+          required: false
+          schema: { type: boolean, default: false }
+          description: "Include other users' tokens (requires users:read)"
+      responses:
+        '200':
+          description: Token list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiToken'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing tokens:manage permission, or missing users:read with all=true
+    post:
+      tags: [Tokens]
+      summary: Create an API token for the caller
+      description: >-
+        Creates a long-lived bearer token (`unm_…`) bound to the CALLING user.
+        Requires permission `tokens:manage`. The raw value is returned exactly
+        once in `rawToken` — store it now, only its SHA-256 hash is kept.
+        `permissions` may narrow the grant to a subset of the caller's effective
+        permissions; omit it (or pass []) to inherit the full current effective
+        set.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiTokenCreateRequest'
+      responses:
+        '201':
+          description: Token created (rawToken shown once)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiTokenCreated'
+        '400':
+          description: Invalid payload or permission not in caller's effective set
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing tokens:manage permission
+
+  /tokens/{id}:
+    delete:
+      tags: [Tokens]
+      summary: Revoke an API token
+      description: >-
+        Revokes a token. Revoking your own tokens requires permission
+        `tokens:manage`; permission `users:write` allows revoking any user's
+        token.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Token revoked
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing tokens:manage (own token) or users:write (other user's token)
+        '404':
+          description: Token not found
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1949,7 +2039,9 @@ components:
       description: >-
         Authenticated JWT used for RBAC protected endpoints. Privileged operations
         marked with `x-2fa-required: true` additionally expect a token with a 2FA
-        completion claim (for example `amr` includes `totp`).
+        completion claim (for example `amr` includes `totp`). Long-lived API tokens
+        (`unm_…`, created via POST /tokens) are also accepted as bearer credentials;
+        they can never satisfy a 2FA requirement.
 
   schemas:
     Secret:
@@ -2005,6 +2097,64 @@ components:
           items:
             $ref: '#/components/schemas/SecretType'
 
+    # A long-lived API token for agents/scripts (MCP server, CI). The raw value
+    # is shown once at creation; only its SHA-256 hash is stored.
+    ApiToken:
+      type: object
+      required: [id, userId, permissions]
+      properties:
+        id: { type: string }
+        userId: { type: string }
+        username: { type: [string, 'null'], description: "Owner's username (all=true listings)" }
+        label: { type: [string, 'null'] }
+        tokenPrefix: { type: [string, 'null'], description: "First characters of the raw value for display (e.g. 'unm_abc123')" }
+        permissions:
+          type: array
+          items: { type: string }
+          description: "Granted permission ids; empty = inherit the owner's full effective set"
+        inheritsAllPermissions: { type: boolean, description: "True when permissions is empty (inherit all)" }
+        expiresAt: { type: [string, 'null'], format: date-time }
+        lastUsedAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+
+    ApiTokenCreateRequest:
+      type: object
+      properties:
+        label: { type: string, maxLength: 120, description: "Human-readable purpose (e.g. 'MCP server')" }
+        permissions:
+          type: array
+          items: { type: string }
+          description: "Optional narrowing to a subset of the caller's effective permissions; omit for inherit-all"
+        expiresAt: { type: [string, 'null'], format: date-time, description: "ISO expiry timestamp; null/omitted = no expiry" }
+
+    ApiTokenCreated:
+      allOf:
+        - $ref: '#/components/schemas/ApiToken'
+      type: object
+      required: [rawToken]
+      properties:
+        rawToken: { type: string, description: "The bearer token value (unm_…) — returned exactly once" }
+
+    # One named credential slot a plugin declares in /discover (beyond its
+    # primary secret), e.g. a web-UI login distinct from SNMP.
+    CredentialSlotDescriptor:
+      type: object
+      required: [name, secretType]
+      properties:
+        name: { type: string, description: "Slot key (e.g. 'web'); unique per plugin" }
+        secretType: { type: string, description: "Secret type the bound secret must have (e.g. usernamePassword)" }
+        required: { type: boolean, default: false, description: "True when a config action needs this slot (UI hint, not enforced at assignment time)" }
+        description: { type: string, description: "Human-readable purpose shown next to the picker in the webapp" }
+
+    # A declared slot with the secret bound to it on an assignment (list views).
+    BoundCredentialSlot:
+      allOf:
+        - $ref: '#/components/schemas/CredentialSlotDescriptor'
+      type: object
+      properties:
+        secretId: { type: [string, 'null'], description: "secrets.id bound to this slot; null = unbound" }
+        secretLabel: { type: [string, 'null'] }
+
     # One row of the device ↔ plugin join table (a device can have several).
     DevicePluginAssignment:
       type: object
@@ -2014,6 +2164,10 @@ components:
         deviceId: { type: string }
         pluginId: { type: string }
         secretId: { type: string, description: "Credential source for this assignment (null = no credentials)" }
+        extraCredentials:
+          type: object
+          additionalProperties: { type: string }
+          description: "Bound extra credential slots: slot name → secrets.id"
         isPrimary: { type: boolean, description: "Exactly one primary per device; default target for config jobs" }
         createdAt: { type: string, format: date-time }
         # Enriched fields returned by the list endpoints:
@@ -2022,6 +2176,11 @@ components:
         pluginEndpoint: { type: string, format: uri }
         pluginOnline: { type: boolean }
         secretLabel: { type: string }
+        credentialSlots:
+          type: array
+          items:
+            $ref: '#/components/schemas/BoundCredentialSlot'
+          description: "The plugin's declared slots with their bound secrets resolved (list views only)"
 
     # A device address as presented to the UI and plugins (primary flag included).
     DeviceAddress:
@@ -2049,14 +2208,22 @@ components:
         pluginId: { type: string }
         secretId: { type: [string, 'null'], description: "Optional credential source for this assignment (null = no credentials)" }
         isPrimary: { type: boolean, default: false }
+        extraCredentials:
+          type: object
+          additionalProperties: { type: [string, 'null'] }
+          description: "Extra credential slots to bind (slot name → secrets.id; null clears a slot). Validated against the plugin's declared slots."
 
     # Optional body for PATCH /devices/{deviceId}/plugins/{pluginId}.
     DevicePluginAssignmentUpdate:
       type: object
-      maxProperties: 2
+      maxProperties: 3
       properties:
         secretId: { type: [string, 'null'], description: "New credential source; null clears it" }
         isPrimary: { type: boolean, description: "Set true to make this assignment the primary" }
+        extraCredentials:
+          type: object
+          additionalProperties: { type: [string, 'null'] }
+          description: "Replace bound slot secrets (validated per slot type); provided = full replacement of the slot map"
 
     Device:
       type: object
@@ -2715,12 +2882,17 @@ components:
         authType:
           type: string
           enum: [none, token, mTLS]
-        iconUrl: { type: [string, 'null'], description: "Icon path relative to the plugin root (e.g. /icons/lancom.svg); served via GET /plugins/{id}/icon" }
+        iconUrl: { type: [string, 'null'], description: "Icon path relative to the plugin root (e.g. /icons/lancom-lx.svg); served via GET /plugins/{id}/icon" }
         deviceModels:
           type: array
           items:
             $ref: '#/components/schemas/DeviceModelEntry'
           description: "Supported device model catalog advertised in /discover; null when the plugin has no catalog (e.g. ICMP)"
+        credentialSlots:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSlotDescriptor'
+          description: "Additional named credential slots beyond the primary secret (null = none)"
 
     DeviceModelEntry:
       type: object

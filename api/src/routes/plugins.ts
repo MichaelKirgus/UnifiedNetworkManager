@@ -7,6 +7,7 @@ import { requireAuth, requirePermission } from '../auth/middleware';
 import { getRequiredSecretType } from '../secretsProvider';
 import { resolvePluginEndpoint } from '../utils/pluginEndpoint';
 import type { DeviceModelEntry } from '../types/deviceModels';
+import { CredentialSlotDescriptor, normalizeCredentialSlots } from '../types/credentialSlots';
 import {
   SettingsValidationError,
   getPluginOptions,
@@ -15,6 +16,17 @@ import {
 } from '../pluginSettings';
 
 const router = Router();
+
+/** Parses a stored credentialSlots JSON column (never throws). */
+function parseCredentialSlots(raw: unknown): CredentialSlotDescriptor[] | null {
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  try {
+    const parsed = normalizeCredentialSlots(JSON.parse(raw));
+    return parsed ?? null;
+  } catch {
+    return null;
+  }
+}
 
 function serializePlugin(row: any) {
   let deviceModels: DeviceModelEntry[] | null = null;
@@ -36,6 +48,7 @@ function serializePlugin(row: any) {
     authType: row.authType,
     iconUrl: row.iconUrl ?? null,
     deviceModels,
+    credentialSlots: parseCredentialSlots(row.credentialSlots),
     lastSeenAt: row.lastSeenAt ?? null,
   };
 }
@@ -113,11 +126,15 @@ router.get('/plugins', requireAuth, async (_req, res) => {
 });
 
 // GET /plugins/:id/required-secret-type - The secret type a device plugin
-// expects for its device credentials (read from the plugin's /discover).
+// expects for its device credentials (read from the plugin's /discover), plus
+// any additional named credential slots it declares (drives per-slot pickers).
 router.get('/plugins/:id/required-secret-type', requireAuth, async (req, res) => {
   const { id } = req.params;
-  const requiredSecretType = await getRequiredSecretType(id);
-  res.status(200).json({ requiredSecretType });
+  const [requiredSecretType, row] = await Promise.all([
+    getRequiredSecretType(id),
+    db.query.plugins.findFirst({ where: (plugins, { eq }) => eq(plugins.id, id) }),
+  ]);
+  res.status(200).json({ requiredSecretType, credentialSlots: parseCredentialSlots(row?.credentialSlots) });
 });
 
 // GET /plugins/:id/metrics - The metric descriptors a plugin declared in its

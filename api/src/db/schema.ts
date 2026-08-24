@@ -11,6 +11,28 @@ export const users = pgTable('users', {
   createdAt: text('createdAt').notNull(),
 });
 
+// Long-lived bearer tokens for agents/scripts (e.g. the MCP server). The raw
+// token value is shown exactly once at creation; only its SHA-256 hash is
+// stored. `permissions` holds the granted set (a subset of the creator's
+// effective permissions at creation time); an empty list means "inherit the
+// creator's full current effective set". Enforcement intersects with the
+// user's CURRENT effective permissions on every request, so demotions apply
+// immediately without revoking tokens.
+export const apiTokens = pgTable('api_tokens', {
+  id: text('id').primaryKey(),
+  userId: text('userId').notNull(),
+  label: text('label'),
+  // SHA-256 hex of the raw token value (the only stored form).
+  tokenHash: text('tokenHash').notNull().unique(),
+  // First characters of the raw value, for display in lists ("unm_abc1…").
+  tokenPrefix: text('tokenPrefix'),
+  // JSON string array of granted permission ids ([] = inherit all effective).
+  permissions: text('permissions').notNull().default('[]'),
+  expiresAt: text('expiresAt'),
+  lastUsedAt: text('lastUsedAt'),
+  createdAt: text('createdAt').notNull(),
+});
+
 // Named bundles of permissions. Roles are NOT evaluated at enforcement time —
 // a user's effective permission set is the union of their explicit `users.permissions`
 // and the permissions of every role they carry, computed when the JWT is minted
@@ -75,6 +97,11 @@ export const devicePlugins = pgTable(
     // Credential source for THIS assignment (each plugin may use a different
     // secret). NULL = the plugin is called without credentials.
     secretId: text('secretId'),
+    // Additional named credential slots declared by the plugin in /discover
+    // (`credentialSlots`), e.g. { "web": "<secretId>" }. JSON object mapping
+    // slot name → secrets.id; NULL/{} = no extra slots bound. Lets one device
+    // assignment carry several distinct credentials (e.g. SNMP + web UI).
+    extraCredentials: text('extraCredentials'),
     isPrimary: boolean('isPrimary').notNull().default(false),
     createdAt: text('createdAt').notNull(),
   },
@@ -153,6 +180,11 @@ export const plugins = pgTable('plugins', {
   // dropdowns in the webapp's device create/edit form. NULL = no catalog
   // (e.g. generic plugins like ICMP where a model list makes no sense).
   deviceModels: text('deviceModels'),
+  // Named credential slots declared by the plugin in /discover (JSON array of
+  // { name, secretType, required?, description? }). Drives per-slot credential
+  // pickers in the webapp's assignment builder; bound secrets live on
+  // device_plugins.extraCredentials. NULL = no extra slots (primary secret only).
+  credentialSlots: text('credentialSlots'),
   createdAt: text('createdAt').notNull(),
   lastSeenAt: text('lastSeenAt'),
 });

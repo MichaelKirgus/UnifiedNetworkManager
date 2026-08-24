@@ -13,6 +13,12 @@ import * as schema from '../db/schema';
  * of each plugin owning its own database connection. All routes are gated by
  * the shared `x-plugin-api-key` header (see `pluginAuth`).
  *
+ * IMPORTANT: every path is namespaced under /plugin/* — user data included.
+ * This router mounts BEFORE the OpenAPI validator, so any path that overlaps a
+ * public route (e.g. POST /users) would shadow it and 403 webapp requests with
+ * "Invalid plugin API key". The /plugin prefix keeps internal paths disjoint
+ * from the public surface (same convention as /plugin/secrets).
+ *
  * The user-data endpoints are the "flexible" data access layer for identity
  * providers: the basic-auth plugin uses them to look up users for credential
  * verification, and future plugins (or admin tooling) can create/update users
@@ -30,7 +36,7 @@ export function internalRouter() {
     next();
   };
 
-  // --- User data (identity provider access) --------------------------------
+  // --- User data under /plugin/users (identity provider access) ------------
 
   // Serialize a user row for plugin consumption. `roles`/`permissions` are
   // returned as stored (JSON strings) to match the column shape; the plugin
@@ -47,8 +53,8 @@ export function internalRouter() {
     };
   }
 
-  // GET /users/username/:username - look up a user by username (login step 1).
-  router.get('/users/username/:username', pluginAuth, async (req: Request, res: Response) => {
+  // GET /plugin/users/username/:username - look up a user by username (login step 1).
+  router.get('/plugin/users/username/:username', pluginAuth, async (req: Request, res: Response) => {
     const { username } = req.params;
     try {
       const row = await db.query.users.findFirst({
@@ -64,8 +70,8 @@ export function internalRouter() {
     }
   });
 
-  // GET /users/:id - look up a user by id (login step 2 / TOTP verify).
-  router.get('/users/:id', pluginAuth, async (req: Request, res: Response) => {
+  // GET /plugin/users/:id - look up a user by id (login step 2 / TOTP verify).
+  router.get('/plugin/users/:id', pluginAuth, async (req: Request, res: Response) => {
     const { id } = req.params;
     try {
       const row = await db.query.users.findFirst({
@@ -81,9 +87,9 @@ export function internalRouter() {
     }
   });
 
-  // POST /users - create a user. `password` is hashed server-side; the plugin
-  // never stores or transmits a raw password hash it computed itself.
-  router.post('/users', pluginAuth, async (req: Request, res: Response) => {
+  // POST /plugin/users - create a user. `password` is hashed server-side; the
+  // plugin never stores or transmits a raw password hash it computed itself.
+  router.post('/plugin/users', pluginAuth, async (req: Request, res: Response) => {
     const { username, password, totpSecret, roles, permissions } = req.body ?? {};
     if (!username || !password) {
       return res.status(400).json({ error: 'username and password are required' });
@@ -119,8 +125,8 @@ export function internalRouter() {
     }
   });
 
-  // PATCH /users/:id - update a user (password, totpSecret, roles, permissions).
-  router.patch('/users/:id', pluginAuth, async (req: Request, res: Response) => {
+  // PATCH /plugin/users/:id - update a user (password, totpSecret, roles, permissions).
+  router.patch('/plugin/users/:id', pluginAuth, async (req: Request, res: Response) => {
     const { id } = req.params;
     const { password, totpSecret, roles, permissions } = req.body ?? {};
     try {
@@ -159,8 +165,8 @@ export function internalRouter() {
     }
   });
 
-  // DELETE /users/:id - remove a user.
-  router.delete('/users/:id', pluginAuth, async (req: Request, res: Response) => {
+  // DELETE /plugin/users/:id - remove a user.
+  router.delete('/plugin/users/:id', pluginAuth, async (req: Request, res: Response) => {
     const { id } = req.params;
     try {
       const existing = await db.query.users.findFirst({

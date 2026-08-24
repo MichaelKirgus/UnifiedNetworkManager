@@ -21,6 +21,7 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'secrets:write': 'Create and update secrets',
   'secrets:delete': 'Delete secrets',
   'sites:write': 'Create, update and delete sites',
+  'tokens:manage': "Create, view and revoke your own API tokens",
   'users:read': 'View users and their roles/permissions',
   'users:write': 'Edit user roles/permissions, manage roles, and delete users',
   'users:create': 'Create new users with an initial password and TOTP enrollment',

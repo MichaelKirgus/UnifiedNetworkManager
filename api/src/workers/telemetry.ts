@@ -5,6 +5,8 @@ import { eq, inArray, lt, sql } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { getSecret } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
+import { parseExtraCredentials } from '../types/credentialSlots';
+import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
 
 const POLL_INTERVAL_MS = 30_000;
 // Inventory rows not refreshed within this window are swept away (offline
@@ -32,6 +34,8 @@ interface AssignmentTarget {
   ipAddresses: DeviceAddressView[];
   pluginId: string;
   secretId: string | null;
+  /** Bound extra credential slots (slot name → secrets.id). */
+  extraCredentials: Record<string, string>;
   endpoint: string;
   // User-selected hardware model / firmware version (from a plugin's advertised
   // catalog). Forwarded to /monitoring so vendor plugins can adapt their data
@@ -47,7 +51,10 @@ async function pollAssignment(target: AssignmentTarget): Promise<string> {
     // decrypted values. For backward compatibility we also pass the legacy
     // `apiKey`/`apiSecret` keys when the secret is of type `apiKey`.
     const decrypted = target.secretId ? await getSecret(target.secretId) : null;
-    const credentials = decrypted?.fields ?? {};
+    const credentials = withSlots(
+      decrypted?.fields ?? {},
+      await decryptCredentialSlots(target.extraCredentials)
+    );
 
     // Per-device settings overrides are resolved for THIS assignment scope.
     const headers = await settingsHeaders(target.pluginId, target.deviceId).catch(() => ({}));
@@ -302,6 +309,7 @@ async function pollAllDevices(): Promise<void> {
       ipAddresses,
       pluginId: a.pluginId,
       secretId: a.secretId,
+      extraCredentials: parseExtraCredentials(a.extraCredentials),
       endpoint: plugin.endpoint,
       model: device.model ?? null,
       firmwareVersion: device.firmwareVersion ?? null,

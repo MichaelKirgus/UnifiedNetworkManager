@@ -241,7 +241,26 @@ export default function DeviceDetail() {
                       </span>
                     )}
                   </td>
-                  <td className="py-2 pr-3 text-slate-600">{a.secretLabel ?? '—'}</td>
+                  <td className="py-2 pr-3">
+                    <span className="text-slate-600">{a.secretLabel ?? '—'}</span>
+                    {a.credentialSlots && a.credentialSlots.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {a.credentialSlots.map((slot) => (
+                          <span
+                            key={slot.name}
+                            title={`${slot.description ?? `Credential slot "${slot.name}"`} (${slot.secretType})`}
+                            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
+                              slot.secretId
+                                ? 'bg-indigo-50 text-indigo-700'
+                                : 'bg-slate-100 text-slate-400'
+                            }`}
+                          >
+                            {slot.name}: {slot.secretLabel ?? (slot.secretId ? '' : 'not set')}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </td>
                   <td className="py-2 text-right">
                     <div className="inline-flex items-center gap-1">
                       {!a.isPrimary && (

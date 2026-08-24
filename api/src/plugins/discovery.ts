@@ -5,6 +5,7 @@ import { db } from '../db';
 import * as schema from '../db/schema';
 import type { PluginOptionDescriptor } from '../types/pluginOptions';
 import type { DeviceModelEntry } from '../types/deviceModels';
+import { CredentialSlotDescriptor, normalizeCredentialSlots } from '../types/credentialSlots';
 
 /**
  * Self-describing identity that every plugin MUST expose, either via its
@@ -30,6 +31,8 @@ export interface PluginIdentity {
   iconUrl?: string | null;
   /** Supported device model catalog (drives Model/Firmware dropdowns in the webapp). Absent = no catalog. */
   deviceModels?: DeviceModelEntry[];
+  /** Additional named credential slots beyond the primary secret (see types/credentialSlots.ts). */
+  credentialSlots?: CredentialSlotDescriptor[];
 }
 
 /**
@@ -116,6 +119,7 @@ async function fetchIdentity(endpoint: string): Promise<PluginIdentity | null> {
       actions: Array.isArray(data.actions) ? data.actions : undefined,
       iconUrl: normalizeIconPath(data.iconUrl),
       deviceModels: normalizeDeviceModels(data.deviceModels),
+      credentialSlots: normalizeCredentialSlots(data.credentialSlots),
     };
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -147,6 +151,10 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
   const hasIcon = iconUrl !== null;
   const hasModels = Array.isArray(identity.deviceModels) && identity.deviceModels.length > 0;
   const deviceModelsJson = hasModels ? JSON.stringify(identity.deviceModels) : null;
+  // Credential slots: same guard — the mDNS TXT path carries none, so a TXT
+  // upsert must never wipe slot descriptors set by the HTTP polling path.
+  const hasSlots = Array.isArray(identity.credentialSlots) && identity.credentialSlots.length > 0;
+  const credentialSlotsJson = hasSlots ? JSON.stringify(identity.credentialSlots) : null;
 
   if (existing) {
     await db
@@ -163,6 +171,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
         ...(hasActions ? { actionDescriptors } : {}),
         ...(hasIcon ? { iconUrl } : {}),
         ...(hasModels ? { deviceModels: deviceModelsJson } : {}),
+        ...(hasSlots ? { credentialSlots: credentialSlotsJson } : {}),
         lastSeenAt: now,
       })
       .where(eq(schema.plugins.id, identity.uuid));
@@ -180,6 +189,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
       actionDescriptors,
       iconUrl,
       deviceModels: deviceModelsJson,
+      credentialSlots: credentialSlotsJson,
       createdAt: now,
       lastSeenAt: now,
     });

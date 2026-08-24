@@ -136,6 +136,30 @@ export async function initDb(): Promise<void> {
   await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "iconUrl" TEXT`);
   await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "deviceModels" TEXT`);
 
+  // Generic credential slots: plugins may declare additional named credential
+  // slots in /discover (e.g. a web-UI user/password distinct from SNMP). The
+  // slot descriptors are cached on the plugin row; bound secrets live per
+  // assignment as JSON { slotName: secretId } on device_plugins.extraCredentials.
+  await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "credentialSlots" TEXT`);
+  await pool.query(
+    `ALTER TABLE device_plugins ADD COLUMN IF NOT EXISTS "extraCredentials" TEXT`
+  );
+
+  // Long-lived API tokens for agents/scripts (MCP server, CI). Only the
+  // SHA-256 hash of the token is stored; the raw value is shown once at creation.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS api_tokens (
+      id TEXT PRIMARY KEY,
+      "userId" TEXT NOT NULL,
+      label TEXT,
+      "tokenHash" TEXT NOT NULL UNIQUE,
+      "tokenPrefix" TEXT,
+      permissions TEXT NOT NULL DEFAULT '[]',
+      "expiresAt" TEXT,
+      "lastUsedAt" TEXT,
+      "createdAt" TEXT NOT NULL
+    )`);
+
   // User-selected hardware model / firmware version on devices — chosen from a
   // plugin's advertised catalog, forwarded to every /monitoring call.
   await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS "model" TEXT`);
