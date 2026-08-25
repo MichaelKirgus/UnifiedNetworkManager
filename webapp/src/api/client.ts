@@ -250,6 +250,41 @@ export interface HostRow {
   devices: HostDeviceMember[];
 }
 
+/** One configured tunnel from the cross-device inventory view. Unlike networks/hosts,
+ * rows are NOT merged across devices — a tunnel row is one logical tunnel on one device. */
+export interface TunnelRow {
+  deviceId: string;
+  pluginId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  /** Display name of the reporting plugin instance (e.g. "OPNsense Plugin"). */
+  pluginName?: string | null;
+  /** Tunnel/interface name on the device (e.g. "wg0", "IPSEC-1", "gre1"). */
+  name: string;
+  type: 'wireguard' | 'openvpn' | 'ipsec' | 'pppoe' | 'gre';
+  /** Remote endpoint (peer IP/FQDN, remote gateway, GRE destination); '' = unknown. */
+  peerAddress?: string;
+  /** Local side of the tunnel (WG server IP, local gateway, PPPoE WAN IP); '' = unknown. */
+  localAddress?: string;
+  /** Tunnel subnet / assigned network (e.g. "10.99.0.0/24"). */
+  subnet?: string | null;
+  status: 'up' | 'down' | 'enabled' | 'disabled' | 'unknown';
+  /** Live session uptime in seconds (null when not a live-session metric). */
+  uptimeSeconds?: number | null;
+  /** Seconds since the last handshake (WireGuard peers; null = no live data). */
+  lastHandshakeSeconds?: number | null;
+  /** Kernel interface carrying the tunnel traffic. */
+  interfaceName?: string | null;
+  /** Receive rate in bytes/s (plugin-computed counter delta; null when unavailable). */
+  rxRate?: number | null;
+  /** Transmit rate in bytes/s (plugin-computed counter delta; null when unavailable). */
+  txRate?: number | null;
+  /** Type-specific extras (ikeType, cryptAlg, mode, allowedIPs, ...). */
+  extra?: Record<string, unknown>;
+  collectedAt: string;
+}
+
 /** A user account (never includes password hashes or TOTP secrets). */
 export interface User {
   id: string;
@@ -680,6 +715,14 @@ export const api = {
     if (params?.source) qs.set('source', params.source);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<HostRow[]>(`/hosts${suffix}`);
+  },
+  tunnels: (params?: { deviceId?: string; siteId?: string; type?: 'wireguard' | 'openvpn' | 'ipsec' | 'pppoe' | 'gre' }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.type) qs.set('type', params.type);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<TunnelRow[]>(`/tunnels${suffix}`);
   },
   // Users + permission catalog.
   users: () => apiFetch<User[]>('/users'),

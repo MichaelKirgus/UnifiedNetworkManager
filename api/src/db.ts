@@ -249,6 +249,31 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_hosts_ip ON hosts (ip)`);
 
+  // Tunnels inventory table (Tunnels page) — same lifecycle as networks/hosts.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tunnels (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      "peerAddress" TEXT NOT NULL DEFAULT '',
+      "localAddress" TEXT NOT NULL DEFAULT '',
+      subnet TEXT,
+      status TEXT NOT NULL DEFAULT 'unknown',
+      "uptimeSeconds" DOUBLE PRECISION,
+      "lastHandshakeSeconds" DOUBLE PRECISION,
+      "interfaceName" TEXT,
+      "rxRate" DOUBLE PRECISION,
+      "txRate" DOUBLE PRECISION,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name, type)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_tunnels_device ON tunnels ("deviceId")`);
+  // Added after the initial release — existing deployments need the column.
+  await pool.query(`ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS "lastHandshakeSeconds" DOUBLE PRECISION`);
+
   // The legacy singular columns are superseded by device_plugins. There is no
   // production data to migrate (confirmed), so drop them outright — any dev
   // devices must be recreated via the new multi-plugin create flow.

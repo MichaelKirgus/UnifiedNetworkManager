@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../db';
-import { eq, inArray, lt, sql } from 'drizzle-orm';
+import { and, eq, inArray, lt, notInArray, sql } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { getSecret } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
@@ -239,6 +239,76 @@ async function ingestInventory(
         },
       });
     }
+
+    // --- tunnels (WireGuard / OpenVPN / IPsec / PPPoE / GRE) -----------------
+    const rawTunnels = Array.isArray(metrics['tunnels']) ? (metrics['tunnels'] as unknown[]) : [];
+    if (rawTunnels.length > 0) {
+      const values: {
+        deviceId: string; pluginId: string; name: string; type: string; peerAddress: string;
+        localAddress: string; subnet: string | null; status: string; uptimeSeconds: number | null;
+        lastHandshakeSeconds: number | null;
+        interfaceName: string | null; rxRate: number | null; txRate: number | null;
+        extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawTunnels) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        const type = typeof r['type'] === 'string' ? (r['type'] as string).trim().toLowerCase() : '';
+        if (!name || !type) continue; // both are part of the conflict key
+        values.push({
+          deviceId,
+          pluginId,
+          name,
+          type,
+          peerAddress: typeof r['peerAddress'] === 'string' ? (r['peerAddress'] as string).trim() : '',
+          localAddress: typeof r['localAddress'] === 'string' ? (r['localAddress'] as string).trim() : '',
+          subnet: typeof r['subnet'] === 'string' && (r['subnet'] as string).trim() !== '' ? (r['subnet'] as string).trim() : null,
+          status: typeof r['status'] === 'string' && (r['status'] as string).trim() !== '' ? (r['status'] as string).trim().toLowerCase() : 'unknown',
+          uptimeSeconds: typeof r['uptimeSeconds'] === 'number' && Number.isFinite(r['uptimeSeconds']) ? r['uptimeSeconds'] : null,
+          lastHandshakeSeconds: typeof r['lastHandshakeSeconds'] === 'number' && Number.isFinite(r['lastHandshakeSeconds']) ? r['lastHandshakeSeconds'] : null,
+          interfaceName: typeof r['interfaceName'] === 'string' && (r['interfaceName'] as string).trim() !== '' ? (r['interfaceName'] as string).trim() : null,
+          rxRate: typeof r['rxRate'] === 'number' && Number.isFinite(r['rxRate']) ? r['rxRate'] : null,
+          txRate: typeof r['txRate'] === 'number' && Number.isFinite(r['txRate']) ? r['txRate'] : null,
+          extra: r['extra'] && typeof r['extra'] === 'object' ? JSON.stringify(r['extra']) : '{}',
+          collectedAt,
+        });
+      }
+      // Same de-dup guard as the other inventory blocks.
+      const tunnelByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        tunnelByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}|${v.type}`, v);
+      }
+      if (tunnelByKey.size > 0) {
+        await db.insert(schema.tunnels).values(Array.from(tunnelByKey.values())).onConflictDoUpdate({
+          target: [schema.tunnels.deviceId, schema.tunnels.pluginId, schema.tunnels.name, schema.tunnels.type],
+          set: {
+            peerAddress: sql`excluded."peerAddress"`,
+            localAddress: sql`excluded."localAddress"`,
+            subnet: sql`excluded.subnet`,
+            status: sql`excluded.status`,
+            uptimeSeconds: sql`excluded."uptimeSeconds"`,
+            lastHandshakeSeconds: sql`excluded."lastHandshakeSeconds"`,
+            interfaceName: sql`excluded."interfaceName"`,
+            rxRate: sql`excluded."rxRate"`,
+            txRate: sql`excluded."txRate"`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      // Tunnels are CONFIG objects — a tunnel deleted on the device must vanish
+      // from the page, not linger until the 24h sweep. Drop rows this snapshot
+      // no longer reports (only when the key is present at all: an ABSENT key
+      // means "plugin doesn't report tunnels", which must not wipe other data).
+      const seenTunnelNames = new Set(values.map((v) => v.name));
+      await db.delete(schema.tunnels)
+        .where(and(
+          eq(schema.tunnels.deviceId, deviceId),
+          eq(schema.tunnels.pluginId, pluginId),
+          notInArray(schema.tunnels.name, Array.from(seenTunnelNames))
+        ));
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(
@@ -257,6 +327,7 @@ async function sweepStaleInventory(): Promise<void> {
   const cutoff = new Date(Date.now() - INVENTORY_STALE_AFTER_MS).toISOString();
   await db.delete(schema.hosts).where(lt(schema.hosts.lastSeenAt, cutoff));
   await db.delete(schema.networks).where(lt(schema.networks.collectedAt, cutoff));
+  await db.delete(schema.tunnels).where(lt(schema.tunnels.collectedAt, cutoff));
 }
 
 /**

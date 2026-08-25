@@ -321,6 +321,49 @@ export const hosts = pgTable(
   }
 );
 
+// One row per configured tunnel (WireGuard/OpenVPN/IPsec/PPPoE/GRE) as reported
+// by a plugin's `tunnels` metric. Powers the cross-device Tunnels page, same
+// upsert-per-poll + 24h-sweep lifecycle as networks/hosts. A device without any
+// tunnels simply contributes no rows (switches/APs never emit this key).
+export const tunnels = pgTable(
+  'tunnels',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Tunnel/interface name on the device (e.g. "wg0", "IPSEC-1", "gre1").
+    name: text('name').notNull(),
+    // wireguard | openvpn | ipsec | pppoe | gre — normalized to lowercase at ingest.
+    type: text('type').notNull(),
+    // Remote endpoint (peer IP/FQDN, remote gateway, GRE destination). '' = unknown.
+    peerAddress: text('peerAddress').notNull().default(''),
+    // Local side of the tunnel (WG server IP, local gateway, PPPoE WAN IP). '' = unknown.
+    localAddress: text('localAddress').notNull().default(''),
+    // Tunnel subnet / assigned network (e.g. "10.99.0.0/24"). null = n/a.
+    subnet: text('subnet'),
+    // up | down | enabled | disabled — plugins report what they can observe.
+    status: text('status').notNull().default('unknown'),
+    // Live session uptime in seconds (null when not a live-session metric).
+    uptimeSeconds: doublePrecision('uptimeSeconds'),
+    // Seconds since the last handshake (WireGuard peers; null = no live data).
+    lastHandshakeSeconds: doublePrecision('lastHandshakeSeconds'),
+    // Kernel interface carrying the tunnel traffic (display + rate context).
+    interfaceName: text('interfaceName'),
+    // Per-tunnel traffic rates (bytes/s), computed plugin-side as counter deltas.
+    rxRate: doublePrecision('rxRate'),
+    txRate: doublePrecision('txRate'),
+    // Type-specific extras (JSON object): ikeType, cryptAlg, mode, allowedIPs, ...
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkTunnels: uniqueIndex('uq_tunnels')
+        .on(table.deviceId, table.pluginId, table.name, table.type),
+      idxTunnelsDevice: index('idx_tunnels_device').on(table.deviceId),
+    };
+  }
+);
+
 // Execution plans produced by a plugin's /plan endpoint (e.g. an OPNsense
 // WireGuard tunnel spanning two firewalls). The API persists the plan and its
 // steps, fulfils the plan's provisionRequests via the secrets provider at

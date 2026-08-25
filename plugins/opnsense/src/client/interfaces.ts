@@ -60,3 +60,5 @@ export const bridges = itemController('bridge_settings');
 export const loopbacks = itemController('loopback_settings');
 /** Virtual IPs (VIPs / CARP/PPPoE). */
 export const vips = itemController('vip_settings');
+/** GRE tunnels (source → destination point-to-point links). */
+export const gres = itemController('gre_settings');

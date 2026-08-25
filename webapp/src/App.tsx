@@ -11,6 +11,7 @@ import Plugins from './pages/Plugins';
 import Sites from './pages/Sites';
 import Networks from './pages/Networks';
 import Hosts from './pages/Hosts';
+import Tunnels from './pages/Tunnels';
 import Users from './pages/Users';
 import Roles from './pages/Roles';
 import Tokens from './pages/Tokens';
@@ -105,6 +106,14 @@ export default function App() {
         element={
           <RequireAuth>
             <Hosts />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/tunnels"
+        element={
+          <RequireAuth>
+            <Tunnels />
           </RequireAuth>
         }
       />

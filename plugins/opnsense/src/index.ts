@@ -19,6 +19,7 @@ import { resolveEdition } from './client/editions';
 import { detectDnsBackend, DnsBackend } from './client/dns';
 import { detectDhcpBackend, DhcpBackend, searchKeaLeases, searchDnsmasqLeases } from './client/dhcp';
 import { getInterfacesInfo, vlans } from './client/interfaces';
+import { collectTunnels, attachTunnelRates, enrichTunnelsWithLiveState, TunnelRow } from './tunnels';
 import { getAction, listModules } from './actions/registry';
 import { ActionContext, ActionResult, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest, listCatalog } from './plan';
@@ -136,6 +137,8 @@ interface InventorySnapshot {
   networks: Record<string, unknown>[];
   /** Active DHCP leases normalized across Kea/dnsmasq backends. */
   dhcpLeases: Record<string, unknown>[];
+  /** Configured tunnels (WireGuard/OpenVPN/IPsec/PPPoE/GRE) — see collectTunnels. */
+  tunnels: TunnelRow[];
 }
 
 const inventoryCache = new Map<string, InventorySnapshot>();
@@ -302,7 +305,10 @@ async function getInventory(
     vlans.get(client).catch(() => undefined),
   ]);
 
-  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [] };
+  // Raw interfaces_info entries — kept for the PPPoE tunnel detector (which
+  // needs the interface TYPE fields that parseNetworkRows discards).
+  let ifEntries: Record<string, unknown>[] = [];
+  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [] };
   if (info?.ok && info.data && typeof info.data === 'object') {
     const d = info.data as Record<string, unknown>;
     if (d['name'] !== undefined) snap.hostname = String(d['name']);
@@ -323,20 +329,19 @@ async function getInventory(
   // defensive and logs a warning when it can't recognize an entry's shape.
   if (ifInfo?.ok && ifInfo.data && typeof ifInfo.data === 'object') {
     const data = ifInfo.data as Record<string, unknown>;
-    const entries: Record<string, unknown>[] = [];
     // Real OPNsense shape: searchRecordsetBase wraps the interface list in a
     // recordset ({ rows: [...], total }). Fallbacks for other shapes: a direct
     // array, or an object keyed by interface name.
     if (Array.isArray(data['rows'])) {
-      for (const e of data['rows'] as unknown[]) if (e && typeof e === 'object') entries.push(e as Record<string, unknown>);
+      for (const e of data['rows'] as unknown[]) if (e && typeof e === 'object') ifEntries.push(e as Record<string, unknown>);
     } else if (Array.isArray(data)) {
-      for (const e of data) if (e && typeof e === 'object') entries.push(e as Record<string, unknown>);
+      for (const e of data) if (e && typeof e === 'object') ifEntries.push(e as Record<string, unknown>);
     } else {
       for (const v of Object.values(data)) {
-        if (v && typeof v === 'object' && !Array.isArray(v)) entries.push(v as Record<string, unknown>);
+        if (v && typeof v === 'object' && !Array.isArray(v)) ifEntries.push(v as Record<string, unknown>);
       }
     }
-    const rows = entries.flatMap((e) => parseNetworkRows(e));
+    const rows = ifEntries.flatMap((e) => parseNetworkRows(e));
     if (rows.length > 0) snap.networks = rows;
 
     // VLAN IDs: vlan_settings rows carry the parent interface + vlanid. Attach
@@ -378,6 +383,15 @@ async function getInventory(
     }
   } catch {
     // best-effort — a failing lease endpoint must not sink the inventory cache
+  }
+
+  // Tunnels (WireGuard/OpenVPN/IPsec/PPPoE/GRE) — slow-changing like networks.
+  // PPPoE rows reuse the interfaces_info entries collected above; the other
+  // types hit their own endpoints. Each section is independent and best-effort.
+  try {
+    snap.tunnels = await collectTunnels(client, ifEntries);
+  } catch {
+    // best-effort — a failing tunnel endpoint must not sink the inventory cache
   }
 
   inventoryCache.set(host, snap);
@@ -596,6 +610,11 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
   // Active DHCP leases — inventory, slow refresh.
   if (Array.isArray(metrics['dhcpLeases']) && (metrics['dhcpLeases'] as unknown[]).length > 0) {
     push({ key: 'dhcpLeases', label: 'DHCP Leases', type: 'string', visualization: 'table', group: 'Inventory', columns: ['mac', 'ip', 'hostname', 'intf', 'expiry'], intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  // Configured tunnels (WireGuard/OpenVPN/IPsec/PPPoE/GRE) — inventory, slow
+  // refresh; also normalized into the API's cross-device `tunnels` table.
+  if (Array.isArray(metrics['tunnels']) && (metrics['tunnels'] as unknown[]).length > 0) {
+    push({ key: 'tunnels', label: 'Tunnels', type: 'string', visualization: 'table', group: 'Inventory', columns: ['name', 'type', 'peerAddress', 'localAddress', 'subnet', 'status', 'interfaceName'], intervalMs: INVENTORY_INTERVAL_MS });
   }
   // Interface MACs (name + mac per interface).
   if (Array.isArray(metrics['interfaces']) && (metrics['interfaces'] as unknown[]).length > 0) {
@@ -889,12 +908,12 @@ async function collectMetrics(
   // Shape: { statistics: { "[igc0] / <mac>": { name, received-bytes, sent-bytes, ... } } }
   // Emitted as a nested object keyed by interface: { traffic: { igc0: { rx, tx } } }
   // so the webapp can render it as a table (rows = interfaces, columns = rx/tx).
+  const traffic: Record<string, Record<string, number>> = {};
   try {
     const stats = await getInterfaceStats(host, apiKey, apiSecret, transport);
     if (stats.ok && stats.data && typeof stats.data === 'object') {
       const data = stats.data as Record<string, unknown>;
       const statistics = (data['statistics'] ?? data) as Record<string, unknown>;
-      const traffic: Record<string, Record<string, number>> = {};
       for (const [rawKey, raw] of Object.entries(statistics)) {
         if (raw === null || typeof raw !== 'object') continue;
         const r = raw as Record<string, unknown>;
@@ -919,6 +938,22 @@ async function collectMetrics(
     }
   } catch {
     // best-effort
+  }
+
+  // Tunnels: emit the cached config-level inventory enriched with LIVE runtime
+  // state (WireGuard last-handshake + real peer endpoint from service/show; IPsec
+  // SA status from sessions), then attach per-tunnel rates. The rate tracker
+  // keeps one counter sample per host in memory and computes bytes/s deltas —
+  // first poll after (re)start has no delta, so those rows simply carry no
+  // rxRate/txRate (expected warm-up behavior). Emitted even when the stats
+  // endpoint failed: tunnel inventory is independent of traffic data.
+  if (inventory.tunnels.length > 0) {
+    const tunnelClient = createClient(host, { apiKey, apiSecret }, transport);
+    // Enrichment hits live endpoints on every poll (not cached with inventory).
+    // Best-effort: a failure falls back to the config-level rows unchanged.
+    const liveTunnels = await enrichTunnelsWithLiveState(tunnelClient, inventory.tunnels)
+      .catch(() => inventory.tunnels);
+    metrics['tunnels'] = attachTunnelRates(host, liveTunnels, traffic);
   }
 
   return { metrics, interfaces };

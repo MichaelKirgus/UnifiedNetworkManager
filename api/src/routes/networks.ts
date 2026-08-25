@@ -554,4 +554,80 @@ router.get('/hosts', requireAuth, async (_req, res: Response) => {
   }
 });
 
+// GET /tunnels - All configured tunnels across devices.
+// Query params: deviceId (exact), siteId (filter by device's site),
+// type ('wireguard'|'openvpn'|'ipsec'|'pppoe'|'gre').
+// Unlike networks/hosts, no cross-device merge is needed — a tunnel row is
+// already one logical tunnel on one device.
+router.get('/tunnels', requireAuth, async (_req, res: Response) => {
+  try {
+    const { deviceId, siteId, type } = _req.query as Record<string, string | undefined>;
+
+    if (type && !['wireguard', 'openvpn', 'ipsec', 'pppoe', 'gre'].includes(type)) {
+      res.status(400).json({ error: '"type" must be one of: wireguard, openvpn, ipsec, pppoe, gre' });
+      return;
+    }
+
+    let where;
+    const typeClause = type ? eq(schema.tunnels.type, type) : undefined;
+    if (deviceId && siteId) {
+      // Both filters: verify the device belongs to the site first.
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) {
+        res.status(200).json([]);
+        return;
+      }
+      where = typeClause ? and(eq(schema.tunnels.deviceId, deviceId), typeClause) : eq(schema.tunnels.deviceId, deviceId);
+    } else if (deviceId) {
+      where = typeClause ? and(eq(schema.tunnels.deviceId, deviceId), typeClause) : eq(schema.tunnels.deviceId, deviceId);
+    } else if (siteId) {
+      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (deviceIds.length === 0) {
+        res.status(200).json([]);
+        return;
+      }
+      const deviceClause = inArray(schema.tunnels.deviceId, deviceIds);
+      where = typeClause ? and(deviceClause, typeClause) : deviceClause;
+    } else if (typeClause) {
+      where = typeClause;
+    }
+
+    const rows = await db.query.tunnels.findMany({
+      ...(where ? { where } : {}),
+      orderBy: [asc(schema.tunnels.deviceId), asc(schema.tunnels.type), asc(schema.tunnels.name)],
+    });
+
+    const [deviceViews, pluginNames] = await Promise.all([
+      loadDeviceViews(Array.from(new Set(rows.map((r) => r.deviceId)))),
+      loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId)))),
+    ]);
+
+    res.status(200).json(
+      rows.map((r) => {
+        const device = deviceViews.get(r.deviceId);
+        return {
+          ...r,
+          extra: safeParseJson<Record<string, unknown>>(r.extra),
+          deviceName: device?.name ?? null,
+          managementAddress: device?.managementAddress ?? null,
+          siteName: device?.siteName ?? null,
+          pluginName: pluginNames.get(r.pluginId) ?? null,
+        };
+      })
+    );
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+/** Parses a JSON text column defensively — corrupt rows must not break the list. */
+function safeParseJson<T>(raw: string): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return {} as T;
+  }
+}
+
 export default router;

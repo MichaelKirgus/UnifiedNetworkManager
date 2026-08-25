@@ -1646,6 +1646,49 @@ paths:
         '401':
           description: Authentication required
 
+  /tunnels:
+    get:
+      tags: [Inventory]
+      summary: List all configured tunnels across devices
+      description: >-
+        Cross-device view of the normalized `tunnels` inventory table, populated
+        by the telemetry worker from each plugin's /monitoring metrics (e.g.
+        OPNsense WireGuard/OpenVPN/IPsec/PPPoE/GRE configurations and LANCOM
+        LCOS IPsec connections). One row per tunnel on one device — no merging;
+        devices without tunnels contribute no rows. Rows not refreshed within
+        24h are swept away.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: type
+          required: false
+          schema:
+            type: string
+            enum: [wireguard, openvpn, ipsec, pppoe, gre]
+          description: Filter by tunnel type
+      responses:
+        '200':
+          description: Tunnel rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TunnelRow'
+        '400':
+          description: Invalid type filter value
+        '401':
+          description: Authentication required
+
   /users:
     get:
       tags: [Users]
@@ -2534,6 +2577,39 @@ components:
                 type: array
                 items: { type: string }
                 description: "Interface(s) on the observing device where the host was seen (e.g. [lan], [wlan0])"
+
+    TunnelRow:
+      type: object
+      required: [deviceId, pluginId, name, type, status, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this tunnel is configured on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this tunnel" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        name: { type: string, description: "Tunnel/interface name on the device (e.g. wg0, IPSEC-1, gre1)" }
+        type:
+          type: string
+          enum: [wireguard, openvpn, ipsec, pppoe, gre]
+          description: "Normalized tunnel technology"
+        peerAddress: { type: string, description: "Remote endpoint (peer IP/FQDN, remote gateway, GRE destination); '' = unknown" }
+        localAddress: { type: string, description: "Local side of the tunnel (WG server IP, local gateway, PPPoE WAN IP); '' = unknown" }
+        subnet: { type: [string, 'null'], description: "Tunnel subnet / assigned network (e.g. 10.99.0.0/24)" }
+        status:
+          type: string
+          enum: [up, down, enabled, disabled, unknown]
+          description: "What the plugin can observe — live state where available, config state otherwise"
+        uptimeSeconds: { type: [number, 'null'], description: "Live session uptime in seconds (null when not a live-session metric)" }
+        lastHandshakeSeconds: { type: [number, 'null'], description: "Seconds since the last handshake (WireGuard peers; null = no live data)" }
+        interfaceName: { type: [string, 'null'], description: "Kernel interface carrying the tunnel traffic" }
+        rxRate: { type: [number, 'null'], description: "Receive rate in bytes/s (plugin-computed counter delta; null when unavailable)" }
+        txRate: { type: [number, 'null'], description: "Transmit rate in bytes/s (plugin-computed counter delta; null when unavailable)" }
+        extra:
+          type: object
+          additionalProperties: true
+          description: "Type-specific extras (ikeType, cryptAlg, mode, allowedIPs, ...)"
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this tunnel" }
 
     # One plugin's monitoring snapshot for a device (a device can have several).
     PluginTelemetrySnapshot:

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import clsx from 'clsx';
 import {
+  Cable,
   KeyRound,
   Laptop,
   ListChecks,
@@ -25,6 +26,8 @@ const NAV_ITEMS = [
   // Cross-device inventory views (populated by the telemetry worker).
   { to: '/networks', label: 'Networks', icon: Network },
   { to: '/hosts', label: 'Hosts', icon: Laptop },
+  // Cable stands in for a tunnel link (lucide's `Tunnel` icon is not in the installed version).
+  { to: '/tunnels', label: 'Tunnels', icon: Cable },
   { to: '/sites', label: 'Sites', icon: MapPin },
   { to: '/secrets', label: 'Secrets', icon: KeyRound },
   { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks },

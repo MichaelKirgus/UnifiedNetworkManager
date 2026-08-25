@@ -108,6 +108,17 @@ export function getServiceStatus(client: AxiosInstance): Promise<OpnsenseApiResu
   return get(client, '/api/wireguard/service/status');
 }
 
+/**
+ * GET /api/wireguard/service/show — LIVE runtime state (the data behind the
+ * web UI's WireGuard → Status/diagnostics page). Returns rows[] with two row
+ * types: `interface` (one per wg interface) and `peer` (one per connected peer),
+ * carrying `endpoint`, `latest-handshake-age` (seconds), `latest-handshake-epoch`,
+ * `transfer-rx`/`transfer-tx` (cumulative bytes) and `peer-status` (online/offline).
+ */
+export function getServiceShow(client: AxiosInstance): Promise<OpnsenseApiResult> {
+  return get(client, '/api/wireguard/service/show');
+}
+
 /** POST /api/wireguard/service/reconfigure — ACTIVATE staged wireguard changes (reload the service). */
 export function reconfigureService(client: AxiosInstance): Promise<OpnsenseApiResult> {
   return post(client, '/api/wireguard/service/reconfigure', {});

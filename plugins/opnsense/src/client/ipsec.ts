@@ -112,6 +112,18 @@ export function getServiceStatus(client: AxiosInstance): Promise<OpnsenseApiResu
   return get(client, '/api/ipsec/service/status');
 }
 
+// --- Live sessions (the data behind VPN → IPsec → Status Overview) ---------------------
+
+/** GET /api/ipsec/sessions/search_phase1 — live IKE (phase-1) SAs. */
+export function searchPhase1Sessions(client: AxiosInstance): Promise<OpnsenseApiResult> {
+  return get(client, '/api/ipsec/sessions/search_phase1');
+}
+
+/** GET /api/ipsec/sessions/search_phase2 — live IPsec (phase-2) child SAs. */
+export function searchPhase2Sessions(client: AxiosInstance): Promise<OpnsenseApiResult> {
+  return get(client, '/api/ipsec/sessions/search_phase2');
+}
+
 /** POST /api/ipsec/service/reconfigure — ACTIVATE staged ipsec changes (reload swanctl). */
 export function reconfigureService(client: AxiosInstance): Promise<OpnsenseApiResult> {
   return post(client, '/api/ipsec/service/reconfigure', {});

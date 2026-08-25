@@ -319,6 +319,39 @@ app.post('/monitoring', async (req, res) => {
       }));
     }
 
+    // --- Tunnels (normalized for the cross-device Tunnels page) --------------
+    // IPsec connections from the VPN table + PPPoE WAN links. The LCOS MIB has
+    // no WireGuard/OpenVPN/GRE subtrees, so those types never appear here.
+    const tunnelRows: Record<string, unknown>[] = [];
+    for (const v of snapshot.vpnConnections) {
+      const up = /connected|bundled/i.test(v.stateLabel);
+      tunnelRows.push({
+        name: v.physConn || v.peer,
+        type: 'ipsec',
+        peerAddress: v.peer === v.physConn ? '' : v.peer, // peer == physConn → no separate remote known
+        localAddress: '',
+        status: up ? 'up' : /disconnect/i.test(v.stateLabel) ? 'down' : 'enabled',
+        uptimeSeconds: v.connTimeSeconds,
+        extra: { ikeType: v.ikeType || null, cryptAlg: v.cryptAlg || null, mode: v.modeLabel || null },
+      });
+    }
+    for (const w of snapshot.wanIps) {
+      if (!/ppp/i.test(w.typeLabel)) continue; // PPPoE WAN links only
+      const rate = fast.wanRates[w.peer];
+      tunnelRows.push({
+        name: w.peer,
+        type: 'pppoe',
+        peerAddress: '', // the ISP side is not exposed via SNMP
+        localAddress: w.address || '',
+        status: w.address ? 'up' : 'down',
+        interfaceName: w.peer,
+        // wanRates are bits/s; the tunnels contract stores bytes/s.
+        ...(rate?.rx !== null && rate?.rx !== undefined ? { rxRate: rate.rx / 8 } : {}),
+        ...(rate?.tx !== null && rate?.tx !== undefined ? { txRate: rate.tx / 8 } : {}),
+      });
+    }
+    if (tunnelRows.length > 0) metrics['tunnels'] = tunnelRows;
+
     // --- WiFi (built-in radios only — most routers report nothing) ----------
     const hasWifi = snapshot.radios.length > 0 || snapshot.ssids.length > 0 || snapshot.clients.length > 0;
     if (hasWifi) {
@@ -426,6 +459,19 @@ app.post('/monitoring', async (req, res) => {
     if (Object.keys(fast.wanRates).length > 0) {
       const d = descriptors.find((x) => x.key === 'wan.rates');
       if (d) d.rows = Object.keys(fast.wanRates);
+    }
+    // Normalized tunnel rows (IPsec + PPPoE) — also ingested by the API into
+    // the cross-device `tunnels` table; rendered here as a per-device table.
+    if (Array.isArray(metrics['tunnels']) && (metrics['tunnels'] as unknown[]).length > 0) {
+      descriptors.push({
+        key: 'tunnels',
+        label: 'Tunnels',
+        type: 'string',
+        visualization: 'table',
+        group: 'VPN',
+        columns: ['name', 'type', 'peerAddress', 'localAddress', 'status'],
+        intervalMs: opts.inventoryTtlMs,
+      });
     }
     if (metrics['system.error']) {
       descriptors.push({ key: 'system.error', label: 'Error', type: 'string', visualization: 'text', group: 'System' });
