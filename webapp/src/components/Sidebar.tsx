@@ -18,6 +18,7 @@ import {
   Shield,
   UserRound,
   Users as UsersIcon,
+  Wifi as WifiIcon,
 } from 'lucide-react';
 import { can, clearPermissions, clearUsername } from '../auth/permissions';
 
@@ -28,6 +29,7 @@ const NAV_ITEMS = [
   { to: '/hosts', label: 'Hosts', icon: Laptop },
   // Cable stands in for a tunnel link (lucide's `Tunnel` icon is not in the installed version).
   { to: '/tunnels', label: 'Tunnels', icon: Cable },
+  { to: '/wifi', label: 'WiFi', icon: WifiIcon },
   { to: '/sites', label: 'Sites', icon: MapPin },
   { to: '/secrets', label: 'Secrets', icon: KeyRound },
   { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks },

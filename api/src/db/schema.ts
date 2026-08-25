@@ -364,6 +364,90 @@ export const tunnels = pgTable(
   }
 );
 
+// One row per SSID×band as reported by a plugin's `wifiNetworks` metric.
+// Powers the cross-device WiFi page (grouped by SSID name across devices).
+export const wifiSsids = pgTable(
+  'wifi_ssids',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // SSID / network name as broadcast.
+    name: text('name').notNull(),
+    // '2.4' | '5' | '6' — '' when the device cannot say which band (e.g. a
+    // dual-band radio with one channel value). Rows with '' stay in the table
+    // but are excluded from the spectrum view.
+    band: text('band').notNull().default(''),
+    // Channel number on this band (null when unknown).
+    channel: integer('channel'),
+    bssid: text('bssid'),
+    // Security/encryption as reported ('WPA2-PSK' …); null = not exposed.
+    encryption: text('encryption'),
+    vlanId: integer('vlanId'),
+    // Radio interface broadcasting this SSID (e.g. "WLAN-1") — shown on the
+    // device chip in the webapp.
+    ifc: text('ifc'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkWifiSsids: uniqueIndex('uq_wifi_ssids')
+        .on(table.deviceId, table.pluginId, table.name, table.band),
+      idxWifiSsidsDevice: index('idx_wifi_ssids_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per channel with an airtime-utilization sample (`wifiAirtime`
+// metric). LX APs report a true per-channel table; LCOS routers emit their
+// radio's utilization at the radio's own channel.
+export const wifiChannels = pgTable(
+  'wifi_channels',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    channel: integer('channel').notNull(),
+    // Airtime utilization in percent (0–100); null when the device reports no
+    // value for this channel.
+    utilizationPct: doublePrecision('utilizationPct'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkWifiChannels: uniqueIndex('uq_wifi_channels')
+        .on(table.deviceId, table.pluginId, table.channel),
+      idxWifiChannelsDevice: index('idx_wifi_channels_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per associated WLAN client (`wlanClients` metric) — powers the
+// per-SSID connected-client counts on the WiFi page. Upserted by MAC, so a
+// roaming client keeps its latest SSID/radio.
+export const wifiClients = pgTable(
+  'wifi_clients',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    mac: text('mac').notNull(),
+    ssid: text('ssid'),
+    ip: text('ip'), // '' when the client has no address yet (counted, not joinable)
+    hostname: text('hostname'),
+    intf: text('intf'), // radio interface (e.g. "WLAN-1")
+    signalDbm: doublePrecision('signalDbm'),
+    txRateMbps: doublePrecision('txRateMbps'),
+    rxRateMbps: doublePrecision('rxRateMbps'),
+    vlanId: integer('vlanId'),
+    lastSeenAt: text('lastSeenAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkWifiClients: uniqueIndex('uq_wifi_clients')
+        .on(table.deviceId, table.pluginId, table.mac),
+      idxWifiClientsDevice: index('idx_wifi_clients_device').on(table.deviceId),
+    };
+  }
+);
+
 // Execution plans produced by a plugin's /plan endpoint (e.g. an OPNsense
 // WireGuard tunnel spanning two firewalls). The API persists the plan and its
 // steps, fulfils the plan's provisionRequests via the secrets provider at

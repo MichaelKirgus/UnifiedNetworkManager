@@ -71,6 +71,7 @@ export interface LcosRadio {
 export interface LcosSsid {
   name: string; // networkName (profile) — display key
   ssid: string;
+  ifc: string; // radio interface it is broadcast on (e.g. "WLAN-1"), '' when unknown
   bssid: string; // '' when unavailable
   band: string;
   vlanId: number | null;
@@ -515,6 +516,8 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
       case 4: s.pskSuccess = Number(value) || 0; break;
       case 5: s.pskFailures = Number(value) || 0; break;
       case 6: s.pskWrongPassphrase = Number(value) || 0; break;
+      // Radio interface ("WLAN-1") — joins the SSID row to its radio/channel.
+      case 7: if (!s.ifc) s.ifc = value; break;
       case 10: s.bssid = normalizeMac(value); break;
     }
   }
@@ -706,6 +709,7 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
     ssids: [...ssids.entries()].map(([name, s]) => ({
       name,
       ssid: s.ssid || name,
+      ifc: s.ifc || '',
       bssid: s.bssid || '',
       band: s.band || '',
       vlanId: s.vlanId ?? null,

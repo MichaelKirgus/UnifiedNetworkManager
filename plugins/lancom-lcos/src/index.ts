@@ -382,6 +382,32 @@ app.post('/monitoring', async (req, res) => {
         rxRateMbps: c.rxRateMbps !== null ? String(c.rxRateMbps) : '—',
         vlanId: c.vlanId !== null ? String(c.vlanId) : '—',
       }));
+
+      // wifiNetworks[] / wifiAirtime[] → cross-device WiFi page. Band and
+      // channel are joined from the radio table (this MIB indexes the network
+      // table by radio only); airtime is per-radio — there is no per-channel
+      // utilization table in LCOS.
+      const BAND_SHORT: Record<string, string> = { '2.4 GHz': '2.4', '5 GHz': '5' };
+      const wifiNetworks: Array<Record<string, unknown>> = [];
+      for (const s of snapshot.ssids) {
+        const name = s.name || '';
+        if (!name) continue;
+        const radio = snapshot.radios.find((r) => r.ifc === s.ifc);
+        wifiNetworks.push({
+          name,
+          band: BAND_SHORT[radio?.bandLabel ?? ''] ?? '',
+          channel: radio?.channel ?? null,
+          ifc: s.ifc || null,
+          bssid: s.bssid || null,
+          vlanId: s.vlanId,
+        });
+      }
+      if (wifiNetworks.length > 0) metrics['wifiNetworks'] = wifiNetworks;
+
+      const wifiAirtime = snapshot.radios
+        .filter((r) => r.channel !== null && Number.isFinite(r.channel))
+        .map((r) => ({ channel: r.channel, utilizationPct: r.utilizationPct }));
+      if (wifiAirtime.length > 0) metrics['wifiAirtime'] = wifiAirtime;
     }
 
     // --- Temperature --------------------------------------------------------
@@ -433,10 +459,18 @@ app.post('/monitoring', async (req, res) => {
       }));
     if (leaseRows.length > 0) metrics['dhcpLeases'] = leaseRows;
 
-    // wlanClients[] → hosts table with source 'wlan' (only clients with an IP).
-    const wlanClients = snapshot.clients
-      .filter((c) => c.ip4 !== '' || c.ip6 !== '')
-      .map((c) => ({ mac: c.mac, ip: c.ip4 || c.ip6, hostname: c.hostname || null, intf: c.ifc || null }));
+    // wlanClients[] → hosts table with source 'wlan' + WiFi page client counts.
+    // ALL associated stations are emitted — IP-less ones included; host
+    // ingestion skips rows without an address. The SSID is joined via the
+    // station's radio (the network table is indexed by radio in this MIB).
+    const ssidByIfc = new Map(snapshot.ssids.filter((s) => s.name !== '').map((s) => [s.ifc, s.name]));
+    const wlanClients = snapshot.clients.map((c) => ({
+      mac: c.mac,
+      ip: c.ip4 || c.ip6,
+      hostname: c.hostname || null,
+      intf: c.ifc || null,
+      ssid: (c.ifc ? ssidByIfc.get(c.ifc) : undefined) ?? null,
+    }));
     if (wlanClients.length > 0) metrics['wlanClients'] = wlanClients;
 
     // --- Health -------------------------------------------------------------

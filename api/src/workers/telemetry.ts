@@ -309,6 +309,152 @@ async function ingestInventory(
           notInArray(schema.tunnels.name, Array.from(seenTunnelNames))
         ));
     }
+
+    // --- WiFi (SSIDs / per-channel airtime / associated clients) ------------
+    const numOrNull = (v: unknown): number | null =>
+      typeof v === 'number' && Number.isFinite(v) ? v : null;
+
+    const rawWifiNetworks = Array.isArray(metrics['wifiNetworks']) ? (metrics['wifiNetworks'] as unknown[]) : [];
+    if (rawWifiNetworks.length > 0) {
+      const values: {
+        deviceId: string; pluginId: string; name: string; band: string; channel: number | null;
+        bssid: string | null; encryption: string | null; vlanId: number | null; ifc: string | null;
+        collectedAt: string;
+      }[] = [];
+      for (const raw of rawWifiNetworks) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        if (!name) continue;
+        values.push({
+          deviceId,
+          pluginId,
+          name,
+          band: typeof r['band'] === 'string' ? (r['band'] as string).trim() : '',
+          channel: numOrNull(r['channel']),
+          bssid: typeof r['bssid'] === 'string' && (r['bssid'] as string).trim() !== '' ? (r['bssid'] as string).trim().toLowerCase() : null,
+          encryption: typeof r['encryption'] === 'string' && (r['encryption'] as string).trim() !== '' ? (r['encryption'] as string).trim() : null,
+          vlanId: numOrNull(r['vlanId']),
+          ifc: typeof r['ifc'] === 'string' && (r['ifc'] as string).trim() !== '' ? (r['ifc'] as string).trim() : null,
+          collectedAt,
+        });
+      }
+      const wifiByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        wifiByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}|${v.band}`, v);
+      }
+      if (wifiByKey.size > 0) {
+        await db.insert(schema.wifiSsids).values(Array.from(wifiByKey.values())).onConflictDoUpdate({
+          target: [schema.wifiSsids.deviceId, schema.wifiSsids.pluginId, schema.wifiSsids.name, schema.wifiSsids.band],
+          set: {
+            channel: sql`excluded.channel`,
+            bssid: sql`excluded.bssid`,
+            encryption: sql`excluded.encryption`,
+            vlanId: sql`excluded."vlanId"`,
+            ifc: sql`excluded.ifc`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      // SSIDs are CONFIG objects — a removed network must vanish from the page.
+      const seenWifiNames = new Set(values.map((v) => v.name));
+      await db.delete(schema.wifiSsids)
+        .where(and(
+          eq(schema.wifiSsids.deviceId, deviceId),
+          eq(schema.wifiSsids.pluginId, pluginId),
+          notInArray(schema.wifiSsids.name, Array.from(seenWifiNames))
+        ));
+    }
+
+    const rawWifiAirtime = Array.isArray(metrics['wifiAirtime']) ? (metrics['wifiAirtime'] as unknown[]) : [];
+    if (rawWifiAirtime.length > 0) {
+      const values: { deviceId: string; pluginId: string; channel: number; utilizationPct: number | null; collectedAt: string }[] = [];
+      for (const raw of rawWifiAirtime) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const ch = numOrNull(r['channel']);
+        if (ch === null) continue; // channel is part of the conflict key
+        values.push({ deviceId, pluginId, channel: Math.round(ch), utilizationPct: numOrNull(r['utilizationPct']), collectedAt });
+      }
+      const airByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        airByKey.set(`${v.deviceId}|${v.pluginId}|${v.channel}`, v);
+      }
+      if (airByKey.size > 0) {
+        await db.insert(schema.wifiChannels).values(Array.from(airByKey.values())).onConflictDoUpdate({
+          target: [schema.wifiChannels.deviceId, schema.wifiChannels.pluginId, schema.wifiChannels.channel],
+          set: {
+            utilizationPct: sql`excluded."utilizationPct"`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      const seenAirtimeChannels = new Set(values.map((v) => v.channel));
+      await db.delete(schema.wifiChannels)
+        .where(and(
+          eq(schema.wifiChannels.deviceId, deviceId),
+          eq(schema.wifiChannels.pluginId, pluginId),
+          notInArray(schema.wifiChannels.channel, Array.from(seenAirtimeChannels))
+        ));
+    }
+
+    // Associated WLAN clients — upserted by MAC (a roaming client keeps its
+    // latest SSID/radio). Rows for stations that disappeared are dropped.
+    const rawWifiClients = Array.isArray(metrics['wlanClients']) ? (metrics['wlanClients'] as unknown[]) : [];
+    if (rawWifiClients.length > 0) {
+      const values: {
+        deviceId: string; pluginId: string; mac: string; ssid: string | null; ip: string | null;
+        hostname: string | null; intf: string | null; signalDbm: number | null;
+        txRateMbps: number | null; rxRateMbps: number | null; vlanId: number | null; lastSeenAt: string;
+      }[] = [];
+      for (const raw of rawWifiClients) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const mac = typeof r['mac'] === 'string' ? (r['mac'] as string).trim().toLowerCase() : '';
+        if (!mac) continue; // MAC is part of the conflict key
+        values.push({
+          deviceId,
+          pluginId,
+          mac,
+          ssid: typeof r['ssid'] === 'string' && (r['ssid'] as string).trim() !== '' ? (r['ssid'] as string).trim() : null,
+          ip: typeof r['ip'] === 'string' && (r['ip'] as string).trim() !== '' ? (r['ip'] as string).trim() : null,
+          hostname: typeof r['hostname'] === 'string' && (r['hostname'] as string).trim() !== '' ? (r['hostname'] as string) : null,
+          intf: typeof r['intf'] === 'string' && (r['intf'] as string).trim() !== '' ? (r['intf'] as string) : null,
+          signalDbm: numOrNull(r['signalDbm']),
+          txRateMbps: numOrNull(r['txRateMbps']),
+          rxRateMbps: numOrNull(r['rxRateMbps']),
+          vlanId: numOrNull(r['vlanId']),
+          lastSeenAt: collectedAt,
+        });
+      }
+      const clientByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        clientByKey.set(`${v.deviceId}|${v.pluginId}|${v.mac}`, v);
+      }
+      if (clientByKey.size > 0) {
+        await db.insert(schema.wifiClients).values(Array.from(clientByKey.values())).onConflictDoUpdate({
+          target: [schema.wifiClients.deviceId, schema.wifiClients.pluginId, schema.wifiClients.mac],
+          set: {
+            ssid: sql`excluded.ssid`,
+            ip: sql`excluded.ip`,
+            hostname: sql`excluded.hostname`,
+            intf: sql`excluded.intf`,
+            signalDbm: sql`excluded."signalDbm"`,
+            txRateMbps: sql`excluded."txRateMbps"`,
+            rxRateMbps: sql`excluded."rxRateMbps"`,
+            vlanId: sql`excluded."vlanId"`,
+            lastSeenAt: sql`excluded."lastSeenAt"`,
+          },
+        });
+      }
+      const seenClientMacs = new Set(values.map((v) => v.mac));
+      await db.delete(schema.wifiClients)
+        .where(and(
+          eq(schema.wifiClients.deviceId, deviceId),
+          eq(schema.wifiClients.pluginId, pluginId),
+          notInArray(schema.wifiClients.mac, Array.from(seenClientMacs))
+        ));
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(
@@ -328,6 +474,9 @@ async function sweepStaleInventory(): Promise<void> {
   await db.delete(schema.hosts).where(lt(schema.hosts.lastSeenAt, cutoff));
   await db.delete(schema.networks).where(lt(schema.networks.collectedAt, cutoff));
   await db.delete(schema.tunnels).where(lt(schema.tunnels.collectedAt, cutoff));
+  await db.delete(schema.wifiSsids).where(lt(schema.wifiSsids.collectedAt, cutoff));
+  await db.delete(schema.wifiChannels).where(lt(schema.wifiChannels.collectedAt, cutoff));
+  await db.delete(schema.wifiClients).where(lt(schema.wifiClients.lastSeenAt, cutoff));
 }
 
 /**

@@ -274,6 +274,59 @@ export async function initDb(): Promise<void> {
   // Added after the initial release — existing deployments need the column.
   await pool.query(`ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS "lastHandshakeSeconds" DOUBLE PRECISION`);
 
+  // WiFi inventory tables (WiFi page) — same lifecycle as networks/hosts/tunnels.
+  // One row per SSID×band as reported by a plugin's `wifiNetworks` metric.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS wifi_ssids (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      band TEXT NOT NULL DEFAULT '',
+      channel INTEGER,
+      bssid TEXT,
+      encryption TEXT,
+      "vlanId" INTEGER,
+      ifc TEXT,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name, band)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_wifi_ssids_device ON wifi_ssids ("deviceId")`);
+
+  // One row per channel with an airtime-utilization sample (`wifiAirtime`).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS wifi_channels (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      channel INTEGER NOT NULL,
+      "utilizationPct" DOUBLE PRECISION,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", channel)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_wifi_channels_device ON wifi_channels ("deviceId")`);
+
+  // One row per associated WLAN client (`wlanClients`) — powers the per-SSID
+  // connected-client counts on the WiFi page.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS wifi_clients (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      mac TEXT NOT NULL,
+      ssid TEXT,
+      ip TEXT,
+      hostname TEXT,
+      intf TEXT,
+      "signalDbm" DOUBLE PRECISION,
+      "txRateMbps" DOUBLE PRECISION,
+      "rxRateMbps" DOUBLE PRECISION,
+      "vlanId" INTEGER,
+      "lastSeenAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", mac)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_wifi_clients_device ON wifi_clients ("deviceId")`);
+
   // The legacy singular columns are superseded by device_plugins. There is no
   // production data to migrate (confirmed), so drop them outright — any dev
   // devices must be recreated via the new multi-plugin create flow.

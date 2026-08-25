@@ -285,6 +285,60 @@ export interface TunnelRow {
   collectedAt: string;
 }
 
+/** One distinct (band, channel) pair broadcasting an SSID. */
+export interface WifiChannelRef {
+  /** '2.4' | '5' | '6'; '' when the device cannot say which band. */
+  band: string;
+  channel?: number | null;
+}
+
+/** One device broadcasting an SSID (one entry per device+plugin instance). */
+export interface WifiDeviceRef {
+  deviceId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+  /** Radio interface(s) broadcasting this SSID (e.g. "WLAN-1"). */
+  interfaces: string[];
+}
+
+/** One SSID group in the cross-device WiFi overview (grouped by name). */
+export interface WifiSsidGroup {
+  name: string;
+  channels: WifiChannelRef[];
+  /** Distinct encryption values across the group; empty when not exposed. */
+  security: string[];
+  /** VLAN id — only set when unique across ALL rows of this SSID. */
+  vlanId?: number | null;
+  /** Connected clients currently associated with this SSID (all devices). */
+  clientCount: number;
+  airtimeMeanPct?: number | null;
+  airtimeMaxPct?: number | null;
+  devices: WifiDeviceRef[];
+}
+
+/** One bar in the per-band spectrum view. */
+export interface WifiSpectrumEntry {
+  name: string;
+  channel: number;
+  utilizationPct?: number | null;
+}
+
+/** Per-band spectrum data (2.4 / 5 / 6 GHz), own SSIDs only. */
+export interface WifiBandView {
+  band: '2.4' | '5' | '6';
+  minChannel?: number | null;
+  maxChannel?: number | null;
+  entries: WifiSpectrumEntry[];
+}
+
+/** Response of GET /wifi — grouped SSIDs + per-band spectrum entries. */
+export interface WifiOverview {
+  ssids: WifiSsidGroup[];
+  bands: WifiBandView[];
+}
+
 /** A user account (never includes password hashes or TOTP secrets). */
 export interface User {
   id: string;
@@ -723,6 +777,12 @@ export const api = {
     if (params?.type) qs.set('type', params.type);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<TunnelRow[]>(`/tunnels${suffix}`);
+  },
+  wifi: (params?: { siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<WifiOverview>(`/wifi${suffix}`);
   },
   // Users + permission catalog.
   users: () => apiFetch<User[]>('/users'),

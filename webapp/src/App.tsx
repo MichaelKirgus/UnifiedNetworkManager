@@ -12,6 +12,7 @@ import Sites from './pages/Sites';
 import Networks from './pages/Networks';
 import Hosts from './pages/Hosts';
 import Tunnels from './pages/Tunnels';
+import Wifi from './pages/Wifi';
 import Users from './pages/Users';
 import Roles from './pages/Roles';
 import Tokens from './pages/Tokens';
@@ -114,6 +115,14 @@ export default function App() {
         element={
           <RequireAuth>
             <Tunnels />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/wifi"
+        element={
+          <RequireAuth>
+            <Wifi />
           </RequireAuth>
         }
       />

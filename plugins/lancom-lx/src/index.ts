@@ -411,15 +411,48 @@ app.post('/monitoring', async (req, res) => {
     });
 
     // wlanClients[] → hosts table with source 'wlan' (API-side ingestion).
-    const wlanClients = snapshot.clients
-      .filter((c) => c.ip4 !== '' || c.ip6 !== '')
-      .map((c) => ({
-        mac: c.mac,
-        ip: c.ip4 || c.ip6,
-        hostname: c.hostname || c.username || null,
-        intf: c.ifc || null,
-      }));
+    // ALL associated stations are emitted — IP-less ones included — because the
+    // cross-device WiFi page counts connected clients per SSID. Host ingestion
+    // skips rows without an address, so the Hosts page is unaffected.
+    const wlanClients = snapshot.clients.map((c) => ({
+      mac: c.mac,
+      ip: c.ip4 || c.ip6,
+      hostname: c.hostname || c.username || null,
+      intf: c.ifc || null,
+      ssid: c.ssid || null,
+    }));
     if (wlanClients.length > 0) metrics['wlanClients'] = wlanClients;
+
+    // wifiNetworks[] / wifiAirtime[] → cross-device WiFi page. One row per
+    // SSID×band (per radio); the channel is joined from the radio table via the
+    // SSID's ifc, and airtime comes from the per-channel utilization table.
+    const BAND_SHORT: Record<string, string> = { '2.4 GHz': '2.4', '5 GHz': '5', '6 GHz': '6' };
+    const wifiNetworks: Array<Record<string, unknown>> = [];
+    const emittedWifiKeys = new Set<string>();
+    for (const s of snapshot.ssids) {
+      const name = s.ssid || s.name;
+      if (!name) continue;
+      const band = BAND_SHORT[s.band] ?? '';
+      const key = `${name}|${band}`;
+      if (emittedWifiKeys.has(key)) continue;
+      emittedWifiKeys.add(key);
+      const radio = snapshot.radios.find((r) => r.ifc === s.ifc);
+      wifiNetworks.push({
+        name,
+        band,
+        channel: radio?.channel ?? null,
+        ifc: s.ifc || null,
+        bssid: s.bssid || null,
+        encryption: s.encryption || null,
+        vlanId: s.vlanId,
+      });
+    }
+    if (wifiNetworks.length > 0) metrics['wifiNetworks'] = wifiNetworks;
+
+    const wifiAirtime = snapshot.channelUtilization
+      .filter((c) => Number.isFinite(c.channel))
+      .map((c) => ({ channel: c.channel, utilizationPct: c.utilizationPct }));
+    if (wifiAirtime.length > 0) metrics['wifiAirtime'] = wifiAirtime;
 
     // --- Health -------------------------------------------------------------
     let health: Health = 'ok';

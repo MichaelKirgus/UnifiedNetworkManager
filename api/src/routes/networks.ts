@@ -621,6 +621,144 @@ router.get('/tunnels', requireAuth, async (_req, res: Response) => {
   }
 });
 
+// GET /wifi - Cross-device WiFi overview (WiFi page).
+// Groups the normalized `wifi_ssids` rows by SSID name across all devices and
+// joins per-channel airtime (`wifi_channels`) + connected-client counts
+// (`wifi_clients`). Also returns a per-band entry list for the spectrum view.
+// Query params: siteId (filter to one site's devices).
+router.get('/wifi', requireAuth, async (_req, res: Response) => {
+  try {
+    const { siteId } = _req.query as Record<string, string | undefined>;
+
+    let deviceIds: string[] | null = null;
+    if (siteId) {
+      deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (deviceIds.length === 0) {
+        res.status(200).json({ ssids: [], bands: [] });
+        return;
+      }
+    }
+
+    const [ssidRows, channelRows, clientRows] = await Promise.all([
+      db.query.wifiSsids.findMany(deviceIds ? { where: inArray(schema.wifiSsids.deviceId, deviceIds) } : undefined),
+      db.query.wifiChannels.findMany(deviceIds ? { where: inArray(schema.wifiChannels.deviceId, deviceIds) } : undefined),
+      db.query.wifiClients.findMany(deviceIds ? { where: inArray(schema.wifiClients.deviceId, deviceIds) } : undefined),
+    ]);
+
+    const [deviceViews, pluginNames] = await Promise.all([
+      loadDeviceViews(Array.from(new Set(ssidRows.map((r) => r.deviceId)))),
+      loadPluginNames(Array.from(new Set(ssidRows.map((r) => r.pluginId)))),
+    ]);
+
+    // Per-device channel -> utilization lookup (airtime join).
+    const utilByDeviceChannel = new Map<string, number | null>();
+    for (const c of channelRows) {
+      utilByDeviceChannel.set(`${c.deviceId}|${c.channel}`, c.utilizationPct);
+    }
+
+    // Per-SSID connected-client counts (a client's latest SSID wins — the row
+    // is upserted by MAC, so each station appears exactly once per device).
+    const clientsBySsid = new Map<string, number>();
+    for (const c of clientRows) {
+      if (!c.ssid) continue;
+      clientsBySsid.set(c.ssid, (clientsBySsid.get(c.ssid) ?? 0) + 1);
+    }
+
+    // --- Group SSID rows by name -------------------------------------------
+    interface SsidGroup {
+      name: string;
+      channels: Array<{ channel: number | null; band: string }>;
+      security: string[];
+      vlanId: number | null; // only when unique across the whole group
+      clientCount: number;
+      airtimeMeanPct: number | null;
+      airtimeMaxPct: number | null;
+      // pluginId is an internal join key (one chip per device+plugin instance) —
+      // it is not part of the serialized response shape.
+      devices: Array<{ deviceId: string; pluginId?: string; deviceName: string | null; managementAddress: string | null; siteName: string | null; pluginName: string | null; interfaces: string[] }>;
+    }
+
+    const groups = new Map<string, SsidGroup>();
+    for (const r of ssidRows) {
+      let g = groups.get(r.name);
+      if (!g) {
+        g = { name: r.name, channels: [], security: [], vlanId: null, clientCount: clientsBySsid.get(r.name) ?? 0, airtimeMeanPct: null, airtimeMaxPct: null, devices: [] };
+        groups.set(r.name, g);
+      }
+      // Channels: one entry per distinct (band, channel) pair.
+      if (!g.channels.some((c) => c.band === r.band && c.channel === r.channel)) {
+        g.channels.push({ channel: r.channel, band: r.band });
+      }
+      // Security: distinct non-empty values across all rows of the group.
+      if (r.encryption && !g.security.includes(r.encryption)) g.security.push(r.encryption);
+      // Devices: one chip per device+plugin, radio interfaces listed.
+      let dev = g.devices.find((d) => d.deviceId === r.deviceId && (d as { pluginId?: string }).pluginId === r.pluginId);
+      if (!dev) {
+        const view = deviceViews.get(r.deviceId);
+        dev = { deviceId: r.deviceId, deviceName: view?.name ?? null, managementAddress: view?.managementAddress ?? null, siteName: view?.siteName ?? null, pluginName: pluginNames.get(r.pluginId) ?? null, interfaces: [] };
+        (dev as { pluginId?: string }).pluginId = r.pluginId; // internal join key, not serialized
+        g.devices.push(dev);
+      }
+      if (r.ifc && !dev.interfaces.includes(r.ifc)) dev.interfaces.push(r.ifc);
+    }
+
+    // Second pass: airtime mean/max + unique VLAN. Collect per-group utilizations
+    // and distinct VLAN ids in one loop over the raw rows.
+    const utilsByGroup = new Map<string, number[]>();
+    const vlansByGroup = new Map<string, Set<number>>();
+    for (const r of ssidRows) {
+      if (r.channel !== null) {
+        const util = utilByDeviceChannel.get(`${r.deviceId}|${r.channel}`);
+        if (typeof util === 'number' && Number.isFinite(util)) {
+          let arr = utilsByGroup.get(r.name);
+          if (!arr) { arr = []; utilsByGroup.set(r.name, arr); }
+          arr.push(util);
+        }
+      }
+      if (r.vlanId !== null) {
+        let set = vlansByGroup.get(r.name);
+        if (!set) { set = new Set(); vlansByGroup.set(r.name, set); }
+        set.add(r.vlanId);
+      }
+    }
+    for (const g of groups.values()) {
+      const utils = utilsByGroup.get(g.name);
+      if (utils && utils.length > 0) {
+        g.airtimeMeanPct = Math.round((utils.reduce((a, b) => a + b, 0) / utils.length) * 10) / 10;
+        g.airtimeMaxPct = Math.max(...utils);
+      } else {
+        g.airtimeMeanPct = null;
+        g.airtimeMaxPct = null;
+      }
+      const vlans = vlansByGroup.get(g.name);
+      g.vlanId = vlans && vlans.size === 1 ? Array.from(vlans)[0] : null;
+    }
+
+    // --- Band view (spectrum) ----------------------------------------------
+    // One entry per SSID×band row with a known channel; band '' rows are
+    // excluded (the device cannot place them on the spectrum).
+    const BANDS = ['2.4', '5', '6'] as const;
+    const bands = BANDS.map((band) => {
+      const entries = ssidRows
+        .filter((r) => r.band === band && r.channel !== null)
+        .map((r) => ({ name: r.name, channel: r.channel as number, utilizationPct: utilByDeviceChannel.get(`${r.deviceId}|${r.channel}`) ?? null }));
+      const channels = entries.map((e) => e.channel);
+      return {
+        band,
+        minChannel: channels.length > 0 ? Math.min(...channels) : null,
+        maxChannel: channels.length > 0 ? Math.max(...channels) : null,
+        entries,
+      };
+    });
+
+    const ssids = Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
+    res.status(200).json({ ssids, bands });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 /** Parses a JSON text column defensively — corrupt rows must not break the list. */
 function safeParseJson<T>(raw: string): T {
   try {

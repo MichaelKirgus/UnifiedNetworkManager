@@ -1689,6 +1689,33 @@ paths:
         '401':
           description: Authentication required
 
+  /wifi:
+    get:
+      tags: [Inventory]
+      summary: Cross-device WiFi overview (SSIDs grouped by name)
+      description: >-
+        Groups the normalized `wifi_ssids` inventory rows by SSID name across all
+        devices and joins per-channel airtime utilization (`wifi_channels`) with
+        connected-client counts (`wifi_clients`). Populated by the telemetry
+        worker from each plugin's /monitoring metrics (LANCOM LX APs and LCOS
+        routers with built-in radios). Also returns a per-band entry list for
+        the spectrum view. Rows not refreshed within 24h are swept away.
+      parameters:
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+      responses:
+        '200':
+          description: WiFi overview (grouped SSIDs + per-band spectrum entries)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WifiOverview'
+        '401':
+          description: Authentication required
+
   /users:
     get:
       tags: [Users]
@@ -2610,6 +2637,85 @@ components:
           additionalProperties: true
           description: "Type-specific extras (ikeType, cryptAlg, mode, allowedIPs, ...)"
         collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this tunnel" }
+
+    WifiOverview:
+      type: object
+      required: [ssids, bands]
+      properties:
+        ssids:
+          type: array
+          items:
+            $ref: '#/components/schemas/WifiSsidGroup'
+        bands:
+          type: array
+          description: "Per-band spectrum entries (2.4 / 5 / 6 GHz), own SSIDs only"
+          items:
+            $ref: '#/components/schemas/WifiBandView'
+
+    WifiSsidGroup:
+      type: object
+      required: [name, channels, security, clientCount]
+      properties:
+        name: { type: string, description: "SSID / network name (grouping key)" }
+        channels:
+          type: array
+          description: "Distinct (band, channel) pairs broadcasting this SSID"
+          items:
+            $ref: '#/components/schemas/WifiChannelRef'
+        security:
+          type: array
+          description: "Distinct encryption values across the group (empty when not exposed)"
+          items: { type: string }
+        vlanId: { type: [number, 'null'], description: "VLAN id — only set when unique across ALL rows of this SSID" }
+        clientCount: { type: integer, description: "Connected clients currently associated with this SSID (across all devices)" }
+        airtimeMeanPct: { type: [number, 'null'], description: "Mean airtime utilization (%) over all channels/devices of this SSID; null when no data" }
+        airtimeMaxPct: { type: [number, 'null'], description: "Maximum airtime utilization (%) over all channels/devices of this SSID; null when no data" }
+        devices:
+          type: array
+          description: "Devices broadcasting this SSID (one entry per device+plugin instance)"
+          items:
+            $ref: '#/components/schemas/WifiDeviceRef'
+
+    WifiChannelRef:
+      type: object
+      required: [band]
+      properties:
+        band: { type: string, description: "'2.4' | '5' | '6'; '' when the device cannot say which band" }
+        channel: { type: [number, 'null'], description: "Channel number on that band; null when unknown" }
+
+    WifiDeviceRef:
+      type: object
+      required: [deviceId]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'] }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginName: { type: [string, 'null'] }
+        interfaces:
+          type: array
+          description: "Radio interface(s) broadcasting this SSID (e.g. WLAN-1)"
+          items: { type: string }
+
+    WifiBandView:
+      type: object
+      required: [band, entries]
+      properties:
+        band: { type: string, enum: ['2.4', '5', '6'] }
+        minChannel: { type: [number, 'null'], description: "Lowest channel in use on this band (for axis scaling); null when empty" }
+        maxChannel: { type: [number, 'null'], description: "Highest channel in use on this band; null when empty" }
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/WifiSpectrumEntry'
+
+    WifiSpectrumEntry:
+      type: object
+      required: [name, channel]
+      properties:
+        name: { type: string, description: "SSID broadcasting on this channel" }
+        channel: { type: number }
+        utilizationPct: { type: [number, 'null'], description: "Airtime utilization (%) at this channel; null when the device reports no value" }
 
     # One plugin's monitoring snapshot for a device (a device can have several).
     PluginTelemetrySnapshot:

@@ -43,6 +43,9 @@ interface DataTableProps<T> {
   selectable?: boolean;
   /** Bulk action buttons rendered in the selection bar (requires `selectable`). */
   bulkActions?: DataTableBulkAction<T>[];
+  /** Called when the pointer enters a row, or leaves the table body entirely.
+   * Used e.g. by the WiFi page to highlight matching spectrum bars on hover. */
+  onRowHover?: (row: T | null) => void;
 }
 
 const MIN_COL_WIDTH = 80;
@@ -140,6 +143,7 @@ export function DataTable<T>({
   searchPlaceholder = 'Search…',
   selectable = false,
   bulkActions,
+  onRowHover,
 }: DataTableProps<T>) {
   const { prefs, setPrefs, reset } = useTablePrefs(storageKey);
   const [menuOpen, setMenuOpen] = useState(false); // column visibility picker
@@ -578,11 +582,18 @@ export function DataTable<T>({
                 </tr>
               )}
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody
+            className="divide-y divide-slate-100"
+            onMouseLeave={() => onRowHover?.(null)}
+          >
             {viewRows.map((row) => {
               const key = rowKey(row);
               return (
-                <tr key={key} className={clsx('hover:bg-slate-50', selectable && selectedKeys.has(key) && 'bg-blue-50/40')}>
+                <tr
+                  key={key}
+                  className={clsx('hover:bg-slate-50', selectable && selectedKeys.has(key) && 'bg-blue-50/40')}
+                  onMouseEnter={() => onRowHover?.(row)}
+                >
                   {selectable && (
                     <td className="px-3 py-2">
                       <input
