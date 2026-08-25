@@ -117,7 +117,9 @@ export async function snmpWalk(
     return parseWalkOutput(stdout);
   } catch (err) {
     const e = err as Error & { stderr?: string };
-    const detail = ((e.stderr ?? '') || e.message).trim().split('\n')[0];
+    // Keep the first few lines — net-snmp's "Reason: (noSuchName)…" line is
+    // what callers need to tell an agent-answered error apart from a timeout.
+    const detail = ((e.stderr ?? '') || e.message).trim().split('\n').slice(0, 3).join(' | ');
     throw new Error(`snmpwalk failed for ${host}: ${detail}`);
   }
 }
@@ -149,7 +151,9 @@ export async function snmpGet(
     return parseWalkOutput(stdout);
   } catch (err) {
     const e = err as Error & { stderr?: string };
-    const detail = ((e.stderr ?? '') || e.message).trim().split('\n')[0];
+    // Keep the first few lines — net-snmp's "Reason: (noSuchName)…" line is
+    // what callers need to tell an agent-answered error apart from a timeout.
+    const detail = ((e.stderr ?? '') || e.message).trim().split('\n').slice(0, 3).join(' | ');
     throw new Error(`snmpget failed for ${host}: ${detail}`);
   }
 }
@@ -190,7 +194,9 @@ export async function snmpSet(
     return '';
   } catch (err) {
     const e = err as Error & { stderr?: string };
-    const detail = ((e.stderr ?? '') || e.message).trim().split('\n')[0];
+    // Keep the first few lines — net-snmp's "Reason:" line distinguishes a
+    // rejected SET from a transport failure.
+    const detail = ((e.stderr ?? '') || e.message).trim().split('\n').slice(0, 3).join(' | ');
     throw new Error(`snmpset failed for ${host} (${oid}): ${detail}`);
   }
 }
