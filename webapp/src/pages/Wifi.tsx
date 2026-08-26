@@ -1,11 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { ChevronDown, ChevronUp, Wifi as WifiIcon } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
-import { api, WifiBandView, WifiSsidGroup } from '../api/client';
+import { api, WifiBandView, WifiNeighborRef, WifiSsidGroup } from '../api/client';
 
 /** Color scale for airtime utilization (green → amber → red). */
 function utilColor(pct: number | null): string {
@@ -13,6 +13,20 @@ function utilColor(pct: number | null): string {
   if (pct < 30) return 'text-emerald-700';
   if (pct < 70) return 'text-amber-600';
   return 'text-red-600';
+}
+
+/** Bar fill for airtime utilization (green → amber → red). */
+function utilBarColor(pct: number | null): string {
+  if (pct === null) return '#cbd5e1'; // slate-300 — no data
+  if (pct < 30) return '#10b981'; // emerald-500
+  if (pct < 70) return '#f59e0b'; // amber-500
+  return '#ef4444'; // red-500
+}
+
+/** Pick a tick step so the axis shows at most ~14 labels. */
+function tickStep(span: number): number {
+  for (const s of [1, 2, 5, 10, 20]) if (span / s <= 14) return s;
+  return 50;
 }
 
 /** Stable per-SSID hues (scanner style): each network gets its own color so
@@ -32,9 +46,10 @@ const BAND_DEFAULTS: Record<string, { min: number; max: number; label: string }>
   '6': { min: 1, max: 233, label: '6 GHz' },
 };
 
-/** One WiFi-scanner-style band panel: a horizontal channel axis with one bar
- * per SSID×channel entry. Bar height ∝ airtime utilization; hovering an SSID
- * (here or in the table above) dims every other SSID's bars. */
+/** inSSIDer-style band panel: ONE bar per channel (height = airtime
+ * utilization), a noise-floor line at the bottom, and colored dots for own
+ * SSIDs at their channel position. Hovering an SSID (legend/table/dot) dims
+ * every channel that does NOT carry it. */
 function BandPanel({
   view,
   allNames,
@@ -56,61 +71,127 @@ function BandPanel({
   const max = Math.max(def.max, view.maxChannel ?? def.max);
   const span = max - min;
 
-  // Group entries by channel so co-channel SSIDs sit side by side instead of
-  // stacking on top of each other.
-  const byChannel = new Map<number, typeof view.entries>();
-  for (const e of view.entries) {
-    let arr = byChannel.get(e.channel);
-    if (!arr) { arr = []; byChannel.set(e.channel, arr); }
-    arr.push(e);
+  // Which own SSIDs sit on each channel (for hover dimming of bars).
+  const ssidsOnChannel = new Map<number, Set<string>>();
+  for (const m of view.markers) {
+    let set = ssidsOnChannel.get(m.channel);
+    if (!set) { set = new Set(); ssidsOnChannel.set(m.channel, set); }
+    set.add(m.name);
   }
+
+  const leftPct = (ch: number): string => `${((ch - min) / span) * 100}%`;
+  const step = tickStep(span);
+  const ticks: number[] = [];
+  for (let ch = Math.ceil(min / step) * step; ch <= max; ch += step) ticks.push(ch);
+
+  const empty = view.channels.length === 0 && view.markers.length === 0;
 
   return (
     <div className="rounded-lg border border-slate-200 bg-white p-3">
       <div className="mb-1 flex items-center justify-between">
         <span className="text-sm font-semibold text-slate-700">{def.label}</span>
-        <span className="text-xs text-slate-400">
-          {view.entries.length > 0 ? `${view.entries.length} network${view.entries.length === 1 ? '' : 's'} · ch ${min}–${max}` : 'no networks on this band'}
+        <span className="flex items-center gap-3 text-xs text-slate-400">
+          {view.noiseFloorDbm !== null && view.noiseFloorDbm !== undefined && (
+            <span title="Noisiest radio noise floor on this band" className="font-mono">noise {Math.round(view.noiseFloorDbm)} dBm</span>
+          )}
+          <span>{view.markers.length > 0 ? `${view.markers.length} network${view.markers.length === 1 ? '' : 's'} · ` : ''}ch {min}–{max}</span>
         </span>
       </div>
-      <div className="relative h-28 w-full">
-        {view.entries.length === 0 && (
+      <div className="relative h-32 w-full">
+        {empty && (
           <div className="flex h-full items-center justify-center text-xs text-slate-300">—</div>
         )}
-        {/* Airtime gridlines (bar area = 76px above the axis, bars sit on bottom-5). */}
+        {/* Airtime gridlines — bar area = 76px above the axis (bottom-5). */}
         {[0, 50, 100].map((v) => (
           <div key={v} className="absolute left-0 right-0" style={{ bottom: 20 + (v / 100) * 76 }}>
             <div className="h-px bg-slate-100" />
             <span className="absolute -top-1.5 left-0 text-[9px] font-mono text-slate-300">{v}%</span>
           </div>
         ))}
-        {[...byChannel.entries()].map(([channel, entries]) => {
-          const leftPct = ((channel - min) / span) * 100;
+        {/* One bar per channel — height ∝ airtime utilization (worst case across devices). */}
+        {view.channels.map((c) => {
+          const util: number | null = c.utilizationPct ?? null;
+          const h = util === null ? 8 : Math.max(8, (util / 100) * 76);
+          const names = ssidsOnChannel.get(c.channel);
+          const dimmed = hoveredSsid !== null && !(names?.has(hoveredSsid));
           return (
-            <div key={channel} className="absolute bottom-5 flex items-end gap-px" style={{ left: `${leftPct}%`, transform: 'translateX(-50%)' }}>
-              {entries.map((e, i) => {
-                const dimmed = hoveredSsid !== null && e.name !== hoveredSsid;
-                const util: number | null = e.utilizationPct ?? null;
-                const h = util === null ? 12 : Math.max(12, (util / 100) * 76);
-                return (
-                  <div
-                    key={`${e.name}-${i}`}
-                    className={clsx('w-3.5 rounded-t transition-opacity duration-150', dimmed && 'opacity-20')}
-                    style={{ height: h, background: `hsl(${ssidHue(e.name, allNames)}, 65%, 45%)` }}
-                    title={`${e.name} — ch ${channel}${util !== null ? ` · airtime ${util}%` : ''}`}
-                    onMouseEnter={() => onHover(e.name)}
-                    onMouseLeave={() => onHover(null)}
-                  />
-                );
-              })}
-            </div>
+            <div
+              key={c.channel}
+              className={clsx('absolute bottom-5 w-4 rounded-t transition-opacity duration-150', dimmed && 'opacity-25')}
+              style={{ left: leftPct(c.channel), transform: 'translateX(-50%)', height: h, background: utilBarColor(util) }}
+              title={`ch ${c.channel}${util !== null ? ` · airtime ${Math.round(util * 10) / 10}%` : ''}${names?.size ? `\n${[...names].join(', ')}` : ''}`}
+            />
           );
         })}
-        {/* Channel axis */}
+        {/* Own-SSID markers — colored dots in a lane above the bars. */}
+        {view.markers.map((m) => (
+          <div
+            key={`${m.name}-${m.channel}`}
+            className={clsx('absolute h-2.5 w-2.5 -translate-x-1/2 rounded-full border border-white shadow-sm transition-opacity duration-150', hoveredSsid !== null && m.name !== hoveredSsid && 'opacity-20')}
+            style={{ left: leftPct(m.channel), bottom: 20 + 76 + 4, background: `hsl(${ssidHue(m.name, allNames)}, 65%, 45%)` }}
+            title={`${m.name} — ch ${m.channel}`}
+            onMouseEnter={() => onHover(m.name)}
+            onMouseLeave={() => onHover(null)}
+          />
+        ))}
+        {/* Noise floor line (annotation — dBm is not on the % axis). */}
+        {view.noiseFloorDbm !== null && view.noiseFloorDbm !== undefined && !empty && (
+          <div className="absolute left-0 right-0 border-t border-dashed border-amber-400/70" style={{ bottom: 21 }}>
+            <span className="absolute -top-3.5 right-0 text-[9px] font-mono text-amber-600">noise {Math.round(view.noiseFloorDbm)} dBm</span>
+          </div>
+        )}
+        {/* Channel axis + ticks */}
         <div className="absolute bottom-0 left-0 right-0 h-px bg-slate-200" />
-        <div className="absolute -bottom-4 left-0 text-[10px] font-mono text-slate-400">{min}</div>
-        <div className="absolute -bottom-4 right-0 text-[10px] font-mono text-slate-400">{max}</div>
+        {ticks.map((ch) => (
+          <div key={ch} className="absolute -bottom-4 -translate-x-1/2 text-[9px] font-mono text-slate-400" style={{ left: leftPct(ch) }}>
+            {ch}
+          </div>
+        ))}
       </div>
+    </div>
+  );
+}
+
+/** Neighbor networks seen by device scan engines (inSSIDer's network list). */
+function NeighborList({ neighbors }: { neighbors: WifiNeighborRef[] }) {
+  const MAX_SHOWN = 30;
+  const shown = neighbors.slice(0, MAX_SHOWN);
+  return (
+    <div className="flex h-full flex-col rounded-lg border border-slate-200 bg-white p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-sm font-semibold text-slate-700">Neighbor networks</span>
+        <span className="text-xs text-slate-400">{neighbors.length} seen by your devices</span>
+      </div>
+      {shown.length === 0 ? (
+        <p className="m-auto text-xs text-slate-300">No neighbor scan data yet — LANCOM LX APs populate this within a poll cycle.</p>
+      ) : (
+        <ul className="-my-1 min-h-0 flex-1 divide-y divide-slate-50 overflow-y-auto">
+          {shown.map((n) => {
+            const dbm = n.signalDbm ?? null;
+            // Map -90…-30 dBm onto a 4–100% bar width.
+            const pct = dbm === null ? 0 : Math.max(4, Math.min(100, ((dbm + 90) / 60) * 100));
+            const color = dbm === null ? 'bg-slate-200' : dbm >= -55 ? 'bg-emerald-500' : dbm >= -70 ? 'bg-amber-500' : 'bg-red-400';
+            return (
+              <li key={`${n.deviceId}-${n.bssid}`} className="flex items-center gap-2 py-1.5" title={`BSSID ${n.bssid}${n.siteName ? ` · site ${n.siteName}` : ''} — seen by ${n.deviceName ?? n.managementAddress ?? 'unknown device'}`}>
+                <div className="h-1.5 w-16 shrink-0 overflow-hidden rounded bg-slate-100">
+                  <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
+                </div>
+                <span className={clsx('w-40 truncate text-xs', n.ssid ? 'font-medium text-slate-700' : 'italic text-slate-400')}>
+                  {n.ssid || `hidden (${n.bssid.slice(-5)})`}
+                </span>
+                <span className="whitespace-nowrap rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-600">
+                  {n.band || '—'}G · ch {n.channel ?? '?'}
+                </span>
+                <span className="w-12 shrink-0 text-right font-mono text-[10px] text-slate-500">{dbm !== null ? `${Math.round(dbm)} dBm` : '—'}</span>
+                <span className="min-w-0 flex-1 truncate text-right text-[10px] text-slate-400">{n.deviceName ?? n.managementAddress ?? ''}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {neighbors.length > MAX_SHOWN && (
+        <p className="mt-2 text-center text-[10px] text-slate-400">+{neighbors.length - MAX_SHOWN} more (weakest signals hidden)</p>
+      )}
     </div>
   );
 }
@@ -129,9 +210,74 @@ export default function Wifi() {
   const [hoveredSsid, setHoveredSsid] = useState<string | null>(null);
   const [spectrumOpen, setSpectrumOpen] = useState(true);
 
+  // Splitter layout: band diagrams (left) vs neighbor list (right). Each side can
+  // be collapsed so the other takes the full width; while both are open the
+  // divider is draggable.
+  const [bandsOpen, setBandsOpen] = useState(true);
+  const [neighborsOpen, setNeighborsOpen] = useState(true);
+  const [splitPct, setSplitPct] = useState(68);
+  const splitRef = useRef<HTMLDivElement>(null);
+  const dragCleanup = useRef<(() => void) | null>(null);
+
+  // Horizontal splitter: SSID table (top) vs spectrum view (bottom). The table
+  // gets a fixed share of the page height; collapsing the spectrum below gives
+  // it back to the table.
+  const [tablePct, setTablePct] = useState(50);
+  const vSplitRef = useRef<HTMLDivElement>(null);
+  const vDragCleanup = useRef<(() => void) | null>(null);
+
+  useEffect(() => () => { dragCleanup.current?.(); vDragCleanup.current?.(); }, []);
+
+  const startVDrag = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    const el = vSplitRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const move = (ev: globalThis.MouseEvent) => {
+      const pct = ((ev.clientY - rect.top) / rect.height) * 100;
+      setTablePct(Math.min(75, Math.max(25, pct)));
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      vDragCleanup.current = null;
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    vDragCleanup.current = up;
+  };
+
+  const startDrag = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    const el = splitRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const move = (ev: globalThis.MouseEvent) => {
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      setSplitPct(Math.min(75, Math.max(25, pct)));
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      dragCleanup.current = null;
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    dragCleanup.current = up;
+  };
+
   const overview = wifiQuery.data;
   const groups: WifiSsidGroup[] = overview?.ssids ?? [];
   const bands: WifiBandView[] = overview?.bands ?? [];
+  const neighbors: WifiNeighborRef[] = overview?.neighbors ?? [];
 
   // Sorted name list drives the stable per-SSID color palette (same order in
   // legend and all band panels).
@@ -231,71 +377,158 @@ export default function Wifi() {
 
   return (
     <Layout>
-      <div className="mb-4">
-        <h1 className="text-xl font-bold text-slate-900">WiFi</h1>
-        <p className="mt-1 text-sm text-slate-500">
-          All SSIDs across your devices, grouped by name — channels, security, VLAN and the devices broadcasting each network.
-          Hover a row (or a bar below) to highlight that SSID in the spectrum view.
-        </p>
-      </div>
+      {/* Full-height column: header, then table / spectrum split by a
+          horizontal splitter — collapsing the spectrum gives its space back to
+          the table instead of leaving it empty below. */}
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="mb-3 shrink-0">
+          <h1 className="text-xl font-bold text-slate-900">WiFi</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            All SSIDs across your devices, grouped by name — channels, security, VLAN and the devices broadcasting each network.
+            The spectrum view shows one bar per channel (airtime), a noise-floor line and your own networks as colored dots;
+            hover a row, legend entry or dot to highlight that SSID in all bands. Drag the divider between table and diagram to resize.
+          </p>
+        </div>
 
-      {wifiQuery.isLoading && <p className="text-sm text-slate-500">Loading WiFi networks...</p>}
-      {wifiQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load WiFi data: {(wifiQuery.error as Error).message}</p>
-      )}
+        {wifiQuery.isLoading && <p className="shrink-0 text-sm text-slate-500">Loading WiFi networks...</p>}
+        {wifiQuery.isError && (
+          <p className="shrink-0 text-sm text-red-600">Failed to load WiFi data: {(wifiQuery.error as Error).message}</p>
+        )}
 
-      <div className="flex flex-col gap-4">
-        <DataTable<WifiSsidGroup>
-          columns={columns}
-          rows={groups}
-          rowKey={(row) => row.name}
-          storageKey="wifi"
-          searchPlaceholder="Search SSIDs…"
-          emptyMessage="No WiFi networks reported yet — devices with built-in radios (LANCOM LX APs, LCOS routers) populate this view within a poll cycle."
-          onRowHover={(row) => setHoveredSsid(row ? row.name : null)}
-        />
-
-        {/* Collapsible spectrum view — all three bands, WiFi-scanner style. */}
-        <div className="rounded-lg border border-slate-200 bg-white">
-          <button
-            type="button"
-            onClick={() => setSpectrumOpen((o) => !o)}
-            className="flex w-full items-center justify-between px-4 py-3 text-left"
-            aria-expanded={spectrumOpen}
+        <div ref={vSplitRef} className="flex min-h-0 flex-1 flex-col">
+          {/* SSID table (top) — fixed share of the page height while the spectrum is
+              open; when collapsed it takes everything left of the header card. */}
+          <div
+            className={clsx('min-h-0 overflow-y-auto pr-1', !spectrumOpen && 'flex-1')}
+            style={{ height: spectrumOpen ? `${tablePct}%` : undefined }}
           >
-            <span className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-              <WifiIcon size={16} className="text-slate-500" />
-              Spectrum view — all bands
-            </span>
-            {spectrumOpen ? <ChevronUp size={18} className="text-slate-400" /> : <ChevronDown size={18} className="text-slate-400" />}
-          </button>
+            <DataTable<WifiSsidGroup>
+              columns={columns}
+              rows={groups}
+              rowKey={(row) => row.name}
+              storageKey="wifi"
+              searchPlaceholder="Search SSIDs…"
+              emptyMessage="No WiFi networks reported yet — devices with built-in radios (LANCOM LX APs, LCOS routers) populate this view within a poll cycle."
+              onRowHover={(row) => setHoveredSsid(row ? row.name : null)}
+            />
+          </div>
+
+          {/* Horizontal splitter between table and spectrum view. */}
           {spectrumOpen && (
-            <div className="flex flex-col gap-3 border-t border-slate-100 p-4">
-              {/* Legend: one swatch per SSID (same colors as the bars). Hovering a
-                  legend entry highlights that SSID's bars in ALL bands. */}
-              {groups.length > 0 && (
-                <div className="flex flex-wrap gap-x-4 gap-y-1">
-                  {groups.map((g) => (
-                    <span
-                      key={g.name}
-                      className="flex cursor-default items-center gap-1.5 text-xs text-slate-600"
-                      onMouseEnter={() => setHoveredSsid(g.name)}
-                      onMouseLeave={() => setHoveredSsid(null)}
-                    >
-                      <span
-                        className={clsx('h-2.5 w-2.5 rounded-sm transition-opacity duration-150', hoveredSsid !== null && hoveredSsid !== g.name && 'opacity-30')}
-                        style={{ background: `hsl(${ssidHue(g.name, allSsidNames)}, 65%, 45%)` }}
-                      />
-                      {g.name}
-                    </span>
-                  ))}
-                </div>
-              )}
-              {bands.map((b) => (
-                <BandPanel key={b.band} view={b} allNames={allSsidNames} hoveredSsid={hoveredSsid} onHover={setHoveredSsid} />
-              ))}
+            <div
+              role="separator"
+              aria-orientation="horizontal"
+              onMouseDown={startVDrag}
+              className="group relative -my-1 h-3 shrink-0 cursor-row-resize"
+              title="Drag to resize — or collapse the spectrum view for full table height"
+            >
+              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-slate-200 transition-colors group-hover:bg-indigo-400" />
+              <div className="absolute left-1/2 top-1/2 flex h-3 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center">
+                <span className="h-1 w-6 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400" />
+              </div>
             </div>
           )}
+
+          {/* Spectrum view (bottom) — takes the remaining height; each column
+              inside scrolls independently so nothing spills out of the card.
+              The header stays mounted when collapsed so it can be re-opened. */}
+          <div className={clsx('shrink-0 min-h-0 pl-1', spectrumOpen && 'flex-1')}>
+            {/* Collapsible spectrum view — all three bands, WiFi-scanner style.
+                The header (with its toggle) stays mounted when collapsed so the
+                view can be re-opened; only the content below it is conditional. */}
+            <div className="flex h-full min-h-0 flex-col rounded-lg border border-slate-200 bg-white">
+              <button
+                type="button"
+                onClick={() => setSpectrumOpen((o) => !o)}
+                className="flex w-full shrink-0 items-center justify-between px-4 py-3 text-left"
+                aria-expanded={spectrumOpen}
+              >
+                <span className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+                  <WifiIcon size={16} className="text-slate-500" />
+                  Spectrum view — all bands
+                </span>
+                {spectrumOpen ? <ChevronUp size={18} className="text-slate-400" /> : <ChevronDown size={18} className="text-slate-400" />}
+              </button>
+          {spectrumOpen && (
+            <div className="flex min-h-0 flex-1 flex-col border-t border-slate-100 p-4">
+              {/* Legend: one swatch per SSID (same colors as the marker dots).
+                  Hovering a legend entry highlights that SSID in ALL bands. The
+                  column toggles live here too, so they stay reachable even when
+                  there is no data yet. */}
+              <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1">
+                {groups.map((g) => (
+                  <span
+                    key={g.name}
+                    className="flex cursor-default items-center gap-1.5 text-xs text-slate-600"
+                    onMouseEnter={() => setHoveredSsid(g.name)}
+                    onMouseLeave={() => setHoveredSsid(null)}
+                  >
+                    <span
+                      className={clsx('h-2.5 w-2.5 rounded-full transition-opacity duration-150', hoveredSsid !== null && hoveredSsid !== g.name && 'opacity-30')}
+                      style={{ background: `hsl(${ssidHue(g.name, allSsidNames)}, 65%, 45%)` }}
+                    />
+                    {g.name}
+                  </span>
+                ))}
+                <span className="ml-auto flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setBandsOpen((o) => !o)}
+                    title={bandsOpen ? 'Collapse the band diagrams' : 'Show the band diagrams'}
+                    aria-label={bandsOpen ? 'Collapse the band diagrams' : 'Show the band diagrams'}
+                    className={clsx('rounded px-1.5 py-0.5 text-[11px] font-medium', bandsOpen ? 'bg-slate-200 text-slate-700' : 'text-slate-400 hover:bg-slate-100')}
+                  >
+                    {bandsOpen ? '▸ Diagrams' : '◂ Diagrams'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNeighborsOpen((o) => !o)}
+                    title={neighborsOpen ? 'Collapse the neighbor list' : 'Show the neighbor list'}
+                    aria-label={neighborsOpen ? 'Collapse the neighbor list' : 'Show the neighbor list'}
+                    className={clsx('rounded px-1.5 py-0.5 text-[11px] font-medium', neighborsOpen ? 'bg-slate-200 text-slate-700' : 'text-slate-400 hover:bg-slate-100')}
+                  >
+                    {neighborsOpen ? 'Neighbors ▸' : '◂ Neighbors'}
+                  </button>
+                </span>
+              </div>
+              <div ref={splitRef} className="flex min-h-0 flex-1 items-stretch">
+                {/* Band diagrams (left) — scrolls internally when the pane is short. */}
+                {bandsOpen && (
+                  <div
+                    className="min-w-0 flex-col gap-3 overflow-y-auto"
+                    style={{ display: 'flex', width: neighborsOpen ? `${splitPct}%` : '100%' }}
+                  >
+                    {bands.map((b) => (
+                      <BandPanel key={b.band} view={b} allNames={allSsidNames} hoveredSsid={hoveredSsid} onHover={setHoveredSsid} />
+                    ))}
+                  </div>
+                )}
+                {/* Draggable splitter — only when both columns are open */}
+                {bandsOpen && neighborsOpen && (
+                  <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    onMouseDown={startDrag}
+                    className="group relative -mx-1.5 my-0 w-3 shrink-0 cursor-col-resize"
+                    title="Drag to resize — or collapse a column above for full width"
+                  >
+                    <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-200 transition-colors group-hover:bg-indigo-400" />
+                    <div className="absolute inset-y-0 left-1/2 flex w-3 -translate-x-1/2 items-center justify-center">
+                      <span className="h-8 w-1 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400" />
+                    </div>
+                  </div>
+                )}
+                {/* Neighbor list (right) */}
+                {neighborsOpen && (
+                  <div className="min-w-0 flex-1">
+                    <NeighborList neighbors={neighbors} />
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+            </div>
+          </div>
         </div>
       </div>
     </Layout>

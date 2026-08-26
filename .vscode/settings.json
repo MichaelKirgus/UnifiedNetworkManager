@@ -13,10 +13,6 @@
         "/^cd /home/michael/Git/MichaelKirgus/UnifiedNetworkManager && node validate-openapi\\.cjs 2>&1 \\| tail -3$/": {
             "approve": true,
             "matchCommandLine": true
-        },
-        "/^cd /home/michael/Git/MichaelKirgus/UnifiedNetworkManager/plugins/lancom-lx && npx tsc --noEmit && echo LANCOM-LX-TSC-OK && cd \.\./\.\. && sudo docker compose build lancom-lx-plugin 2>&1 \\| grep -E 'Built\\|ERROR' ; sudo docker compose up -d lancom-lx-plugin 2>&1 \\| tail -1$/": {
-            "approve": true,
-            "matchCommandLine": true
         }
     }
 }

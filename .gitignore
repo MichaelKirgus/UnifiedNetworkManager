@@ -10,3 +10,4 @@ build/
 npm-debug.log*
 .vite/
 coverage/
+.vscode/settings.json

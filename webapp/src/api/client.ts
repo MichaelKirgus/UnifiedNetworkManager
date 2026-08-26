@@ -318,25 +318,48 @@ export interface WifiSsidGroup {
   devices: WifiDeviceRef[];
 }
 
-/** One bar in the per-band spectrum view. */
-export interface WifiSpectrumEntry {
-  name: string;
+/** One channel bar in the per-band spectrum view (inSSIDer-style). */
+export interface WifiChannelBar {
   channel: number;
+  /** Worst-case airtime utilization across all devices on this channel. */
   utilizationPct?: number | null;
 }
 
-/** Per-band spectrum data (2.4 / 5 / 6 GHz), own SSIDs only. */
+/** Own SSID marker at its channel position in the spectrum view. */
+export interface WifiSsidMarker {
+  name: string;
+  channel: number;
+}
+
+/** Per-band spectrum data (2.4 / 5 / 6 GHz). */
 export interface WifiBandView {
   band: '2.4' | '5' | '6';
   minChannel?: number | null;
   maxChannel?: number | null;
-  entries: WifiSpectrumEntry[];
+  /** Noisiest radio noise floor on this band (dBm) — shaded line under bars. */
+  noiseFloorDbm?: number | null;
+  channels: WifiChannelBar[];
+  markers: WifiSsidMarker[];
 }
 
-/** Response of GET /wifi — grouped SSIDs + per-band spectrum entries. */
+/** Neighbor network seen by a device's scan engine (own BSSIDs excluded). */
+export interface WifiNeighborRef {
+  deviceId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  bssid: string;
+  ssid?: string | null;
+  band: string;
+  channel?: number | null;
+  signalDbm?: number | null;
+}
+
+/** Response of GET /wifi — grouped SSIDs + per-band spectrum + neighbors. */
 export interface WifiOverview {
   ssids: WifiSsidGroup[];
   bands: WifiBandView[];
+  neighbors: WifiNeighborRef[];
 }
 
 /** A user account (never includes password hashes or TOTP secrets). */
