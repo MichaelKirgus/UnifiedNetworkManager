@@ -253,7 +253,8 @@ export function extractValue(type: string, raw: string): string {
     case 'Counter64':
     case 'Unsigned32':
     case 'Timeticks': {
-      const m = text.match(/(\d+)/); // "up(1)", "12345 (2 min, 3 sec)" → number
+      // Keep the sign — INTEGER values can be negative (e.g. dBm noise floors).
+      const m = text.match(/(-?\d+)/); // "up(1)", "-90", "12345 (2 min, 3 sec)" → number
       return m ? m[1] : '';
     }
     case 'OBJECT IDENTIFIER':
