@@ -200,6 +200,53 @@ export const WLAN_STATION = {
 } as const;
 
 /* ------------------------------------------------------------------ *
+ * IP routing status — 11.1.10 (active routing table)
+ * ------------------------------------------------------------------ */
+
+/** lcsStatusIpRouterActIpRoutingTabTable (TABLE node 11.1.10.30).
+ *  The router's ACTIVE routing table — one row per installed route, with a
+ *  per-row Type enum that labels the protocol (static/rip/bgp/ospf/…). A single
+ *  walk therefore yields static AND dynamically-learned routes together.
+ *  Index: [ipAddress(4 octets), ipNetmask(4 octets), rtgTag int]. IPv4 only —
+ *  the MIB has no v6 route table. */
+export const IP_ROUTES = {
+  base: `${LCOS_BASE}.1.10.30`, // rows: <base>.1.<col>.<ip(4)><netmask(4)><rtgTag>
+  COL_IP: 1, // IpAddress — destination network address
+  COL_NETMASK: 2, // IpAddress — netmask (dotted-quad)
+  COL_RTG_TAG: 3, // Integer32 0..65535 — routing table tag
+  COL_GATEWAY: 4, // IpAddress — next hop ('0.0.0.0' = directly connected)
+  COL_PEER: 5, // DisplayString (SIZE 0..255) — peer/interface name when set
+  COL_DISTANCE: 6, // Integer32 0..255 — admin distance
+  COL_MASQUERADE: 7, // enum eNo(0)/eOn(1)/eIntranet(2)/eUnknown(255)
+  /** Route origin (see IP_ROUTE_TYPES in lcosClient.ts). */
+  COL_TYPE: 8,
+} as const;
+
+/** Standard ipCidrRouteTable (IP-FORWARD-MIB, RFC 2993) — MIB-2 base .1.3.6.1.2.1.4.24.
+ *  Fallback for firmware that does NOT expose the vendor active-routing table
+ *  (lcsStatusIpRouterActIpRoutingTabTable / 11.1.10.30): LCOS agents implement
+ *  this standard table on all models, but with a NON-STANDARD row layout
+ *  (verified live on LCOS 10.94):
+ *    <base>.4.1.<col(1..16)>.<dest(4 octets).mask(4 octets).filler(1).nextHop(4 octets)>
+ *  The column number follows standard IP-FORWARD-MIB ordering (1=dest, 2=mask,
+ *  3=tos, 4=nextHop, …, 6=type, 7=proto, …, 11=metric1, …, 16=status). The
+ *  agent reports several columns with the wrong SNMP type (Gauge32 instead of
+ *  INTEGER) and its proto/type enums do not follow RFC semantics — so the
+ *  parser derives protocol from next-hop presence and keeps raw values. */
+export const IP_CIDR_ROUTES = {
+  base: '.1.3.6.1.2.1.4.24', // rows: <base>.4.1.<col>.<dest(4)><mask(4)>0<nextHop(4)>
+  COL_DEST: 1, // IpAddress — destination network address
+  COL_MASK: 2, // IpAddress — netmask (dotted-quad)
+  COL_NEXT_HOP: 4, // IpAddress — '0.0.0.0'/'255.255.255.255' = directly connected
+  /** RFC {other(0), invalid(1), direct(2), indirect(3)} — agent values unreliable; only invalid(1) is acted on (row dropped). */
+  COL_TYPE: 6,
+  /** RFC {other(0), connected(1), static(2)}. */
+  COL_PROTO: 7,
+  COL_METRIC1: 11, // INTEGER — routing metric/cost (-1/0 = unset)
+  COL_STATUS: 16, // INTEGER {active(1), inactive(2), garbage(3), probe(4)}
+} as const;
+
+/* ------------------------------------------------------------------ *
  * Temperature monitor — 11.1.70 (min/max extremes per sensor)
  * ------------------------------------------------------------------ */
 

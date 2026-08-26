@@ -19,7 +19,9 @@ import { resolveEdition } from './client/editions';
 import { detectDnsBackend, DnsBackend } from './client/dns';
 import { detectDhcpBackend, DhcpBackend, searchKeaLeases, searchDnsmasqLeases } from './client/dhcp';
 import { getInterfacesInfo, vlans } from './client/interfaces';
+import { searchGateways } from './client/routes';
 import { collectTunnels, attachTunnelRates, enrichTunnelsWithLiveState, TunnelRow } from './tunnels';
+import { collectRoutes, deriveConnectedAndDefaultRoutes, enrichRoutesWithGatewayStatus, RouteRow } from './routes';
 import { getAction, listModules } from './actions/registry';
 import { ActionContext, ActionResult, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest, listCatalog } from './plan';
@@ -139,6 +141,10 @@ interface InventorySnapshot {
   dhcpLeases: Record<string, unknown>[];
   /** Configured tunnels (WireGuard/OpenVPN/IPsec/PPPoE/GRE) — see collectTunnels. */
   tunnels: TunnelRow[];
+  /** Configured static routes — see collectRoutes. */
+  routes: RouteRow[];
+  /** Configured gateways (routing/settings) — feeds the derived default-route rows. */
+  gateways: Record<string, unknown>[];
 }
 
 const inventoryCache = new Map<string, InventorySnapshot>();
@@ -297,18 +303,19 @@ async function getInventory(
   // The client-lib calls need a bound axios instance for this appliance.
   const client = createClient(host, { apiKey, apiSecret }, transport);
 
-  const [info, arp, ndp, ifInfo, vlanRes] = await Promise.all([
+  const [info, arp, ndp, ifInfo, vlanRes, gwRes] = await Promise.all([
     getSystemInformation(host, apiKey, apiSecret, transport).catch(() => undefined),
     getArpTable(host, apiKey, apiSecret, transport).catch(() => undefined),
     getNdpTable(host, apiKey, apiSecret, transport).catch(() => undefined),
     getInterfacesInfo(client).catch(() => undefined),
     vlans.get(client).catch(() => undefined),
+    searchGateways(client).catch(() => undefined),
   ]);
 
   // Raw interfaces_info entries — kept for the PPPoE tunnel detector (which
   // needs the interface TYPE fields that parseNetworkRows discards).
   let ifEntries: Record<string, unknown>[] = [];
-  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [] };
+  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [], routes: [], gateways: [] };
   if (info?.ok && info.data && typeof info.data === 'object') {
     const d = info.data as Record<string, unknown>;
     if (d['name'] !== undefined) snap.hostname = String(d['name']);
@@ -392,6 +399,21 @@ async function getInventory(
     snap.tunnels = await collectTunnels(client, ifEntries);
   } catch {
     // best-effort — a failing tunnel endpoint must not sink the inventory cache
+  }
+
+  // Static routes (routes/routes module) — slow-changing like networks.
+  try {
+    snap.routes = await collectRoutes(client);
+  } catch {
+    // best-effort — a failing route endpoint must not sink the inventory cache
+  }
+
+  // Configured gateways (routing/settings) — used to derive default-route rows
+  // so hosts that only use their WAN gateway still appear on the Routes page.
+  if (gwRes?.ok && gwRes.data && typeof gwRes.data === 'object') {
+    const d = gwRes.data as Record<string, unknown>;
+    const rows = Array.isArray(d['rows']) ? d['rows'] : Array.isArray(gwRes.data) ? gwRes.data : Object.values(d);
+    snap.gateways = (rows as unknown[]).filter((r): r is Record<string, unknown> => !!r && typeof r === 'object');
   }
 
   inventoryCache.set(host, snap);
@@ -615,6 +637,11 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
   // refresh; also normalized into the API's cross-device `tunnels` table.
   if (Array.isArray(metrics['tunnels']) && (metrics['tunnels'] as unknown[]).length > 0) {
     push({ key: 'tunnels', label: 'Tunnels', type: 'string', visualization: 'table', group: 'Inventory', columns: ['name', 'type', 'peerAddress', 'localAddress', 'subnet', 'status', 'interfaceName'], intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  // Configured static routes — inventory, slow refresh; also normalized into
+  // the API's cross-device `routes` table.
+  if (Array.isArray(metrics['routes']) && (metrics['routes'] as unknown[]).length > 0) {
+    push({ key: 'routes', label: 'Routes', type: 'string', visualization: 'table', group: 'Inventory', columns: ['destination', 'gateway', 'protocol', 'distance', 'status'], intervalMs: INVENTORY_INTERVAL_MS });
   }
   // Interface MACs (name + mac per interface).
   if (Array.isArray(metrics['interfaces']) && (metrics['interfaces'] as unknown[]).length > 0) {
@@ -954,6 +981,18 @@ async function collectMetrics(
     const liveTunnels = await enrichTunnelsWithLiveState(tunnelClient, inventory.tunnels)
       .catch(() => inventory.tunnels);
     metrics['tunnels'] = attachTunnelRates(host, liveTunnels, traffic);
+  }
+
+  // Routes: static-route config PLUS derived rows (connected subnets + default
+  // route per WAN gateway) so hosts without explicit static routes still show
+  // up on the Routes page. Enriched with LIVE gateway reachability (one extra
+  // endpoint call per poll — not cached). Best-effort: a failing status
+  // endpoint falls back to the config-level rows unchanged.
+  const allRoutes = [...inventory.routes, ...deriveConnectedAndDefaultRoutes(inventory.networks, inventory.gateways, inventory.routes)];
+  if (allRoutes.length > 0) {
+    const routeClient = createClient(host, { apiKey, apiSecret }, transport);
+    metrics['routes'] = await enrichRoutesWithGatewayStatus(routeClient, allRoutes)
+      .catch(() => allRoutes);
   }
 
   return { metrics, interfaces };

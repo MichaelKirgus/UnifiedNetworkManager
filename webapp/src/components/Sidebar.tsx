@@ -14,6 +14,7 @@ import {
   Puzzle,
   Route as RouteIcon,
   Server,
+  Waypoints,
   KeySquare,
   Shield,
   UserRound,
@@ -29,6 +30,8 @@ const NAV_ITEMS = [
   { to: '/hosts', label: 'Hosts', icon: Laptop },
   // Cable stands in for a tunnel link (lucide's `Tunnel` icon is not in the installed version).
   { to: '/tunnels', label: 'Tunnels', icon: Cable },
+  // Waypoints — Route is already used by the Plans item.
+  { to: '/routes', label: 'Routes', icon: Waypoints },
   { to: '/wifi', label: 'WiFi', icon: WifiIcon },
   { to: '/sites', label: 'Sites', icon: MapPin },
   { to: '/secrets', label: 'Secrets', icon: KeyRound },

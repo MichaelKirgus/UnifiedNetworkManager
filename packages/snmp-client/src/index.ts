@@ -216,8 +216,12 @@ export function parseWalkOutput(stdout: string): Map<string, string> {
   for (const line of stdout.split('\n')) {
     if (!line.trim()) continue;
     // Type names may contain hyphens ("Hex-STRING") — \w alone would drop those
-    // lines and smear their values onto the previous entry.
-    const m = line.match(/^(\S+)\s*=\s*([\w-]+):\s?(.*)$/);
+    // lines and smear their values onto the previous entry. Some agents answer
+    // with a type mismatch, which net-snmp prints as
+    // `OID = Wrong Type (should be INTEGER): Gauge32: 4` — the optional group
+    // skips that prefix so the real type+value still parse instead of being
+    // smeared onto the previous entry.
+    const m = line.match(/^(\S+)\s*=\s*(?:Wrong Type \(should be [^)]*\):\s?)?([\w-]+):\s?(.*)$/);
     if (m) {
       lastOid = m[1];
       raw.set(lastOid, { type: m[2], text: m[3] });

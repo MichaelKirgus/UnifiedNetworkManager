@@ -285,6 +285,35 @@ export interface TunnelRow {
   collectedAt: string;
 }
 
+/** One route entry from the cross-device inventory view. Rows are NOT merged
+ * across devices — a route row is one entry on one device. Static and
+ * dynamically-learned routes to the same destination appear as separate rows
+ * (protocol is part of the identity). */
+export interface RouteRow {
+  deviceId: string;
+  pluginId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  /** Display name of the reporting plugin instance (e.g. "OPNsense Plugin"). */
+  pluginName?: string | null;
+  /** Destination network as CIDR ("10.25.0.0/16", "0.0.0.0/0" for default). */
+  destination: string;
+  /** Next-hop gateway address or name ('' = directly connected / unknown). */
+  gateway?: string;
+  protocol: 'static' | 'connected' | 'ospf' | 'bgp' | 'rip' | 'other';
+  /** Administrative distance (null when the source doesn't expose it). */
+  distance?: number | null;
+  /** Route metric / cost (null when n/a). */
+  metric?: number | null;
+  mtu?: number | null;
+  status: 'active' | 'inactive' | 'unknown';
+  /** Protocol-specific extras: uuid/description/gatewayStatus/gatewayLatencyMs
+   * (OPNsense), rtgTag/peer/rawType (LCOS). */
+  extra?: Record<string, unknown>;
+  collectedAt: string;
+}
+
 /** One distinct (band, channel) pair broadcasting an SSID. */
 export interface WifiChannelRef {
   /** '2.4' | '5' | '6'; '' when the device cannot say which band. */
@@ -800,6 +829,14 @@ export const api = {
     if (params?.type) qs.set('type', params.type);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<TunnelRow[]>(`/tunnels${suffix}`);
+  },
+  routes: (params?: { deviceId?: string; siteId?: string; protocol?: 'static' | 'connected' | 'ospf' | 'bgp' | 'rip' | 'other' }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.protocol) qs.set('protocol', params.protocol);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<RouteRow[]>(`/routes${suffix}`);
   },
   wifi: (params?: { siteId?: string }) => {
     const qs = new URLSearchParams();

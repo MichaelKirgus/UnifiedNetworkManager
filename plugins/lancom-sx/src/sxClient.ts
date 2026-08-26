@@ -21,6 +21,7 @@ import { SnmpCredentials, TransportOptions, snmpGet, snmpWalk, suffixOf, normali
 import {
   DETECT, SX4_BASE, SX3_BASE,
   SX4_SYS, SX4_PSU, SX4_PORT_CONF, SX4_PORT_TRAFFIC, SX4_VLAN, SX4_SVI, SX4_NEIGHBOR,
+  SX4_IP_ROUTES, SX4_IP_STATUS_ROUTES,
   SX4_POE_STATUS, SX4_POE_TOTALS, SX4_LACP_STATUS,
   SX3_SYS, SX3_PORT_CONF, SX3_PORT_TRAFFIC, QB_FDB,
 } from './sxOids';
@@ -99,6 +100,14 @@ export interface SxNeighbor {
   port: number | null; // learned-on port from Q-BRIDGE FDB, null when unknown
 }
 
+/** One route entry from the switch's routing tables (4.x only). */
+export interface SxRoute {
+  destination: string; // CIDR ("10.25.0.0/16") or bare address as reported
+  gateway: string;     // '' = directly connected / unknown
+  protocol: 'static' | 'connected'; // matched against the static config table
+  distance: number | null; // admin distance from the config table (null for connected)
+}
+
 /** The full slow-path snapshot for one host. */
 export interface SxSwitchSnapshot {
   collectedAt: number;
@@ -124,6 +133,7 @@ export interface SxSwitchSnapshot {
   lags: SxLagPort[]; // empty on 3.x or when no LACP is configured
   networks: SxNetwork[];
   neighbors: SxNeighbor[];
+  routes: SxRoute[]; // live routing table (4.x only — the 3.x tree has none)
 }
 
 /* ------------------------------------------------------------------ *
@@ -289,6 +299,8 @@ function inventoryWalks(variant: SxVariant): string[] {
       SX4_PORT_CONF.base, // per-port link/speed/description
       SX4_VLAN.base, // per-port VLAN mode/PVID/allowed list
       SX4_SVI.base, // configured IP interfaces (VLAN SVIs) → networks inventory
+      SX4_IP_STATUS_ROUTES.base, // live routing table → routes inventory
+      SX4_IP_ROUTES.base, // static route config (distance enrichment) → routes inventory
       SX4_NEIGHBOR.base, // ARP/NDP neighbor cache → hosts inventory
       SX4_POE_STATUS.base, // per-PoE-port power status
       SX4_POE_TOTALS.base, // switch-wide PoE totals
@@ -559,6 +571,66 @@ function parseSx4(out: Map<string, string>, get: (oid: string) => string): SxSwi
     finalNeighbors.push({ mac, ip, version, port: mac ? (fdbPortByMac.get(mac) ?? null) : null });
   }
 
+  // --- Routes from the live status table + static config table --------------
+  // The status table lists ALL active routes but carries no protocol label; the
+  // static config table tells us which destinations are statically configured
+  // (and their admin distance). A status row matching a config entry → 'static',
+  // everything else → 'connected'. Matching is on the BARE network address so it
+  // works whether the agent reports "10.25.0.0" or "10.25.0.0/16".
+  const bareNet = (s: string): string => s.split('/')[0].trim();
+
+  // Static route config (index int) — network + maskLength + distance per entry.
+  const cfgByIndex = new Map<number, { network: string; maskLen: number | null; distance: number | null }>();
+  for (const [oid, value] of out) {
+    const row = splitRow(oid, SX4_IP_ROUTES.base);
+    if (!row || row.idx.length !== 1) continue;
+    const idx = Number(row.idx[0]);
+    if (!Number.isInteger(idx)) continue;
+    let c = cfgByIndex.get(idx);
+    if (!c) { c = { network: '', maskLen: null, distance: null }; cfgByIndex.set(idx, c); }
+    switch (row.col) {
+      case SX4_IP_ROUTES.COL_NETWORK: c.network = value.trim(); break;
+      case SX4_IP_ROUTES.COL_MASK_LENGTH: c.maskLen = toInt(value); break;
+      case SX4_IP_ROUTES.COL_DISTANCE: c.distance = toInt(value); break;
+    }
+  }
+  const staticByBareDest = new Map<string, { distance: number | null; maskLen: number | null }>();
+  for (const c of cfgByIndex.values()) {
+    if (!c.network) continue;
+    staticByBareDest.set(bareNet(c.network), { distance: c.distance, maskLen: c.maskLen });
+  }
+
+  // Live status routes (index int) — destination + gateway per entry.
+  const statusRouteByIndex = new Map<number, { network: string; gateway: string }>();
+  for (const [oid, value] of out) {
+    const row = splitRow(oid, SX4_IP_STATUS_ROUTES.base);
+    if (!row || row.idx.length !== 1) continue;
+    const idx = Number(row.idx[0]);
+    if (!Number.isInteger(idx)) continue;
+    let r = statusRouteByIndex.get(idx);
+    if (!r) { r = { network: '', gateway: '' }; statusRouteByIndex.set(idx, r); }
+    switch (row.col) {
+      case SX4_IP_STATUS_ROUTES.COL_NETWORK: r.network = value.trim(); break;
+      case SX4_IP_STATUS_ROUTES.COL_GATEWAY: r.gateway = value.trim(); break;
+    }
+  }
+
+  const finalRoutes: SxRoute[] = [];
+  for (const s of statusRouteByIndex.values()) {
+    if (!s.network) continue; // no destination column seen — skip
+    let destination = s.network;
+    let protocol: 'static' | 'connected' = 'connected';
+    let distance: number | null = null;
+    const match = staticByBareDest.get(bareNet(s.network));
+    if (match) {
+      protocol = 'static';
+      distance = match.distance;
+      // Enrich a bare destination with its configured prefix when we have it.
+      if (!destination.includes('/') && match.maskLen !== null) destination = `${destination}/${match.maskLen}`;
+    }
+    finalRoutes.push({ destination, gateway: s.gateway === '0.0.0.0' ? '' : s.gateway, protocol, distance });
+  }
+
   return {
     collectedAt: Date.now(),
     variant: 'sx4',
@@ -592,6 +664,7 @@ function parseSx4(out: Map<string, string>, get: (oid: string) => string): SxSwi
     lags,
     networks: finalNetworks,
     neighbors: finalNeighbors,
+    routes: finalRoutes,
   };
 }
 
@@ -661,6 +734,7 @@ function parseSx3(out: Map<string, string>, get: (oid: string) => string): SxSwi
     lags: [],
     networks,
     neighbors: [], // no neighbor-cache table on the 3.x tree
+    routes: [], // no route tables in the legacy GS-2310 MIB
   };
 }
 

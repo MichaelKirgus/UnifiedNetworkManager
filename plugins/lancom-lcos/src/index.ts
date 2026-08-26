@@ -352,6 +352,22 @@ app.post('/monitoring', async (req, res) => {
     }
     if (tunnelRows.length > 0) metrics['tunnels'] = tunnelRows;
 
+    // --- Routes (normalized for the cross-device Routes page) ----------------
+    // The active routing table carries static AND dynamically-learned routes in
+    // one walk — the per-row Type enum is already mapped to a protocol by the
+    // client. IPv4 only (the MIB has no v6 route table).
+    if (snapshot.routes.length > 0) {
+      metrics['routes'] = snapshot.routes.map((r) => ({
+        destination: r.destination,
+        gateway: r.gateway,
+        protocol: r.protocol,
+        distance: r.distance,
+        metric: r.metric, // set by the ipCidrRouteTable fallback only
+        status: 'active', // the active table only lists installed routes
+        extra: { rtgTag: r.rtgTag, peer: r.peer || null, rawType: r.rawTypeLabel || null },
+      }));
+    }
+
     // --- WiFi (built-in radios only — most routers report nothing) ----------
     const hasWifi = snapshot.radios.length > 0 || snapshot.ssids.length > 0 || snapshot.clients.length > 0;
     if (hasWifi) {
@@ -515,6 +531,19 @@ app.post('/monitoring', async (req, res) => {
         visualization: 'table',
         group: 'VPN',
         columns: ['name', 'type', 'peerAddress', 'localAddress', 'status'],
+        intervalMs: opts.inventoryTtlMs,
+      });
+    }
+    // Normalized route rows — also ingested by the API into the cross-device
+    // `routes` table; rendered here as a per-device table.
+    if (Array.isArray(metrics['routes']) && (metrics['routes'] as unknown[]).length > 0) {
+      descriptors.push({
+        key: 'routes',
+        label: 'Routes',
+        type: 'string',
+        visualization: 'table',
+        group: 'Routing',
+        columns: ['destination', 'gateway', 'protocol', 'distance', 'status'],
         intervalMs: opts.inventoryTtlMs,
       });
     }

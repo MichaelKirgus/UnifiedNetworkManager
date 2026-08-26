@@ -274,6 +274,29 @@ export async function initDb(): Promise<void> {
   // Added after the initial release — existing deployments need the column.
   await pool.query(`ALTER TABLE tunnels ADD COLUMN IF NOT EXISTS "lastHandshakeSeconds" DOUBLE PRECISION`);
 
+  // Routes inventory table (Routes page) — same lifecycle as networks/hosts/tunnels.
+  // One row per route entry on one device, protocol-labeled. `protocol` is part of the
+  // PK so static and dynamically-learned routes to the SAME destination coexist
+  // (e.g. a static default + an OSPF-learned prefix), and delete-on-absent at ingest
+  // keys on destination|protocol so one plugin's snapshot never wipes another protocol.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS routes (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      destination TEXT NOT NULL,
+      gateway TEXT NOT NULL DEFAULT '',
+      protocol TEXT NOT NULL DEFAULT 'static',
+      distance DOUBLE PRECISION,
+      metric DOUBLE PRECISION,
+      mtu INTEGER,
+      status TEXT NOT NULL DEFAULT 'unknown',
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", destination, protocol)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_routes_device ON routes ("deviceId")`);
+
   // WiFi inventory tables (WiFi page) — same lifecycle as networks/hosts/tunnels.
   // One row per SSID×band as reported by a plugin's `wifiNetworks` metric.
   await pool.query(`

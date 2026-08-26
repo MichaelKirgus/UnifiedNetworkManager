@@ -158,6 +158,29 @@ export const SX4_SVI = {
   COL_IPV6_MASK_LEN: 12, // Integer32 0..128 (read-write)
 } as const;
 
+/** lcsIPRoutesTable (TABLE node …14.1.4.4.1) — index: int 1..32.
+ *  Configured STATIC routes (read-write; we only read). */
+export const SX4_IP_ROUTES = {
+  base: `${SX4_BASE}.1.4.4.1`, // rows: <base>.1.<col>.<index>
+  COL_INDEX: 2, // Integer32 1..32 (not-accessible)
+  COL_NETWORK: 3, // DisplayString IPv4/IPv6 network address
+  COL_MASK_LENGTH: 4, // Integer32 0..128
+  COL_GATEWAY: 5, // DisplayString IPv4/IPv6 gateway
+  COL_NEXT_HOP_VLAN: 6, // Integer32 0..4094 (v6 link-local gateways)
+  COL_ROW_STATUS: 7, // RowStatus — skip when parsing (not a data column)
+  COL_DISTANCE: 50, // Integer32 1..255 admin distance (DEFVAL 1)
+} as const;
+
+/** lcsIPStatusRouteTable (TABLE node …14.1.4.9.1) — index: int 1..2048.
+ *  LIVE routing table ("show all routing entries") → routes inventory. */
+export const SX4_IP_STATUS_ROUTES = {
+  base: `${SX4_BASE}.1.4.9.1`, // rows: <base>.1.<col>.<index>
+  COL_INDEX: 1, // Integer32 1..2048 (not-accessible)
+  COL_NETWORK: 2, // DisplayString destination network or host address
+  COL_GATEWAY: 3, // DisplayString gateway address of this route
+  COL_ADDRESS: 4, // DisplayString "the route address"
+} as const;
+
 /** lcsIPStatusNeighborCacheTable (TABLE node …14.1.4.10.1) — index: int 1..1024.
  *  The switch's ARP/NDP neighbor cache → hosts inventory. */
 export const SX4_NEIGHBOR = {

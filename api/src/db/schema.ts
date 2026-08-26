@@ -364,6 +364,43 @@ export const tunnels = pgTable(
   }
 );
 
+// One row per route entry on one device, as reported by a plugin's `routes`
+// metric. Powers the cross-device Routes page, same upsert-per-poll + 24h-sweep
+// lifecycle as networks/hosts/tunnels. A device without routing data (e.g. an AP)
+// simply contributes no rows. `protocol` is part of the PK so static and
+// dynamically-learned routes to the same destination coexist.
+export const routes = pgTable(
+  'routes',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Destination network as CIDR (e.g. "10.25.0.0/16", "default" → "0.0.0.0/0").
+    destination: text('destination').notNull(),
+    // Next-hop gateway address or name ('' = directly connected / unknown).
+    gateway: text('gateway').notNull().default(''),
+    // static | connected | ospf | bgp | rip | other — normalized at ingest.
+    protocol: text('protocol').notNull().default('static'),
+    // Administrative distance (null when the source doesn't expose it).
+    distance: doublePrecision('distance'),
+    // Route metric / cost (null when n/a).
+    metric: doublePrecision('metric'),
+    mtu: integer('mtu'),
+    // active | inactive | unknown — plugins report what they can observe.
+    status: text('status').notNull().default('unknown'),
+    // Protocol-specific extras (JSON object): uuid, description,
+    // gatewayStatus/gatewayLatencyMs (OPNsense), rtgTag/peer/rawType (LCOS) …
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkRoutes: uniqueIndex('uq_routes')
+        .on(table.deviceId, table.pluginId, table.destination, table.protocol),
+      idxRoutesDevice: index('idx_routes_device').on(table.deviceId),
+    };
+  }
+);
+
 // One row per SSID×band as reported by a plugin's `wifiNetworks` metric.
 // Powers the cross-device WiFi page (grouped by SSID name across devices).
 export const wifiSsids = pgTable(

@@ -1689,6 +1689,52 @@ paths:
         '401':
           description: Authentication required
 
+  /routes:
+    get:
+      tags: [Inventory]
+      summary: List all route entries across devices
+      description: >-
+        Cross-device view of the normalized `routes` inventory table, populated
+        by the telemetry worker from each plugin's /monitoring metrics (e.g.
+        OPNsense static routes with live gateway status, LANCOM LCOS active
+        routing tables — static + OSPF/BGP/RIP rows protocol-labeled per row —
+        and LANCOM SX switch routing tables). One row per route entry on one
+        device; static and dynamically-learned routes to the same destination
+        appear as separate rows (protocol is part of the identity). Devices
+        without routing data contribute no rows. Rows not refreshed within 24h
+        are swept away.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: protocol
+          required: false
+          schema:
+            type: string
+            enum: [static, connected, ospf, bgp, rip, other]
+          description: Filter by route protocol
+      responses:
+        '200':
+          description: Route rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RouteRow'
+        '400':
+          description: Invalid protocol filter value
+        '401':
+          description: Authentication required
+
   /wifi:
     get:
       tags: [Inventory]
@@ -2637,6 +2683,35 @@ components:
           additionalProperties: true
           description: "Type-specific extras (ikeType, cryptAlg, mode, allowedIPs, ...)"
         collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this tunnel" }
+
+    RouteRow:
+      type: object
+      required: [deviceId, pluginId, destination, protocol, status, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this route is configured on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this route" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        destination: { type: string, description: "Destination network as CIDR (e.g. 10.25.0.0/16, 0.0.0.0/0 for default)" }
+        gateway: { type: string, description: "Next-hop gateway address or name; '' = directly connected / unknown" }
+        protocol:
+          type: string
+          enum: [static, connected, ospf, bgp, rip, other]
+          description: "Normalized route origin — static config vs. dynamically learned (OSPF/BGP/RIP)"
+        distance: { type: [number, 'null'], description: "Administrative distance (null when the source doesn't expose it)" }
+        metric: { type: [number, 'null'], description: "Route metric / cost (null when n/a)" }
+        mtu: { type: [integer, 'null'], description: "Per-route MTU override (null when n/a)" }
+        status:
+          type: string
+          enum: [active, inactive, unknown]
+          description: "What the plugin can observe — installed/active vs. configured-but-inactive"
+        extra:
+          type: object
+          additionalProperties: true
+          description: "Protocol-specific extras (uuid, description, gatewayStatus, gatewayLatencyMs for OPNsense; rtgTag, peer, rawType for LCOS)"
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this route" }
 
     WifiOverview:
       type: object

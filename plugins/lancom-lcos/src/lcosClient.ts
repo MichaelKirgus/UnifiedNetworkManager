@@ -19,7 +19,7 @@
 import { SnmpCredentials, TransportOptions, snmpGet, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
 import {
   LCOS_BASE, SYS, HW, FIRMWARE, LAN_IF, LAN_BYTES, WAN_BYTES, WAN_IP,
-  NET_LIST, ARP, DHCP, VPN_CONN, WLAN_NET, WLAN_RADIO, WLAN_STATION, TEMP_EXTREMES,
+  NET_LIST, ARP, DHCP, VPN_CONN, IP_ROUTES, IP_CIDR_ROUTES, WLAN_NET, WLAN_RADIO, WLAN_STATION, TEMP_EXTREMES,
 } from './lcosOids';
 
 /* ------------------------------------------------------------------ *
@@ -126,6 +126,18 @@ export interface LcosTempExtreme {
   valueTenthsC: number | null;
 }
 
+/** One entry of the router's active routing table (IPv4 only — no v6 table in the MIB). */
+export interface LcosRoute {
+  destination: string; // CIDR built from the ip + netmask columns
+  gateway: string;     // '' = directly connected / unknown
+  protocol: 'static' | 'connected' | 'rip' | 'bgp' | 'ospf' | 'other'; // mapped from the Type enum (or next-hop presence on the standard-table fallback)
+  distance: number | null;
+  metric: number | null;   // routing cost — only set by the ipCidrRouteTable fallback
+  rtgTag: number | null;   // routing-table tag (0 = default table)
+  peer: string;            // DisplayString peer/interface name, '' when unset
+  rawTypeLabel: string;    // human label of the MIB Type value (for 'other' rows)
+}
+
 /** The full slow-path snapshot for one host. */
 export interface LcosRouterSnapshot {
   collectedAt: number;
@@ -154,6 +166,7 @@ export interface LcosRouterSnapshot {
   radios: LcosRadio[];
   ssids: LcosSsid[];
   clients: LcosClient[];
+  routes: LcosRoute[]; // active routing table — vendor table when present, else standard ipCidrRouteTable fallback
   temperatureExtremes: LcosTempExtreme[];
 }
 
@@ -193,6 +206,26 @@ const RADIO_BANDS: Record<number, string> = { 0: '', 1: '2.4 GHz', 2: '5 GHz', 3
 // Channel-bandwidth enum — verified live on a GS-series router (WLAN-1=0→20,
 // WLAN-2=2→80). Values outside the map fall back to null.
 const RADIO_BANDWIDTHS: Record<number, number> = { 0: 20, 1: 40, 2: 80 };
+
+/** Active-routing-table Type enum (lcsStatusIpRouterActIpRoutingTabEntryType).
+ *  Maps the MIB value to our normalized protocol; eDisabled(8) rows are SKIPPED
+ *  entirely by the parser. Values outside the map → 'other' with a raw label. */
+const IP_ROUTE_TYPES: Record<number, { protocol: LcosRoute['protocol']; label: string }> = {
+  0: { protocol: 'other', label: 'unknown' },
+  1: { protocol: 'static', label: 'static' },
+  2: { protocol: 'rip', label: 'rip' },
+  3: { protocol: 'other', label: 'vpn' },
+  4: { protocol: 'other', label: 'capwap' },
+  5: { protocol: 'other', label: 'ras' },
+  6: { protocol: 'other', label: 'intranet' },
+  7: { protocol: 'other', label: 'dmz' },
+  // 8 = eDisabled — skipped, not mapped
+  9: { protocol: 'bgp', label: 'ebgp' },
+  10: { protocol: 'bgp', label: 'ibgp' },
+  11: { protocol: 'ospf', label: 'ospf' },
+  12: { protocol: 'other', label: 'lisp' },
+  13: { protocol: 'other', label: 'dhcp' },
+};
 
 function label(map: Record<number, string>, raw: string | undefined): string {
   if (raw === undefined || raw === '') return '';
@@ -290,6 +323,8 @@ const INVENTORY_WALKS: string[] = [
   NET_LIST.base, // configured networks (LAN/VLAN IPs)
   ARP.base, // ARP cache → hosts inventory
   DHCP.base, // active DHCP leases → hosts inventory
+  IP_ROUTES.base, // active routing table (static + OSPF/BGP/RIP) → routes inventory
+  IP_CIDR_ROUTES.base, // standard ipCidrRouteTable — fallback when the vendor table is absent on this firmware
   VPN_CONN.base, // active VPN connections
   WLAN_NET.base, // per-radio SSIDs (built-in radios only — empty on pure routers)
   WLAN_RADIO.base, // per-radio RF status
@@ -341,8 +376,15 @@ export async function getLcosInventory(
   // Batches of 4 keep total wall time around ~2-3s while staying well under
   // the agent's concurrency limit.
   const BATCH = 4;
+  // Some embedded agents (observed on LCOS 10.94) drop requests for a few
+  // seconds after a burst — even sequential ones issued immediately after the
+  // last batch fail until their request queue drains. A short pause between
+  // batches and before the retry pass lets them recover; total added latency
+  // is ~2-3s, still well inside the API's poll budget.
+  const settle = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
   const failed: string[] = [];
   for (let i = 0; i < INVENTORY_WALKS.length; i += BATCH) {
+    if (i > 0) await settle(750);
     const chunk = INVENTORY_WALKS.slice(i, i + BATCH);
     const results = await Promise.allSettled(chunk.map((oid) => snmpWalk(host, creds, [oid], opts)));
     for (let j = 0; j < results.length; j++) {
@@ -358,8 +400,10 @@ export async function getLcosInventory(
 
   // One sequential retry for anything that threw (empty-but-successful walks
   // are indistinguishable from "table genuinely empty" — the quality gate
-  // below catches those via missing system scalars).
+  // below catches those via missing system scalars). Wait first so flaky
+  // agents have drained their request queue since the last batch.
   let failures = 0;
+  if (failed.length > 0) await settle(1_500);
   for (const oid of failed) {
     try {
       const retry = await snmpWalk(host, creds, [oid], opts);
@@ -367,6 +411,7 @@ export async function getLcosInventory(
     } catch {
       failures++; // still failing after the retry — subtree stays empty this cycle
     }
+    if (failed.length > 1) await settle(500); // let flaky agents drain between retries too
   }
 
   if (out.size === 0 && failures > 0) {
@@ -594,7 +639,89 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
     }
   }
 
-  // --- Temperature extremes (index: type int — min/max per sensor) --------
+  // --- Active routing table (index: [ip(4 octets), netmask(4 octets), rtgTag]) --
+  // One walk yields static AND dynamically-learned routes; the per-row Type
+  // enum labels the protocol. IPv4 only — the MIB has no v6 route table.
+  type LcosRouteRow = LcosRoute & { key: string }; // internal dedup key, stripped at return
+  const routes: LcosRouteRow[] = [];
+  for (const [oid, value] of out) {
+    const row = splitRow(oid, IP_ROUTES.base);
+    if (!row || row.idx.length !== 9) continue; // ip(4) + netmask(4) + rtgTag
+    const ip = decodeIpIndex(row.idx, 0);
+    const netmask = decodeIpIndex(row.idx, 4);
+    if (!ip || !netmask) continue;
+    const tag = Number(row.idx[8]);
+    const key = `${ip}|${netmask}|${tag}`;
+    let r = routes.find((x) => x.key === key);
+    if (!r) {
+      // Build the CIDR up front — both index columns are always present in a
+      // complete row, and netmaskToPrefix is hoisted (function declaration).
+      const prefix = netmaskToPrefix(netmask);
+      r = { key, destination: ip + (prefix !== null ? `/${prefix}` : ''), gateway: '', protocol: 'other', distance: null, metric: null, rtgTag: Number.isFinite(tag) ? tag : null, peer: '', rawTypeLabel: '' };
+      routes.push(r);
+    }
+    switch (row.col) {
+      case IP_ROUTES.COL_GATEWAY: r.gateway = value.trim() === '0.0.0.0' ? '' : value.trim(); break;
+      case IP_ROUTES.COL_PEER: r.peer = value.trim(); break;
+      case IP_ROUTES.COL_DISTANCE: r.distance = toInt(value); break;
+      case IP_ROUTES.COL_TYPE: {
+        const n = Number(value);
+        if (Number.isInteger(n) && n === 8) { routes.splice(routes.indexOf(r), 1); } // eDisabled — drop the row
+        else {
+          const m = IP_ROUTE_TYPES[n];
+          r.protocol = m ? m.protocol : 'other';
+          r.rawTypeLabel = m ? m.label : String(value);
+        }
+        break;
+      }
+    }
+  }
+
+  // --- Standard ipCidrRouteTable fallback ---------------------------------
+  // Firmware that lacks the vendor active-routing table (11.1.10.30 — e.g.
+  // LCOS 10.94 on some models) still implements the standard IP-FORWARD-MIB
+  // table; parse it when the vendor walk yielded no rows. Row layout is
+  // non-standard (see IP_CIDR_ROUTES in lcosOids.ts): the index embeds
+  // dest+mask+nextHop and columns follow RFC 2993 numbering. The agent's
+  // proto/type enums do not follow RFC semantics, so protocol comes from
+  // next-hop presence; raw values are kept for transparency.
+  const standardRoutes: LcosRouteRow[] = [];
+  const stdInvalidKeys = new Set<string>(); // ipCidrRouteType invalid(1) rows — dropped at return
+  for (const [oid, value] of out) {
+    const suffix = suffixOf(oid, IP_CIDR_ROUTES.base); // "4.1.<col>.<idx…>"
+    if (!suffix) continue;
+    const parts = suffix.split('.');
+    if (parts.length < 3 || parts[0] !== '4' || parts[1] !== '1') continue;
+    const col = Number(parts[2]);
+    const idx = parts.slice(3);
+    if (idx.length !== 13) continue; // dest(4)+mask(4)+filler(1)+nextHop(4)
+    const ip = decodeIpIndex(idx, 0);
+    const netmask = decodeIpIndex(idx, 4);
+    const nextHopRaw = decodeIpIndex(idx, 9);
+    if (!ip || !netmask || !nextHopRaw) continue;
+    const key = `std|${ip}|${netmask}`;
+    let r = standardRoutes.find((x) => x.key === key);
+    if (!r) {
+      const prefix = netmaskToPrefix(netmask);
+      const connected = nextHopRaw === '0.0.0.0' || nextHopRaw === '255.255.255.255';
+      r = { key, destination: ip + (prefix !== null ? `/${prefix}` : ''), gateway: connected ? '' : nextHopRaw, protocol: connected ? 'connected' : 'static', distance: null, metric: null, rtgTag: null, peer: '', rawTypeLabel: '' };
+      standardRoutes.push(r);
+    }
+    switch (col) {
+      case IP_CIDR_ROUTES.COL_TYPE: if (Number(value) === 1) stdInvalidKeys.add(key); break; // invalid — drop the row
+      case IP_CIDR_ROUTES.COL_PROTO: {
+        const n = Number(value);
+        // Only RFC static(2) is trusted for rows with a real next hop; the
+        // agent's other values don't follow the enum (e.g. it reports 2 for
+        // everything), so anything else degrades to 'other' + raw label.
+        if (r.gateway !== '' && !(Number.isInteger(n) && n === 2)) { r.protocol = 'other'; r.rawTypeLabel = `proto=${value}`; }
+        break;
+      }
+      case IP_CIDR_ROUTES.COL_METRIC1: { const m = toInt(value); if (m !== null && m > 0) r.metric = m; } break; // -1/0 = unset per RFC
+    }
+  }
+
+// --- Temperature extremes (index: type int — min/max per sensor) --------
   const temperatureExtremes: LcosTempExtreme[] = [];
   for (const [oid, value] of out) {
     const row = splitRow(oid, TEMP_EXTREMES.base);
@@ -636,6 +763,9 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
     radios,
     ssids,
     clients: [...clientBySlot.values()],
+    // Vendor active-routing table wins when it yields rows (richer protocol
+    // labels + admin distance); otherwise fall back to the standard table.
+    routes: (routes.length > 0 ? routes : standardRoutes.filter((x) => !stdInvalidKeys.has(x.key))).map((row) => ({ destination: row.destination, gateway: row.gateway, protocol: row.protocol, distance: row.distance, metric: row.metric, rtgTag: row.rtgTag, peer: row.peer, rawTypeLabel: row.rawTypeLabel })),
     temperatureExtremes,
   };
 }

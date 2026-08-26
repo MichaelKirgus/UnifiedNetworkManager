@@ -621,6 +621,74 @@ router.get('/tunnels', requireAuth, async (_req, res: Response) => {
   }
 });
 
+// GET /routes - All route entries across devices (Routes page).
+// Query params: deviceId (exact), siteId (filter by device's site),
+// protocol ('static'|'connected'|'ospf'|'bgp'|'rip'|'other').
+// No cross-device merge — a route row is one entry on one device. Static and
+// dynamically-learned routes to the same destination appear as separate rows
+// (protocol is part of the PK).
+router.get('/routes', requireAuth, async (_req, res: Response) => {
+  try {
+    const { deviceId, siteId, protocol } = _req.query as Record<string, string | undefined>;
+
+    if (protocol && !['static', 'connected', 'ospf', 'bgp', 'rip', 'other'].includes(protocol)) {
+      res.status(400).json({ error: '"protocol" must be one of: static, connected, ospf, bgp, rip, other' });
+      return;
+    }
+
+    let where;
+    const protocolClause = protocol ? eq(schema.routes.protocol, protocol) : undefined;
+    if (deviceId && siteId) {
+      // Both filters: verify the device belongs to the site first.
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) {
+        res.status(200).json([]);
+        return;
+      }
+      where = protocolClause ? and(eq(schema.routes.deviceId, deviceId), protocolClause) : eq(schema.routes.deviceId, deviceId);
+    } else if (deviceId) {
+      where = protocolClause ? and(eq(schema.routes.deviceId, deviceId), protocolClause) : eq(schema.routes.deviceId, deviceId);
+    } else if (siteId) {
+      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (deviceIds.length === 0) {
+        res.status(200).json([]);
+        return;
+      }
+      const deviceClause = inArray(schema.routes.deviceId, deviceIds);
+      where = protocolClause ? and(deviceClause, protocolClause) : deviceClause;
+    } else if (protocolClause) {
+      where = protocolClause;
+    }
+
+    const rows = await db.query.routes.findMany({
+      ...(where ? { where } : {}),
+      orderBy: [asc(schema.routes.deviceId), asc(schema.routes.protocol), asc(schema.routes.destination)],
+    });
+
+    const [deviceViews, pluginNames] = await Promise.all([
+      loadDeviceViews(Array.from(new Set(rows.map((r) => r.deviceId)))),
+      loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId)))),
+    ]);
+
+    res.status(200).json(
+      rows.map((r) => {
+        const device = deviceViews.get(r.deviceId);
+        return {
+          ...r,
+          extra: safeParseJson<Record<string, unknown>>(r.extra),
+          deviceName: device?.name ?? null,
+          managementAddress: device?.managementAddress ?? null,
+          siteName: device?.siteName ?? null,
+          pluginName: pluginNames.get(r.pluginId) ?? null,
+        };
+      })
+    );
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 // GET /wifi - Cross-device WiFi overview (WiFi page).
 // Groups the normalized `wifi_ssids` rows by SSID name across all devices and
 // joins per-channel airtime (`wifi_channels`) + connected-client counts

@@ -329,6 +329,17 @@ app.post('/monitoring', async (req, res) => {
     // NOTE: no dhcpLeases[] — the LCOS-SX MIB's DHCP binding table is commented
     // out in both firmware lines, so per-lease data is not available via SNMP.
 
+    // routes[] → cross-device Routes page (4.x only; 3.x switches emit nothing).
+    if (snapshot.routes.length > 0) {
+      metrics['routes'] = snapshot.routes.map((r) => ({
+        destination: r.destination,
+        gateway: r.gateway,
+        protocol: r.protocol,
+        distance: r.distance,
+        status: 'active', // the live status table only lists active entries
+      }));
+    }
+
     // --- Health -------------------------------------------------------------
     let health: Health = 'ok';
     const warnings: string[] = [];
@@ -354,6 +365,10 @@ app.post('/monitoring', async (req, res) => {
     }
     if (metrics['system.error']) {
       descriptors.push({ key: 'system.error', label: 'Error', type: 'string', visualization: 'text', group: 'System' });
+    }
+    // Routes table descriptor — only when the snapshot actually carries rows.
+    if (Array.isArray(metrics['routes']) && (metrics['routes'] as unknown[]).length > 0) {
+      descriptors.push({ key: 'routes', label: 'Routes', type: 'string', visualization: 'table', group: 'Inventory', columns: ['destination', 'gateway', 'protocol', 'distance'], intervalMs: opts.inventoryTtlMs });
     }
     // Descriptors for the user-selected model/firmware metrics (only when set).
     if (selectedModel) {

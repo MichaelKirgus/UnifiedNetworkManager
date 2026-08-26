@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../db';
-import { and, eq, inArray, lt, notInArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, lt, notInArray, or, sql } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { getSecret } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
@@ -310,6 +310,81 @@ async function ingestInventory(
         ));
     }
 
+    // --- routes (static + dynamically-learned route entries) ----------------
+    const rawRoutes = Array.isArray(metrics['routes']) ? (metrics['routes'] as unknown[]) : [];
+    if (rawRoutes.length > 0) {
+      const ROUTE_PROTOCOLS = new Set(['static', 'connected', 'ospf', 'bgp', 'rip', 'other']);
+      const values: {
+        deviceId: string; pluginId: string; destination: string; gateway: string; protocol: string;
+        distance: number | null; metric: number | null; mtu: number | null; status: string;
+        extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawRoutes) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const destination = typeof r['destination'] === 'string' ? (r['destination'] as string).trim() : '';
+        let protocol = typeof r['protocol'] === 'string' ? (r['protocol'] as string).trim().toLowerCase() : '';
+        if (!ROUTE_PROTOCOLS.has(protocol)) protocol = 'other'; // unknown labels never break the PK enum
+        if (!destination) continue; // destination is part of the conflict key
+        values.push({
+          deviceId,
+          pluginId,
+          destination,
+          gateway: typeof r['gateway'] === 'string' ? (r['gateway'] as string).trim() : '',
+          protocol,
+          distance: typeof r['distance'] === 'number' && Number.isFinite(r['distance']) ? r['distance'] : null,
+          metric: typeof r['metric'] === 'number' && Number.isFinite(r['metric']) ? r['metric'] : null,
+          mtu: typeof r['mtu'] === 'number' && Number.isFinite(r['mtu']) ? Math.trunc(r['mtu']) : null,
+          status: typeof r['status'] === 'string' && (r['status'] as string).trim() !== '' ? (r['status'] as string).trim().toLowerCase() : 'unknown',
+          extra: r['extra'] && typeof r['extra'] === 'object' ? JSON.stringify(r['extra']) : '{}',
+          collectedAt,
+        });
+      }
+      // Same de-dup guard as the other inventory blocks.
+      const routeByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        routeByKey.set(`${v.deviceId}|${v.pluginId}|${v.destination}|${v.protocol}`, v);
+      }
+      if (routeByKey.size > 0) {
+        await db.insert(schema.routes).values(Array.from(routeByKey.values())).onConflictDoUpdate({
+          target: [schema.routes.deviceId, schema.routes.pluginId, schema.routes.destination, schema.routes.protocol],
+          set: {
+            gateway: sql`excluded.gateway`,
+            distance: sql`excluded.distance`,
+            metric: sql`excluded.metric`,
+            mtu: sql`excluded.mtu`,
+            status: sql`excluded.status`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      // Routes are CONFIG/runtime objects — a route removed on the device must
+      // vanish from the page, not linger until the 24h sweep. Drop rows this
+      // snapshot no longer reports (only when the key is present at all: an
+      // ABSENT key means "plugin doesn't report routes", which must not wipe
+      // other data). Keyed on destination|protocol pairs — NOT destination
+      // alone — so a static and an OSPF-learned route to the same prefix can't
+      // wipe each other when only one of them is reported by this plugin.
+      const existingRouteKeys = await db
+        .select({ destination: schema.routes.destination, protocol: schema.routes.protocol })
+        .from(schema.routes)
+        .where(and(eq(schema.routes.deviceId, deviceId), eq(schema.routes.pluginId, pluginId)));
+      const seenRouteKeys = new Set(values.map((v) => `${v.destination}|${v.protocol}`));
+      const staleRoutes = existingRouteKeys.filter(
+        (k) => !seenRouteKeys.has(`${k.destination}|${k.protocol}`)
+      );
+      if (staleRoutes.length > 0) {
+        await db.delete(schema.routes).where(
+          and(
+            eq(schema.routes.deviceId, deviceId),
+            eq(schema.routes.pluginId, pluginId),
+            or(...staleRoutes.map((k) => and(eq(schema.routes.destination, k.destination), eq(schema.routes.protocol, k.protocol))))
+          )
+        );
+      }
+    }
+
     // --- WiFi (SSIDs / per-channel airtime / associated clients) ------------
     const numOrNull = (v: unknown): number | null =>
       typeof v === 'number' && Number.isFinite(v) ? v : null;
@@ -570,6 +645,7 @@ async function sweepStaleInventory(): Promise<void> {
   await db.delete(schema.hosts).where(lt(schema.hosts.lastSeenAt, cutoff));
   await db.delete(schema.networks).where(lt(schema.networks.collectedAt, cutoff));
   await db.delete(schema.tunnels).where(lt(schema.tunnels.collectedAt, cutoff));
+  await db.delete(schema.routes).where(lt(schema.routes.collectedAt, cutoff));
   await db.delete(schema.wifiSsids).where(lt(schema.wifiSsids.collectedAt, cutoff));
   await db.delete(schema.wifiChannels).where(lt(schema.wifiChannels.collectedAt, cutoff));
   await db.delete(schema.wifiRadios).where(lt(schema.wifiRadios.collectedAt, cutoff));
