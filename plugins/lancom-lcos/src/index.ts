@@ -408,6 +408,17 @@ app.post('/monitoring', async (req, res) => {
         .filter((r) => r.channel !== null && Number.isFinite(r.channel))
         .map((r) => ({ channel: r.channel, utilizationPct: r.utilizationPct }));
       if (wifiAirtime.length > 0) metrics['wifiAirtime'] = wifiAirtime;
+
+      // wifiRadios[] → per-radio RF context for the WiFi page spectrum view
+      // (noise-floor line + bandwidth). One row per radio.
+      const wifiRadios = snapshot.radios.map((r) => ({
+        ifc: r.ifc || null,
+        band: BAND_SHORT[r.bandLabel] ?? '',
+        channel: r.channel,
+        bandwidthMhz: r.bandwidthMhz,
+        noiseFloorDbm: r.noiseFloorDbm,
+      }));
+      if (wifiRadios.length > 0) metrics['wifiRadios'] = wifiRadios;
     }
 
     // --- Temperature --------------------------------------------------------

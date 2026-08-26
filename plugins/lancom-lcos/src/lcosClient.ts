@@ -89,6 +89,7 @@ export interface LcosRadio {
   ifc: string; // "WLAN-1" …
   bandLabel: string; // '2.4 GHz' / '5 GHz' / 'dual'
   channel: number | null;
+  bandwidthMhz: number | null; // 20/40/80 — enum mapping verified live on GS hardware
   noiseFloorDbm: number | null;
   modemLoadPct: number | null;
   txPower: string; // DisplayString as reported, '' when unknown
@@ -189,6 +190,9 @@ const STATION_STATES: Record<number, string> = {
 };
 
 const RADIO_BANDS: Record<number, string> = { 0: '', 1: '2.4 GHz', 2: '5 GHz', 3: 'dual (2.4+5 GHz)' };
+// Channel-bandwidth enum — verified live on a GS-series router (WLAN-1=0→20,
+// WLAN-2=2→80). Values outside the map fall back to null.
+const RADIO_BANDWIDTHS: Record<number, number> = { 0: 20, 1: 40, 2: 80 };
 
 function label(map: Record<number, string>, raw: string | undefined): string {
   if (raw === undefined || raw === '') return '';
@@ -550,7 +554,7 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
     if (!key) continue;
     let r = radios.find((x) => x.ifc === key);
     if (!r) {
-      r = { ifc: key, bandLabel: '', channel: null, noiseFloorDbm: null, modemLoadPct: null, txPower: '', utilizationPct: null };
+      r = { ifc: key, bandLabel: '', channel: null, bandwidthMhz: null, noiseFloorDbm: null, modemLoadPct: null, txPower: '', utilizationPct: null };
       radios.push(r);
     }
     switch (row.col) {
@@ -560,6 +564,10 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
       case WLAN_RADIO.COL_MODEM_LOAD: r.modemLoadPct = toInt(value); break;
       case WLAN_RADIO.COL_TX_POWER: r.txPower = value; break;
       case WLAN_RADIO.COL_UTILIZATION: r.utilizationPct = toInt(value); break;
+      case WLAN_RADIO.COL_BANDWIDTH: {
+        const n = toInt(value);
+        if (n !== null) r.bandwidthMhz = RADIO_BANDWIDTHS[n] ?? null;
+      } break;
     }
   }
 
