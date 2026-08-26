@@ -306,6 +306,39 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_wifi_channels_device ON wifi_channels ("deviceId")`);
 
+  // One row per radio (`wifiRadios`) — noise floor + bandwidth for the
+  // spectrum view.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS wifi_radios (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      ifc TEXT NOT NULL DEFAULT '',
+      band TEXT NOT NULL DEFAULT '',
+      channel INTEGER,
+      "bandwidthMhz" INTEGER,
+      "noiseFloorDbm" DOUBLE PRECISION,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", ifc)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_wifi_radios_device ON wifi_radios ("deviceId")`);
+
+  // One row per neighbor network (`wifiNeighbors`) — scanner-style list.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS wifi_neighbors (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      bssid TEXT NOT NULL,
+      ssid TEXT,
+      band TEXT NOT NULL DEFAULT '',
+      channel INTEGER,
+      "signalDbm" DOUBLE PRECISION,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", bssid)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_wifi_neighbors_device ON wifi_neighbors ("deviceId")`);
+
   // One row per associated WLAN client (`wlanClients`) — powers the per-SSID
   // connected-client counts on the WiFi page.
   await pool.query(`

@@ -2640,7 +2640,7 @@ components:
 
     WifiOverview:
       type: object
-      required: [ssids, bands]
+      required: [ssids, bands, neighbors]
       properties:
         ssids:
           type: array
@@ -2648,9 +2648,14 @@ components:
             $ref: '#/components/schemas/WifiSsidGroup'
         bands:
           type: array
-          description: "Per-band spectrum entries (2.4 / 5 / 6 GHz), own SSIDs only"
+          description: "Per-band spectrum view (2.4 / 5 / 6 GHz): one bar per channel + noise floor + own-SSID markers"
           items:
             $ref: '#/components/schemas/WifiBandView'
+        neighbors:
+          type: array
+          description: "Neighbor networks seen by device scan engines (own BSSIDs excluded), strongest signal first"
+          items:
+            $ref: '#/components/schemas/WifiNeighborRef'
 
     WifiSsidGroup:
       type: object
@@ -2699,23 +2704,50 @@ components:
 
     WifiBandView:
       type: object
-      required: [band, entries]
+      required: [band, channels, markers]
       properties:
         band: { type: string, enum: ['2.4', '5', '6'] }
         minChannel: { type: [number, 'null'], description: "Lowest channel in use on this band (for axis scaling); null when empty" }
         maxChannel: { type: [number, 'null'], description: "Highest channel in use on this band; null when empty" }
-        entries:
+        noiseFloorDbm: { type: [number, 'null'], description: "Noisiest radio noise floor (dBm) on this band — the shaded line under the bars; null when no radio reports it" }
+        channels:
           type: array
+          description: "One entry per channel with airtime data or an own SSID (inSSIDer-style bar chart)"
           items:
-            $ref: '#/components/schemas/WifiSpectrumEntry'
+            $ref: '#/components/schemas/WifiChannelBar'
+        markers:
+          type: array
+          description: "Own SSIDs at their channel position (deduped per name+channel)"
+          items:
+            $ref: '#/components/schemas/WifiSsidMarker'
 
-    WifiSpectrumEntry:
+    WifiChannelBar:
+      type: object
+      required: [channel]
+      properties:
+        channel: { type: number }
+        utilizationPct: { type: [number, 'null'], description: "Worst-case airtime utilization (%) across all devices reporting this channel; null when no device reports a value" }
+
+    WifiSsidMarker:
       type: object
       required: [name, channel]
       properties:
-        name: { type: string, description: "SSID broadcasting on this channel" }
+        name: { type: string, description: "Own SSID broadcasting on this channel" }
         channel: { type: number }
-        utilizationPct: { type: [number, 'null'], description: "Airtime utilization (%) at this channel; null when the device reports no value" }
+
+    WifiNeighborRef:
+      type: object
+      required: [deviceId, bssid]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Device whose scan engine saw this network" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        bssid: { type: string }
+        ssid: { type: [string, 'null'], description: "Neighbor SSID name; null when hidden/unknown" }
+        band: { type: string, description: "'2.4' | '5' | '6'; '' when unknown" }
+        channel: { type: [number, 'null'] }
+        signalDbm: { type: [number, 'null'], description: "Received signal strength (dBm) at the scanning device" }
 
     # One plugin's monitoring snapshot for a device (a device can have several).
     PluginTelemetrySnapshot:

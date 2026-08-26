@@ -639,14 +639,16 @@ router.get('/wifi', requireAuth, async (_req, res: Response) => {
       }
     }
 
-    const [ssidRows, channelRows, clientRows] = await Promise.all([
+    const [ssidRows, channelRows, clientRows, radioRows, neighborRows] = await Promise.all([
       db.query.wifiSsids.findMany(deviceIds ? { where: inArray(schema.wifiSsids.deviceId, deviceIds) } : undefined),
       db.query.wifiChannels.findMany(deviceIds ? { where: inArray(schema.wifiChannels.deviceId, deviceIds) } : undefined),
       db.query.wifiClients.findMany(deviceIds ? { where: inArray(schema.wifiClients.deviceId, deviceIds) } : undefined),
+      db.query.wifiRadios.findMany(deviceIds ? { where: inArray(schema.wifiRadios.deviceId, deviceIds) } : undefined),
+      db.query.wifiNeighbors.findMany(deviceIds ? { where: inArray(schema.wifiNeighbors.deviceId, deviceIds) } : undefined),
     ]);
 
     const [deviceViews, pluginNames] = await Promise.all([
-      loadDeviceViews(Array.from(new Set(ssidRows.map((r) => r.deviceId)))),
+      loadDeviceViews(Array.from(new Set([...ssidRows.map((r) => r.deviceId), ...neighborRows.map((r) => r.deviceId)]))),
       loadPluginNames(Array.from(new Set(ssidRows.map((r) => r.pluginId)))),
     ]);
 
@@ -735,24 +737,92 @@ router.get('/wifi', requireAuth, async (_req, res: Response) => {
     }
 
     // --- Band view (spectrum) ----------------------------------------------
-    // One entry per SSID×band row with a known channel; band '' rows are
-    // excluded (the device cannot place them on the spectrum).
+    // inSSIDer-style: ONE bar per channel (airtime utilization), a noise-floor
+    // line from the radio table, and markers for own SSIDs at their channel.
+    // Band '' rows are excluded (the device cannot place them on the spectrum).
     const BANDS = ['2.4', '5', '6'] as const;
+    const bandOfChannel = (ch: number): string => (ch >= 1 && ch <= 14 ? '2.4' : ch >= 36 && ch <= 165 ? '5' : '6');
+
+    // Per-band channel → worst-case utilization across ALL devices reporting
+    // that channel (multiple APs can share a channel; the chart shows how busy
+    // it is, so the max wins).
+    const utilByBandChannel = new Map<string, number>();
+    for (const c of channelRows) {
+      if (typeof c.utilizationPct !== 'number' || !Number.isFinite(c.utilizationPct)) continue;
+      const key = `${bandOfChannel(c.channel)}|${c.channel}`;
+      utilByBandChannel.set(key, Math.max(utilByBandChannel.get(key) ?? -1, c.utilizationPct));
+    }
+
     const bands = BANDS.map((band) => {
-      const entries = ssidRows
-        .filter((r) => r.band === band && r.channel !== null)
-        .map((r) => ({ name: r.name, channel: r.channel as number, utilizationPct: utilByDeviceChannel.get(`${r.deviceId}|${r.channel}`) ?? null }));
-      const channels = entries.map((e) => e.channel);
+      // Channel set = channels with airtime data ∪ own-SSID channels, so a bar
+      // exists even when only one of the two sources reported it.
+      const channelSet = new Set<number>();
+      for (const c of channelRows) if (bandOfChannel(c.channel) === band) channelSet.add(c.channel);
+      for (const r of ssidRows) {
+        if (r.band === band && r.channel !== null) channelSet.add(r.channel);
+      }
+
+      // Noise floor: one line per band — take the noisiest radio on that band
+      // (highest dBm = worst case). Band '' radios (dual-band) cannot be placed
+      // and are skipped.
+      const noiseFloors: number[] = [];
+      for (const r of radioRows) {
+        if (r.band !== band || typeof r.noiseFloorDbm !== 'number' || !Number.isFinite(r.noiseFloorDbm)) continue;
+        noiseFloors.push(r.noiseFloorDbm);
+      }
+
+      const channels = Array.from(channelSet).sort((a, b) => a - b).map((ch) => ({
+        channel: ch,
+        utilizationPct: utilByBandChannel.get(`${band}|${ch}`) ?? null,
+      }));
+
+      // Own-SSID markers (deduped per name+channel — one dot per SSID).
+      const seenMarkers = new Set<string>();
+      const markers: Array<{ name: string; channel: number }> = [];
+      for (const r of ssidRows) {
+        if (r.band !== band || r.channel === null) continue;
+        const key = `${r.name}|${r.channel}`;
+        if (seenMarkers.has(key)) continue;
+        seenMarkers.add(key);
+        markers.push({ name: r.name, channel: r.channel });
+      }
+
       return {
         band,
-        minChannel: channels.length > 0 ? Math.min(...channels) : null,
-        maxChannel: channels.length > 0 ? Math.max(...channels) : null,
-        entries,
+        minChannel: channels.length > 0 ? Math.min(...channels.map((c) => c.channel)) : null,
+        maxChannel: channels.length > 0 ? Math.max(...channels.map((c) => c.channel)) : null,
+        noiseFloorDbm: noiseFloors.length > 0 ? Math.max(...noiseFloors) : null,
+        channels,
+        markers,
       };
     });
 
+    // --- Neighbor list (scanner view) ---------------------------------------
+    // Own BSSIDs are excluded — they already appear as SSID groups above.
+    const ownBssids = new Set(ssidRows.map((r) => r.bssid).filter((b): b is string => !!b));
+    const neighbors: Array<{
+      deviceId: string; deviceName: string | null; managementAddress: string | null; siteName: string | null;
+      bssid: string; ssid: string | null; band: string; channel: number | null; signalDbm: number | null;
+    }> = [];
+    for (const n of neighborRows) {
+      if (ownBssids.has(n.bssid)) continue; // own network seen by another AP's scan
+      const view = deviceViews.get(n.deviceId);
+      neighbors.push({
+        deviceId: n.deviceId,
+        deviceName: view?.name ?? null,
+        managementAddress: view?.managementAddress ?? null,
+        siteName: view?.siteName ?? null,
+        bssid: n.bssid,
+        ssid: n.ssid,
+        band: n.band,
+        channel: n.channel,
+        signalDbm: n.signalDbm,
+      });
+    }
+    neighbors.sort((a, b) => (b.signalDbm ?? -200) - (a.signalDbm ?? -200));
+
     const ssids = Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
-    res.status(200).json({ ssids, bands });
+    res.status(200).json({ ssids, bands, neighbors });
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

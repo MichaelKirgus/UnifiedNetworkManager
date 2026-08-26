@@ -398,6 +398,102 @@ async function ingestInventory(
         ));
     }
 
+    // Radios — noise floor + bandwidth for the spectrum view. Upserted by ifc;
+    // a radio that disappears (e.g. disabled) is dropped with its row.
+    const rawWifiRadios = Array.isArray(metrics['wifiRadios']) ? (metrics['wifiRadios'] as unknown[]) : [];
+    if (rawWifiRadios.length > 0) {
+      const values: {
+        deviceId: string; pluginId: string; ifc: string; band: string; channel: number | null;
+        bandwidthMhz: number | null; noiseFloorDbm: number | null; collectedAt: string;
+      }[] = [];
+      for (const raw of rawWifiRadios) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        values.push({
+          deviceId,
+          pluginId,
+          ifc: typeof r['ifc'] === 'string' ? (r['ifc'] as string).trim() : '',
+          band: typeof r['band'] === 'string' ? (r['band'] as string).trim() : '',
+          channel: numOrNull(r['channel']),
+          bandwidthMhz: numOrNull(r['bandwidthMhz']),
+          noiseFloorDbm: numOrNull(r['noiseFloorDbm']),
+          collectedAt,
+        });
+      }
+      const radioByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        radioByKey.set(`${v.deviceId}|${v.pluginId}|${v.ifc}`, v);
+      }
+      if (radioByKey.size > 0) {
+        await db.insert(schema.wifiRadios).values(Array.from(radioByKey.values())).onConflictDoUpdate({
+          target: [schema.wifiRadios.deviceId, schema.wifiRadios.pluginId, schema.wifiRadios.ifc],
+          set: {
+            band: sql`excluded.band`,
+            channel: sql`excluded.channel`,
+            bandwidthMhz: sql`excluded."bandwidthMhz"`,
+            noiseFloorDbm: sql`excluded."noiseFloorDbm"`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      const seenRadioIfcs = new Set(values.map((v) => v.ifc));
+      await db.delete(schema.wifiRadios)
+        .where(and(
+          eq(schema.wifiRadios.deviceId, deviceId),
+          eq(schema.wifiRadios.pluginId, pluginId),
+          notInArray(schema.wifiRadios.ifc, Array.from(seenRadioIfcs))
+        ));
+    }
+
+    // Neighbor networks — scanner-style list. Upserted by BSSID; neighbors that
+    // left range are dropped each snapshot (the scan table is a live view).
+    const rawWifiNeighbors = Array.isArray(metrics['wifiNeighbors']) ? (metrics['wifiNeighbors'] as unknown[]) : [];
+    if (rawWifiNeighbors.length > 0) {
+      const values: {
+        deviceId: string; pluginId: string; bssid: string; ssid: string | null; band: string;
+        channel: number | null; signalDbm: number | null; collectedAt: string;
+      }[] = [];
+      for (const raw of rawWifiNeighbors) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const bssid = typeof r['bssid'] === 'string' ? (r['bssid'] as string).trim().toLowerCase() : '';
+        if (!bssid) continue; // BSSID is part of the conflict key
+        values.push({
+          deviceId,
+          pluginId,
+          bssid,
+          ssid: typeof r['ssid'] === 'string' && (r['ssid'] as string).trim() !== '' ? (r['ssid'] as string).trim() : null,
+          band: typeof r['band'] === 'string' ? (r['band'] as string).trim() : '',
+          channel: numOrNull(r['channel']),
+          signalDbm: numOrNull(r['signalDbm']),
+          collectedAt,
+        });
+      }
+      const neighborByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        neighborByKey.set(`${v.deviceId}|${v.pluginId}|${v.bssid}`, v);
+      }
+      if (neighborByKey.size > 0) {
+        await db.insert(schema.wifiNeighbors).values(Array.from(neighborByKey.values())).onConflictDoUpdate({
+          target: [schema.wifiNeighbors.deviceId, schema.wifiNeighbors.pluginId, schema.wifiNeighbors.bssid],
+          set: {
+            ssid: sql`excluded.ssid`,
+            band: sql`excluded.band`,
+            channel: sql`excluded.channel`,
+            signalDbm: sql`excluded."signalDbm"`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      const seenBssids = new Set(values.map((v) => v.bssid));
+      await db.delete(schema.wifiNeighbors)
+        .where(and(
+          eq(schema.wifiNeighbors.deviceId, deviceId),
+          eq(schema.wifiNeighbors.pluginId, pluginId),
+          notInArray(schema.wifiNeighbors.bssid, Array.from(seenBssids))
+        ));
+    }
+
     // Associated WLAN clients — upserted by MAC (a roaming client keeps its
     // latest SSID/radio). Rows for stations that disappeared are dropped.
     const rawWifiClients = Array.isArray(metrics['wlanClients']) ? (metrics['wlanClients'] as unknown[]) : [];
@@ -476,6 +572,8 @@ async function sweepStaleInventory(): Promise<void> {
   await db.delete(schema.tunnels).where(lt(schema.tunnels.collectedAt, cutoff));
   await db.delete(schema.wifiSsids).where(lt(schema.wifiSsids.collectedAt, cutoff));
   await db.delete(schema.wifiChannels).where(lt(schema.wifiChannels.collectedAt, cutoff));
+  await db.delete(schema.wifiRadios).where(lt(schema.wifiRadios.collectedAt, cutoff));
+  await db.delete(schema.wifiNeighbors).where(lt(schema.wifiNeighbors.collectedAt, cutoff));
   await db.delete(schema.wifiClients).where(lt(schema.wifiClients.lastSeenAt, cutoff));
 }
 

@@ -420,6 +420,56 @@ export const wifiChannels = pgTable(
   }
 );
 
+// One row per radio as reported by a plugin's `wifiRadios` metric — powers the
+// spectrum view's noise-floor line and bandwidth context on the WiFi page.
+export const wifiRadios = pgTable(
+  'wifi_radios',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Radio interface (e.g. "WLAN-1"); '' when the device does not name it —
+    // NOT NULL so the conflict key stays reliable (NULLs are distinct in PG).
+    ifc: text('ifc').notNull().default(''),
+    // '2.4' | '5' | '6' — '' when the device cannot say which band (dual-band).
+    band: text('band').notNull().default(''),
+    channel: integer('channel'),
+    bandwidthMhz: integer('bandwidthMhz'), // 20/40/80; null when unknown
+    noiseFloorDbm: doublePrecision('noiseFloorDbm'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkWifiRadios: uniqueIndex('uq_wifi_radios')
+        .on(table.deviceId, table.pluginId, table.ifc),
+      idxWifiRadiosDevice: index('idx_wifi_radios_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per neighbor network seen by a device's scan engine (`wifiNeighbors`
+// metric) — powers the scanner-style network list on the WiFi page. Upserted
+// by BSSID; rows for networks that disappeared are dropped each snapshot.
+export const wifiNeighbors = pgTable(
+  'wifi_neighbors',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    bssid: text('bssid').notNull(),
+    ssid: text('ssid'), // '' when hidden/unknown
+    band: text('band').notNull().default(''),
+    channel: integer('channel'),
+    signalDbm: doublePrecision('signalDbm'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkWifiNeighbors: uniqueIndex('uq_wifi_neighbors')
+        .on(table.deviceId, table.pluginId, table.bssid),
+      idxWifiNeighborsDevice: index('idx_wifi_neighbors_device').on(table.deviceId),
+    };
+  }
+);
+
 // One row per associated WLAN client (`wlanClients` metric) — powers the
 // per-SSID connected-client counts on the WiFi page. Upserted by MAC, so a
 // roaming client keeps its latest SSID/radio.
