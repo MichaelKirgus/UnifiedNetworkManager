@@ -399,7 +399,7 @@ export default function Wifi() {
           {/* SSID table (top) — fixed share of the page height while the spectrum is
               open; when collapsed it takes everything left of the header card. */}
           <div
-            className={clsx('min-h-0 overflow-y-auto pr-1', !spectrumOpen && 'flex-1')}
+            className={clsx('min-h-0 pr-1', !spectrumOpen && 'flex-1')}
             style={{ height: spectrumOpen ? `${tablePct}%` : undefined }}
           >
             <DataTable<WifiSsidGroup>
@@ -407,6 +407,7 @@ export default function Wifi() {
               rows={groups}
               rowKey={(row) => row.name}
               storageKey="wifi"
+              fillHeight
               searchPlaceholder="Search SSIDs…"
               emptyMessage="No WiFi networks reported yet — devices with built-in radios (LANCOM LX APs, LCOS routers) populate this view within a poll cycle."
               onRowHover={(row) => setHoveredSsid(row ? row.name : null)}

@@ -46,6 +46,11 @@ interface DataTableProps<T> {
   /** Called when the pointer enters a row, or leaves the table body entirely.
    * Used e.g. by the WiFi page to highlight matching spectrum bars on hover. */
   onRowHover?: (row: T | null) => void;
+  /** Fill the parent's height (parent must have a definite height, e.g. the
+   * WiFi table pane behind the splitter). Without it the card grows with its
+   * content up to a viewport-based cap; either way the header + filter rows
+   * stay pinned while the body scrolls internally. */
+  fillHeight?: boolean;
 }
 
 const MIN_COL_WIDTH = 80;
@@ -144,6 +149,7 @@ export function DataTable<T>({
   selectable = false,
   bulkActions,
   onRowHover,
+  fillHeight = false,
 }: DataTableProps<T>) {
   const { prefs, setPrefs, reset } = useTablePrefs(storageKey);
   const [menuOpen, setMenuOpen] = useState(false); // column visibility picker
@@ -326,9 +332,13 @@ export function DataTable<T>({
   return (
     // NOTE: no overflow-hidden here — the toolbar dropdowns are absolutely
     // positioned and must be allowed to extend beyond the card's edges.
-    <div className="rounded-md border border-slate-200 bg-white shadow-sm">
+    // Flex column with a viewport-based cap: tall tables scroll INTERNALLY so
+    // the toolbar, status line and (sticky) header rows never leave the screen.
+    // With fillHeight the parent's height is authoritative (no viewport cap);
+    // otherwise tall tables are capped so they scroll internally on normal pages.
+    <div className={clsx('flex flex-col rounded-md border border-slate-200 bg-white shadow-sm', fillHeight ? 'h-full' : 'max-h-[calc(100vh-200px)]')}>
       {/* Toolbar: quick search + filter toggle | column picker + export */}
-      <div className="relative flex flex-wrap items-center gap-2 border-b border-slate-200 px-3 py-1.5" ref={menuRef}>
+      <div className="relative flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 px-3 py-1.5" ref={menuRef}>
         <div className="relative min-w-[180px] flex-1 sm:max-w-xs">
           <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
           <input
@@ -445,7 +455,7 @@ export function DataTable<T>({
 
       {/* Status line: row count + active filter chips (only when narrowing) */}
       {hasActiveNarrowing && (
-        <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-200 bg-slate-50/60 px-3 py-1 text-xs text-slate-500">
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-slate-200 bg-slate-50/60 px-3 py-1 text-xs text-slate-500">
           <span>
             {viewRows.length} of {rows.length} rows
           </span>
@@ -476,7 +486,7 @@ export function DataTable<T>({
 
       {/* Selection bar with bulk actions */}
       {selectable && selectedKeys.size > 0 && (
-        <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-blue-50/60 px-3 py-1.5 text-sm">
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 bg-blue-50/60 px-3 py-1.5 text-sm">
           <span className="font-medium text-slate-700">{selectedKeys.size} selected</span>
           {(bulkActions ?? []).map((action) => (
             <button
@@ -502,8 +512,10 @@ export function DataTable<T>({
           </button>
         </div>
       ) : (
-      <div className="overflow-x-auto">
-        <table className="min-w-full table-fixed divide-y divide-slate-200 text-sm">
+        // The ONLY scroll container of the card — header rows below are sticky
+        // inside it, so they stay visible while the body scrolls.
+        <div className="min-h-0 flex-1 overflow-auto">
+        <table className="min-w-full table-fixed text-sm">
           {/* Only columns with an explicit width (resized or declared) are pinned;
               the rest share the remaining space, so the table fits its container
               and no horizontal scrollbar appears unless the user resizes wider. */}
@@ -536,7 +548,11 @@ export function DataTable<T>({
                     key={col.key}
                     scope="col"
                     aria-sort={sortable ? (active === 'asc' ? 'ascending' : active === 'desc' ? 'descending' : 'none') : undefined}
-                    className="relative select-none border-r border-slate-200 px-4 py-2 text-left font-semibold text-slate-600 last:border-r-0"
+                    // sticky pins the header to the top of the scroll container;
+                    // opaque bg is required so rows don't show through. The
+                    // border-b replaces the old table-level divide-y (which would
+                    // scroll away under the pinned header).
+                    className="sticky top-0 z-10 select-none border-b border-r border-slate-200 bg-slate-50 px-4 py-2 text-left font-semibold text-slate-600 last:border-r-0"
                   >
                     {sortable ? (
                       <button type="button" onClick={() => cycleSort(col.key)} className="group flex w-full items-center gap-1.5 text-left">
@@ -562,9 +578,12 @@ export function DataTable<T>({
             </tr>
               {showFilters && (
                 <tr className="bg-white">
-                  {selectable && <td className="border-r border-slate-200" />}
+                  {/* top-[37px] = header row height (py-2 + 20px line-height +
+                      1px border) — keeps the filter inputs pinned directly
+                      under the header with no gap or overlap. */}
+                  {selectable && <td className="sticky top-[37px] z-10 border-b border-r border-slate-200 bg-white" />}
                   {visibleColumns.map((col) => (
-                    <td key={col.key} className="border-r border-slate-200 px-2 py-1 last:border-r-0">
+                    <td key={col.key} className="sticky top-[37px] z-10 border-b border-r border-slate-200 bg-white px-2 py-1 last:border-r-0">
                       {col.filterable !== false ? (
                         <input
                           type="text"
@@ -615,7 +634,7 @@ export function DataTable<T>({
             })}
           </tbody>
         </table>
-      </div>
+        </div>
       )}
     </div>
   );
