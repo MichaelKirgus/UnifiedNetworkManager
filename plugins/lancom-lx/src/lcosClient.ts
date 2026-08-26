@@ -487,7 +487,8 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
       case 2: r.band = label(RADIO_BANDS, value); break;
       case 3: r.channel = toInt(value); break;
       // Unsigned magnitude of the dBm noise floor — negate for display.
-      case 4: { const n = toInt(value); if (n !== null) r.noiseFloorDbm = -n; } break;
+      // Signed dBm — the shared parser preserves the sign (no negation needed).
+      case 4: r.noiseFloorDbm = toInt(value); break;
       case 6: r.modemLoadPct = toInt(value); break;
       case 7: r.txPowerDbm = toInt(value); break;
       case 9: r.stations = toInt(value); break;
@@ -573,7 +574,8 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
       case 71: c.mode = label(OP_MODES, value) || stripE(value); break;
       case 80: c.hostname = value; break;
       // Unsigned magnitude of the dBm signal — negate for display.
-      case 97: { const n = toInt(value); if (n !== null) c.signalDbm = -n; } break;
+      // Signed dBm — the shared parser preserves the sign.
+      case 97: c.signalDbm = toInt(value); break;
       case 98: if (!c.ssid) c.ssid = value; break; // networkName fallback
       case 99: c.ssid = value || c.ssid; break;
     }
@@ -633,6 +635,7 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
     switch (row.col) {
       case 3: l.connected = value === '1'; break; // eYes(1)/eNo(0)
       // Unsigned magnitude of the dBm receive signal — negate for display.
+      // Gauge32 magnitude (verified live) — negate for display.
       case 5: { const n = toInt(value); if (n !== null) l.signalDbm = -n; } break;
     }
   }
@@ -650,8 +653,8 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
       case 2: n.ssid = value; break;
       case 8: n.channel = toInt(value); break;
       case 16: n.band = label(RADIO_BANDS, value); break;
-      // Unsigned magnitude of the dBm signal — negate for display.
-      case 26: { const num = toInt(value); if (num !== null) n.signalDbm = -num; } break;
+      // Signed dBm — the shared parser preserves the sign.
+      case 26: n.signalDbm = toInt(value); break;
     }
   }
 

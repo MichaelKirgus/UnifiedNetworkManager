@@ -454,6 +454,33 @@ app.post('/monitoring', async (req, res) => {
       .map((c) => ({ channel: c.channel, utilizationPct: c.utilizationPct }));
     if (wifiAirtime.length > 0) metrics['wifiAirtime'] = wifiAirtime;
 
+    // wifiRadios[] → per-radio RF context for the WiFi page spectrum view
+    // (noise-floor line + bandwidth). One row per radio.
+    const mhzOf = (label: string): number | null => {
+      const m = /(\d+)/.exec(label || '');
+      return m ? Number(m[1]) : null;
+    };
+    const wifiRadios = snapshot.radios.map((r) => ({
+      ifc: r.ifc || null,
+      band: BAND_SHORT[r.band] ?? '',
+      channel: r.channel,
+      bandwidthMhz: mhzOf(r.bandwidth),
+      noiseFloorDbm: r.noiseFloorDbm,
+    }));
+    if (wifiRadios.length > 0) metrics['wifiRadios'] = wifiRadios;
+
+    // wifiNeighbors[] → neighbor scan results for the WiFi page's scanner list.
+    // Same data as the `wifi.neighbors` device metric above, but in inventory
+    // form so the API can persist it cross-device.
+    const wifiNeighbors = snapshot.neighbors.map((n) => ({
+      bssid: n.bssid,
+      ssid: n.ssid || null,
+      band: BAND_SHORT[n.band] ?? '',
+      channel: n.channel,
+      signalDbm: n.signalDbm,
+    }));
+    if (wifiNeighbors.length > 0) metrics['wifiNeighbors'] = wifiNeighbors;
+
     // --- Health -------------------------------------------------------------
     let health: Health = 'ok';
     const warnings: string[] = [];
