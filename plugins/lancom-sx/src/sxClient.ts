@@ -329,16 +329,22 @@ function enrichmentWalks(): string[] {
   return [QB_FDB.base];
 }
 
+/** Optional structured-log sink for walk failures (wired to the plugin logger). */
+export interface SxLogSink {
+  log(level: 'warn' | 'error', message: string, context?: Record<string, unknown>): void;
+}
+
 /**
- * Returns the cached SX snapshot for a host, re-walking only when the cache is
- * empty or older than `inventoryTtlMs`. Never throws — degrades to stale/empty
+ * Returns the cached SX snapshot for a host, re-walking only when the cache
+ * is empty or older than `inventoryTtlMs`. Never throws — degrades to stale/empty
  * data with an explanatory error. A null snapshot means "not a recognized
  * Lancom SX switch" (the caller maps that to health 'unknown').
  */
 export async function getSxInventory(
   host: string,
   creds: SnmpCredentials,
-  opts: SxOptions
+  opts: SxOptions,
+  log?: SxLogSink
 ): Promise<{ snapshot: SxSwitchSnapshot | null; fromCache: boolean; error?: string }> {
   const cached = inventoryCache.get(host, opts.inventoryTtlMs);
   if (cached) {
@@ -370,7 +376,9 @@ export async function getSxInventory(
       const r = await snmpWalk(host, creds, [oid], opts);
       for (const [k, v] of r) out.set(k, v);
     } catch (e: unknown) {
-      console.error(`[lancom-sx] inventory walk ${oid} failed:`, e instanceof Error ? e.message : e);
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[lancom-sx] inventory walk ${oid} failed:`, msg);
+      log?.log('warn', `SNMP inventory walk ${oid} failed on ${host}: ${msg}`, { oid, host });
       failed.push(oid);
     }
   }
@@ -382,7 +390,9 @@ export async function getSxInventory(
         const r = await snmpWalk(host, creds, [oid], opts);
         for (const [k, v] of r) out.set(k, v);
       } catch (e: unknown) {
-        console.error(`[lancom-sx] FDB enrichment walk failed:`, e instanceof Error ? e.message : e);
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[lancom-sx] FDB enrichment walk failed:`, msg);
+        log?.log('warn', `Q-BRIDGE FDB enrichment walk ${oid} failed on ${host}: ${msg}`, { oid, host });
         // Best-effort — host rows simply lack port info this cycle.
       }
     }

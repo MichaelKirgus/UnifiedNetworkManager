@@ -305,5 +305,80 @@ export function internalRouter() {
     }
   });
 
+  // --- Plugin log ingestion -------------------------------------------------
+  //
+  // Plugins push structured log entries in batches (see the SDK's
+  // createPluginLogger). The sender self-reports its pluginId (its effective
+  // UUID); there is no per-plugin identity on this shared-key channel, so the
+  // id is validated against the plugins table. Entries are capped to keep a
+  // chatty or buggy plugin from flooding the database: max 100 entries per
+  // request (excess dropped), message truncated at ~2KB, context JSON at ~8KB.
+
+  const LOG_LEVELS = new Set(['debug', 'info', 'warn', 'error']);
+  const MAX_LOG_ENTRIES_PER_REQUEST = 100;
+  const MAX_MESSAGE_LENGTH = 2048;
+  const MAX_CONTEXT_BYTES = 8192;
+
+  // POST /plugin/logs - accept a batch of log entries from one plugin.
+  router.post('/plugin/logs', pluginAuth, async (req: Request, res: Response) => {
+    const { pluginId, entries } = req.body ?? {};
+    if (!pluginId || typeof pluginId !== 'string') {
+      return res.status(400).json({ error: 'pluginId is required' });
+    }
+    if (!Array.isArray(entries)) {
+      return res.status(400).json({ error: 'entries must be an array' });
+    }
+
+    try {
+      const plugin = await db.query.plugins.findFirst({
+        where: (plugins, { eq }) => eq(plugins.id, pluginId),
+      });
+      if (!plugin) {
+        return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
+      }
+
+      let accepted = 0;
+      const batch = entries.slice(0, MAX_LOG_ENTRIES_PER_REQUEST);
+      if (entries.length > MAX_LOG_ENTRIES_PER_REQUEST) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[logs] plugin ${pluginId} sent ${entries.length} entries in one request; ` +
+            `dropping the last ${entries.length - MAX_LOG_ENTRIES_PER_REQUEST}`
+        );
+      }
+
+      const now = new Date().toISOString();
+      const rows = batch.map((e: Record<string, unknown>) => {
+        let context: string | null = null;
+        if (e.context !== undefined && e.context !== null) {
+          try {
+            const serialized = JSON.stringify(e.context);
+            context = serialized.length > MAX_CONTEXT_BYTES ? serialized.slice(0, MAX_CONTEXT_BYTES) : serialized;
+          } catch {
+            context = null; // non-serializable context: drop it rather than fail the batch
+          }
+        }
+        return {
+          id: uuidv4(),
+          pluginId,
+          deviceId: typeof e.deviceId === 'string' && e.deviceId ? e.deviceId : null,
+          level: LOG_LEVELS.has(String(e.level)) ? String(e.level) : 'info',
+          message: String(e.message ?? '').slice(0, MAX_MESSAGE_LENGTH),
+          context,
+          timestamp: typeof e.timestamp === 'string' && e.timestamp ? e.timestamp : now,
+        };
+      });
+
+      if (rows.length > 0) {
+        await db.insert(schema.pluginLogs).values(rows);
+        accepted = rows.length;
+      }
+      res.status(201).json({ accepted });
+    } catch (error) {
+      console.error('Error ingesting plugin logs:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   return router;
 }

@@ -343,6 +343,11 @@ const INVENTORY_WALKS: string[] = [
   TEMP_EXTREMES.base, // temperature min/max extremes
 ];
 
+/** Optional structured-log sink for walk failures (wired to the plugin logger). */
+export interface LcosLogSink {
+  log(level: 'warn' | 'error', message: string, context?: Record<string, unknown>): void;
+}
+
 /**
  * Returns the cached LCOS snapshot for a host, re-walking only when the cache
  * is empty or older than `inventoryTtlMs`. Never throws — degrades to
@@ -352,7 +357,8 @@ const INVENTORY_WALKS: string[] = [
 export async function getLcosInventory(
   host: string,
   creds: SnmpCredentials,
-  opts: LcosOptions
+  opts: LcosOptions,
+  log?: LcosLogSink
 ): Promise<{ snapshot: LcosRouterSnapshot | null; fromCache: boolean; error?: string }> {
   const cached = inventoryCache.get(host, opts.inventoryTtlMs);
   if (cached) {
@@ -405,7 +411,10 @@ export async function getLcosInventory(
         for (const [k, v] of r.value) out.set(k, v);
         continue;
       }
-      console.error(`[lancom-lcos] inventory walk ${chunk[j]} failed:`, r.reason?.message ?? r.reason);
+      const reason = (r as { reason?: unknown }).reason;
+      const msg = reason instanceof Error ? reason.message : String(reason ?? 'unknown error');
+      console.error(`[lancom-lcos] inventory walk ${chunk[j]} failed:`, msg);
+      log?.log('warn', `SNMP inventory walk ${chunk[j]} failed on ${host}: ${msg}`, { oid: chunk[j], host });
       failed.push(chunk[j]);
     }
   }

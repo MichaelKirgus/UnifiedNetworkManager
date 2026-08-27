@@ -19,6 +19,7 @@ import {
   MetricDescriptor,
   PluginOptionDescriptor,
   clampInt,
+  createPluginLogger,
   createPluginServer,
   errorDescriptor,
   readSettings,
@@ -51,6 +52,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     max: 600,
     description: 'How often the plugin re-collects from the device.',
   },
+  {
+    key: 'logToApi',
+    label: 'Send logs to UNM',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Ship structured log entries (poll failures, config/plan errors) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
+  },
 ];
 
 // --- Metric descriptors -----------------------------------------------------------
@@ -81,6 +90,14 @@ const server = createPluginServer({
 });
 const app = server.app;
 
+// --- Structured logging ---------------------------------------------------------------
+// createPluginLogger batches entries in memory and POSTs them to the API's
+// internal POST /plugin/logs endpoint (fire-and-forget, drop-on-failure —
+// logging never breaks a poll). Emission is gated per call by the `logToApi`
+// option via setEnabled() below; it flows through the settings loop, so it
+// works globally and per-device with zero extra plumbing. See docs/PLUGIN-DEVELOPMENT.md.
+const logger = createPluginLogger(identity);
+
 // --- POST /monitoring -----------------------------------------------------------------
 /**
  * The API polls this every ~30 s with a HARD 10 s budget. Body (decrypted by
@@ -94,6 +111,7 @@ app.post('/monitoring', async (req, res) => {
 
   // Effective settings: declared defaults ⊕ user overrides from the header.
   const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
   const pollIntervalSeconds = clampInt(settings.pollIntervalSeconds, 5, 600, 30);
 
   const fail = (health: Health, error: string) => {
@@ -129,6 +147,8 @@ app.post('/monitoring', async (req, res) => {
       activeSettings: { pollIntervalSeconds },
     });
   } catch (err) {
+    // Log to the API AND keep console output for container logs.
+    logger.error(`Monitoring poll for ${managementAddress} failed: ${(err as Error).message}`, { deviceId, context: { host: managementAddress } });
     return fail('critical', `Monitoring failed: ${(err as Error).message}`);
   }
 });

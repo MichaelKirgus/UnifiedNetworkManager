@@ -3,6 +3,7 @@ import {
   MetricDescriptor,
   PluginOptionDescriptor,
   clampInt,
+  createPluginLogger,
   createPluginServer,
   errorDescriptor,
   INVENTORY_INTERVAL_MS,
@@ -96,6 +97,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     description:
       'Walk IEEE 802.11 MIB tables for access-point and client info (SSID, BSSID, channel, security + connected client MACs). Refreshes with the inventory interval. Turn off per-device when a dedicated WiFi plugin covers the device.',
   },
+  {
+    key: 'logToApi',
+    label: 'Send logs to UNM',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Ship structured log entries (SNMP walk failures) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
+  },
 ];
 
 // Pre-wired app: cors + json + /healthz + /discover (+ mDNS on listen) come
@@ -111,6 +120,11 @@ const server = createPluginServer({
   },
 });
 const app = server.app;
+
+// Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
+// Emission is gated per call by the `logToApi` option via setEnabled() — it
+// flows through the settings loop, so it works globally and per-device.
+const logger = createPluginLogger(identity);
 
 /** Resolves walk options from effective settings. */
 function resolveOptions(settings: Record<string, unknown>): WalkOptions {
@@ -159,6 +173,7 @@ app.post('/monitoring', async (req, res) => {
   const managementAddress = typeof body.managementAddress === 'string' ? body.managementAddress : '';
 
   const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
   const opts = resolveOptions(settings);
   const host = hostFromAddress(managementAddress);
 
@@ -187,7 +202,13 @@ app.post('/monitoring', async (req, res) => {
     const snapshot = inventory.snapshot;
 
     if (!snapshot) {
+      logger.error(`SNMP collection from ${host} failed: ${inventory.error ?? 'no data available'}`, { deviceId, context: { host } });
       return fail('critical', inventory.error ?? 'SNMP collection failed — no data available.');
+    }
+
+    if (inventory.error) {
+      // Partial walk failure — the snapshot is usable but some subtrees are empty.
+      logger.warn(`Partial SNMP data from ${host}: ${inventory.error}`, { deviceId, context: { host } });
     }
 
     // Fast path: counter-only walk every cycle for fresh rates.
@@ -283,6 +304,7 @@ app.post('/monitoring', async (req, res) => {
       },
     });
   } catch (err) {
+    logger.error(`Monitoring poll for ${host} failed: ${(err as Error).message}`, { deviceId, context: { host } });
     return fail('critical', (err as Error).message);
   }
 });

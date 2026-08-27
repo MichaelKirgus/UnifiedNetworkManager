@@ -243,9 +243,15 @@ let gatewayStatusShapeLogged = false;
  * 'unknown') and `gatewayLatencyMs`. Unknown response shapes degrade to
  * 'unknown' rather than failing.
  */
+/** Optional structured-log sink for enrichment failures (wired to the plugin logger). */
+export interface EnrichLogSink {
+  log(level: 'warn' | 'error', message: string, context?: Record<string, unknown>): void;
+}
+
 export async function enrichRoutesWithGatewayStatus(
   client: AxiosInstance,
-  routes: RouteRow[]
+  routes: RouteRow[],
+  log?: EnrichLogSink
 ): Promise<RouteRow[]> {
   if (routes.length === 0) return routes;
 
@@ -293,10 +299,12 @@ export async function enrichRoutesWithGatewayStatus(
       }
     } else if (res && !res.ok) {
       console.error(`[opnsense] gateway/status returned HTTP ${res.status} — enrichment skipped`);
+      log?.log('warn', `gateway/status returned HTTP ${res.status} — route enrichment skipped`, { endpoint: 'gateway/status', httpStatus: res.status });
     }
   } catch (err) {
     // best-effort — a failing status endpoint must not sink the route rows
     console.error('[opnsense] gateway/status call failed:', err instanceof Error ? err.message : String(err));
+    log?.log('warn', 'gateway/status call failed — route enrichment skipped', { endpoint: 'gateway/status', error: err instanceof Error ? err.message : String(err) });
   }
 
   if (byName.size === 0 && routes.length > 0) {

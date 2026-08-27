@@ -21,6 +21,7 @@ tags:
   - name: Secrets
   - name: Sites
   - name: Inventory
+  - name: Logs
   - name: Users
   - name: Tokens
 paths:
@@ -1762,6 +1763,71 @@ paths:
         '401':
           description: Authentication required
 
+  /logs:
+    get:
+      tags: [Logs]
+      summary: List plugin log entries (global view)
+      description: >-
+        Structured log entries pushed by plugins via the internal POST
+        /plugin/logs endpoint. Powers the global Logs page and the per-device
+        Logs section in DeviceDetail (same route with a fixed deviceId).
+        Requires permission `logs:read` — logs can carry critical details
+        (endpoints, error payloads). Rows are kept for LOG_RETENTION_DAYS
+        (default 7) and then swept away. Newest first.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: pluginId
+          required: false
+          schema: { type: string }
+          description: Filter to one plugin instance
+        - in: query
+          name: level
+          required: false
+          schema:
+            type: string
+            enum: [debug, info, warn, error]
+          description: "Filter by level (comma list allowed, e.g. 'warn,error')"
+        - in: query
+          name: search
+          required: false
+          schema: { type: string }
+          description: Case-insensitive substring match on message and context
+        - in: query
+          name: from
+          required: false
+          schema: { type: string, format: date-time }
+          description: Inclusive lower bound (ISO-8601)
+        - in: query
+          name: to
+          required: false
+          schema: { type: string, format: date-time }
+          description: Exclusive upper bound (ISO-8601)
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 500, maximum: 2000 }
+          description: Max rows to return (default 500, hard cap 2000)
+      responses:
+        '200':
+          description: Log entries, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LogEntry'
+        '400':
+          description: Invalid level filter value
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing logs:read permission
+
   /users:
     get:
       tags: [Users]
@@ -2564,6 +2630,27 @@ components:
                 items: { type: string }
 
     # --- Cross-device inventory views (Networks + Hosts pages) --------------
+
+    LogEntry:
+      type: object
+      description: >-
+        One structured log entry emitted by a plugin (batched via the internal
+        POST /plugin/logs endpoint). `context` is an arbitrary JSON object with
+        structured details ({endpoint, httpStatus, oid, ...}) — null when the
+        plugin sent none.
+      required: [id, pluginId, level, message, timestamp]
+      properties:
+        id: { type: string }
+        pluginId: { type: string, description: "Plugin instance id (the sender's effective UUID)" }
+        pluginName: { type: [string, 'null'], description: "Display name of the plugin instance" }
+        deviceId: { type: [string, 'null'], description: "Device the entry relates to; null for plugin-level events" }
+        deviceName: { type: [string, 'null'] }
+        level:
+          type: string
+          enum: [debug, info, warn, error]
+        message: { type: string, description: "Human-readable message (truncated at ~2KB on ingest)" }
+        context: { type: object, additionalProperties: true, nullable: true, description: "Structured details; null when absent" }
+        timestamp: { type: string, format: date-time, description: "ISO-8601 timestamp from the plugin's clock" }
 
     NetworkRow:
       type: object

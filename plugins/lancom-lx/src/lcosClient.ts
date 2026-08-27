@@ -378,10 +378,16 @@ const INVENTORY_WALKS: string[] = [
  * stale/empty data with an explanatory error. Partial walk failures (some
  * subtrees missing) still yield a usable snapshot; total failure does not.
  */
+/** Optional structured-log sink for walk failures (wired to the plugin logger). */
+export interface LcosLogSink {
+  log(level: 'warn' | 'error', message: string, context?: Record<string, unknown>): void;
+}
+
 export async function getLcosInventory(
   host: string,
   creds: SnmpCredentials,
-  opts: LcosOptions
+  opts: LcosOptions,
+  log?: LcosLogSink
 ): Promise<{ snapshot: LcosSnapshot | null; fromCache: boolean; error?: string }> {
   const cached = inventoryCache.get(host, opts.inventoryTtlMs);
   if (cached) {
@@ -428,7 +434,9 @@ export async function getLcosInventory(
         for (const [k, v] of r.value) out.set(k, v);
         continue;
       }
-      console.error(`[lancom] inventory walk ${chunk[j]} failed:`, r.reason?.message ?? r.reason);
+      const msg = r.reason instanceof Error ? r.reason.message : String(r.reason ?? 'unknown error');
+      console.error(`[lancom] inventory walk ${chunk[j]} failed:`, msg);
+      log?.log('warn', `SNMP inventory walk ${chunk[j]} failed on ${host}: ${msg}`, { oid: chunk[j], host });
       failed.push(chunk[j]);
     }
   }

@@ -22,3 +22,5 @@ export { TtlCache } from './ttlCache';
 export type { TtlCacheOptions } from './ttlCache';
 export { createApiClient, isNotFound } from './apiClient';
 export type { ApiClientOptions } from './apiClient';
+export { createPluginLogger, LOG_LEVELS } from './logging';
+export type { PluginLogger, PluginLoggerOptions, PluginLogEntry, LogLevel, LogCallOptions } from './logging';

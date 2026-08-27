@@ -8,7 +8,8 @@ import { MetricView } from '../components/MetricView';
 import { OptionForm } from '../components/OptionForm';
 import { DeviceIcon } from '../components/DeviceIcon';
 import { PluginAssignmentBuilder } from '../components/PluginAssignmentBuilder';
-import { api, DeviceAddress, DevicePluginAssignmentInput, MetricDescriptor, Plugin } from '../api/client';
+import { api, DeviceAddress, LogEntry, DevicePluginAssignmentInput, MetricDescriptor, Plugin } from '../api/client';
+import { can } from '../auth/permissions';
 import { isValidAddress, addressError } from '../utils/address';
 
 /** Resolves the current value for a metric descriptor from a metrics map. */
@@ -60,6 +61,17 @@ export default function DeviceDetail() {
     queryFn: () => api.deviceTelemetry(deviceId as string, 30),
     enabled: Boolean(deviceId),
     refetchInterval: 30_000,
+  });
+
+  // Per-device plugin log entries (gated by logs:read — logs can carry critical
+  // details). Newest first; the API caps at 500 rows, which is plenty for a
+  // single device's recent activity.
+  const [logLevelFilter, setLogLevelFilter] = useState('');
+  const logsQuery = useQuery({
+    queryKey: ['deviceLogs', deviceId, logLevelFilter],
+    queryFn: () => api.logs({ deviceId: deviceId as string, level: (logLevelFilter || undefined) as LogEntry['level'] | undefined }),
+    enabled: Boolean(deviceId) && can('logs:read'),
+    refetchInterval: 15_000,
   });
 
   const device = (devicesQuery.data ?? []).find((d) => d.id === deviceId);
@@ -426,6 +438,88 @@ export default function DeviceDetail() {
           </section>
         );
       })}
+
+      {/* --- Plugin logs (gated by logs:read) ------------------------------ */}
+      {can('logs:read') && (
+        <section className="mb-8">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Logs</h2>
+            <select
+              className="rounded-md border border-slate-300 px-2 py-1 text-xs"
+              value={logLevelFilter}
+              onChange={(e) => setLogLevelFilter(e.target.value)}
+            >
+              <option value="">All levels</option>
+              <option value="debug">Debug</option>
+              <option value="info">Info</option>
+              <option value="warn">Warn</option>
+              <option value="error">Error</option>
+            </select>
+          </div>
+
+          {logsQuery.isLoading && <p className="text-sm text-slate-500">Loading logs...</p>}
+          {logsQuery.isError && (
+            <p className="text-sm text-red-600">Failed to load logs: {(logsQuery.error as Error).message}</p>
+          )}
+          {logsQuery.data &&
+            (logsQuery.data.length === 0 ? (
+              <p className="text-sm text-slate-500">
+                No log entries for this device yet — plugins ship failures and state changes here.
+              </p>
+            ) : (
+              <div className="overflow-x-auto rounded-md border border-slate-200 bg-white shadow-sm">
+                <table className="w-full text-left text-sm">
+                  <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-3 py-2">Time</th>
+                      <th className="px-3 py-2">Level</th>
+                      <th className="px-3 py-2">Plugin</th>
+                      <th className="px-3 py-2">Message</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {logsQuery.data.map((entry) => (
+                      <tr key={entry.id} className="border-b border-slate-100 last:border-0">
+                        <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-500">
+                          {new Date(entry.timestamp).toLocaleString()}
+                        </td>
+                        <td className="px-3 py-2">
+                          <span
+                            className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${
+                              entry.level === 'error'
+                                ? 'bg-red-100 text-red-700'
+                                : entry.level === 'warn'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : entry.level === 'debug'
+                                    ? 'bg-slate-100 text-slate-500'
+                                    : 'bg-blue-100 text-blue-700'
+                            }`}
+                          >
+                            {entry.level}
+                          </span>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-600">{entry.pluginName ?? entry.pluginId}</td>
+                        <td className="px-3 py-2">
+                          <div className="flex flex-col gap-1">
+                            <span className="break-words text-slate-800">{entry.message}</span>
+                            {entry.context && Object.keys(entry.context).length > 0 && (
+                              <details className="text-xs">
+                                <summary className="cursor-pointer font-medium text-blue-600 hover:underline">Details</summary>
+                                <pre className="mt-1 max-h-48 overflow-auto rounded bg-slate-900 p-2 font-mono text-[11px] leading-relaxed text-slate-100">
+                                  {JSON.stringify(entry.context, null, 2)}
+                                </pre>
+                              </details>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+        </section>
+      )}
 
       {/* --- Add plugin modal --------------------------------------------- */}
       {showAddPlugin && (

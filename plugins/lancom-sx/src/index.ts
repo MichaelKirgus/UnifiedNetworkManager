@@ -4,6 +4,7 @@ import {
   MetricDescriptor,
   PluginOptionDescriptor,
   clampInt,
+  createPluginLogger,
   createPluginServer,
   errorDescriptor,
   hostFromAddress,
@@ -93,6 +94,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     description:
       'Walks the Q-BRIDGE forwarding database to attach a port number to each ARP/NDP host row. OFF by default — on a switch with a populated MAC table this walk takes ~15-20 s and can exceed the API poll budget.',
   },
+  {
+    key: 'logToApi',
+    label: 'Send logs to UNM',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Ship structured log entries (SNMP walk failures, config/plan errors) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
+  },
 ];
 
 // Pre-wired app: cors + json (32mb for base64 config payloads) + /healthz +
@@ -118,6 +127,11 @@ const server = createPluginServer({
   },
 });
 const app = server.app;
+
+// Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
+// Emission is gated per call by the `logToApi` option via setEnabled() — it
+// flows through the settings loop, so it works globally and per-device.
+const logger = createPluginLogger(identity);
 
 /** Resolves SNMP walk options from effective settings. */
 function resolveOptions(settings: Record<string, unknown>): SxOptions {
@@ -148,6 +162,7 @@ app.post('/monitoring', async (req, res) => {
   const selectedFirmware = typeof body.firmwareVersion === 'string' && body.firmwareVersion ? body.firmwareVersion : null;
 
   const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
   const opts = resolveOptions(settings);
   const host = hostFromAddress(managementAddress);
 
@@ -174,14 +189,22 @@ app.post('/monitoring', async (req, res) => {
   try {
     // Slow path: targeted parallel LCOS-SX walks (only the subtrees we use),
     // TTL-cached per host with a quality gate against partial-failure data.
-    const inventory = await getSxInventory(host, creds, opts);
+    const inventory = await getSxInventory(host, creds, opts, {
+      log: (level, message, context) => logger.warn(message, { deviceId, context }),
+    });
     const snapshot = inventory.snapshot;
 
     if (!snapshot) {
       // No LCOS-SX tree at all — this device is not a Lancom SX switch (or SNMP
       // is misconfigured). 'unknown' rather than 'critical': the plugin may simply
       // be assigned to the wrong device type.
+      logger.warn(`No usable LCOS-SX data from ${host}: ${inventory.error ?? 'no LCOS-SX MIB tree'}`, { deviceId, context: { host } });
       return fail('unknown', inventory.error ?? 'No LCOS-SX MIB data on this device.');
+    }
+
+    if (inventory.error) {
+      // Partial walk failure — the snapshot is usable but some subtrees are empty.
+      logger.warn(`Partial LCOS-SX data from ${host}: ${inventory.error}`, { deviceId, context: { host } });
     }
 
     // Fast path: counter-only walk every cycle for fresh port rates.
@@ -348,6 +371,7 @@ app.post('/monitoring', async (req, res) => {
       },
     });
   } catch (err) {
+    logger.error(`Monitoring poll for ${host} failed: ${(err as Error).message}`, { deviceId, context: { host } });
     return fail('critical', (err as Error).message);
   }
 });
@@ -390,8 +414,7 @@ app.post('/config', async (req, res) => {
         ? (body.payload as Record<string, unknown>)
         : {};
 
-  const settings = readSettings(req, PLUGIN_OPTIONS);
-
+  const settings = readSettings(req, PLUGIN_OPTIONS);  logger.setEnabled(settings.logToApi === true);
   if (!actionId) {
     res.status(400).json({ success: false, result: { error: 'Missing actionId (or legacy "action")' } });
     return;
@@ -442,8 +465,12 @@ app.post('/config', async (req, res) => {
     }
 
     const result = await action.execute(ctx, input);
+    if (!result.success) {
+      logger.warn(`Config action ${actionId} reported failure for ${managementAddress}: ${typeof result.error === 'string' ? result.error : JSON.stringify(result)}`, { deviceId: typeof deviceId === 'string' ? deviceId : null, context: { host: managementAddress, actionId } });
+    }
     res.status(200).json({ success: result.success, result: { ...result } });
   } catch (err) {
+    logger.error(`Config action ${actionId} failed for ${managementAddress}: ${(err as Error).message}`, { deviceId: typeof deviceId === 'string' ? deviceId : null, context: { host: managementAddress, actionId } });
     res.status(200).json({ success: false, result: { error: (err as Error).message } });
   }
 });
@@ -458,6 +485,8 @@ app.post('/config', async (req, res) => {
  */
 app.post('/plan', async (req, res) => {
   const body = req.body ?? {};
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
 
   const planReq: PlanRequest = {
     intent: {
@@ -478,9 +507,11 @@ app.post('/plan', async (req, res) => {
     res.status(200).json({ plan });
   } catch (err) {
     if (err instanceof PlanningError) {
+      logger.error(`Planning ${planReq.intent.actionId} failed: ${err.message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
       res.status(400).json({ error: err.message });
       return;
     }
+    logger.error(`Planning ${planReq.intent.actionId} failed unexpectedly: ${(err as Error).message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
     res.status(500).json({ error: (err as Error).message });
   }
 });

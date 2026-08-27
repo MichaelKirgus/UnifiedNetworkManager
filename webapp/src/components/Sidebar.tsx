@@ -13,6 +13,7 @@ import {
   PanelLeftOpen,
   Puzzle,
   Route as RouteIcon,
+  ScrollText,
   Server,
   Waypoints,
   KeySquare,
@@ -32,6 +33,8 @@ const NAV_ITEMS = [
   { to: '/tunnels', label: 'Tunnels', icon: Cable },
   // Waypoints — Route is already used by the Plans item.
   { to: '/routes', label: 'Routes', icon: Waypoints },
+  // Structured log entries shipped by plugins (gated — logs can carry critical details).
+  { to: '/logs', label: 'Logs', icon: ScrollText, requiresPermission: 'logs:read' },
   { to: '/wifi', label: 'WiFi', icon: WifiIcon },
   { to: '/sites', label: 'Sites', icon: MapPin },
   { to: '/secrets', label: 'Secrets', icon: KeyRound },

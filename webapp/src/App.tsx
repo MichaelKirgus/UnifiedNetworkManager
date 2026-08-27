@@ -13,6 +13,7 @@ import Networks from './pages/Networks';
 import Hosts from './pages/Hosts';
 import Tunnels from './pages/Tunnels';
 import RoutesPage from './pages/Routes';
+import Logs from './pages/Logs';
 import Wifi from './pages/Wifi';
 import Users from './pages/Users';
 import Roles from './pages/Roles';
@@ -124,6 +125,14 @@ export default function App() {
         element={
           <RequireAuth>
             <RoutesPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/logs"
+        element={
+          <RequireAuth>
+            <Logs />
           </RequireAuth>
         }
       />

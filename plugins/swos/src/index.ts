@@ -1,7 +1,9 @@
 import path from 'path';
 import {
   Health,
+  PluginOptionDescriptor,
   clampInt,
+  createPluginLogger,
   createPluginServer,
   errorDescriptor,
   modelFirmwareDescriptors,
@@ -43,7 +45,7 @@ const identity = resolvePluginIdentity({
  * values and injects them back via the `x-unm-settings` header on every call —
  * this plugin never stores settings itself (see readSettings()).
  */
-const PLUGIN_OPTIONS = [
+const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
   {
     key: 'cacheTtlSeconds',
     label: 'Snapshot cache TTL (seconds)',
@@ -62,6 +64,14 @@ const PLUGIN_OPTIONS = [
     min: 500,
     max: 9_000,
     description: 'Timeout for a single .b endpoint fetch. Kept well under the API\'s 10 s poll budget.',
+  },
+  {
+    key: 'logToApi',
+    label: 'Send logs to UNM',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Ship structured log entries (poll failures, config/plan errors) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
   },
 ];
 
@@ -86,6 +96,11 @@ const server = createPluginServer({
   },
 });
 const app = server.app;
+
+// Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
+// Emission is gated per call by the `logToApi` option via setEnabled() — it
+// flows through the settings loop, so it works globally and per-device.
+const logger = createPluginLogger(identity);
 
 /** Resolves collection options from effective settings. */
 function resolveOptions(settings: Record<string, unknown>): SwosOptions {
@@ -117,6 +132,7 @@ app.post('/monitoring', async (req, res) => {
   const selectedFirmware = typeof body.firmwareVersion === 'string' && body.firmwareVersion ? body.firmwareVersion : null;
 
   const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
   const opts = resolveOptions(settings);
 
   const fail = (health: Health, error: string) => {
@@ -148,6 +164,7 @@ app.post('/monitoring', async (req, res) => {
     if (s.ports.length === 0 && !s.identity) warnings.push('no ports or identity reported');
     if (warnings.length > 0) {
       health = 'warning';
+      logger.warn(`SwOS monitoring degraded for ${managementAddress}: ${warnings.join('; ')}`, { deviceId, context: { host: managementAddress } });
     }
 
     const metrics = buildMetrics(s, selectedModel, selectedFirmware);
@@ -173,11 +190,18 @@ app.post('/monitoring', async (req, res) => {
       },
     });
   } catch (err) {
-    if (err instanceof SwosAuthError) return fail('critical', err.message);
-    const message = (err as Error).message;
+    const message = err instanceof Error ? err.message : String(err);
+    if (err instanceof SwosAuthError) {
+      logger.error(`SwOS authentication failed for ${managementAddress}: ${message}`, { deviceId, context: { host: managementAddress } });
+      return fail('critical', message);
+    }
     // "Not a recognized SwOS device" means the plugin is assigned to the wrong
     // device type — 'unknown' rather than 'critical' (mirrors LANCOM semantics).
-    if (/not a recognized swos/i.test(message)) return fail('unknown', message);
+    if (/not a recognized swos/i.test(message)) {
+      logger.warn(`SwOS probe for ${managementAddress} found no SwOS device: ${message}`, { deviceId, context: { host: managementAddress } });
+      return fail('unknown', message);
+    }
+    logger.error(`SwOS monitoring failed for ${managementAddress}: ${message}`, { deviceId, context: { host: managementAddress } });
     return fail('critical', `SwOS monitoring failed: ${message}`);
   }
 });
@@ -209,8 +233,7 @@ app.post('/config', async (req, res) => {
         ? (body.payload as Record<string, unknown>)
         : {};
 
-  const settings = readSettings(req, PLUGIN_OPTIONS);
-
+  const settings = readSettings(req, PLUGIN_OPTIONS);  logger.setEnabled(settings.logToApi === true);
   if (!actionId) {
     res.status(400).json({ success: false, result: { error: 'Missing actionId (or legacy "action")' } });
     return;
@@ -241,12 +264,17 @@ app.post('/config', async (req, res) => {
     }
 
     const result: ActionResult = await action.execute(ctx, input);
+    if (!result.success) {
+      logger.warn(`Config action ${actionId} reported failure for ${managementAddress}: ${typeof result.error === 'string' ? result.error : JSON.stringify(result)}`, { deviceId: typeof deviceId === 'string' ? deviceId : null, context: { host: managementAddress, actionId } });
+    }
     res.status(200).json({ success: result.success, result: { ...result } });
   } catch (err) {
     if (err instanceof SwosAuthError) {
+      logger.error(`Config action ${actionId} failed for ${managementAddress}: ${err.message}`, { deviceId: typeof deviceId === 'string' ? deviceId : null, context: { host: managementAddress, actionId } });
       res.status(200).json({ success: false, result: { error: err.message } });
       return;
     }
+    logger.error(`Config action ${actionId} failed for ${managementAddress}: ${(err as Error).message}`, { deviceId: typeof deviceId === 'string' ? deviceId : null, context: { host: managementAddress, actionId } });
     res.status(200).json({ success: false, result: { error: (err as Error).message } });
   }
 });
@@ -260,6 +288,8 @@ app.post('/config', async (req, res) => {
  */
 app.post('/plan', async (req, res) => {
   const body = req.body ?? {};
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
 
   const planReq: PlanRequest = {
     intent: {
@@ -283,9 +313,11 @@ app.post('/plan', async (req, res) => {
     res.status(200).json({ plan });
   } catch (err) {
     if (err instanceof PlanningError) {
+      logger.error(`Planning ${planReq.intent.actionId} failed: ${err.message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
       res.status(400).json({ error: err.message });
       return;
     }
+    logger.error(`Planning ${planReq.intent.actionId} failed unexpectedly: ${(err as Error).message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
     res.status(500).json({ error: (err as Error).message });
   }
 });

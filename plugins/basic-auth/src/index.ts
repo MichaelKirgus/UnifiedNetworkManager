@@ -1,4 +1,11 @@
-import { createPluginServer, requirePluginKey, resolvePluginIdentity } from '@unm/plugin-sdk';
+import {
+  PluginOptionDescriptor,
+  createPluginLogger,
+  createPluginServer,
+  readSettings,
+  requirePluginKey,
+  resolvePluginIdentity,
+} from '@unm/plugin-sdk';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { verifyTotp } from './totp';
@@ -26,6 +33,22 @@ const identity = resolvePluginIdentity({
 
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 
+/**
+ * Configurable options. This plugin is called by the API's auth broker (not the
+ * telemetry loop), but the settings header still flows through — so `logToApi`
+ * works here exactly like in device-facing plugins.
+ */
+const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
+  {
+    key: 'logToApi',
+    label: 'Send logs to UNM',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Ship structured log entries (failed login/2FA attempts, API errors) to the UNM API for the Logs view. Disable to keep logging container-local only.',
+  },
+];
+
 // Pre-wired app (cors + json + /healthz + /discover, mDNS on listen) comes from
 // @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
@@ -35,9 +58,15 @@ const server = createPluginServer({
     // The `identityProvider` capability marks this plugin as an identity provider;
     // `flow` tells the webapp which UI to render.
     identityProvider: { flow: 'password' },
+    options: PLUGIN_OPTIONS,
   },
 });
 const app = server.app;
+
+// Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
+// Emission is gated per call by the `logToApi` option via setEnabled() — it
+// flows through the settings loop, so it works globally and per-device.
+const logger = createPluginLogger(identity);
 
 // --- Challenge token store (in-memory, 5-minute TTL) -----------------------
 interface ChallengeEntry {
@@ -61,10 +90,20 @@ function purgeExpiredChallenges(): void {
  */
 app.post('/auth/login', requirePluginKey, async (req, res) => {
   const { username, password } = req.body ?? {};
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
 
-  const user = await getUserByUsername(typeof username === 'string' ? username : '');
-  if (!user || !bcrypt.compareSync(typeof password === 'string' ? password : '', user.passwordHash)) {
-    res.status(401).json({ error: 'Invalid username or password' });
+  let user;
+  try {
+    user = await getUserByUsername(typeof username === 'string' ? username : '');
+    if (!user || !bcrypt.compareSync(typeof password === 'string' ? password : '', user.passwordHash)) {
+      // Security-relevant: failed credential check (bounded by the API's auth rate limiter).
+      logger.warn(`Login attempt with invalid credentials for "${typeof username === 'string' ? username : '?'}"`, { context: { username } });
+      res.status(401).json({ error: 'Invalid username or password' });
+      return;
+    }
+  } catch (err) {
+    logger.error(`User lookup failed during login for "${typeof username === 'string' ? username : '?'}": ${(err as Error).message}`, { context: { username } });
+    res.status(502).json({ error: 'Identity backend unavailable' });
     return;
   }
 
@@ -81,15 +120,25 @@ app.post('/auth/login', requirePluginKey, async (req, res) => {
  */
 app.post('/auth/2fa/verify', requirePluginKey, async (req, res) => {
   const { challengeToken, code } = req.body ?? {};
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
 
   purgeExpiredChallenges();
   const entry = typeof challengeToken === 'string' ? challenges.get(challengeToken) : undefined;
   if (!entry) {
+    // Security-relevant: unknown/expired challenge (possible replay or stale UI).
+    logger.warn('2FA verification with an invalid or expired challenge token');
     res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
     return;
   }
 
-  const user = await getUserById(entry.userId);
+  let user;
+  try {
+    user = await getUserById(entry.userId);
+  } catch (err) {
+    logger.error(`User lookup failed during 2FA verification: ${(err as Error).message}`);
+    res.status(502).json({ error: 'Identity backend unavailable' });
+    return;
+  }
   if (!user) {
     res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
     return;

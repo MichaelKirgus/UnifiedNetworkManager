@@ -3,6 +3,7 @@ import {
   MetricDescriptor,
   PluginOptionDescriptor,
   clampInt,
+  createPluginLogger,
   createPluginServer,
   hostFromAddress,
   readSettings,
@@ -139,6 +140,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     max: 10000,
     description: 'How long to wait for each reply before counting it lost.',
   },
+  {
+    key: 'logToApi',
+    label: 'Send logs to UNM',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Ship structured log entries (poll failures) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
+  },
 ];
 
 // Pre-wired app: cors + json + /healthz + /discover (+ mDNS on listen) come
@@ -155,6 +164,11 @@ const server = createPluginServer({
 });
 const app = server.app;
 
+// Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
+// Emission is gated per call by the `logToApi` option via setEnabled() — it
+// flows through the settings loop, so it works globally and per-device.
+const logger = createPluginLogger(identity);
+
 /** Maps a ping result to the plugin health vocabulary. */
 function healthFromPing(ping: PingResult): Health {
   if (ping.error) return 'critical'; // binary itself failed — not just unreachable
@@ -170,6 +184,7 @@ app.post('/monitoring', async (req, res) => {
 
   // Effective settings injected by the API (defaults ⊕ user overrides).
   const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
 
   // Target: per-device/global pingHost override wins, else the device's
   // management address.
@@ -226,6 +241,7 @@ app.post('/monitoring', async (req, res) => {
       },
     });
   } catch (err) {
+    logger.error(`Ping run for ${target} failed: ${(err as Error).message}`, { deviceId, context: { target, count, timeoutMs } });
     res.status(200).json({
       deviceId,
       collectedAt: new Date().toISOString(),

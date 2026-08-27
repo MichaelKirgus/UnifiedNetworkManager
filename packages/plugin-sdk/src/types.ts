@@ -27,6 +27,9 @@ export const CAPABILITIES = [
   'planning',
   'secretsProvider',
   'identityProvider',
+  // Reserved for future log-forwarder plugins (syslog daemon, OpenSearch, ...).
+  // Regular plugins do NOT advertise this — they ship logs via createPluginLogger.
+  'logIngestion',
 ] as const;
 export type PluginCapability = (typeof CAPABILITIES)[number];
 

@@ -383,6 +383,28 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_wifi_clients_device ON wifi_clients ("deviceId")`);
 
+  // Plugin log entries (see schema.pluginLogs). Pushed by plugins in batches
+  // via POST /plugin/logs; swept by the retention worker after LOG_RETENTION_DAYS.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS plugin_logs (
+      id TEXT PRIMARY KEY,
+      "pluginId" TEXT NOT NULL,
+      "deviceId" TEXT,
+      level TEXT NOT NULL DEFAULT 'info',
+      message TEXT NOT NULL,
+      context TEXT,
+      timestamp TEXT NOT NULL
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_plugin_logs_device_timestamp
+      ON plugin_logs ("deviceId", timestamp)`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_plugin_logs_plugin_timestamp
+      ON plugin_logs ("pluginId", timestamp)`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_plugin_logs_timestamp
+      ON plugin_logs (timestamp)`);
+
   // The legacy singular columns are superseded by device_plugins. There is no
   // production data to migrate (confirmed), so drop them outright — any dev
   // devices must be recreated via the new multi-plugin create flow.

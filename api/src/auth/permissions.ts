@@ -15,6 +15,10 @@
 export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'devices:read': 'View devices, their plugins and telemetry',
   'devices:write': 'Create, update and delete devices and plugin assignments',
+  // Logs can carry critical details (endpoints, error payloads), so they get
+  // their own permission instead of riding on devices:read. Gates both the
+  // global /logs page and the per-device Logs section in DeviceDetail.
+  'logs:read': 'View plugin log entries (device and global)',
   'configs:apply': 'Submit configuration jobs to devices (requires 2FA)',
   'plugins:manage': 'Change global plugin settings',
   'secrets:read': 'View secrets (metadata only — values stay encrypted)',

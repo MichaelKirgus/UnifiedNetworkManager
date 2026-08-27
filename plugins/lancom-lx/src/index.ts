@@ -4,6 +4,7 @@ import {
   MetricDescriptor,
   PluginOptionDescriptor,
   clampInt,
+  createPluginLogger,
   createPluginServer,
   errorDescriptor,
   hostFromAddress,
@@ -90,6 +91,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     description:
       'Caps the per-client station table and RF neighbor scan payloads. Higher values increase walk size on busy APs.',
   },
+  {
+    key: 'logToApi',
+    label: 'Send logs to UNM',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Ship structured log entries (SNMP walk failures) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
+  },
 ];
 
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
@@ -113,6 +122,11 @@ const server = createPluginServer({
   },
 });
 const app = server.app;
+
+// Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
+// Emission is gated per call by the `logToApi` option via setEnabled() — it
+// flows through the settings loop, so it works globally and per-device.
+const logger = createPluginLogger(identity);
 
 /** Resolves walk options from effective settings. */
 function resolveOptions(settings: Record<string, unknown>): LcosOptions {
@@ -144,6 +158,7 @@ app.post('/monitoring', async (req, res) => {
   const selectedFirmware = typeof body.firmwareVersion === 'string' && body.firmwareVersion ? body.firmwareVersion : null;
 
   const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
   const opts = resolveOptions(settings);
   const host = hostFromAddress(managementAddress);
 
@@ -171,14 +186,22 @@ app.post('/monitoring', async (req, res) => {
   try {
     // Slow path: targeted parallel LCOS walks (only the subtrees we use),
     // TTL-cached per host with a quality gate against partial-failure data.
-    const inventory = await getLcosInventory(host, creds, opts);
+    const inventory = await getLcosInventory(host, creds, opts, {
+      log: (level, message, context) => logger.warn(message, { deviceId, context }),
+    });
     const snapshot = inventory.snapshot;
 
     if (!snapshot) {
       // No LCOS tree at all — this device is not a LANCOM LX AP (or SNMP is
       // misconfigured). 'unknown' rather than 'critical': the plugin may simply
       // be assigned to the wrong device type.
+      logger.warn(`No usable LCOS-LX data from ${host}: ${inventory.error ?? 'no LCOS-LX MIB tree'}`, { deviceId, context: { host } });
       return fail('unknown', inventory.error ?? 'No LCOS-LX MIB data on this device.');
+    }
+
+    if (inventory.error) {
+      // Partial walk failure — the snapshot is usable but some subtrees are empty.
+      logger.warn(`Partial LCOS-LX data from ${host}: ${inventory.error}`, { deviceId, context: { host } });
     }
 
     // Fast path: counter-only walks every cycle for fresh rates + event deltas.
@@ -484,6 +507,7 @@ app.post('/monitoring', async (req, res) => {
       },
     });
   } catch (err) {
+    logger.error(`Monitoring poll for ${host} failed: ${(err as Error).message}`, { deviceId, context: { host } });
     return fail('critical', (err as Error).message);
   }
 });

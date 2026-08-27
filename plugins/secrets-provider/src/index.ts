@@ -1,5 +1,11 @@
-import type { SecretField, SecretType } from '@unm/plugin-sdk';
-import { createPluginServer, requirePluginKey, resolvePluginIdentity } from '@unm/plugin-sdk';
+import type { PluginOptionDescriptor, SecretField, SecretType } from '@unm/plugin-sdk';
+import {
+  createPluginLogger,
+  createPluginServer,
+  readSettings,
+  requirePluginKey,
+  resolvePluginIdentity,
+} from '@unm/plugin-sdk';
 import { encrypt, decrypt } from './crypto';
 import { storeSecret, listSecrets, getSecret, deleteSecret, updateSecret } from './apiClient';
 import { GENERATABLE_TYPES } from './keygen';
@@ -101,6 +107,22 @@ export const SECRET_TYPES: SecretType[] = [
   },
 ];
 
+/**
+ * Configurable options. This plugin is called by the API's secrets broker (not
+ * the telemetry loop), but the settings header still flows through — so
+ * `logToApi` works here exactly like in device-facing plugins.
+ */
+const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
+  {
+    key: 'logToApi',
+    label: 'Send logs to UNM',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Ship structured log entries (secret CRUD/crypto failures) to the UNM API for the Logs view. Disable to keep logging container-local only.',
+  },
+];
+
 // Pre-wired app (cors + json + /healthz + /discover, mDNS on listen) comes from
 // @unm/plugin-sdk — this file only registers its own routes. The
 // `secretsProvider` capability marks this plugin as the secrets manager; the API
@@ -110,9 +132,15 @@ const server = createPluginServer({
   logTag: 'secrets-provider',
   discovery: {
     secretsProvider: { algorithm: 'aes-256-gcm', secretTypes: SECRET_TYPES },
+    options: PLUGIN_OPTIONS,
   },
 });
 const app = server.app;
+
+// Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
+// Emission is gated per call by the `logToApi` option via setEnabled() — it
+// flows through the settings loop, so it works globally and per-device.
+const logger = createPluginLogger(identity);
 
 /**
  * Create a secret. The plugin encrypts the fields object (it owns the key) and
@@ -121,6 +149,7 @@ const app = server.app;
  */
 app.post('/secrets', requirePluginKey, async (req, res) => {
   const { type, fields, label, expiresAt, userId } = req.body ?? {};
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
   if (!type || typeof type !== 'string') {
     res.status(400).json({ error: 'type is required' });
     return;
@@ -146,6 +175,7 @@ app.post('/secrets', requirePluginKey, async (req, res) => {
     });
     res.status(201).json({ id: record.id, createdAt: record.createdAt });
   } catch (err) {
+    logger.error(`Failed to store secret of type ${type}: ${(err as Error).message}`, { context: { type, userId } });
     res.status(500).json({ error: (err as Error).message });
   }
 });
@@ -154,10 +184,12 @@ app.post('/secrets', requirePluginKey, async (req, res) => {
  * List secret metadata (no ciphertext, no decrypted values).
  */
 app.get('/secrets', requirePluginKey, async (_req, res) => {
+  logger.setEnabled(readSettings(_req, PLUGIN_OPTIONS).logToApi === true);
   try {
     const secrets = await listSecrets();
     res.status(200).json(secrets);
   } catch (err) {
+    logger.error(`Failed to list secrets: ${(err as Error).message}`);
     res.status(500).json({ error: (err as Error).message });
   }
 });
@@ -168,6 +200,7 @@ app.get('/secrets', requirePluginKey, async (_req, res) => {
  */
 app.get('/secrets/:id', requirePluginKey, async (req, res) => {
   const { id } = req.params;
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
   try {
     const record = await getSecret(id);
     if (!record) {
@@ -177,6 +210,7 @@ app.get('/secrets/:id', requirePluginKey, async (req, res) => {
     const fields = JSON.parse(decrypt(record.encryptedValue));
     res.status(200).json({ type: record.type, fields });
   } catch (err) {
+    logger.error(`Failed to retrieve/decrypt secret ${id}: ${(err as Error).message}`, { context: { id } });
     res.status(500).json({ error: (err as Error).message });
   }
 });
@@ -186,10 +220,12 @@ app.get('/secrets/:id', requirePluginKey, async (req, res) => {
  */
 app.delete('/secrets/:id', requirePluginKey, async (req, res) => {
   const { id } = req.params;
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
   try {
     await deleteSecret(id);
     res.status(204).send();
   } catch (err) {
+    logger.error(`Failed to delete secret ${id}: ${(err as Error).message}`, { context: { id } });
     res.status(500).json({ error: (err as Error).message });
   }
 });
@@ -204,6 +240,7 @@ app.delete('/secrets/:id', requirePluginKey, async (req, res) => {
  */
 app.post('/generate', requirePluginKey, async (req, res) => {
   const { type, fields, label, expiresAt, userId } = req.body ?? {};
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
   if (!type || typeof type !== 'string') {
     res.status(400).json({ error: 'type is required' });
     return;
@@ -242,6 +279,7 @@ app.post('/generate', requirePluginKey, async (req, res) => {
     });
     res.status(201).json({ id: record.id, createdAt: record.createdAt, type });
   } catch (err) {
+    logger.error(`Failed to generate secret of type ${type}: ${(err as Error).message}`, { context: { type, userId: uid } });
     res.status(500).json({ error: (err as Error).message });
   }
 });
@@ -255,6 +293,7 @@ app.post('/generate', requirePluginKey, async (req, res) => {
  */
 app.post('/regenerate', requirePluginKey, async (req, res) => {
   const { id } = req.body ?? {};
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
   if (!id || typeof id !== 'string') {
     res.status(400).json({ error: 'id is required' });
     return;
@@ -282,6 +321,7 @@ app.post('/regenerate', requirePluginKey, async (req, res) => {
     await updateSecret(id, encrypt(JSON.stringify(merged)));
     res.status(200).json({ id: record.id, type: record.type });
   } catch (err) {
+    logger.error(`Failed to regenerate secret ${id}: ${(err as Error).message}`, { context: { id } });
     res.status(500).json({ error: (err as Error).message });
   }
 });

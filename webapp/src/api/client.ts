@@ -314,6 +314,23 @@ export interface RouteRow {
   collectedAt: string;
 }
 
+/** One structured log entry emitted by a plugin (see GET /logs). */
+export interface LogEntry {
+  id: string;
+  /** Plugin instance id (the sender's effective UUID). */
+  pluginId: string;
+  /** Display name of the plugin instance. */
+  pluginName?: string | null;
+  /** Device the entry relates to; null for plugin-level events. */
+  deviceId?: string | null;
+  deviceName?: string | null;
+  level: 'debug' | 'info' | 'warn' | 'error';
+  message: string;
+  /** Structured details ({endpoint, httpStatus, oid, ...}); null when absent. */
+  context?: Record<string, unknown> | null;
+  timestamp: string;
+}
+
 /** One distinct (band, channel) pair broadcasting an SSID. */
 export interface WifiChannelRef {
   /** '2.4' | '5' | '6'; '' when the device cannot say which band. */
@@ -843,6 +860,27 @@ export const api = {
     if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<WifiOverview>(`/wifi${suffix}`);
+  },
+  // Plugin log entries (global Logs page + per-device section in DeviceDetail).
+  logs: (params?: {
+    deviceId?: string;
+    pluginId?: string;
+    level?: 'debug' | 'info' | 'warn' | 'error';
+    search?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.pluginId) qs.set('pluginId', params.pluginId);
+    if (params?.level) qs.set('level', params.level);
+    if (params?.search) qs.set('search', params.search);
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<LogEntry[]>(`/logs${suffix}`);
   },
   // Users + permission catalog.
   users: () => apiFetch<User[]>('/users'),

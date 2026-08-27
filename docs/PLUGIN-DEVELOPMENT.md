@@ -77,6 +77,7 @@ the shared SDK first — keep that structure when editing.
 | `CounterTracker` (`{toBitsPerSec?=true, staleMs?}`) | Counter-delta rate tracking: `.sample(key, value)` → bits/s (or Δ/s), null on first sample or counter reset; `.evictStale()`, `.clear()`. Use for any cumulative byte/packet counters. |
 | `TtlCache<V>` (`{isFresh?, maxSize?}`) | TTL cache with a quality gate + oldest-first eviction. Pair it with a plain `Map` "lastKnown" fallback to serve stale data on blips instead of flapping health. |
 | `createApiClient()` / `isNotFound(err)` | Axios bootstrap for plugins that call BACK into the API's internal `/plugin/*` routes (basic-auth, secrets-provider). Reads `UNM_API_URL` + `PLUGIN_API_KEY`. |
+| `createPluginLogger(identity)` | Structured log shipping to the API (`POST /plugin/logs`). Fire-and-forget batching with drop-on-failure — see §8 Logging. |
 | `requirePluginKey` | Middleware authenticating the calling API via `x-plugin-api-key` (skipped when unset = dev mode). |
 | Contract types | `Health`, `MetricDescriptor`, `PluginOptionDescriptor`, `DeviceModelEntry`, `CredentialSlotDescriptor`, `SecretField/SecretType`, `RiskLevel`, `InputSchema(Property)`, `CatalogEntry`, `ProvisionRequest`, `PlanStep`, `Plan`, `PlanDevice<C>`, `PlanRequest<C>`, `StepCredentials`, `MonitoringRequestBody/ResponseBody`, `ConfigRequestBody/ResponseBody`. |
 
@@ -155,7 +156,58 @@ Clamp integers with `clampInt` so a bad override can't break collection.
 
 ---
 
-## 8. Verification checklist (per plugin)
+## 8. Logging (ship structured logs to the API)
+
+Every plugin should emit its console-worthy events as structured log entries so
+they show up in the webapp — per device (DeviceDetail → Logs section) and
+globally (Logs page with level/plugin/device/search/time-range filters).
+
+**Setup (once, at startup):**
+```ts
+import { createPluginLogger } from '@unm/plugin-sdk';
+const logger = createPluginLogger(identity); // identity from resolvePluginIdentity()
+```
+
+**Gate emission per call** with the conventional `logToApi` boolean option
+(default `true`) — it flows through the settings loop, so users can disable it
+globally or per-device in the Settings UI:
+```ts
+const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
+  // …your options…
+  { key: 'logToApi', label: 'Send logs to UNM', type: 'boolean' as const, default: true,
+    description: 'Ship structured log entries (poll failures, config/plan errors) to the UNM API for the device Logs view. Disable to keep logging container-local only.' },
+];
+
+// in each handler, right after readSettings():
+const settings = readSettings(req, PLUGIN_OPTIONS);
+logger.setEnabled(settings.logToApi === true);
+```
+
+**Emit at your existing error sites** (keep the `console.error` too — container
+logs stay useful for debugging):
+```ts
+logger.error(`Monitoring poll for ${host} failed: ${(err as Error).message}`, {
+  deviceId,                                   // null/omit for plugin-level events
+  context: { host },                          // arbitrary JSON details (capped ~8KB)
+});
+// levels: logger.debug / .info / .warn / .error — message capped ~2KB at ingest
+```
+
+**Semantics:** entries are batched in memory (~2 s flush, max 500 queued,
+drop-oldest on overflow) and POSTed to the API's internal `POST /plugin/logs`
+with the shared `x-plugin-api-key`. **Drop-on-failure**: if the API is
+unreachable or rejects a batch, entries get one retry then are silently
+dropped — logging must never break a poll, config job, or plan step. Without
+`PLUGIN_API_KEY` set the logger degrades to a no-op (with a startup warning).
+Entries are kept `LOG_RETENTION_DAYS` (default 7) on the API side.
+
+**What NOT to log:** per-poll success spam (the telemetry table already shows
+health), secrets/credentials, or anything that would make logs grow unbounded.
+Log failures and state changes; keep messages short — details go in `context`.
+
+---
+
+## 9. Verification checklist (per plugin)
 
 ```bash
 cd plugins/<your-plugin> && npx tsc --noEmit        # type-check

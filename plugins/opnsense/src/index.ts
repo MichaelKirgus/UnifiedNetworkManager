@@ -4,6 +4,7 @@ import {
   MetricDescriptor,
   PluginOptionDescriptor,
   INVENTORY_INTERVAL_MS,
+  createPluginLogger,
   createPluginServer,
   pickNumber,
   pickString,
@@ -662,6 +663,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     description: 'Cache slow-changing data (ARP/NDP tables, hostname) in memory and only re-fetch when the TTL elapses.',
   },
   {
+    key: 'logToApi',
+    label: 'Send logs to UNM',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Ship structured log entries (poll failures, config/plan errors) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
+  },
+  {
     key: 'transport',
     label: 'Transport',
     type: 'string' as const,
@@ -698,6 +707,11 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
       'Force the DHCP backend. auto = probe (Kea on newer installs, dnsmasq on older). Affects which static-mapping endpoints /config uses.',
   },
 ];
+
+// Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
+// Emission is gated per call by the `logToApi` option via setEnabled() — it
+// flows through the settings loop, so it works globally and per-device.
+const logger = createPluginLogger(identity);
 
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
@@ -773,7 +787,8 @@ async function collectMetrics(
   host: string,
   apiKey: string,
   apiSecret: string,
-  transport?: OpnsenseTransport
+  transport?: OpnsenseTransport,
+  deviceId?: string | null
 ): Promise<{ metrics: Record<string, unknown>; interfaces: string[] }> {
   const metrics: Record<string, unknown> = {};
   const interfaces: string[] = [];
@@ -911,8 +926,9 @@ async function collectMetrics(
   const allRoutes = [...inventory.routes, ...deriveConnectedAndDefaultRoutes(inventory.networks, inventory.gateways, inventory.routes)];
   if (allRoutes.length > 0) {
     const routeClient = createClient(host, { apiKey, apiSecret }, transport);
-    metrics['routes'] = await enrichRoutesWithGatewayStatus(routeClient, allRoutes)
-      .catch(() => allRoutes);
+    metrics['routes'] = await enrichRoutesWithGatewayStatus(routeClient, allRoutes, {
+      log: (_level, message, context) => logger.warn(message, { deviceId, context }),
+    }).catch(() => allRoutes);
   }
 
   return { metrics, interfaces };
@@ -929,13 +945,14 @@ app.post('/monitoring', async (req, res) => {
   // Effective settings injected by the API (defaults ⊕ user overrides). The
   // plugin reads its options from here — it never stores them itself.
   const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
   const transport: OpnsenseTransport =
     typeof settings.transport === 'string' && ['auto', 'http', 'https'].includes(settings.transport)
       ? (settings.transport as OpnsenseTransport)
       : 'auto';
 
   try {
-    const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret, transport);
+    const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret, transport, deviceId);
 
     // Echo of the user-selected model/firmware (mirrors the LANCOM plugin) —
     // informational only; shown as text cards in the device detail view.
@@ -974,6 +991,7 @@ app.post('/monitoring', async (req, res) => {
       },
     });
   } catch (err) {
+    logger.error(`Monitoring poll failed for ${managementAddress}: ${(err as Error).message}`, { deviceId, context: { host: managementAddress } });
     res.status(200).json({
       deviceId: deviceId ?? null,
       collectedAt: new Date().toISOString(),
@@ -1017,6 +1035,7 @@ app.post('/config', async (req, res) => {
         : {};
 
   const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
   const transport = transportOf(settings);
 
   if (!actionId) {
@@ -1067,6 +1086,7 @@ app.post('/config', async (req, res) => {
     const result: ActionResult = await action.execute(ctx, input);
     res.status(200).json({ success: result.success, result: { ...result } });
   } catch (err) {
+    logger.error(`Config action ${actionId} failed for ${managementAddress}: ${(err as Error).message}`, { deviceId: typeof deviceId === 'string' ? deviceId : null, context: { host: managementAddress, actionId } });
     res.status(200).json({ success: false, result: { error: (err as Error).message } });
   }
 });
@@ -1113,6 +1133,7 @@ async function buildActionContext(args: {
 app.post('/plan', async (req, res) => {
   const body = req.body ?? {};
   const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
 
   const planReq: PlanRequest = {
     intent: {
@@ -1140,9 +1161,11 @@ app.post('/plan', async (req, res) => {
     res.status(200).json({ plan });
   } catch (err) {
     if (err instanceof PlanningError) {
+      logger.error(`Planning ${planReq.intent.actionId} failed: ${err.message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
       res.status(400).json({ error: err.message });
       return;
     }
+    logger.error(`Planning ${planReq.intent.actionId} failed unexpectedly: ${(err as Error).message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
     res.status(500).json({ error: (err as Error).message });
   }
 });

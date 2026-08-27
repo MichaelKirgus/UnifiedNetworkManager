@@ -17,10 +17,12 @@ import { internalRouter } from './routes/internal';
 import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import plansRouter from './routes/plans';
 import networksRouter from './routes/networks';
+import logsRouter from './routes/logs';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startPluginDiscovery } from './plugins/discovery';
 import { startConfigJobWorker } from './workers/configJob';
 import { startPlanExecutorWorker } from './workers/planExecutor';
+import { startLogRetentionWorker } from './workers/logRetention';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const API_PREFIX = '/v1';
@@ -94,6 +96,8 @@ async function main(): Promise<void> {
   api.use(configJobsRouter);
   // Cross-device inventory views (/networks, /hosts) — self-defining paths.
   api.use(networksRouter);
+  // Plugin log entries (global view + per-device section in DeviceDetail).
+  api.use(logsRouter);
   // The plans router defines its own /plans/... paths (like the devices router),
   // so it is mounted without an extra prefix.
   api.use(plansRouter);
@@ -129,6 +133,7 @@ async function main(): Promise<void> {
     startTelemetryWorker();
     startConfigJobWorker();
     startPlanExecutorWorker();
+    startLogRetentionWorker();
   });
 
   // Discover plugins via mDNS/DNS-SD, with HTTP polling as a fallback for

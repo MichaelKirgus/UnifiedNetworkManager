@@ -253,6 +253,39 @@ export const telemetry = pgTable('telemetry', {
   };
 });
 
+// Structured log entries emitted by plugins via POST /plugin/logs (see
+// routes/internal.ts). Plugins batch their console-worthy events and push them
+// to the API; a retention worker deletes rows older than LOG_RETENTION_DAYS.
+// Powers the per-device Logs section in DeviceDetail and the global Logs page.
+export const pluginLogs = pgTable(
+  'plugin_logs',
+  {
+    id: text('id').primaryKey(),
+    // Self-reported by the sender (its effectiveUuid); validated against the
+    // plugins table at ingest — unknown ids are rejected with a 400.
+    pluginId: text('pluginId').notNull(),
+    // Device the entry relates to, when known (null for plugin-level events).
+    deviceId: text('deviceId'),
+    // debug | info | warn | error
+    level: text('level').notNull().default('info'),
+    message: text('message').notNull(),
+    // JSON object with structured details ({endpoint, httpStatus, oid, ...}).
+    context: text('context'),
+    // ISO-8601 timestamp from the plugin's clock (stored as received).
+    timestamp: text('timestamp').notNull(),
+  },
+  (table) => {
+    return {
+      idxPluginLogsDeviceTimestamp: index('idx_plugin_logs_device_timestamp')
+        .on(table.deviceId, table.timestamp),
+      idxPluginLogsPluginTimestamp: index('idx_plugin_logs_plugin_timestamp')
+        .on(table.pluginId, table.timestamp),
+      // Plain timestamp index for the retention sweep (DELETE WHERE timestamp < cutoff).
+      idxPluginLogsTimestamp: index('idx_plugin_logs_timestamp').on(table.timestamp),
+    };
+  }
+);
+
 // Normalized inventory tables — populated by the telemetry worker from the
 // plugin's /monitoring metrics (see workers/telemetry.ts ingestInventory).
 // They power the cross-device Networks and Hosts pages in the webapp. Rows are
