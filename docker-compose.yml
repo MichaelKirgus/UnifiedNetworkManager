@@ -35,26 +35,32 @@ services:
       - SECRETS_PLUGIN_ID=${SECRETS_PLUGIN_ID:-00000000-0000-4000-8000-000000000002}
       # Poll these plugin endpoints for discovery (mDNS is often isolated on
       # Docker bridge networks). Ensures the provider plugins are registered.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005,http://lancom-lx-plugin:4006,http://lancom-lcos-plugin:4008,http://swos-plugin:4007,http://lancom-sx-plugin:4009}
+      # All plugins listen on the conventional internal port 4080 (see
+      # docs/PLUGIN-DEVELOPMENT.md); compose maps distinct HOST ports to it.
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://swos-plugin:4080,http://lancom-sx-plugin:4080}
     depends_on:
       - postgres
     restart: unless-stopped
 
   opnsense-plugin:
+    # Root context — the image also builds the shared @unm/plugin-sdk package.
     build:
-      context: ./plugins/opnsense
+      context: .
+      dockerfile: plugins/opnsense/Dockerfile
     ports:
-      - "4001:4001"
+      - "4001:4080"
     # Lets the plugin reach host-network services (e.g. mock-appliance on :80/:443)
     # as http(s)://host.docker.internal — plain Linux Docker has no such name by default.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      - PORT=4001
+      # Conventional internal port for ALL plugins; the host mapping above is
+      # only for curl-from-host debugging + setup.sh wait_for_port.
+      - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
-      # Without this the plugin advertises http://localhost:4001, which is
+      # Without this the plugin advertises http://localhost:4080, which is
       # unreachable from the API container.
-      - ADVERTISED_ENDPOINT=http://opnsense-plugin:4001
+      - ADVERTISED_ENDPOINT=http://opnsense-plugin:4080
       - OPNSENSE_HOST=${OPNSENSE_HOST:-https://opnsense.local}
       - OPNSENSE_KEY=${OPNSENSE_KEY:-}
       - OPNSENSE_SECRET=${OPNSENSE_SECRET:-}
@@ -64,14 +70,16 @@ services:
   # measured from inside its own container via system ping (ICMP echo). No
   # credentials needed — it probes whatever host the device's settings point at.
   icmp-plugin:
+    # Root context — the image also builds the shared @unm/plugin-sdk package.
     build:
-      context: ./plugins/icmp
+      context: .
+      dockerfile: plugins/icmp/Dockerfile
     ports:
-      - "4004:4004"
+      - "4004:4080"
     environment:
-      - PORT=4004
+      - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
-      - ADVERTISED_ENDPOINT=http://icmp-plugin:4004
+      - ADVERTISED_ENDPOINT=http://icmp-plugin:4080
     restart: unless-stopped
 
   # ── Multi-instance example ────────────────────────────────────────────────
@@ -83,12 +91,13 @@ services:
   # Also append the endpoint to the api service's PLUGIN_POLL_ENDPOINTS list.
   # icmp-site-a:
   #   build:
-  #     context: ./plugins/icmp
+  #     context: .
+  #     dockerfile: plugins/icmp/Dockerfile
   #   ports:
-  #     - "4010:4004"
+  #     - "4010:4080"   # next free HOST port — the container port is always 4080
   #   environment:
-  #     - PORT=4004
-  #     - ADVERTISED_ENDPOINT=http://icmp-site-a:4010
+  #     - PORT=4080
+  #     - ADVERTISED_ENDPOINT=http://icmp-site-a:4080
   #     - PLUGIN_INSTANCE_ID=site-a
   #     # - PLUGIN_DISPLAY_NAME=HQ ICMP
   #   restart: unless-stopped
@@ -103,11 +112,11 @@ services:
       context: .
       dockerfile: plugins/snmp/Dockerfile
     ports:
-      - "4005:4005"
+      - "4005:4080"
     environment:
-      - PORT=4005
+      - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
-      - ADVERTISED_ENDPOINT=http://snmp-plugin:4005
+      - ADVERTISED_ENDPOINT=http://snmp-plugin:4080
       # Directory inside the container where extra MIB files are looked up.
       - MIB_DIR=/app/mibs
     volumes:
@@ -124,11 +133,11 @@ services:
       context: .
       dockerfile: plugins/lancom-lx/Dockerfile
     ports:
-      - "4006:4006"
+      - "4006:4080"
     environment:
-      - PORT=4006
+      - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
-      - ADVERTISED_ENDPOINT=http://lancom-lx-plugin:4006
+      - ADVERTISED_ENDPOINT=http://lancom-lx-plugin:4080
       # Directory inside the container where extra MIB files are looked up.
       - MIB_DIR=/app/mibs
     volumes:
@@ -147,11 +156,11 @@ services:
       context: .
       dockerfile: plugins/lancom-lcos/Dockerfile
     ports:
-      - "4008:4008"
+      - "4008:4080"
     environment:
-      - PORT=4008
+      - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
-      - ADVERTISED_ENDPOINT=http://lancom-lcos-plugin:4008
+      - ADVERTISED_ENDPOINT=http://lancom-lcos-plugin:4080
       # Directory inside the container where extra MIB files are looked up.
       - MIB_DIR=/app/mibs
     volumes:
@@ -170,11 +179,11 @@ services:
       context: .
       dockerfile: plugins/lancom-sx/Dockerfile
     ports:
-      - "4009:4009"
+      - "4009:4080"
     environment:
-      - PORT=4009
+      - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
-      - ADVERTISED_ENDPOINT=http://lancom-sx-plugin:4009
+      - ADVERTISED_ENDPOINT=http://lancom-sx-plugin:4080
       # Directory inside the container where extra MIB files are looked up.
       - MIB_DIR=/app/mibs
     volumes:
@@ -185,14 +194,16 @@ services:
   # plus plan/config actions and network/MAC inventory propagation. SwOS only —
   # RouterOS devices get their own plugin later.
   swos-plugin:
+    # Root context — the image also builds the shared @unm/plugin-sdk package.
     build:
-      context: ./plugins/swos
+      context: .
+      dockerfile: plugins/swos/Dockerfile
     ports:
-      - "4007:4007"
+      - "4007:4080"
     environment:
-      - PORT=4007
+      - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
-      - ADVERTISED_ENDPOINT=http://swos-plugin:4007
+      - ADVERTISED_ENDPOINT=http://swos-plugin:4080
     restart: unless-stopped
 
   # MCP server for AI agents: exposes the API's OpenAPI operations as MCP tools
@@ -222,7 +233,7 @@ services:
       # Same database as the API — used by the debug SQL tool only.
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
       # Endpoints probed by the plugin_probe debug tool (same list as the api).
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4002,http://secrets-provider-plugin:4003,http://opnsense-plugin:4001,http://icmp-plugin:4004,http://snmp-plugin:4005,http://lancom-lx-plugin:4006,http://lancom-lcos-plugin:4008,http://swos-plugin:4007,http://lancom-sx-plugin:4009}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://swos-plugin:4080,http://lancom-sx-plugin:4080}
     depends_on:
       - api
     restart: unless-stopped
@@ -247,14 +258,16 @@ services:
   # owns the `users` table and this plugin reads/writes user records through
   # the API's internal user-data endpoints (UNM_API_URL + x-plugin-api-key).
   basic-auth-plugin:
+    # Root context — the image also builds the shared @unm/plugin-sdk package.
     build:
-      context: ./plugins/basic-auth
+      context: .
+      dockerfile: plugins/basic-auth/Dockerfile
     ports:
-      - "4002:4002"
+      - "4002:4080"
     environment:
-      - PORT=4002
+      - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
-      - ADVERTISED_ENDPOINT=http://basic-auth-plugin:4002
+      - ADVERTISED_ENDPOINT=http://basic-auth-plugin:4080
       # Base URL of the API's internal user-data endpoints (plugin -> API).
       - UNM_API_URL=http://api:3000/v1
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -268,14 +281,16 @@ services:
   # stores/reads ciphertext through the API's internal endpoints
   # (UNM_API_URL + x-plugin-api-key).
   secrets-provider-plugin:
+    # Root context — the image also builds the shared @unm/plugin-sdk package.
     build:
-      context: ./plugins/secrets-provider
+      context: .
+      dockerfile: plugins/secrets-provider/Dockerfile
     ports:
-      - "4003:4003"
+      - "4003:4080"
     environment:
-      - PORT=4003
+      - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
-      - ADVERTISED_ENDPOINT=http://secrets-provider-plugin:4003
+      - ADVERTISED_ENDPOINT=http://secrets-provider-plugin:4080
       # Base URL of the API's internal secrets-data endpoints (plugin -> API).
       - UNM_API_URL=http://api:3000/v1
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}

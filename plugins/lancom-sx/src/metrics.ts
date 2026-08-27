@@ -10,26 +10,11 @@
  */
 
 import { SxVariant } from './sxClient';
+import { INVENTORY_INTERVAL_MS, MetricDescriptor } from '@unm/plugin-sdk';
 
-export interface MetricDescriptor {
-  key: string;
-  label: string;
-  unit?: string;
-  format?: 'bytes' | 'bits' | 'duration' | 'number' | 'text';
-  type: 'number' | 'string' | 'boolean' | 'enum';
-  visualization: 'gauge' | 'plot' | 'text' | 'table';
-  group?: string;
-  min?: number;
-  max?: number;
-  color?: string;
-  rows?: string[];
-  columns?: string[];
-  summary?: boolean;
-  intervalMs?: number;
-}
-
-/** Slow-path (inventory) refresh cadence hint — matches the plugin's TTL. */
-export const INVENTORY_INTERVAL_MS = 15 * 60 * 1000;
+// Re-exported so sibling files keep importing from './metrics'.
+export type { MetricDescriptor };
+export { INVENTORY_INTERVAL_MS };
 
 /**
  * Builds the full descriptor set for a monitoring response. The variant

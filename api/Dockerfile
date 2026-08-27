@@ -1,8 +1,16 @@
 # Build context is the repository root (see docker-compose.yml) so that the
-# shared openapi/ spec directory can be copied alongside the api/ source.
+# shared openapi/ spec directory AND the @unm/plugin-sdk package can be copied
+# alongside the api/ source.
 FROM node:20-alpine
 
 WORKDIR /app
+
+# Shared SDK — must exist BEFORE `cd api && npm install`: the api has a file:
+# dependency on it (types-only), and npm links/copies from this path. Building
+# it first also guarantees dist/ exists if anything ever requires() it.
+COPY packages/plugin-sdk/package.json packages/plugin-sdk/tsconfig.json packages/plugin-sdk/
+COPY packages/plugin-sdk/src/ packages/plugin-sdk/src/
+RUN cd packages/plugin-sdk && npm install --legacy-peer-deps && npm run build
 
 COPY api/package*.json ./api/
 RUN cd api && npm install --legacy-peer-deps

@@ -5,24 +5,19 @@
  * semantics validates both plugin options and plan step inputs. The API does a
  * light check at plan-edit time; the authoritative validation still happens in
  * the plugin's /config handler (which re-validates against its own schema).
+ *
+ * The contract types come from @unm/plugin-sdk — re-exported here so callers
+ * keep their existing imports. This module keeps its OWN validator runtime:
+ * it is deliberately lighter than the SDK's (plan-edit-time checks only, e.g.
+ * numeric-string coercion for enums), while authoritative validation always
+ * happens in the plugin.
  */
 
-export interface InputSchemaProperty {
-  type: 'string' | 'number' | 'boolean' | 'array' | 'object';
-  label?: string;
-  description?: string;
-  required?: boolean;
-  default?: unknown;
-  /** Regex the string value must match. */
-  pattern?: string;
-  min?: number;
-  max?: number;
-  enum?: (string | number)[];
-  /** For type 'array': schema of each element. */
-  items?: InputSchemaProperty;
-  /** For type 'object': nested property schemas. */
-  properties?: Record<string, InputSchemaProperty>;
-}
+import type { InputSchemaProperty as SdkInputSchemaProperty } from '@unm/plugin-sdk';
+
+/** The API-side property schema — the SDK contract minus minLength/maxLength,
+ * which only the plugin's /config validator enforces. */
+export interface InputSchemaProperty extends Omit<SdkInputSchemaProperty, 'minLength' | 'maxLength'> {}
 
 /** A map of property name → schema (the catalog's `inputSchema`). */
 export type InputSchema = Record<string, InputSchemaProperty>;

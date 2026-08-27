@@ -1,4 +1,4 @@
-import axios, { AxiosInstance } from 'axios';
+import { createApiClient, isNotFound } from '@unm/plugin-sdk';
 
 /**
  * Client for the UnifiedNetworkManager API's internal user-data endpoints.
@@ -9,24 +9,12 @@ import axios, { AxiosInstance } from 'axios';
  * the shared `x-plugin-api-key`). This keeps the plugin free of any database
  * dependency and lets the API stay the single owner of platform data.
  *
- * Base URL: `UNM_API_URL` (defaults to `http://localhost:3000/v1` for local
- * dev; set to `http://api:3000/v1` inside Docker).
+ * The axios bootstrap + 404 helper come from @unm/plugin-sdk; base URL is
+ * `UNM_API_URL` (defaults to `http://localhost:3000/v1`; set to
+ * `http://api:3000/v1` inside Docker).
  */
 
-const BASE_URL = (process.env.UNM_API_URL ?? 'http://localhost:3000/v1').replace(/\/+$/, '');
-const API_KEY = process.env.PLUGIN_API_KEY;
-const TIMEOUT_MS = 5000;
-
-const http: AxiosInstance = axios.create({
-  baseURL: BASE_URL,
-  timeout: TIMEOUT_MS,
-  headers: API_KEY ? { 'x-plugin-api-key': API_KEY } : undefined,
-});
-
-/** True when the error is an axios 404 response (i.e. "not found"). */
-function isNotFound(err: unknown): boolean {
-  return axios.isAxiosError(err) && err.response?.status === 404;
-}
+const http = createApiClient();
 
 /** A user record as returned by the API's internal user endpoints. */
 export interface UserRecord {

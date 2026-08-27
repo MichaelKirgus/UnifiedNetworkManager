@@ -9,15 +9,9 @@
  *
  * Plugins without a meaningful catalog (e.g. ICMP) simply omit `deviceModels`
  * from /discover — the form then shows no model fields for their vendors.
+ *
+ * The canonical contract lives in @unm/plugin-sdk — re-exported here so API
+ * modules keep their existing imports.
  */
 
-export interface DeviceModelEntry {
-  /** Vendor this entry applies to; must match one of the plugin's `vendors`. */
-  vendor: string;
-  /** Display name of the hardware model, e.g. "LX45". */
-  model: string;
-  /** Optional icon path relative to the plugin root (served via the API's icon proxy). */
-  iconPath?: string;
-  /** Optional list of firmware versions for this model (plain strings, user-selectable). */
-  firmwareVersions?: string[];
-}
+export type { DeviceModelEntry } from '@unm/plugin-sdk';

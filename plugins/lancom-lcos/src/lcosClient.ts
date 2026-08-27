@@ -17,6 +17,7 @@
  */
 
 import { SnmpCredentials, TransportOptions, snmpGet, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
+import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 import {
   LCOS_BASE, SYS, HW, FIRMWARE, LAN_IF, LAN_BYTES, WAN_BYTES, WAN_IP,
   NET_LIST, ARP, DHCP, VPN_CONN, IP_ROUTES, IP_CIDR_ROUTES, WLAN_NET, WLAN_RADIO, WLAN_STATION, TEMP_EXTREMES,
@@ -305,7 +306,17 @@ function decodeIpTextIndex(idx: string[]): { ip: string; text: string } | null {
  * Slow path — targeted parallel walks of the runtime-status subtrees we use
  * ------------------------------------------------------------------ */
 
-const inventoryCache = new Map<string, LcosRouterSnapshot>();
+// Fresh-snapshot cache (TTL-gated) + a last-known map so a failed refresh can
+// still fall back to the most recent data even after TTL expiry.
+const inventoryCache = new TtlCache<LcosRouterSnapshot>();
+const lastKnown = new Map<string, LcosRouterSnapshot>();
+function rememberLastKnown(host: string, snapshot: LcosRouterSnapshot): void {
+  lastKnown.set(host, snapshot);
+  if (lastKnown.size > 512) {
+    const oldest = lastKnown.keys().next().value; // Map iteration = insertion order
+    if (oldest !== undefined) lastKnown.delete(oldest);
+  }
+}
 
 /**
  * The exact subtrees the slow path needs — nothing else. Deliberately NOT a
@@ -343,10 +354,11 @@ export async function getLcosInventory(
   creds: SnmpCredentials,
   opts: LcosOptions
 ): Promise<{ snapshot: LcosRouterSnapshot | null; fromCache: boolean; error?: string }> {
-  const cached = inventoryCache.get(host);
-  if (cached && Date.now() - cached.collectedAt < opts.inventoryTtlMs) {
+  const cached = inventoryCache.get(host, opts.inventoryTtlMs);
+  if (cached) {
     return { snapshot: cached, fromCache: true };
   }
+  const stale = lastKnown.get(host); // expired-but-usable fallback
 
   // Probe gate: one cheap snmpget against a scalar every LCOS router exposes
   // (hardware-info sw version). Non-LANCOM devices answer "No Such Object" in
@@ -357,8 +369,8 @@ export async function getLcosInventory(
     probe = await snmpGet(host, creds, [HW.swVersion], opts);
   } catch {
     return {
-      snapshot: cached ?? null,
-      fromCache: cached !== undefined,
+      snapshot: stale ?? null,
+      fromCache: stale !== undefined,
       error: 'SNMP query failed — device unreachable or credentials rejected.',
     };
   }
@@ -416,8 +428,8 @@ export async function getLcosInventory(
 
   if (out.size === 0 && failures > 0) {
     return {
-      snapshot: cached ?? null,
-      fromCache: cached !== undefined,
+      snapshot: stale ?? null,
+      fromCache: stale !== undefined,
       error: 'SNMP walk of the LCOS status tree failed.',
     };
   }
@@ -435,7 +447,10 @@ export async function getLcosInventory(
   // never be served from cache for the whole TTL; it's returned once and the
   // next poll retries fresh.
   const complete = snapshot.system.serialNumber !== '';
-  if (complete) inventoryCache.set(host, snapshot);
+  if (complete) {
+    inventoryCache.set(host, snapshot);
+    rememberLastKnown(host, snapshot);
+  }
 
   return {
     snapshot,
@@ -801,12 +816,9 @@ function decodeNetIfc(raw: string): string {
  * Fast path — byte-counter walks every poll → rx/tx rates (bits/s)
  * ------------------------------------------------------------------ */
 
-interface CounterBaseline {
-  ts: number;
-  counters: Record<string, number>; // key = `${table}:${ifc}:${rx|tx}`
-}
-
-const counterCache = new Map<string, CounterBaseline>();
+// Shared counter-delta tracker (@unm/plugin-sdk): first sample → null,
+// reset/wrap skipped, baseline always refreshed, stale hosts evicted.
+const rateTracker = new CounterTracker(); // octets/s → bits/s
 
 /** One rate sample per interface: bits/s in each direction (null when unknown). */
 export type LcosRates = Record<string, { rx: number | null; tx: number | null }>;
@@ -837,8 +849,7 @@ export async function walkLcosCounters(
   }
 
   const now = Date.now();
-  const prev = counterCache.get(host);
-  const next: CounterBaseline = { ts: now, counters: {} };
+  rateTracker.evictStale(now);
 
   const lanRates: LcosRates = {};
   for (const [oid, value] of out) {
@@ -848,9 +859,14 @@ export async function walkLcosCounters(
     if (!key) continue;
     const n = Number(value);
     if (!Number.isFinite(n)) continue;
-    const cKey = `lan:${key}:${row.col === LAN_BYTES.COL_RX ? 'rx' : 'tx'}`;
-    next.counters[cKey] = n;
-    rateFromBaseline(prev, now, cKey, n, lanRates, key);
+    const dir = row.col === LAN_BYTES.COL_RX ? 'rx' : 'tx';
+    // Integer bits/s, as before — the tracker returns a float rate.
+    const r = rateTracker.sample(`lan:${key}:${dir}`, n, now);
+    if (r !== null) {
+      const cur = lanRates[key] ?? (lanRates[key] = { rx: null, tx: null });
+      if (dir === 'rx') cur.rx = Math.round(r);
+      else cur.tx = Math.round(r);
+    }
   }
 
   const wanRates: LcosRates = {};
@@ -862,12 +878,15 @@ export async function walkLcosCounters(
     const key = decodeWanIfc(row.idx[0]);
     const n = Number(value);
     if (!Number.isFinite(n)) continue;
-    const cKey = `wan:${key}:${row.col === WAN_BYTES.COL_HRX ? 'rx' : 'tx'}`;
-    next.counters[cKey] = n;
-    rateFromBaseline(prev, now, cKey, n, wanRates, key);
+    const dir = row.col === WAN_BYTES.COL_HRX ? 'rx' : 'tx';
+    const r = rateTracker.sample(`wan:${key}:${dir}`, n, now);
+    if (r !== null) {
+      const cur = wanRates[key] ?? (wanRates[key] = { rx: null, tx: null });
+      if (dir === 'rx') cur.rx = Math.round(r);
+      else cur.tx = Math.round(r);
+    }
   }
 
-  counterCache.set(host, next);
   return { lanRates, wanRates };
 }
 
@@ -878,26 +897,4 @@ function decodeWanIfc(raw: string): string {
   if (WAN_IFC_NAMES[n]) return WAN_IFC_NAMES[n];
   // DSL/XDSL/ADSL/VDSL channels are spaced per technology — fall back to the raw value.
   return `WAN-ifc${n}`;
-}
-
-/** Computes one direction's rate from the baseline, storing it into `rates`. */
-function rateFromBaseline(
-  prev: CounterBaseline | undefined,
-  now: number,
-  cKey: string,
-  newVal: number,
-  rates: LcosRates,
-  ifcName: string
-): void {
-  const cur = rates[ifcName] ?? (rates[ifcName] = { rx: null, tx: null });
-  if (!prev) return; // first sample — no baseline yet
-  const oldVal = prev.counters[cKey];
-  if (oldVal === undefined) return; // counter unseen in the previous cycle
-  const dtSec = (now - prev.ts) / 1000;
-  if (dtSec <= 0) return; // clock skew or duplicate poll within the same ms
-  const delta = newVal - oldVal;
-  if (delta < 0) return; // counter reset/wrap — skip this sample, re-baseline next cycle
-  const bitsPerSec = Math.round((delta * 8) / dtSec);
-  if (cKey.endsWith(':rx')) cur.rx = bitsPerSec;
-  else cur.tx = bitsPerSec;
 }

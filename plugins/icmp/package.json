@@ -10,6 +10,7 @@
     "start": "node dist/src/index.js"
   },
   "dependencies": {
+    "@unm/plugin-sdk": "file:../../packages/plugin-sdk",
     "bonjour-service": "^1.2.1",
     "express": "^4.18.2",
     "cors": "^2.8.5"

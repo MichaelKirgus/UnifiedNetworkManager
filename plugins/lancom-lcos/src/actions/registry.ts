@@ -12,9 +12,10 @@
 
 import http from 'http';
 import https from 'https';
+import { createRegistry } from '@unm/plugin-sdk';
 import { snmpGet, snmpSet, snmpWalk } from '@unm/snmp-client';
 import { SETUP } from '../lcosOids';
-import { ActionContext, ActionDescriptor, ActionResult, InputSchema, RiskLevel } from './types';
+import { ActionContext, ActionDescriptor, ActionResult } from './types';
 
 // --- Small helpers --------------------------------------------------------------------
 
@@ -344,45 +345,26 @@ const networkStateRead: ActionDescriptor = {
 // --- Registry ---------------------------------------------------------------------------
 
 const ALL_ACTIONS: ActionDescriptor[] = [configBackupDownload, ntpServersSet, dnsServersSet, lanIfcStateSet, networkStateRead];
-const byId = new Map<string, ActionDescriptor>(ALL_ACTIONS.map((a) => [a.id, a]));
+
+/** The shared registry factory (@unm/plugin-sdk) — one source for /discover, /plan and /config. */
+export const registry = createRegistry(ALL_ACTIONS);
 
 /** Returns the action for an id, or undefined. */
 export function getAction(id: string): ActionDescriptor | undefined {
-  return byId.get(id);
+  return registry.getAction(id);
 }
 
 /** All actions (the full catalog). */
 export function listActions(): ActionDescriptor[] {
-  return ALL_ACTIONS;
+  return registry.listActions();
 }
 
 /** Distinct module names, for catalog grouping in the webapp. */
 export function listModules(): string[] {
-  return [...new Set(ALL_ACTIONS.map((a) => a.module))];
-}
-
-/** A serializable catalog entry (what /discover advertises + the API persists). */
-export interface CatalogEntry {
-  id: string;
-  label: string;
-  description?: string;
-  module: string;
-  riskLevel: RiskLevel;
-  deviceCount: number | 'N';
-  timeoutMs?: number;
-  inputSchema: InputSchema;
+  return registry.listModules();
 }
 
 /** The full action catalog (single-device actions only in v1). */
-export function listCatalog(): CatalogEntry[] {
-  return ALL_ACTIONS.map((a) => ({
-    id: a.id,
-    label: a.label,
-    description: a.description,
-    module: a.module,
-    riskLevel: a.riskLevel,
-    deviceCount: 1 as const,
-    timeoutMs: a.timeoutMs,
-    inputSchema: a.inputSchema,
-  }));
+export function listCatalog() {
+  return registry.listCatalog();
 }

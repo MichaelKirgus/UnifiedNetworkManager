@@ -1,6 +1,15 @@
-import express from 'express';
-import cors from 'cors';
-import { Bonjour } from 'bonjour-service';
+import {
+  Health,
+  MetricDescriptor,
+  PluginOptionDescriptor,
+  clampInt,
+  createPluginServer,
+  errorDescriptor,
+  INVENTORY_INTERVAL_MS,
+  hostFromAddress,
+  readSettings,
+  resolvePluginIdentity,
+} from '@unm/plugin-sdk';
 import {
   SnmpCredentials,
   SystemInfo,
@@ -14,7 +23,7 @@ import {
 // Per-version credential validation (v1/v2c community + v3 USM) is shared by
 // all SNMP-based plugins — one implementation in @unm/snmp-client.
 import { buildSnmpCredentials } from '@unm/snmp-client';
-import { buildDescriptors, DISCOVER_METRICS, INVENTORY_INTERVAL_MS, MetricDescriptor } from './metrics';
+import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000003';
 export const PLUGIN_NAME = 'SNMP Plugin';
@@ -25,29 +34,24 @@ export const PLUGIN_NAME = 'SNMP Plugin';
  * (`<uuid>:<instanceId>`) so the API registers them as separate plugins.
  * `PLUGIN_DISPLAY_NAME` optionally overrides the advertised name; without it,
  * the instance id is appended: "SNMP Plugin (site-a)". Unset = single-instance behavior.
+ * (Convention implemented in @unm/plugin-sdk's resolvePluginIdentity.)
  */
-const INSTANCE_ID = process.env.PLUGIN_INSTANCE_ID?.trim() ?? '';
-export const EFFECTIVE_UUID = INSTANCE_ID ? `${PLUGIN_UUID}:${INSTANCE_ID}` : PLUGIN_UUID;
-export const DISPLAY_NAME =
-  process.env.PLUGIN_DISPLAY_NAME?.trim() || (INSTANCE_ID ? `${PLUGIN_NAME} (${INSTANCE_ID})` : PLUGIN_NAME);
-// 0.3.0 — WiFi (802.11) collection: IEEE 802.11 MIB walks for access-point
-// and client facts, gated by the boolean `collectWifi` option (default on).
-export const PLUGIN_VERSION = '0.3.0';
-export const PLUGIN_VENDORS = ['generic'];
-export const PLUGIN_CAPABILITIES = ['monitoring', 'inventory'];
-export const PLUGIN_AUTH_TYPE = 'none';
-
-const PORT = Number(process.env.PORT ?? 4005);
-const ADVERTISED_ENDPOINT = process.env.ADVERTISED_ENDPOINT ?? `http://localhost:${PORT}`;
-
-type Health = 'ok' | 'warning' | 'critical' | 'unknown';
+const identity = resolvePluginIdentity({
+  uuid: PLUGIN_UUID,
+  name: PLUGIN_NAME,
+  // 0.3.0 — WiFi (802.11) collection: IEEE 802.11 MIB walks for access-point
+  // and client facts, gated by the boolean `collectWifi` option (default on).
+  version: '0.3.0',
+  vendors: ['generic'],
+  capabilities: ['monitoring', 'inventory'],
+});
 
 /**
  * Configurable options. Declared in /discover so the API persists user-set
  * values and injects them back via the `x-unm-settings` header on every call —
  * this plugin never stores settings itself (see readSettings()).
  */
-const PLUGIN_OPTIONS = [
+const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
   {
     key: 'timeoutMs',
     label: 'SNMP timeout (ms)',
@@ -94,66 +98,19 @@ const PLUGIN_OPTIONS = [
   },
 ];
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-app.get('/healthz', (_req, res) => {
-  res.status(200).json({ status: 'ok' });
-});
-
-app.get('/discover', (_req, res) => {
-  res.status(200).json({
-    uuid: EFFECTIVE_UUID,
-    name: DISPLAY_NAME,
-    version: PLUGIN_VERSION,
-    vendors: PLUGIN_VENDORS,
-    capabilities: PLUGIN_CAPABILITIES,
-    endpoint: ADVERTISED_ENDPOINT,
-    authType: PLUGIN_AUTH_TYPE,
+// Pre-wired app: cors + json + /healthz + /discover (+ mDNS on listen) come
+// from @unm/plugin-sdk — this file only registers its own routes.
+const server = createPluginServer({
+  identity,
+  logTag: 'snmp-plugin',
+  discovery: {
     // Credentials come from the existing 'snmp' secret type (version + community for v1/v2c, USM fields for v3).
     requiredSecretType: 'snmp',
     metrics: DISCOVER_METRICS,
     options: PLUGIN_OPTIONS,
-  });
+  },
 });
-
-/**
- * Reads the effective settings the API injects on every call (defaults ⊕ user
- * overrides) from the `x-unm-settings` JSON header, merged over this plugin's
- * declared defaults so a missing header still yields sane values.
- */
-function readSettings(req: { headers?: Record<string, unknown> }): Record<string, unknown> {
-  const defaults: Record<string, unknown> = {};
-  for (const opt of PLUGIN_OPTIONS) if (opt.default !== undefined) defaults[opt.key] = opt.default;
-
-  const raw = req.headers?.['x-unm-settings'];
-  if (typeof raw !== 'string' || raw.trim() === '') return defaults;
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') return { ...defaults, ...(parsed as Record<string, unknown>) };
-  } catch {
-    // Malformed header: fall back to defaults rather than failing the call.
-  }
-  return defaults;
-}
-
-function clampInt(value: unknown, min: number, max: number, fallback: number): number {
-  const n = typeof value === 'number' && Number.isInteger(value) ? value : fallback;
-  return Math.min(max, Math.max(min, n));
-}
-
-/** Extracts a bare host (no scheme/port/brackets) from a management address. */
-function hostFromAddress(address: string): string {
-  const trimmed = (address ?? '').trim();
-  if (!trimmed) return '';
-  try {
-    const u = new URL(trimmed.includes('://') ? trimmed : `http://${trimmed}`);
-    return u.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 literal brackets
-  } catch {
-    return trimmed.split('/')[0].split(':')[0];
-  }
-}
+const app = server.app;
 
 /** Resolves walk options from effective settings. */
 function resolveOptions(settings: Record<string, unknown>): WalkOptions {
@@ -201,7 +158,7 @@ app.post('/monitoring', async (req, res) => {
   const deviceId = typeof body.deviceId === 'string' ? body.deviceId : null;
   const managementAddress = typeof body.managementAddress === 'string' ? body.managementAddress : '';
 
-  const settings = readSettings(req);
+  const settings = readSettings(req, PLUGIN_OPTIONS);
   const opts = resolveOptions(settings);
   const host = hostFromAddress(managementAddress);
 
@@ -213,7 +170,7 @@ app.post('/monitoring', async (req, res) => {
       metrics: { 'system.error': error },
       metricDescriptors: [
         ...buildDescriptors([], opts.inventoryTtlMs),
-        { key: 'system.error', label: 'Error', type: 'string' as const, visualization: 'text' as const, group: 'System' },
+        errorDescriptor(),
       ],
       error,
     });
@@ -307,7 +264,7 @@ app.post('/monitoring', async (req, res) => {
     const hasWifi = !!wifi && (wifi.accessPoints.length > 0 || wifi.clients.length > 0);
     const descriptors: MetricDescriptor[] = buildDescriptors(names, opts.inventoryTtlMs, hasWifi);
     if (metrics['system.error']) {
-      descriptors.push({ key: 'system.error', label: 'Error', type: 'string', visualization: 'text', group: 'System' });
+      descriptors.push(errorDescriptor());
     }
 
     res.status(200).json({
@@ -415,7 +372,7 @@ app.get('/inventory', async (req, res) => {
     return res.status(200).json(inventoryError(error ?? 'Missing SNMP credentials.'));
   }
 
-  res.status(200).json(await runInventory(host, creds, resolveOptions(readSettings(req))));
+  res.status(200).json(await runInventory(host, creds, resolveOptions(readSettings(req, PLUGIN_OPTIONS))));
 });
 
 app.post('/inventory', async (req, res) => {
@@ -434,40 +391,12 @@ app.post('/inventory', async (req, res) => {
     return res.status(200).json(inventoryError(error ?? 'Missing SNMP credentials.'));
   }
 
-  res.status(200).json(await runInventory(host, creds, resolveOptions(readSettings(req))));
+  res.status(200).json(await runInventory(host, creds, resolveOptions(readSettings(req, PLUGIN_OPTIONS))));
 });
 
-/**
- * Advertises this plugin over mDNS/DNS-SD so the UnifiedNetworkManager API can
- * discover it automatically. Best-effort — the API also polls known endpoints.
- */
-function startMdnsAdvertising(): void {
-  try {
-    const bonjour = new Bonjour();
-    bonjour.publish({
-      name: DISPLAY_NAME,
-      type: 'unm-plugin',
-      port: PORT,
-      txt: {
-        uuid: EFFECTIVE_UUID,
-        name: DISPLAY_NAME,
-        version: PLUGIN_VERSION,
-        vendors: PLUGIN_VENDORS.join(','),
-        capabilities: PLUGIN_CAPABILITIES.join(','),
-        endpoint: ADVERTISED_ENDPOINT,
-        authType: PLUGIN_AUTH_TYPE,
-      },
-    });
-    // eslint-disable-next-line no-console
-    console.log(`[snmp-plugin] advertising via mDNS as "${DISPLAY_NAME}" (${EFFECTIVE_UUID})`);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn('[snmp-plugin] mDNS advertising unavailable, falling back to polling discovery only:', (err as Error).message);
-  }
-}
-
-app.listen(PORT, () => {
-  // eslint-disable-next-line no-console
-  console.log(`[snmp-plugin] listening on port ${PORT}`);
-  startMdnsAdvertising();
+// listen() binds the conventional plugin port (4080 by default) and starts
+// mDNS advertising — both handled by @unm/plugin-sdk.
+server.listen().catch((err) => {
+  console.error('[snmp-plugin] fatal startup error:', err);
+  process.exit(1);
 });

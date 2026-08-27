@@ -11,9 +11,10 @@
  * changes are applied and persisted immediately by the switch.
  */
 
+import { createRegistry } from '@unm/plugin-sdk';
 import { buildPostArray, buildPostData, encodeHexString, encodeIpLe, encodePortMask } from '../swosClient';
 import { getField, hasField } from '../platform';
-import { ActionContext, ActionDescriptor, InputSchema, RiskLevel, validateInput } from './types';
+import { ActionContext, ActionDescriptor } from './types';
 
 // --- Small helpers --------------------------------------------------------------------
 
@@ -533,48 +534,28 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   systemManagementAction,
 ];
 
-const byId = new Map<string, ActionDescriptor>(ALL_ACTIONS.map((a) => [a.id, a]));
+// One registry serves /discover, /plan and /config — the byId map + listers come
+// from @unm/plugin-sdk's createRegistry.
+const registry = createRegistry(ALL_ACTIONS);
 
 /** Returns the action for an id, or undefined. */
 export function getAction(id: string): ActionDescriptor | undefined {
-  return byId.get(id);
+  return registry.getAction(id);
 }
 
 /** All actions (the full catalog). */
 export function listActions(): ActionDescriptor[] {
-  return ALL_ACTIONS;
+  return registry.listActions();
 }
 
 /** Distinct module names, for catalog grouping in the webapp. */
 export function listModules(): string[] {
-  return [...new Set(ALL_ACTIONS.map((a) => a.module))];
-}
-
-// --- Catalog (for /discover) ---------------------------------------------------------------
-
-export interface CatalogEntry {
-  id: string;
-  label: string;
-  description?: string;
-  module: string;
-  riskLevel: RiskLevel;
-  deviceCount: number | 'N';
-  timeoutMs?: number;
-  inputSchema: InputSchema;
+  return registry.listModules();
 }
 
 /** The full action catalog (single-device actions only in v1 — no multi-device intents). */
-export function listCatalog(): CatalogEntry[] {
-  return ALL_ACTIONS.map((a) => ({
-    id: a.id,
-    label: a.label,
-    description: a.description,
-    module: a.module,
-    riskLevel: a.riskLevel,
-    deviceCount: 1 as const,
-    timeoutMs: a.timeoutMs,
-    inputSchema: a.inputSchema,
-  }));
+export function listCatalog() {
+  return registry.listCatalog();
 }
 
 // --- Shared decode helper (avoids importing monitoring into the registry) -------------------

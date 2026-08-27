@@ -20,17 +20,10 @@
  * credential stays at the top level of `credentials`, unchanged.
  */
 
-/** One named credential slot as advertised by a plugin in /discover. */
-export interface CredentialSlotDescriptor {
-  /** Slot key (e.g. "web"). Unique per plugin; used as the map key everywhere. */
-  name: string;
-  /** Secret type the bound secret must have (e.g. "usernamePassword", "snmp"). */
-  secretType: string;
-  /** True when a config action needs this slot — surfaced in the UI, not enforced at assignment time. */
-  required?: boolean;
-  /** Human-readable purpose shown next to the picker in the webapp. */
-  description?: string;
-}
+// The descriptor contract lives in @unm/plugin-sdk — re-exported so API modules
+// keep their existing imports.
+export type { CredentialSlotDescriptor } from '@unm/plugin-sdk';
+import type { CredentialSlotDescriptor } from '@unm/plugin-sdk';
 
 /** Bound secrets for one assignment: slot name → secrets.id (JSON object). */
 export type ExtraCredentials = Record<string, string>;

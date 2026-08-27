@@ -1,0 +1,18 @@
+# Keep the build context lean AND correct: host node_modules must never be
+# copied into images. The api image's `npm install` creates a SYMLINK at
+# /app/api/node_modules/@unm/plugin-sdk (file: dep); if the host's real
+# directory were also copied over it, BuildKit fails with
+# "cannot copy to non-directory". Same for every plugin image.
+# NOTE: BuildKit uses filepath.Match (no globstar) — list depths explicitly.
+node_modules
+*/node_modules
+plugins/*/node_modules
+
+.git
+dist
+*.log
+.env
+.env.*
+.DS_Store
+coverage
+.vite

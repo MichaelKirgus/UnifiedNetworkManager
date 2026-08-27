@@ -1,7 +1,15 @@
 import path from 'path';
-import express from 'express';
-import cors from 'cors';
-import { Bonjour } from 'bonjour-service';
+import {
+  Health,
+  MetricDescriptor,
+  PluginOptionDescriptor,
+  INVENTORY_INTERVAL_MS,
+  createPluginServer,
+  pickNumber,
+  pickString,
+  readSettings,
+  resolvePluginIdentity,
+} from '@unm/plugin-sdk';
 import {
   getSystemStatus,
   getSystemResources,
@@ -35,31 +43,16 @@ export const PLUGIN_NAME = 'OPNsense Plugin';
  * (`<uuid>:<instanceId>`) so the API registers them as separate plugins.
  * `PLUGIN_DISPLAY_NAME` optionally overrides the advertised name; without it,
  * the instance id is appended: "OPNsense Plugin (site-a)". Unset = single-instance behavior.
+ * (Convention implemented in @unm/plugin-sdk's resolvePluginIdentity.)
  */
-const INSTANCE_ID = process.env.PLUGIN_INSTANCE_ID?.trim() ?? '';
-export const EFFECTIVE_UUID = INSTANCE_ID ? `${PLUGIN_UUID}:${INSTANCE_ID}` : PLUGIN_UUID;
-export const DISPLAY_NAME =
-  process.env.PLUGIN_DISPLAY_NAME?.trim() || (INSTANCE_ID ? `${PLUGIN_NAME} (${INSTANCE_ID})` : PLUGIN_NAME);
-export const PLUGIN_VERSION = '0.2.0';
-export const PLUGIN_VENDORS = ['opnsense'];
-// 'planning' advertises the /plan endpoint (multi-device intents) so the API
-// can offer bulk rollout + tunnel provisioning flows in the webapp.
-export const PLUGIN_CAPABILITIES = ['monitoring', 'configuration', 'inventory', 'planning'];
-export const PLUGIN_AUTH_TYPE = 'none';
-
-const PORT = Number(process.env.PORT ?? 4001);
-const ADVERTISED_ENDPOINT = process.env.ADVERTISED_ENDPOINT ?? `http://localhost:${PORT}`;
-
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-// Static icon assets (plugin + per-model icons), advertised in /discover and
-// fetched by the API's icon proxy. dist/src/../../icons = <plugin root>/icons.
-app.use('/icons', express.static(path.join(__dirname, '../../icons')));
-
-app.get('/healthz', (_req, res) => {
-  res.status(200).json({ status: 'ok' });
+const identity = resolvePluginIdentity({
+  uuid: PLUGIN_UUID,
+  name: PLUGIN_NAME,
+  version: '0.2.0',
+  vendors: ['opnsense'],
+  // 'planning' advertises the /plan endpoint (multi-device intents) so the API
+  // can offer bulk rollout + tunnel provisioning flows in the webapp.
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning'],
 });
 
 /**
@@ -93,23 +86,9 @@ app.get('/healthz', (_req, res) => {
  *                 (cheap local call) without hammering the device. This is the
  *                 extensible "refresh cadence" contract: any plugin declares
  *                 per-metric intervals and scales to many devices.
+ *
+ * The type itself lives in @unm/plugin-sdk (imported above).
  */
-export interface MetricDescriptor {
-  key: string;
-  label: string;
-  unit?: string;
-  format?: 'bytes' | 'bits' | 'duration' | 'number' | 'text';
-  type: 'number' | 'string' | 'boolean' | 'enum';
-  visualization: 'gauge' | 'plot' | 'text' | 'table';
-  group?: string;
-  min?: number;
-  max?: number;
-  color?: string;
-  rows?: string[];
-  columns?: string[];
-  summary?: boolean;
-  intervalMs?: number;
-}
 
 /**
  * Refresh cadence per metric class. Live metrics (CPU, memory, traffic) are
@@ -120,8 +99,7 @@ export interface MetricDescriptor {
  * scale to many devices: appliance load is bounded by intervalMs, not by the
  * number of API polls.
  */
-const LIVE_INTERVAL_MS = 30_000;
-const INVENTORY_INTERVAL_MS = 15 * 60 * 1000;
+const LIVE_INTERVAL_MS = 30_000; // (INVENTORY_INTERVAL_MS comes from @unm/plugin-sdk)
 
 /**
  * In-memory inventory cache, keyed by management host. Holds the slow-changing
@@ -660,54 +638,12 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
 }
 
 /**
- * Plugin identity endpoint. The UnifiedNetworkManager API can poll this
- * endpoint (as a fallback to mDNS discovery) to discover and upsert this
- * plugin. Returns the full, self-describing identity of this plugin, including
- * the metric descriptors that drive the webapp's visualization.
- */
-app.get('/discover', (_req, res) => {
-  res.status(200).json({
-    uuid: EFFECTIVE_UUID,
-    name: DISPLAY_NAME,
-    version: PLUGIN_VERSION,
-    vendors: PLUGIN_VENDORS,
-    capabilities: PLUGIN_CAPABILITIES,
-    endpoint: ADVERTISED_ENDPOINT,
-    authType: PLUGIN_AUTH_TYPE,
-    // The secret type this plugin expects for device credentials. The API
-    // broker reads this to filter which secrets/providers are applicable to
-    // devices managed by this plugin.
-    requiredSecretType: 'apiKey',
-    // Static metric descriptors (system metrics). The traffic table descriptor
-    // is emitted dynamically from /monitoring (it needs the live interface
-    // list, which is only available when polling a specific device).
-    metrics: buildMetricDescriptors([]),
-    // Configurable options. The API persists user-set values for these and
-    // injects them back via the `x-unm-settings` header on every call.
-    options: PLUGIN_OPTIONS,
-    // The full action catalog (single-device actions + multi-device intents).
-    // The API persists this and validates job/plan actionIds against it; the
-    // webapp renders only what exists. One registry serves /discover, /plan
-    // and /config — see src/actions/registry.ts.
-    actions: listCatalog(),
-    modules: listModules(),
-    // Icon + supported device model catalog — drives the webapp's Model/Firmware
-    // dropdowns and the icon shown on the Devices pages. The user's selection is
-    // forwarded to /monitoring (model/firmwareVersion) for future per-model logic.
-    iconUrl: '/icons/opnsense.svg',
-    deviceModels: DEVICE_MODELS,
-  });
-});
-
-type Health = 'ok' | 'warning' | 'critical' | 'unknown';
-
-/**
  * The options this plugin exposes for configuration. Declared in /discover so
  * the API can persist + validate user-set values and the webapp can render a
  * generic form — this plugin never stores settings itself; it receives them
  * on every call via the `x-unm-settings` header (see readSettings()).
  */
-const PLUGIN_OPTIONS = [
+const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
   {
     key: 'pollIntervalSec',
     label: 'Poll interval (seconds)',
@@ -763,25 +699,32 @@ const PLUGIN_OPTIONS = [
   },
 ];
 
-/**
- * Reads the effective settings the API injects on every call (defaults ⊕ user
- * overrides) from the `x-unm-settings` JSON header, merged over this plugin's
- * declared defaults so a missing header still yields sane values.
- */
-function readSettings(req: { headers?: Record<string, unknown> }): Record<string, unknown> {
-  const defaults: Record<string, unknown> = {};
-  for (const opt of PLUGIN_OPTIONS) defaults[opt.key] = opt.default;
-
-  const raw = req.headers?.['x-unm-settings'];
-  if (typeof raw !== 'string' || raw.trim() === '') return defaults;
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') return { ...defaults, ...(parsed as Record<string, unknown>) };
-  } catch {
-    // Malformed header: fall back to defaults rather than failing the call.
-  }
-  return defaults;
-}
+// Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
+// listen) come from @unm/plugin-sdk — this file only registers its own routes.
+const server = createPluginServer({
+  identity,
+  logTag: 'opnsense-plugin',
+  // Static icon assets (plugin + per-model icons), advertised in /discover and
+  // fetched by the API's icon proxy. dist/src/../../icons = <plugin root>/icons.
+  iconsDir: path.join(__dirname, '../../icons'),
+  discovery: {
+    // The secret type this plugin expects for device credentials. The API
+    // broker reads this to filter which secrets/providers are applicable to
+    // devices managed by this plugin.
+    requiredSecretType: 'apiKey',
+    // Static metric descriptors (system metrics). The traffic table descriptor
+    // is emitted dynamically from /monitoring (it needs the live interface
+    // list, which is only available when polling a specific device).
+    metrics: buildMetricDescriptors([]),
+    options: PLUGIN_OPTIONS,
+    // The full action catalog (single-device actions + multi-device intents).
+    actions: listCatalog(),
+    modules: listModules(),
+    iconUrl: '/icons/opnsense.svg',
+    deviceModels: DEVICE_MODELS,
+  },
+});
+const app = server.app;
 
 /** Extracts the effective transport option from injected settings. */
 function transportOf(settings: Record<string, unknown>): OpnsenseTransport {
@@ -819,30 +762,7 @@ async function resolveRuntimeContext(
   return { edition: editionInfo.edition, syncClasses: editionInfo.classes ?? [], dnsBackend, dhcpBackend };
 }
 
-/**
- * Reads a numeric value from an object, trying several candidate keys (OPNsense
- * field names vary by version). Returns `undefined` when none is present.
- */
-function pickNumber(obj: Record<string, unknown>, keys: string[]): number | undefined {
-  for (const k of keys) {
-    const v = obj[k];
-    if (typeof v === 'number' && Number.isFinite(v)) return v;
-    if (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v))) return Number(v);
-  }
-  return undefined;
-}
-
-/**
- * Reads the first non-empty string value from an object, trying several
- * candidate keys (OPNsense field names vary by version).
- */
-function pickString(obj: Record<string, unknown>, keys: string[]): string | undefined {
-  for (const k of keys) {
-    const v = obj[k];
-    if (typeof v === 'string' && v.trim() !== '') return v;
-  }
-  return undefined;
-}
+// pickNumber / pickString (multi-key field readers) come from @unm/plugin-sdk.
 
 /**
  * Collects a rich set of metrics from the OPNsense appliance: CPU load,
@@ -1008,7 +928,7 @@ app.post('/monitoring', async (req, res) => {
 
   // Effective settings injected by the API (defaults ⊕ user overrides). The
   // plugin reads its options from here — it never stores them itself.
-  const settings = readSettings(req);
+  const settings = readSettings(req, PLUGIN_OPTIONS);
   const transport: OpnsenseTransport =
     typeof settings.transport === 'string' && ['auto', 'http', 'https'].includes(settings.transport)
       ? (settings.transport as OpnsenseTransport)
@@ -1096,7 +1016,7 @@ app.post('/config', async (req, res) => {
         ? (body.payload as Record<string, unknown>)
         : {};
 
-  const settings = readSettings(req);
+  const settings = readSettings(req, PLUGIN_OPTIONS);
   const transport = transportOf(settings);
 
   if (!actionId) {
@@ -1192,7 +1112,7 @@ async function buildActionContext(args: {
  */
 app.post('/plan', async (req, res) => {
   const body = req.body ?? {};
-  const settings = readSettings(req);
+  const settings = readSettings(req, PLUGIN_OPTIONS);
 
   const planReq: PlanRequest = {
     intent: {
@@ -1264,33 +1184,9 @@ app.get('/inventory', async (req, res) => {
  * best-effort advertisement; the API also polls known plugin endpoints as a
  * fallback.
  */
-function startMdnsAdvertising(): void {
-  try {
-    const bonjour = new Bonjour();
-    bonjour.publish({
-      name: DISPLAY_NAME,
-      type: 'unm-plugin',
-      port: PORT,
-      txt: {
-        uuid: EFFECTIVE_UUID,
-        name: DISPLAY_NAME,
-        version: PLUGIN_VERSION,
-        vendors: PLUGIN_VENDORS.join(','),
-        capabilities: PLUGIN_CAPABILITIES.join(','),
-        endpoint: ADVERTISED_ENDPOINT,
-        authType: PLUGIN_AUTH_TYPE,
-      },
-    });
-    // eslint-disable-next-line no-console
-    console.log(`[opnsense-plugin] advertising via mDNS as "${DISPLAY_NAME}" (${EFFECTIVE_UUID})`);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn('[opnsense-plugin] mDNS advertising unavailable, falling back to polling discovery only:', (err as Error).message);
-  }
-}
-
-app.listen(PORT, () => {
-  // eslint-disable-next-line no-console
-  console.log(`[opnsense-plugin] listening on port ${PORT}`);
-  startMdnsAdvertising();
+// listen() binds the conventional plugin port (4080 by default) and starts
+// mDNS advertising — both handled by @unm/plugin-sdk.
+server.listen().catch((err) => {
+  console.error('[opnsense-plugin] fatal startup error:', err);
+  process.exit(1);
 });

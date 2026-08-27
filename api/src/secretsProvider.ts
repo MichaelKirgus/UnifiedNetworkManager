@@ -1,3 +1,4 @@
+import type { SecretField, SecretType } from '@unm/plugin-sdk';
 import axios from 'axios';
 import { eq } from 'drizzle-orm';
 import { db } from './db';
@@ -28,24 +29,9 @@ const PROVIDER_TIMEOUT_MS = 5000;
 const PROVIDER_CACHE_TTL_MS = 5000;
 const ONLINE_WINDOW_MS = 5 * 60 * 1000;
 
-/** A secret field as declared by a provider's secret type schema. */
-export interface SecretField {
-  name: string;
-  label: string;
-  input: 'text' | 'password' | 'select';
-  secret?: boolean;
-  required?: boolean;
-  options?: string[];
-}
-
-/** A secret type (e.g. `apiKey`, `usernamePassword`) with its field schema. */
-export interface SecretType {
-  type: string;
-  label: string;
-  fields: SecretField[];
-  /** True when the provider can create/rotate this type's material itself. */
-  generatable?: boolean;
-}
+// The secret field/type contract lives in @unm/plugin-sdk — re-exported so API
+// modules keep their existing imports.
+export type { SecretField, SecretType };
 
 /** A registered secrets provider + the secret types it serves. */
 export interface SecretProviderInfo {

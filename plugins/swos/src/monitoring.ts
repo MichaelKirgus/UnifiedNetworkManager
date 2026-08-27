@@ -10,6 +10,8 @@
  */
 
 import { createHash } from 'crypto';
+import type { MetricDescriptor } from '@unm/plugin-sdk';
+import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 import { SwosClient, SwosData, decodeHexString, decodeMac, decodeIpLe, decodePortMask } from './swosClient';
 import { SwosPlatform, createPlatform, getField, hasField } from './platform';
 
@@ -459,17 +461,17 @@ export async function collectSnapshot(client: SwosClient): Promise<SwosSnapshot>
     const txRaw = hasField(map, 'statsTxBytes') && Array.isArray(st[map.statsTxBytes!]) ? (st[map.statsTxBytes!] as number[]) : [];
     if (rxRaw.length > 0 || txRaw.length > 0) {
       const nowMs = Date.now();
-      const prev = statsHistory.get(client.base);
-      // Per-port rates may be null (counter reset on that port) even when others are valid.
-      let rxRate: (number | null)[] | null = null;
-      let txRate: (number | null)[] | null = null;
-      if (prev && nowMs > prev.atMs) {
-        const dtSec = (nowMs - prev.atMs) / 1000;
-        // Counter reset (reboot/config restore) or clock skew → negative delta; drop the rates.
-        rxRate = rxRaw.map((v, i) => ((v - (prev.rxBytes[i] ?? v)) < 0 ? null : Math.round(((v - (prev.rxBytes[i] ?? v)) / dtSec) * 8)));
-        txRate = txRaw.map((v, i) => ((v - (prev.txBytes[i] ?? v)) < 0 ? null : Math.round(((v - (prev.txBytes[i] ?? v)) / dtSec) * 8)));
-      }
-      statsHistory.set(client.base, { atMs: nowMs, rxBytes: rxRaw, txBytes: txRaw });
+      rateTracker.evictStale(nowMs);
+      // Per-port rates may be null (first sample or counter reset on that port)
+      // even when others are valid — the tracker returns null in both cases.
+      const rxRate: (number | null)[] = rxRaw.map((v, i) => {
+        const r = rateTracker.sample(`${client.base}:rx:${i}`, v, nowMs);
+        return r === null ? null : Math.round(r);
+      });
+      const txRate: (number | null)[] = txRaw.map((v, i) => {
+        const r = rateTracker.sample(`${client.base}:tx:${i}`, v, nowMs);
+        return r === null ? null : Math.round(r);
+      });
 
       const count = Math.max(rxRaw.length, txRaw.length);
       portStats = [];
@@ -527,13 +529,10 @@ export async function collectSnapshot(client: SwosClient): Promise<SwosSnapshot>
 // --- Throughput rate state (per host) ---------------------------------------------------------
 // stats.b only exposes CUMULATIVE byte counters; the Web UI polls it every second and
 // derives rates client-side. We do the same across API poll intervals: keep the last
-// sample per management address and compute Δbytes/Δt between collections.
-interface StatsSample {
-  atMs: number;
-  rxBytes: number[];
-  txBytes: number[];
-}
-const statsHistory = new Map<string, StatsSample>();
+// sample per management address + port and compute Δbytes/Δt between collections.
+// The shared CounterTracker (octets→bits/s) encodes the invariants: first sample →
+// null, counter reset/wrap → skip, baseline refreshed on every call, stale eviction.
+const rateTracker = new CounterTracker();
 
 /** Humanizes a bits/s rate for table cells (the webapp renders table values verbatim). */
 function formatBitsPerSec(v: number | null): string {
@@ -549,13 +548,19 @@ function formatBitsPerSec(v: number | null): string {
 }
 
 // --- TTL cache ------------------------------------------------------------------------------
+// Fresh snapshots live in the shared TtlCache; lastKnown keeps the most recent
+// good snapshot per key as a stale fallback (serve old data rather than flap to
+// critical on a blip).
+const snapshotCache = new TtlCache<SwosSnapshot>();
+const lastKnown = new Map<string, SwosSnapshot>();
 
-interface CacheEntry {
-  at: number;
-  snapshot: SwosSnapshot;
+function rememberLastKnown(key: string, snapshot: SwosSnapshot): void {
+  lastKnown.set(key, snapshot);
+  if (lastKnown.size > 512) {
+    const oldest = lastKnown.keys().next().value; // Map iteration = insertion order
+    if (oldest !== undefined) lastKnown.delete(oldest);
+  }
 }
-
-const cache = new Map<string, CacheEntry>();
 
 export interface MonitoringResult {
   snapshot: SwosSnapshot;
@@ -577,27 +582,24 @@ export async function getMonitoring(
   // one credential set must never be served for another.
   const pwHash = createHash('md5').update(credentials.password, 'utf8').digest('hex');
   const key = `${address}|${credentials.username}:${pwHash}`;
-  const now = Date.now();
-  const cached = cache.get(key);
 
-  if (cached && now - cached.at < opts.cacheTtlMs) {
-    return { snapshot: cached.snapshot, stale: false };
+  const cached = snapshotCache.get(key, opts.cacheTtlMs);
+  if (cached) {
+    return { snapshot: cached, stale: false };
   }
 
   try {
     const client = new SwosClient(address, credentials, opts.requestTimeoutMs);
     const snapshot = await collectSnapshot(client);
-    cache.set(key, { at: now, snapshot });
-    // Opportunistic eviction so the map can't grow unbounded across devices.
-    if (cache.size > 512) {
-      for (const [k, v] of cache) if (now - v.at > opts.cacheTtlMs * 4) cache.delete(k);
-    }
+    snapshotCache.set(key, snapshot);
+    rememberLastKnown(key, snapshot);
     return { snapshot, stale: false };
   } catch (err) {
     const message = (err as Error).message;
-    if (cached) {
+    const stale = lastKnown.get(key); // expired-but-usable fallback
+    if (stale) {
       // Serve the last good data rather than flapping to critical on a blip.
-      return { snapshot: cached.snapshot, stale: true, error: `Snapshot is stale — refresh failed: ${message}` };
+      return { snapshot: stale, stale: true, error: `Snapshot is stale — refresh failed: ${message}` };
     }
     throw err;
   }
@@ -605,26 +607,13 @@ export async function getMonitoring(
 
 /** Test hook: clears the per-host cache. */
 export function clearMonitoringCache(): void {
-  cache.clear();
+  snapshotCache.clear();
 }
 
 // --- Metric descriptors ---------------------------------------------------------------------------
-
-export interface MetricDescriptor {
-  key: string;
-  label: string;
-  unit?: string;
-  format?: 'bytes' | 'bits' | 'duration' | 'number' | 'text';
-  type: 'number' | 'string' | 'boolean' | 'enum';
-  visualization: 'gauge' | 'plot' | 'text' | 'table';
-  group?: string;
-  min?: number;
-  max?: number;
-  color?: string;
-  rows?: string[];
-  columns?: string[];
-  summary?: boolean;
-}
+// The shared contract type comes from @unm/plugin-sdk (re-exported so sibling
+// files keep their existing imports).
+export type { MetricDescriptor };
 
 /** Builds the descriptor set for one snapshot (groups appear only when present). */
 export function buildDescriptors(s: SwosSnapshot): MetricDescriptor[] {

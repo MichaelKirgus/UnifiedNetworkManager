@@ -1,4 +1,4 @@
-import axios, { AxiosInstance } from 'axios';
+import { createApiClient, isNotFound } from '@unm/plugin-sdk';
 
 /**
  * Client for the UnifiedNetworkManager API's internal secrets-data endpoints.
@@ -9,19 +9,12 @@ import axios, { AxiosInstance } from 'axios';
  * `x-plugin-api-key`). The plugin is the crypto holder: it encrypts before
  * storing and decrypts after reading.
  *
- * Base URL: `UNM_API_URL` (defaults to `http://localhost:3000/v1` for local
- * dev; set to `http://api:3000/v1` inside Docker).
+ * The axios bootstrap + 404 helper come from @unm/plugin-sdk; base URL is
+ * `UNM_API_URL` (defaults to `http://localhost:3000/v1`; set to
+ * `http://api:3000/v1` inside Docker).
  */
 
-const BASE_URL = (process.env.UNM_API_URL ?? 'http://localhost:3000/v1').replace(/\/+$/, '');
-const API_KEY = process.env.PLUGIN_API_KEY;
-const TIMEOUT_MS = 5000;
-
-const http: AxiosInstance = axios.create({
-  baseURL: BASE_URL,
-  timeout: TIMEOUT_MS,
-  headers: API_KEY ? { 'x-plugin-api-key': API_KEY } : undefined,
-});
+const http = createApiClient();
 
 /** A secret row as stored by the API (ciphertext). */
 export interface SecretRecord {
@@ -77,7 +70,7 @@ export async function getSecret(id: string): Promise<SecretRecord | null> {
     const res = await http.get<SecretRecord>(`/plugin/secrets/${encodeURIComponent(id)}`);
     return res.data;
   } catch (err) {
-    if (axios.isAxiosError(err) && err.response?.status === 404) {
+    if (isNotFound(err)) {
       return null;
     }
     throw err;

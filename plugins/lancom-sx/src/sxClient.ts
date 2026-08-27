@@ -18,6 +18,7 @@
  */
 
 import { SnmpCredentials, TransportOptions, snmpGet, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
+import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 import {
   DETECT, SX4_BASE, SX3_BASE,
   SX4_SYS, SX4_PSU, SX4_PORT_CONF, SX4_PORT_TRAFFIC, SX4_VLAN, SX4_SVI, SX4_NEIGHBOR,
@@ -288,7 +289,17 @@ export async function detectVariant(
  * Slow path — targeted parallel walks of the runtime-status subtrees we use
  * ------------------------------------------------------------------ */
 
-const inventoryCache = new Map<string, SxSwitchSnapshot>();
+// Fresh-snapshot cache (TTL-gated) + a last-known map so a failed refresh can
+// still fall back to the most recent data even after TTL expiry.
+const inventoryCache = new TtlCache<SxSwitchSnapshot>();
+const lastKnown = new Map<string, SxSwitchSnapshot>();
+function rememberLastKnown(host: string, snapshot: SxSwitchSnapshot): void {
+  lastKnown.set(host, snapshot);
+  if (lastKnown.size > 512) {
+    const oldest = lastKnown.keys().next().value; // Map iteration = insertion order
+    if (oldest !== undefined) lastKnown.delete(oldest);
+  }
+}
 
 /** The exact subtrees the slow path needs per variant — nothing else. */
 function inventoryWalks(variant: SxVariant): string[] {
@@ -329,15 +340,16 @@ export async function getSxInventory(
   creds: SnmpCredentials,
   opts: SxOptions
 ): Promise<{ snapshot: SxSwitchSnapshot | null; fromCache: boolean; error?: string }> {
-  const cached = inventoryCache.get(host);
-  if (cached && Date.now() - cached.collectedAt < opts.inventoryTtlMs) {
+  const cached = inventoryCache.get(host, opts.inventoryTtlMs);
+  if (cached) {
     return { snapshot: cached, fromCache: true };
   }
+  const stale = lastKnown.get(host); // expired-but-usable fallback
 
   // Probe gate first — cheap rejection of non-SX devices / bad credentials.
   const det = await detectVariant(host, creds, opts);
   if (det.error) {
-    return { snapshot: cached ?? null, fromCache: cached !== undefined, error: det.error };
+    return { snapshot: stale ?? null, fromCache: stale !== undefined, error: det.error };
   }
   if (!det.variant) {
     // Agent answered but has neither SX tree — not a Lancom SX switch.
@@ -388,7 +400,7 @@ export async function getSxInventory(
   }
 
   if (out.size === 0 && failures > 0) {
-    return { snapshot: cached ?? null, fromCache: cached !== undefined, error: 'SNMP walk of the LCOS-SX status tree failed.' };
+    return { snapshot: stale ?? null, fromCache: stale !== undefined, error: 'SNMP walk of the LCOS-SX status tree failed.' };
   }
   if (out.size === 0) {
     variantCache.delete(host);
@@ -402,7 +414,10 @@ export async function getSxInventory(
   // partial artifact must never be served from cache for the whole TTL. It's
   // returned once and the next poll retries fresh.
   const complete = snapshot.system.serialNumber !== '' && failures === 0;
-  if (complete) inventoryCache.set(host, snapshot);
+  if (complete) {
+    inventoryCache.set(host, snapshot);
+    rememberLastKnown(host, snapshot);
+  }
 
   return {
     snapshot,
@@ -742,12 +757,9 @@ function parseSx3(out: Map<string, string>, get: (oid: string) => string): SxSwi
  * Fast path — port byte-counter walk every poll → rx/tx rates (bits/s)
  * ------------------------------------------------------------------ */
 
-interface CounterBaseline {
-  ts: number;
-  counters: Record<string, number>; // key = `${port}:rx|tx`
-}
-
-const counterCache = new Map<string, CounterBaseline>();
+// Shared counter-delta tracker (@unm/plugin-sdk): first sample → null,
+// reset/wrap skipped, baseline always refreshed, stale hosts evicted.
+const rateTracker = new CounterTracker(); // octets/s → bits/s
 
 /** One rate sample per port: bits/s in each direction (null when unknown). */
 export type SxRates = Record<string, { rx: number | null; tx: number | null }>;
@@ -788,8 +800,7 @@ export async function walkSxCounters(
   }
 
   const now = Date.now();
-  const prev = counterCache.get(host);
-  const next: CounterBaseline = { ts: now, counters: {} };
+  rateTracker.evictStale(now);
   const rates: SxRates = {};
 
   for (const [oid, value] of out) {
@@ -801,33 +812,15 @@ export async function walkSxCounters(
     if (!Number.isInteger(port)) continue;
     const n = Number(value);
     if (!Number.isFinite(n)) continue;
-    const cKey = `${port}:${row.col === SX4_PORT_TRAFFIC.COL_RX_OCTETS ? 'rx' : 'tx'}`;
-    next.counters[cKey] = n;
-    rateFromBaseline(prev, now, cKey, n, rates, `P${port}`);
+    const dir = row.col === SX4_PORT_TRAFFIC.COL_RX_OCTETS ? 'rx' : 'tx';
+    // Integer bits/s, as before — the tracker returns a float rate.
+    const r = rateTracker.sample(`${host}:${port}:${dir}`, n, now);
+    if (r === null) continue;
+    const cur = rates[`P${port}`] ?? (rates[`P${port}`] = { rx: null, tx: null });
+    const bitsPerSec = Math.round(r);
+    if (dir === 'rx') cur.rx = bitsPerSec;
+    else cur.tx = bitsPerSec;
   }
 
-  counterCache.set(host, next);
   return rates;
-}
-
-/** Computes one direction's rate from the baseline, storing it into `rates`. */
-function rateFromBaseline(
-  prev: CounterBaseline | undefined,
-  now: number,
-  cKey: string,
-  newVal: number,
-  rates: SxRates,
-  portName: string
-): void {
-  const cur = rates[portName] ?? (rates[portName] = { rx: null, tx: null });
-  if (!prev) return; // first sample — no baseline yet
-  const oldVal = prev.counters[cKey];
-  if (oldVal === undefined) return; // counter unseen in the previous cycle
-  const dtSec = (now - prev.ts) / 1000;
-  if (dtSec <= 0) return; // clock skew or duplicate poll within the same ms
-  const delta = newVal - oldVal;
-  if (delta < 0) return; // counter reset/wrap — skip this sample, re-baseline next cycle
-  const bitsPerSec = Math.round((delta * 8) / dtSec);
-  if (cKey.endsWith(':rx')) cur.rx = bitsPerSec;
-  else cur.tx = bitsPerSec;
 }

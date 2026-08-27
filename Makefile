@@ -5,6 +5,7 @@
 setup:
 	@echo "Installing dependencies..."
 	@( \
+	  (cd packages/plugin-sdk && npm install) & \
 	  (cd packages/snmp-client && npm install) & \
 	  (cd api && npm install) & \
 	  (cd webapp && npm install) & \
@@ -20,21 +21,29 @@ setup:
 	  wait )
 	@echo "Dependencies installed successfully."
 
-# Build the shared package + all plugins + the MCP server.
+# Build the shared packages + all plugins + the MCP server.
 #
-# Ordering: @unm/snmp-client must build FIRST — the snmp and lancom-lx plugins
-# depend on it via `file:` links, which npm COPIES into their node_modules at
-# install time. We refresh those copies from the fresh dist before building the
-# plugins so they compile against current shared code; everything else then runs
-# concurrently (tsc builds are CPU-bound and independent of each other).
+# Ordering: @unm/plugin-sdk and @unm/snmp-client must build FIRST — every
+# plugin (and the api, types-only) depends on them via `file:` links, which npm
+# COPIES into node_modules at install time. We refresh those copies from the
+# fresh dist before building the plugins so they compile against current shared
+# code; everything else then runs concurrently (tsc builds are CPU-bound and
+# independent of each other).
 build:
-	@echo "Building @unm/snmp-client..."
+	@echo "Building @unm/plugin-sdk + @unm/snmp-client..."
+	cd packages/plugin-sdk && npm run build
 	cd packages/snmp-client && npm run build
-	@echo "Refreshing file:-linked copies in dependent plugins..."
-	for p in snmp lancom-lx lancom-lcos; do \
+	@echo "Refreshing file:-linked copies in dependent plugins + api..."
+	for p in icmp snmp lancom-lx lancom-sx lancom-lcos opnsense swos basic-auth secrets-provider; do \
+	  rm -rf plugins/$$p/node_modules/@unm/plugin-sdk; \
+	  cp -r packages/plugin-sdk plugins/$$p/node_modules/@unm/plugin-sdk; \
+	done
+	for p in snmp lancom-lx lancom-sx lancom-lcos; do \
 	  rm -rf plugins/$$p/node_modules/@unm/snmp-client; \
 	  cp -r packages/snmp-client plugins/$$p/node_modules/@unm/snmp-client; \
 	done
+	rm -rf api/node_modules/@unm/plugin-sdk; \
+	cp -r packages/plugin-sdk api/node_modules/@unm/plugin-sdk
 	@echo "Building plugins + MCP server in parallel..."
 	@( \
 	  (cd plugins/opnsense && npm run build) & \

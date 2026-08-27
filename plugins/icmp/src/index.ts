@@ -1,6 +1,13 @@
-import express from 'express';
-import cors from 'cors';
-import { Bonjour } from 'bonjour-service';
+import {
+  Health,
+  MetricDescriptor,
+  PluginOptionDescriptor,
+  clampInt,
+  createPluginServer,
+  hostFromAddress,
+  readSettings,
+  resolvePluginIdentity,
+} from '@unm/plugin-sdk';
 import { pingHost, PingResult } from './icmpping';
 import { collectInventory, TargetInventory } from './inventory';
 
@@ -13,18 +20,15 @@ export const PLUGIN_NAME = 'ICMP Plugin';
  * (`<uuid>:<instanceId>`) so the API registers them as separate plugins.
  * `PLUGIN_DISPLAY_NAME` optionally overrides the advertised name; without it,
  * the instance id is appended: "ICMP Plugin (site-a)". Unset = single-instance behavior.
+ * (Convention implemented in @unm/plugin-sdk's resolvePluginIdentity.)
  */
-const INSTANCE_ID = process.env.PLUGIN_INSTANCE_ID?.trim() ?? '';
-export const EFFECTIVE_UUID = INSTANCE_ID ? `${PLUGIN_UUID}:${INSTANCE_ID}` : PLUGIN_UUID;
-export const DISPLAY_NAME =
-  process.env.PLUGIN_DISPLAY_NAME?.trim() || (INSTANCE_ID ? `${PLUGIN_NAME} (${INSTANCE_ID})` : PLUGIN_NAME);
-export const PLUGIN_VERSION = '0.1.0';
-export const PLUGIN_VENDORS = ['generic'];
-export const PLUGIN_CAPABILITIES = ['monitoring', 'inventory'];
-export const PLUGIN_AUTH_TYPE = 'none';
-
-const PORT = Number(process.env.PORT ?? 4004);
-const ADVERTISED_ENDPOINT = process.env.ADVERTISED_ENDPOINT ?? `http://localhost:${PORT}`;
+const identity = resolvePluginIdentity({
+  uuid: PLUGIN_UUID,
+  name: PLUGIN_NAME,
+  version: '0.1.0',
+  vendors: ['generic'],
+  capabilities: ['monitoring', 'inventory'],
+});
 
 /**
  * Hard wall-clock budget for one ping run. The API's telemetry worker gives a
@@ -34,20 +38,18 @@ const ADVERTISED_ENDPOINT = process.env.ADVERTISED_ENDPOINT ?? `http://localhost
  */
 const PING_BUDGET_MS = 8_000;
 
-type Health = 'ok' | 'warning' | 'critical' | 'unknown';
-
 /**
  * Metric descriptors (static — this plugin always emits exactly these keys).
  * The webapp renders from these, so no per-plugin UI code is needed.
  */
-const METRIC_DESCRIPTORS = [
+const METRIC_DESCRIPTORS: MetricDescriptor[] = [
   {
     key: 'ping.latency',
     label: 'Latency (avg RTT)',
     unit: 'ms',
-    format: 'number' as const,
-    type: 'number' as const,
-    visualization: 'plot' as const,
+    format: 'number',
+    type: 'number',
+    visualization: 'plot',
     group: 'ICMP',
     color: '#3b82f6',
     summary: true, // headline metric in the device overview table
@@ -56,9 +58,9 @@ const METRIC_DESCRIPTORS = [
     key: 'ping.lossPercent',
     label: 'Packet loss',
     unit: '%',
-    format: 'number' as const,
-    type: 'number' as const,
-    visualization: 'gauge' as const,
+    format: 'number',
+    type: 'number',
+    visualization: 'gauge',
     group: 'ICMP',
     min: 0,
     max: 100,
@@ -68,37 +70,37 @@ const METRIC_DESCRIPTORS = [
     key: 'ping.jitter',
     label: 'Jitter (RTT stddev)',
     unit: 'ms',
-    format: 'number' as const,
-    type: 'number' as const,
-    visualization: 'text' as const,
+    format: 'number',
+    type: 'number',
+    visualization: 'text',
     group: 'ICMP',
   },
   {
     key: 'ping.reachable',
     label: 'Reachable',
-    type: 'boolean' as const,
-    visualization: 'text' as const,
+    type: 'boolean',
+    visualization: 'text',
     group: 'ICMP',
   },
   {
     key: 'inventory.target',
     label: 'Target host',
-    type: 'string' as const,
-    visualization: 'text' as const,
+    type: 'string',
+    visualization: 'text',
     group: 'Inventory',
   },
   {
     key: 'inventory.ip',
     label: 'Resolved IP',
-    type: 'string' as const,
-    visualization: 'text' as const,
+    type: 'string',
+    visualization: 'text',
     group: 'Inventory',
   },
   {
     key: 'inventory.mac',
     label: 'MAC address',
-    type: 'string' as const,
-    visualization: 'text' as const,
+    type: 'string',
+    visualization: 'text',
     group: 'Inventory',
   },
 ];
@@ -108,11 +110,11 @@ const METRIC_DESCRIPTORS = [
  * values and injects them back via the `x-unm-settings` header on every call —
  * this plugin never stores settings itself (see readSettings()).
  */
-const PLUGIN_OPTIONS = [
+const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
   {
     key: 'pingHost',
     label: 'Target host override',
-    type: 'string' as const,
+    type: 'string',
     // Characters valid in hostnames / IPv4 / IPv6 literals (incl. brackets).
     pattern: '^[a-zA-Z0-9._:\\-\\[\\]]+$',
     maxLength: 253,
@@ -122,7 +124,7 @@ const PLUGIN_OPTIONS = [
   {
     key: 'pingCount',
     label: 'Echo request count',
-    type: 'integer' as const,
+    type: 'integer',
     default: 4,
     min: 1,
     max: 20,
@@ -131,7 +133,7 @@ const PLUGIN_OPTIONS = [
   {
     key: 'timeoutMs',
     label: 'Per-packet timeout (ms)',
-    type: 'integer' as const,
+    type: 'integer',
     default: 3000,
     min: 500,
     max: 10000,
@@ -139,66 +141,19 @@ const PLUGIN_OPTIONS = [
   },
 ];
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-app.get('/healthz', (_req, res) => {
-  res.status(200).json({ status: 'ok' });
-});
-
-app.get('/discover', (_req, res) => {
-  res.status(200).json({
-    uuid: EFFECTIVE_UUID,
-    name: DISPLAY_NAME,
-    version: PLUGIN_VERSION,
-    vendors: PLUGIN_VENDORS,
-    capabilities: PLUGIN_CAPABILITIES,
-    endpoint: ADVERTISED_ENDPOINT,
-    authType: PLUGIN_AUTH_TYPE,
+// Pre-wired app: cors + json + /healthz + /discover (+ mDNS on listen) come
+// from @unm/plugin-sdk — this file only registers its own routes.
+const server = createPluginServer({
+  identity,
+  logTag: 'icmp-plugin',
+  discovery: {
     // No credentials needed — the plugin pings from its own container.
     requiredSecretType: null,
     metrics: METRIC_DESCRIPTORS,
     options: PLUGIN_OPTIONS,
-  });
+  },
 });
-
-/**
- * Reads the effective settings the API injects on every call (defaults ⊕ user
- * overrides) from the `x-unm-settings` JSON header, merged over this plugin's
- * declared defaults so a missing header still yields sane values.
- */
-function readSettings(req: { headers?: Record<string, unknown> }): Record<string, unknown> {
-  const defaults: Record<string, unknown> = {};
-  for (const opt of PLUGIN_OPTIONS) if (opt.default !== undefined) defaults[opt.key] = opt.default;
-
-  const raw = req.headers?.['x-unm-settings'];
-  if (typeof raw !== 'string' || raw.trim() === '') return defaults;
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') return { ...defaults, ...(parsed as Record<string, unknown>) };
-  } catch {
-    // Malformed header: fall back to defaults rather than failing the call.
-  }
-  return defaults;
-}
-
-function clampInt(value: unknown, min: number, max: number, fallback: number): number {
-  const n = typeof value === 'number' && Number.isInteger(value) ? value : fallback;
-  return Math.min(max, Math.max(min, n));
-}
-
-/** Extracts a bare host (no scheme/port/brackets) from a management address. */
-function hostFromAddress(address: string): string {
-  const trimmed = (address ?? '').trim();
-  if (!trimmed) return '';
-  try {
-    const u = new URL(trimmed.includes('://') ? trimmed : `http://${trimmed}`);
-    return u.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 literal brackets
-  } catch {
-    return trimmed.split('/')[0].split(':')[0];
-  }
-}
+const app = server.app;
 
 /** Maps a ping result to the plugin health vocabulary. */
 function healthFromPing(ping: PingResult): Health {
@@ -214,7 +169,7 @@ app.post('/monitoring', async (req, res) => {
   const managementAddress = typeof body.managementAddress === 'string' ? body.managementAddress : '';
 
   // Effective settings injected by the API (defaults ⊕ user overrides).
-  const settings = readSettings(req);
+  const settings = readSettings(req, PLUGIN_OPTIONS);
 
   // Target: per-device/global pingHost override wins, else the device's
   // management address.
@@ -282,37 +237,9 @@ app.post('/monitoring', async (req, res) => {
   }
 });
 
-/**
- * Advertises this plugin over mDNS/DNS-SD so the UnifiedNetworkManager API can
- * discover it automatically. Best-effort — the API also polls known endpoints.
- */
-function startMdnsAdvertising(): void {
-  try {
-    const bonjour = new Bonjour();
-    bonjour.publish({
-      name: DISPLAY_NAME,
-      type: 'unm-plugin',
-      port: PORT,
-      txt: {
-        uuid: EFFECTIVE_UUID,
-        name: DISPLAY_NAME,
-        version: PLUGIN_VERSION,
-        vendors: PLUGIN_VENDORS.join(','),
-        capabilities: PLUGIN_CAPABILITIES.join(','),
-        endpoint: ADVERTISED_ENDPOINT,
-        authType: PLUGIN_AUTH_TYPE,
-      },
-    });
-    // eslint-disable-next-line no-console
-        console.log(`[icmp-plugin] advertising via mDNS as "${DISPLAY_NAME}" (${EFFECTIVE_UUID})`);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-      console.warn('[icmp-plugin] mDNS advertising unavailable, falling back to polling discovery only:', (err as Error).message);
-  }
-}
-
-app.listen(PORT, () => {
-  // eslint-disable-next-line no-console
-  console.log(`[icmp-plugin] listening on port ${PORT}`);
-  startMdnsAdvertising();
+// listen() binds the conventional plugin port (4080 by default) and starts
+// mDNS advertising — both handled by @unm/plugin-sdk.
+server.listen().catch((err) => {
+  console.error('[icmp-plugin] fatal startup error:', err);
+  process.exit(1);
 });

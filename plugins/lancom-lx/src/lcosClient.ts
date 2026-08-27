@@ -16,6 +16,7 @@
  */
 
 import { SnmpCredentials, TransportOptions, snmpGet, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
+import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 import {
   LCOS_BASE, SYS, HW, STATION, RADIOS, WLAN_IF, CHANNEL_UTIL, ENV_SCAN, WDS,
   LAN_PORTS, LAN_BYTES, BRIDGE_VLAN, IP_ADDR, SNMP_EVENT,
@@ -330,7 +331,17 @@ function decodeStationIndex(idx: string[]): string | null {
  * Slow path — one broad walk of the whole runtime-status subtree
  * ------------------------------------------------------------------ */
 
-const inventoryCache = new Map<string, LcosSnapshot>();
+// Fresh-snapshot cache (TTL-gated) + a last-known map so a failed refresh can
+// still fall back to the most recent data even after TTL expiry.
+const inventoryCache = new TtlCache<LcosSnapshot>();
+const lastKnown = new Map<string, LcosSnapshot>();
+function rememberLastKnown(host: string, snapshot: LcosSnapshot): void {
+  lastKnown.set(host, snapshot);
+  if (lastKnown.size > 512) {
+    const oldest = lastKnown.keys().next().value; // Map iteration = insertion order
+    if (oldest !== undefined) lastKnown.delete(oldest);
+  }
+}
 
 /**
  * The exact subtrees the slow path needs — nothing else. Deliberately NOT a
@@ -372,10 +383,11 @@ export async function getLcosInventory(
   creds: SnmpCredentials,
   opts: LcosOptions
 ): Promise<{ snapshot: LcosSnapshot | null; fromCache: boolean; error?: string }> {
-  const cached = inventoryCache.get(host);
-  if (cached && Date.now() - cached.collectedAt < opts.inventoryTtlMs) {
+  const cached = inventoryCache.get(host, opts.inventoryTtlMs);
+  if (cached) {
     return { snapshot: cached, fromCache: true };
   }
+  const stale = lastKnown.get(host); // expired-but-usable fallback
 
   // Probe gate: one cheap snmpget against a scalar every LX-Series AP exposes
   // (hardware-info sw version). Non-LANCOM devices answer "No Such Object" in
@@ -386,8 +398,8 @@ export async function getLcosInventory(
     probe = await snmpGet(host, creds, [HW.swVersion], opts);
   } catch {
     return {
-      snapshot: cached ?? null,
-      fromCache: cached !== undefined,
+      snapshot: stale ?? null,
+      fromCache: stale !== undefined,
       error: 'SNMP query failed — device unreachable or credentials rejected.',
     };
   }
@@ -436,8 +448,8 @@ export async function getLcosInventory(
 
   if (out.size === 0 && failures > 0) {
     return {
-      snapshot: cached ?? null,
-      fromCache: cached !== undefined,
+      snapshot: stale ?? null,
+      fromCache: stale !== undefined,
       error: 'SNMP walk of the LCOS status tree failed.',
     };
   }
@@ -455,7 +467,10 @@ export async function getLcosInventory(
   // never be served from cache for the whole TTL; it's returned once and the
   // next poll retries fresh.
   const complete = snapshot.system.serialNumber !== '';
-  if (complete) inventoryCache.set(host, snapshot);
+  if (complete) {
+    inventoryCache.set(host, snapshot);
+    rememberLastKnown(host, snapshot);
+  }
 
   return {
     snapshot,
@@ -771,8 +786,10 @@ function toInt(v: string | undefined): number | null {
  * Fast path — counter-only walks for rates + station event deltas
  * ------------------------------------------------------------------ */
 
-interface Baseline { value: number; at: number; }
-const baselines = new Map<string, Baseline>();
+// Shared counter-delta trackers (@unm/plugin-sdk): first sample → null,
+// reset/wrap skipped, baseline always refreshed, stale hosts evicted.
+const rateTracker = new CounterTracker(); // octets/s → bits/s
+const deltaTracker = new CounterTracker({ toBitsPerSec: false }); // raw per-second deltas (trap counters)
 
 /**
  * Walks the fast-path counters (radio bytes, LAN port bytes/CRC, SNMP-event
@@ -796,6 +813,8 @@ export async function walkLcosCounters(
     ]);
 
     const now = Date.now();
+    rateTracker.evictStale(now);
+    deltaTracker.evictStale(now);
     // Radio byte counters — column-first rows: <base>.1.<col>.<ifcText…>,
     // col 22 = TxBytes, col 23 = RxBytes (verified against {COLUMN} annotations).
     const radioRates: Record<string, { rx: number | null; tx: number | null }> = {};
@@ -806,7 +825,7 @@ export async function walkLcosCounters(
       if (!key) continue;
       radioRates[key] ??= { rx: null, tx: null };
       const isTx = row.col === 22;
-      const rate = sampleRate(`${host}:radio:${key}:${isTx ? 'tx' : 'rx'}`, Number(value), now);
+      const rate = rateTracker.sample(`${host}:radio:${key}:${isTx ? 'tx' : 'rx'}`, Number(value), now);
       if (rate !== null) {
         if (isTx) radioRates[key].tx = rate;
         else radioRates[key].rx = rate;
@@ -821,7 +840,7 @@ export async function walkLcosCounters(
       const key = decodeSingleText(row.idx);
       if (!key) continue;
       portRates[key] ??= { rx: null, tx: null, crcPerSec: null };
-      const rate = sampleRate(`${host}:port:${key}:${row.col}`, Number(value), now);
+      const rate = row.col === 4 ? deltaTracker.sample(`${host}:port:${key}:${row.col}`, Number(value), now) : rateTracker.sample(`${host}:port:${key}:${row.col}`, Number(value), now);
       if (rate === null) continue;
       if (row.col === 2) portRates[key].tx = rate;
       else if (row.col === 3) portRates[key].rx = rate;
@@ -845,7 +864,7 @@ export async function walkLcosCounters(
       if (!row || row.col !== 4) continue; // col 4 = count
       const name = TRAP_NAMES[trapNames.get(row.idx.join('.')) ?? ''];
       if (!name) continue;
-      const delta = sampleDelta(`${host}:trap:${row.idx.join('.')}`, Number(value), now);
+      const delta = deltaTracker.sample(`${host}:trap:${row.idx.join('.')}`, Number(value), now);
       if (delta !== null && delta > 0) wifiEvents[name] = (wifiEvents[name] ?? 0) + delta;
     }
 
@@ -865,22 +884,3 @@ const TRAP_NAMES: Record<string, string> = {
   AssRej: 'assocRejected',
   Connected: 'connected',
 };
-
-/** Counter → bits/s rate with reset/wrap skip (same pattern as the SNMP plugin). */
-function sampleRate(key: string, current: number, now: number): number | null {
-  const prev = baselines.get(key);
-  baselines.set(key, { value: current, at: now });
-  if (!prev || now <= prev.at) return null; // first sample — no delta yet
-  if (current < prev.value) return null; // counter reset/wrap — skip this sample
-  const seconds = (now - prev.at) / 1000;
-  return ((current - prev.value) * 8) / seconds; // octets/s → bits/s
-}
-
-/** Counter → events-per-poll delta with reset skip. */
-function sampleDelta(key: string, current: number, now: number): number | null {
-  const prev = baselines.get(key);
-  baselines.set(key, { value: current, at: now });
-  if (!prev || now <= prev.at) return null;
-  if (current < prev.value) return null; // counter reset — skip
-  return current - prev.value;
-}

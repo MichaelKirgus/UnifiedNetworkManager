@@ -11,29 +11,14 @@
  * actions are gated by their `dangerous` risk level instead.
  */
 
-import { randomUUID } from 'crypto';
+import { finalizePlan, PlanningError } from '@unm/plugin-sdk';
+import type { Plan, PlanDevice, PlanRequest } from '@unm/plugin-sdk';
 import { getAction, listActions } from './actions/registry';
-import { Plan, PlanStep, validateInput } from './actions/types';
+import { validateInput } from './actions/types';
 
-export interface PlanDevice {
-  deviceId: string;
-  managementAddress: string;
-  /** This device's SNMP credential fields (resolved by the API from its assignment). */
-  credentials: Record<string, unknown>;
-}
-
-export interface PlanRequest {
-  intent: { actionId: string; inputs: Record<string, unknown> };
-  devices: PlanDevice[];
-}
-
-/** Raised for invalid plan requests (mapped to HTTP 400 by the /plan endpoint). */
-export class PlanningError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'PlanningError';
-  }
-}
+// Shared plan contract types + error (re-exported so index.ts keeps its imports).
+export type { Plan, PlanDevice, PlanRequest };
+export { PlanningError };
 
 /**
  * Builds an execution plan. Throws PlanningError (→ HTTP 400) on invalid
@@ -55,19 +40,14 @@ export function buildPlan(req: PlanRequest): Plan {
     throw new PlanningError(`Invalid action input: ${issues.map((i) => `${i.path}: ${i.message}`).join('; ')}`);
   }
 
-  // Fan-out: one step per device with the same inputs.
-  const steps: PlanStep[] = devices.map((d, i) => ({
-    stepIndex: i,
+  // Fan-out: one step per device with the same inputs. finalizePlan without a
+  // rollbackStep — SX v1 has no snapshot/backup mechanism, so there is nothing
+  // to prepend and no index shifting happens (snapshotCount stays 0).
+  const rawSteps = devices.map((d) => ({
     deviceId: d.deviceId,
     actionId: action.id,
     input: { ...(inputs ?? {}) },
   }));
 
-  return {
-    id: randomUUID(),
-    createdAt: new Date().toISOString(),
-    intentActionId: actionId,
-    provisionRequests: [], // SX v1 never provisions secrets.
-    steps,
-  };
+  return finalizePlan(actionId, devices, [], rawSteps, () => false); // SX v1 never provisions secrets.
 }

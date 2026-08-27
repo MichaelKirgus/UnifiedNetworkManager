@@ -1,4 +1,4 @@
-import { pgTable, text, boolean, integer, doublePrecision, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, text, boolean, integer, doublePrecision, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const users = pgTable('users', {
@@ -281,7 +281,16 @@ export const networks = pgTable(
   },
   (table) => {
     return {
-      pkNetworks: uniqueIndex('uq_networks')
+      // Real composite PK — initDb() creates the table with this PRIMARY KEY,
+      // so it MUST be declared here too or drizzle-kit push tries to delete it
+      // and crashes on the diff. The name must match what Postgres auto-generates
+      // (<table>_pkey) because drizzle-kit matches composite PKs by constraint
+      // name; any other name makes push plan a drop+recreate of every PK.
+      pkNetworks: primaryKey({
+        name: 'networks_pkey',
+        columns: [table.deviceId, table.pluginId, table.name, table.ip],
+      }),
+      uqNetworks: uniqueIndex('uq_networks')
         .on(table.deviceId, table.pluginId, table.name, table.ip),
       idxNetworksDevice: index('idx_networks_device').on(table.deviceId),
     };
@@ -311,7 +320,12 @@ export const hosts = pgTable(
   },
   (table) => {
     return {
-      pkHosts: uniqueIndex('uq_hosts')
+      // Name matches Postgres' auto-generated <table>_pkey (see networks above).
+      pkHosts: primaryKey({
+        name: 'hosts_pkey',
+        columns: [table.deviceId, table.pluginId, table.mac, table.ip, table.source],
+      }),
+      uqHosts: uniqueIndex('uq_hosts')
         .on(table.deviceId, table.pluginId, table.mac, table.ip, table.source),
       idxHostsDevice: index('idx_hosts_device').on(table.deviceId),
       // For the future topology view: "which devices see this MAC / IP".
@@ -357,8 +371,11 @@ export const tunnels = pgTable(
   },
   (table) => {
     return {
-      pkTunnels: uniqueIndex('uq_tunnels')
-        .on(table.deviceId, table.pluginId, table.name, table.type),
+      // Name matches Postgres' auto-generated <table>_pkey (see networks above).
+      pkTunnels: primaryKey({
+        name: 'tunnels_pkey',
+        columns: [table.deviceId, table.pluginId, table.name, table.type],
+      }),
       idxTunnelsDevice: index('idx_tunnels_device').on(table.deviceId),
     };
   }
@@ -394,8 +411,11 @@ export const routes = pgTable(
   },
   (table) => {
     return {
-      pkRoutes: uniqueIndex('uq_routes')
-        .on(table.deviceId, table.pluginId, table.destination, table.protocol),
+      // Name matches Postgres' auto-generated <table>_pkey (see networks above).
+      pkRoutes: primaryKey({
+        name: 'routes_pkey',
+        columns: [table.deviceId, table.pluginId, table.destination, table.protocol],
+      }),
       idxRoutesDevice: index('idx_routes_device').on(table.deviceId),
     };
   }
@@ -427,8 +447,11 @@ export const wifiSsids = pgTable(
   },
   (table) => {
     return {
-      pkWifiSsids: uniqueIndex('uq_wifi_ssids')
-        .on(table.deviceId, table.pluginId, table.name, table.band),
+      // Name matches Postgres' auto-generated <table>_pkey (see networks above).
+      pkWifiSsids: primaryKey({
+        name: 'wifi_ssids_pkey',
+        columns: [table.deviceId, table.pluginId, table.name, table.band],
+      }),
       idxWifiSsidsDevice: index('idx_wifi_ssids_device').on(table.deviceId),
     };
   }
@@ -450,8 +473,11 @@ export const wifiChannels = pgTable(
   },
   (table) => {
     return {
-      pkWifiChannels: uniqueIndex('uq_wifi_channels')
-        .on(table.deviceId, table.pluginId, table.channel),
+      // Name matches Postgres' auto-generated <table>_pkey (see networks above).
+      pkWifiChannels: primaryKey({
+        name: 'wifi_channels_pkey',
+        columns: [table.deviceId, table.pluginId, table.channel],
+      }),
       idxWifiChannelsDevice: index('idx_wifi_channels_device').on(table.deviceId),
     };
   }
@@ -476,8 +502,11 @@ export const wifiRadios = pgTable(
   },
   (table) => {
     return {
-      pkWifiRadios: uniqueIndex('uq_wifi_radios')
-        .on(table.deviceId, table.pluginId, table.ifc),
+      // Name matches Postgres' auto-generated <table>_pkey (see networks above).
+      pkWifiRadios: primaryKey({
+        name: 'wifi_radios_pkey',
+        columns: [table.deviceId, table.pluginId, table.ifc],
+      }),
       idxWifiRadiosDevice: index('idx_wifi_radios_device').on(table.deviceId),
     };
   }
@@ -500,8 +529,11 @@ export const wifiNeighbors = pgTable(
   },
   (table) => {
     return {
-      pkWifiNeighbors: uniqueIndex('uq_wifi_neighbors')
-        .on(table.deviceId, table.pluginId, table.bssid),
+      // Name matches Postgres' auto-generated <table>_pkey (see networks above).
+      pkWifiNeighbors: primaryKey({
+        name: 'wifi_neighbors_pkey',
+        columns: [table.deviceId, table.pluginId, table.bssid],
+      }),
       idxWifiNeighborsDevice: index('idx_wifi_neighbors_device').on(table.deviceId),
     };
   }
@@ -528,8 +560,11 @@ export const wifiClients = pgTable(
   },
   (table) => {
     return {
-      pkWifiClients: uniqueIndex('uq_wifi_clients')
-        .on(table.deviceId, table.pluginId, table.mac),
+      // Name matches Postgres' auto-generated <table>_pkey (see networks above).
+      pkWifiClients: primaryKey({
+        name: 'wifi_clients_pkey',
+        columns: [table.deviceId, table.pluginId, table.mac],
+      }),
       idxWifiClientsDevice: index('idx_wifi_clients_device').on(table.deviceId),
     };
   }

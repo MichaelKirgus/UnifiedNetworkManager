@@ -8,6 +8,7 @@ import { requireAuth, requirePermission, require2FA } from '../auth/middleware';
 import { getSecret, generateSecret, regenerateSecret, deleteSecret } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
 import { planQueue } from '../queue';
+import type { CatalogEntry as SdkCatalogEntry } from '@unm/plugin-sdk';
 import { validateInput, type InputSchema } from '../utils/inputSchema';
 
 const router = Router();
@@ -57,8 +58,12 @@ interface StepRow {
   finishedAt: string | null;
 }
 
-interface CatalogEntry {
-  id: string;
+/**
+ * The persisted catalog entry as stored on the plugin row. Looser than the
+ * SDK's wire type: rows written before a field existed (or by older plugins)
+ * may lack label/module/riskLevel/etc., so every field except `id` is optional.
+ */
+type CatalogEntry = Omit<SdkCatalogEntry, 'label' | 'module' | 'riskLevel' | 'deviceCount' | 'inputSchema'> & {
   label?: string;
   description?: string;
   module?: string;
@@ -67,7 +72,7 @@ interface CatalogEntry {
   beOnly?: boolean;
   timeoutMs?: number;
   inputSchema?: InputSchema;
-}
+};
 
 const EDITABLE_STATUSES = ['draft', 'ready'];
 

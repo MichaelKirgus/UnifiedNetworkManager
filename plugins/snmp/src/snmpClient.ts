@@ -2,6 +2,7 @@
 // normalization) lives in the shared @unm/snmp-client package so every
 // SNMP-based plugin uses one implementation.
 import { SnmpCredentials, TransportOptions, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
+import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 
 // Re-exported so existing imports (index.ts) keep working unchanged.
 export type { SnmpCredentials } from '@unm/snmp-client';
@@ -503,7 +504,17 @@ function wifiSecurityLabel(raw: string | undefined): string {
  * Inventory cache (slow path, TTL-based — opnsense LIVE/INVENTORY split)
  * ------------------------------------------------------------------ */
 
-const inventoryCache = new Map<string, InventorySnapshot>();
+// Fresh-snapshot cache (TTL-gated) + a last-known map so a failed refresh can
+// still fall back to the most recent data even after TTL expiry.
+const inventoryCache = new TtlCache<InventorySnapshot>();
+const lastKnown = new Map<string, InventorySnapshot>();
+function rememberLastKnown(host: string, snapshot: InventorySnapshot): void {
+  lastKnown.set(host, snapshot);
+  if (lastKnown.size > 512) {
+    const oldest = lastKnown.keys().next().value; // Map iteration = insertion order
+    if (oldest !== undefined) lastKnown.delete(oldest);
+  }
+}
 
 /**
  * Returns the cached inventory snapshot for a host, performing the slow
@@ -518,13 +529,14 @@ export async function getInventory(
   // WiFi collection is ON by default — only an explicit false disables it.
   const collectWifi = opts.collectWifi !== false;
 
-  const cached = inventoryCache.get(host);
-  if (cached && Date.now() - cached.collectedAt < opts.inventoryTtlMs) {
+  const cached = inventoryCache.get(host, opts.inventoryTtlMs);
+  if (cached) {
     // A cache hit is only fresh enough when the WiFi state matches: toggling
     // collectWifi on must not wait for TTL expiry to get first data.
     const wifiStale = collectWifi && cached.wifi === undefined;
     if (!wifiStale) return { snapshot: cached, fromCache: true };
   }
+  const stale = lastKnown.get(host); // expired-but-usable fallback
 
   // System group, interface tables and (optionally) WLAN tables are independent — walk in parallel.
   const [system, tables, wifi] = await Promise.all([
@@ -535,25 +547,27 @@ export async function getInventory(
 
   if (!system && !tables) {
     return {
-      snapshot: cached ?? null,
-      fromCache: cached !== undefined,
+      snapshot: stale ?? null,
+      fromCache: stale !== undefined,
       error: 'SNMP walks failed — no system or interface data could be collected.',
     };
   }
 
+  const fallback = cached ?? stale; // merge base for partial refreshes
   const snapshot: InventorySnapshot = {
     collectedAt: Date.now(),
-    system: system ?? cached?.system ?? null,
-    interfaces: tables && tables.interfaces.length > 0 ? tables.interfaces : (cached?.interfaces ?? []),
+    system: system ?? fallback?.system ?? null,
+    interfaces: tables && tables.interfaces.length > 0 ? tables.interfaces : (fallback?.interfaces ?? []),
     counters: tables?.counters ?? {},
     useHc: tables?.useHc ?? false,
     // undefined = collection disabled; null = collected but no 802.11 data.
-    wifi: collectWifi ? (wifi ?? cached?.wifi ?? null) : undefined,
+    wifi: collectWifi ? (wifi ?? fallback?.wifi ?? null) : undefined,
   };
   inventoryCache.set(host, snapshot);
+  rememberLastKnown(host, snapshot);
 
   // Partial failure is worth surfacing even though we have usable data.
-  const error = !system && cached?.system ? undefined : !system ? 'System group walk failed.' : undefined;
+  const error = !system && fallback?.system ? undefined : !system ? 'System group walk failed.' : undefined;
   return { snapshot, fromCache: false, ...(error ? { error } : {}) };
 }
 
@@ -608,12 +622,9 @@ export async function walkCounters(
  * Rate computation (counter deltas → bits/s) with baseline cache
  * ------------------------------------------------------------------ */
 
-interface Baseline {
-  value: number;
-  at: number;
-}
-
-const baselines = new Map<string, Baseline>(); // `${host}:${ifIndex}:in|out`
+// Shared counter-delta tracker (@unm/plugin-sdk): first sample → null,
+// reset/wrap skipped, baseline always refreshed, stale hosts evicted.
+const rateTracker = new CounterTracker();
 
 /**
  * Computes per-interface rx/tx rates in bits/s from the current counters and
@@ -625,25 +636,14 @@ export function computeRates(
   counters: Counters
 ): Record<string, { rx: number | null; tx: number | null }> {
   const now = Date.now();
+  rateTracker.evictStale(now);
   const rates: Record<string, { rx: number | null; tx: number | null }> = {};
 
   for (const [ifIndex, c] of Object.entries(counters)) {
     rates[ifIndex] = {
-      rx: sampleRate(`${host}:${ifIndex}:in`, c.inOctets, now),
-      tx: sampleRate(`${host}:${ifIndex}:out`, c.outOctets, now),
+      rx: rateTracker.sample(`${host}:${ifIndex}:in`, c.inOctets, now),
+      tx: rateTracker.sample(`${host}:${ifIndex}:out`, c.outOctets, now),
     };
   }
   return rates;
-}
-
-function sampleRate(key: string, current: number, now: number): number | null {
-  const prev = baselines.get(key);
-  // Always refresh the baseline so the NEXT cycle has a reference point.
-  baselines.set(key, { value: current, at: now });
-
-  if (!prev || now <= prev.at) return null; // first sample — no delta yet
-  if (current < prev.value) return null; // counter reset/wrap — skip this sample
-
-  const seconds = (now - prev.at) / 1000;
-  return ((current - prev.value) * 8) / seconds; // octets/s → bits/s
 }

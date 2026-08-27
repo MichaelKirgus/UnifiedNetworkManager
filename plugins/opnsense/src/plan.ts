@@ -1,10 +1,11 @@
-import { randomUUID } from 'crypto';
+import { finalizePlan, PlanningError } from '@unm/plugin-sdk';
+import type { Plan, PlanDevice as SdkPlanDevice, PlanRequest as SdkPlanRequest, PlanStep, ProvisionRequest, InputSchema, RiskLevel } from '@unm/plugin-sdk';
 import * as dnsClient from './client/dns';
 import * as dhcpClient from './client/dhcp';
 import { createClient, OpnsenseCredentials, OpnsenseTransport } from './client/http';
 import { resolveEdition, SyncClass } from './client/editions';
 import { getAction, listActions } from './actions/registry';
-import { ActionDescriptor, InputSchema, Plan, PlanStep, ProvisionRequest, RiskLevel, validateInput } from './actions/types';
+import { ActionDescriptor, validateInput } from './actions/types';
 
 /**
  * The planner: turns a multi-device INTENT into an ordered, dependency-aware
@@ -24,16 +25,9 @@ import { ActionDescriptor, InputSchema, Plan, PlanStep, ProvisionRequest, RiskLe
  *    holds all devices' context.
  */
 
-export interface PlanDevice {
-  deviceId: string;
-  managementAddress: string;
-  /** This device's API key/secret pair (resolved by the API from its assignment). */
-  credentials: OpnsenseCredentials;
-}
-
-export interface PlanRequest {
-  intent: { actionId: string; inputs: Record<string, unknown> };
-  devices: PlanDevice[];
+// The SDK's generic PlanRequest is extended with OPNsense transport/edition
+// overrides (normally injected by the API via settings).
+export interface PlanRequest extends SdkPlanRequest<OpnsenseCredentials> {
   transport?: OpnsenseTransport;
   /** Plugin option overrides (normally injected by the API via settings). */
   editionOverride?: string;
@@ -41,13 +35,12 @@ export interface PlanRequest {
   dhcpBackend?: 'auto' | 'dnsmasq' | 'kea';
 }
 
-/** Raised for invalid plan requests (mapped to HTTP 400 by the /plan endpoint). */
-export class PlanningError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'PlanningError';
-  }
-}
+// A plan device carrying OPNsense credentials (primary secret fields only).
+type PlanDevice = SdkPlanDevice<OpnsenseCredentials>;
+
+// Shared plan contract types + error (re-exported so index.ts keeps its imports).
+export type { Plan, PlanDevice };
+export { PlanningError };
 
 // --- Per-device context (lazy, memoized probes) ---------------------------------
 
@@ -358,7 +351,7 @@ export async function buildPlan(req: PlanRequest): Promise<Plan> {
 
     const provisionRequests = intent.provision(inputs ?? {});
     const rawSteps = intent.buildSteps(inputs ?? {}, devices);
-    return finalizePlan(actionId, devices, provisionRequests, rawSteps, req);
+    return finalizePlan(actionId, devices, provisionRequests, rawSteps, isDirtyStep, { rollbackStep: () => ({ actionId: 'snapshot.create', input: {} }) });
   }
 
   // --- Single-device action (fan-out across the batch) -----------------------------
@@ -387,71 +380,11 @@ export async function buildPlan(req: PlanRequest): Promise<Plan> {
     rawSteps.push({ deviceId: device.deviceId, actionId: effectiveId, input: { ...(inputs ?? {}) } });
   }
 
-  return finalizePlan(actionId, devices, [], rawSteps, req);
+  return finalizePlan(actionId, devices, [], rawSteps, isDirtyStep, { rollbackStep: () => ({ actionId: 'snapshot.create', input: {} }) });
 }
 
-/** Shifts every ${steps[N]...} token in a step input by `offset` indices. */
-function shiftStepTokens(input: Record<string, unknown>, offset: number): Record<string, unknown> {
-  if (offset === 0) return input;
-  const shift = (v: unknown): unknown => {
-    if (typeof v === 'string') {
-      return v.replace(/\$\{steps\[(\d+)\]\./g, (_m, n: string) => `\${steps[${Number(n) + offset}].`);
-    }
-    if (Array.isArray(v)) return v.map(shift);
-    if (v !== null && typeof v === 'object') {
-      const out: Record<string, unknown> = {};
-      for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = shift(val);
-      return out;
-    }
-    return v;
-  };
-  const result: Record<string, unknown> = {};
-  for (const [k, val] of Object.entries(input)) result[k] = shift(val);
-  return result;
-}
-
-/**
- * Post-processes raw steps: assigns indices, prepends a best-effort snapshot
- * rollback point per device that has any non-read step (so the plan is undoable
- * via snapshot.restore + ${steps[N].result.details.snapshotUuid}).
- */
-function finalizePlan(
-  intentActionId: string,
-  devices: PlanDevice[],
-  provisionRequests: ProvisionRequest[],
-  rawSteps: Omit<PlanStep, 'stepIndex'>[],
-  req: PlanRequest
-): Plan {
-  // Devices that receive at least one write/dangerous step get a rollback point.
-  const dirtyDevices = new Set<string>();
-  for (const s of rawSteps) {
-    const a = getAction(s.actionId);
-    if (a && a.riskLevel !== 'read') dirtyDevices.add(s.deviceId);
-  }
-
-  const steps: PlanStep[] = [];
-  let nextIndex = 0;
-  for (const device of devices) {
-    if (!dirtyDevices.has(device.deviceId)) continue;
-    steps.push({ stepIndex: nextIndex++, deviceId: device.deviceId, actionId: 'snapshot.create', input: {}, bestEffort: true });
-  }
-
-  // Re-index dependencies AND ${steps[N].result...} substitution tokens: raw
-  // steps refer to positions within rawSteps. The offset is the number of
-  // prepended snapshot steps (FIXED before we append raw steps — using a live
-  // steps.length here would drift as we push). The emitted plan must carry
-  // FINAL indices everywhere, so both are shifted by the same amount.
-  const snapshotCount = steps.length;
-  for (const s of rawSteps) {
-    const deps = s.dependsOn?.map((d) => d + snapshotCount);
-    steps.push({ ...s, stepIndex: nextIndex++, input: shiftStepTokens(s.input, snapshotCount), ...(deps && deps.length > 0 ? { dependsOn: deps } : {}) });
-  }
-
-  return {
-    id: randomUUID(),
-    createdAt: new Date().toISOString(),
-    intentActionId,
-    provisionRequests,
-    steps,
-  };
+/** True when a step's action mutates the appliance (write/dangerous). */
+function isDirtyStep(stepActionId: string): boolean {
+  const a = getAction(stepActionId);
+  return !!a && a.riskLevel !== 'read';
 }

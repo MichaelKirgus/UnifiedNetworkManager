@@ -1,10 +1,20 @@
-import express from 'express';
-import cors from 'cors';
 import path from 'path';
-import { Bonjour } from 'bonjour-service';
+import {
+  Health,
+  MetricDescriptor,
+  PluginOptionDescriptor,
+  clampInt,
+  createPluginServer,
+  errorDescriptor,
+  hostFromAddress,
+  INVENTORY_INTERVAL_MS,
+  modelFirmwareDescriptors,
+  readSettings,
+  resolvePluginIdentity,
+} from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 import { LcosOptions, getLcosInventory, walkLcosCounters } from './lcosClient';
-import { buildDescriptors, DISCOVER_METRICS, INVENTORY_INTERVAL_MS, MetricDescriptor } from './metrics';
+import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 import { DEVICE_MODELS } from './deviceModels';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000004';
@@ -14,32 +24,26 @@ export const PLUGIN_NAME = 'LANCOM LX-Series Plugin';
  * Multi-instance support: set `PLUGIN_INSTANCE_ID` (e.g. "site-a") to run several
  * instances of the same plugin type — each advertises a distinct identity
  * (`<uuid>:<instanceId>`) so the API registers them as separate plugins.
+ * (Convention implemented in @unm/plugin-sdk's resolvePluginIdentity.)
  */
-const INSTANCE_ID = process.env.PLUGIN_INSTANCE_ID?.trim() ?? '';
-export const EFFECTIVE_UUID = INSTANCE_ID ? `${PLUGIN_UUID}:${INSTANCE_ID}` : PLUGIN_UUID;
-export const DISPLAY_NAME =
-  process.env.PLUGIN_DISPLAY_NAME?.trim() || (INSTANCE_ID ? `${PLUGIN_NAME} (${INSTANCE_ID})` : PLUGIN_NAME);
-
-// 0.1.0 — initial release: LCOS-LX-MIB monitoring (system, radios, SSIDs,
-// per-client stations, LAN ports) + inventory propagation for the Networks/
-// Hosts pages. Read-only by design — the vendor MIB exposes no writable
-// objects; actions require a separate transport (future phase).
-export const PLUGIN_VERSION = '0.1.0';
-export const PLUGIN_VENDORS = ['lancom'];
-export const PLUGIN_CAPABILITIES = ['monitoring', 'inventory'];
-export const PLUGIN_AUTH_TYPE = 'none';
-
-const PORT = Number(process.env.PORT ?? 4006);
-const ADVERTISED_ENDPOINT = process.env.ADVERTISED_ENDPOINT ?? `http://localhost:${PORT}`;
-
-type Health = 'ok' | 'warning' | 'critical' | 'unknown';
+const identity = resolvePluginIdentity({
+  uuid: PLUGIN_UUID,
+  name: PLUGIN_NAME,
+  // 0.1.0 — initial release: LCOS-LX-MIB monitoring (system, radios, SSIDs,
+  // per-client stations, LAN ports) + inventory propagation for the Networks/
+  // Hosts pages. Read-only by design — the vendor MIB exposes no writable
+  // objects; actions require a separate transport (future phase).
+  version: '0.1.0',
+  vendors: ['lancom'],
+  capabilities: ['monitoring', 'inventory'],
+});
 
 /**
  * Configurable options. Declared in /discover so the API persists user-set
  * values and injects them back via the `x-unm-settings` header on every call —
  * this plugin never stores settings itself (see readSettings()).
  */
-const PLUGIN_OPTIONS = [
+const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
   {
     key: 'timeoutMs',
     label: 'SNMP timeout (ms)',
@@ -88,27 +92,15 @@ const PLUGIN_OPTIONS = [
   },
 ];
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-// Static icon assets (plugin + per-model icons), advertised in /discover and
-// fetched by the API's icon proxy. dist/src/../../icons = <plugin root>/icons.
-app.use('/icons', express.static(path.join(__dirname, '../../icons')));
-
-app.get('/healthz', (_req, res) => {
-  res.status(200).json({ status: 'ok' });
-});
-
-app.get('/discover', (_req, res) => {
-  res.status(200).json({
-    uuid: EFFECTIVE_UUID,
-    name: DISPLAY_NAME,
-    version: PLUGIN_VERSION,
-    vendors: PLUGIN_VENDORS,
-    capabilities: PLUGIN_CAPABILITIES,
-    endpoint: ADVERTISED_ENDPOINT,
-    authType: PLUGIN_AUTH_TYPE,
+// Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
+// listen) come from @unm/plugin-sdk — this file only registers its own routes.
+const server = createPluginServer({
+  identity,
+  logTag: 'lancom-lx-plugin',
+  // Static icon assets (plugin + per-model icons), advertised in /discover and
+  // fetched by the API's icon proxy. dist/src/../../icons = <plugin root>/icons.
+  iconsDir: path.join(__dirname, '../../icons'),
+  discovery: {
     // Credentials come from the existing 'snmp' secret type (version + community for v1/v2c, USM fields for v3).
     requiredSecretType: 'snmp',
     metrics: DISCOVER_METRICS,
@@ -118,45 +110,9 @@ app.get('/discover', (_req, res) => {
     // forwarded to /monitoring (model/firmwareVersion) for future per-model logic.
     iconUrl: '/icons/lancom-lx.svg',
     deviceModels: DEVICE_MODELS,
-  });
+  },
 });
-
-/**
- * Reads the effective settings the API injects on every call (defaults ⊕ user
- * overrides) from the `x-unm-settings` JSON header, merged over this plugin's
- * declared defaults so a missing header still yields sane values.
- */
-function readSettings(req: { headers?: Record<string, unknown> }): Record<string, unknown> {
-  const defaults: Record<string, unknown> = {};
-  for (const opt of PLUGIN_OPTIONS) if (opt.default !== undefined) defaults[opt.key] = opt.default;
-
-  const raw = req.headers?.['x-unm-settings'];
-  if (typeof raw !== 'string' || raw.trim() === '') return defaults;
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') return { ...defaults, ...(parsed as Record<string, unknown>) };
-  } catch {
-    // Malformed header: fall back to defaults rather than failing the call.
-  }
-  return defaults;
-}
-
-function clampInt(value: unknown, min: number, max: number, fallback: number): number {
-  const n = typeof value === 'number' && Number.isInteger(value) ? value : fallback;
-  return Math.min(max, Math.max(min, n));
-}
-
-/** Extracts a bare host (no scheme/port/brackets) from a management address. */
-function hostFromAddress(address: string): string {
-  const trimmed = (address ?? '').trim();
-  if (!trimmed) return '';
-  try {
-    const u = new URL(trimmed.includes('://') ? trimmed : `http://${trimmed}`);
-    return u.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 literal brackets
-  } catch {
-    return trimmed.split('/')[0].split(':')[0];
-  }
-}
+const app = server.app;
 
 /** Resolves walk options from effective settings. */
 function resolveOptions(settings: Record<string, unknown>): LcosOptions {
@@ -187,7 +143,7 @@ app.post('/monitoring', async (req, res) => {
   const selectedModel = typeof body.model === 'string' && body.model ? body.model : null;
   const selectedFirmware = typeof body.firmwareVersion === 'string' && body.firmwareVersion ? body.firmwareVersion : null;
 
-  const settings = readSettings(req);
+  const settings = readSettings(req, PLUGIN_OPTIONS);
   const opts = resolveOptions(settings);
   const host = hostFromAddress(managementAddress);
 
@@ -201,7 +157,7 @@ app.post('/monitoring', async (req, res) => {
       // the WiFi groups (their summary cells would render empty).
       metricDescriptors: [
         ...buildDescriptors(opts.inventoryTtlMs, false),
-        { key: 'system.error', label: 'Error', type: 'string' as const, visualization: 'text' as const, group: 'System' },
+        errorDescriptor(),
       ],
       error,
     });
@@ -503,15 +459,10 @@ app.post('/monitoring', async (req, res) => {
       if (d) d.rows = Object.keys(fast.portRates);
     }
     if (metrics['system.error']) {
-      descriptors.push({ key: 'system.error', label: 'Error', type: 'string', visualization: 'text', group: 'System' });
+      descriptors.push(errorDescriptor());
     }
     // Descriptors for the user-selected model/firmware metrics (only when set).
-    if (selectedModel) {
-      descriptors.push({ key: 'system.model', label: 'Selected Model', type: 'string', visualization: 'text', group: 'System' });
-    }
-    if (selectedFirmware) {
-      descriptors.push({ key: 'system.firmwareVersion', label: 'Selected Firmware', type: 'string', visualization: 'text', group: 'System' });
-    }
+    descriptors.push(...modelFirmwareDescriptors(selectedModel, selectedFirmware));
 
     res.status(200).json({
       deviceId,
@@ -537,37 +488,9 @@ app.post('/monitoring', async (req, res) => {
   }
 });
 
-/**
- * Advertises this plugin over mDNS/DNS-SD so the UnifiedNetworkManager API can
- * discover it automatically. Best-effort — the API also polls known endpoints.
- */
-function startMdnsAdvertising(): void {
-  try {
-    const bonjour = new Bonjour();
-    bonjour.publish({
-      name: DISPLAY_NAME,
-      type: 'unm-plugin',
-      port: PORT,
-      txt: {
-        uuid: EFFECTIVE_UUID,
-        name: DISPLAY_NAME,
-        version: PLUGIN_VERSION,
-        vendors: PLUGIN_VENDORS.join(','),
-        capabilities: PLUGIN_CAPABILITIES.join(','),
-        endpoint: ADVERTISED_ENDPOINT,
-        authType: PLUGIN_AUTH_TYPE,
-      },
-    });
-    // eslint-disable-next-line no-console
-    console.log(`[lancom-lx-plugin] advertising via mDNS as "${DISPLAY_NAME}" (${EFFECTIVE_UUID})`);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn('[lancom-lx-plugin] mDNS advertising unavailable, falling back to polling discovery only:', (err as Error).message);
-  }
-}
-
-app.listen(PORT, () => {
-  // eslint-disable-next-line no-console
-  console.log(`[lancom-lx-plugin] listening on port ${PORT}`);
-  startMdnsAdvertising();
+// listen() binds the conventional plugin port (4080 by default) and starts
+// mDNS advertising — both handled by @unm/plugin-sdk.
+server.listen().catch((err) => {
+  console.error('[lancom-lx-plugin] fatal startup error:', err);
+  process.exit(1);
 });

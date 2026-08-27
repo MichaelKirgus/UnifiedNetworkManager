@@ -12,10 +12,11 @@
  * instead of touching an OID that doesn't exist there.
  */
 
+import { createRegistry } from '@unm/plugin-sdk';
 import { snmpGet, snmpSet, snmpWalk } from '@unm/snmp-client';
 import { SX4_PORT_CONF, SX4_POE_CONF, SX4_LACP_CONF, SX4_VLAN, SX3_PORT_CONF } from '../sxOids';
 import { detectVariant, SxOptions } from '../sxClient';
-import { ActionContext, ActionDescriptor, InputSchema, RiskLevel } from './types';
+import { ActionContext, ActionDescriptor } from './types';
 
 // --- Small helpers --------------------------------------------------------------------
 
@@ -373,45 +374,26 @@ const portsStateRead: ActionDescriptor = {
 // --- Registry ---------------------------------------------------------------------------
 
 const ALL_ACTIONS: ActionDescriptor[] = [portSpeedModeSet, poeModeSet, poePrioritySet, lacpPortSet, vlanPvidSet, vlanModeSet, portsStateRead];
-const byId = new Map<string, ActionDescriptor>(ALL_ACTIONS.map((a) => [a.id, a]));
+
+/** The shared registry factory (@unm/plugin-sdk) — one source for /discover, /plan and /config. */
+export const registry = createRegistry(ALL_ACTIONS);
 
 /** Returns the action for an id, or undefined. */
 export function getAction(id: string): ActionDescriptor | undefined {
-  return byId.get(id);
+  return registry.getAction(id);
 }
 
 /** All actions (the full catalog). */
 export function listActions(): ActionDescriptor[] {
-  return ALL_ACTIONS;
+  return registry.listActions();
 }
 
 /** Distinct module names, for catalog grouping in the webapp. */
 export function listModules(): string[] {
-  return [...new Set(ALL_ACTIONS.map((a) => a.module))];
-}
-
-/** A serializable catalog entry (what /discover advertises + the API persists). */
-export interface CatalogEntry {
-  id: string;
-  label: string;
-  description?: string;
-  module: string;
-  riskLevel: RiskLevel;
-  deviceCount: number | 'N';
-  timeoutMs?: number;
-  inputSchema: InputSchema;
+  return registry.listModules();
 }
 
 /** The full action catalog (single-device actions only in v1). */
-export function listCatalog(): CatalogEntry[] {
-  return ALL_ACTIONS.map((a) => ({
-    id: a.id,
-    label: a.label,
-    description: a.description,
-    module: a.module,
-    riskLevel: a.riskLevel,
-    deviceCount: 1 as const,
-    timeoutMs: a.timeoutMs,
-    inputSchema: a.inputSchema,
-  }));
+export function listCatalog() {
+  return registry.listCatalog();
 }

@@ -1,6 +1,5 @@
-import express from 'express';
-import cors from 'cors';
-import { Bonjour } from 'bonjour-service';
+import type { SecretField, SecretType } from '@unm/plugin-sdk';
+import { createPluginServer, requirePluginKey, resolvePluginIdentity } from '@unm/plugin-sdk';
 import { encrypt, decrypt } from './crypto';
 import { storeSecret, listSecrets, getSecret, deleteSecret, updateSecret } from './apiClient';
 import { GENERATABLE_TYPES } from './keygen';
@@ -14,48 +13,23 @@ export const PLUGIN_NAME = 'Secrets Provider (Device Credentials)';
  * (`<uuid>:<instanceId>`) so the API registers them as separate plugins.
  * `PLUGIN_DISPLAY_NAME` optionally overrides the advertised name; without it,
  * the instance id is appended. Unset = single-instance behavior.
+ * (Convention implemented in @unm/plugin-sdk's resolvePluginIdentity.)
  */
-const INSTANCE_ID = process.env.PLUGIN_INSTANCE_ID?.trim() ?? '';
-export const EFFECTIVE_UUID = INSTANCE_ID ? `${PLUGIN_UUID}:${INSTANCE_ID}` : PLUGIN_UUID;
-export const DISPLAY_NAME =
-  process.env.PLUGIN_DISPLAY_NAME?.trim() || (INSTANCE_ID ? `${PLUGIN_NAME} (${INSTANCE_ID})` : PLUGIN_NAME);
-export const PLUGIN_VERSION = '0.1.0';
-export const PLUGIN_VENDORS = ['unm'];
-export const PLUGIN_CAPABILITIES = ['secretsProvider'];
-export const PLUGIN_AUTH_TYPE = 'token';
-
-const PORT = Number(process.env.PORT ?? 4003);
-const ADVERTISED_ENDPOINT = process.env.ADVERTISED_ENDPOINT ?? `http://localhost:${PORT}`;
+const identity = resolvePluginIdentity({
+  uuid: PLUGIN_UUID,
+  name: PLUGIN_NAME,
+  version: '0.1.0',
+  vendors: ['unm'],
+  capabilities: ['secretsProvider'],
+  authType: 'token',
+});
 
 /**
- * The secret types this provider serves, with a field schema for each. The
- * webapp renders forms dynamically from this, and the API validates/relays the
- * fields. This is the provider-declared contract (flexible: a provider can
- * offer custom types).
+ * The secret types this provider serves, with a field schema for each (the
+ * shared contract types come from @unm/plugin-sdk). The webapp renders forms
+ * dynamically from this, and the API validates/relays the fields. This is the
+ * provider-declared contract (flexible: a provider can offer custom types).
  */
-export interface SecretField {
-  name: string;
-  label: string;
-  input: 'text' | 'password' | 'select';
-  secret?: boolean;
-  required?: boolean;
-  options?: string[];
-}
-
-export interface SecretType {
-  type: string;
-  label: string;
-  fields: SecretField[];
-  /**
-   * True when the provider can CREATE this secret's material itself (via
-   * POST /generate) and ROTATE it in place (POST /regenerate). The webapp uses
-   * this to offer a "Generate" button instead of manual entry, and the API's
-   * plan-provisioning flow relies on it to fulfill provisionRequests without
-   * any human typing keys.
-   */
-  generatable?: boolean;
-}
-
 export const SECRET_TYPES: SecretType[] = [
   {
     type: 'apiKey',
@@ -127,46 +101,18 @@ export const SECRET_TYPES: SecretType[] = [
   },
 ];
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-/**
- * Authenticates the calling UnifiedNetworkManager API using the shared
- * `x-plugin-api-key` (the same convention the API uses for its internal
- * plugin-facing routes). When `PLUGIN_API_KEY` is unset (dev), the check is
- * skipped to match the API's own behavior.
- */
-function requirePluginKey(req: express.Request, res: express.Response, next: express.NextFunction): void {
-  const expected = process.env.PLUGIN_API_KEY;
-  const provided = req.headers['x-plugin-api-key'];
-  if (expected && provided !== expected) {
-    res.status(403).json({ error: 'Forbidden: Invalid plugin API key' });
-    return;
-  }
-  next();
-}
-
-app.get('/healthz', (_req, res) => {
-  res.status(200).json({ status: 'ok' });
-});
-
-/**
- * Plugin identity endpoint. The `secretsProvider` capability marks this plugin
- * as the secrets manager; the API broker delegates secret CRUD + crypto to it.
- */
-app.get('/discover', (_req, res) => {
-  res.status(200).json({
-    uuid: EFFECTIVE_UUID,
-    name: DISPLAY_NAME,
-    version: PLUGIN_VERSION,
-    vendors: PLUGIN_VENDORS,
-    capabilities: PLUGIN_CAPABILITIES,
-    endpoint: ADVERTISED_ENDPOINT,
-    authType: PLUGIN_AUTH_TYPE,
+// Pre-wired app (cors + json + /healthz + /discover, mDNS on listen) comes from
+// @unm/plugin-sdk — this file only registers its own routes. The
+// `secretsProvider` capability marks this plugin as the secrets manager; the API
+// broker delegates secret CRUD + crypto to it.
+const server = createPluginServer({
+  identity,
+  logTag: 'secrets-provider',
+  discovery: {
     secretsProvider: { algorithm: 'aes-256-gcm', secretTypes: SECRET_TYPES },
-  });
+  },
 });
+const app = server.app;
 
 /**
  * Create a secret. The plugin encrypts the fields object (it owns the key) and
@@ -192,7 +138,7 @@ app.post('/secrets', requirePluginKey, async (req, res) => {
     const encryptedValue = encrypt(JSON.stringify(fields));
     const record = await storeSecret({
       type,
-      providerId: EFFECTIVE_UUID,
+      providerId: identity.effectiveUuid,
       label: label ?? null,
       encryptedValue,
       userId,
@@ -288,7 +234,7 @@ app.post('/generate', requirePluginKey, async (req, res) => {
     const encryptedValue = encrypt(JSON.stringify(merged));
     const record = await storeSecret({
       type,
-      providerId: EFFECTIVE_UUID,
+      providerId: identity.effectiveUuid,
       label: typeof label === 'string' ? label : null,
       encryptedValue,
       userId: uid,
@@ -340,38 +286,9 @@ app.post('/regenerate', requirePluginKey, async (req, res) => {
   }
 });
 
-/**
- * Advertises this plugin over mDNS/DNS-SD so the API can discover it
- * automatically (service type `_unm-plugin._tcp`). Best-effort; the API also
- * polls known plugin endpoints as a fallback.
- */
-function startMdnsAdvertising(): void {
-  try {
-    const bonjour = new Bonjour();
-    bonjour.publish({
-      name: DISPLAY_NAME,
-      type: 'unm-plugin',
-      port: PORT,
-      txt: {
-        uuid: EFFECTIVE_UUID,
-        name: DISPLAY_NAME,
-        version: PLUGIN_VERSION,
-        vendors: PLUGIN_VENDORS.join(','),
-        capabilities: PLUGIN_CAPABILITIES.join(','),
-        endpoint: ADVERTISED_ENDPOINT,
-        authType: PLUGIN_AUTH_TYPE,
-      },
-    });
-    // eslint-disable-next-line no-console
-    console.log(`[secrets-provider] advertising via mDNS as "${DISPLAY_NAME}" (${EFFECTIVE_UUID})`);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn('[secrets-provider] mDNS advertising unavailable:', (err as Error).message);
-  }
-}
-
-app.listen(PORT, () => {
-  // eslint-disable-next-line no-console
-  console.log(`[secrets-provider] listening on port ${PORT}`);
-  startMdnsAdvertising();
+// listen() binds the conventional plugin port (4080 by default) and starts
+// mDNS advertising — both handled by @unm/plugin-sdk.
+server.listen().catch((err) => {
+  console.error('[secrets-provider] fatal startup error:', err);
+  process.exit(1);
 });
