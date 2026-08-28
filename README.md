@@ -1,44 +1,128 @@
-# UnifiedNetworkManager
+# UnifiedNetworkManager (UNM)
 
-Open source network management and monitoring platform for mixed-vendor environments.
+Open-source network management and monitoring platform for mixed-vendor environments. A central control plane that manages devices through **pluggable vendor adapters** — each plugin is a small microservice speaking one common contract, so adding a new device family never means touching the core.
+
+Currently supported vendors: **OPNsense** (routing/firewall), **LANCOM LCOS-LX** (Wi-Fi 6/7 access points), **LANCOM LCOS** (routers), **LANCOM SX-Series** (managed switches, both 4.x and legacy GS-2310 firmware lines), **MikroTik SwOS / SwOS Lite** (switches), plus generic **SNMP** and **ICMP ping** plugins for anything else.
 
 ## Features
 
-This repository now defines a concrete, implementation-ready foundation for a unified manager that can operate across:
+- **Open API** — vendor-neutral REST contract in [`openapi/unified-network-manager.openapi.yaml`](openapi/unified-network-manager.openapi.yaml); the Express API validates every request against it at runtime (`express-openapi-validator`).
+- **Plugin system** — vendor adapters are independent microservices discovered via mDNS/DNS-SD with an HTTP polling fallback. A device can carry **multiple plugins at once** (e.g. generic SNMP + a vendor plugin), each with its own credentials; exactly one is *primary*.
+- **Authentication with RBAC + 2FA** — JWT auth, flat permission catalog, DB-backed roles, TOTP two-factor for privileged operations (config jobs and plan execution require an enrolled authenticator). The API itself is a pure auth broker: credential verification is delegated to the pluggable **basic-auth** identity provider.
+- **Secrets management** — device credentials are encrypted at rest by the pluggable **secrets-provider** plugin (the crypto holder); the API only ever stores ciphertext. Generatable secret types (WireGuard key pairs, tunnel PSKs, OpenVPN CA/cert/key) can be created and regenerated from the UI or as part of a plan.
+- **Configuration workflows** — single-device config jobs plus multi-step **plans**: ordered steps with dependencies, token substitution between step results (`${steps[N].result.details.<key>}`), automatic best-effort config snapshots before writes (undoable plans), and secret provisioning wired into the plan lifecycle.
+- **Cross-device inventory pages** — Networks (logical subnets/VLANs merged across devices), Hosts (one row per MAC, ARP/NDP/DHCP/Wi-Fi sources), Routes (static + connected + dynamic, with gateway health enrichment), Tunnels (WireGuard/IPsec/OpenVPN live state: peer addresses, handshake age, transfer rates), and Wi-Fi clients.
+- **Plugin log pipeline** — plugins ship structured logs to the API (`POST /plugin/logs`); entries are retained for a configurable number of days and browsable globally or per device in the webapp (gated by its own `logs:read` permission). Emission is on by default and can be switched off globally or per device.
+- **Plugin self-metrics** — every plugin auto-serves `GET /metrics` (CPU%, heap/RSS memory, event-loop lag, in-flight polls, last-poll duration + error rate, emitted metric count, log queue depth); the API samples it every 30 s and the webapp shows per-plugin runtime health with history sparklines — for spotting overloaded plugins or growing telemetry payloads.
+- **MCP server** — exposes the whole API to AI agents over the [Model Context Protocol](https://modelcontextprotocol.io); new endpoints appear as tools automatically.
 
-- **MikroTik** (switching/routing)
-- **OPNsense** (routing/firewall)
-- **OpenWrt** (WLAN/edge; including legacy LEDE/OpenWrt deployments)
+## Architecture
 
-Core requirements addressed:
+```mermaid
+flowchart LR
+    subgraph Browser
+        W[Webapp<br/>React + Vite]
+    end
+    subgraph Docker
+        A[API :3000/v1<br/>Express + Drizzle + Postgres 16]
+        P1[OPNsense plugin]
+        P2[ICMP / SNMP plugins]
+        P3[LANCOM LX / LCOS / SX plugins]
+        P4[SwOS plugin]
+        BA[basic-auth plugin<br/>identity provider]
+        SP[secrets-provider plugin<br/>crypto holder]
+        M[MCP server :3901]
+    end
+    D[(Postgres 16)]
+    HW[Real appliances /<br/>mock-appliance]
 
-- **Open API** (vendor-neutral): see `/openapi/unified-network-manager.openapi.yaml`
-- **Authentication with RBAC + 2FA**: role/permission model and TOTP challenge endpoints
-- **Plugin system**: vendor adapters are registered as plugins instead of hardcoded integrations
-- **Scalability**: stateless API workers, queue-based config execution, and horizontally scalable telemetry ingestion
+    W -->|REST + JWT| A
+    M -->|OpenAPI tools| A
+    A <--> D
+    A -->|/monitoring, /config, /plan<br/>+ x-unm-settings header| P1 & P2 & P3 & P4
+    P1 & P2 & P3 & P4 -->|telemetry + logs| A
+    A -->|credential verification| BA
+    A -->|encrypt/decrypt/generate| SP
+    P1 & P3 & P4 --> HW
+```
 
-## Architecture (minimal baseline)
+- **Control plane API** (`api/`) — auth, RBAC, inventory, monitoring, config jobs, plans, secrets broker. Background workers (telemetry poll every 30 s, config-job executor, plan executor, log retention sweep) start only after the HTTP server has bound successfully.
+- **Plugin runtime** — each plugin advertises itself via `/discover` (identity, capabilities, options, actions, device-model catalog). The API caches descriptors and injects effective settings as an `x-unm-settings` JSON header on every call it makes to a plugin.
+- **Telemetry pipeline** — normalized metrics + inventory ride in one `telemetry` row per poll; the API fans inventory out into the cross-device `networks`, `hosts`, `routes`, and tunnel tables.
 
-- **Control Plane API**: central REST API for auth, inventory, monitoring, and configuration workflows
-- **Plugin Runtime**: loads vendor-specific adapters through a common contract
-- **Task Queue**: async execution for configuration jobs and polling tasks
-- **Telemetry Pipeline**: normalized metrics/events from heterogeneous devices into a common model
+## Repository layout
 
-## Plugin model
+| Path | What it is |
+|------|-----------|
+| `api/` | Express API service (Drizzle ORM + Postgres), OpenAPI-validated, JWT/RBAC/TOTP auth, workers for telemetry/config jobs/plans/log retention |
+| `webapp/` | React 18 + Vite + Tailwind SPA (login, devices, plans, networks, hosts, routes, tunnels, Wi-Fi, logs, plugins, secrets, sites, users, roles, tokens) |
+| `packages/plugin-sdk/` | Shared TypeScript SDK for plugins (`@unm/plugin-sdk`): HTTP server scaffolding (incl. auto-mounted self-metrics `/metrics`), settings reading, API client, structured logger |
+| `packages/snmp-client/` | Shared net-snmp CLI wrapper used by the SNMP + LANCOM plugins |
+| `plugins/opnsense/` | OPNsense plugin — monitoring, inventory, config actions, multi-device plan intents (WireGuard/IPsec/OpenVPN/routes), tunnel + route enrichment |
+| `plugins/icmp/` | ICMP ping plugin — reachability/latency/jitter/loss + IP/MAC inventory; no credentials needed |
+| `plugins/snmp/` | Generic SNMP v1/v2c/v3 monitoring (system group, interface throughput) + inventory via net-snmp CLI |
+| `plugins/lancom-lx/` | LANCOM LCOS-LX access points — radios, SSIDs, stations, RF environment, WDS/CAPWAP; Wi-Fi client propagation |
+| `plugins/lancom-lcos/` | LANCOM LCOS routers — system/LAN/WAN metrics, VPN + firewall counters; config over SNMP SET (`lcsSetup`) with web-UI backup via a second credential slot |
+| `plugins/lancom-sx/` | LANCOM SX-Series switches (4.x unified MIB **and** legacy GS-2310 3.x tree, auto-detected) — ports, PoE, LAG/LACP; config over SNMP SET |
+| `plugins/swos/` | MikroTik SwOS / SwOS Lite switches via the `.b-file` HTTP API (Digest auth) — system, ports, PoE, SFP, VLANs; plan/config actions |
+| `plugins/basic-auth/` | Identity provider plugin — local users + TOTP verification on behalf of the API |
+| `plugins/secrets-provider/` | Secrets provider plugin — encryption at rest (owns `MASTER_KEY`) + key/cert generation |
+| `mcp/` | MCP server exposing the OpenAPI operations as tools (+ read-only SQL & plugin probes on a gated debug endpoint) |
+| `openapi/` | The OpenAPI contract — single source of truth for the public API surface |
+| `scripts/` | Mock OPNsense appliance + TLS material, plan e2e test suite |
+| `docs/PLUGIN-DEVELOPMENT.md` | **The plugin developer guide** — contract, SDK usage, settings loop, logging, discovery, deployment |
 
-Each plugin is responsible for one or more `vendor/deviceType` combinations and exposes capabilities:
+## Getting started
 
-- `monitoring` (health/metrics/events)
-- `configuration` (read/apply/reconcile)
-- `inventory` (facts/interfaces/modules)
+Prerequisites: Docker (with compose), Node.js ≥ 20. The script detects whether you can reach the Docker daemon without sudo and only escalates when truly needed.
 
-Plugins are discovered and registered through API endpoints and validated against the plugin schema in the OpenAPI contract.
+```bash
+./setup.sh
+```
+
+This installs all dependencies (`make setup`), starts Postgres, syncs the schema (`drizzle-kit push`), builds the shared packages + plugins in parallel (`make build`), starts every plugin container with `--build`, then runs the API and webapp as hot-reloading dev servers. It blocks until you press Enter; teardown (dev servers + containers) happens automatically on exit/Ctrl+C.
+
+| URL | Service |
+|-----|---------|
+| http://localhost:5173 | Web app |
+| http://localhost:3000/v1 | API (health at `/healthz`) |
+| http://localhost:3901/mcp | MCP server (`/debug/mcp` gated by `MCP_DEBUG_KEY`, default `dev-mcp-debug-key`) |
+
+### First login
+
+On first boot the API seeds an **admin** user (password `admin`) and prints its generated TOTP secret + `otpauth://` URI to the console — scan it with an authenticator app, then complete 2FA at login. Accounts created without an enrolled TOTP can pass 2FA with any 6-digit code in dev mode but will **not** receive the `amr: totp` claim required by 2FA-gated endpoints (config jobs, plan execution).
+
+### Manual / containerized run
+
+```bash
+make setup                                  # install all deps
+docker compose up -d --build postgres api \
+  opnsense-plugin icmp-plugin snmp-plugin lancom-lx-plugin lancom-sx-plugin \
+  lancom-lcos-plugin swos-plugin basic-auth-plugin secrets-provider-plugin webapp mcp
+```
+
+Dev mode with hot reload (API + webapp on the host, plugins in Docker): `make api-dev` / `make web-dev`. Other targets: `make up|down|restart`, `make stop-api|stop-web`, `make clean` (removes containers **and** volumes).
 
 ## Security model
 
-- **RBAC** with explicit permissions (e.g., `devices:read`, `configs:apply`, `tokens:manage`) — the admin role carries every permission automatically; new permissions are backfilled into existing admins on API start
-- **2FA (TOTP)** required for privileged operations
-- **Audit trail** for login, device changes, and plugin actions
+- **RBAC** — flat permission catalog (`api/src/auth/permissions.ts` is the single source of truth; `GET /v1/permissions` serves it to the UIs). Users carry their effective permissions in JWT claims; roles are DB-backed bundles unioned into explicit grants at login time. New permissions added to the catalog are **backfilled onto existing admin users and the built-in admin role** on API start, so upgrades never lock admins out.
+- **2FA (TOTP)** — required for privileged operations (`configs:apply`); enrollment is per-user via the My Account page or by an admin with `users:manage-credentials`.
+- **Secrets** — values are encrypted by the secrets-provider plugin; the API stores only ciphertext and never sees plaintext. The webapp shows metadata only.
+- **API tokens** — long-lived bearer tokens (`unm_…`) for agents/scripts, self-service on the Tokens page or `POST /v1/tokens`, with per-token permission narrowing.
+
+Permission catalog (current):
+
+| Permission | Grants |
+|------------|--------|
+| `devices:read` | View devices, their plugins and telemetry |
+| `logs:read` | View plugin log entries (device and global) — separate from `devices:read` because logs can carry critical details |
+| `configs:apply` | Submit configuration jobs / execute plans (requires 2FA) |
+| `plugins:manage` | Change global plugin settings |
+| `secrets:read` / `secrets:write` / `secrets:delete` | Manage secrets (metadata only — values stay encrypted) |
+| `sites:write` | Create, update and delete sites |
+| `tokens:manage` | Create, view and revoke your own API tokens |
+| `users:read` / `users:write` / `users:create` | View users; edit roles/permissions & manage roles; create users with initial password + TOTP enrollment |
+| `users:manage-credentials` / `users:self-credentials` | Reset passwords and manage 2FA of other users / own account |
 
 ## Device addressing (multi-IP)
 
@@ -48,39 +132,27 @@ Each device has exactly one **primary address** (`managementAddress`) plus any n
 - Every `/monitoring` and `/config` call to a plugin carries **all** addresses as `ipAddresses: [{ address, isPrimary }]`, so plugins can reach secondary interfaces when they need to.
 - Transport handling (TLS vs plaintext, self-signed certificates) lives in the **plugin**, not on the device — e.g. the OPNsense plugin's `transport` option (`auto` = HTTPS with self-signed accepted, `https`, or `http`).
 
-## SNMP plugin (monitoring + inventory)
+## Plugin model
 
-The `plugins/snmp/` service collects data over **SNMPv1/v2c and SNMPv3 (USM)** using the net-snmp CLI. It provides:
+Each plugin is responsible for one or more `vendor/deviceType` combinations and advertises capabilities:
 
-- **Monitoring**: system group (description, object ID, name, location, contact, uptime), per-interface rx/tx throughput in bits/s (computed from counter deltas each poll cycle), and an aggregated total-throughput metric shown as a quick metric in the devices table.
-- **Inventory**: per-interface attributes (name, type, speed, MAC address, operational status) + system identity data, exposed both as "Inventory"-group metrics (visible in Device Detail) and via dedicated endpoints: `GET /inventory?managementAddress=…&community=…` for v1/v2c, and `POST /inventory` with a JSON body (`{ managementAddress, credentials: { version, … } }`, same contract as `/monitoring`) — required for SNMPv3 so USM passwords never travel in URLs.
+- `monitoring` (health/metrics/events)
+- `inventory` (facts/interfaces/modules — propagated into the cross-device pages)
+- `configuration` (read/apply/reconcile actions)
+- `planning` (multi-step, multi-device plan intents with a step catalog)
+- `secretsProvider` / `identityProvider` (the two broker plugins; swappable via `SECRETS_PLUGIN_ID` / `AUTH_PLUGIN_ID`)
 
-**Setup:**
-1. Create an **snmp-type secret** (Secrets page): version + community string for `v1`/`v2c`, or USM username / security level / auth+priv protocols and passwords for `v3`.
-2. Assign the SNMP Plugin to a device and attach that secret to the assignment.
-3. Optionally drop vendor `.mib` files into `plugins/snmp/mibs/` — they're mounted read-only at `/app/mibs` inside the container and added to snmpwalk's MIB search path.
+Plugins are discovered automatically (mDNS/DNS-SD + HTTP polling fallback — see `PLUGIN_POLL_ENDPOINTS`) and validated against the plugin schema in the OpenAPI contract. The full developer guide, including the settings loop, credential slots, device-model catalogs, and the logging pipeline, lives in [`docs/PLUGIN-DEVELOPMENT.md`](docs/PLUGIN-DEVELOPMENT.md).
 
-**Options** (Plugins page → Configure): `timeoutMs`, `retries`, `mibDir` (container-internal path), `inventoryTtlMs` (slow-path refresh cadence, default 15 min). Live throughput counters always refresh every poll cycle regardless of the inventory TTL.
+### Plugin log pipeline
 
-## LANCOM LCOS plugin (routers — monitoring + config)
+Every plugin ships structured logs to `POST /plugin/logs` (shared `x-plugin-api-key`, self-reported `pluginId`). Entries land in `plugin_logs` with level, message, optional JSON context and device association; a retention worker deletes rows older than `LOG_RETENTION_DAYS` (default 7) hourly. The webapp shows them on the global **Logs** page and per device in Device Detail — both gated by `logs:read`.
 
-The `plugins/lancom-lcos/` service manages **Lancom LCOS routers** over the unified LCOS MIB (`LC-UNIFIED-LCOS`, base OID `.1.3.6.1.4.1.2356.11`). It is a full-capability plugin:
+Emission is **on by default** via the standard settings loop: each plugin declares a boolean `logToApi` option, so it can be switched off globally (Plugins → Configure) or overridden per device without redeploying anything. The SDK's `createPluginLogger()` batches entries (2 s flush), queues up to 500 with drop-oldest backpressure, and degrades silently when the API is unreachable — logging never blocks a poll cycle.
 
-- **Monitoring**: system/hardware (CPU load, memory, model/serial/SW version), per-interface LAN + WAN throughput in bits/s (counter deltas each poll cycle), VPN connection counts, firewall counters, temperature — plus the user-selected model/firmware from the device form.
-- **Inventory**: interface IP rows, ARP table and DHCP leases are propagated into the Networks/Hosts pages on every slow-path refresh.
-- **Configuration + plans** over **SNMP SET** against the writable `lcsSetup` tree (e.g. NTP servers, DNS servers, LAN interface enable/disable) — each action reads current state, applies via `snmpset`, and re-reads to verify. Plans automatically prepend a best-effort config-backup step before any write so they are undoable.
-- **Config backup** over the router's web UI (HTTP + Basic auth) using a separate **`web` credential slot** (`usernamePassword`) — this is exactly what the plugin credential-slot system was designed for: one device, two distinct credentials (SNMP primary + web UI).
+### Multi-instance plugins (remote sites)
 
-**Setup:**
-1. Create an **snmp-type secret** and assign it as the plugin's primary credential on the device.
-2. Optionally create a **usernamePassword secret** for the router's web UI and bind it to the `web` slot in the device's plugin assignment (needed only for backup/restore actions).
-3. The vendor MIB ships in `plugins/lancom-lcos/mibs/` (mounted read-only at `/app/mibs`) — parsing uses numeric OIDs, so it is for debugging only.
-
-**Options** (Plugins page → Configure): `timeoutMs`, `retries`, `mibDir`, `inventoryTtlMs`, plus `webTransport` (`auto` = HTTPS with self-signed accepted | `http` | `https`) and `backupPath` (the web-UI backup endpoint, configurable while the exact LCOS URL is being probed on real hardware).
-
-## Multi-instance plugins (remote sites)
-
-Every plugin supports running **multiple instances of the same type** — e.g. one ICMP or SNMP plugin at each remote site, all reporting into a single UnifiedNetworkManager instance. Each instance registers as its own plugin row and can be assigned to devices independently.
+Every plugin supports running **multiple instances of the same type** — e.g. one ICMP or SNMP plugin at each remote site, all reporting into a single UNM instance. Each instance registers as its own plugin row and can be assigned to devices independently.
 
 Two optional environment variables control this:
 
@@ -89,30 +161,13 @@ Two optional environment variables control this:
 | `PLUGIN_INSTANCE_ID` (e.g. `site-a`) | Makes the advertised identity unique (`<plugin-uuid>:site-a`). Without it, two instances of the same plugin type would collide into one registration. |
 | `PLUGIN_DISPLAY_NAME` (optional) | Overrides the displayed name. If unset, the instance id is appended automatically: `ICMP Plugin (site-a)`. |
 
-With neither set, behavior is exactly as before — single-instance deployments are unaffected.
+With neither set, behavior is exactly as before — single-instance deployments are unaffected. A commented example lives in `docker-compose.yml`; also append the new endpoint to the API's `PLUGIN_POLL_ENDPOINTS` list (or rely on mDNS discovery). Notes: each instance needs a unique `ADVERTISED_ENDPOINT`; settings are per-instance; changing an id/name just restarts it and the old registration goes offline like any stopped plugin.
 
-**Example** (`docker-compose.yml`) — a second ICMP plugin for site A:
+## Plans & configuration jobs
 
-```yaml
-  icmp-site-a:
-    build:
-      context: ./plugins/icmp
-    ports:
-      - "4010:4004"
-    environment:
-      - PORT=4004
-      - ADVERTISED_ENDPOINT=http://icmp-site-a:4010   # must be unique per instance
-      - PLUGIN_INSTANCE_ID=site-a                     # required for multi-instance
-      # - PLUGIN_DISPLAY_NAME=HQ ICMP                 # optional display name
-    restart: unless-stopped
-```
-
-Also append the new endpoint to the API's `PLUGIN_POLL_ENDPOINTS` list (or rely on mDNS discovery). The instance then appears as its own row on the **Plugins** page, with independent online status, settings, and device assignments.
-
-Notes:
-- Each instance needs a unique `ADVERTISED_ENDPOINT` (different container name or published port) — that's how the API routes telemetry to the right one.
-- Settings are per-instance: configuring "ICMP Plugin (site-a)" does not affect "ICMP Plugin".
-- If you change an instance's id/name, restart it; the old registration simply goes offline like any stopped plugin.
+- **Config jobs** — single-device action submissions (`POST /devices/:deviceId/config-jobs` with an explicit `pluginId`), executed by the config-job worker against that plugin assignment. Require `configs:apply` + 2FA.
+- **Plans** — multi-step workflows with per-step dependencies, reordering (cycle-checked while draft/ready), and `${steps[N].result.details.<key>}` token substitution from earlier step results. The executor runs one plan at a time, persists the *resolved* input of each step before dispatch, honors `bestEffort` flags, and marks orphaned executing plans failed on startup. Plan creation can **provision secrets** (e.g. WireGuard key pairs) through the secrets provider with rollback on failure; provisioned material is referenced by id in steps and never stored in plaintext anywhere.
+- E2E test suite: `scripts/e2e-plans.ts` against the mock OPNsense appliance (`docker compose up -d mock-appliance`).
 
 ## MCP server (AI agent access)
 
@@ -151,38 +206,23 @@ The `mcp/` service exposes the UNM API to AI agents via the [Model Context Proto
 
 The same server also runs in **stdio mode** without Docker (client-launched, production-safe tools only): `node mcp/dist/index.js` with `UNM_API_TOKEN` set — no `MCP_PORT` needed.
 
-## Next implementation steps
+## Development workflow
 
-1. Build the API service from the OpenAPI contract
-2. Implement reference plugins for OPNsense, OpenWrt, and MikroTik
-3. Add persistent storage and queue workers
-4. Add UI/CLI clients using the same open API
+- **Build order matters**: `@unm/plugin-sdk` and `@unm/snmp-client` must build first — npm `file:` dependencies are *copied* into each consumer's `node_modules`, so `make build` refreshes those copies before fanning out all plugin builds in parallel. After editing a shared package, always run `make build`.
+- **Type-check**: `cd api && npx tsc --noEmit`, same for `webapp/` and each plugin; or just `make build`.
+- **OpenAPI is enforced**: every new public route must be added to `openapi/unified-network-manager.openapi.yaml` — the validator 404s undocumented paths. Structural check: `node validate-openapi.cjs`.
+- **Schema changes**: idempotent DDL in `initDb()` (`api/src/db.ts`) + `drizzle-kit push`; keep `schema.ts` composite-PK names equal to the live Postgres constraint names.
+- **Smoke tests**: `cd plugins/opnsense && ../../node_modules/.bin/tsx smoke-test.ts` (same for `plugins/swos`).
+- **Plugin images always rebuild from source** (`docker compose up -d --build <service>`) — reusing stale images silently serves old code.
 
-## Getting started (reference implementation)
+### Key environment variables (API)
 
-This repository now includes a working reference implementation of the platform described above:
-
-- `api/` — Express API service, dynamically validated against the OpenAPI spec (`express-openapi-validator`), JWT auth + RBAC + TOTP 2FA, SQLite persistence (`better-sqlite3`), and background workers for telemetry polling and config job processing.
-- `plugins/opnsense/` — reference plugin microservice implementing the monitoring/configuration/inventory contract against the OPNsense REST API.
-- `webapp/` — React 18 + Vite + Tailwind single-page app (Login, Devices, Device Detail, Config Jobs, Plugins).
-- `docker-compose.yml` — wires the api, opnsense plugin, and webapp services together for local use.
-
-### Running locally
-
-```bash
-# API (http://localhost:3000, mounted under /v1)
-cd api && npm install && npm run dev
-
-# Reference OPNsense plugin (http://localhost:4001)
-cd plugins/opnsense && npm install && npm run dev
-
-# Web app (http://localhost:5173)
-cd webapp && npm install && npm run dev
-```
-
-On first run, the API seeds a default `admin` user (password `admin`) and prints that
-user's generated TOTP secret and `otpauth://` enrollment URI to the console — scan it
-with an authenticator app (or feed the secret into any TOTP generator) to complete the
-2FA step at `/auth/2fa/verify`. Accounts created without an enrolled TOTP secret can
-complete 2FA with any 6-digit code in dev mode, but will **not** receive the `amr: totp`
-claim required by 2FA-gated endpoints such as submitting config jobs.
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `JWT_SECRET` | `dev-secret` | JWT signing key — change in production |
+| `DATABASE_URL` | `postgresql://unm:unm@postgres:5432/unm` | Postgres connection |
+| `PLUGIN_API_KEY` | `dev-plugin-key` | Shared key the API presents to plugins (`x-plugin-api-key`) and that plugins use for log shipping / broker calls |
+| `AUTH_PLUGIN_ID` | built-in basic-auth plugin | Active identity provider; falls back to built-in when unset/offline |
+| `SECRETS_PLUGIN_ID` | built-in secrets-provider plugin | Active secrets provider; same fallback behavior |
+| `LOG_RETENTION_DAYS` | `7` | Plugin log retention window for the hourly sweep |
+| `PLUGIN_POLL_ENDPOINTS` | all 9 plugins on `:4080` | HTTP discovery fallback list (mDNS is often isolated on Docker bridge networks) |
