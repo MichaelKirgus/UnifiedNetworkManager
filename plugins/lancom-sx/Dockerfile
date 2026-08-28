@@ -2,10 +2,9 @@
 # shared @unm/snmp-client package can be copied in alongside this plugin.
 FROM node:20-alpine
 
-# net-snmp provides the daemon + standard MIBs; net-snmp-tools provides the
-# snmpwalk/snmpget/snmpset CLIs used for all SNMP traffic (via @unm/snmp-client).
-# Vendor MIBs are expected in a mounted volume (see docker-compose.yml, /app/mibs).
-RUN apk add --no-cache net-snmp net-snmp-tools
+# No system packages needed: @unm/snmp-client speaks SNMP over native UDP via
+# the `net-snmp` npm package (installed below with its own deps). Vendor MIBs
+# are still expected in a mounted volume for manual debugging only.
 
 WORKDIR /app
 
@@ -17,10 +16,12 @@ COPY packages/plugin-sdk/package.json packages/plugin-sdk/tsconfig.json packages
 COPY packages/plugin-sdk/src/ packages/plugin-sdk/src/
 RUN cd packages/plugin-sdk && npm install --legacy-peer-deps && npm run build
 
-# Shared transport package (no runtime deps — only its dist/ is needed at run
-# time; the plugin's tsc build follows the file: symlink to compile against it).
+# Shared transport package. Its runtime dep (the `net-snmp` UDP stack) is
+# installed here and travels with the copy; the plugin's tsc build follows the
+# file: symlink to compile against its sources.
 COPY packages/snmp-client/package.json packages/snmp-client/tsconfig.json packages/snmp-client/
-COPY packages/snmp-client/src/index.ts packages/snmp-client/src/
+COPY packages/snmp-client/scripts/ packages/snmp-client/scripts/
+COPY packages/snmp-client/src/ packages/snmp-client/src/
 RUN cd packages/snmp-client && npm install --legacy-peer-deps && npm run build
 
 # Plugin: `npm install` links @unm/snmp-client → ../../packages/snmp-client.

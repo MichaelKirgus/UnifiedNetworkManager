@@ -1,23 +1,19 @@
 /**
  * @unm/snmp-client — shared SNMP transport for UnifiedNetworkManager plugins.
  *
- * Wraps the net-snmp CLI (`snmpwalk` / `snmpget` / `snmpset`) with:
+ * Native UDP implementation on top of the `net-snmp` npm package (pure JS —
+ * no CLI subprocess, so credentials never appear in a command line):
  *  - v1/v2c community and v3 USM credential handling (one place, one contract)
- *  - forced numeric OIDs in output (-O n) so parsing never depends on loaded MIBs
+ *  - numeric OIDs everywhere — no MIB name resolution, no MIB files needed
  *  - timeout/retry budgeting that fits the API's poll window
- *  - line parsing of `OID = TYPE: value` output incl. wrapped continuation lines
+ *  - result maps keyed by LEADING-DOT dotted OIDs with normalized string values
+ *    (same shape as the old snmpwalk-CLI transport → zero plugin changes)
  *
  * Plugin-specific concerns (which OIDs to walk, table layouts, caching, rate
  * math) stay in each plugin — this package is transport only.
  */
 
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-
-const execFileAsync = promisify(execFile);
-
-/** Default location of net-snmp's standard MIBs on alpine. */
-export const DEFAULT_MIB_DIR = '/usr/share/snmp/mibs';
+import * as snmp from 'net-snmp';
 
 /** Hard cap so a single walk can never exceed the API's 10s poll budget. */
 const WALK_BUDGET_MS = 9_500;
@@ -43,59 +39,130 @@ export interface SnmpCredentials {
   privPassword?: string;
 }
 
-/** Transport knobs shared by snmpWalk/snmpget. Plugins may extend this. */
+/** Transport knobs shared by snmpWalk/snmpGet. Plugins may extend this. */
 export interface TransportOptions {
   timeoutMs: number;
   retries: number;
-  /** Container-internal directory holding extra (vendor) MIB files. */
+  /** Agent UDP port (default 161). */
+  port?: number;
+  /**
+   * Accepted for backwards compatibility with the old CLI transport (which
+   * needed vendor MIB files). The native stack works purely on numeric OIDs,
+   * so this is intentionally ignored.
+   */
   mibDir?: string;
 }
 
-/**
- * Builds the version/authentication CLI args for snmpwalk/snmpget/snmpset from credentials.
- * v1/v2c use a community string; v3 uses USM (security level + username, with
- * auth/priv protocol+password pairs added per security level).
- */
-export function buildVersionArgs(creds: SnmpCredentials): string[] {
+/** Accepts both leading-dot plugin constants ('.1.3.6…') and bare dotted OIDs. */
+function stripDot(oid: string): string {
+  return oid.replace(/^\./, '');
+}
+
+/** Maps our credential contract onto a net-snmp session (fresh per operation). */
+function createSession(host: string, creds: SnmpCredentials, opts: TransportOptions): snmp.Session {
+  const sessionOpts = {
+    timeout: Math.max(50, opts.timeoutMs),
+    retries: Math.max(0, opts.retries),
+    port: opts.port ?? 161,
+  };
+
   if (creds.version === 'v3') {
-    const level = creds.securityLevel ?? 'noAuthNoPriv';
-    const args = ['-v', '3', '-l', level, '-u', creds.username ?? ''];
-    if (level !== 'noAuthNoPriv' && creds.authProtocol) {
-      args.push('-a', creds.authProtocol, '-A', creds.authPassword ?? '');
+    // DES privacy uses crypto.createCipheriv('des-cbc'), which Node ≥17 rejects
+    // without --openssl-legacy-provider → fail fast with an actionable message.
+    if ((creds.securityLevel ?? 'noAuthNoPriv') === 'authPriv' && creds.privProtocol === 'DES') {
+      throw new Error(`SNMPv3 DES privacy is not supported by the native transport (Node ≥17 OpenSSL) — use AES instead`);
     }
-    if (level === 'authPriv' && creds.privProtocol) {
-      args.push('-x', creds.privProtocol, '-X', creds.privPassword ?? '');
+    const level =
+      creds.securityLevel === 'authNoPriv'
+        ? snmp.SecurityLevel.authNoPriv
+        : creds.securityLevel === 'authPriv'
+          ? snmp.SecurityLevel.authPriv
+          : snmp.SecurityLevel.noAuthNoPriv;
+    const user: snmp.V3User = { name: creds.username ?? '', level };
+    if (level !== snmp.SecurityLevel.noAuthNoPriv && creds.authProtocol) {
+      // authKey/privKey hold PASSPHRASES — the library derives the localized
+      // keys itself (RFC 3414 A.2.1), exactly like `snmpwalk -A/-X`.
+      user.authProtocol = creds.authProtocol === 'MD5' ? snmp.AuthProtocols.md5 : snmp.AuthProtocols.sha;
+      user.authKey = creds.authPassword ?? '';
     }
-    return args;
+    if (level === snmp.SecurityLevel.authPriv && creds.privProtocol) {
+      // Only AES reaches here — DES throws above.
+      user.privProtocol = snmp.PrivProtocols.aes;
+      user.privKey = creds.privPassword ?? '';
+    }
+    return snmp.createV3Session(host, user, sessionOpts);
   }
-  // snmpwalk expects `-v 1` / `-v 2c` (no "v" prefix); the secret stores 'v1'/'v2c'.
-  return ['-v', creds.version.replace(/^v/, ''), '-c', creds.community ?? ''];
+
+  // createSession defaults to v1 when version is omitted — pass it explicitly.
+  const version = creds.version === 'v1' ? snmp.Version1 : snmp.Version2c;
+  return snmp.createSession(host, creds.community ?? '', { ...sessionOpts, version });
 }
 
-/** Common CLI args after the version/credential ones. */
-function buildCommonArgs(creds: SnmpCredentials, opts: TransportOptions): string[] {
-  const args = buildVersionArgs(creds);
-  // Force numeric OIDs in the output — without this, net-snmp resolves them to
-  // MIB names (e.g. SNMPv2-MIB::sysDescr.0) which depends on loaded MIBs and
-  // would break our numeric-OID parsing below.
-  args.push('-O', 'n');
-  args.push('-t', String(Math.max(1, Math.round(opts.timeoutMs / 1000))));
-  args.push('-r', String(opts.retries));
-  // `-M` REPLACES the MIB search path (it does not extend it) — so always
-  // include the standard net-snmp dir alongside any vendor volume. Without
-  // this, a configured mibDir silently breaks resolution of SNMPv2-MIB & co.
-  if (opts.mibDir) args.push('-M', [opts.mibDir, DEFAULT_MIB_DIR].filter(Boolean).join(':'));
-  return args;
+/** Decodes an RFC-2578 Counter64 (8 big-endian bytes) to its decimal string. */
+function decodeCounter64(buf: Buffer): string {
+  return buf.length === 8 ? buf.readBigUInt64BE().toString(10) : buf.toString('hex');
 }
 
-function mibDirsEnv(mibDir?: string): NodeJS.ProcessEnv {
-  const mibdirs = [mibDir, DEFAULT_MIB_DIR].filter(Boolean).join(':');
-  return { ...process.env, MIBDIRS: mibdirs };
+/** True when every byte is printable ASCII (0x20–0x7E). */
+function isPrintableAscii(buf: Buffer): boolean {
+  for (let i = 0; i < buf.length; i++) if (buf[i] < 0x20 || buf[i] > 0x7e) return false;
+  return true;
+}
+
+/** Normalizes a typed varbind value to its machine-readable string form. */
+function normalizeValue(vb: snmp.VarBind): string {
+  const t = vb.type;
+  if (t === snmp.ObjectType.Integer) return String(vb.value ?? ''); // Integer32 — signed, keep sign
+  if (t === snmp.ObjectType.Counter || t === snmp.ObjectType.Gauge || t === snmp.ObjectType.TimeTicks) {
+    return String(vb.value ?? ''); // Counter32 / Gauge32 / Unsigned32 / TimeTicks
+  }
+  if (t === snmp.ObjectType.Counter64) {
+    // The npm agent's own mock encodes Counter64 with a non-standard tag-70;
+    // the library's readUint64 yields an 8-byte big-endian Buffer for it.
+    const v = vb.value;
+    if (Buffer.isBuffer(v)) return decodeCounter64(v);
+    return typeof v === 'string' ? v : String(v ?? '');
+  }
+  if (t === snmp.ObjectType.OID || t === snmp.ObjectType.IpAddress) {
+    return String(vb.value ?? ''); // dotted OID / "a.b.c.d" — keep as-is
+  }
+  if (t === snmp.ObjectType.Boolean) return vb.value ? '1' : '0';
+  // OctetString / Opaque arrive as Buffer (or string).
+  const v = vb.value;
+  if (v === null || v === undefined) return '';
+  if (Buffer.isBuffer(v)) {
+    // Real devices encode RFC-2578 Counter64 as tag 0x04 + exactly 8 bytes,
+    // which the library types as OctetString. The old CLI transport printed
+    // these decimal whenever a MIB defined them (always in production), so
+    // decode to decimal for parity — but only when the bytes are not a plain
+    // printable string: real counters carry leading zero bytes, while an
+    // 8-char ifAlias must survive intact.
+    if (v.length === 8 && !isPrintableAscii(v)) return decodeCounter64(v);
+    // Any other binary OCTET STRING (MacAddress = 6 raw bytes, opaque data…)
+    // is rendered exactly like the old CLI's `Hex-STRING: XX XX …` output —
+    // plugin parsers such as normalizeMac() already consume that form.
+    if (!isPrintableAscii(v)) return v.toString('hex').toUpperCase().replace(/(.{2})/g, '$1 ').trim();
+    return v.toString('utf8');
+  }
+  return String(v);
+}
+
+/** Wraps transport errors in the shape plugins already log (`<op> failed for <host>: …`). */
+function wrapError(op: string, host: string, err: unknown): Error {
+  const msg = err instanceof Error ? err.message : String(err);
+  return new Error(`${op} failed for ${host}: ${msg}`);
+}
+
+/** Promise wrapper around a callback-based session request. */
+function promiseRequest<T>(fn: (cb: (err: Error | null, result?: T) => void) => void): Promise<T> {
+  return new Promise((resolve, reject) => fn((err, result) => (err ? reject(err) : resolve(result as T))));
 }
 
 /**
- * Runs `snmpwalk` for the given OID(s) and returns a map of full OID → value.
- * Throws on non-zero exit / timeout — callers decide how to degrade.
+ * Walks the subtree under the FIRST given OID and returns a map of full
+ * leading-dot OID → normalized value (snmpwalk-CLI semantics — extra OIDs are
+ * ignored, matching the old transport). Throws on timeout / agent error; an
+ * empty subtree resolves to an empty map.
  */
 export async function snmpWalk(
   host: string,
@@ -103,32 +170,59 @@ export async function snmpWalk(
   oids: string[],
   opts: TransportOptions
 ): Promise<Map<string, string>> {
-  const args = buildCommonArgs(creds, opts);
-  args.push(host, ...oids);
+  const base = stripDot(oids[0] ?? '');
+  if (!base) return new Map();
 
-  const budgetMs = Math.min(opts.timeoutMs * (opts.retries + 1) + 2_000, WALK_BUDGET_MS);
-
+  const session = createSession(host, creds, opts);
   try {
-    const { stdout } = await execFileAsync('snmpwalk', args, {
-      timeout: budgetMs,
-      maxBuffer: 16 * 1024 * 1024,
-      env: mibDirsEnv(opts.mibDir),
-    });
-    return parseWalkOutput(stdout);
+    return await walkSubtree(session, host, base, opts);
   } catch (err) {
-    const e = err as Error & { stderr?: string };
-    // Keep the first few lines — net-snmp's "Reason: (noSuchName)…" line is
-    // what callers need to tell an agent-answered error apart from a timeout.
-    const detail = ((e.stderr ?? '') || e.message).trim().split('\n').slice(0, 3).join(' | ');
-    throw new Error(`snmpwalk failed for ${host}: ${detail}`);
+    throw wrapError('snmpwalk', host, err);
+  } finally {
+    session.close();
   }
 }
 
 /**
- * Runs `snmpget` for the given OID(s) and returns a map of full OID → value.
- * For scalars and small fixed tables where a whole-subtree walk is wasteful.
- * OIDs that don't exist on the agent are simply absent from the result (the
- * "No Such Object" line doesn't match the output format). Throws like snmpWalk.
+ * GetBulk-driven subtree walk with an overall deadline replicating the old
+ * CLI budget: min(timeoutMs × (retries+1) + 2s, 9.5s). The library's own
+ * per-request timeout/retries cover single PDUs; this bounds the whole walk.
+ */
+function walkSubtree(session: snmp.Session, host: string, baseOid: string, opts: TransportOptions): Promise<Map<string, string>> {
+  const budgetMs = Math.min(opts.timeoutMs * (opts.retries + 1) + 2_000, WALK_BUDGET_MS);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const out = new Map<string, string>();
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(`timed out after ${budgetMs}ms`));
+      }
+    }, budgetMs);
+
+    session.subtree(
+      baseOid,
+      50, // maxRepetitions per GetBulk PDU (v2c/v3); v1 falls back to getNext internally
+      varbinds => {
+        for (const vb of varbinds) if (!snmp.isVarbindError(vb)) out.set(`.${vb.oid}`, normalizeValue(vb));
+        return false; // keep going — subtree() stops at the boundary itself
+      },
+      err => {
+        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        if (err) reject(err);
+        else resolve(out);
+      }
+    );
+  });
+}
+
+/**
+ * GETs the given OIDs and returns a map of full leading-dot OID → value. For
+ * scalars and small fixed tables where a whole-subtree walk is wasteful.
+ * OIDs that don't exist on the agent are simply absent from the result (error
+ * varbinds are filtered). Throws like snmpWalk.
  */
 export async function snmpGet(
   host: string,
@@ -136,34 +230,27 @@ export async function snmpGet(
   oids: string[],
   opts: TransportOptions
 ): Promise<Map<string, string>> {
-  const args = buildCommonArgs(creds, opts);
-  args.push(host, ...oids);
+  if (!oids.length) return new Map();
 
-  // snmpget answers one PDU per OID — a flat budget is fine.
-  const budgetMs = Math.min(opts.timeoutMs * (opts.retries + 1) + 2_000, WALK_BUDGET_MS);
-
+  const session = createSession(host, creds, opts);
   try {
-    const { stdout } = await execFileAsync('snmpget', args, {
-      timeout: budgetMs,
-      maxBuffer: 4 * 1024 * 1024,
-      env: mibDirsEnv(opts.mibDir),
-    });
-    return parseWalkOutput(stdout);
+    const varbinds = await promiseRequest<snmp.VarBind[]>(cb => session.get(oids.map(stripDot), cb));
+    const out = new Map<string, string>();
+    for (const vb of varbinds) if (!snmp.isVarbindError(vb)) out.set(`.${vb.oid}`, normalizeValue(vb));
+    return out;
   } catch (err) {
-    const e = err as Error & { stderr?: string };
-    // Keep the first few lines — net-snmp's "Reason: (noSuchName)…" line is
-    // what callers need to tell an agent-answered error apart from a timeout.
-    const detail = ((e.stderr ?? '') || e.message).trim().split('\n').slice(0, 3).join(' | ');
-    throw new Error(`snmpget failed for ${host}: ${detail}`);
+    throw wrapError('snmpget', host, err);
+  } finally {
+    session.close();
   }
 }
 
 /**
- * Runs `snmpset` for a single OID and returns the value the agent echoed back
- * in its response PDU (the new value, as printed by net-snmp). Throws on
- * non-zero exit / timeout like snmpWalk — callers treat that as "SET rejected".
+ * SETs a single OID and returns the value the agent echoed back in its
+ * response PDU. Throws on rejection / timeout like snmpWalk — callers treat
+ * that as "SET rejected".
  *
- * `syntax` is the SNMP type tag net-snmp expects for the value:
+ * `syntax` is the SNMP type tag for the value:
  *   s = DisplayString/STRING, i = INTEGER, t = TimeTicks, x = OCTET STRING (hex),
  *   a = IpAddress. Counter/Gauge objects are never SET in practice.
  */
@@ -175,100 +262,51 @@ export async function snmpSet(
   value: string,
   opts: TransportOptions
 ): Promise<string> {
-  const args = buildCommonArgs(creds, opts);
-  // snmpset takes exactly one OID + its type/value pair.
-  args.push(host, oid, `${syntax}:${value}`);
+  let type: number;
+  let payload: unknown;
+  switch (syntax) {
+    case 's':
+      type = snmp.ObjectType.OctetString;
+      payload = value;
+      break;
+    case 'i': {
+      const n = parseInt(value, 10);
+      if (Number.isNaN(n)) throw new Error(`snmpset failed for ${host} (${oid}): invalid integer "${value}"`);
+      type = snmp.ObjectType.Integer;
+      payload = n;
+      break;
+    }
+    case 't': {
+      const n = parseInt(value, 10);
+      if (Number.isNaN(n) || n < 0) throw new Error(`snmpset failed for ${host} (${oid}): invalid TimeTicks "${value}"`);
+      type = snmp.ObjectType.TimeTicks;
+      payload = n;
+      break;
+    }
+    case 'x':
+      type = snmp.ObjectType.OctetString;
+      payload = Buffer.from(value.replace(/[^0-9a-f]/gi, ''), 'hex');
+      break;
+    case 'a':
+      // The library validates the dotted quad (4 octets 0–255) and throws a
+      // RequestInvalidError otherwise.
+      type = snmp.ObjectType.IpAddress;
+      payload = value;
+      break;
+  }
 
-  const budgetMs = Math.min(opts.timeoutMs * (opts.retries + 1) + 2_000, WALK_BUDGET_MS);
-
+  const session = createSession(host, creds, opts);
   try {
-    const { stdout } = await execFileAsync('snmpset', args, {
-      timeout: budgetMs,
-      maxBuffer: 4 * 1024 * 1024,
-      env: mibDirsEnv(opts.mibDir),
-    });
-    // snmpset prints the response PDU in walk format ("OID = TYPE: value") —
-    // reuse the shared parser and return whatever the agent confirmed.
-    const parsed = parseWalkOutput(stdout);
-    for (const v of parsed.values()) return v;
+    const varbinds = await promiseRequest<snmp.VarBind[]>(cb =>
+      session.set([{ oid: stripDot(oid), type, value: payload }], cb)
+    );
+    for (const vb of varbinds) if (!snmp.isVarbindError(vb)) return normalizeValue(vb);
     return '';
   } catch (err) {
-    const e = err as Error & { stderr?: string };
-    // Keep the first few lines — net-snmp's "Reason:" line distinguishes a
-    // rejected SET from a transport failure.
-    const detail = ((e.stderr ?? '') || e.message).trim().split('\n').slice(0, 3).join(' | ');
-    throw new Error(`snmpset failed for ${host} (${oid}): ${detail}`);
-  }
-}
-
-/**
- * Parses `snmpwalk`/`snmpget` output lines of the form:
- *   .1.3.6.1.2.1.1.1.0 = STRING: Linux host 6.1 ...
- * Long values wrap onto continuation lines (no "OID =" prefix) at net-snmp's
- * display width — those are appended to the previous entry WITHOUT a space
- * while the value's opening quote is still open, so wrapped strings reassemble
- * exactly (a naive space-join corrupts every value longer than ~35 chars).
- */
-export function parseWalkOutput(stdout: string): Map<string, string> {
-  const raw = new Map<string, { type: string; text: string }>();
-  let lastOid: string | null = null;
-
-  for (const line of stdout.split('\n')) {
-    if (!line.trim()) continue;
-    // Type names may contain hyphens ("Hex-STRING") — \w alone would drop those
-    // lines and smear their values onto the previous entry. Some agents answer
-    // with a type mismatch, which net-snmp prints as
-    // `OID = Wrong Type (should be INTEGER): Gauge32: 4` — the optional group
-    // skips that prefix so the real type+value still parse instead of being
-    // smeared onto the previous entry.
-    const m = line.match(/^(\S+)\s*=\s*(?:Wrong Type \(should be [^)]*\):\s?)?([\w-]+):\s?(.*)$/);
-    if (m) {
-      lastOid = m[1];
-      raw.set(lastOid, { type: m[2], text: m[3] });
-    } else {
-      // net-snmp prints EMPTY string values WITHOUT a type prefix (`OID = ""`).
-      // Without this branch they'd be treated as continuation lines and smeared
-      // onto the previous entry's value (corrupting long hostnames).
-      const empty = line.match(/^(\S+)\s*=\s*""\s*$/);
-      if (empty) {
-        lastOid = empty[1];
-        raw.set(lastOid, { type: 'STRING', text: '""' });
-      } else if (lastOid && raw.has(lastOid)) {
-        const e = raw.get(lastOid)!;
-        // Continuation of a wrapped quoted value? Append verbatim — no space.
-        const quoteOpen = e.text.startsWith('"') && !e.text.endsWith('"');
-        e.text += quoteOpen ? line.trim() : ` ${line.trim()}`;
-      }
-    }
-  }
-
-  const entries = new Map<string, string>();
-  for (const [oid, { type, text }] of raw) entries.set(oid, extractValue(type, text));
-  return entries;
-}
-
-/** Normalizes a typed value to its machine-readable form. */
-export function extractValue(type: string, raw: string): string {
-  const text = (raw ?? '').trim();
-  switch (type) {
-    case 'INTEGER':
-    case 'Gauge32':
-    case 'Counter32':
-    case 'Counter64':
-    case 'Unsigned32':
-    case 'Timeticks': {
-      // Keep the sign — INTEGER values can be negative (e.g. dBm noise floors).
-      const m = text.match(/(-?\d+)/); // "up(1)", "-90", "12345 (2 min, 3 sec)" → number
-      return m ? m[1] : '';
-    }
-    case 'OBJECT IDENTIFIER':
-      return text; // dotted OID or resolved name — keep as-is
-    default: {
-      // net-snmp wraps DisplayStrings in double quotes when they need escaping
-      // (some builds quote all strings) — strip the outer pair.
-      if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) return text.slice(1, -1);
-      return text; // STRING, OCTET STRING, MAC ADDRESS, IpAddress, ...
-    }
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`snmpset failed for ${host} (${oid}): ${msg}`);
+  } finally {
+    session.close();
   }
 }
 

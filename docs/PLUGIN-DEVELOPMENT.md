@@ -217,7 +217,7 @@ What is collected, and why you'd look at it:
 
 | Field | Meaning |
 | --- | --- |
-| `cpuPercent` | % of ONE core over the last sample window (>100 possible on multi-core hosts). A plugin that should be idle but burns CPU (e.g. a walk loop that stopped being paced) shows up here. Note: child processes like `snmpwalk` are NOT counted — their cost shows in poll duration instead. |
+| `cpuPercent` | % of ONE core over the last sample window (>100 possible on multi-core hosts). A plugin that should be idle but burns CPU (e.g. a walk loop that stopped being paced) shows up here. Note: SNMP traffic is native UDP in-process (`@unm/snmp-client`) — its cost shows in poll duration, not CPU. |
 | `heapUsedBytes` / `heapTotalBytes` / `rssBytes` | Node heap + resident set size. Monotonic heap growth = leak; in a single-node-process container RSS ≈ the container's memory usage. |
 | `eventLoopLagMs` | Moving-average event-loop lag (ms). The classic Node overload indicator — catches blocking work that CPU% misses. 0 is healthy. |
 | `inFlight` | `/monitoring` + `/config` + `/plan` requests currently being handled. **>1 means a poll is taking longer than the API's 30 s cycle** → slow device or stuck walk; this directly explains telemetry gaps. |

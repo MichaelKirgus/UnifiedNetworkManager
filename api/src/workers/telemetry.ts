@@ -302,12 +302,14 @@ async function ingestInventory(
       // no longer reports (only when the key is present at all: an ABSENT key
       // means "plugin doesn't report tunnels", which must not wipe other data).
       const seenTunnelNames = new Set(values.map((v) => v.name));
-      await db.delete(schema.tunnels)
-        .where(and(
-          eq(schema.tunnels.deviceId, deviceId),
-          eq(schema.tunnels.pluginId, pluginId),
-          notInArray(schema.tunnels.name, Array.from(seenTunnelNames))
-        ));
+      if (seenTunnelNames.size > 0) {
+        await db.delete(schema.tunnels)
+          .where(and(
+            eq(schema.tunnels.deviceId, deviceId),
+            eq(schema.tunnels.pluginId, pluginId),
+            notInArray(schema.tunnels.name, Array.from(seenTunnelNames))
+          ));
+      }
     }
 
     // --- routes (static + dynamically-learned route entries) ----------------
@@ -433,12 +435,14 @@ async function ingestInventory(
       }
       // SSIDs are CONFIG objects — a removed network must vanish from the page.
       const seenWifiNames = new Set(values.map((v) => v.name));
-      await db.delete(schema.wifiSsids)
-        .where(and(
-          eq(schema.wifiSsids.deviceId, deviceId),
-          eq(schema.wifiSsids.pluginId, pluginId),
-          notInArray(schema.wifiSsids.name, Array.from(seenWifiNames))
-        ));
+      if (seenWifiNames.size > 0) {
+        await db.delete(schema.wifiSsids)
+          .where(and(
+            eq(schema.wifiSsids.deviceId, deviceId),
+            eq(schema.wifiSsids.pluginId, pluginId),
+            notInArray(schema.wifiSsids.name, Array.from(seenWifiNames))
+          ));
+      }
     }
 
     const rawWifiAirtime = Array.isArray(metrics['wifiAirtime']) ? (metrics['wifiAirtime'] as unknown[]) : [];
@@ -465,12 +469,14 @@ async function ingestInventory(
         });
       }
       const seenAirtimeChannels = new Set(values.map((v) => v.channel));
-      await db.delete(schema.wifiChannels)
-        .where(and(
-          eq(schema.wifiChannels.deviceId, deviceId),
-          eq(schema.wifiChannels.pluginId, pluginId),
-          notInArray(schema.wifiChannels.channel, Array.from(seenAirtimeChannels))
-        ));
+      if (seenAirtimeChannels.size > 0) {
+        await db.delete(schema.wifiChannels)
+          .where(and(
+            eq(schema.wifiChannels.deviceId, deviceId),
+            eq(schema.wifiChannels.pluginId, pluginId),
+            notInArray(schema.wifiChannels.channel, Array.from(seenAirtimeChannels))
+          ));
+      }
     }
 
     // Radios — noise floor + bandwidth for the spectrum view. Upserted by ifc;
@@ -512,12 +518,14 @@ async function ingestInventory(
         });
       }
       const seenRadioIfcs = new Set(values.map((v) => v.ifc));
-      await db.delete(schema.wifiRadios)
-        .where(and(
-          eq(schema.wifiRadios.deviceId, deviceId),
-          eq(schema.wifiRadios.pluginId, pluginId),
-          notInArray(schema.wifiRadios.ifc, Array.from(seenRadioIfcs))
-        ));
+      if (seenRadioIfcs.size > 0) {
+        await db.delete(schema.wifiRadios)
+          .where(and(
+            eq(schema.wifiRadios.deviceId, deviceId),
+            eq(schema.wifiRadios.pluginId, pluginId),
+            notInArray(schema.wifiRadios.ifc, Array.from(seenRadioIfcs))
+          ));
+      }
     }
 
     // Neighbor networks — scanner-style list. Upserted by BSSID; neighbors that
@@ -561,12 +569,14 @@ async function ingestInventory(
         });
       }
       const seenBssids = new Set(values.map((v) => v.bssid));
-      await db.delete(schema.wifiNeighbors)
-        .where(and(
-          eq(schema.wifiNeighbors.deviceId, deviceId),
-          eq(schema.wifiNeighbors.pluginId, pluginId),
-          notInArray(schema.wifiNeighbors.bssid, Array.from(seenBssids))
-        ));
+      if (seenBssids.size > 0) {
+        await db.delete(schema.wifiNeighbors)
+          .where(and(
+            eq(schema.wifiNeighbors.deviceId, deviceId),
+            eq(schema.wifiNeighbors.pluginId, pluginId),
+            notInArray(schema.wifiNeighbors.bssid, Array.from(seenBssids))
+          ));
+      }
     }
 
     // Associated WLAN clients — upserted by MAC (a roaming client keeps its
@@ -619,12 +629,14 @@ async function ingestInventory(
         });
       }
       const seenClientMacs = new Set(values.map((v) => v.mac));
-      await db.delete(schema.wifiClients)
-        .where(and(
-          eq(schema.wifiClients.deviceId, deviceId),
-          eq(schema.wifiClients.pluginId, pluginId),
-          notInArray(schema.wifiClients.mac, Array.from(seenClientMacs))
-        ));
+      if (seenClientMacs.size > 0) {
+        await db.delete(schema.wifiClients)
+          .where(and(
+            eq(schema.wifiClients.deviceId, deviceId),
+            eq(schema.wifiClients.pluginId, pluginId),
+            notInArray(schema.wifiClients.mac, Array.from(seenClientMacs))
+          ));
+      }
     }
   } catch (err) {
     // eslint-disable-next-line no-console
