@@ -20,6 +20,7 @@
  */
 
 import { createApiClient } from './apiClient';
+import { registerSelfMetricsLogQueueDepth } from './selfMetrics';
 import type { PluginIdentity } from './identity';
 
 export const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
@@ -53,6 +54,8 @@ export interface PluginLogger {
   /** Runtime toggle (wired to the plugin's `logToApi` option). */
   setEnabled(enabled: boolean): void;
   enabled: boolean;
+  /** Entries waiting in the queue — read by the SDK self-metrics endpoint. */
+  readonly logQueueDepth: number;
 }
 
 export interface LogCallOptions {
@@ -87,6 +90,10 @@ export function createPluginLogger(identity: PluginIdentity, opts: PluginLoggerO
   let enabled = true;
   let flushing = false;
   let warnedDrops = false;
+
+  // Expose the pending-entries count to the auto-mounted GET /metrics endpoint
+  // (self-metrics reads it at request time, so registration order doesn't matter).
+  registerSelfMetricsLogQueueDepth(() => queue.length);
 
   async function flush(): Promise<void> {
     if (flushing || queue.length === 0) return;
@@ -148,6 +155,9 @@ export function createPluginLogger(identity: PluginIdentity, opts: PluginLoggerO
     },
     get enabled() {
       return enabled;
+    },
+    get logQueueDepth() {
+      return queue.length;
     },
   };
 }

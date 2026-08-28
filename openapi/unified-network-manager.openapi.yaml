@@ -1283,6 +1283,51 @@ paths:
         '404':
           description: Plugin not found
 
+  /plugins/{id}/self-metrics:
+    get:
+      tags: [Plugins]
+      summary: Get runtime self-metrics samples of a plugin process
+      description: >-
+        Health samples of the plugin PROCESS itself (not its devices): CPU%,
+        heap/RSS memory, event-loop lag, in-flight work requests, last-poll
+        duration + error rate, emitted metric count and log queue depth.
+        Collected by an API worker polling each plugin's auto-mounted GET
+        /metrics endpoint every 30s (see @unm/plugin-sdk createSelfMetrics).
+        `latest` is the most recent sample; `history` carries up to `limit`
+        samples newest-first for sparklines. Samples are kept for
+        LOG_RETENTION_DAYS (default 7). A plugin that predates the endpoint
+        simply has no samples (`latest: null`).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 120, maximum: 576 }
+          description: Max history samples to return (default 120 = last hour at the 30s cadence)
+      responses:
+        '200':
+          description: Latest sample + history
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pluginId, latest, history]
+                properties:
+                  pluginId: { type: string }
+                  latest:
+                    $ref: '#/components/schemas/PluginSelfMetricsSample'
+                  history:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PluginSelfMetricsSample'
+        '401':
+          description: Authentication required
+        '404':
+          description: Plugin not found
+
   /plugins/{id}/actions:
     get:
       tags: [Plugins]
@@ -2652,6 +2697,30 @@ components:
         context: { type: object, additionalProperties: true, nullable: true, description: "Structured details; null when absent" }
         timestamp: { type: string, format: date-time, description: "ISO-8601 timestamp from the plugin's clock" }
 
+    PluginSelfMetricsSample:
+      type: object
+      description: >-
+        One self-metrics sample of a plugin process, collected by the API
+        worker from the plugin's auto-mounted GET /metrics endpoint. All
+        fields are nullable — older plugin images (predating the SDK feature)
+        or partial payloads simply omit what they don't report.
+      required: [id, pluginId, timestamp]
+      properties:
+        id: { type: string }
+        pluginId: { type: string }
+        uptimeSeconds: { type: [integer, 'null'], description: "Seconds since the plugin process started" }
+        heapUsedBytes: { type: [integer, 'null'] }
+        heapTotalBytes: { type: [integer, 'null'] }
+        rssBytes: { type: [integer, 'null'], description: "Resident set size — in a single-node-process container this is the container's memory usage" }
+        cpuPercent: { type: [number, 'null'], description: "% of ONE core over the plugin's sample window (can exceed 100 on multi-core hosts)" }
+        eventLoopLagMs: { type: [number, 'null'], description: "Moving-average event-loop lag in ms (0 = healthy; high values mean blocking work)" }
+        inFlight: { type: [integer, 'null'], description: "/monitoring + /config + /plan requests being handled at sample time (>1 = a poll is taking longer than the 30s cycle)" }
+        lastPollMs: { type: [number, 'null'], description: "Duration of the plugin's last completed work request" }
+        errorRatePercent: { type: [number, 'null'], description: "Failure rate of the plugin's last N work requests (0-100)" }
+        emittedMetricsCount: { type: [integer, 'null'], description: "Metric keys in the plugin's last /monitoring payload (per-poll telemetry weight)" }
+        logQueueDepth: { type: [integer, 'null'], description: "Pending entries in the plugin logger queue; null when no logger is registered" }
+        timestamp: { type: string, format: date-time }
+
     NetworkRow:
       type: object
       description: >-
@@ -3269,6 +3338,7 @@ components:
           items:
             $ref: '#/components/schemas/CredentialSlotDescriptor'
           description: "Additional named credential slots beyond the primary secret (null = none)"
+        declaredMetricCount: { type: [integer, 'null'], description: "Number of metric descriptors the plugin declared in /discover (how many metrics it can emit); null when unknown" }
 
     DeviceModelEntry:
       type: object

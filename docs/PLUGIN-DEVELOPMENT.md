@@ -65,7 +65,7 @@ the shared SDK first — keep that structure when editing.
 | Export | Purpose |
 | --- | --- |
 | `resolvePluginIdentity({uuid,name,version,vendors,capabilities,authType?})` | Multi-instance identity from env (`PORT`, `ADVERTISED_ENDPOINT`, `PLUGIN_INSTANCE_ID`, `PLUGIN_DISPLAY_NAME`). Returns `{effectiveUuid, displayName, port, endpoint, …}`. |
-| `createPluginServer({identity, logTag?, jsonLimit?, iconsDir?, discovery?})` | Pre-wired express app: cors + json + `/healthz` + `/discover` (+ static `/icons`). `.listen()` binds the port and starts mDNS advertising (service type `_unm-plugin._tcp`). Returns `{app, identity, listen()}`. |
+| `createPluginServer({identity, logTag?, jsonLimit?, iconsDir?, discovery?, selfMetricsExtra?})` | Pre-wired express app: cors + json + `/healthz` + `/discover` + **auto-mounted `GET /metrics`** (self-metrics — see §9) (+ static `/icons`). `.listen()` binds the port and starts mDNS advertising (service type `_unm-plugin._tcp`). Returns `{app, identity, listen()}`. |
 | `readSettings(req, options)` | Parses the `x-unm-settings` JSON header the API injects on every call, merged over your declared option defaults. Missing/malformed header → sane defaults. |
 | `clampInt(v,min,max,fallback)`, `hostFromAddress(addr)`, `pickString/pickNumber` | Small shared helpers. |
 | `MetricDescriptor` + factories `gaugeMetric/textMetric/tableMetric/errorDescriptor/modelFirmwareDescriptors` | The metric contract the webapp renders from, plus convenience builders. |
@@ -77,7 +77,8 @@ the shared SDK first — keep that structure when editing.
 | `CounterTracker` (`{toBitsPerSec?=true, staleMs?}`) | Counter-delta rate tracking: `.sample(key, value)` → bits/s (or Δ/s), null on first sample or counter reset; `.evictStale()`, `.clear()`. Use for any cumulative byte/packet counters. |
 | `TtlCache<V>` (`{isFresh?, maxSize?}`) | TTL cache with a quality gate + oldest-first eviction. Pair it with a plain `Map` "lastKnown" fallback to serve stale data on blips instead of flapping health. |
 | `createApiClient()` / `isNotFound(err)` | Axios bootstrap for plugins that call BACK into the API's internal `/plugin/*` routes (basic-auth, secrets-provider). Reads `UNM_API_URL` + `PLUGIN_API_KEY`. |
-| `createPluginLogger(identity)` | Structured log shipping to the API (`POST /plugin/logs`). Fire-and-forget batching with drop-on-failure — see §8 Logging. |
+| `createPluginLogger(identity)` | Structured log shipping to the API (`POST /plugin/logs`). Fire-and-forget batching with drop-on-failure — see §8 Logging. Its queue depth is automatically exposed in `GET /metrics`. |
+| `createSelfMetrics(opts?)` → `{trackMiddleware, handler, collect}` | The self-metrics collector behind the auto-mounted `GET /metrics` (CPU%, memory, event-loop lag, poll stats). Only needed if you build a server by hand instead of using `createPluginServer` — see §9. |
 | `requirePluginKey` | Middleware authenticating the calling API via `x-plugin-api-key` (skipped when unset = dev mode). |
 | Contract types | `Health`, `MetricDescriptor`, `PluginOptionDescriptor`, `DeviceModelEntry`, `CredentialSlotDescriptor`, `SecretField/SecretType`, `RiskLevel`, `InputSchema(Property)`, `CatalogEntry`, `ProvisionRequest`, `PlanStep`, `Plan`, `PlanDevice<C>`, `PlanRequest<C>`, `StepCredentials`, `MonitoringRequestBody/ResponseBody`, `ConfigRequestBody/ResponseBody`. |
 
@@ -207,7 +208,39 @@ Log failures and state changes; keep messages short — details go in `context`.
 
 ---
 
-## 9. Verification checklist (per plugin)
+## 9. Self-metrics (your plugin's own runtime health)
+
+Every plugin built with `createPluginServer()` automatically serves **`GET /metrics`**
+— no code needed. The API polls it every 30 s and stores samples in
+`plugin_metrics`; the webapp's Plugins page shows them per plugin (hover a row).
+What is collected, and why you'd look at it:
+
+| Field | Meaning |
+| --- | --- |
+| `cpuPercent` | % of ONE core over the last sample window (>100 possible on multi-core hosts). A plugin that should be idle but burns CPU (e.g. a walk loop that stopped being paced) shows up here. Note: child processes like `snmpwalk` are NOT counted — their cost shows in poll duration instead. |
+| `heapUsedBytes` / `heapTotalBytes` / `rssBytes` | Node heap + resident set size. Monotonic heap growth = leak; in a single-node-process container RSS ≈ the container's memory usage. |
+| `eventLoopLagMs` | Moving-average event-loop lag (ms). The classic Node overload indicator — catches blocking work that CPU% misses. 0 is healthy. |
+| `inFlight` | `/monitoring` + `/config` + `/plan` requests currently being handled. **>1 means a poll is taking longer than the API's 30 s cycle** → slow device or stuck walk; this directly explains telemetry gaps. |
+| `lastPollMs` / `errorRatePercent` | Duration and failure rate of the last 20 work requests. Distinguishes "plugin overloaded" from "device unresponsive". |
+| `emittedMetricsCount` | Metric keys in your LAST `/monitoring` payload — the actual per-poll telemetry weight (vs. the declared descriptor count shown next to it). Grows as you add metrics; a proxy for DB write cost. |
+| `logQueueDepth` | Pending entries in the plugin logger queue (absent when you have no logger). A full queue means log shipping is falling behind. |
+| `uptimeSeconds` | Process age — context after restarts (cold caches, first-sample nulls). |
+
+**Custom gauges:** pass `selfMetricsExtra` to `createPluginServer()` — an object or a function returning an object of finite numbers, merged into the response under its own keys. Nothing needs it on day one; everything above is collected generically in the SDK.
+
+If you build your express app by hand (no `createPluginServer`), mount the same thing yourself:
+```ts
+import { createSelfMetrics } from '@unm/plugin-sdk';
+const selfMetrics = createSelfMetrics(); // optional: { extra, windowSize }
+app.use(selfMetrics.trackMiddleware);    // BEFORE your /monitoring, /config, /plan routes
+app.get('/metrics', selfMetrics.handler);
+```
+
+Samples are kept `LOG_RETENTION_DAYS` (default 7) and swept by the same retention worker as plugin logs.
+
+---
+
+## 10. Verification checklist (per plugin)
 
 ```bash
 cd plugins/<your-plugin> && npx tsc --noEmit        # type-check

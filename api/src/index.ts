@@ -23,6 +23,7 @@ import { startPluginDiscovery } from './plugins/discovery';
 import { startConfigJobWorker } from './workers/configJob';
 import { startPlanExecutorWorker } from './workers/planExecutor';
 import { startLogRetentionWorker } from './workers/logRetention';
+import { startPluginMetricsWorker } from './workers/pluginMetrics';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const API_PREFIX = '/v1';
@@ -134,6 +135,7 @@ async function main(): Promise<void> {
     startConfigJobWorker();
     startPlanExecutorWorker();
     startLogRetentionWorker();
+    startPluginMetricsWorker();
   });
 
   // Discover plugins via mDNS/DNS-SD, with HTTP polling as a fallback for

@@ -24,3 +24,5 @@ export { createApiClient, isNotFound } from './apiClient';
 export type { ApiClientOptions } from './apiClient';
 export { createPluginLogger, LOG_LEVELS } from './logging';
 export type { PluginLogger, PluginLoggerOptions, PluginLogEntry, LogLevel, LogCallOptions } from './logging';
+export { createSelfMetrics } from './selfMetrics';
+export type { PluginSelfMetrics, SelfMetricsOptions, SelfMetricsLoggerLike } from './selfMetrics';

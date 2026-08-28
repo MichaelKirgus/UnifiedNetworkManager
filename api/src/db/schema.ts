@@ -1,4 +1,4 @@
-import { pgTable, text, boolean, integer, doublePrecision, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
+import { pgTable, text, boolean, integer, bigint, doublePrecision, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const users = pgTable('users', {
@@ -282,6 +282,45 @@ export const pluginLogs = pgTable(
         .on(table.pluginId, table.timestamp),
       // Plain timestamp index for the retention sweep (DELETE WHERE timestamp < cutoff).
       idxPluginLogsTimestamp: index('idx_plugin_logs_timestamp').on(table.timestamp),
+    };
+  }
+);
+
+// Self-metrics samples of the plugin processes themselves (see workers/pluginMetrics.ts).
+// The API polls each registered plugin's GET /metrics endpoint (auto-mounted by
+// @unm/plugin-sdk) and stores one row per sample. Powers the per-plugin health
+// view in the webapp (CPU/memory/event-loop lag/poll duration/error rate).
+export const pluginMetrics = pgTable(
+  'plugin_metrics',
+  {
+    id: text('id').primaryKey(),
+    pluginId: text('pluginId').notNull(),
+    // Seconds since the plugin process started.
+    uptimeSeconds: integer('uptimeSeconds'),
+    heapUsedBytes: bigint('heapUsedBytes', { mode: 'number' }),
+    heapTotalBytes: bigint('heapTotalBytes', { mode: 'number' }),
+    rssBytes: bigint('rssBytes', { mode: 'number' }),
+    // % of one core over the plugin's own sample window (can exceed 100).
+    cpuPercent: doublePrecision('cpuPercent'),
+    // Moving-average event-loop lag in ms.
+    eventLoopLagMs: doublePrecision('eventLoopLagMs'),
+    // Work requests (/monitoring, /config, /plan) being handled at sample time.
+    inFlight: integer('inFlight'),
+    lastPollMs: doublePrecision('lastPollMs'),
+    // Failure rate of the plugin's last N work requests (0-100).
+    errorRatePercent: doublePrecision('errorRatePercent'),
+    // Metric keys in the plugin's last /monitoring payload.
+    emittedMetricsCount: integer('emittedMetricsCount'),
+    // Pending entries in the plugin logger queue (null = no logger registered).
+    logQueueDepth: integer('logQueueDepth'),
+    timestamp: text('timestamp').notNull(),
+  },
+  (table) => {
+    return {
+      idxPluginMetricsPluginTimestamp: index('idx_plugin_metrics_plugin_timestamp')
+        .on(table.pluginId, table.timestamp),
+      // Plain timestamp index for the retention sweep.
+      idxPluginMetricsTimestamp: index('idx_plugin_metrics_timestamp').on(table.timestamp),
     };
   }
 );

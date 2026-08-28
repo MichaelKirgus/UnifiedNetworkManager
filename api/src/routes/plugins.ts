@@ -49,6 +49,17 @@ function serializePlugin(row: any) {
     iconUrl: row.iconUrl ?? null,
     deviceModels,
     credentialSlots: parseCredentialSlots(row.credentialSlots),
+    // Number of metric descriptors the plugin declared in /discover — the
+    // "how many metrics can this plugin emit" figure for the Plugins page.
+    declaredMetricCount: (() => {
+      if (typeof row.metricDescriptors !== 'string' || row.metricDescriptors.length === 0) return null;
+      try {
+        const parsed = JSON.parse(row.metricDescriptors);
+        return Array.isArray(parsed) ? parsed.length : null;
+      } catch {
+        return null;
+      }
+    })(),
     lastSeenAt: row.lastSeenAt ?? null,
   };
 }
@@ -159,6 +170,37 @@ router.get('/plugins/:id/metrics', requireAuth, async (req, res) => {
     }
   }
   res.status(200).json({ pluginId: id, metrics });
+});
+
+// GET /plugins/:id/self-metrics - Runtime health samples of the plugin process
+// itself (CPU%, memory, event-loop lag, poll duration/error rate, emitted
+// metric count, log queue depth), collected by workers/pluginMetrics.ts from
+// the plugin's auto-mounted GET /metrics endpoint. `latest` is the most recent
+// sample; `history` carries up to `limit` samples newest-first for sparklines.
+router.get('/plugins/:id/self-metrics', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  const row = await db.query.plugins.findFirst({
+    where: (plugins, { eq }) => eq(plugins.id, id),
+  });
+  if (!row) {
+    res.status(404).json({ error: 'Plugin not found' });
+    return;
+  }
+
+  const rawLimit = Number(req.query.limit ?? 120); // default: last hour at the 30s poll cadence
+  const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 120, 1), 576);
+
+  const samples = await db.query.pluginMetrics.findMany({
+    where: (metrics, { eq }) => eq(metrics.pluginId, id),
+    orderBy: [desc(schema.pluginMetrics.timestamp)],
+    limit,
+  });
+
+  res.status(200).json({
+    pluginId: id,
+    latest: samples[0] ?? null,
+    history: samples,
+  });
 });
 
 // GET /plugins/:id/actions - The action catalog a plugin declared in its

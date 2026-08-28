@@ -405,6 +405,32 @@ export async function initDb(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_plugin_logs_timestamp
       ON plugin_logs (timestamp)`);
 
+  // Self-metrics samples of the plugin processes themselves (see schema.pluginMetrics).
+  // Polled by workers/pluginMetrics.ts from each plugin's GET /metrics endpoint.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS plugin_metrics (
+      id TEXT PRIMARY KEY,
+      "pluginId" TEXT NOT NULL,
+      "uptimeSeconds" INTEGER,
+      "heapUsedBytes" BIGINT,
+      "heapTotalBytes" BIGINT,
+      "rssBytes" BIGINT,
+      "cpuPercent" DOUBLE PRECISION,
+      "eventLoopLagMs" DOUBLE PRECISION,
+      "inFlight" INTEGER,
+      "lastPollMs" DOUBLE PRECISION,
+      "errorRatePercent" DOUBLE PRECISION,
+      "emittedMetricsCount" INTEGER,
+      "logQueueDepth" INTEGER,
+      timestamp TEXT NOT NULL
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_plugin_metrics_plugin_timestamp
+      ON plugin_metrics ("pluginId", timestamp)`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_plugin_metrics_timestamp
+      ON plugin_metrics (timestamp)`);
+
   // The legacy singular columns are superseded by device_plugins. There is no
   // production data to migrate (confirmed), so drop them outright — any dev
   // devices must be recreated via the new multi-plugin create flow.

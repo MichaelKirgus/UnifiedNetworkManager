@@ -531,7 +531,28 @@ export interface Plugin {
   deviceModels?: DeviceModelEntry[] | null;
   /** Additional named credential slots beyond the primary secret (null = none). */
   credentialSlots?: CredentialSlotDescriptor[] | null;
+  /** Number of metric descriptors declared in /discover (how many metrics it can emit); null when unknown. */
+  declaredMetricCount?: number | null;
   lastSeenAt?: string | null;
+}
+
+/** One self-metrics sample of a plugin process (GET /plugins/:id/self-metrics). */
+export interface PluginSelfMetricsSample {
+  id: string;
+  pluginId: string;
+  uptimeSeconds: number | null;
+  heapUsedBytes: number | null;
+  heapTotalBytes: number | null;
+  rssBytes: number | null;
+  /** % of one core (can exceed 100 on multi-core hosts). */
+  cpuPercent: number | null;
+  eventLoopLagMs: number | null;
+  inFlight: number | null;
+  lastPollMs: number | null;
+  errorRatePercent: number | null;
+  emittedMetricsCount: number | null;
+  logQueueDepth: number | null;
+  timestamp: string;
 }
 
 export interface MetricDescriptor {
@@ -882,6 +903,11 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<LogEntry[]>(`/logs${suffix}`);
   },
+  // Runtime self-metrics of a plugin process (CPU/memory/lag/poll stats).
+  pluginSelfMetrics: (pluginId: string, limit = 120) =>
+    apiFetch<{ pluginId: string; latest: PluginSelfMetricsSample | null; history: PluginSelfMetricsSample[] }>(
+      `/plugins/${pluginId}/self-metrics?limit=${limit}`
+    ),
   // Users + permission catalog.
   users: () => apiFetch<User[]>('/users'),
   createUser: (body: { username: string; password: string; roles?: string[]; permissions?: string[] }) =>

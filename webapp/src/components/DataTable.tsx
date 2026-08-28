@@ -1,4 +1,4 @@
-import { MouseEvent as ReactMouseEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, MouseEvent as ReactMouseEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { Download, Filter, RotateCcw, Search, SlidersHorizontal, X } from 'lucide-react';
 import { useTablePrefs } from './useTablePrefs';
@@ -45,8 +45,9 @@ interface DataTableProps<T> {
   bulkActions?: DataTableBulkAction<T>[];
   /** Called when the pointer enters a row, or leaves the table body entirely.
    * Used e.g. by the WiFi page to highlight matching spectrum bars on hover. */
-  onRowHover?: (row: T | null) => void;
-  /** Fill the parent's height (parent must have a definite height, e.g. the
+  onRowHover?: (row: T | null) => void;  /** Optional detail content rendered in a full-width row directly under each
+   * data row (e.g. per-plugin self-metrics on the Plugins page). */
+  renderRowDetail?: (row: T) => ReactNode;  /** Fill the parent's height (parent must have a definite height, e.g. the
    * WiFi table pane behind the splitter). Without it the card grows with its
    * content up to a viewport-based cap; either way the header + filter rows
    * stay pinned while the body scrolls internally. */
@@ -149,6 +150,7 @@ export function DataTable<T>({
   selectable = false,
   bulkActions,
   onRowHover,
+  renderRowDetail,
   fillHeight = false,
 }: DataTableProps<T>) {
   const { prefs, setPrefs, reset } = useTablePrefs(storageKey);
@@ -607,29 +609,39 @@ export function DataTable<T>({
           >
             {viewRows.map((row) => {
               const key = rowKey(row);
+              const detail = renderRowDetail ? renderRowDetail(row) : null;
               return (
-                <tr
-                  key={key}
-                  className={clsx('hover:bg-slate-50', selectable && selectedKeys.has(key) && 'bg-blue-50/40')}
-                  onMouseEnter={() => onRowHover?.(row)}
-                >
-                  {selectable && (
-                    <td className="px-3 py-2">
-                      <input
-                        type="checkbox"
-                        aria-label={`Select row ${key}`}
-                        checked={selectedKeys.has(key)}
-                        onChange={() => toggleRow(key)}
-                        className="h-3.5 w-3.5 rounded border-slate-300 text-slate-900 focus:ring-slate-400"
-                      />
-                    </td>
+                <Fragment key={key}>
+                  <tr
+                    className={clsx('hover:bg-slate-50', selectable && selectedKeys.has(key) && 'bg-blue-50/40')}
+                    onMouseEnter={() => onRowHover?.(row)}
+                  >
+                    {selectable && (
+                      <td className="px-3 py-2">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select row ${key}`}
+                          checked={selectedKeys.has(key)}
+                          onChange={() => toggleRow(key)}
+                          className="h-3.5 w-3.5 rounded border-slate-300 text-slate-900 focus:ring-slate-400"
+                        />
+                      </td>
+                    )}
+                    {visibleColumns.map((col) => (
+                      <td key={col.key} className="overflow-hidden px-4 py-2 text-slate-700">
+                        {col.render ? col.render(row) : String((row as Record<string, unknown>)[col.key] ?? '')}
+                      </td>
+                    ))}
+                  </tr>
+                  {/* Full-width detail row directly under the data row. */}
+                  {detail !== null && detail !== undefined && (
+                    <tr className="bg-slate-50/70">
+                      <td colSpan={visibleColumns.length + (selectable ? 1 : 0)} className="px-4 py-2 text-xs text-slate-600">
+                        {detail}
+                      </td>
+                    </tr>
                   )}
-                  {visibleColumns.map((col) => (
-                    <td key={col.key} className="overflow-hidden px-4 py-2 text-slate-700">
-                      {col.render ? col.render(row) : String((row as Record<string, unknown>)[col.key] ?? '')}
-                    </td>
-                  ))}
-                </tr>
+                </Fragment>
               );
             })}
           </tbody>

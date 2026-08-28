@@ -9,6 +9,7 @@ import cors from 'cors';
 import express, { Express, Request, Response } from 'express';
 import { Bonjour } from 'bonjour-service';
 import { PluginIdentity } from './identity';
+import { createSelfMetrics } from './selfMetrics';
 import {
   CatalogEntry,
   CredentialSlotDescriptor,
@@ -44,6 +45,8 @@ export interface PluginServerOptions {
   iconsDir?: string;
   /** Extra /discover fields (see DiscoveryExtras). May be a function for dynamic catalogs. */
   discovery?: DiscoveryExtras | (() => DiscoveryExtras);
+  /** Extra custom self-metrics gauges, merged into GET /metrics (see createSelfMetrics). */
+  selfMetricsExtra?: Record<string, number> | (() => Record<string, number>);
 }
 
 export interface PluginServer {
@@ -115,6 +118,15 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
     app.use('/icons', express.static(path.join(opts.iconsDir)));
   }
 
+  // Self-metrics: the UNM API polls GET /metrics per plugin and persists the
+  // samples for the webapp's per-plugin health view. Mounted automatically —
+  // plugins need zero code for CPU/memory/lag/poll-duration visibility.
+  // The plugin logger (if any) registers its queue depth with the self-metrics
+  // module itself — no wiring needed here.
+  const selfMetrics = createSelfMetrics({
+    extra: opts.selfMetricsExtra,
+  });
+
   app.get('/healthz', (_req: Request, res: Response) => {
     res.status(200).json({ status: 'ok' });
   });
@@ -122,6 +134,11 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
   app.get('/discover', (_req: Request, res: Response) => {
     res.status(200).json(buildDiscoverPayload(identity, opts.discovery));
   });
+
+  // Track work requests (/monitoring, /config, /plan): in-flight count,
+  // duration + success of the last N. Must be registered BEFORE the routes.
+  app.use(selfMetrics.trackMiddleware);
+  app.get('/metrics', selfMetrics.handler);
 
   return {
     app,
