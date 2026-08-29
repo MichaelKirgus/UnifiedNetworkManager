@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
-import { Eye, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Copy, Eye, Pencil, Plus, Power, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
@@ -36,6 +36,10 @@ export default function Devices() {
   const emptyIdentity = { name: '', vendor: '', deviceType: 'firewall', managementAddress: '', siteId: '', model: '', firmwareVersion: '' };
   const [identity, setIdentity] = useState(emptyIdentity);
 
+  // Telemetry polling toggle (create + edit modes). Default enabled — disabled
+  // devices are not polled; their historical data and last metrics stay preserved.
+  const [enabled, setEnabled] = useState(true);
+
   // Plugin ids currently selected in the assignment builder (reported via
   // onRowsChange) — drives which model catalogs are offered for the vendor.
   const [selectedPluginIds, setSelectedPluginIds] = useState<string[]>([]);
@@ -53,6 +57,20 @@ export default function Devices() {
   const secretsQuery = useQuery({ queryKey: ['secrets'], queryFn: api.secrets });
   // Site picker options (the Sites page owns creation; this is read-only here).
   const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: api.sites });
+
+  // Clone handoff from DeviceDetail (?edit=<id>): once the device list has
+  // loaded, open the edit form pre-filled with that (cloned) device so the
+  // user can change the IP or other settings before saving.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const editId = searchParams.get('edit');
+    if (!editId || !devicesQuery.data) return;
+    const target = devicesQuery.data.find((d) => d.id === editId);
+    if (target) {
+      openEdit(target);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, devicesQuery.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Model catalog for the selected vendor, merged across ALL plugins currently
   // assigned in the form (a device can have several — e.g. LANCOM + SNMP).
@@ -113,6 +131,23 @@ export default function Devices() {
     deleteDevice.mutate(row.id);
   }
 
+  // Clone reuses ALL settings (plugins + credentials, secondary IPs,
+  // per-device overrides). On success the edit form opens pre-filled with the
+  // clone so the user can change the IP or other settings before saving.
+  const cloneDevice = useMutation({
+    mutationFn: (id: string) => api.cloneDevice(id),
+    onSuccess: (cloned) => {
+      queryClient.invalidateQueries({ queryKey: ['devices'] });
+      openEdit(cloned);
+    },
+    onError: (err: Error) => setFormError(err.message),
+  });
+
+  function handleClone(row: Device) {
+    if (!window.confirm(`Clone device "${row.name}"?\nAll plugin assignments, credentials, secondary IPs and per-device settings are reused. The edit form opens so you can change the IP or other settings.`)) return;
+    cloneDevice.mutate(row.id);
+  }
+
   // Bulk delete (selection bar). Devices referenced by plans fail with 409 —
   // the rest still go through, so report per-device outcomes.
   const bulkDeleteDevices = useMutation({
@@ -155,6 +190,7 @@ export default function Devices() {
         siteId: identity.siteId || null,
         model: identity.model.trim() || null,
         firmwareVersion: identity.firmwareVersion.trim() || null,
+        enabled,
       });
       // Diff secondary IPs: add new, remove deleted.
       const toAdd = additionalIps.filter((ip) => !originalSecondaryIps.some((o) => o.address === ip));
@@ -199,6 +235,7 @@ export default function Devices() {
     setShowForm(false);
     setEditingId(null);
     setIdentity(emptyIdentity);
+    setEnabled(true);
     setSelectedPluginIds([]);
     setAdditionalIps([]);
     setOriginalSecondaryIps([]);
@@ -219,6 +256,7 @@ export default function Devices() {
         plugins: assignments,
         model: identity.model.trim() || null,
         firmwareVersion: identity.firmwareVersion.trim() || null,
+        enabled,
       });
     }
   }
@@ -248,6 +286,7 @@ export default function Devices() {
       model: device.model ?? '',
       firmwareVersion: device.firmwareVersion ?? '',
     });
+    setEnabled(device.enabled !== false);
     const secondaries = (device.ips ?? []).filter((ip) => !ip.isPrimary);
     setAdditionalIps(secondaries.map((s) => s.address));
     setOriginalSecondaryIps(
@@ -318,7 +357,23 @@ export default function Devices() {
         );
       },
     },
-    { header: 'Status', key: 'status', render: (row) => <StatusBadge status={row.status} /> },
+    {
+      header: 'Status',
+      key: 'status',
+      render: (row) => (
+        <span className="inline-flex items-center gap-1.5">
+          <StatusBadge status={row.status} />
+          {row.enabled === false && (
+            <span
+              title="Telemetry polling disabled — historical data and last metrics are preserved"
+              className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600"
+            >
+              disabled
+            </span>
+          )}
+        </span>
+      ),
+    },
     {
       header: 'Metrics',
       key: 'metrics',
@@ -340,7 +395,7 @@ export default function Devices() {
       header: 'Actions',
       key: 'actions',
       excludeFromExport: true,
-      width: 150,
+      width: 180,
       sortable: false,
       render: (row) => (
         <div className="flex items-center gap-1">
@@ -359,6 +414,14 @@ export default function Devices() {
             onClick={() => openEdit(row)}
           >
             <Pencil className="h-4 w-4" />
+          </button>
+          <button
+            aria-label={`Clone ${row.name}`}
+            title="Clone device (reuses all settings)"
+            className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+            onClick={() => handleClone(row)}
+          >
+            <Copy className="h-4 w-4" />
           </button>
           <button
             aria-label={`Delete ${row.name}`}
@@ -516,6 +579,22 @@ export default function Devices() {
             </select>
           </div>
 
+          <div className="col-span-full flex items-center gap-2">
+            <input
+              id="device-enabled"
+              type="checkbox"
+              checked={enabled}
+              onChange={(e) => setEnabled(e.target.checked)}
+              className="h-4 w-4 rounded border-slate-300"
+            />
+            <label htmlFor="device-enabled" className="text-sm font-medium text-slate-700">
+              Enabled (poll telemetry)
+            </label>
+            <span className="text-xs text-slate-400">
+              Disabled devices are not polled — their historical data and last metrics stay preserved.
+            </span>
+          </div>
+
           <div className="col-span-full">
             <label className="mb-1 block text-sm font-medium text-slate-700">Additional IPs (optional)</label>
             <div className="flex gap-2">
@@ -607,6 +686,25 @@ export default function Devices() {
           emptyMessage="No devices registered yet."
           selectable
           bulkActions={[
+            {
+              label: 'Disable selected',
+              confirm: (count) =>
+                `Stop polling ${count} device(s)?\nTheir historical data and last metrics are preserved — re-enable any time to resume polling.`,
+              onClick: async (rows) => {
+                const { errors } = await api.setDevicesEnabled(rows.map((r) => r.id), false);
+                queryClient.invalidateQueries({ queryKey: ['devices'] });
+                if (errors.length > 0) window.alert(`Some devices could not be disabled:\n${errors.join('\n')}`);
+              },
+            },
+            {
+              label: 'Enable selected',
+              confirm: (count) => `Resume polling ${count} device(s)?`,
+              onClick: async (rows) => {
+                const { errors } = await api.setDevicesEnabled(rows.map((r) => r.id), true);
+                queryClient.invalidateQueries({ queryKey: ['devices'] });
+                if (errors.length > 0) window.alert(`Some devices could not be enabled:\n${errors.join('\n')}`);
+              },
+            },
             {
               label: 'Delete selected',
               confirm: (count) =>

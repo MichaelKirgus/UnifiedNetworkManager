@@ -25,6 +25,7 @@ import {
   listDeviceAddresses,
   removeDeviceIp,
 } from '../deviceIps';
+import { parseExtraCredentials } from '../types/credentialSlots';
 import { isValidAddress, addressError } from '../utils/address';
 
 const router = Router();
@@ -41,6 +42,7 @@ function serializeDevice(row: Device, siteName?: string | null) {
     status: row.status,
     model: row.model ?? null,
     firmwareVersion: row.firmwareVersion ?? null,
+    enabled: row.enabled !== false,
   };
 }
 
@@ -367,8 +369,18 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
     updates[field] = ref.value ?? null;
   }
 
+  // enabled toggles telemetry polling for the device. Disabled devices keep
+  // their historical data + last metrics; re-enabling resumes polling.
+  if ('enabled' in body) {
+    if (typeof body.enabled !== 'boolean') {
+      res.status(400).json({ error: '"enabled" must be a boolean' });
+      return;
+    }
+    updates.enabled = body.enabled;
+  }
+
   if (Object.keys(updates).length === 0) {
-    res.status(400).json({ error: `Provide at least one of: ${UPDATABLE_FIELDS.join(', ')}, siteId, model, firmwareVersion` });
+    res.status(400).json({ error: `Provide at least one of: ${UPDATABLE_FIELDS.join(', ')}, siteId, model, firmwareVersion, enabled` });
     return;
   }
 
@@ -402,6 +414,112 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
     plugins,
     ips,
   });
+});
+
+// POST /devices/:deviceId/clone - create a copy of the device with all its
+// settings (plugin assignments incl. credentials + extra slots, secondary IPs,
+// per-device plugin setting overrides). The clone gets a fresh id, status
+// 'unknown' and the name "<source> (copy)" — the webapp opens the edit form
+// right away so the user can change the IP/name before saving.
+router.post('/devices/:deviceId/clone', requireAuth, requirePermission('devices:write'), async (req, res) => {
+  const { deviceId } = req.params;
+  try {
+    const source = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+    if (!source) {
+      res.status(404).json({ error: 'Device not found' });
+      return;
+    }
+
+    // Unique clone name ("X (copy)", "X (copy 2)", ...).
+    const existingNames = new Set(
+      (await db.query.devices.findMany()).map((d) => d.name.toLowerCase())
+    );
+    let cloneName = `${source.name} (copy)`;
+    for (let i = 2; existingNames.has(cloneName.toLowerCase()); i++) {
+      cloneName = `${source.name} (copy ${i})`;
+    }
+
+    const id = uuidv4();
+    await db.insert(schema.devices).values({
+      id,
+      name: cloneName,
+      vendor: source.vendor,
+      deviceType: source.deviceType,
+      managementAddress: source.managementAddress,
+      siteId: source.siteId ?? null,
+      status: 'unknown',
+      model: source.model ?? null,
+      firmwareVersion: source.firmwareVersion ?? null,
+      enabled: source.enabled !== false,
+      createdAt: new Date().toISOString(),
+    });
+
+    // Copy plugin assignments (same plugins, same credential sources — the user
+    // typically changes only the address) + secondary IPs + per-device setting
+    // overrides. Roll everything back on failure so no orphan rows remain.
+    try {
+      const sourceAssignments = await db.query.devicePlugins.findMany({
+        where: eq(schema.devicePlugins.deviceId, deviceId),
+      });
+      for (const a of sourceAssignments) {
+        await addAssignment({
+          deviceId: id,
+          pluginId: a.pluginId,
+          secretId: a.secretId ?? null,
+          isPrimary: a.isPrimary === true,
+          extraCredentials: parseExtraCredentials(a.extraCredentials),
+        });
+      }
+      const sourceIps = await db.query.deviceIps.findMany({
+        where: eq(schema.deviceIps.deviceId, deviceId),
+      });
+      for (const ip of sourceIps) {
+        await addDeviceIp({ deviceId: id, address: ip.address });
+      }
+      const sourceSettings = await db.query.pluginSettings.findMany({
+        where: eq(schema.pluginSettings.deviceId, deviceId),
+      });
+      for (const s of sourceSettings) {
+        await db.insert(schema.pluginSettings).values({
+          id: uuidv4(),
+          pluginId: s.pluginId,
+          deviceId: id,
+          optionKey: s.optionKey,
+          value: s.value,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    } catch (err) {
+      await db.delete(schema.devicePlugins).where(eq(schema.devicePlugins.deviceId, id));
+      await db.delete(schema.deviceIps).where(eq(schema.deviceIps.deviceId, id));
+      await db.delete(schema.pluginSettings).where(eq(schema.pluginSettings.deviceId, id));
+      await db.delete(schema.devices).where(eq(schema.devices.id, id));
+      if (sendAssignmentError(res, err) || sendIpError(res, err)) return;
+      throw err;
+    }
+
+    const created = await db.query.devices.findFirst({ where: eq(schema.devices.id, id) });
+    if (!created) {
+      res.status(500).json({ error: 'Failed to retrieve cloned device' });
+      return;
+    }
+    const pluginsView = await listAssignmentViews(id);
+    let ipsView: { address: string; isPrimary: boolean }[] = [];
+    try {
+      ipsView = await listDeviceAddresses(id);
+    } catch {
+      /* device exists — treat as no secondaries */
+    }
+    const siteNames = await siteNamesFor([created]);
+    res.status(201).json({
+      ...serializeDevice(created, siteNames.get(created.siteId ?? '') ?? null),
+      plugins: pluginsView,
+      ips: ipsView,
+    });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
 });
 
 // DELETE /devices/:deviceId - remove a device and everything that hangs off it.

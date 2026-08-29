@@ -80,6 +80,9 @@ export const devices = pgTable('devices', {
   model: text('model'),
   // Firmware version for this device (from the selected model's firmwareVersions list).
   firmwareVersion: text('firmwareVersion'),
+  // Disabled devices are NOT polled by the telemetry worker; their historical
+  // data and last metrics stay preserved. Default enabled.
+  enabled: boolean('enabled').notNull().default(true),
   createdAt: text('createdAt').notNull(),
 });
 

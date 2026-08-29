@@ -165,6 +165,12 @@ export async function initDb(): Promise<void> {
   await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS "model" TEXT`);
   await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS "firmwareVersion" TEXT`);
 
+  // Disabled devices are skipped by the telemetry worker (no polling); their
+  // historical data + last metrics stay preserved. Default enabled.
+  await pool.query(
+    `ALTER TABLE devices ADD COLUMN IF NOT EXISTS "enabled" BOOLEAN NOT NULL DEFAULT TRUE`
+  );
+
   // Execution plans (see workers/planExecutor.ts). Plans persist a plugin's
   // /plan output + its provisioned secrets; steps run in dependency order.
   await pool.query(`

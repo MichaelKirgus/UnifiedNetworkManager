@@ -248,6 +248,8 @@ paths:
                 # Hardware model / firmware version — null clears the selection.
                 model: { type: [string, 'null'], description: "Hardware model from a plugin's catalog; null clears" }
                 firmwareVersion: { type: [string, 'null'], description: "Firmware version for the selected model; null clears" }
+                # Toggles telemetry polling. Disabled devices keep their historical data + last metrics.
+                enabled: { type: boolean }
       responses:
         '200':
           description: Updated device (with its plugin assignments)
@@ -288,6 +290,37 @@ paths:
           description: Device not found
         '409':
           description: Device is still referenced by plan steps
+
+  /devices/{deviceId}/clone:
+    post:
+      tags: [Devices]
+      summary: Clone a device (all settings reused)
+      description: >-
+        Requires permission `devices:write`. Creates a copy of the device with
+        all its settings — plugin assignments (including credential sources and
+        extra slots), secondary IP addresses, per-device plugin setting
+        overrides, site, model and firmware. The clone gets a fresh id, status
+        'unknown' and the name "<source> (copy)" (numbered when taken). The
+        webapp opens the edit form for the clone so the user can change the IP
+        or other settings before saving.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      responses:
+        '201':
+          description: Cloned device (with its plugin assignments)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing devices:write permission
+        '404':
+          description: Source device not found
 
   /devices/{deviceId}/plugins:
     get:
@@ -2468,6 +2501,7 @@ components:
           enum: [online, degraded, offline, unknown]
         model: { type: [string, 'null'], description: "Hardware model selected from a plugin's advertised catalog (null = unset)" }
         firmwareVersion: { type: [string, 'null'], description: "Firmware version for the selected model (null = unset)" }
+        enabled: { type: boolean, default: true, description: "Disabled devices are not polled; historical data + last metrics stay preserved" }
         ips:
           type: array
           items:

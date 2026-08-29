@@ -654,8 +654,22 @@ async function ingestInventory(
  */
 async function sweepStaleInventory(): Promise<void> {
   const cutoff = new Date(Date.now() - INVENTORY_STALE_AFTER_MS).toISOString();
-  await db.delete(schema.hosts).where(lt(schema.hosts.lastSeenAt, cutoff));
-  await db.delete(schema.networks).where(lt(schema.networks.collectedAt, cutoff));
+  // Disabled devices are intentionally not polled — their inventory rows must
+  // survive the stale sweep (re-enabling a device restores its views without
+  // waiting for fresh data).
+  const disabledIds = (
+    await db.query.devices.findMany({ where: eq(schema.devices.enabled, false) })
+  ).map((d) => d.id);
+  if (disabledIds.length > 0) {
+    await db.delete(schema.hosts).where(and(lt(schema.hosts.lastSeenAt, cutoff), notInArray(schema.hosts.deviceId, disabledIds)));
+    await db.delete(schema.networks).where(and(lt(schema.networks.collectedAt, cutoff), notInArray(schema.networks.deviceId, disabledIds)));
+  } else {
+    await db.delete(schema.hosts).where(lt(schema.hosts.lastSeenAt, cutoff));
+    await db.delete(schema.networks).where(lt(schema.networks.collectedAt, cutoff));
+  }
+  // Tunnels/routes/Wi-Fi rows carry no deviceId — they are only ever refreshed
+  // by polling enabled devices, so the plain stale sweep applies to them.
+  await db.delete(schema.tunnels).where(lt(schema.tunnels.collectedAt, cutoff));
   await db.delete(schema.tunnels).where(lt(schema.tunnels.collectedAt, cutoff));
   await db.delete(schema.routes).where(lt(schema.routes.collectedAt, cutoff));
   await db.delete(schema.wifiSsids).where(lt(schema.wifiSsids.collectedAt, cutoff));
@@ -677,7 +691,11 @@ function deriveDeviceStatus(healths: string[]): string {
 }
 
 async function pollAllDevices(): Promise<void> {
-  const devices = await db.query.devices.findMany();
+  // Disabled devices are not polled — their historical data and last metrics
+  // stay preserved, and the status column keeps its last derived value.
+  const devices = await db.query.devices.findMany({
+    where: eq(schema.devices.enabled, true),
+  });
   if (devices.length === 0) return;
 
   // Load every assignment with its plugin endpoint in one pass.

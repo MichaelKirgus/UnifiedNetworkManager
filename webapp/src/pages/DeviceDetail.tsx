@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { Plus, Settings, Star, Trash2, X } from 'lucide-react';
+import { Copy, Power, Plus, Settings, Star, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { StatusBadge } from '../components/StatusBadge';
 import { MetricView } from '../components/MetricView';
@@ -38,6 +38,31 @@ export default function DeviceDetail() {
       queryClient.invalidateQueries({ queryKey: ['devices'] });
       navigate('/devices');
     },
+  });
+
+  // Telemetry polling toggle — disabled devices keep their historical data +
+  // last metrics; re-enabling resumes polling.
+  const [toggleError, setToggleError] = useState<string | null>(null);
+  const toggleEnabled = useMutation({
+    mutationFn: (enabled: boolean) => api.updateDevice(deviceId as string, { enabled }),
+    onSuccess: () => {
+      setToggleError(null);
+      invalidateDevice();
+    },
+    onError: (err: Error) => setToggleError(err.message),
+  });
+
+  // Clone reuses all settings; the Devices page opens its edit form for the
+  // clone (?edit=<id>) so the user can change the IP or other values.
+  const [cloneError, setCloneError] = useState<string | null>(null);
+  const cloneDevice = useMutation({
+    mutationFn: () => api.cloneDevice(deviceId as string),
+    onSuccess: (cloned) => {
+      setCloneError(null);
+      queryClient.invalidateQueries({ queryKey: ['devices'] });
+      navigate(`/devices?edit=${encodeURIComponent(cloned.id)}`);
+    },
+    onError: (err: Error) => setCloneError(err.message),
   });
 
   const devicesQuery = useQuery({
@@ -184,21 +209,66 @@ export default function DeviceDetail() {
           )}
         </div>
         {monitoringQuery.data && <StatusBadge status={monitoringQuery.data.health} />}
-        {device && (
-          <button
-            onClick={() => {
-              if (window.confirm(`Delete device "${device.name}"?\nIts plugin assignments, secondary IPs and telemetry history are removed. Plans referencing it must be deleted first.`)) {
-                deleteDevice.mutate(device.id);
-              }
-            }}
-            disabled={deleteDevice.isPending}
-            className="ml-auto flex items-center gap-1.5 rounded-md border border-red-200 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+        {device?.enabled === false && (
+          <span
+            title="Telemetry polling disabled — historical data and last metrics are preserved"
+            className="rounded-full bg-slate-200 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600"
           >
-            <Trash2 className="h-4 w-4" />
-            Delete device
-          </button>
+            disabled
+          </span>
+        )}
+        {device && (
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => {
+                const next = device.enabled === false;
+                if (window.confirm(next ? `Resume polling "${device.name}"?` : `Stop polling "${device.name}"?\nIts historical data and last metrics are preserved.`)) {
+                  toggleEnabled.mutate(next);
+                }
+              }}
+              disabled={toggleEnabled.isPending}
+              className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
+                device.enabled === false
+                  ? 'border-green-200 text-green-700 hover:bg-green-50'
+                  : 'border-slate-300 text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              <Power className="h-4 w-4" />
+              {device.enabled === false ? 'Enable polling' : 'Disable polling'}
+            </button>
+            <button
+              onClick={() => {
+                if (window.confirm(`Clone device "${device.name}"?\nAll plugin assignments, credentials, secondary IPs and per-device settings are reused. The edit form opens so you can change the IP or other settings.`)) {
+                  cloneDevice.mutate();
+                }
+              }}
+              disabled={cloneDevice.isPending}
+              className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+            >
+              <Copy className="h-4 w-4" />
+              Clone
+            </button>
+            <button
+              onClick={() => {
+                if (window.confirm(`Delete device "${device.name}"?\nIts plugin assignments, secondary IPs and telemetry history are removed. Plans referencing it must be deleted first.`)) {
+                  deleteDevice.mutate(device.id);
+                }
+              }}
+              disabled={deleteDevice.isPending}
+              className="flex items-center gap-1.5 rounded-md border border-red-200 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+            >
+              <Trash2 className="h-4 w-4" />
+              Delete device
+            </button>
+          </div>
         )}
       </div>
+
+      {(toggleError || cloneError) && (
+        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {toggleError ?? cloneError}
+        </div>
+      )}
 
       {deleteDevice.error && (
         <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">

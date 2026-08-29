@@ -456,6 +456,8 @@ export interface DeviceCreateRequest {
   model?: string | null;
   /** Optional firmware version for the selected model. */
   firmwareVersion?: string | null;
+  /** Telemetry polling toggle (default true); disabled devices keep their history. */
+  enabled?: boolean;
 }
 
 export interface Device {
@@ -478,6 +480,9 @@ export interface Device {
   model?: string | null;
   /** Firmware version for the selected model (null = unset). */
   firmwareVersion?: string | null;
+  /** Telemetry polling toggle — disabled devices are not polled; their historical
+   * data and last metrics stay preserved. Defaults to true when absent. */
+  enabled?: boolean;
 }
 
 /** One supported device model as advertised by a plugin in /discover.
@@ -778,8 +783,12 @@ export const api = {
       body: JSON.stringify(body),
     }),
   /** Update identity fields of an existing device (plugins are managed separately). */
-  updateDevice: (deviceId: string, body: Partial<Pick<Device, 'name' | 'vendor' | 'deviceType' | 'managementAddress' | 'model' | 'firmwareVersion'>> & { siteId?: string | null }) =>
+  updateDevice: (deviceId: string, body: Partial<Pick<Device, 'name' | 'vendor' | 'deviceType' | 'managementAddress' | 'model' | 'firmwareVersion'>> & { siteId?: string | null; enabled?: boolean }) =>
     apiFetch<Device>(`/devices/${deviceId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  /** Clone a device — all settings (plugins + credentials, IPs, per-device
+   * overrides) are reused; the clone gets a fresh id and "(copy)" name. */
+  cloneDevice: (deviceId: string) =>
+    apiFetch<Device & { plugins?: DevicePluginAssignment[] }>(`/devices/${deviceId}/clone`, { method: 'POST' }),
   // Device ↔ plugin assignments.
   devicePlugins: (deviceId: string) =>
     apiFetch<{ deviceId: string; plugins: DevicePluginAssignment[] }>(`/devices/${deviceId}/plugins`),
@@ -806,6 +815,18 @@ export const api = {
   /** Delete a device and everything that hangs off it. 409 while plans reference it. */
   deleteDevice: (deviceId: string) =>
     apiFetch<void>(`/devices/${deviceId}`, { method: 'DELETE' }),
+  /** Toggle telemetry polling for one or more devices (bulk = sequential PATCHes). */
+  setDevicesEnabled: async (deviceIds: string[], enabled: boolean): Promise<{ total: number; errors: string[] }> => {
+    const errors: string[] = [];
+    for (const id of deviceIds) {
+      try {
+        await api.updateDevice(id, { enabled });
+      } catch (err) {
+        errors.push(`${id}: ${(err as Error).message}`);
+      }
+    }
+    return { total: deviceIds.length, errors };
+  },
   // Per-device settings overrides (inherit global → override per device).
   devicePluginOptions: (deviceId: string, pluginId: string) =>
     apiFetch<PluginOptionsResponse>(`/devices/${deviceId}/plugins/${pluginId}/options`),
