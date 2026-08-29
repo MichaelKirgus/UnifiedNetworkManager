@@ -1,5 +1,5 @@
 {
-  "name": "unm-plugin-snmp",
+  "name": "unm-plugin-generic-snmp",
   "version": "0.3.0",
   "private": true,
   "description": "UnifiedNetworkManager plugin: SNMPv1/v2c/v3 monitoring (system group + interface throughput), WiFi (802.11 MIB) collection and inventory via net-snmp CLI.",

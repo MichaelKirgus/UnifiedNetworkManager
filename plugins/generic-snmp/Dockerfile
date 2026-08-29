@@ -25,16 +25,16 @@ COPY packages/snmp-client/src/ packages/snmp-client/src/
 RUN cd packages/snmp-client && npm install --legacy-peer-deps && npm run build
 
 # Plugin: `npm install` links @unm/snmp-client → ../../packages/snmp-client.
-COPY plugins/snmp/package*.json plugins/snmp/tsconfig.json plugins/snmp/
-RUN cd plugins/snmp && npm install --legacy-peer-deps
+COPY plugins/generic-snmp/package*.json plugins/generic-snmp/tsconfig.json plugins/generic-snmp/
+RUN cd plugins/generic-snmp && npm install --legacy-peer-deps
 
-COPY plugins/snmp/src/index.ts plugins/snmp/src/metrics.ts plugins/snmp/src/snmpClient.ts plugins/snmp/src/
-RUN cd plugins/snmp && npm run build \
-    && node -e "require('/app/plugins/snmp/node_modules/@unm/snmp-client')"
+COPY plugins/generic-snmp/src/index.ts plugins/generic-snmp/src/metrics.ts plugins/generic-snmp/src/snmpClient.ts plugins/generic-snmp/src/
+RUN cd plugins/generic-snmp && npm run build \
+    && node -e "require('/app/plugins/generic-snmp/node_modules/@unm/snmp-client')"
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: symlink
 # in node_modules resolve exactly like in local development.
-WORKDIR /app/plugins/snmp
+WORKDIR /app/plugins/generic-snmp
 
 EXPOSE 4080
 

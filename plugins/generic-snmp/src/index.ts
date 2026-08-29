@@ -27,14 +27,14 @@ import { buildSnmpCredentials } from '@unm/snmp-client';
 import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000003';
-export const PLUGIN_NAME = 'SNMP Plugin';
+export const PLUGIN_NAME = 'Generic SNMP Plugin';
 
 /**
  * Multi-instance support: set `PLUGIN_INSTANCE_ID` (e.g. "site-a") to run several
  * instances of the same plugin type — each advertises a distinct identity
  * (`<uuid>:<instanceId>`) so the API registers them as separate plugins.
  * `PLUGIN_DISPLAY_NAME` optionally overrides the advertised name; without it,
- * the instance id is appended: "SNMP Plugin (site-a)". Unset = single-instance behavior.
+ * the instance id is appended: "Generic SNMP Plugin (site-a)". Unset = single-instance behavior.
  * (Convention implemented in @unm/plugin-sdk's resolvePluginIdentity.)
  */
 const identity = resolvePluginIdentity({
@@ -103,7 +103,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 // from @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
   identity,
-  logTag: 'snmp-plugin',
+  logTag: 'generic-snmp-plugin',
   discovery: {
     // Credentials come from the existing 'snmp' secret type (version + community for v1/v2c, USM fields for v3).
     requiredSecretType: 'snmp',
@@ -406,6 +406,6 @@ app.post('/inventory', async (req, res) => {
 // listen() binds the conventional plugin port (4080 by default) and starts
 // mDNS advertising — both handled by @unm/plugin-sdk.
 server.listen().catch((err) => {
-  console.error('[snmp-plugin] fatal startup error:', err);
+  console.error('[generic-snmp-plugin] fatal startup error:', err);
   process.exit(1);
 });

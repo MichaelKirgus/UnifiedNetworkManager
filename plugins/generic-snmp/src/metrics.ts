@@ -1,6 +1,6 @@
 /**
- * Metric descriptors for the SNMP plugin. The webapp renders entirely from
- * these — no per-plugin UI code exists anywhere in the stack.
+ * Metric descriptors for the Generic SNMP Plugin. The webapp renders entirely
+ * from these — no per-plugin UI code exists anywhere in the stack.
  *
  * Descriptor shape mirrors `MetricDescriptor` in webapp/src/api/client.ts:
  *   key, label, unit?, format? ('bytes'|'bits'|'duration'|'number'|'text'),

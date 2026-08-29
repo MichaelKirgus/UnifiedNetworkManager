@@ -60,7 +60,7 @@ flowchart LR
 | `packages/snmp-client/` | Shared net-snmp CLI wrapper used by the SNMP + LANCOM plugins |
 | `plugins/opnsense/` | OPNsense plugin — monitoring, inventory, config actions, multi-device plan intents (WireGuard/IPsec/OpenVPN/routes), tunnel + route enrichment |
 | `plugins/icmp/` | ICMP ping plugin — reachability/latency/jitter/loss + IP/MAC inventory; no credentials needed |
-| `plugins/snmp/` | Generic SNMP v1/v2c/v3 monitoring (system group, interface throughput) + inventory via net-snmp CLI |
+| `plugins/generic-snmp/` | Generic SNMP Plugin — SNMPv1/v2c/v3 monitoring (system group, interface throughput) + inventory via net-snmp CLI |
 | `plugins/lancom-lx/` | LANCOM LCOS-LX access points — radios, SSIDs, stations, RF environment, WDS/CAPWAP; Wi-Fi client propagation |
 | `plugins/lancom-lcos/` | LANCOM LCOS routers — system/LAN/WAN metrics, VPN + firewall counters; config over SNMP SET (`lcsSetup`) with web-UI backup via a second credential slot |
 | `plugins/lancom-sx/` | LANCOM SX-Series switches (4.x unified MIB **and** legacy GS-2310 3.x tree, auto-detected) — ports, PoE, LAG/LACP; config over SNMP SET |
@@ -97,7 +97,7 @@ On first boot the API seeds an **admin** user (password `admin`) and prints its 
 ```bash
 make setup                                  # install all deps
 docker compose up -d --build postgres api \
-  opnsense-plugin icmp-plugin snmp-plugin lancom-lx-plugin lancom-sx-plugin \
+  opnsense-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin \
   lancom-lcos-plugin swos-plugin basic-auth-plugin secrets-provider-plugin webapp mcp
 ```
 

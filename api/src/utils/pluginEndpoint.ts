@@ -21,7 +21,7 @@ const SERVICE_HOST_PORTS: Record<string, number> = {
   'basic-auth-plugin': 4002,
   'secrets-provider-plugin': 4003,
   'icmp-plugin': 4004,
-  'snmp-plugin': 4005,
+  'generic-snmp-plugin': 4005,
   'lancom-lx-plugin': 4006,
   'swos-plugin': 4007,
   'lancom-lcos-plugin': 4008,
