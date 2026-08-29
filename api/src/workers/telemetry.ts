@@ -7,9 +7,19 @@ import { getSecret } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
+import { getSystemSettings } from '../systemSettings';
+import { LEADER_KEYS } from './leader';
+import {
+  initWorker,
+  recordSkippedTelemetryBeat,
+  recordTelemetryCycle,
+  trackBeat,
+} from './stats';
 
 // Poll cadence is env-tunable for large fleets (see README "Scaling & HA"):
 // more devices → longer beat, or raise TELEMETRY_MAX_CONCURRENCY instead.
+// These are the ENV defaults — the Workers page can override both at runtime
+// via system_settings (getSystemSettings), which wins over the environment.
 const POLL_INTERVAL_MS = Math.max(5_000, Number(process.env.TELEMETRY_POLL_INTERVAL_MS ?? 30_000));
 // Cap on in-flight /monitoring calls per cycle. Without a cap the burst grows
 // linearly with fleet size (200 devices × 2 plugins = 400 simultaneous HTTP
@@ -722,7 +732,10 @@ async function pollAllDevices(): Promise<void> {
   const devices = await db.query.devices.findMany({
     where: eq(schema.devices.enabled, true),
   });
-  if (devices.length === 0) return;
+  if (devices.length === 0) {
+    recordTelemetryCycle(0, 0, Date.now() - cycleStartedAt);
+    return;
+  }
 
   // Load every assignment with its plugin endpoint in one pass.
   const assignments = await db.query.devicePlugins.findMany({});
@@ -770,8 +783,9 @@ async function pollAllDevices(): Promise<void> {
   // Poll every assignment independently — one dead plugin must not take the
   // whole device down. Device status is derived worst-wins afterwards. The
   // concurrency cap keeps the per-beat burst flat regardless of fleet size.
+  const entries = Array.from(targetsByDevice.entries());
   await runWithConcurrency(
-    Array.from(targetsByDevice.entries()),
+    entries,
     MAX_CONCURRENT_POLLS,
     async ([deviceId, targets]) => {
       const healths = await Promise.all(targets.map((t) => pollAssignment(t)));
@@ -779,29 +793,45 @@ async function pollAllDevices(): Promise<void> {
       await db.update(schema.devices).set({ status }).where(eq(schema.devices.id, deviceId));
     }
   );
+
+  recordTelemetryCycle(
+    devices.length,
+    entries.reduce((sum, [, targets]) => sum + targets.length, 0),
+    Date.now() - cycleStartedAt
+  );
 }
 
 /** True while a poll cycle is in flight — the timer skips overlapping beats. */
 let pollCycleRunning = false;
+/** Timestamp of the current (or last) cycle start — for duration stats. */
+let cycleStartedAt = Date.now();
 
 /**
- * Starts the telemetry polling loop. Every `POLL_INTERVAL_MS`, each device's
- * assigned plugins are asked for a monitoring snapshot which is normalized and
- * persisted to the `telemetry` table (one row per plugin per cycle).
+ * Starts the telemetry polling loop. Each device's assigned plugins are asked
+ * for a monitoring snapshot which is normalized and persisted to the
+ * `telemetry` table (one row per plugin per cycle). The beat cadence +
+ * concurrency cap are re-read from system_settings every iteration, so an
+ * admin can tune them live from the Workers page without a restart.
+ * Returns a stop function (the loop self-reschedules with setTimeout so the
+ * next beat always picks up the latest configured interval).
  */
-export function startTelemetryWorker(): NodeJS.Timeout {
+export function startTelemetryWorker(): () => void {
+  initWorker('telemetry', LEADER_KEYS.telemetry);
   // eslint-disable-next-line no-console
   console.log(
     `[telemetry] worker started, polling every ${POLL_INTERVAL_MS / 1000}s (max ${MAX_CONCURRENT_POLLS} concurrent polls)`
   );
 
-  // Stale-inventory sweep runs on its own cadence (cheap DELETEs) — counted in
-  // poll cycles so the worker keeps a single timer.
-  const sweepsPerCycle = Math.max(1, Math.round(INVENTORY_SWEEP_INTERVAL_MS / POLL_INTERVAL_MS));
   let cycle = 0;
+  let stopped = false;
+  let timer: NodeJS.Timeout | null = null;
 
-  return setInterval(() => {
+  const tick = async (): Promise<void> => {
+    if (stopped) return;
+    // Runtime-tunable cadence (Workers page overrides the env default).
+    const settings = await getSystemSettings();
     cycle += 1;
+    const sweepsPerCycle = Math.max(1, Math.round(INVENTORY_SWEEP_INTERVAL_MS / settings.telemetryPollIntervalMs));
     if (cycle % sweepsPerCycle === 0) {
       sweepStaleInventory().catch((err) => {
         // eslint-disable-next-line no-console
@@ -813,18 +843,30 @@ export function startTelemetryWorker(): NodeJS.Timeout {
     // unreachable devices at MORE than the configured cadence and double the
     // write load. The next beat simply retries; no work is lost.
     if (pollCycleRunning) {
+      recordSkippedTelemetryBeat();
       // eslint-disable-next-line no-console
       console.warn('[telemetry] previous poll cycle still running — skipping this beat');
-      return;
+    } else {
+      pollCycleRunning = true;
+      cycleStartedAt = Date.now();
+      void trackBeat('telemetry', () => pollAllDevices())
+        .catch((err) => {
+          // eslint-disable-next-line no-console
+          console.error('[telemetry] poll cycle failed:', err);
+        })
+        .finally(() => {
+          pollCycleRunning = false;
+        });
     }
-    pollCycleRunning = true;
-    void pollAllDevices()
-      .catch((err) => {
-        // eslint-disable-next-line no-console
-        console.error('[telemetry] poll cycle failed:', err);
-      })
-      .finally(() => {
-        pollCycleRunning = false;
-      });
-  }, POLL_INTERVAL_MS);
+    timer = setTimeout(() => void tick(), settings.telemetryPollIntervalMs);
+  };
+
+  // First beat after one interval (same as the old setInterval behavior).
+  timer = setTimeout(() => void tick(), POLL_INTERVAL_MS);
+
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
 }
+

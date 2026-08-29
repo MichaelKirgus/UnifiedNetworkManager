@@ -31,6 +31,10 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'users:create': 'Create new users with an initial password and TOTP enrollment',
   'users:manage-credentials': "Reset passwords and manage 2FA of other users",
   'users:self-credentials': 'Change own password and manage own 2FA',
+  // System/HA observability + runtime tuning (Workers page): worker leadership,
+  // poll-cycle stats, Postgres health, and the admin-tunable HA settings.
+  'system:read': 'View system status — workers, leader election, database health',
+  'system:write': 'Change runtime worker/HA settings (poll cadence, concurrency)',
 };
 
 /** All known permission ids (stable order — object key insertion order). */

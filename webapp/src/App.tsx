@@ -18,6 +18,7 @@ import Wifi from './pages/Wifi';
 import Users from './pages/Users';
 import Roles from './pages/Roles';
 import Tokens from './pages/Tokens';
+import Workers from './pages/Workers';
 import MyAccount from './pages/MyAccount';
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -165,6 +166,15 @@ export default function App() {
         element={
           <RequireAuth>
             <Tokens />
+          </RequireAuth>
+        }
+      />
+      {/* Workers/HA monitoring — gated by system:read (nav item hidden without it). */}
+      <Route
+        path="/workers"
+        element={
+          <RequireAuth>
+            <Workers />
           </RequireAuth>
         }
       />

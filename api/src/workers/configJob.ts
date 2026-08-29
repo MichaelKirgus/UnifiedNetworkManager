@@ -4,6 +4,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { configJobQueue } from '../queue';
 import { getSecretFresh } from '../secretsProvider';
+import { initWorker, trackBeat } from './stats';
 import { settingsHeaders } from '../pluginSettings';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
@@ -151,12 +152,13 @@ async function processJob(jobId: string): Promise<void> {
  * plugin `/config` endpoint and the resulting status is persisted.
  */
 export function startConfigJobWorker(): NodeJS.Timeout {
+  initWorker('configJob', -1); // not leader-gated — every replica drains its own queue
   // eslint-disable-next-line no-console
   console.log(`[configJob] worker started, processing every ${PROCESS_INTERVAL_MS / 1000}s`);
   return setInterval(() => {
     const jobs = configJobQueue.drain();
     for (const job of jobs) {
-      processJob(job.data.jobId).catch((err) => {
+      void trackBeat('configJob', () => processJob(job.data.jobId)).catch((err) => {
         // eslint-disable-next-line no-console
         console.error(`[configJob] failed processing job ${job.data.jobId}:`, err);
       });

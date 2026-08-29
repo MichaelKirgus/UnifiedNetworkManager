@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import clsx from 'clsx';
 import {
+  Activity,
   Cable,
   KeyRound,
   Laptop,
@@ -48,6 +49,8 @@ const NAV_ITEMS = [
   { to: '/roles', label: 'Roles', icon: Shield, requiresPermission: 'users:write' },
   // Long-lived API tokens for agents/scripts (MCP server).
   { to: '/tokens', label: 'Tokens', icon: KeySquare, requiresPermission: 'tokens:manage' },
+  // Worker/HA monitoring + runtime tuning (gated — exposes internal topology).
+  { to: '/workers', label: 'Workers & HA', icon: Activity, requiresPermission: 'system:read' },
 ];
 
 // Self-service portal — visible to every signed-in user; credential sections

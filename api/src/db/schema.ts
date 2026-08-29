@@ -711,6 +711,15 @@ export const planSteps = pgTable(
   }
 );
 
+// Runtime-tunable system settings (Workers page → HA & workers panel).
+// Key/value rows; a stored value overrides the env default for that knob
+// (see src/systemSettings.ts). Survives restarts and is shared across replicas.
+export const systemSettings = pgTable('system_settings', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  updatedAt: text('updatedAt').notNull(),
+});
+
 // Add index for config_jobs
 // Note: Drizzle's index definition inside the table definition is 
 // usually the best way to handle this. I'll add it to configJobs.

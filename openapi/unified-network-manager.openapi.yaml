@@ -24,6 +24,7 @@ tags:
   - name: Logs
   - name: Users
   - name: Tokens
+  - name: System
 paths:
   /auth/flow:
     get:
@@ -2290,6 +2291,74 @@ paths:
         '404':
           description: Token not found
 
+  /system/status:
+    get:
+      tags: [System]
+      summary: System/HA status — workers, leader election, database health
+      description: >-
+        Observability for the worker infrastructure (Workers page). Reports THIS
+        instance's view: per-worker leadership state + beat stats, telemetry poll
+        cycle counters, recent leadership/error events, and a read-only Postgres
+        snapshot (version, connections, table sizes). Requires permission
+        `system:read`.
+      responses:
+        '200':
+          description: System status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemStatus'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing system:read permission
+
+  /system/settings:
+    get:
+      tags: [System]
+      summary: Get effective runtime worker/HA settings
+      description: >-
+        Effective values for the admin-tunable knobs (stored overrides win over
+        env defaults) plus the allowed ranges, so form UIs can validate client-side.
+        Requires permission `system:read`.
+      responses:
+        '200':
+          description: Current settings + limits
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemSettingsResponse'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing system:read permission
+    put:
+      tags: [System]
+      summary: Update runtime worker/HA settings (live effect)
+      description: >-
+        Persists new values for the tunable knobs. All-or-nothing, validated and
+        clamped server-side; takes effect on the next worker beat — no restart.
+        Requires permission `system:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SystemSettingsUpdate'
+      responses:
+        '200':
+          description: Saved settings + limits
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemSettingsResponse'
+        '400':
+          description: Invalid value (type or out of range)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing system:write permission
+
 components:
   securitySchemes:
     bearerAuth:
@@ -3404,3 +3473,110 @@ components:
         authType:
           type: string
           enum: [none, token, mTLS]
+
+    # --- System/HA (Workers page) -------------------------------------------
+    WorkerRuntime:
+      type: object
+      required: [name, leaderKey, isLeader, beatsCompleted]
+      properties:
+        name: { type: string, description: "Worker role id (telemetry, planExecutor, retention, telemetryRetention, pluginMetrics, discovery, configJob)" }
+        leaderKey: { type: integer, description: "Advisory-lock key for this role (-1 = not leader-gated; every replica runs it)" }
+        isLeader: { type: boolean, description: "True while THIS instance holds the leadership lock" }
+        becameLeaderAt: { type: [string, 'null'], format: date-time, description: "When this instance acquired leadership (null = standby)" }
+        beatsCompleted: { type: integer }
+        lastBeatStartedAt: { type: [string, 'null'], format: date-time }
+        lastBeatFinishedAt: { type: [string, 'null'], format: date-time }
+        lastBeatDurationMs: { type: [integer, 'null'] }
+        beatErrors: { type: integer }
+        lastError: { type: [string, 'null'] }
+
+    TelemetryCycleStats:
+      type: object
+      required: [cyclesCompleted, cyclesSkippedOverlap]
+      properties:
+        cyclesCompleted: { type: integer }
+        cyclesSkippedOverlap: { type: integer, description: "Beats skipped because the previous cycle was still running (cycle guard)" }
+        devicesPolledLastCycle: { type: integer }
+        assignmentsPolledLastCycle: { type: integer }
+        lastCycleDurationMs: { type: [integer, 'null'] }
+
+    SystemEvent:
+      type: object
+      required: [id, at, type, message]
+      properties:
+        id: { type: integer }
+        at: { type: string, format: date-time }
+        type:
+          type: string
+          enum: [leadership-acquired, leadership-lost, worker-started, beat-error]
+        worker: { type: [string, 'null'] }
+        message: { type: string }
+
+    PostgresTableStat:
+      type: object
+      required: [name, approxRows, totalSizeBytes, totalSizePretty]
+      properties:
+        name: { type: string }
+        approxRows: { type: integer, description: "Approximate live row count (pg_stat_user_tables)" }
+        totalSizeBytes: { type: integer }
+        totalSizePretty: { type: string, example: "12 MB" }
+
+    PostgresStats:
+      type: object
+      required: [version, databaseName, maxConnections, connectionsTotal, tables]
+      properties:
+        version: { type: string, example: "PostgreSQL 16.4 on x86_64-pc-linux-gnu" }
+        databaseName: { type: string }
+        databaseSizePretty: { type: string, example: "250 MB" }
+        maxConnections: { type: integer }
+        connectionsTotal: { type: integer }
+        connectionsActive: { type: integer }
+        connectionsIdle: { type: integer }
+        tables:
+          type: array
+          items:
+            $ref: '#/components/schemas/PostgresTableStat'
+
+    SystemStatus:
+      type: object
+      required: [instance, workers, telemetry, events, postgres]
+      properties:
+        instance:
+          type: object
+          properties:
+            hostname: { type: string }
+            pid: { type: integer }
+            uptimeSeconds: { type: integer }
+            nodeVersion: { type: string }
+        workers:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkerRuntime'
+        telemetry:
+          $ref: '#/components/schemas/TelemetryCycleStats'
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/SystemEvent'
+        postgres:
+          $ref: '#/components/schemas/PostgresStats'
+
+    SystemSettingsUpdate:
+      type: object
+      properties:
+        telemetryPollIntervalMs: { type: integer, description: "Telemetry poll beat in ms (clamped 5000–3600000)" }
+        telemetryMaxConcurrency: { type: integer, description: "Max concurrent /monitoring calls per cycle (clamped 1–2000)" }
+
+    SystemSettingsResponse:
+      allOf:
+        - $ref: '#/components/schemas/SystemSettingsUpdate'
+        - type: object
+          properties:
+            limits:
+              type: object
+              required: [MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS, MIN_CONCURRENCY, MAX_CONCURRENCY]
+              properties:
+                MIN_POLL_INTERVAL_MS: { type: integer }
+                MAX_POLL_INTERVAL_MS: { type: integer }
+                MIN_CONCURRENCY: { type: integer }
+                MAX_CONCURRENCY: { type: integer }

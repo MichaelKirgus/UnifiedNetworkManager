@@ -1,6 +1,8 @@
 import { lt } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
+import { LEADER_KEYS } from './leader';
+import { initWorker, trackBeat } from './stats';
 
 /**
  * Retention for plugin log entries (see routes/internal.ts POST /plugin/logs)
@@ -26,21 +28,24 @@ async function sweepExpiredLogs(): Promise<void> {
  * Starts the log retention sweep. Must be called only after the API has bound
  * its port (same rule as every other worker — see index.ts app.listen callback).
  */
-export function startLogRetentionWorker(): NodeJS.Timeout {
+export function startLogRetentionWorker(): () => void {
+  initWorker('retention', LEADER_KEYS.retention);
   // eslint-disable-next-line no-console
   console.log(`[log-retention] worker started, keeping ${RETENTION_DAYS} days of plugin logs`);
 
   // First sweep runs immediately so stale rows from before the feature (or a
   // retention change) are cleaned up without waiting an hour.
-  sweepExpiredLogs().catch((err) => {
+  void trackBeat('retention', sweepExpiredLogs).catch((err) => {
     // eslint-disable-next-line no-console
     console.error('[log-retention] initial sweep failed:', err);
   });
 
-  return setInterval(() => {
-    sweepExpiredLogs().catch((err) => {
+  const timer = setInterval(() => {
+    void trackBeat('retention', sweepExpiredLogs).catch((err) => {
       // eslint-disable-next-line no-console
       console.error('[log-retention] sweep failed:', err);
     });
   }, SWEEP_INTERVAL_MS);
+
+  return () => clearInterval(timer);
 }

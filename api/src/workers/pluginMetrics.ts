@@ -3,6 +3,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { resolvePluginEndpoint } from '../utils/pluginEndpoint';
+import { LEADER_KEYS } from './leader';
+import { initWorker, trackBeat } from './stats';
 
 /**
  * Plugin self-metrics poller.
@@ -71,19 +73,22 @@ async function pollAllPlugins(): Promise<void> {
  * Starts the self-metrics polling loop. Must be called only after the API has
  * bound its port (same rule as every other worker — see index.ts app.listen).
  */
-export function startPluginMetricsWorker(): NodeJS.Timeout {
+export function startPluginMetricsWorker(): () => void {
+  initWorker('pluginMetrics', LEADER_KEYS.pluginMetrics);
   // eslint-disable-next-line no-console
   console.log(`[plugin-metrics] worker started, polling /metrics every ${POLL_INTERVAL_MS / 1000}s`);
 
-  pollAllPlugins().catch((err) => {
+  void trackBeat('pluginMetrics', pollAllPlugins).catch((err) => {
     // eslint-disable-next-line no-console
     console.error('[plugin-metrics] initial poll failed:', err);
   });
 
-  return setInterval(() => {
-    pollAllPlugins().catch((err) => {
+  const timer = setInterval(() => {
+    void trackBeat('pluginMetrics', pollAllPlugins).catch((err) => {
       // eslint-disable-next-line no-console
       console.error('[plugin-metrics] poll cycle failed:', err);
     });
   }, POLL_INTERVAL_MS);
+
+  return () => clearInterval(timer);
 }

@@ -331,6 +331,81 @@ export interface LogEntry {
   timestamp: string;
 }
 
+// --- System/HA (Workers page) -------------------------------------------------
+
+/** Runtime state of one worker role on THIS instance (GET /system/status). */
+export interface WorkerRuntime {
+  name: string;
+  /** Advisory-lock key for this role (-1 = not leader-gated; every replica runs it). */
+  leaderKey: number;
+  isLeader: boolean;
+  becameLeaderAt?: string | null;
+  beatsCompleted: number;
+  lastBeatStartedAt?: string | null;
+  lastBeatFinishedAt?: string | null;
+  lastBeatDurationMs?: number | null;
+  beatErrors: number;
+  lastError?: string | null;
+}
+
+/** Telemetry poll-cycle counters (cycle guard + durations). */
+export interface TelemetryCycleStats {
+  cyclesCompleted: number;
+  /** Beats skipped because the previous cycle was still running. */
+  cyclesSkippedOverlap: number;
+  devicesPolledLastCycle: number;
+  assignmentsPolledLastCycle: number;
+  lastCycleDurationMs?: number | null;
+}
+
+/** Recent leadership/error event (ring buffer, newest first). */
+export interface SystemEvent {
+  id: number;
+  at: string;
+  type: 'leadership-acquired' | 'leadership-lost' | 'worker-started' | 'beat-error';
+  worker?: string | null;
+  message: string;
+}
+
+/** One tracked Postgres table (approx rows + total size incl. indexes). */
+export interface PostgresTableStat {
+  name: string;
+  approxRows: number;
+  totalSizeBytes: number;
+  totalSizePretty: string;
+}
+
+/** Read-only Postgres snapshot (version, connections, table sizes). */
+export interface PostgresStats {
+  version: string;
+  databaseName: string;
+  databaseSizePretty?: string;
+  maxConnections: number;
+  connectionsTotal: number;
+  connectionsActive: number;
+  connectionsIdle: number;
+  tables: PostgresTableStat[];
+}
+
+/** Full system status payload (GET /system/status). */
+export interface SystemStatus {
+  instance: { hostname: string; pid: number; uptimeSeconds: number; nodeVersion: string };
+  workers: WorkerRuntime[];
+  telemetry: TelemetryCycleStats;
+  events: SystemEvent[];
+  postgres: PostgresStats;
+}
+
+/** Admin-tunable worker/HA settings (GET/PUT /system/settings). */
+export interface SystemSettings {
+  telemetryPollIntervalMs?: number;
+  telemetryMaxConcurrency?: number;
+}
+
+export interface SystemSettingsResponse extends SystemSettings {
+  limits: { MIN_POLL_INTERVAL_MS: number; MAX_POLL_INTERVAL_MS: number; MIN_CONCURRENCY: number; MAX_CONCURRENCY: number };
+}
+
 /** One distinct (band, channel) pair broadcasting an SSID. */
 export interface WifiChannelRef {
   /** '2.4' | '5' | '6'; '' when the device cannot say which band. */
@@ -1008,4 +1083,9 @@ export const api = {
     apiFetch<PlanDetail>(`/plans/${planId}/steps/reorder`, { method: 'PATCH', body: JSON.stringify({ from, to }) }),
   regeneratePlanSecret: (planId: string, ref: string) =>
     apiFetch<{ id: string; type?: string }>(`/plans/${planId}/secrets/${encodeURIComponent(ref)}/regenerate`, { method: 'POST' }),
+  // System/HA observability + runtime tuning (Workers page).
+  systemStatus: () => apiFetch<SystemStatus>('/system/status'),
+  systemSettings: () => apiFetch<SystemSettingsResponse>('/system/settings'),
+  saveSystemSettings: (body: SystemSettings) =>
+    apiFetch<SystemSettingsResponse>('/system/settings', { method: 'PUT', body: JSON.stringify(body) }),
 };

@@ -18,6 +18,7 @@ import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import plansRouter from './routes/plans';
 import networksRouter from './routes/networks';
 import logsRouter from './routes/logs';
+import systemRouter from './routes/system';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startTelemetryRetentionWorker } from './workers/telemetryRetention';
 import { startPluginDiscovery } from './plugins/discovery';
@@ -26,6 +27,7 @@ import { startPlanExecutorWorker } from './workers/planExecutor';
 import { startLogRetentionWorker } from './workers/logRetention';
 import { startPluginMetricsWorker } from './workers/pluginMetrics';
 import { LEADER_KEYS, runAsLeader } from './workers/leader';
+import { initWorker } from './workers/stats';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const API_PREFIX = '/v1';
@@ -101,6 +103,8 @@ async function main(): Promise<void> {
   api.use(networksRouter);
   // Plugin log entries (global view + per-device section in DeviceDetail).
   api.use(logsRouter);
+  // System/HA observability + runtime tuning (/system/status, /system/settings).
+  api.use(systemRouter);
   // The plans router defines its own /plans/... paths (like the devices router),
   // so it is mounted without an extra prefix.
   api.use(plansRouter);
@@ -142,26 +146,17 @@ async function main(): Promise<void> {
 
     startConfigJobWorker();
 
-    void runAsLeader(LEADER_KEYS.telemetry, 'telemetry', () => {
-      const timer = startTelemetryWorker();
+    void runAsLeader(LEADER_KEYS.telemetry, 'telemetry', () => startTelemetryWorker()).then((stop) => workerStops.push(stop));
+    void runAsLeader(LEADER_KEYS.planExecutor, 'planExecutor', () => startPlanExecutorWorker()).then((stop) => workerStops.push(stop));
+    void runAsLeader(LEADER_KEYS.retention, 'retention', () => {
+      const stopLogs = startLogRetentionWorker();
+      return () => stopLogs();
+    }).then((stop) => workerStops.push(stop));
+    void runAsLeader(LEADER_KEYS.telemetryRetention, 'telemetryRetention', () => {
+      const timer = startTelemetryRetentionWorker();
       return () => clearInterval(timer);
-    });
-    void runAsLeader(LEADER_KEYS.planExecutor, 'planExecutor', () => {
-      const timer = startPlanExecutorWorker();
-      return () => clearInterval(timer);
-    });
-    void runAsLeader(LEADER_KEYS.retention, 'retention', async () => {
-      const logTimer = startLogRetentionWorker();
-      const telemetryTimer = startTelemetryRetentionWorker();
-      return () => {
-        clearInterval(logTimer);
-        clearInterval(telemetryTimer);
-      };
-    });
-    void runAsLeader(LEADER_KEYS.pluginMetrics, 'pluginMetrics', () => {
-      const timer = startPluginMetricsWorker();
-      return () => clearInterval(timer);
-    });
+    }).then((stop) => workerStops.push(stop));
+    void runAsLeader(LEADER_KEYS.pluginMetrics, 'pluginMetrics', () => startPluginMetricsWorker()).then((stop) => workerStops.push(stop));
 
     // Discover plugins via mDNS/DNS-SD, with HTTP polling as a fallback for
     // Docker bridge networks where multicast is isolated. Leader-gated: the
@@ -172,6 +167,7 @@ async function main(): Promise<void> {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
+    initWorker('discovery', LEADER_KEYS.discovery);
     void runAsLeader(LEADER_KEYS.discovery, 'discovery', () => {
       const stopDiscovery = startPluginDiscovery({
         pollEndpoints,

@@ -4,6 +4,8 @@ import { asc, eq } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { planQueue } from '../queue';
 import { getSecretFresh } from '../secretsProvider';
+import { LEADER_KEYS } from './leader';
+import { initWorker, trackBeat } from './stats';
 import { settingsHeaders } from '../pluginSettings';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
@@ -327,8 +329,10 @@ async function sweepInterruptedPlans(): Promise<void> {
 /**
  * Starts the plan execution loop. Plans are processed STRICTLY SEQUENTIALLY
  * (one at a time) so two plans never write to the same appliance concurrently.
+ * Returns a stop function (leader step-down / graceful shutdown).
  */
-export function startPlanExecutorWorker(): NodeJS.Timeout {
+export function startPlanExecutorWorker(): () => void {
+  initWorker('planExecutor', LEADER_KEYS.planExecutor);
   // eslint-disable-next-line no-console
   console.log(`[planExecutor] worker started, processing every ${PROCESS_INTERVAL_MS / 1000}s`);
 
@@ -338,15 +342,17 @@ export function startPlanExecutorWorker(): NodeJS.Timeout {
   });
 
   let chain: Promise<void> = Promise.resolve();
-  return setInterval(() => {
+  const timer = setInterval(() => {
     const messages = planQueue.drain();
     for (const message of messages) {
       chain = chain
-        .then(() => processPlan(message.data.planId))
+        .then(() => trackBeat('planExecutor', () => processPlan(message.data.planId)))
         .catch((err) => {
           // eslint-disable-next-line no-console
           console.error(`[planExecutor] failed processing plan ${message.data.planId}:`, err);
         });
     }
   }, PROCESS_INTERVAL_MS);
+
+  return () => clearInterval(timer);
 }

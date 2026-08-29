@@ -182,6 +182,15 @@ export async function initDb(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_telemetry_collected_at
       ON telemetry ("collectedAt")`);
 
+  // Runtime-tunable system settings (Workers page → HA & workers panel).
+  // Key/value rows; a stored value overrides the env default for that knob.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS system_settings (
+      "key" TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL
+    )`);
+
   // Execution plans (see workers/planExecutor.ts). Plans persist a plugin's
   // /plan output + its provisioned secrets; steps run in dependency order.
   await pool.query(`

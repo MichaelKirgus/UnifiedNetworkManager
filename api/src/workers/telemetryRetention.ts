@@ -1,6 +1,8 @@
 import { lt } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
+import { LEADER_KEYS } from './leader';
+import { initWorker, trackBeat } from './stats';
 
 /**
  * Retention for raw telemetry snapshots (see workers/telemetry.ts).
@@ -33,18 +35,19 @@ async function sweepExpiredTelemetry(): Promise<void> {
  * bound its port (same rule as every other worker — see index.ts app.listen).
  */
 export function startTelemetryRetentionWorker(): NodeJS.Timeout {
+  initWorker('telemetryRetention', LEADER_KEYS.telemetryRetention);
   // eslint-disable-next-line no-console
   console.log(`[telemetry-retention] worker started, keeping ${RETENTION_DAYS} days of raw telemetry`);
 
   // First sweep runs immediately so stale rows from before the feature (or a
   // retention change) are cleaned up without waiting an hour.
-  sweepExpiredTelemetry().catch((err) => {
+  void trackBeat('telemetryRetention', sweepExpiredTelemetry).catch((err) => {
     // eslint-disable-next-line no-console
     console.error('[telemetry-retention] initial sweep failed:', err);
   });
 
   return setInterval(() => {
-    sweepExpiredTelemetry().catch((err) => {
+    void trackBeat('telemetryRetention', sweepExpiredTelemetry).catch((err) => {
       // eslint-disable-next-line no-console
       console.error('[telemetry-retention] sweep failed:', err);
     });

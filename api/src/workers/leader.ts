@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
 import { pool } from '../db';
+import { initWorker, setLeaderState } from './stats';
 
 /**
  * Leader election for background workers, built on Postgres advisory locks.
@@ -36,6 +37,7 @@ export const LEADER_KEYS = {
   retention: 9003,
   discovery: 9004,
   pluginMetrics: 9005,
+  telemetryRetention: 9006,
 } as const;
 
 /**
@@ -128,6 +130,7 @@ export async function runAsLeader(
   name: string,
   startWork: () => (() => void) | Promise<() => void>
 ): Promise<() => Promise<void>> {
+  initWorker(name, key);
   let stopped = false;
   let retryTimer: NodeJS.Timeout | null = null;
   let verifyTimer: NodeJS.Timeout | null = null;
@@ -141,6 +144,7 @@ export async function runAsLeader(
     }
     // eslint-disable-next-line no-console
     console.log(`[leader] "${name}" acquired leadership (key ${key})`);
+    setLeaderState(name, true);
     try {
       stopWork = await startWork();
     } catch (err) {
@@ -159,6 +163,7 @@ export async function runAsLeader(
     if (!held) {
       // eslint-disable-next-line no-console
       console.warn(`[leader] "${name}" lost leadership — stepping down to standby`);
+      setLeaderState(name, false);
       if (verifyTimer) clearInterval(verifyTimer);
       stopWork?.();
       stopWork = null;
