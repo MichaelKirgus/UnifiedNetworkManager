@@ -555,6 +555,10 @@ export interface Device {
   model?: string | null;
   /** Firmware version for the selected model (null = unset). */
   firmwareVersion?: string | null;
+  /** Firmware version detected by the plugins' latest telemetry (list endpoints only; null = not reported). */
+  detectedFirmwareVersion?: string | null;
+  /** Serial number from the plugins' latest telemetry (list endpoints only; null = not reported). */
+  serialNumber?: string | null;
   /** Telemetry polling toggle — disabled devices are not polled; their historical
    * data and last metrics stay preserved. Defaults to true when absent. */
   enabled?: boolean;

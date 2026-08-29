@@ -2570,6 +2570,8 @@ components:
           enum: [online, degraded, offline, unknown]
         model: { type: [string, 'null'], description: "Hardware model selected from a plugin's advertised catalog (null = unset)" }
         firmwareVersion: { type: [string, 'null'], description: "Firmware version for the selected model (null = unset)" }
+        detectedFirmwareVersion: { type: [string, 'null'], description: "Firmware version detected from the plugins' latest telemetry — primary plugin first; null when no assigned plugin reports it" }
+        serialNumber: { type: [string, 'null'], description: "Serial number from the plugins' latest telemetry (system.serialNumber); null when not reported" }
         enabled: { type: boolean, default: true, description: "Disabled devices are not polled; historical data + last metrics stay preserved" }
         ips:
           type: array

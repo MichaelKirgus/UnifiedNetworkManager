@@ -313,6 +313,20 @@ export default function Devices() {
     { header: 'Name', key: 'name' },
     { header: 'Vendor', key: 'vendor' },
     { header: 'Type', key: 'deviceType' },
+    {
+      // Detected from the plugins' latest telemetry (primary plugin first) —
+      // distinct from the user-selected `firmwareVersion` identity field.
+      header: 'Software version',
+      key: 'detectedFirmwareVersion',
+      width: 170,
+      render: (row) => row.detectedFirmwareVersion ?? <span className="text-slate-400">—</span>,
+    },
+    {
+      header: 'Serial number',
+      key: 'serialNumber',
+      width: 150,
+      render: (row) => row.serialNumber ? <span className="font-mono text-xs">{row.serialNumber}</span> : <span className="text-slate-400">—</span>,
+    },
     { header: 'Site', key: 'siteName', render: (row) => row.siteName ?? <span className="text-slate-400">—</span> },
     {
       header: 'IP',

@@ -190,6 +190,52 @@ export default function DeviceDetail() {
   const snapshots = monitoringQuery.data?.snapshots ?? [];
   const settingsAssignment = assignments.find((a) => a.pluginId === settingsPluginId);
 
+  // --- Identity rows (firmware + serial) ----------------------------------
+  // Plugins report these under different metric keys:
+  //   lancom-lx/lcos/sx → system.swVersion, mikrotik-swos → system.detectedFirmwareVersion,
+  //   opnsense → version. Serial is system.serialNumber (lancom-*, swos).
+  const FIRMWARE_METRIC_KEYS = ['system.swVersion', 'system.detectedFirmwareVersion', 'version'];
+  const SERIAL_METRIC_KEYS = ['system.serialNumber'];
+
+  /** First non-empty value across the snapshots; the primary plugin's snapshot wins. */
+  function firstMetricValue(keys: string[]): { value: string; pluginName?: string } | null {
+    const ordered = [...snapshots].sort(
+      (a, b) => Number(b.pluginId === primaryPlugin?.id) - Number(a.pluginId === primaryPlugin?.id)
+    );
+    for (const snap of ordered) {
+      for (const k of keys) {
+        const v = snap.metrics[k];
+        if (typeof v === 'string' && v.trim() !== '') {
+          return { value: v, pluginName: assignments.find((a) => a.pluginId === snap.pluginId)?.pluginName };
+        }
+      }
+    }
+    return null;
+  }
+
+  const firmwareInfo = firstMetricValue(FIRMWARE_METRIC_KEYS);
+  const serialInfo = firstMetricValue(SERIAL_METRIC_KEYS);
+
+  function IdentityRow({ label, info }: { label: string; info: { value: string; pluginName?: string } | null }) {
+    return (
+      <div className="flex items-center gap-3 py-2 first:pt-0 last:pb-0">
+        <dt className="w-40 shrink-0 text-sm font-medium text-slate-500">{label}</dt>
+        <dd className="min-w-0 flex-1">
+          {info ? (
+            <span className="flex items-baseline gap-2">
+              <span className="break-all font-mono text-xs text-slate-800">{info.value}</span>
+              {snapshots.length > 1 && info.pluginName && (
+                <span className="shrink-0 text-[11px] text-slate-400">via {info.pluginName}</span>
+              )}
+            </span>
+          ) : (
+            <span className="text-sm text-slate-400">—</span>
+          )}
+        </dd>
+      </div>
+    );
+  }
+
   return (
     <Layout>
       <div className="mb-4">
@@ -275,6 +321,15 @@ export default function DeviceDetail() {
           {(deleteDevice.error as Error).message}
         </div>
       )}
+
+      {/* --- Identity: firmware + serial (from the plugins' monitoring data) */}
+      <section className="mb-8 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Identity</h2>
+        <dl className="divide-y divide-slate-100">
+          <IdentityRow label="Firmware version" info={firmwareInfo} />
+          <IdentityRow label="Serial number" info={serialInfo} />
+        </dl>
+      </section>
 
       {/* --- Plugin assignments ------------------------------------------- */}
       <section className="mb-8 rounded-md border border-slate-200 bg-white p-4 shadow-sm">

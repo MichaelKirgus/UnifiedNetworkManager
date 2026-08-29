@@ -142,6 +142,35 @@ function summaryMetricsFor(telemetry: { metrics: unknown; metricDescriptors: unk
   return out;
 }
 
+// Firmware version + serial number for the overview table's at-a-glance columns.
+// Plugins report these under different metric keys:
+//   lancom-lx/lcos/sx → system.swVersion, mikrotik-swos → system.detectedFirmwareVersion,
+//   opnsense → version. Serial is system.serialNumber (lancom-*, swos).
+const FIRMWARE_METRIC_KEYS = ['system.swVersion', 'system.detectedFirmwareVersion', 'version'];
+const SERIAL_METRIC_KEYS = ['system.serialNumber'];
+
+function parseTelemetryMetrics(row: { metrics: unknown } | undefined): Record<string, unknown> {
+  if (!row) return {};
+  try {
+    const m = typeof row.metrics === 'string' ? JSON.parse(row.metrics) : (row.metrics ?? {});
+    return m && typeof m === 'object' ? (m as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** First non-empty value across the rows; callers order them (primary plugin first). */
+function firstMetricValue(rows: ({ metrics: unknown } | undefined)[], keys: string[]): string | null {
+  for (const row of rows) {
+    const metrics = parseTelemetryMetrics(row);
+    for (const k of keys) {
+      const v = metrics[k];
+      if (typeof v === 'string' && v.trim() !== '') return v;
+    }
+  }
+  return null;
+}
+
 router.get('/devices', requireAuth, async (req, res) => {
   const { vendor, siteId } = req.query;
 
@@ -181,11 +210,18 @@ router.get('/devices', requireAuth, async (req, res) => {
       } catch {
         /* device exists — treat as no secondaries */
       }
+      // Firmware/serial come from the latest telemetry, primary plugin first.
+      const primaryPluginId = plugins.find((p) => p.isPrimary)?.pluginId ?? plugins[0]?.pluginId;
+      const orderedTelemetry = [...perPluginTelemetry].sort(
+        (a, b) => Number(b?.pluginId === primaryPluginId) - Number(a?.pluginId === primaryPluginId)
+      );
       return {
         ...serializeDevice(device, siteNames.get(device.siteId ?? '') ?? null),
         plugins,
         summaryMetrics,
         ips,
+        detectedFirmwareVersion: firstMetricValue(orderedTelemetry, FIRMWARE_METRIC_KEYS),
+        serialNumber: firstMetricValue(orderedTelemetry, SERIAL_METRIC_KEYS),
       };
     })
   );
