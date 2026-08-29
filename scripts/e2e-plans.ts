@@ -127,7 +127,7 @@ async function main(): Promise<void> {
 
   // 4. Two devices assigned to the OPNsense plugin, pointing at the mock appliance.
   const mkDevice = async (name: string, secretId: string) => {
-    const r = await authed('POST', '/devices', { name, vendor: 'OPNsense', deviceType: 'firewall', managementAddress: MOCK_HOSTNAME, plugins: [{ pluginId: opnsenseId, secretId }] });
+    const r = await authed('POST', '/devices', { name, vendor: 'OPNsense', deviceTypes: ['router', 'firewall'], managementAddress: MOCK_HOSTNAME, plugins: [{ pluginId: opnsenseId, secretId }] });
     return ((await r.json()) as { id?: string }).id ?? '';
   };
   const devA = await mkDevice('e2e-fw-A', secretA);

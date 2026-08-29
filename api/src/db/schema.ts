@@ -69,7 +69,15 @@ export const devices = pgTable('devices', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
   vendor: text('vendor').notNull(),
-  deviceType: text('deviceType').notNull(),
+  // Legacy single type string — kept for backward compatibility with older
+  // clients; new code uses `deviceTypes` (array). Migrated from here on boot.
+  deviceType: text('deviceType'),
+  // Multiple roles a device fulfills, e.g. ["router", "firewall"] for an
+  // OPNsense box or ["switch", "router"] for a routed switch. Free-form,
+  // lowercase-normalized; the webapp offers common suggestions.
+  deviceTypes: text('deviceTypes').notNull().default('[]'),
+  // User-assigned free-form tags (e.g. "dmz", "lab") — future filter/plan targeting.
+  tags: text('tags').notNull().default('[]'),
   managementAddress: text('managementAddress').notNull(),
   // Reference to the site this device lives at (NULL = unassigned).
   siteId: text('siteId'),

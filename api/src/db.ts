@@ -176,6 +176,24 @@ export async function initDb(): Promise<void> {
     `ALTER TABLE devices ADD COLUMN IF NOT EXISTS "enabled" BOOLEAN NOT NULL DEFAULT TRUE`
   );
 
+  // Multi-type device roles + free-form tags (JSON arrays of strings).
+  // The legacy single `deviceType` column is kept for old clients but becomes
+  // nullable; its value is split into the array below.
+  await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS "deviceTypes" TEXT NOT NULL DEFAULT '[]'`);
+  await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS "tags" TEXT NOT NULL DEFAULT '[]'`);
+  // One-time data migration: split legacy slash/comma-separated types
+  // ("Router/Firewall", "Access Point") into the array, lowercase-normalized.
+  await pool.query(`
+    UPDATE devices SET "deviceTypes" = (
+      SELECT COALESCE(jsonb_agg(DISTINCT LOWER(TRIM(elem))), '[]'::jsonb)
+      FROM UNNEST(string_to_array(REPLACE("deviceType", '/', ','), ',')) AS elem
+      WHERE TRIM(elem) <> ''
+    )
+    WHERE "deviceTypes" = '[]'
+      AND "deviceType" IS NOT NULL
+      AND TRIM(COALESCE("deviceType", '')) <> ''`);
+  await pool.query(`ALTER TABLE devices ALTER COLUMN "deviceType" DROP NOT NULL`);
+
   // Telemetry retention sweep (workers/telemetryRetention.ts): a plain
   // timestamp index makes the periodic DELETE WHERE collectedAt < cutoff cheap.
   await pool.query(`

@@ -250,7 +250,7 @@ export default function DeviceDetail() {
           <h1 className="text-xl font-bold text-slate-900">{device?.name ?? deviceId}</h1>
           {device && (device.model || device.firmwareVersion) && (
             <p className="mt-0.5 text-xs text-slate-400">
-              {[device.vendor, device.deviceType, device.model, device.firmwareVersion].filter(Boolean).join(' · ')}
+              {[device.vendor, ...(device.deviceTypes ?? []), device.model, device.firmwareVersion].filter(Boolean).join(' · ')}
             </p>
           )}
         </div>

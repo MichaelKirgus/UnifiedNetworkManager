@@ -242,7 +242,17 @@ paths:
               properties:
                 name: { type: string, minLength: 1 }
                 vendor: { type: string, minLength: 1 }
+                # All roles the device fulfills (e.g. ["router", "firewall"]); at least one required.
+                deviceTypes:
+                  type: array
+                  minItems: 1
+                  items: { type: string, minLength: 1 }
+                # Legacy single-type field — equivalent to a one-element deviceTypes.
                 deviceType: { type: string, minLength: 1 }
+                # Free-form user tags; [] clears all. Future filter/plan targeting.
+                tags:
+                  type: array
+                  items: { type: string, minLength: 1 }
                 managementAddress: { type: string, minLength: 1 }
                 # null unassigns the site (OpenAPI 3.1 / JSON Schema type array).
                 siteId: { type: [string, 'null'] }
@@ -2556,12 +2566,21 @@ components:
 
     Device:
       type: object
-      required: [id, name, vendor, deviceType, managementAddress, status]
+      required: [id, name, vendor, deviceTypes, tags, managementAddress, status]
       properties:
         id: { type: string }
         name: { type: string }
         vendor: { type: string }
-        deviceType: { type: string }
+        # Legacy single type (first of deviceTypes) — kept for old clients.
+        deviceType: { type: [string, 'null'] }
+        deviceTypes:
+          type: array
+          items: { type: string }
+          description: "All roles this device fulfills, e.g. ['router', 'firewall']"
+        tags:
+          type: array
+          items: { type: string }
+          description: "Free-form user-assigned tags (future filter/plan targeting)"
         managementAddress: { type: string }
         siteId: { type: [string, 'null'], description: "Assigned site (null = unassigned)" }
         siteName: { type: [string, 'null'], description: "Display name of the assigned site" }
@@ -2592,11 +2611,21 @@ components:
 
     DeviceCreateRequest:
       type: object
-      required: [name, vendor, deviceType, managementAddress, plugins]
+      required: [name, vendor, deviceTypes, managementAddress, plugins]
       properties:
         name: { type: string }
         vendor: { type: string }
-        deviceType: { type: string }
+        # All roles the device fulfills (e.g. ["router", "firewall"]); at least one.
+        deviceTypes:
+          type: array
+          minItems: 1
+          items: { type: string, minLength: 1 }
+        # Legacy single-type field — equivalent to a one-element deviceTypes.
+        deviceType: { type: string, description: "Legacy; use deviceTypes" }
+        # Free-form user tags (optional).
+        tags:
+          type: array
+          items: { type: string, minLength: 1 }
         managementAddress: { type: string, description: "Primary address — IPv4, IPv6 literal, or DNS name (no scheme)" }
         siteId: { type: [string, 'null'], description: "Optional assigned site" }
         # Optional secondary IPs registered at creation time.

@@ -30,12 +30,48 @@ import { isValidAddress, addressError } from '../utils/address';
 
 const router = Router();
 
+/** Parses a stored JSON string array defensively (bad data → []). */
+function readStringArray(raw: unknown): string[] {
+  let arr: unknown = raw;
+  if (typeof raw === 'string') {
+    try { arr = JSON.parse(raw); } catch { return []; }
+  }
+  if (!Array.isArray(arr)) return [];
+  const out: string[] = [];
+  for (const v of arr) {
+    if (typeof v !== 'string') continue;
+    const t = v.trim();
+    if (t !== '' && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+/** Validates a request-body field as an array of non-empty strings; returns the deduped list or an error. */
+function parseStringArrayField(raw: unknown, field: string): { value?: string[]; error?: string } {
+  if (!Array.isArray(raw)) return { error: `"${field}" must be an array of strings` };
+  for (const v of raw as unknown[]) {
+    if (typeof v !== 'string' || v.trim() === '') return { error: `"${field}" entries must be non-empty strings` };
+  }
+  const out: string[] = [];
+  for (const v of raw as string[]) {
+    const t = v.trim();
+    if (!out.includes(t)) out.push(t);
+  }
+  return { value: out };
+}
+
 function serializeDevice(row: Device, siteName?: string | null) {
+  const deviceTypes = readStringArray(row.deviceTypes);
   return {
     id: row.id,
     name: row.name,
     vendor: row.vendor,
-    deviceType: row.deviceType,
+    // Legacy single type (first of the array) — kept for old clients.
+    deviceType: row.deviceType ?? deviceTypes[0] ?? null,
+    /** All roles this device fulfills, e.g. ["router", "firewall"]. */
+    deviceTypes,
+    /** User-assigned free-form tags (future filter/plan targeting). */
+    tags: readStringArray(row.tags),
     managementAddress: row.managementAddress,
     siteId: row.siteId ?? undefined,
     siteName: siteName ?? null,
@@ -238,11 +274,34 @@ interface DevicePluginRef {
 }
 
 router.post('/devices', requireAuth, requirePermission('devices:write'), async (req, res) => {
-  const { name, vendor, deviceType, managementAddress, siteId, plugins, ips } = req.body ?? {};
+  const { name, vendor, managementAddress, siteId, plugins, ips } = req.body ?? {};
 
   if (!Array.isArray(plugins) || plugins.length === 0) {
     res.status(400).json({ error: 'At least one plugin assignment is required ("plugins": [{ "pluginId", ... }])' });
     return;
+  }
+
+  // Device roles: `deviceTypes` array (preferred, e.g. ["router","firewall"])
+  // or the legacy single `deviceType` string.
+  let deviceTypes: string[] | null = null;
+  if ('deviceTypes' in (req.body ?? {})) {
+    const ref = parseStringArrayField(req.body.deviceTypes, 'deviceTypes');
+    if (ref.error) { res.status(400).json({ error: ref.error }); return; }
+    deviceTypes = ref.value!;
+  } else if (typeof req.body?.deviceType === 'string' && req.body.deviceType.trim() !== '') {
+    deviceTypes = [req.body.deviceType.trim()];
+  }
+  if (!deviceTypes || deviceTypes.length === 0) {
+    res.status(400).json({ error: '"deviceTypes" must be a non-empty array of strings (e.g. ["router", "firewall"])' });
+    return;
+  }
+
+  // Free-form tags (optional; used later for filtering / plan targeting).
+  let tags: string[] = [];
+  if ('tags' in (req.body ?? {}) && req.body.tags !== undefined) {
+    const ref = parseStringArrayField(req.body.tags, 'tags');
+    if (ref.error) { res.status(400).json({ error: ref.error }); return; }
+    tags = ref.value!;
   }
   for (const ref of plugins as DevicePluginRef[]) {
     if (!ref || typeof ref.pluginId !== 'string') {
@@ -301,7 +360,9 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
     id,
     name,
     vendor,
-    deviceType,
+    deviceType: deviceTypes[0], // legacy mirror of the first role
+    deviceTypes: JSON.stringify(deviceTypes),
+    tags: JSON.stringify(tags),
     managementAddress,
     siteId: siteRef.value ?? null,
     status: 'unknown',
@@ -356,8 +417,9 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
   });
 });
 
-/** Identity fields that can be changed after creation (plugins are managed separately). */
-const UPDATABLE_FIELDS = ['name', 'vendor', 'deviceType', 'managementAddress'] as const;
+/** Identity fields that can be changed after creation (plugins are managed separately).
+ * `deviceTypes`/`tags` are arrays and handled separately below. */
+const UPDATABLE_FIELDS = ['name', 'vendor', 'managementAddress'] as const;
 
 // PATCH /devices/:deviceId - rename a device, change its management address or site.
 router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write'), async (req, res) => {
@@ -379,6 +441,32 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
       return;
     }
     updates[field] = value.trim();
+  }
+
+  // Device roles: `deviceTypes` array (preferred) or the legacy single
+  // `deviceType`. At least one role is always required.
+  if ('deviceTypes' in body || 'deviceType' in body) {
+    let types: string[] | null = null;
+    if ('deviceTypes' in body) {
+      const ref = parseStringArrayField(body.deviceTypes, 'deviceTypes');
+      if (ref.error) { res.status(400).json({ error: ref.error }); return; }
+      types = ref.value!;
+    } else if (typeof body.deviceType === 'string' && body.deviceType.trim() !== '') {
+      types = [body.deviceType.trim()];
+    }
+    if (!types || types.length === 0) {
+      res.status(400).json({ error: '"deviceTypes" must contain at least one type (e.g. ["router", "firewall"])' });
+      return;
+    }
+    updates.deviceTypes = JSON.stringify(types);
+    updates.deviceType = types[0]; // legacy mirror
+  }
+
+  // Free-form tags — an array of strings; [] clears all.
+  if ('tags' in body) {
+    const ref = parseStringArrayField(body.tags, 'tags');
+    if (ref.error) { res.status(400).json({ error: ref.error }); return; }
+    updates.tags = JSON.stringify(ref.value!);
   }
 
   // siteId is handled separately: null clears the assignment, a string must
@@ -416,7 +504,7 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
   }
 
   if (Object.keys(updates).length === 0) {
-    res.status(400).json({ error: `Provide at least one of: ${UPDATABLE_FIELDS.join(', ')}, siteId, model, firmwareVersion, enabled` });
+    res.status(400).json({ error: `Provide at least one of: ${UPDATABLE_FIELDS.join(', ')}, deviceTypes, tags, siteId, model, firmwareVersion, enabled` });
     return;
   }
 
@@ -480,7 +568,9 @@ router.post('/devices/:deviceId/clone', requireAuth, requirePermission('devices:
       id,
       name: cloneName,
       vendor: source.vendor,
-      deviceType: source.deviceType,
+      deviceType: source.deviceType ?? readStringArray(source.deviceTypes)[0] ?? null,
+      deviceTypes: source.deviceTypes,
+      tags: source.tags,
       managementAddress: source.managementAddress,
       siteId: source.siteId ?? null,
       status: 'unknown',

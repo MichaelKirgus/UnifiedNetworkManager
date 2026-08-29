@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Copy, Eye, Pencil, Plus, Power, Trash2, X } from 'lucide-react';
+import { Copy, Eye, Pencil, Plus, Power, Tag, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { ChipInput } from '../components/ChipInput';
 import { StatusBadge } from '../components/StatusBadge';
 import { MetricCell } from '../components/MetricCell';
 import { DeviceIcon } from '../components/DeviceIcon';
@@ -17,6 +18,14 @@ import { isValidAddress, addressError } from '../utils/address';
 function vendorOptions(plugins: Plugin[]): string[] {
   const vendors = plugins.flatMap((p) => p.vendors ?? []);
   return Array.from(new Set(vendors)).sort();
+}
+
+/** Common device roles offered as one-click suggestions (free-form entries allowed). */
+const TYPE_SUGGESTIONS = ['access point', 'controller', 'firewall', 'load balancer', 'router', 'switch', 'wireless controller'];
+
+/** Capitalizes a stored vendor/type string for display ("opnsense" → "Opnsense"). */
+function cap(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 export default function Devices() {
@@ -33,7 +42,9 @@ export default function Devices() {
 
   // Device identity fields (shared between create and edit modes). Model +
   // firmwareVersion are optional — chosen from the assigned plugins' catalogs.
-  const emptyIdentity = { name: '', vendor: '', deviceType: 'firewall', managementAddress: '', siteId: '', model: '', firmwareVersion: '' };
+  // deviceTypes is a multi-value list (a box can be router AND firewall);
+  // tags are free-form user labels for future filtering / plan targeting.
+  const emptyIdentity = { name: '', vendor: '', deviceTypes: ['firewall'] as string[], tags: [] as string[], managementAddress: '', siteId: '', model: '', firmwareVersion: '' };
   const [identity, setIdentity] = useState(emptyIdentity);
 
   // Telemetry polling toggle (create + edit modes). Default enabled — disabled
@@ -185,7 +196,8 @@ export default function Devices() {
       await api.updateDevice(editingId!, {
         name: identity.name.trim(),
         vendor: identity.vendor,
-        deviceType: identity.deviceType.trim() || 'firewall',
+        deviceTypes: identity.deviceTypes.length > 0 ? identity.deviceTypes : ['firewall'],
+        tags: identity.tags,
         managementAddress: identity.managementAddress.trim(),
         siteId: identity.siteId || null,
         model: identity.model.trim() || null,
@@ -277,10 +289,13 @@ export default function Devices() {
 
   /** Prefills the inline form with a device's values and switches to edit mode. */
   function openEdit(device: Device) {
+    // Fall back to the legacy single type for devices created before multi-type.
+    const types = device.deviceTypes?.length > 0 ? device.deviceTypes : [device.deviceType ?? 'firewall'];
     setIdentity({
       name: device.name,
       vendor: device.vendor,
-      deviceType: device.deviceType,
+      deviceTypes: types,
+      tags: device.tags ?? [],
       managementAddress: device.managementAddress,
       siteId: device.siteId ?? '',
       model: device.model ?? '',
@@ -311,8 +326,53 @@ export default function Devices() {
       render: (row) => <DeviceIcon plugin={primaryPluginOf(row)} model={row.model} />,
     },
     { header: 'Name', key: 'name' },
-    { header: 'Vendor', key: 'vendor' },
-    { header: 'Type', key: 'deviceType' },
+    {
+      // Stored lowercase (from plugin catalogs) — display capitalized.
+      header: 'Vendor',
+      key: 'vendor',
+      render: (row) => cap(row.vendor),
+    },
+    {
+      // A device can fulfill several roles at once (e.g. router + firewall).
+      header: 'Types',
+      key: 'deviceTypes',
+      width: 200,
+      exportValue: (row) => row.deviceTypes.join(', '),
+      render: (row) => {
+        const types = row.deviceTypes ?? [];
+        if (types.length === 0) return <span className="text-slate-400">—</span>;
+        return (
+          <div className="flex flex-wrap gap-1">
+            {types.map((t) => (
+              <span key={t} className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium capitalize text-slate-700">
+                {t}
+              </span>
+            ))}
+          </div>
+        );
+      },
+    },
+    {
+      // Free-form user tags — future filter / plan targeting.
+      header: 'Tags',
+      key: 'tags',
+      width: 180,
+      exportValue: (row) => row.tags.join(', '),
+      render: (row) => {
+        const tags = row.tags ?? [];
+        if (tags.length === 0) return <span className="text-slate-400">—</span>;
+        return (
+          <div className="flex flex-wrap gap-1">
+            {tags.map((t) => (
+              <span key={t} className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700">
+                <Tag className="h-3 w-3" />
+                {t}
+              </span>
+            ))}
+          </div>
+        );
+      },
+    },
     {
       // Detected from the plugins' latest telemetry (primary plugin first) —
       // distinct from the user-selected `firmwareVersion` identity field.
@@ -510,13 +570,25 @@ export default function Devices() {
             </select>
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Device Type</label>
-            <input
-              required
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-              value={identity.deviceType}
-              onChange={(e) => setIdentity({ ...identity, deviceType: e.target.value })}
+            <label className="mb-1 block text-sm font-medium text-slate-700">Device types</label>
+            <ChipInput
+              values={identity.deviceTypes}
+              onChange={(deviceTypes) => setIdentity({ ...identity, deviceTypes })}
+              suggestions={TYPE_SUGGESTIONS}
+              placeholder="e.g. router, firewall — press Enter"
+              ariaLabel="Device types"
             />
+            <p className="mt-1 text-xs text-slate-400">A device can have several roles (e.g. a routed switch is both).</p>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700">Tags</label>
+            <ChipInput
+              values={identity.tags}
+              onChange={(tags) => setIdentity({ ...identity, tags })}
+              placeholder="e.g. dmz, lab — press Enter"
+              ariaLabel="Device tags"
+            />
+            <p className="mt-1 text-xs text-slate-400">Optional free-form labels for filtering and targeted changes.</p>
           </div>
 
           {/* Model + Firmware — only offered when an assigned plugin advertises a

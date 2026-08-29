@@ -518,7 +518,10 @@ export interface PermissionCatalog {
 export interface DeviceCreateRequest {
   name: string;
   vendor: string;
-  deviceType: string;
+  /** All roles this device fulfills, e.g. ["router", "firewall"] (required). */
+  deviceTypes: string[];
+  /** Free-form user tags for filtering / plan targeting (optional). */
+  tags?: string[];
   /** Primary address — IPv4, IPv6 literal, or DNS name (no scheme). */
   managementAddress: string;
   /** Optional assigned site. */
@@ -539,7 +542,12 @@ export interface Device {
   id: string;
   name: string;
   vendor: string;
-  deviceType: string;
+  /** Legacy single type (first of `deviceTypes`) — kept for old clients. */
+  deviceType?: string | null;
+  /** All roles this device fulfills, e.g. ["router", "firewall"]. */
+  deviceTypes: string[];
+  /** Free-form user tags for filtering / plan targeting. */
+  tags: string[];
   managementAddress: string;
   siteId?: string | null;
   /** Display name of the assigned site (null = unassigned). */
@@ -862,7 +870,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   /** Update identity fields of an existing device (plugins are managed separately). */
-  updateDevice: (deviceId: string, body: Partial<Pick<Device, 'name' | 'vendor' | 'deviceType' | 'managementAddress' | 'model' | 'firmwareVersion'>> & { siteId?: string | null; enabled?: boolean }) =>
+  updateDevice: (deviceId: string, body: Partial<Pick<Device, 'name' | 'vendor' | 'deviceTypes' | 'tags' | 'managementAddress' | 'model' | 'firmwareVersion'>> & { siteId?: string | null; enabled?: boolean }) =>
     apiFetch<Device>(`/devices/${deviceId}`, { method: 'PATCH', body: JSON.stringify(body) }),
   /** Clone a device — all settings (plugins + credentials, IPs, per-device
    * overrides) are reused; the clone gets a fresh id and "(copy)" name. */
