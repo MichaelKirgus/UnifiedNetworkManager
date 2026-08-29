@@ -16,7 +16,7 @@
  * status tables and a handful of non-secret setup scalars.
  */
 
-import { SnmpCredentials, TransportOptions, snmpGet, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
+import { SnmpCredentials, SnmpValue, TransportOptions, snmpGet, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
 import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 import {
   LCOS_BASE, SYS, HW, FIRMWARE, LAN_IF, LAN_BYTES, WAN_BYTES, WAN_IP,
@@ -228,13 +228,13 @@ const IP_ROUTE_TYPES: Record<number, { protocol: LcosRoute['protocol']; label: s
   13: { protocol: 'other', label: 'dhcp' },
 };
 
-function label(map: Record<number, string>, raw: string | undefined): string {
+function label(map: Record<number, string>, raw: SnmpValue | undefined): string {
   if (raw === undefined || raw === '') return '';
   const n = Number(raw);
-  return Number.isFinite(n) ? map[n] ?? String(n) : raw;
+  return Number.isFinite(n) ? map[n] ?? String(n) : String(raw);
 }
 
-function toInt(value: string | undefined): number | null {
+function toInt(value: SnmpValue | undefined): number | null {
   if (value === undefined || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -370,7 +370,7 @@ export async function getLcosInventory(
   // (hardware-info sw version). Non-LANCOM devices answer "No Such Object" in
   // ~100ms and are rejected here instead of burning ~13 walks × timeout
   // budget; unreachable hosts fail fast on the single PDU.
-  let probe: Map<string, string>;
+  let probe: Map<string, SnmpValue>;
   try {
     probe = await snmpGet(host, creds, [HW.swVersion], opts);
   } catch {
@@ -385,7 +385,7 @@ export async function getLcosInventory(
     return { snapshot: null, fromCache: false, error: 'No LCOS MIB data on this device.' };
   }
 
-  const out = new Map<string, string>();
+  const out = new Map<string, SnmpValue>();
   for (const [k, v] of probe) out.set(k, v); // reuse the probed scalar
 
   // Walks run in small batches rather than all at once: embedded router agents
@@ -469,8 +469,8 @@ export async function getLcosInventory(
 }
 
 /** Parses the targeted LCOS walk output into a typed snapshot. */
-function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
-  const get = (oid: string): string => out.get(oid) ?? '';
+function parseLcosStatus(out: Map<string, SnmpValue>): LcosRouterSnapshot {
+  const get = (oid: string): SnmpValue => out.get(oid) ?? '';
 
   // --- System scalars -------------------------------------------------
   const memTotal = toInt(get(HW.totalMemoryKbytes));
@@ -486,8 +486,8 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
     let m = firmwareBySlot.get(row.idx[0]);
     if (!m) { m = { module: '', version: '' }; firmwareBySlot.set(row.idx[0], m); }
     switch (row.col) {
-      case FIRMWARE.COL_MODULE: m.module = value; break;
-      case FIRMWARE.COL_VERSION: m.version = value; break;
+      case FIRMWARE.COL_MODULE: m.module = String(value); break;
+      case FIRMWARE.COL_VERSION: m.version = String(value); break;
     }
   }
 
@@ -501,7 +501,7 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
     let p = lanPorts.get(key);
     if (!p) { p = {}; lanPorts.set(key, p); }
     switch (row.col) {
-      case LAN_IF.COL_LINK_ACTIVE: p.linkUp = value === '1'; break;
+      case LAN_IF.COL_LINK_ACTIVE: p.linkUp = Number(value) === 1; break;
       case LAN_IF.COL_CONNECTOR: p.connectorLabel = label(LAN_CONNECTORS, value); break;
       case LAN_IF.COL_MAC: p.mac = normalizeMac(value); break;
     }
@@ -518,9 +518,9 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
     if (!w) { w = {}; wanIps.set(key, w); }
     switch (row.col) {
       case WAN_IP.COL_TYPE: w.typeLabel = label({ 1: 'static', 2: 'dhcp', 3: 'ppp', 4: 'autoconfig' }, value); break;
-      case WAN_IP.COL_ADDR: w.address = value; break;
-      case WAN_IP.COL_NETMASK: w.netmask = value; break;
-      case WAN_IP.COL_GATEWAY: w.gateway = value; break;
+      case WAN_IP.COL_ADDR: w.address = String(value); break;
+      case WAN_IP.COL_NETMASK: w.netmask = String(value); break;
+      case WAN_IP.COL_GATEWAY: w.gateway = String(value); break;
     }
   }
 
@@ -534,7 +534,7 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
     let n = networks.find((x) => x.name === key);
     if (!n) { n = { name: key, ip: '', prefix: null, vlanId: null, ifcLabel: '' }; networks.push(n); }
     switch (row.col) {
-      case NET_LIST.COL_IP: n.ip = value; break;
+      case NET_LIST.COL_IP: n.ip = String(value); break;
       case NET_LIST.COL_NETMASK: n.prefix = netmaskToPrefix(value); break;
       case NET_LIST.COL_VLAN: n.vlanId = toInt(value); break;
       case NET_LIST.COL_IFC: n.ifcLabel = decodeNetIfc(value); break;
@@ -568,7 +568,7 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
     switch (row.col) {
       case DHCP.COL_MAC: d.mac = normalizeMac(value); break;
       case DHCP.COL_TIMEOUT: d.expirySeconds = toInt(value); break;
-      case DHCP.COL_HOSTNAME: d.hostname = value; break;
+      case DHCP.COL_HOSTNAME: d.hostname = String(value); break;
     }
   }
 
@@ -585,12 +585,12 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
       vpnConnections.push(v);
     }
     switch (row.col) {
-      case VPN_CONN.COL_PHYS: v.physConn = value; break;
-      case VPN_CONN.COL_CRYPT_ALG: v.cryptAlg = value; break;
+      case VPN_CONN.COL_PHYS: v.physConn = String(value); break;
+      case VPN_CONN.COL_CRYPT_ALG: v.cryptAlg = String(value); break;
       case VPN_CONN.COL_STATE: v.stateLabel = label(VPN_STATES, value); break;
-      case VPN_CONN.COL_MODE: v.modeLabel = value === '128' ? 'active' : 'passive'; break;
+      case VPN_CONN.COL_MODE: v.modeLabel = Number(value) === 128 ? 'active' : 'passive'; break; // ePassive(0)/eActive(128)
       case VPN_CONN.COL_CONN_TIME: v.connTimeSeconds = toInt(value); break;
-      case VPN_CONN.COL_IKE_TYPE: v.ikeType = value; break;
+      case VPN_CONN.COL_IKE_TYPE: v.ikeType = String(value); break;
     }
   }
 
@@ -607,8 +607,8 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
     // keep the first non-empty name seen.
     if (!s) { s = { ifc: key, name: '', operating: null, bssid: '', stations: null, vlanId: null }; ssids.push(s); }
     switch (row.col) {
-      case WLAN_NET.COL_OPERATING: s.operating = value === '1'; break;
-      case WLAN_NET.COL_NAME: if (!s.name) s.name = value; break;
+      case WLAN_NET.COL_OPERATING: s.operating = Number(value) === 1; break;
+      case WLAN_NET.COL_NAME: if (!s.name) s.name = String(value); break;
       case WLAN_NET.COL_STATIONS: s.stations = toInt(value); break;
       case WLAN_NET.COL_BSSID: s.bssid = normalizeMac(value); break;
       case WLAN_NET.COL_VLAN: s.vlanId = toInt(value); break;
@@ -631,7 +631,7 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
       case WLAN_RADIO.COL_CHANNEL: r.channel = toInt(value); break;
       case WLAN_RADIO.COL_NOISE: r.noiseFloorDbm = toInt(value); break;
       case WLAN_RADIO.COL_MODEM_LOAD: r.modemLoadPct = toInt(value); break;
-      case WLAN_RADIO.COL_TX_POWER: r.txPower = value; break;
+      case WLAN_RADIO.COL_TX_POWER: r.txPower = String(value); break;
       case WLAN_RADIO.COL_UTILIZATION: r.utilizationPct = toInt(value); break;
       case WLAN_RADIO.COL_BANDWIDTH: {
         const n = toInt(value);
@@ -653,13 +653,13 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
       case WLAN_STATION.COL_MAC: c.mac = normalizeMac(value); break;
       case WLAN_STATION.COL_IFC: c.ifc = `WLAN-${Number(value) + 1}`; break; // eWlan1(0)…eWlan4(3)
       case WLAN_STATION.COL_SIGNAL: c.signalDbm = toInt(value); break;
-      case WLAN_STATION.COL_IP4: if (value && value !== '0.0.0.0') c.ip4 = value; break;
+      case WLAN_STATION.COL_IP4: { const v = String(value).trim(); if (v && v !== '0.0.0.0') c.ip4 = v; } break;
       case WLAN_STATION.COL_VLAN: c.vlanId = toInt(value); break;
-      case WLAN_STATION.COL_USER: if (!c.hostname) c.hostname = value; break;
+      case WLAN_STATION.COL_USER: if (!c.hostname) c.hostname = String(value).trim(); break;
       case WLAN_STATION.COL_EFF_TX: c.txRateMbps = toInt(value); break;
       case WLAN_STATION.COL_EFF_RX: c.rxRateMbps = toInt(value); break;
-      case WLAN_STATION.COL_IP6: if (value && value !== '::') c.ip6 = value; break;
-      case WLAN_STATION.COL_HOSTNAME: if (!c.hostname) c.hostname = value; break;
+      case WLAN_STATION.COL_IP6: { const v = String(value).trim(); if (v && v !== '::') c.ip6 = v; } break;
+      case WLAN_STATION.COL_HOSTNAME: if (!c.hostname) c.hostname = String(value).trim(); break;
     }
   }
 
@@ -685,8 +685,8 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
       routes.push(r);
     }
     switch (row.col) {
-      case IP_ROUTES.COL_GATEWAY: r.gateway = value.trim() === '0.0.0.0' ? '' : value.trim(); break;
-      case IP_ROUTES.COL_PEER: r.peer = value.trim(); break;
+      case IP_ROUTES.COL_GATEWAY: { const v = String(value).trim(); r.gateway = v === '0.0.0.0' ? '' : v; } break;
+      case IP_ROUTES.COL_PEER: r.peer = String(value).trim(); break;
       case IP_ROUTES.COL_DISTANCE: r.distance = toInt(value); break;
       case IP_ROUTES.COL_TYPE: {
         const n = Number(value);
@@ -764,18 +764,18 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
     collectedAt: Date.now(),
     isLancom: true,
     system: {
-      name: get(SYS.setupName),
-      swVersion: get(HW.swVersion),
-      serialNumber: get(HW.serialNumber),
-      modelNumber: get(HW.modelNumber),
-      cpuType: get(HW.cpuType),
-      uptimeText: get(SYS.operatingTime),
+      name: String(get(SYS.setupName)),
+      swVersion: String(get(HW.swVersion)),
+      serialNumber: String(get(HW.serialNumber)),
+      modelNumber: String(get(HW.modelNumber)),
+      cpuType: String(get(HW.cpuType)),
+      uptimeText: String(get(SYS.operatingTime)),
       cpuLoadPct: cpuRaw,
       memoryTotalKb: memTotal,
       memoryFreeKb: memFree,
-      securityEngine: secEngine === '' ? null : secEngine === '1',
-      bootCause: get(FIRMWARE.bootCause),
-      featureWord: get(FIRMWARE.featureWord),
+      securityEngine: secEngine === '' ? null : Number(secEngine) === 1,
+      bootCause: String(get(FIRMWARE.bootCause)),
+      featureWord: String(get(FIRMWARE.featureWord)),
     },
     firmwareModules: [...firmwareBySlot.values()],
     lanPorts: [...lanPorts.entries()].map(([name, p]) => ({ name, ...p } as LcosLanPort)),
@@ -795,8 +795,8 @@ function parseLcosStatus(out: Map<string, string>): LcosRouterSnapshot {
 }
 
 /** Converts a dotted-quad netmask to its CIDR prefix length (null on bad input). */
-function netmaskToPrefix(netmask: string): number | null {
-  const parts = (netmask ?? '').split('.').map(Number);
+function netmaskToPrefix(netmask: SnmpValue | undefined): number | null {
+  const parts = String(netmask ?? '').split('.').map(Number);
   if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return null;
   let prefix = 0;
   for (const part of parts) {
@@ -813,8 +813,8 @@ function netmaskToPrefix(netmask: string): number | null {
  *   eWlan1(512)/eWlan2(513) → "WLAN-1"/"WLAN-2" (higher WLAN/P2P values use an
  *   ambiguous radio/ifc encoding — return '' rather than guess a wrong label).
  */
-function decodeNetIfc(raw: string): string {
-  const n = Number(raw);
+function decodeNetIfc(raw: SnmpValue | undefined): string {
+  const n = Number(raw ?? '');
   if (!Number.isInteger(n)) return '';
   if (n >= 256 && n <= 511) return `LAN-${n - 255}`;
   if (n === 512 || n === 513) return `WLAN-${n - 511}`;
@@ -844,14 +844,14 @@ export async function walkLcosCounters(
   opts: LcosOptions
 ): Promise<{ lanRates: LcosRates; wanRates: LcosRates }> {
   const empty = { lanRates: {} as LcosRates, wanRates: {} as LcosRates };
-  let out: Map<string, string>;
+  let out: Map<string, SnmpValue>;
   try {
-    // Two small walks — run them concurrently (separate processes).
+    // Two small walks — run them concurrently (separate sessions).
     const [lan, wan] = await Promise.all([
       snmpWalk(host, creds, [LAN_BYTES.base], opts),
       snmpWalk(host, creds, [WAN_BYTES.base], opts),
     ]);
-    out = new Map<string, string>();
+    out = new Map<string, SnmpValue>();
     for (const m of [lan, wan]) for (const [k, v] of m) out.set(k, v);
   } catch {
     return empty; // counters unavailable this cycle — rates stay null

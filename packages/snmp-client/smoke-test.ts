@@ -1,10 +1,11 @@
 /**
- * Smoke test for @unm/snmp-client's native transport (Round 1).
+ * Smoke test for @unm/snmp-client's native transport + typed value contract.
  *
  * Boots net-snmp's own in-process agent on 127.0.0.1:16100 with a small MIB
- * (scalars incl. Counter64 + IpAddress, one table) and exercises snmpGet /
- * snmpWalk / snmpSet over v2c community AND v3 authPriv (SHA/AES), plus the
- * negative paths (unknown community → timeout, DES privacy rejection).
+ * (scalars incl. Counter64, binary MacAddress, RFC-2578 raw counter bytes,
+ * Boolean + IpAddress, one table) and exercises snmpGet / snmpWalk / snmpSet
+ * over v2c community AND v3 authPriv (SHA/AES), plus the negative paths
+ * (unknown community → timeout, DES privacy rejection).
  *
  * Run from packages/snmp-client AFTER `npm run build`:  npm run smoke
  */
@@ -76,6 +77,13 @@ async function main(): Promise<void> {
   agent.registerProvider({ name: 'bigCounter', type: snmp.MibProviderType.Scalar, oid: '1.3.6.1.4.1.99999.1', scalarType: snmp.ObjectType.Counter64, maxAccess: snmp.MaxAccess['read-only'] });
   agent.registerProvider({ name: 'dnsServer', type: snmp.MibProviderType.Scalar, oid: '1.3.6.1.4.1.99999.2', scalarType: snmp.ObjectType.IpAddress, maxAccess: snmp.MaxAccess['read-write'] });
   agent.registerProvider({ name: 'macAddr', type: snmp.MibProviderType.Scalar, oid: '1.3.6.1.4.1.99999.3', scalarType: snmp.ObjectType.OctetString, maxAccess: snmp.MaxAccess['read-only'] });
+  // RFC-2578 Counter64 as a plain OCTET STRING (tag 0x04 + 8 non-printable
+  // bytes — how real devices encode it; must decode to bigint).
+  agent.registerProvider({ name: 'rawC64', type: snmp.MibProviderType.Scalar, oid: '1.3.6.1.4.1.99999.4', scalarType: snmp.ObjectType.OctetString, maxAccess: snmp.MaxAccess['read-only'] });
+  // Printable 8-char OCTET STRING (ifAlias-shaped) — must stay a string,
+  // NOT be mis-decoded as a Counter64.
+  agent.registerProvider({ name: 'alias8', type: snmp.MibProviderType.Scalar, oid: '1.3.6.1.4.1.99999.5', scalarType: snmp.ObjectType.OctetString, maxAccess: snmp.MaxAccess['read-only'] });
+  agent.registerProvider({ name: 'flagBool', type: snmp.MibProviderType.Scalar, oid: '1.3.6.1.4.1.99999.6', scalarType: snmp.ObjectType.Boolean, maxAccess: snmp.MaxAccess['read-only'] });
   agent.registerProvider({
     name: 'ifTable',
     type: snmp.MibProviderType.Table,
@@ -97,9 +105,15 @@ async function main(): Promise<void> {
   c64.writeBigUInt64BE(5_000_000_000n); // 0x0000012A05F200
   mib.setScalarValue('bigCounter', c64);
   mib.setScalarValue('dnsServer', '192.168.1.1');
-  // Raw 6-byte MacAddress (binary OCTET STRING) — must come back as spaced
-  // uppercase hex, exactly like the old CLI's `Hex-STRING: AA BB …` output.
+  // Raw 6-byte MacAddress (binary OCTET STRING) — must come back as the raw
+  // Buffer (plugins consume it via normalizeMac, which accepts Buffers).
   mib.setScalarValue('macAddr', Buffer.from('AABBCCDDEEFF', 'hex'));
+  const RAW_C64 = 0x012a05f2n; // 8 bytes with a non-printable tail (0xF2)
+  const rawC64Buf = Buffer.alloc(8);
+  rawC64Buf.writeBigUInt64BE(RAW_C64);
+  mib.setScalarValue('rawC64', rawC64Buf);
+  mib.setScalarValue('alias8', 'abcdefgh');
+  mib.setScalarValue('flagBool', true);
   mib.addTableRow('ifTable', [1, 'lo', 12345]);
   mib.addTableRow('ifTable', [2, 'eth0', 67890]);
 
@@ -118,11 +132,14 @@ async function main(): Promise<void> {
     mib.setScalarValue('dnsServer', '192.168.1.1');
 
     // get: present + missing OIDs — scalars are addressed with a trailing ".0"
-    const g = await snmpGet(HOST, creds, ['.1.3.6.1.2.1.1.1.0', '.1.3.6.1.4.1.99999.1.0', '.1.3.6.1.4.1.99999.2.0', '.1.3.6.1.4.1.99999.3.0', '.1.3.6.1.4.1.777'], OPTS);
+    const g = await snmpGet(HOST, creds, ['.1.3.6.1.2.1.1.1.0', '.1.3.6.1.4.1.99999.1.0', '.1.3.6.1.4.1.99999.2.0', '.1.3.6.1.4.1.99999.3.0', '.1.3.6.1.4.1.99999.4.0', '.1.3.6.1.4.1.99999.5.0', '.1.3.6.1.4.1.99999.6.0', '.1.3.6.1.4.1.777'], OPTS);
     check('get sysDescr (string)', g.get('.1.3.6.1.2.1.1.1.0') === 'UNM smoke-test agent', g.get('.1.3.6.1.2.1.1.1.0'));
-    check('get Counter64 > 2^32 as decimal string', g.get('.1.3.6.1.4.1.99999.1.0') === '5000000000', g.get('.1.3.6.1.4.1.99999.1.0'));
+    check('get Counter64 > 2^32 as bigint', g.get('.1.3.6.1.4.1.99999.1.0') === 5_000_000_000n, g.get('.1.3.6.1.4.1.99999.1.0'));
     check('get IpAddress dotted-quad', g.get('.1.3.6.1.4.1.99999.2.0') === '192.168.1.1', g.get('.1.3.6.1.4.1.99999.2.0'));
-    check('get binary MacAddress as spaced hex (CLI Hex-STRING parity)', g.get('.1.3.6.1.4.1.99999.3.0') === 'AA BB CC DD EE FF', g.get('.1.3.6.1.4.1.99999.3.0'));
+    check('get binary MacAddress as raw Buffer', (v => Buffer.isBuffer(v) && v.equals(Buffer.from('AABBCCDDEEFF', 'hex')))(g.get('.1.3.6.1.4.1.99999.3.0')), g.get('.1.3.6.1.4.1.99999.3.0'));
+    check('get RFC-2578 8-byte OCTET STRING as bigint', g.get('.1.3.6.1.4.1.99999.4.0') === RAW_C64, g.get('.1.3.6.1.4.1.99999.4.0'));
+    check('get printable 8-char OCTET STRING stays string', g.get('.1.3.6.1.4.1.99999.5.0') === 'abcdefgh', g.get('.1.3.6.1.4.1.99999.5.0'));
+    check('get Boolean as boolean true', g.get('.1.3.6.1.4.1.99999.6.0') === true, g.get('.1.3.6.1.4.1.99999.6.0'));
     check('get missing OID absent (no throw)', !g.has('.1.3.6.1.4.1.777'), [...g.keys()]);
 
     // walk: system subtree only — ifTable (…2.2.1) must NOT leak in.
@@ -131,10 +148,10 @@ async function main(): Promise<void> {
     check('walk returns sysDescr', w.get('.1.3.6.1.2.1.1.1.0') === 'UNM smoke-test agent', [...w.entries()]);
     check('walk stays inside subtree (no ifTable leak)', [...w.keys()].every(k => k.startsWith('.1.3.6.1.2.1.1.')), [...w.keys()]);
 
-    // walk: table with 2 rows × 3 cols = 6 entries, Counter32 as number string
+    // walk: table with 2 rows × 3 cols = 6 entries, Counter32 as number
     const wt = await snmpWalk(HOST, creds, ['.1.3.6.1.2.1.2.2.1'], OPTS);
     check('walk table entry count (2×3)', wt.size === 6, [...wt.entries()]);
-    check('walk Counter32 value', wt.get('.1.3.6.1.2.1.2.2.1.10.1') === '12345', wt.get('.1.3.6.1.2.1.2.2.1.10.1'));
+    check('walk Counter32 value as number', wt.get('.1.3.6.1.2.1.2.2.1.10.1') === 12345, wt.get('.1.3.6.1.2.1.2.2.1.10.1'));
 
     // walk: non-existent subtree → empty map, no throw
     const we = await snmpWalk(HOST, creds, ['.1.3.6.1.4.1.777'], OPTS);

@@ -1,7 +1,7 @@
 // SNMP transport (snmpwalk, v1/v2c + v3 USM args, output parsing, MAC
 // normalization) lives in the shared @unm/snmp-client package so every
 // SNMP-based plugin uses one implementation.
-import { SnmpCredentials, TransportOptions, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
+import { SnmpCredentials, SnmpValue, TransportOptions, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
 import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 
 // Re-exported so existing imports (index.ts) keep working unchanged.
@@ -171,15 +171,15 @@ async function walkSystem(host: string, creds: SnmpCredentials, opts: WalkOption
     // OID when given several, so a single broad subtree is both correct and faster.
     const out = await snmpWalk(host, creds, [SYS_BASE], opts);
     // Scalar instances are addressed with a trailing ".0".
-    const get = (oid: string): string => out.get(`${oid}.0`) ?? '';
+    const get = (oid: string): SnmpValue => out.get(`${oid}.0`) ?? '';
 
     const uptimeTicks = Number(get(SYSTEM_OIDS.uptime));
     return {
-      description: get(SYSTEM_OIDS.description),
-      objectId: get(SYSTEM_OIDS.objectId),
-      name: get(SYSTEM_OIDS.name),
-      location: get(SYSTEM_OIDS.location),
-      contact: get(SYSTEM_OIDS.contact),
+      description: String(get(SYSTEM_OIDS.description)),
+      objectId: String(get(SYSTEM_OIDS.objectId)),
+      name: String(get(SYSTEM_OIDS.name)),
+      location: String(get(SYSTEM_OIDS.location)),
+      contact: String(get(SYSTEM_OIDS.contact)),
       uptimeSeconds: Number.isFinite(uptimeTicks) && uptimeTicks > 0 ? Math.round(uptimeTicks / 100) : null,
     };
   } catch {
@@ -201,7 +201,7 @@ async function walkTables(host: string, creds: SnmpCredentials, opts: WalkOption
   try {
     const [ifOut, xOut] = await Promise.all([
       snmpWalk(host, creds, [IF_TABLE], opts),
-      snmpWalk(host, creds, [IF_XTABLE], opts).catch(() => new Map<string, string>()),
+      snmpWalk(host, creds, [IF_XTABLE], opts).catch(() => new Map<string, SnmpValue>()),
     ]);
 
     // Accumulate per-ifIndex attributes from both tables.
@@ -230,7 +230,7 @@ async function walkTables(host: string, creds: SnmpCredentials, opts: WalkOption
 
       switch (field) {
         case 2: // ifDescr — fallback name
-          row(idx).name ||= value;
+          row(idx).name ||= String(value);
           break;
         case 3: {
           const n = Number(value);
@@ -293,7 +293,7 @@ async function walkTables(host: string, creds: SnmpCredentials, opts: WalkOption
           counters[idx].outOctets = Number(value);
           break;
         case 18: // ifName — preferred display name
-          row(idx).name ||= value;
+          row(idx).name ||= String(value);
           break;
       }
     }
@@ -357,9 +357,9 @@ export async function walkWifi(
 }
 
 /** Parses the newer revision's BSS + station tables from one broad walk. */
-function parseNewerWlan(out: Map<string, string>): WifiInfo {
-  const bssRows = new Map<string, Record<number, string>>();
-  const stationRows = new Map<string, Record<number, string>>();
+function parseNewerWlan(out: Map<string, SnmpValue>): WifiInfo {
+  const bssRows = new Map<string, Record<number, SnmpValue>>();
+  const stationRows = new Map<string, Record<number, SnmpValue>>();
 
   for (const [oid, value] of out) {
     let tableBase = '';
@@ -386,7 +386,7 @@ function parseNewerWlan(out: Map<string, string>): WifiInfo {
   const accessPoints: WifiAccessPoint[] = [...bssRows.entries()]
     .sort((a, b) => Number(a[0]) - Number(b[0]))
     .map(([, cols]) => ({
-      ssid: cols[BSS_COLS.ssid] ?? '',
+      ssid: String(cols[BSS_COLS.ssid] ?? ''),
       bssid: normalizeMac(cols[BSS_COLS.bssid] ?? ''), // '' when not MAC-shaped (layout differs)
       channel: toIntOrNull(cols[BSS_COLS.channel]),
       security: wifiSecurityLabel(cols[BSS_COLS.security]),
@@ -404,7 +404,7 @@ function parseNewerWlan(out: Map<string, string>): WifiInfo {
           if (mac) break;
         }
       }
-      return { mac, ssid: cols[STATION_COLS.ssid] ?? '', rateMbps: toIntOrNull(cols[STATION_COLS.rateMbps]) };
+      return { mac, ssid: String(cols[STATION_COLS.ssid] ?? ''), rateMbps: toIntOrNull(cols[STATION_COLS.rateMbps]) };
     })
     .filter((c) => c.mac !== ''); // a station row without a MAC is useless for display
 
@@ -423,7 +423,7 @@ function parseNewerWlan(out: Map<string, string>): WifiInfo {
  * data needs the newer .1.3.6.1.2.1.105 tree or a vendor MIB. (Subtree 2.x on
  * LANCOM holds the AP's own radio MACs, not client stations.)
  */
-function parseLegacyWlan(out: Map<string, string>): WifiInfo {
+function parseLegacyWlan(out: Map<string, SnmpValue>): WifiInfo {
   const aps = new Map<string, { ssid: string; bssid: string }>();
   const channels = new Map<string, number>();
 
@@ -445,7 +445,7 @@ function parseLegacyWlan(out: Map<string, string>): WifiInfo {
       if (dot > 0 && !idxPart.includes('.')) {
         const col = Number(suffix.slice(0, dot));
         if (col === 1) apRow(idxPart).bssid ||= normalizeMac(value); // BSSID
-        else if (col === 9 && value) apRow(idxPart).ssid = value; // dot11DesiredSSID
+        else if (col === 9 && value) apRow(idxPart).ssid = String(value); // dot11DesiredSSID
       }
       continue;
     }
@@ -457,7 +457,7 @@ function parseLegacyWlan(out: Map<string, string>): WifiInfo {
     if (dot > 0 && !suffix.slice(dot + 1).includes('.')) {
       const col = Number(suffix.slice(dot + 1));
       if (col === 1) apRow(suffix.slice(0, dot)).bssid ||= normalizeMac(value);
-      else if (col === 2 && value) apRow(suffix.slice(0, dot)).ssid = value; // best-effort column guess
+      else if (col === 2 && value) apRow(suffix.slice(0, dot)).ssid = String(value); // best-effort column guess
     }
 
     // DSSS PHY table — current channel per ifIndex.
@@ -486,17 +486,17 @@ function parseLegacyWlan(out: Map<string, string>): WifiInfo {
 }
 
 /** Integer or null when absent/non-numeric. */
-function toIntOrNull(v: string | undefined): number | null {
+function toIntOrNull(v: SnmpValue | undefined): number | null {
   if (v === undefined) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
 
 /** Security enum → label, numeric fallback for unknown values, '' when absent. */
-function wifiSecurityLabel(raw: string | undefined): string {
+function wifiSecurityLabel(raw: SnmpValue | undefined): string {
   if (raw === undefined || raw === '') return '';
   const n = Number(raw);
-  if (!Number.isFinite(n)) return raw; // already a text value — keep as-is
+  if (!Number.isFinite(n)) return String(raw); // already a text value — keep as-is
   return WIFI_SECURITY_NAMES[n] ?? String(n);
 }
 

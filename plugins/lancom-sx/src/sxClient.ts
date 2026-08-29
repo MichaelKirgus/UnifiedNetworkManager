@@ -17,7 +17,7 @@
  * by the config actions in src/actions/, never by this module.
  */
 
-import { SnmpCredentials, TransportOptions, snmpGet, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
+import { SnmpCredentials, SnmpValue, TransportOptions, snmpGet, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
 import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 import {
   DETECT, SX4_BASE, SX3_BASE,
@@ -143,22 +143,22 @@ export interface SxSwitchSnapshot {
 
 const VLAN_MODES: Record<number, string> = { 0: 'access', 1: 'trunk', 2: 'hybrid' };
 
-function label(map: Record<number, string>, raw: string | undefined): string {
+function label(map: Record<number, string>, raw: SnmpValue | undefined): string {
   if (raw === undefined || raw === '') return '';
   const n = Number(raw);
-  return Number.isFinite(n) ? map[n] ?? String(n) : raw;
+  return Number.isFinite(n) ? map[n] ?? String(n) : String(raw);
 }
 
-function toInt(value: string | undefined): number | null {
+function toInt(value: SnmpValue | undefined): number | null {
   if (value === undefined || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? Math.trunc(n) : null;
 }
 
-/** Extracts a leading numeric value from DisplayStrings like "12.5", "30 W", "45 C". */
-function toNumberLoose(value: string | undefined): number | null {
+/** Extracts a leading numeric value from DisplayStrings like "12.5", "30 W", "45 C" (plain numbers pass through). */
+function toNumberLoose(value: SnmpValue | undefined): number | null {
   if (value === undefined) return null;
-  const m = value.match(/-?\d+(?:\.\d+)?/);
+  const m = String(value).match(/-?\d+(?:\.\d+)?/);
   return m ? Number(m[0]) : null;
 }
 
@@ -168,9 +168,10 @@ function toNumberLoose(value: string | undefined): number | null {
  *  A naive leading-number match grabs the WINDOW label ("100") and reports
  *  100% forever. Prefer the longest window present (10s → 1s → 100ms) as the
  *  stable gauge value; fall back to a bare percentage for other formats. */
-function parseCpuLoadPct(value: string | undefined): number | null {
-  if (value === undefined || value.trim() === '') return null;
-  const t = value.trim();
+function parseCpuLoadPct(value: SnmpValue | undefined): number | null {
+  if (value === undefined) return null;
+  const t = String(value).trim();
+  if (t === '') return null;
   for (const window of ['10s', '1s', '100ms']) {
     const m = t.match(new RegExp(`${window}\\s*:\\s*(\\d+(?:\\.\\d+)?)%?`));
     if (m) return Math.max(0, Math.min(100, Number(m[1])));
@@ -183,9 +184,11 @@ function parseCpuLoadPct(value: string | undefined): number | null {
 
 /** Parses memory DisplayStrings like "500 M" / "1.2 G" (LCOS-SX reports the
  *  total as a string, not an integer) into MB; plain integers pass through. */
-function toMbLoose(value: string | undefined): number | null {
-  if (value === undefined || value.trim() === '') return null;
-  const m = value.match(/(\d+(?:\.\d+)?)\s*([KMG])?/i);
+function toMbLoose(value: SnmpValue | undefined): number | null {
+  if (value === undefined) return null;
+  const t = String(value).trim();
+  if (t === '') return null;
+  const m = t.match(/(\d+(?:\.\d+)?)\s*([KMG])?/i);
   if (!m) return null;
   const n = Number(m[1]);
   switch ((m[2] ?? '').toUpperCase()) {
@@ -215,8 +218,8 @@ function splitRow(oid: string, base: string): { col: number; idx: string[] } | n
 }
 
 /** Converts a dotted-quad netmask to its CIDR prefix length (null on bad input). */
-function netmaskToPrefix(netmask: string): number | null {
-  const parts = (netmask ?? '').split('.').map(Number);
+function netmaskToPrefix(netmask: SnmpValue | undefined): number | null {
+  const parts = String(netmask ?? '').split('.').map(Number);
   if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return null;
   let prefix = 0;
   for (const part of parts) {
@@ -254,7 +257,7 @@ export async function detectVariant(
   /** One single-OID probe. `agentAnswered` distinguishes "the agent replied but
    *  this OID is unknown" from a transport-level failure (unreachable host or
    *  rejected credentials — the agent stays silent, net-snmp times out). */
-  const probe = async (oid: string): Promise<{ value?: string; agentAnswered: boolean }> => {
+  const probe = async (oid: string): Promise<{ value?: SnmpValue; agentAnswered: boolean }> => {
     try {
       const m = await snmpGet(host, creds, [oid], opts);
       return { value: m.get(oid), agentAnswered: true };
@@ -363,7 +366,7 @@ export async function getSxInventory(
     return { snapshot: null, fromCache: false, error: 'No LCOS-SX MIB data on this device.' };
   }
 
-  const out = new Map<string, string>();
+  const out = new Map<string, SnmpValue>();
   // Walks run STRICTLY SEQUENTIALLY. Verified on a GS-3510XP (4.30): running
   // two snmpwalk sessions concurrently makes the agent's response buffer race —
   // DisplayString values come back corrupted with fragments of OTHER rows in
@@ -437,14 +440,14 @@ export async function getSxInventory(
 }
 
 /** Parses the targeted SX walk output into a typed snapshot. */
-function parseSxStatus(out: Map<string, string>, variant: SxVariant): SxSwitchSnapshot {
-  const get = (oid: string): string => out.get(oid) ?? '';
+function parseSxStatus(out: Map<string, SnmpValue>, variant: SxVariant): SxSwitchSnapshot {
+  const get = (oid: string): SnmpValue => out.get(oid) ?? '';
 
   if (variant === 'sx4') return parseSx4(out, get);
   return parseSx3(out, get);
 }
 
-function parseSx4(out: Map<string, string>, get: (oid: string) => string): SxSwitchSnapshot {
+function parseSx4(out: Map<string, SnmpValue>, get: (oid: string) => SnmpValue): SxSwitchSnapshot {
   // --- System scalars -------------------------------------------------
   // memoryTotal is a DisplayString ("500 M"); freeMem is an Integer32 in MB.
   const memTotal = toMbLoose(get(SX4_SYS.memoryTotalMb));
@@ -460,9 +463,9 @@ function parseSx4(out: Map<string, string>, get: (oid: string) => string): SxSwi
     let p = ports.get(port);
     if (!p) { p = {}; ports.set(port, p); }
     switch (row.col) {
-      case SX4_PORT_CONF.COL_DESCRIPTION: p.label = value.trim(); break;
-      case SX4_PORT_CONF.COL_LINK: p.linkUp = /^up$/i.test(value.trim()) ? true : /^down$/i.test(value.trim()) ? false : null; break;
-      case SX4_PORT_CONF.COL_SPEED_STATUS: p.speedStatus = value.trim(); break;
+      case SX4_PORT_CONF.COL_DESCRIPTION: p.label = String(value).trim(); break;
+      case SX4_PORT_CONF.COL_LINK: p.linkUp = /^up$/i.test(String(value).trim()) ? true : /^down$/i.test(String(value).trim()) ? false : null; break;
+      case SX4_PORT_CONF.COL_SPEED_STATUS: p.speedStatus = String(value).trim(); break;
     }
   }
 
@@ -477,7 +480,7 @@ function parseSx4(out: Map<string, string>, get: (oid: string) => string): SxSwi
     switch (row.col) {
       case SX4_VLAN.COL_MODE: p.vlanModeLabel = label(VLAN_MODES, value); break;
       case SX4_VLAN.COL_PVID: p.pvid = toInt(value); break;
-      case SX4_VLAN.COL_ALLOWED_VLANS: p.allowedVlans = value.trim() === '-' ? '' : value.trim(); break;
+      case SX4_VLAN.COL_ALLOWED_VLANS: { const t = String(value).trim(); p.allowedVlans = t === '-' ? '' : t; } break;
     }
   }
 
@@ -494,13 +497,13 @@ function parseSx4(out: Map<string, string>, get: (oid: string) => string): SxSwi
       poePorts.push(e);
     }
     switch (row.col) {
-      case SX4_POE_STATUS.COL_PD_CLASS: e.pdClass = value.trim(); break;
+      case SX4_POE_STATUS.COL_PD_CLASS: e.pdClass = String(value).trim(); break;
       case SX4_POE_STATUS.COL_POWER_REQUESTED: e.powerRequestedWatts = toNumberLoose(value); break;
       case SX4_POE_STATUS.COL_POWER_ALLOCATED: e.powerAllocatedWatts = toNumberLoose(value); break;
       case SX4_POE_STATUS.COL_POWER_USED: e.powerUsedWatts = toNumberLoose(value); break;
       case SX4_POE_STATUS.COL_CURRENT_USED: e.currentUsedAmps = toNumberLoose(value); break;
-      case SX4_POE_STATUS.COL_PRIORITY: e.priorityLabel = value.trim().toLowerCase(); break;
-      case SX4_POE_STATUS.COL_PORT_STATUS: e.portStatusLabel = value.trim(); break;
+      case SX4_POE_STATUS.COL_PRIORITY: e.priorityLabel = String(value).trim().toLowerCase(); break;
+      case SX4_POE_STATUS.COL_PORT_STATUS: e.portStatusLabel = String(value).trim(); break;
     }
   }
 
@@ -527,11 +530,11 @@ function parseSx4(out: Map<string, string>, get: (oid: string) => string): SxSwi
     let e = lags.find((x) => x.port === port);
     if (!e) { e = { port, lacpLabel: '', key: '', aggrId: '', partnerSystemId: '', partnerPort: '' }; lags.push(e); }
     switch (row.col) {
-      case SX4_LACP_STATUS.COL_LACP: e.lacpLabel = value.trim(); break;
-      case SX4_LACP_STATUS.COL_KEY: e.key = value.trim(); break;
-      case SX4_LACP_STATUS.COL_AGGR_ID: e.aggrId = value.trim(); break;
+      case SX4_LACP_STATUS.COL_LACP: e.lacpLabel = String(value).trim(); break;
+      case SX4_LACP_STATUS.COL_KEY: e.key = String(value).trim(); break;
+      case SX4_LACP_STATUS.COL_AGGR_ID: e.aggrId = String(value).trim(); break;
       case SX4_LACP_STATUS.COL_PARTNER_SYSTEM_ID: e.partnerSystemId = normalizeMac(value); break;
-      case SX4_LACP_STATUS.COL_PARTNER_PORT: e.partnerPort = value.trim(); break;
+      case SX4_LACP_STATUS.COL_PARTNER_PORT: e.partnerPort = String(value).trim(); break;
     }
   }
 
@@ -548,9 +551,9 @@ function parseSx4(out: Map<string, string>, get: (oid: string) => string): SxSwi
     if (!s) { s = { vlanId: null, ip4: '', pfx4: null, ip6: '', pfx6: null }; sviByIndex.set(idx, s); }
     switch (row.col) {
       case SX4_SVI.COL_VLAN: s.vlanId = toInt(value); break;
-      case SX4_SVI.COL_IPV4_ADDRESS: if (value && value !== '0.0.0.0') s.ip4 = value.trim(); break;
+      case SX4_SVI.COL_IPV4_ADDRESS: { const v = String(value).trim(); if (v && v !== '0.0.0.0') s.ip4 = v; } break;
       case SX4_SVI.COL_IPV4_MASK_LEN: s.pfx4 = toInt(value); break;
-      case SX4_SVI.COL_IPV6_ADDRESS: { const v = value.trim(); if (v && v !== '::') s.ip6 = v; } break;
+      case SX4_SVI.COL_IPV6_ADDRESS: { const v = String(value).trim(); if (v && v !== '::') s.ip6 = v; } break;
       case SX4_SVI.COL_IPV6_MASK_LEN: s.pfx6 = toInt(value); break;
     }
   }
@@ -585,7 +588,7 @@ function parseSx4(out: Map<string, string>, get: (oid: string) => string): SxSwi
     let n = neighborByIndex.get(idx);
     if (!n) { n = { mac: '', ip: '' }; neighborByIndex.set(idx, n); }
     switch (row.col) {
-      case SX4_NEIGHBOR.COL_IP_ADDRESS: n.ip = value.trim(); break;
+      case SX4_NEIGHBOR.COL_IP_ADDRESS: n.ip = String(value).trim(); break;
       case SX4_NEIGHBOR.COL_LINK_ADDRESS: n.mac = normalizeMac(value); break;
     }
   }
@@ -614,7 +617,7 @@ function parseSx4(out: Map<string, string>, get: (oid: string) => string): SxSwi
     let c = cfgByIndex.get(idx);
     if (!c) { c = { network: '', maskLen: null, distance: null }; cfgByIndex.set(idx, c); }
     switch (row.col) {
-      case SX4_IP_ROUTES.COL_NETWORK: c.network = value.trim(); break;
+      case SX4_IP_ROUTES.COL_NETWORK: c.network = String(value).trim(); break;
       case SX4_IP_ROUTES.COL_MASK_LENGTH: c.maskLen = toInt(value); break;
       case SX4_IP_ROUTES.COL_DISTANCE: c.distance = toInt(value); break;
     }
@@ -635,8 +638,8 @@ function parseSx4(out: Map<string, string>, get: (oid: string) => string): SxSwi
     let r = statusRouteByIndex.get(idx);
     if (!r) { r = { network: '', gateway: '' }; statusRouteByIndex.set(idx, r); }
     switch (row.col) {
-      case SX4_IP_STATUS_ROUTES.COL_NETWORK: r.network = value.trim(); break;
-      case SX4_IP_STATUS_ROUTES.COL_GATEWAY: r.gateway = value.trim(); break;
+      case SX4_IP_STATUS_ROUTES.COL_NETWORK: r.network = String(value).trim(); break;
+      case SX4_IP_STATUS_ROUTES.COL_GATEWAY: r.gateway = String(value).trim(); break;
     }
   }
 
@@ -660,19 +663,19 @@ function parseSx4(out: Map<string, string>, get: (oid: string) => string): SxSwi
     collectedAt: Date.now(),
     variant: 'sx4',
     system: {
-      name: get(SX4_SYS.name).trim(),
-      model: get(SX4_SYS.model).trim(),
-      firmwareVersion: get(SX4_SYS.firmwareVersion).trim(),
-      serialNumber: get(SX4_SYS.serialNumber).trim(),
+      name: String(get(SX4_SYS.name)).trim(),
+      model: String(get(SX4_SYS.model)).trim(),
+      firmwareVersion: String(get(SX4_SYS.firmwareVersion)).trim(),
+      serialNumber: String(get(SX4_SYS.serialNumber)).trim(),
       hostMac: normalizeMac(get(SX4_SYS.hostMacAddress)),
-      uptimeText: get(SX4_SYS.uptime).trim(),
+      uptimeText: String(get(SX4_SYS.uptime)).trim(),
       cpuLoadPct: parseCpuLoadPct(get(SX4_SYS.cpuLoad)),
       memoryTotalMb: memTotal,
       memoryFreeMb: memFree,
       temperatureC: [toNumberLoose(get(SX4_SYS.temperature1)), toNumberLoose(get(SX4_SYS.temperature2)), toNumberLoose(get(SX4_SYS.temperature3))],
-      fanSpeedText: get(SX4_SYS.fanSpeed).trim(),
-      psuAStatus: get(SX4_PSU.psuAStatus).trim(),
-      psuBStatus: get(SX4_PSU.psuBStatus).trim(),
+      fanSpeedText: String(get(SX4_SYS.fanSpeed)).trim(),
+      psuAStatus: String(get(SX4_PSU.psuAStatus)).trim(),
+      psuBStatus: String(get(SX4_PSU.psuBStatus)).trim(),
     },
     ports: [...ports.entries()].map(([port, p]) => ({
       port,
@@ -693,7 +696,7 @@ function parseSx4(out: Map<string, string>, get: (oid: string) => string): SxSwi
   };
 }
 
-function parseSx3(out: Map<string, string>, get: (oid: string) => string): SxSwitchSnapshot {
+function parseSx3(out: Map<string, SnmpValue>, get: (oid: string) => SnmpValue): SxSwitchSnapshot {
   // --- System scalars -------------------------------------------------
   const memFreeKb = toInt(get(SX3_SYS.memFreeKb));
   const ramSizeMb = toNumberLoose(get(SX3_SYS.ramSize)) ?? null; // DisplayString KB → MB
@@ -708,20 +711,20 @@ function parseSx3(out: Map<string, string>, get: (oid: string) => string): SxSwi
     let p = ports.get(port);
     if (!p) { p = {}; ports.set(port, p); }
     switch (row.col) {
-      case SX3_PORT_CONF.COL_DESCRIPTION: p.label = value.trim(); break;
-      case SX3_PORT_CONF.COL_LINK: p.linkUp = /^up$/i.test(value.trim()) ? true : /^down$/i.test(value.trim()) ? false : null; break;
-      case SX3_PORT_CONF.COL_CURRENT_SPEED: p.speedStatus = value.trim(); break;
-      case SX3_PORT_CONF.COL_MEDIA: p.media = value.trim(); break;
+      case SX3_PORT_CONF.COL_DESCRIPTION: p.label = String(value).trim(); break;
+      case SX3_PORT_CONF.COL_LINK: p.linkUp = /^up$/i.test(String(value).trim()) ? true : /^down$/i.test(String(value).trim()) ? false : null; break;
+      case SX3_PORT_CONF.COL_CURRENT_SPEED: p.speedStatus = String(value).trim(); break;
+      case SX3_PORT_CONF.COL_MEDIA: p.media = String(value).trim(); break;
     }
   }
 
   // --- Networks from the management-address scalars (no SVI table on 3.x) --
   const networks: SxNetwork[] = [];
-  const v4 = get(SX3_SYS.ipv4Address).trim();
+  const v4 = String(get(SX3_SYS.ipv4Address)).trim();
   if (v4 && v4 !== '0.0.0.0') {
-    networks.push({ name: 'Management', ip: v4, prefix: netmaskToPrefix(get(SX3_SYS.ipv4SubnetMask).trim()), version: 'v4', vlanId: null });
+    networks.push({ name: 'Management', ip: v4, prefix: netmaskToPrefix(get(SX3_SYS.ipv4SubnetMask)), version: 'v4', vlanId: null });
   }
-  const v6 = get(SX3_SYS.ipv6Address).trim();
+  const v6 = String(get(SX3_SYS.ipv6Address)).trim();
   if (v6 && v6 !== '::') {
     networks.push({ name: 'Management', ip: v6, prefix: toInt(get(SX3_SYS.ipv6Prefix)), version: 'v6', vlanId: null });
   }
@@ -730,12 +733,12 @@ function parseSx3(out: Map<string, string>, get: (oid: string) => string): SxSwi
     collectedAt: Date.now(),
     variant: 'sx3',
     system: {
-      name: get(SX3_SYS.deviceName).trim(),
-      model: get(SX3_SYS.model).trim(),
-      firmwareVersion: get(SX3_SYS.firmwareVersion).trim(),
-      serialNumber: get(SX3_SYS.serialNumber).trim(),
+      name: String(get(SX3_SYS.deviceName)).trim(),
+      model: String(get(SX3_SYS.model)).trim(),
+      firmwareVersion: String(get(SX3_SYS.firmwareVersion)).trim(),
+      serialNumber: String(get(SX3_SYS.serialNumber)).trim(),
       hostMac: normalizeMac(get(SX3_SYS.hostMacAddress)),
-      uptimeText: get(SX3_SYS.uptime).trim(),
+      uptimeText: String(get(SX3_SYS.uptime)).trim(),
       cpuLoadPct: parseCpuLoadPct(get(SX3_SYS.cpuLoad)),
       memoryTotalMb: ramSizeMb,
       memoryFreeMb: memFreeKb !== null ? Math.round(memFreeKb / 1024) : null,
@@ -798,7 +801,7 @@ export async function walkSxCounters(
     `${base}.1.${SX4_PORT_TRAFFIC.COL_RX_OCTETS}`,
     `${base}.1.${SX4_PORT_TRAFFIC.COL_TX_OCTETS}`,
   ];
-  const out = new Map<string, string>();
+  const out = new Map<string, SnmpValue>();
   for (const oid of colOids) {
     try {
       // Sequential — the SX agents corrupt responses under concurrent sessions.

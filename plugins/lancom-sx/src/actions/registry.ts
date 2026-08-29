@@ -13,7 +13,7 @@
  */
 
 import { createRegistry } from '@unm/plugin-sdk';
-import { snmpGet, snmpSet, snmpWalk } from '@unm/snmp-client';
+import { snmpGet, snmpSet, snmpWalk, SnmpValue } from '@unm/snmp-client';
 import { SX4_PORT_CONF, SX4_POE_CONF, SX4_LACP_CONF, SX4_VLAN, SX3_PORT_CONF } from '../sxOids';
 import { detectVariant, SxOptions } from '../sxClient';
 import { ActionContext, ActionDescriptor } from './types';
@@ -31,8 +31,8 @@ function sxOpts(ctx: ActionContext): SxOptions {
   return { ...ctx.opts, inventoryTtlMs: 0, enrichHostPorts: false };
 }
 
-/** Reads one scalar OID and returns its value (or null when absent). */
-async function readScalar(ctx: ActionContext, oid: string): Promise<string | null> {
+/** Reads one scalar OID and returns its typed value (or null when absent). */
+async function readScalar(ctx: ActionContext, oid: string): Promise<SnmpValue | null> {
   try {
     const m = await snmpGet(ctx.host, ctx.credentials.snmp, [oid], ctx.opts);
     return m.get(oid) ?? null;
@@ -90,14 +90,14 @@ const portSpeedModeSet: ActionDescriptor = {
 
     const before = await readScalar(ctx, oid);
     if (before === null) return { success: false, error: `Port ${port} does not expose a speed-mode object on this device.` };
-    if (String(before) === String(mode)) {
+    if (Number(before) === mode) {
       // Already in the requested state — idempotent no-op.
       return { success: true, applied: false, verified: true, details: { port, mode, alreadySet: true } };
     }
 
-    await snmpSet(ctx.host, ctx.credentials.snmp, oid, 'i', String(mode), ctx.opts);
+    await snmpSet(ctx.host, ctx.credentials.snmp, oid, 'i', mode, ctx.opts);
     const got = await readScalar(ctx, oid);
-    const verified = got === String(mode);
+    const verified = got !== null && Number(got) === mode;
     return {
       success: verified,
       applied: true,
@@ -132,13 +132,13 @@ const poeModeSet: ActionDescriptor = {
     const oid = `${SX4_POE_CONF.base}.1.${SX4_POE_CONF.COL_POE_MODE}.${port}`;
     const before = await readScalar(ctx, oid);
     if (before === null) return { success: false, error: `Port ${port} does not expose a PoE mode object on this device.` };
-    if (String(before) === String(mode)) {
+    if (Number(before) === mode) {
       return { success: true, applied: false, verified: true, details: { port, mode, alreadySet: true } };
     }
 
-    await snmpSet(ctx.host, ctx.credentials.snmp, oid, 'i', String(mode), ctx.opts);
+    await snmpSet(ctx.host, ctx.credentials.snmp, oid, 'i', mode, ctx.opts);
     const got = await readScalar(ctx, oid);
-    const verified = got === String(mode);
+    const verified = got !== null && Number(got) === mode;
     return { success: verified, applied: true, verified, details: { port, mode, before: String(before), after: got ?? null } };
   },
 };
@@ -163,19 +163,19 @@ const poePrioritySet: ActionDescriptor = {
     const { port, error } = parsePort(input);
     if (error || !port) return { success: false, error };
     const prioLabel = str(input, 'priority');
-    const prioValue = prioLabel === 'low' ? '0' : prioLabel === 'high' ? '1' : prioLabel === 'critical' ? '2' : null;
-    if (!prioValue) return { success: false, error: `Invalid priority ${String(input.priority)} (expected low|high|critical)` };
+    const prioValue: number | null = prioLabel === 'low' ? 0 : prioLabel === 'high' ? 1 : prioLabel === 'critical' ? 2 : null;
+    if (prioValue === null) return { success: false, error: `Invalid priority ${String(input.priority)} (expected low|high|critical)` };
 
     const oid = `${SX4_POE_CONF.base}.1.${SX4_POE_CONF.COL_PRIORITY}.${port}`;
     const before = await readScalar(ctx, oid);
     if (before === null) return { success: false, error: `Port ${port} does not expose a PoE priority object on this device.` };
-    if (String(before) === prioValue) {
+    if (Number(before) === prioValue) {
       return { success: true, applied: false, verified: true, details: { port, priority: prioLabel, alreadySet: true } };
     }
 
     await snmpSet(ctx.host, ctx.credentials.snmp, oid, 'i', prioValue, ctx.opts);
     const got = await readScalar(ctx, oid);
-    const verified = got === prioValue;
+    const verified = got !== null && Number(got) === prioValue;
     return { success: verified, applied: true, verified, details: { port, priority: prioLabel, before: String(before), after: got ?? null } };
   },
 };
@@ -203,32 +203,33 @@ const lacpPortSet: ActionDescriptor = {
     const { port, error } = parsePort(input);
     if (error || !port) return { success: false, error };
     const enabled = typeof input.enabled === 'boolean' ? input.enabled : true;
-    const roleValue = str(input, 'role') === 'active' ? '1' : '0';
-    const timeoutValue = str(input, 'timeout') === 'fast' ? '1' : '0';
+    const roleValue = str(input, 'role') === 'active' ? 1 : 0;
+    const timeoutValue = str(input, 'timeout') === 'fast' ? 1 : 0;
 
     const enabledOid = `${SX4_LACP_CONF.base}.1.${SX4_LACP_CONF.COL_ENABLED}.${port}`;
     const beforeEnabled = await readScalar(ctx, enabledOid);
     if (beforeEnabled === null) return { success: false, error: `Port ${port} does not expose a LACP config object on this device.` };
 
     // 1. Enable/disable flag first — the other columns only matter when enabled.
-    await snmpSet(ctx.host, ctx.credentials.snmp, enabledOid, 'i', enabled ? '1' : '0', ctx.opts);
+    await snmpSet(ctx.host, ctx.credentials.snmp, enabledOid, 'i', enabled ? 1 : 0, ctx.opts);
 
     if (enabled) {
       const key = typeof input.key === 'number' && Number.isInteger(input.key) ? Math.floor(input.key) : null;
       if (key === null || key < 1 || key > 65535) return { success: false, error: 'A valid aggregation key (1..65535) is required when enabling LACP.' };
-      await snmpSet(ctx.host, ctx.credentials.snmp, `${SX4_LACP_CONF.base}.1.${SX4_LACP_CONF.COL_KEY}.${port}`, 'i', String(key), ctx.opts);
+      await snmpSet(ctx.host, ctx.credentials.snmp, `${SX4_LACP_CONF.base}.1.${SX4_LACP_CONF.COL_KEY}.${port}`, 'i', key, ctx.opts);
       await snmpSet(ctx.host, ctx.credentials.snmp, `${SX4_LACP_CONF.base}.1.${SX4_LACP_CONF.COL_ROLE}.${port}`, 'i', roleValue, ctx.opts);
       await snmpSet(ctx.host, ctx.credentials.snmp, `${SX4_LACP_CONF.base}.1.${SX4_LACP_CONF.COL_TIMEOUT}.${port}`, 'i', timeoutValue, ctx.opts);
     }
 
     // 2. Re-read to verify.
-    const gotEnabled = (await readScalar(ctx, enabledOid)) === (enabled ? '1' : '0');
+    const ge = await readScalar(ctx, enabledOid);
+    const gotEnabled = ge !== null && Number(ge) === (enabled ? 1 : 0);
     let verified = gotEnabled;
     if (enabled) {
       const key = Math.floor(input.key as number);
       const gotKey = await readScalar(ctx, `${SX4_LACP_CONF.base}.1.${SX4_LACP_CONF.COL_KEY}.${port}`);
       const gotRole = await readScalar(ctx, `${SX4_LACP_CONF.base}.1.${SX4_LACP_CONF.COL_ROLE}.${port}`);
-      verified = gotEnabled && gotKey === String(key) && gotRole === roleValue;
+      verified = gotEnabled && (gotKey !== null && Number(gotKey) === key) && (gotRole !== null && Number(gotRole) === roleValue);
     }
     return { success: verified, applied: true, verified, details: { port, enabled, beforeEnabled: String(beforeEnabled) } };
   },
@@ -259,13 +260,13 @@ const vlanPvidSet: ActionDescriptor = {
     const oid = `${SX4_VLAN.base}.1.${SX4_VLAN.COL_PVID}.${port}`;
     const before = await readScalar(ctx, oid);
     if (before === null) return { success: false, error: `Port ${port} does not expose a VLAN PVID object on this device.` };
-    if (String(before) === String(pvid)) {
+    if (Number(before) === pvid) {
       return { success: true, applied: false, verified: true, details: { port, pvid, alreadySet: true } };
     }
 
-    await snmpSet(ctx.host, ctx.credentials.snmp, oid, 'i', String(pvid), ctx.opts);
+    await snmpSet(ctx.host, ctx.credentials.snmp, oid, 'i', pvid, ctx.opts);
     const got = await readScalar(ctx, oid);
-    const verified = got === String(pvid);
+    const verified = got !== null && Number(got) === pvid;
     return { success: verified, applied: true, verified, details: { port, pvid, before: String(before), after: got ?? null } };
   },
 };
@@ -290,19 +291,19 @@ const vlanModeSet: ActionDescriptor = {
     const { port, error } = parsePort(input);
     if (error || !port) return { success: false, error };
     const modeLabel = str(input, 'mode');
-    const modeValue = modeLabel === 'access' ? '0' : modeLabel === 'trunk' ? '1' : modeLabel === 'hybrid' ? '2' : null;
-    if (!modeValue) return { success: false, error: `Invalid VLAN mode ${String(input.mode)} (expected access|trunk|hybrid)` };
+    const modeValue: number | null = modeLabel === 'access' ? 0 : modeLabel === 'trunk' ? 1 : modeLabel === 'hybrid' ? 2 : null;
+    if (modeValue === null) return { success: false, error: `Invalid VLAN mode ${String(input.mode)} (expected access|trunk|hybrid)` };
 
     const oid = `${SX4_VLAN.base}.1.${SX4_VLAN.COL_MODE}.${port}`;
     const before = await readScalar(ctx, oid);
     if (before === null) return { success: false, error: `Port ${port} does not expose a VLAN mode object on this device.` };
-    if (String(before) === modeValue) {
+    if (Number(before) === modeValue) {
       return { success: true, applied: false, verified: true, details: { port, mode: modeLabel, alreadySet: true } };
     }
 
     await snmpSet(ctx.host, ctx.credentials.snmp, oid, 'i', modeValue, ctx.opts);
     const got = await readScalar(ctx, oid);
-    const verified = got === modeValue;
+    const verified = got !== null && Number(got) === modeValue;
     return { success: verified, applied: true, verified, details: { port, mode: modeLabel, before: String(before), after: got ?? null } };
   },
 };
@@ -335,8 +336,8 @@ const portsStateRead: ActionDescriptor = {
         const port = parts.slice(1).join('.');
         if (!/^\d+$/.test(port)) continue;
         const entry = ports[port] ?? (ports[port] = { link: '', speed: '' });
-        if (col === linkCol) entry.link = value.trim();
-        else if (col === speedCol) entry.speed = value.trim();
+        if (col === linkCol) entry.link = String(value).trim();
+        else if (col === speedCol) entry.speed = String(value).trim();
       }
     } catch {
       // best-effort — the port table is the core of this action, but a partial
@@ -361,7 +362,7 @@ const portsStateRead: ActionDescriptor = {
         const lacpEnabled: Record<string, boolean> = {};
         for (const [oid, value] of lacp) {
           const tail = oid.split('.').pop();
-          if (tail && /^\d+$/.test(tail)) lacpEnabled[`P${tail}`] = value === '1';
+          if (tail && /^\d+$/.test(tail)) lacpEnabled[`P${tail}`] = Number(value) === 1;
         }
         details.lacpEnabled = lacpEnabled;
       } catch { /* no LACP configured */ }

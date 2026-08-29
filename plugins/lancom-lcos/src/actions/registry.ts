@@ -13,7 +13,7 @@
 import http from 'http';
 import https from 'https';
 import { createRegistry } from '@unm/plugin-sdk';
-import { snmpGet, snmpSet, snmpWalk } from '@unm/snmp-client';
+import { snmpGet, snmpSet, snmpWalk, SnmpValue } from '@unm/snmp-client';
 import { SETUP } from '../lcosOids';
 import { ActionContext, ActionDescriptor, ActionResult } from './types';
 
@@ -34,8 +34,8 @@ function encodeTextIndex(text: string): string {
   return [octets.length, ...octets].join('.');
 }
 
-/** Reads one scalar OID and returns its value (or null when absent). */
-async function readScalar(ctx: ActionContext, oid: string): Promise<string | null> {
+/** Reads one scalar OID and returns its typed value (or null when absent). */
+async function readScalar(ctx: ActionContext, oid: string): Promise<SnmpValue | null> {
   try {
     const m = await snmpGet(ctx.host, ctx.credentials.snmp, [oid], ctx.opts);
     return m.get(oid) ?? null;
@@ -52,7 +52,8 @@ async function readNtpServers(ctx: ActionContext): Promise<string[]> {
     for (const [oid, value] of m) {
       // Row shape relative to the table base: `.1.<col>.<index…>` — col 1 only.
       if (!oid.startsWith(`${SETUP.ntpRqAddressTableBase}.1.1.`)) continue;
-      if (value && !out.includes(value)) out.push(value);
+      const v = String(value).trim();
+      if (v && !out.includes(v)) out.push(v);
     }
     return out;
   } catch {
@@ -215,7 +216,7 @@ const ntpServersSet: ActionDescriptor = {
     const enabled = typeof input.enabled === 'boolean' ? input.enabled : true;
 
     // 1. Operating flag (eNo(0)/eYes(1)).
-    await snmpSet(ctx.host, ctx.credentials.snmp, SETUP.ntpOperating, 'i', enabled ? '1' : '0', ctx.opts);
+    await snmpSet(ctx.host, ctx.credentials.snmp, SETUP.ntpOperating, 'i', enabled ? 1 : 0, ctx.opts);
 
     // 2. Upsert each server row: <table>.1.<col=1>.<encoded-address> = address.
     const existing = await readNtpServers(ctx);
@@ -226,7 +227,8 @@ const ntpServersSet: ActionDescriptor = {
     }
 
     // 3. Re-read to verify.
-    const verifiedFlag = (await readScalar(ctx, SETUP.ntpOperating)) === (enabled ? '1' : '0');
+    const gotFlag = await readScalar(ctx, SETUP.ntpOperating);
+    const verifiedFlag = gotFlag !== null && Number(gotFlag) === (enabled ? 1 : 0);
     const nowServers = await readNtpServers(ctx);
     const allPresent = servers.every((s) => nowServers.includes(s));
     return {
@@ -259,7 +261,7 @@ const dnsServersSet: ActionDescriptor = {
 
     const gotPrimary = await readScalar(ctx, SETUP.dnsDefault);
     const gotBackup = backup ? await readScalar(ctx, SETUP.dnsBackup) : null;
-    const verified = gotPrimary === primary && (backup === undefined || gotBackup === backup);
+    const verified = String(gotPrimary ?? '') === primary && (backup === undefined || String(gotBackup ?? '') === backup);
     return {
       success: verified,
       applied: true,
@@ -288,12 +290,12 @@ const lanIfcStateSet: ActionDescriptor = {
     const enabled = typeof input.enabled === 'boolean' ? input.enabled : true;
 
     // Inverted semantics: operating ON = eYes(0), OFF = eNo(1).
-    const value = enabled ? '0' : '1';
+    const value = enabled ? 0 : 1;
     const oid = `${SETUP.lanIfcTableBase}.1.${SETUP.LAN_COL_OPERATING}.${port}`;
     await snmpSet(ctx.host, ctx.credentials.snmp, oid, 'i', value, ctx.opts);
 
     const got = await readScalar(ctx, oid);
-    const verified = got === value;
+    const verified = got !== null && Number(got) === value;
     return {
       success: verified,
       applied: true,
@@ -334,8 +336,8 @@ const networkStateRead: ActionDescriptor = {
     return {
       success: true,
       details: {
-        ntp: { operating: ntpOperating === null ? null : ntpOperating === '1', servers: ntpServers },
-        dns: { primary: dnsDefault ?? null, backup: dnsBackup ?? null },
+        ntp: { operating: ntpOperating === null ? null : Number(ntpOperating) === 1, servers: ntpServers },
+        dns: { primary: dnsDefault !== null && dnsDefault !== '' ? String(dnsDefault) : null, backup: dnsBackup !== null && dnsBackup !== '' ? String(dnsBackup) : null },
         lanPorts,
       },
     };

@@ -61,15 +61,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: 2,
     min: 0,
     max: 10,
-    description: 'How many times snmpwalk retries a request before giving up.',
-  },
-  {
-    key: 'mibDir',
-    label: 'MIB directory (container path)',
-    type: 'string' as const,
-    maxLength: 512,
-    description:
-      'Container-internal directory holding extra MIB files. Defaults to the MIB_DIR env var (the mounted ./plugins/lancom-lx/mibs volume at /app/mibs). Parsing uses numeric OIDs — MIBs are for debugging only.',
+    description: 'How many times an SNMP request is retried before giving up.',
   },
   {
     key: 'inventoryTtlMs',
@@ -130,11 +122,9 @@ const logger = createPluginLogger(identity);
 
 /** Resolves walk options from effective settings. */
 function resolveOptions(settings: Record<string, unknown>): LcosOptions {
-  const settingMib = typeof settings.mibDir === 'string' && settings.mibDir.trim() ? settings.mibDir.trim() : '';
   return {
     timeoutMs: clampInt(settings.timeoutMs, 1_000, 30_000, 5_000),
     retries: clampInt(settings.retries, 0, 10, 2),
-    mibDir: settingMib || (process.env.MIB_DIR ? process.env.MIB_DIR : undefined),
     inventoryTtlMs: clampInt(settings.inventoryTtlMs, 60_000, 86_400_000, INVENTORY_INTERVAL_MS),
     maxClientRows: clampInt(settings.maxClientRows, 10, 2_000, 100),
   };
@@ -497,7 +487,6 @@ app.post('/monitoring', async (req, res) => {
       activeSettings: {
         timeoutMs: opts.timeoutMs,
         retries: opts.retries,
-        mibDir: opts.mibDir ?? null,
         inventoryTtlMs: opts.inventoryTtlMs,
         maxClientRows: opts.maxClientRows,
         // User-selected hardware model / firmware version (forwarded by the API).

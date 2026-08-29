@@ -61,7 +61,7 @@ export interface ActionContext {
   address: string;
   deviceId?: string;
   credentials: StepCredentials;
-  /** Effective transport options (timeout/retries/mibDir). */
+  /** Effective transport options (timeout/retries/port). */
   opts: TransportOptions;
 }
 

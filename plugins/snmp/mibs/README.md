@@ -1,12 +1,17 @@
-# SNMP MIB files
+# SNMP MIB files (manual debugging only)
 
-Drop vendor `.mib` files into this directory — they are mounted read-only
-into the snmp-plugin container at `/app/mibs` and added to `snmpwalk`'s MIB
-search path (`-M /app/mibs` + `MIBDIRS`).
+Drop vendor `.mib` files into this directory — it is mounted read-only into
+the snmp-plugin container at `/app/mibs`.
 
-Standard MIBs (SNMPv2-MIB, IF-MIB, …) already ship with net-snmp inside the
-container, so this directory is only needed for vendor-specific definitions.
+The plugin itself queries **numeric OIDs** over native UDP
+(`@unm/snmp-client`, no CLI, no MIB parsing), so no MIB file is required for
+normal operation. This volume exists purely to make manual debugging easier —
+e.g. running `snmpwalk -M /app/mibs` from a host that has net-snmp installed:
 
-The plugin's core walks use numeric OIDs and therefore work without any MIB
-files; adding MIBs improves human-readable output (resolved names instead of
-numeric values) for any future OID-based extensions.
+```sh
+# symbolic names instead of numeric OIDs (host-side, needs net-snmp CLI)
+snmpwalk -v2c -c public <device> -M /path/to/plugins/snmp/mibs 1.3.6.1.2.1.2
+```
+
+Standard MIBs (SNMPv2-MIB, IF-MIB, …) are not needed at runtime either — the
+plugin never resolves symbolic names.

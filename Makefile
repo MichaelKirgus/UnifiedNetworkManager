@@ -50,6 +50,7 @@ build:
 	  (cd plugins/icmp && npm run build) & \
 	  (cd plugins/snmp && npm run build) & \
 	  (cd plugins/lancom-lx && npm run build) & \
+	  (cd plugins/lancom-sx && npm run build) & \
 	  (cd plugins/lancom-lcos && npm run build) & \
 	  (cd plugins/basic-auth && npm run build) & \
 	  (cd plugins/secrets-provider && npm run build) & \
@@ -64,9 +65,9 @@ build:
 up:
 	@echo "Starting infrastructure..."
 	@if command -v docker-compose &> /dev/null; then \
-		docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin lancom-lx-plugin lancom-lcos-plugin swos-plugin mcp; \
+		docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-lcos-plugin swos-plugin mcp; \
 	else \
-		docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin lancom-lx-plugin lancom-lcos-plugin swos-plugin mcp; \
+		docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-lcos-plugin swos-plugin mcp; \
 	fi
 	@echo "Infrastructure is up."
 

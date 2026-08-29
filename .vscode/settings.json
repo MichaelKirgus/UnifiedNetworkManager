@@ -13,6 +13,10 @@
         "/^cd /home/michael/Git/MichaelKirgus/UnifiedNetworkManager && node validate-openapi\\.cjs 2>&1 \\| tail -3$/": {
             "approve": true,
             "matchCommandLine": true
+        },
+        "/^node /tmp/unm-parity-diff\\.cjs 2>&1 \\| head -80$/": {
+            "approve": true,
+            "matchCommandLine": true
         }
     }
 }

@@ -15,7 +15,7 @@
  * 13.2 setup tree is out of scope for monitoring by design.
  */
 
-import { SnmpCredentials, TransportOptions, snmpGet, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
+import { SnmpCredentials, SnmpValue, TransportOptions, snmpGet, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
 import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 import {
   LCOS_BASE, SYS, HW, STATION, RADIOS, WLAN_IF, CHANNEL_UTIL, ENV_SCAN, WDS,
@@ -179,10 +179,10 @@ const LMC_STATUS: Record<number, string> = {
   13: 'cert storage failed', 14: 'active', 15: 'cert gen aborted', 16: 'no activation code',
 };
 
-function label(map: Record<number, string>, raw: string | undefined): string {
+function label(map: Record<number, string>, raw: SnmpValue | undefined): string {
   if (raw === undefined || raw === '') return '';
   const n = Number(raw);
-  return Number.isFinite(n) ? map[n] ?? String(n) : raw;
+  return Number.isFinite(n) ? map[n] ?? String(n) : String(raw);
 }
 
 /* ------------------------------------------------------------------ *
@@ -399,7 +399,7 @@ export async function getLcosInventory(
   // (hardware-info sw version). Non-LANCOM devices answer "No Such Object" in
   // ~100ms and are rejected here instead of burning ~17 walks × timeout
   // budget; unreachable hosts fail fast on the single PDU.
-  let probe: Map<string, string>;
+  let probe: Map<string, SnmpValue>;
   try {
     probe = await snmpGet(host, creds, [HW.swVersion], opts);
   } catch {
@@ -414,7 +414,7 @@ export async function getLcosInventory(
     return { snapshot: null, fromCache: false, error: 'No LCOS-LX MIB data on this device.' };
   }
 
-  const out = new Map<string, string>();
+  const out = new Map<string, SnmpValue>();
   for (const [k, v] of probe) out.set(k, v); // reuse the probed scalar
 
   // Walks run in small batches rather than all at once: embedded AP agents
@@ -488,8 +488,8 @@ export async function getLcosInventory(
 }
 
 /** Parses the targeted LCOS walk output into a typed snapshot. */
-function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnapshot {
-  const get = (oid: string): string => out.get(oid) ?? '';
+function parseLcosStatus(out: Map<string, SnmpValue>, opts: LcosOptions): LcosSnapshot {
+  const get = (oid: string): SnmpValue => out.get(oid) ?? '';
 
   // --- System scalars -------------------------------------------------
   const memTotal = Number(get(HW.totalMemoryKbytes));
@@ -519,7 +519,7 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
       case 19: r.bandwidth = label(BANDWIDTHS, value); break;
       // cols 22/23 (rx/tx bytes Counter64) are fast-path only — skipped here.
       case 50: r.temperatureC = toInt(value); break;
-      case 51: r.dfsBlocked = value === '1'; break;
+      case 51: r.dfsBlocked = Number(value) === 1; break;
     }
   }
 
@@ -536,12 +536,12 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
     // every row so it survives even when only one column is present.
     s.band = label(RADIO_BANDS, String(key.num));
     switch (row.col) {
-      case 2: s.ssid = value; break;
+      case 2: s.ssid = String(value); break;
       case 4: s.pskSuccess = Number(value) || 0; break;
       case 5: s.pskFailures = Number(value) || 0; break;
       case 6: s.pskWrongPassphrase = Number(value) || 0; break;
       // Radio interface ("WLAN-1") — joins the SSID row to its radio/channel.
-      case 7: if (!s.ifc) s.ifc = value; break;
+      case 7: if (!s.ifc) s.ifc = String(value); break;
       case 10: s.bssid = normalizeMac(value); break;
     }
   }
@@ -557,7 +557,7 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
     switch (row.col) {
       case 6: s.encryption = label(ENCRYPTIONS, value); break;
       case 18: s.maxStations = toInt(value); break;
-      case 21: if (!s.ssid) s.ssid = value; break;
+      case 21: if (!s.ssid) s.ssid = String(value); break;
       case 34: s.vlanId = toInt(value); break;
     }
   }
@@ -580,27 +580,27 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
     }
     switch (row.col) {
       case 2: c.band = label(RADIO_BANDS, value); break;
-      case 3: c.ifc = value; // plain text value ("WLAN-1")
+      case 3: c.ifc = String(value); // plain text value ("WLAN-1")
       // Verified live: connectTime is in CENTISECONDS (delta 75s → +750).
       case 18: { const n = toInt(value); if (n !== null) c.sessionSeconds = Math.round(n / 100); } break;
       // LCOS reports "0.0.0.0" for stations without an IPv4 address — treat as absent,
       // otherwise it masks the station's real IPv6 in the merged host view.
-      case 27: c.ip4 = value === '0.0.0.0' ? '' : value; break;
-      case 28: c.ip6 = value === '::' ? '' : value; break; // link-local/none → absent
+      case 27: c.ip4 = value === '0.0.0.0' ? '' : String(value); break;
+      case 28: c.ip6 = value === '::' ? '' : String(value); break; // link-local/none → absent
       case 33: { const w = label(WPA_VERSIONS, value); if (w) c.wpa = w; } break;
       case 38: c.vlanId = toInt(value); break;
-      case 39: c.username = value; break;
+      case 39: c.username = String(value); break;
       // Pairwise cipher ("CCMP"…) — append to the WPA version.
       case 40: if (value) c.wpa = c.wpa ? `${c.wpa}/${stripE(value)}` : stripE(value); break;
       case 50: c.txRateMbps = toInt(value); break;
       case 51: c.rxRateMbps = toInt(value); break;
       case 71: c.mode = label(OP_MODES, value) || stripE(value); break;
-      case 80: c.hostname = value; break;
+      case 80: c.hostname = String(value); break;
       // Unsigned magnitude of the dBm signal — negate for display.
       // Signed dBm — the shared parser preserves the sign.
       case 97: c.signalDbm = toInt(value); break;
-      case 98: if (!c.ssid) c.ssid = value; break; // networkName fallback
-      case 99: c.ssid = value || c.ssid; break;
+      case 98: if (!c.ssid) c.ssid = String(value); break; // networkName fallback
+      case 99: c.ssid = String(value) || c.ssid; break;
     }
   }
   clients.sort((a, b) => a.mac.localeCompare(b.mac));
@@ -615,7 +615,7 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
     let p = ports.find((x) => x.name === key);
     if (!p) { p = { name: key, linkUp: null, speedLabel: '', mac: '' }; ports.push(p); }
     switch (row.col) {
-      case 2: p.linkUp = value === '1'; break; // eNo(0)/eYes(1)
+      case 2: p.linkUp = Number(value) === 1; break; // eNo(0)/eYes(1)
       case 3: p.speedLabel = label(PORT_SPEEDS, value); break;
       case 4: p.mac = normalizeMac(value); break;
     }
@@ -632,7 +632,7 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
     let ip = ipRows.get(key);
     if (!ip) { ip = { ifname: dec.ifname, version: dec.version, address: dec.address, gateway: '' }; ipRows.set(key, ip); }
     // "::" / empty mean no default route on that interface.
-    if (value && value !== '::') ip.gateway = value;
+    if (value && value !== '::') ip.gateway = String(value);
   }
   const ips = [...ipRows.values()];
 
@@ -643,7 +643,7 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
     if (!row || row.col !== 3) continue; // col 3 = flags ("PVID Egress Untagged"…)
     const dec = decodeNumberText(row.idx);
     if (!dec) continue;
-    vlans.push({ ifname: dec.text, vlanId: dec.num, flags: value });
+    vlans.push({ ifname: dec.text, vlanId: dec.num, flags: String(value) });
   }
 
   // --- WDS links (index: [linkName text, colon-MAC text]) -----------------
@@ -656,7 +656,7 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
     let l = wdsLinks.find((x) => x.remoteMac === dec.mac && x.name === dec.text);
     if (!l) { l = { name: dec.text, remoteMac: dec.mac, connected: null, signalDbm: null }; wdsLinks.push(l); }
     switch (row.col) {
-      case 3: l.connected = value === '1'; break; // eYes(1)/eNo(0)
+      case 3: l.connected = Number(value) === 1; break; // eYes(1)/eNo(0)
       // Unsigned magnitude of the dBm receive signal — negate for display.
       // Gauge32 magnitude (verified live) — negate for display.
       case 5: { const n = toInt(value); if (n !== null) l.signalDbm = -n; } break;
@@ -673,7 +673,7 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
     let n = neighbors.find((x) => x.bssid === bssid);
     if (!n) { n = { bssid, ssid: '', channel: null, band: '', signalDbm: null }; neighbors.push(n); }
     switch (row.col) {
-      case 2: n.ssid = value; break;
+      case 2: n.ssid = String(value); break;
       case 8: n.channel = toInt(value); break;
       case 16: n.band = label(RADIO_BANDS, value); break;
       // Signed dBm — the shared parser preserves the sign.
@@ -690,7 +690,7 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
     let e = channelUtilization.find((x) => x.channel === ch);
     if (!e) { e = { channel: ch, utilizationPct: null, overload: false }; channelUtilization.push(e); }
     if (row.col === 2) e.utilizationPct = toInt(value);
-    else if (row.col === 3) e.overload = value !== '0';
+    else if (row.col === 3) e.overload = Number(value) !== 0;
   }
 
   // --- CAPWAP / LMC management state ------------------------------------
@@ -709,9 +709,9 @@ function parseLcosStatus(out: Map<string, string>, opts: LcosOptions): LcosSnaps
     collectedAt: Date.now(),
     isLancom: true,
     system: {
-      name: get(SYS.setupName),
-      swVersion: get(HW.swVersion),
-      serialNumber: get(HW.serialNumber),
+      name: String(get(SYS.setupName)),
+      swVersion: String(get(HW.swVersion)),
+      serialNumber: String(get(HW.serialNumber)),
       uptimeSeconds: Number.isFinite(uptime) && uptime > 0 ? uptime : null,
       // Verified live: the value is already a percentage (5 → 5%).
       cpuLoadPct: Number.isFinite(cpuRaw) ? Math.min(100, Math.round(cpuRaw)) : null,
@@ -768,13 +768,14 @@ const RADIO_MODES: Record<number, string> = {
   267: '11a/n/ac/ax/be', 268: '11ax', 269: '11ax/be',
 };
 
-/** Strips the vendor "e" prefix from enum text values ("eRun" → "Run"). */
-function stripE(v: string): string {
-  return (v ?? '').replace(/^e/, '');
+/** Strips the vendor "e" prefix from enum text values ("eRun" → "Run"). Non-text values pass through as-is. */
+function stripE(v: SnmpValue | undefined): string {
+  if (typeof v !== 'string') return '';
+  return v.replace(/^e/, '');
 }
 
 /** Combines the three LMC cloud status scalars into one readable summary. */
-function summarizeLmc(mgmtRaw: string, ctrlRaw: string, monRaw: string): string {
+function summarizeLmc(mgmtRaw: SnmpValue, ctrlRaw: SnmpValue, monRaw: SnmpValue): string {
   const parts = [
     `mgmt ${label(LMC_STATUS, mgmtRaw) || stripE(mgmtRaw)}`,
     `control ${label(LMC_STATUS, ctrlRaw) || stripE(ctrlRaw)}`,
@@ -784,7 +785,7 @@ function summarizeLmc(mgmtRaw: string, ctrlRaw: string, monRaw: string): string 
 }
 
 /** Integer or null when absent/non-numeric. */
-function toInt(v: string | undefined): number | null {
+function toInt(v: SnmpValue | undefined): number | null {
   if (v === undefined || v === '') return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
@@ -860,7 +861,7 @@ export async function walkLcosCounters(
     // shortens (verified live: [3,0,0,N] for trap N) — so instead of
     // reconstructing OIDs we join count rows to their NAME column (col 3),
     // which carries plain text ("AuthStation"…).
-    const trapNames = new Map<string, string>();
+    const trapNames = new Map<string, SnmpValue>();
     for (const [oid, value] of eventOut) {
       const row = splitRow(oid, SNMP_EVENT.base);
       if (!row || row.col !== 3) continue; // col 3 = name
@@ -870,7 +871,7 @@ export async function walkLcosCounters(
     for (const [oid, value] of eventOut) {
       const row = splitRow(oid, SNMP_EVENT.base);
       if (!row || row.col !== 4) continue; // col 4 = count
-      const name = TRAP_NAMES[trapNames.get(row.idx.join('.')) ?? ''];
+      const name = TRAP_NAMES[String(trapNames.get(row.idx.join('.')) ?? '')];
       if (!name) continue;
       const delta = deltaTracker.sample(`${host}:trap:${row.idx.join('.')}`, Number(value), now);
       if (delta !== null && delta > 0) wifiEvents[name] = (wifiEvents[name] ?? 0) + delta;

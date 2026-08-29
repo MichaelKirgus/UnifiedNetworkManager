@@ -115,9 +115,10 @@ services:
   #   restart: unless-stopped
 
   # SNMP plugin: SNMPv1/v2c monitoring (system group + interface throughput)
-  # and inventory via the net-snmp CLI. Credentials come from an snmp-type
-  # secret assigned per device (community + version). Vendor MIB files can be
-  # dropped into ./plugins/snmp/mibs — mounted read-only at /app/mibs.
+  # and inventory over native UDP (@unm/snmp-client). Credentials come from an
+  # snmp-type secret assigned per device (community + version). Vendor MIB
+  # files can be dropped into ./plugins/snmp/mibs — mounted read-only at
+  # /app/mibs for manual debugging only.
   snmp-plugin:
     # Root context — the image also builds the shared @unm/snmp-client package.
     build:
@@ -129,8 +130,6 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://snmp-plugin:4080
-      # Directory inside the container where extra MIB files are looked up.
-      - MIB_DIR=/app/mibs
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -155,8 +154,6 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://lancom-lx-plugin:4080
-      # Directory inside the container where extra MIB files are looked up.
-      - MIB_DIR=/app/mibs
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -183,8 +180,6 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://lancom-lcos-plugin:4080
-      # Directory inside the container where extra MIB files are looked up.
-      - MIB_DIR=/app/mibs
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -211,8 +206,6 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://lancom-sx-plugin:4080
-      # Directory inside the container where extra MIB files are looked up.
-      - MIB_DIR=/app/mibs
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}

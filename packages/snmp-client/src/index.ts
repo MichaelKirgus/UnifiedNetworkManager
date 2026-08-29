@@ -6,8 +6,8 @@
  *  - v1/v2c community and v3 USM credential handling (one place, one contract)
  *  - numeric OIDs everywhere — no MIB name resolution, no MIB files needed
  *  - timeout/retry budgeting that fits the API's poll window
- *  - result maps keyed by LEADING-DOT dotted OIDs with normalized string values
- *    (same shape as the old snmpwalk-CLI transport → zero plugin changes)
+ *  - result maps keyed by LEADING-DOT dotted OIDs with TYPED values
+ *    (SnmpValue = number | bigint | boolean | Buffer | string)
  *
  * Plugin-specific concerns (which OIDs to walk, table layouts, caching, rate
  * math) stay in each plugin — this package is transport only.
@@ -45,13 +45,19 @@ export interface TransportOptions {
   retries: number;
   /** Agent UDP port (default 161). */
   port?: number;
-  /**
-   * Accepted for backwards compatibility with the old CLI transport (which
-   * needed vendor MIB files). The native stack works purely on numeric OIDs,
-   * so this is intentionally ignored.
-   */
-  mibDir?: string;
 }
+
+/**
+ * A typed SNMP varbind value, as returned by snmpWalk/snmpGet and echoed by
+ * snmpSet. Mapping from the wire types:
+ *   Integer32 / Counter32 / Gauge32 / TimeTicks → number (signed, as-is)
+ *   Counter64 (typed tag 70 AND RFC-2578 8-byte OCTET STRING) → bigint
+ *   Boolean → boolean
+ *   binary OCTET STRING (MacAddress = 6 raw bytes, opaque data…) → Buffer
+ *   printable-ASCII OCTET STRING / DisplayString → string (utf8)
+ *   OID / IpAddress → dotted string
+ */
+export type SnmpValue = number | bigint | boolean | Buffer | string;
 
 /** Accepts both leading-dot plugin constants ('.1.3.6…') and bare dotted OIDs. */
 function stripDot(oid: string): string {
@@ -98,9 +104,9 @@ function createSession(host: string, creds: SnmpCredentials, opts: TransportOpti
   return snmp.createSession(host, creds.community ?? '', { ...sessionOpts, version });
 }
 
-/** Decodes an RFC-2578 Counter64 (8 big-endian bytes) to its decimal string. */
-function decodeCounter64(buf: Buffer): string {
-  return buf.length === 8 ? buf.readBigUInt64BE().toString(10) : buf.toString('hex');
+/** Decodes an RFC-2578 Counter64 (8 big-endian bytes) to a bigint. */
+function decodeCounter64(buf: Buffer): SnmpValue {
+  return buf.length === 8 ? buf.readBigUInt64BE() : buf.toString('hex');
 }
 
 /** True when every byte is printable ASCII (0x20–0x7E). */
@@ -109,39 +115,45 @@ function isPrintableAscii(buf: Buffer): boolean {
   return true;
 }
 
-/** Normalizes a typed varbind value to its machine-readable string form. */
-function normalizeValue(vb: snmp.VarBind): string {
+/** Coerces a numeric wire value to a finite JS number (0 for malformed). */
+function asNumber(v: unknown): number {
+  const n = typeof v === 'number' ? v : Number(v ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Maps a raw net-snmp varbind value to its typed SnmpValue form. */
+function normalizeValue(vb: snmp.VarBind): SnmpValue {
   const t = vb.type;
-  if (t === snmp.ObjectType.Integer) return String(vb.value ?? ''); // Integer32 — signed, keep sign
+  if (t === snmp.ObjectType.Integer) return asNumber(vb.value); // Integer32 — signed, keep sign
   if (t === snmp.ObjectType.Counter || t === snmp.ObjectType.Gauge || t === snmp.ObjectType.TimeTicks) {
-    return String(vb.value ?? ''); // Counter32 / Gauge32 / Unsigned32 / TimeTicks
+    return asNumber(vb.value); // Counter32 / Gauge32 / Unsigned32 / TimeTicks
   }
   if (t === snmp.ObjectType.Counter64) {
     // The npm agent's own mock encodes Counter64 with a non-standard tag-70;
     // the library's readUint64 yields an 8-byte big-endian Buffer for it.
     const v = vb.value;
     if (Buffer.isBuffer(v)) return decodeCounter64(v);
-    return typeof v === 'string' ? v : String(v ?? '');
+    if (typeof v === 'number') return BigInt(Math.trunc(v));
+    const s = typeof v === 'string' ? v.trim() : '';
+    return /^\d+$/.test(s) ? BigInt(s) : s; // decimal string → bigint, else pass through
   }
   if (t === snmp.ObjectType.OID || t === snmp.ObjectType.IpAddress) {
     return String(vb.value ?? ''); // dotted OID / "a.b.c.d" — keep as-is
   }
-  if (t === snmp.ObjectType.Boolean) return vb.value ? '1' : '0';
+  if (t === snmp.ObjectType.Boolean) return !!vb.value;
   // OctetString / Opaque arrive as Buffer (or string).
   const v = vb.value;
   if (v === null || v === undefined) return '';
   if (Buffer.isBuffer(v)) {
     // Real devices encode RFC-2578 Counter64 as tag 0x04 + exactly 8 bytes,
-    // which the library types as OctetString. The old CLI transport printed
-    // these decimal whenever a MIB defined them (always in production), so
-    // decode to decimal for parity — but only when the bytes are not a plain
-    // printable string: real counters carry leading zero bytes, while an
-    // 8-char ifAlias must survive intact.
+    // which the library types as OctetString. Decode to bigint — but only
+    // when the bytes are not a plain printable string: real counters carry
+    // leading zero bytes, while an 8-char ifAlias must survive intact.
     if (v.length === 8 && !isPrintableAscii(v)) return decodeCounter64(v);
     // Any other binary OCTET STRING (MacAddress = 6 raw bytes, opaque data…)
-    // is rendered exactly like the old CLI's `Hex-STRING: XX XX …` output —
-    // plugin parsers such as normalizeMac() already consume that form.
-    if (!isPrintableAscii(v)) return v.toString('hex').toUpperCase().replace(/(.{2})/g, '$1 ').trim();
+    // is handed over as the raw Buffer — plugins consume it directly
+    // (normalizeMac() accepts Buffers).
+    if (!isPrintableAscii(v)) return v;
     return v.toString('utf8');
   }
   return String(v);
@@ -160,16 +172,16 @@ function promiseRequest<T>(fn: (cb: (err: Error | null, result?: T) => void) => 
 
 /**
  * Walks the subtree under the FIRST given OID and returns a map of full
- * leading-dot OID → normalized value (snmpwalk-CLI semantics — extra OIDs are
- * ignored, matching the old transport). Throws on timeout / agent error; an
- * empty subtree resolves to an empty map.
+ * leading-dot OID → typed value (snmpwalk-CLI semantics — extra OIDs are
+ * ignored). Throws on timeout / agent error; an empty subtree resolves to an
+ * empty map.
  */
 export async function snmpWalk(
   host: string,
   creds: SnmpCredentials,
   oids: string[],
   opts: TransportOptions
-): Promise<Map<string, string>> {
+): Promise<Map<string, SnmpValue>> {
   const base = stripDot(oids[0] ?? '');
   if (!base) return new Map();
 
@@ -188,11 +200,11 @@ export async function snmpWalk(
  * CLI budget: min(timeoutMs × (retries+1) + 2s, 9.5s). The library's own
  * per-request timeout/retries cover single PDUs; this bounds the whole walk.
  */
-function walkSubtree(session: snmp.Session, host: string, baseOid: string, opts: TransportOptions): Promise<Map<string, string>> {
+function walkSubtree(session: snmp.Session, host: string, baseOid: string, opts: TransportOptions): Promise<Map<string, SnmpValue>> {
   const budgetMs = Math.min(opts.timeoutMs * (opts.retries + 1) + 2_000, WALK_BUDGET_MS);
   return new Promise((resolve, reject) => {
     let settled = false;
-    const out = new Map<string, string>();
+    const out = new Map<string, SnmpValue>();
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true;
@@ -219,23 +231,23 @@ function walkSubtree(session: snmp.Session, host: string, baseOid: string, opts:
 }
 
 /**
- * GETs the given OIDs and returns a map of full leading-dot OID → value. For
- * scalars and small fixed tables where a whole-subtree walk is wasteful.
- * OIDs that don't exist on the agent are simply absent from the result (error
- * varbinds are filtered). Throws like snmpWalk.
+ * GETs the given OIDs and returns a map of full leading-dot OID → typed
+ * value. For scalars and small fixed tables where a whole-subtree walk is
+ * wasteful. OIDs that don't exist on the agent are simply absent from the
+ * result (error varbinds are filtered). Throws like snmpWalk.
  */
 export async function snmpGet(
   host: string,
   creds: SnmpCredentials,
   oids: string[],
   opts: TransportOptions
-): Promise<Map<string, string>> {
+): Promise<Map<string, SnmpValue>> {
   if (!oids.length) return new Map();
 
   const session = createSession(host, creds, opts);
   try {
     const varbinds = await promiseRequest<snmp.VarBind[]>(cb => session.get(oids.map(stripDot), cb));
-    const out = new Map<string, string>();
+    const out = new Map<string, SnmpValue>();
     for (const vb of varbinds) if (!snmp.isVarbindError(vb)) out.set(`.${vb.oid}`, normalizeValue(vb));
     return out;
   } catch (err) {
@@ -246,52 +258,48 @@ export async function snmpGet(
 }
 
 /**
- * SETs a single OID and returns the value the agent echoed back in its
- * response PDU. Throws on rejection / timeout like snmpWalk — callers treat
- * that as "SET rejected".
+ * SETs a single OID and returns the typed value the agent echoed back in its
+ * response PDU ('' when the echo carries no varbind). Throws on rejection /
+ * timeout like snmpWalk — callers treat that as "SET rejected".
  *
  * `syntax` is the SNMP type tag for the value:
  *   s = DisplayString/STRING, i = INTEGER, t = TimeTicks, x = OCTET STRING (hex),
  *   a = IpAddress. Counter/Gauge objects are never SET in practice.
+ * Values may be passed natively: numbers for 'i'/'t', Buffer or hex string
+ * for 'x', strings everywhere else.
  */
 export async function snmpSet(
   host: string,
   creds: SnmpCredentials,
   oid: string,
   syntax: 's' | 'i' | 't' | 'x' | 'a',
-  value: string,
+  value: string | number | Buffer,
   opts: TransportOptions
-): Promise<string> {
+): Promise<SnmpValue> {
   let type: number;
   let payload: unknown;
   switch (syntax) {
     case 's':
       type = snmp.ObjectType.OctetString;
-      payload = value;
+      payload = typeof value === 'string' ? value : Buffer.isBuffer(value) ? value.toString('utf8') : String(value);
       break;
-    case 'i': {
-      const n = parseInt(value, 10);
-      if (Number.isNaN(n)) throw new Error(`snmpset failed for ${host} (${oid}): invalid integer "${value}"`);
+    case 'i':
       type = snmp.ObjectType.Integer;
-      payload = n;
+      payload = toIntValue(value, oid, host, 'integer');
       break;
-    }
-    case 't': {
-      const n = parseInt(value, 10);
-      if (Number.isNaN(n) || n < 0) throw new Error(`snmpset failed for ${host} (${oid}): invalid TimeTicks "${value}"`);
+    case 't':
       type = snmp.ObjectType.TimeTicks;
-      payload = n;
+      payload = toIntValue(value, oid, host, 'TimeTicks', true);
       break;
-    }
     case 'x':
       type = snmp.ObjectType.OctetString;
-      payload = Buffer.from(value.replace(/[^0-9a-f]/gi, ''), 'hex');
+      payload = Buffer.isBuffer(value) ? value : Buffer.from(String(value).replace(/[^0-9a-f]/gi, ''), 'hex');
       break;
     case 'a':
       // The library validates the dotted quad (4 octets 0–255) and throws a
       // RequestInvalidError otherwise.
       type = snmp.ObjectType.IpAddress;
-      payload = value;
+      payload = String(value);
       break;
   }
 
@@ -310,14 +318,29 @@ export async function snmpSet(
   }
 }
 
+/** Coerces a SET value to an integer (strings via parseInt, as before). */
+function toIntValue(value: string | number | Buffer, oid: string, host: string, what: string, nonNegative = false): number {
+  const n = typeof value === 'number' ? value : parseInt(String(value), 10);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || (nonNegative && n < 0)) {
+    throw new Error(`snmpset failed for ${host} (${oid}): invalid ${what} "${String(value)}"`);
+  }
+  return n;
+}
+
 /** Suffix of `oid` after `base.`, or '' when it doesn't extend base. */
 export function suffixOf(oid: string, base: string): string {
   return oid.startsWith(base + '.') ? oid.slice(base.length + 1) : '';
 }
 
-/** Normalizes MAC representations ("00-1A-2B..", "001a.2b3c.4d5e") to aa:bb:cc:dd:ee:ff. */
-export function normalizeMac(raw: string): string {
-  const hex = (raw ?? '').replace(/[^0-9a-f]/gi, '').toLowerCase();
+/**
+ * Normalizes MAC representations to aa:bb:cc:dd:ee:ff. Accepts dotted/hyphen/
+ * Cisco-grouped text forms AND raw binary Buffers (SNMP MacAddress columns —
+ * 6 raw bytes, hex-encoded internally). Any other SnmpValue is stringified
+ * first (defensive for mis-typed columns). Returns '' unless exactly 12 hex digits.
+ */
+export function normalizeMac(raw: SnmpValue | undefined): string {
+  const text = Buffer.isBuffer(raw) ? raw.toString('hex') : String(raw ?? '');
+  const hex = text.replace(/[^0-9a-f]/gi, '').toLowerCase();
   if (hex.length !== 12) return ''; // non-Ethernet MAC length — don't guess
   return hex.replace(/(.{2})(?=.)/g, '$1:');
 }
