@@ -15,7 +15,7 @@
  * 13.2 setup tree is out of scope for monitoring by design.
  */
 
-import { SnmpCredentials, SnmpValue, TransportOptions, snmpGet, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
+import { SnmpCredentials, SnmpValue, TransportOptions, snmpGet, snmpWalkMulti, suffixOf, normalizeMac } from '@unm/snmp-client';
 import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 import {
   LCOS_BASE, SYS, HW, STATION, RADIOS, WLAN_IF, CHANNEL_UTIL, ENV_SCAN, WDS,
@@ -348,7 +348,7 @@ function rememberLastKnown(host: string, snapshot: LcosSnapshot): void {
  * single `13.1` walk: that subtree contains large tables we never read
  * (bridge-VLAN membership ~2600 lines, an internal 13.1.100 table ~1400 lines)
  * and takes ~30s RTT-bound on a real AP, while this set finishes in ~2s.
- * Each entry is one snmpwalk; they run in parallel (separate processes).
+ * All entries are walked together in one combined GetBulk stream (snmpWalkMulti).
  */
 const INVENTORY_WALKS: string[] = [
   `${LCOS_BASE}.1.2`, // uptime scalar
@@ -417,41 +417,19 @@ export async function getLcosInventory(
   const out = new Map<string, SnmpValue>();
   for (const [k, v] of probe) out.set(k, v); // reuse the probed scalar
 
-  // Walks run in small batches rather than all at once: embedded AP agents
-  // have tiny concurrent-request queues, and a burst of ~19 parallel walks
-  // (especially alongside the generic SNMP plugin polling the same agent)
-  // makes them answer some walks with EMPTY views instead of timing out.
-  // Batches of 4 keep total wall time around ~2s while staying well under
-  // the agent's concurrency limit.
-  const BATCH = 4;
-  const failed: string[] = [];
-  for (let i = 0; i < INVENTORY_WALKS.length; i += BATCH) {
-    const chunk = INVENTORY_WALKS.slice(i, i + BATCH);
-    const results = await Promise.allSettled(chunk.map((oid) => snmpWalk(host, creds, [oid], opts)));
-    for (let j = 0; j < results.length; j++) {
-      const r = results[j];
-      if (r.status === 'fulfilled') {
-        for (const [k, v] of r.value) out.set(k, v);
-        continue;
-      }
-      const msg = r.reason instanceof Error ? r.reason.message : String(r.reason ?? 'unknown error');
-      console.error(`[lancom] inventory walk ${chunk[j]} failed:`, msg);
-      log?.log('warn', `SNMP inventory walk ${chunk[j]} failed on ${host}: ${msg}`, { oid: chunk[j], host });
-      failed.push(chunk[j]);
-    }
-  }
-
-  // One sequential retry for anything that threw (empty-but-successful walks
-  // are indistinguishable from "table genuinely empty" — the quality gate
-  // below catches those via missing system scalars).
+  // All inventory subtrees in ONE combined GetBulk stream on a single shared
+  // session: each PDU advances every subtree at once. The stream is strictly
+  // sequential, so the embedded AP agents' tiny concurrent-request queues are
+  // never stressed — no batching needed (and none of the old empty-view races).
   let failures = 0;
-  for (const oid of failed) {
-    try {
-      const retry = await snmpWalk(host, creds, [oid], opts);
-      for (const [k, v] of retry) out.set(k, v);
-    } catch (err) {
-      failures++; // still failing after the retry — subtree stays empty this cycle
-    }
+  try {
+    const walked = await snmpWalkMulti(host, creds, INVENTORY_WALKS, opts);
+    for (const [k, v] of walked) out.set(k, v);
+  } catch (err) {
+    failures++;
+    const msg = err instanceof Error ? err.message : String(err ?? 'unknown error');
+    console.error('[lancom] inventory walk failed:', msg);
+    log?.log('warn', `SNMP inventory walk failed on ${host}: ${msg}`, { host });
   }
 
   if (out.size === 0 && failures > 0) {
@@ -815,11 +793,10 @@ export async function walkLcosCounters(
   wifiEvents: Record<string, number>; // trap name → events since last poll
 } | null> {
   try {
-    const [radioOut, lanOut, eventOut] = await Promise.all([
-      snmpWalk(host, creds, [RADIOS.base], opts),
-      snmpWalk(host, creds, [LAN_BYTES.base], opts),
-      snmpWalk(host, creds, [SNMP_EVENT.base], opts),
-    ]);
+    // All three counter tables in ONE combined walk (shared session). The
+    // parsing loops below filter by their own base OID via splitRow(), so the
+    // merged map is safe to reuse for each.
+    const counters = await snmpWalkMulti(host, creds, [RADIOS.base, LAN_BYTES.base, SNMP_EVENT.base], opts);
 
     const now = Date.now();
     rateTracker.evictStale(now);
@@ -827,7 +804,7 @@ export async function walkLcosCounters(
     // Radio byte counters — column-first rows: <base>.1.<col>.<ifcText…>,
     // col 22 = TxBytes, col 23 = RxBytes (verified against {COLUMN} annotations).
     const radioRates: Record<string, { rx: number | null; tx: number | null }> = {};
-    for (const [oid, value] of radioOut) {
+    for (const [oid, value] of counters) {
       const row = splitRow(oid, RADIOS.base);
       if (!row || (row.col !== 22 && row.col !== 23)) continue;
       const key = decodeSingleText(row.idx);
@@ -843,7 +820,7 @@ export async function walkLcosCounters(
 
     // LAN port byte/CRC counters — col 2 = TxBytes, col 3 = RxBytes, col 4 = CRC.
     const portRates: Record<string, { rx: number | null; tx: number | null; crcPerSec: number | null }> = {};
-    for (const [oid, value] of lanOut) {
+    for (const [oid, value] of counters) {
       const row = splitRow(oid, LAN_BYTES.base);
       if (!row || (row.col !== 2 && row.col !== 3 && row.col !== 4)) continue;
       const key = decodeSingleText(row.idx);
@@ -862,13 +839,13 @@ export async function walkLcosCounters(
     // reconstructing OIDs we join count rows to their NAME column (col 3),
     // which carries plain text ("AuthStation"…).
     const trapNames = new Map<string, SnmpValue>();
-    for (const [oid, value] of eventOut) {
+    for (const [oid, value] of counters) {
       const row = splitRow(oid, SNMP_EVENT.base);
       if (!row || row.col !== 3) continue; // col 3 = name
       trapNames.set(row.idx.join('.'), value);
     }
     const wifiEvents: Record<string, number> = {};
-    for (const [oid, value] of eventOut) {
+    for (const [oid, value] of counters) {
       const row = splitRow(oid, SNMP_EVENT.base);
       if (!row || row.col !== 4) continue; // col 4 = count
       const name = TRAP_NAMES[String(trapNames.get(row.idx.join('.')) ?? '')];

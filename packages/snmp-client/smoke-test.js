@@ -176,6 +176,17 @@ async function main() {
         // walk: non-existent subtree → empty map, no throw
         const we = await (0, index_1.snmpWalk)(HOST, creds, ['.1.3.6.1.4.1.777'], OPTS);
         check('walk missing subtree → empty', we.size === 0, [...we.entries()]);
+        // walkMulti: two subtrees in one combined stream — merged map, no leak.
+        const wm = await (0, index_1.snmpWalkMulti)(HOST, creds, ['.1.3.6.1.2.1.1', '.1.3.6.1.2.1.2.2.1'], OPTS);
+        check('walkMulti merges both subtrees (2 scalars + 6 table cells)', wm.size === 8, [...wm.entries()]);
+        check('walkMulti keeps values typed', wm.get('.1.3.6.1.2.1.1.1.0') === 'UNM smoke-test agent' && wm.get('.1.3.6.1.2.1.2.2.1.10.1') === 12345, [...wm.entries()]);
+        check('walkMulti no cross-subtree leak', [...wm.keys()].every(k => k.startsWith('.1.3.6.1.2.1.1.') || k.startsWith('.1.3.6.1.2.1.2.2.1.')), [...wm.keys()]);
+        // walkMulti: missing subtree contributes nothing, no throw.
+        const wmMissing = await (0, index_1.snmpWalkMulti)(HOST, creds, ['.1.3.6.1.4.1.777', '.1.3.6.1.2.1.1'], OPTS);
+        check('walkMulti missing subtree → only the real one (2 entries)', wmMissing.size === 2 && wmMissing.get('.1.3.6.1.2.1.1.5.0') !== undefined, [...wmMissing.entries()]);
+        // walkMulti: low maxRepetitions still yields the full table.
+        const wmLow = await (0, index_1.snmpWalkMulti)(HOST, creds, ['.1.3.6.1.2.1.2.2.1'], { ...OPTS, maxRepetitions: 2 });
+        check('walkMulti maxRepetitions=2 still full table (6 entries)', wmLow.size === 6 && wmLow.get('.1.3.6.1.2.1.2.2.1.10.2') === 67890, [...wmLow.entries()]);
         // set: string + IpAddress, with echo and persistence re-read (scalar instance OIDs)
         const s1 = await (0, index_1.snmpSet)(HOST, creds, '.1.3.6.1.2.1.1.5.0', 's', 'changed-by-smoke', OPTS);
         check('set string echoed', s1 === 'changed-by-smoke', s1);
@@ -189,6 +200,9 @@ async function main() {
     // set: table cell (string) via v2c
     const s3 = await (0, index_1.snmpSet)(HOST, V2C, '.1.3.6.1.2.1.2.2.1.2.1', 's', 'lo-renamed', OPTS);
     check('set table cell (string)', s3 === 'lo-renamed', s3);
+    // walkMulti over v1 — no GetBulk, must fall back to sequential subtree walks.
+    const wmV1 = await (0, index_1.snmpWalkMulti)(HOST, { version: 'v1', community: 'public' }, ['.1.3.6.1.2.1.1', '.1.3.6.1.2.1.2.2.1'], OPTS);
+    check('walkMulti v1 fallback merges both subtrees (8 entries)', wmV1.size === 8 && wmV1.get('.1.3.6.1.2.1.2.2.1.10.1') === 12345, [...wmV1.entries()]);
     // negative paths
     await expectThrow('unknown community rejected (timeout)', () => (0, index_1.snmpGet)(HOST, { version: 'v2c', community: 'wrong' }, ['.1.3.6.1.2.1.1.1.0'], OPTS));
     await expectThrow('DES privacy rejected with clear error', () => (0, index_1.snmpGet)(HOST, { ...V3_AES, privProtocol: 'DES' }, ['.1.3.6.1.2.1.1.1.0'], OPTS), 'AES');

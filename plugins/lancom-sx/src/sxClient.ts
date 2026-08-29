@@ -17,7 +17,7 @@
  * by the config actions in src/actions/, never by this module.
  */
 
-import { SnmpCredentials, SnmpValue, TransportOptions, snmpGet, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
+import { SnmpCredentials, SnmpValue, TransportOptions, snmpGet, snmpWalkMulti, suffixOf, normalizeMac } from '@unm/snmp-client';
 import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 import {
   DETECT, SX4_BASE, SX3_BASE,
@@ -367,30 +367,27 @@ export async function getSxInventory(
   }
 
   const out = new Map<string, SnmpValue>();
-  // Walks run STRICTLY SEQUENTIALLY. Verified on a GS-3510XP (4.30): running
-  // two snmpwalk sessions concurrently makes the agent's response buffer race —
-  // DisplayString values come back corrupted with fragments of OTHER rows in
-  // the same table (e.g. every neighbor-cache MAC gained "…fe02:279e" from a
-  // v6 address row). Sequential walks are clean; total ~5s on a 48-port switch,
-  // comfortably inside the API's 10s poll budget. Do NOT parallelize this back.
-  const failed: string[] = [];
-  for (const oid of inventoryWalks(det.variant)) {
-    try {
-      const r = await snmpWalk(host, creds, [oid], opts);
-      for (const [k, v] of r) out.set(k, v);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error(`[lancom-sx] inventory walk ${oid} failed:`, msg);
-      log?.log('warn', `SNMP inventory walk ${oid} failed on ${host}: ${msg}`, { oid, host });
-      failed.push(oid);
-    }
+  // All inventory subtrees in ONE combined GetBulk stream on a single shared
+  // session. This is STRICTLY SEQUENTIAL (one PDU at a time), which is the safe
+  // mode verified on a GS-3510XP: concurrent sessions race the agent's response
+  // buffer and corrupt DisplayString values with fragments of other rows. The
+  // combined stream keeps that guarantee while cutting PDUs + socket churn.
+  let failures = 0;
+  try {
+    const walked = await snmpWalkMulti(host, creds, inventoryWalks(det.variant), opts);
+    for (const [k, v] of walked) out.set(k, v);
+  } catch (e: unknown) {
+    failures++;
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[lancom-sx] inventory walk failed:', msg);
+    log?.log('warn', `SNMP inventory walk failed on ${host}: ${msg}`, { host });
   }
 
   // Opt-in FDB enrichment (slow on populated switches — see SxOptions).
   if (opts.enrichHostPorts) {
     for (const oid of enrichmentWalks()) {
       try {
-        const r = await snmpWalk(host, creds, [oid], opts);
+        const r = await snmpWalkMulti(host, creds, [oid], opts);
         for (const [k, v] of r) out.set(k, v);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -398,17 +395,6 @@ export async function getSxInventory(
         log?.log('warn', `Q-BRIDGE FDB enrichment walk ${oid} failed on ${host}: ${msg}`, { oid, host });
         // Best-effort — host rows simply lack port info this cycle.
       }
-    }
-  }
-
-  // One retry for anything that threw (still sequential).
-  let failures = 0;
-  for (const oid of failed) {
-    try {
-      const retry = await snmpWalk(host, creds, [oid], opts);
-      for (const [k, v] of retry) out.set(k, v);
-    } catch {
-      failures++; // still failing after the retry — subtree stays empty this cycle
     }
   }
 
@@ -801,15 +787,13 @@ export async function walkSxCounters(
     `${base}.1.${SX4_PORT_TRAFFIC.COL_RX_OCTETS}`,
     `${base}.1.${SX4_PORT_TRAFFIC.COL_TX_OCTETS}`,
   ];
-  const out = new Map<string, SnmpValue>();
-  for (const oid of colOids) {
-    try {
-      // Sequential — the SX agents corrupt responses under concurrent sessions.
-      const r = await snmpWalk(host, creds, [oid], opts);
-      for (const [k, v] of r) out.set(k, v);
-    } catch {
-      return {}; // counters unavailable this cycle — rates stay null
-    }
+  let out: Map<string, SnmpValue>;
+  try {
+    // Both column subtrees in ONE combined walk (shared session) — still a
+    // strictly sequential PDU stream, which the SX agents require.
+    out = await snmpWalkMulti(host, creds, colOids, opts);
+  } catch {
+    return {}; // counters unavailable this cycle — rates stay null
   }
 
   const now = Date.now();

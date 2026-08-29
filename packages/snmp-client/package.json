@@ -1,8 +1,8 @@
 {
   "name": "@unm/snmp-client",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "Shared SNMP transport for UnifiedNetworkManager plugins: native UDP stack (net-snmp npm) with v1/v2c community and v3 USM credentials, numeric-OID value normalization, MAC normalization.",
+  "description": "Shared SNMP transport for UnifiedNetworkManager plugins: native UDP stack (net-snmp npm) with v1/v2c community and v3 USM credentials, numeric-OID value normalization, MAC normalization, single- and multi-subtree bulk walks.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {

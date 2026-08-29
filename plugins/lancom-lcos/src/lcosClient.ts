@@ -16,7 +16,7 @@
  * status tables and a handful of non-secret setup scalars.
  */
 
-import { SnmpCredentials, SnmpValue, TransportOptions, snmpGet, snmpWalk, suffixOf, normalizeMac } from '@unm/snmp-client';
+import { SnmpCredentials, SnmpValue, TransportOptions, snmpGet, snmpWalkMulti, suffixOf, normalizeMac } from '@unm/snmp-client';
 import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 import {
   LCOS_BASE, SYS, HW, FIRMWARE, LAN_IF, LAN_BYTES, WAN_BYTES, WAN_IP,
@@ -322,8 +322,8 @@ function rememberLastKnown(host: string, snapshot: LcosRouterSnapshot): void {
  * The exact subtrees the slow path needs — nothing else. Deliberately NOT a
  * single `11.1` walk: that subtree contains large tables we never read (WLAN
  * client translation tables, RADIUS logs, NetBIOS lists) and would take far
- * longer than the API's 10s poll budget on a real router. Each entry is one
- * snmpwalk; they run in parallel batches (separate processes).
+ * longer than the API's 10s poll budget on a real router. All entries are
+ * walked together in one combined GetBulk stream (snmpWalkMulti).
  */
 const INVENTORY_WALKS: string[] = [
   `${LCOS_BASE}.2.1`, // device name — single config-mirror scalar (no secrets)
@@ -388,51 +388,20 @@ export async function getLcosInventory(
   const out = new Map<string, SnmpValue>();
   for (const [k, v] of probe) out.set(k, v); // reuse the probed scalar
 
-  // Walks run in small batches rather than all at once: embedded router agents
-  // have tiny concurrent-request queues, and a burst of ~13 parallel walks
-  // makes them answer some walks with EMPTY views instead of timing out.
-  // Batches of 4 keep total wall time around ~2-3s while staying well under
-  // the agent's concurrency limit.
-  const BATCH = 4;
-  // Some embedded agents (observed on LCOS 10.94) drop requests for a few
-  // seconds after a burst — even sequential ones issued immediately after the
-  // last batch fail until their request queue drains. A short pause between
-  // batches and before the retry pass lets them recover; total added latency
-  // is ~2-3s, still well inside the API's poll budget.
-  const settle = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
-  const failed: string[] = [];
-  for (let i = 0; i < INVENTORY_WALKS.length; i += BATCH) {
-    if (i > 0) await settle(750);
-    const chunk = INVENTORY_WALKS.slice(i, i + BATCH);
-    const results = await Promise.allSettled(chunk.map((oid) => snmpWalk(host, creds, [oid], opts)));
-    for (let j = 0; j < results.length; j++) {
-      const r = results[j];
-      if (r.status === 'fulfilled') {
-        for (const [k, v] of r.value) out.set(k, v);
-        continue;
-      }
-      const reason = (r as { reason?: unknown }).reason;
-      const msg = reason instanceof Error ? reason.message : String(reason ?? 'unknown error');
-      console.error(`[lancom-lcos] inventory walk ${chunk[j]} failed:`, msg);
-      log?.log('warn', `SNMP inventory walk ${chunk[j]} failed on ${host}: ${msg}`, { oid: chunk[j], host });
-      failed.push(chunk[j]);
-    }
-  }
-
-  // One sequential retry for anything that threw (empty-but-successful walks
-  // are indistinguishable from "table genuinely empty" — the quality gate
-  // below catches those via missing system scalars). Wait first so flaky
-  // agents have drained their request queue since the last batch.
+  // All inventory subtrees in ONE combined GetBulk stream on a single shared
+  // session: each PDU advances every subtree at once (~17 PDUs / ~1.2s live-
+  // profiled vs ~52 PDUs / ~4.7s for the old batched single walks). The stream
+  // is strictly sequential, so the embedded agents' tiny concurrent-request
+  // queues are never stressed — no batching or settle pauses needed.
   let failures = 0;
-  if (failed.length > 0) await settle(1_500);
-  for (const oid of failed) {
-    try {
-      const retry = await snmpWalk(host, creds, [oid], opts);
-      for (const [k, v] of retry) out.set(k, v);
-    } catch {
-      failures++; // still failing after the retry — subtree stays empty this cycle
-    }
-    if (failed.length > 1) await settle(500); // let flaky agents drain between retries too
+  try {
+    const walked = await snmpWalkMulti(host, creds, INVENTORY_WALKS, opts);
+    for (const [k, v] of walked) out.set(k, v);
+  } catch (err) {
+    failures++;
+    const msg = err instanceof Error ? err.message : String(err ?? 'unknown error');
+    console.error('[lancom-lcos] inventory walk failed:', msg);
+    log?.log('warn', `SNMP inventory walk failed on ${host}: ${msg}`, { host });
   }
 
   if (out.size === 0 && failures > 0) {
@@ -846,13 +815,8 @@ export async function walkLcosCounters(
   const empty = { lanRates: {} as LcosRates, wanRates: {} as LcosRates };
   let out: Map<string, SnmpValue>;
   try {
-    // Two small walks — run them concurrently (separate sessions).
-    const [lan, wan] = await Promise.all([
-      snmpWalk(host, creds, [LAN_BYTES.base], opts),
-      snmpWalk(host, creds, [WAN_BYTES.base], opts),
-    ]);
-    out = new Map<string, SnmpValue>();
-    for (const m of [lan, wan]) for (const [k, v] of m) out.set(k, v);
+    // Both byte-counter tables in one combined walk (shared session).
+    out = await snmpWalkMulti(host, creds, [LAN_BYTES.base, WAN_BYTES.base], opts);
   } catch {
     return empty; // counters unavailable this cycle — rates stay null
   }
