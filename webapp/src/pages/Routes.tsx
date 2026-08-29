@@ -144,6 +144,7 @@ export default function Routes() {
           rows={routesQuery.data}
           rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.destination}|${row.protocol}`}
           storageKey="routes"
+          autoRefresh={{ intervalMs: 30_000, queries: [routesQuery] }}
           searchPlaceholder="Search routes…"
           emptyMessage="No routes collected yet — assign a routing plugin (e.g. OPNsense, LANCOM LCOS or LANCOM SX) to a device and wait for the next poll."
         />

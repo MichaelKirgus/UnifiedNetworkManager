@@ -1,6 +1,6 @@
 import { Fragment, MouseEvent as ReactMouseEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { Download, Filter, RotateCcw, Search, SlidersHorizontal, X } from 'lucide-react';
+import { Download, Filter, RefreshCw, RotateCcw, Search, SlidersHorizontal, X } from 'lucide-react';
 import { useTablePrefs } from './useTablePrefs';
 
 export interface DataTableColumn<T> {
@@ -30,6 +30,14 @@ export interface DataTableBulkAction<T> {
   onClick: (rows: T[]) => void | Promise<void>;
 }
 
+/** Minimal shape of an auto-refreshing query — satisfied by any useQuery() result.
+ * Methods are optional because the query-result union includes placeholder/error
+ * variants that don't carry them. */
+export interface AutoRefreshable {
+  setRefetchInterval?: (interval: false | number) => void;
+  refetch?: () => unknown;
+}
+
 interface DataTableProps<T> {
   columns: DataTableColumn<T>[];
   rows: T[];
@@ -52,6 +60,16 @@ interface DataTableProps<T> {
    * content up to a viewport-based cap; either way the header + filter rows
    * stay pinned while the body scrolls internally. */
   fillHeight?: boolean;
+  /** When provided, adds a Live/Paused toggle to the toolbar that pauses or resumes
+   * background refetching of the page's polling queries. The choice is persisted per
+   * table (via `storageKey`); resuming triggers an immediate refresh and restores
+   * `intervalMs`. */
+  autoRefresh?: {
+    /** Base refresh cadence in ms, restored when toggled back on. */
+    intervalMs: number;
+    /** The page's auto-refreshing queries (any useQuery result works). */
+    queries: AutoRefreshable[];
+  };
 }
 
 const MIN_COL_WIDTH = 80;
@@ -152,6 +170,7 @@ export function DataTable<T>({
   onRowHover,
   renderRowDetail,
   fillHeight = false,
+  autoRefresh,
 }: DataTableProps<T>) {
   const { prefs, setPrefs, reset } = useTablePrefs(storageKey);
   const [menuOpen, setMenuOpen] = useState(false); // column visibility picker
@@ -194,6 +213,28 @@ export function DataTable<T>({
       document.removeEventListener('keydown', onKeyDown);
     };
   }, [menuOpen, exportOpen]);
+
+  // Auto-refresh toggle state lives in the persisted table prefs so each page
+  // remembers its choice across reloads (default: on). The queries are kept in a
+  // ref — the prop is an inline object whose identity changes every render, and we
+  // only want to touch the query timers when the toggle actually flips.
+  const autoRefreshOn = prefs.autoRefreshOn !== false;
+  const autoRefreshRef = useRef(autoRefresh);
+  useEffect(() => {
+    autoRefreshRef.current = autoRefresh;
+  });
+  useEffect(() => {
+    const ar = autoRefreshRef.current;
+    if (!ar) return;
+    for (const q of ar.queries) q.setRefetchInterval?.(autoRefreshOn ? ar.intervalMs : false);
+  }, [autoRefreshOn]);
+
+  function toggleAutoRefresh() {
+    const next = !autoRefreshOn;
+    setPrefs((p) => ({ ...p, autoRefreshOn: next }));
+    // Resume with an immediate refresh so the data isn't stale by a full interval.
+    if (next && autoRefresh) for (const q of autoRefresh.queries) void q.refetch?.();
+  }
 
   const visibleColumns = useMemo(
     () => columns.filter((c) => !prefs.hiddenKeys.includes(c.key)),
@@ -371,6 +412,28 @@ export function DataTable<T>({
             <span className="rounded-full bg-slate-700 px-1.5 text-[10px] font-semibold leading-4 text-white">{activeFilterCols.length}</span>
           )}
         </button>
+
+        {autoRefresh && (
+          <button
+            type="button"
+            onClick={toggleAutoRefresh}
+            aria-pressed={autoRefreshOn}
+            title={
+              autoRefreshOn
+                ? `Refreshing every ${Math.round(autoRefresh.intervalMs / 1000)} s — click to pause`
+                : 'Auto-refresh paused — click to resume'
+            }
+            className={clsx(
+              'flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium',
+              autoRefreshOn
+                ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                : 'border-slate-300 text-slate-600 hover:bg-slate-50'
+            )}
+          >
+            <RefreshCw className={clsx('h-3.5 w-3.5', autoRefreshOn && 'animate-spin [animation-duration:2s]')} />
+            {autoRefreshOn ? 'Live' : 'Paused'}
+          </button>
+        )}
 
         <div className="ml-auto flex items-center gap-2">
         <button

@@ -9,9 +9,11 @@ export interface TablePrefs {
   sort: TableSortState | null;
   hiddenKeys: string[];
   widths: Record<string, number>;
+  /** Whether auto-refresh is enabled (tables with an `autoRefresh` prop). Defaults to true. */
+  autoRefreshOn: boolean;
 }
 
-const DEFAULT_PREFS: TablePrefs = { sort: null, hiddenKeys: [], widths: {} };
+const DEFAULT_PREFS: TablePrefs = { sort: null, hiddenKeys: [], widths: {}, autoRefreshOn: true };
 
 function storageKeyFor(storageKey?: string): string | null {
   return storageKey ? `unm:datatable:${storageKey}` : null;
@@ -47,6 +49,7 @@ function loadPrefs(key: string | null): TablePrefs {
       sort: normalizeSort(parsed.sort),
       hiddenKeys: normalizeHiddenKeys(parsed.hiddenKeys),
       widths: normalizeWidths(parsed.widths),
+      autoRefreshOn: parsed.autoRefreshOn !== false,
     };
   } catch {
     return DEFAULT_PREFS;

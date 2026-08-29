@@ -171,6 +171,7 @@ export default function Tunnels() {
           rows={tunnelsQuery.data}
           rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.name}|${row.type}`}
           storageKey="tunnels"
+          autoRefresh={{ intervalMs: 30_000, queries: [tunnelsQuery] }}
           searchPlaceholder="Search tunnels…"
           emptyMessage="No tunnels collected yet — assign a router plugin (e.g. OPNsense or LANCOM LCOS) to a device and wait for the next poll."
         />

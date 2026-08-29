@@ -225,6 +225,7 @@ export default function Logs() {
           rows={logsQuery.data}
           rowKey={(row) => row.id}
           storageKey="logs"
+          autoRefresh={{ intervalMs: 30_000, queries: [logsQuery] }}
           searchPlaceholder="Search logs…"
           emptyMessage="No log entries in this range yet — plugins ship failures and state changes here (poll errors, config/plan results)."
         />

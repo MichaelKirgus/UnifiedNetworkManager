@@ -129,6 +129,7 @@ export default function Networks() {
           rows={networksQuery.data}
           rowKey={(row) => row.key}
           storageKey="networks"
+          autoRefresh={{ intervalMs: 30_000, queries: [networksQuery] }}
           searchPlaceholder="Search networks…"
           emptyMessage="No networks collected yet — assign a plugin (e.g. OPNsense) to a device and wait for the next poll."
         />

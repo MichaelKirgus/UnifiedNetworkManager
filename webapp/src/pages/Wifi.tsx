@@ -407,6 +407,7 @@ export default function Wifi() {
               rows={groups}
               rowKey={(row) => row.name}
               storageKey="wifi"
+              autoRefresh={{ intervalMs: 30_000, queries: [wifiQuery] }}
               fillHeight
               searchPlaceholder="Search SSIDs…"
               emptyMessage="No WiFi networks reported yet — devices with built-in radios (LANCOM LX APs, LCOS routers) populate this view within a poll cycle."

@@ -186,7 +186,7 @@ export default function ConfigJobs() {
         <p className="text-sm text-red-600">Failed to load config jobs: {(jobsQuery.error as Error).message}</p>
       )}
       {jobsQuery.data && (
-        <DataTable columns={columns} rows={jobsQuery.data} rowKey={(row) => row.id} storageKey="config-jobs" emptyMessage="No config jobs have been submitted yet." />
+        <DataTable columns={columns} rows={jobsQuery.data} rowKey={(row) => row.id} storageKey="config-jobs" autoRefresh={{ intervalMs: 10_000, queries: [jobsQuery] }} emptyMessage="No config jobs have been submitted yet." />
       )}
     </Layout>
   );

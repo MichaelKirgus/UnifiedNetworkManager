@@ -125,6 +125,7 @@ export default function Hosts() {
           rows={hostsQuery.data}
           rowKey={(row) => row.mac}
           storageKey="hosts"
+          autoRefresh={{ intervalMs: 30_000, queries: [hostsQuery] }}
           searchPlaceholder="Search hosts…"
           emptyMessage="No hosts discovered yet — assign a plugin (e.g. OPNsense) to a device and wait for the next poll."
         />

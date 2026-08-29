@@ -72,6 +72,7 @@ function PlansList({ onCreate }: { onCreate: () => void }) {
           rows={plansQuery.data.map((p) => ({ ...p, intentActionId: p.intentActionId }))}
           rowKey={(row) => row.id}
           storageKey="plans"
+          autoRefresh={{ intervalMs: 10_000, queries: [plansQuery] }}
           emptyMessage="No plans yet. Create one to roll out a multi-device change (e.g. a WireGuard tunnel)."
         />
       )}

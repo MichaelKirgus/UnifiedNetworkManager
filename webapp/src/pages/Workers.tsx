@@ -215,6 +215,7 @@ export default function Workers() {
             rows={status?.workers ?? []}
             rowKey={(row) => row.name}
             storageKey="unm:table:workers"
+            autoRefresh={{ intervalMs: 10_000, queries: [statusQuery] }}
             emptyMessage="No workers registered yet (API still starting up)"
           />
         </section>
