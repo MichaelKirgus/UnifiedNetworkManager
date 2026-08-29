@@ -9,6 +9,7 @@ import {
   deleteSecret,
   listSecretProviders,
   generateSecret,
+  invalidateSecretCache,
   regenerateSecret,
 } from '../secretsProvider';
 
@@ -158,6 +159,7 @@ router.post('/:id/regenerate', requireAuth, requirePermission('secrets:write'), 
   const { id } = req.params;
   try {
     const result = await regenerateSecret(id);
+    invalidateSecretCache(id); // rotated key material must not be served from cache
     res.status(200).json(result);
   } catch (err) {
     const e = err as { status?: number; message?: string };
@@ -170,6 +172,7 @@ router.delete('/:id', requireAuth, requirePermission('secrets:delete'), async (r
   const { id } = req.params;
   try {
     await deleteSecret(id);
+    invalidateSecretCache(id); // deleted secret must not be served from cache
     res.status(204).send();
   } catch (err) {
     const e = err as { status?: number; message?: string };

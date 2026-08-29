@@ -252,8 +252,8 @@ export const telemetry = pgTable('telemetry', {
 }, (table) => {
   return {
     idxTelemetryDevicePluginCollected: index('idx_telemetry_device_plugin_collected')
-      .on(table.deviceId, table.pluginId, table.collectedAt),
-  };
+      .on(table.deviceId, table.pluginId, table.collectedAt),    // Plain timestamp index for the retention sweep (DELETE WHERE collectedAt < cutoff).
+    idxTelemetryCollectedAt: index('idx_telemetry_collected_at').on(table.collectedAt),  };
 });
 
 // Structured log entries emitted by plugins via POST /plugin/logs (see

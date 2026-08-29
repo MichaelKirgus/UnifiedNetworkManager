@@ -321,11 +321,15 @@ export async function resetDevicePluginSettings(
 }
 
 // --- Effective-values cache (for header injection on every plugin call) -----
-// The telemetry worker polls /monitoring every 30s per device; resolving
-// settings from the DB each time would add a query per poll. A short TTL
-// cache keeps writes visible within seconds without hammering Postgres.
+// The telemetry worker polls /monitoring every beat per device; resolving
+// settings from the DB each time would add a query per poll. Writes invalidate
+// this cache immediately (invalidateEffectiveCache), so the TTL only bounds how
+// long OTHER API replicas keep serving pre-change values after an edit — 60s is
+// plenty and, crucially, LONGER than the poll beat: with a 5s TTL vs a 30s beat
+// every single poll was a cache miss anyway (hundreds of extra queries/cycle at
+// scale for zero benefit).
 
-const EFFECTIVE_CACHE_TTL_MS = 5_000;
+const EFFECTIVE_CACHE_TTL_MS = 60_000;
 const effectiveCache = new Map<string, { values: Record<string, unknown>; cachedAt: number }>();
 
 function cacheKey(pluginId: string, deviceId?: string | null): string {

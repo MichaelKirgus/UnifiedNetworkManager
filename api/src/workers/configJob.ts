@@ -3,7 +3,7 @@ import { db } from '../db';
 import { and, asc, eq } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { configJobQueue } from '../queue';
-import { getSecret } from '../secretsProvider';
+import { getSecretFresh } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
@@ -99,10 +99,11 @@ async function processJob(jobId: string): Promise<void> {
     // decrypted secret on our behalf. Secrets are typed: `fields` holds the
     // decrypted values. For backward compatibility we also pass the legacy
     // `apiKey`/`apiSecret` keys when the secret is of type `apiKey`.
-    const decrypted = assignment.secretId ? await getSecret(assignment.secretId) : null;
+    // FRESH (uncached) — a config change must apply with current credentials.
+    const decrypted = assignment.secretId ? await getSecretFresh(assignment.secretId) : null;
     const credentials = withSlots(
       decrypted?.fields ?? {},
-      await decryptCredentialSlots(parseExtraCredentials(assignment.extraCredentials))
+      await decryptCredentialSlots(parseExtraCredentials(assignment.extraCredentials), { fresh: true })
     );
 
     // Inject the plugin's effective settings (device override ⊕ global ⊕

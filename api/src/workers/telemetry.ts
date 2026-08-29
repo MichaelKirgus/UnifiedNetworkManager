@@ -8,11 +8,37 @@ import { settingsHeaders } from '../pluginSettings';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
 
-const POLL_INTERVAL_MS = 30_000;
+// Poll cadence is env-tunable for large fleets (see README "Scaling & HA"):
+// more devices → longer beat, or raise TELEMETRY_MAX_CONCURRENCY instead.
+const POLL_INTERVAL_MS = Math.max(5_000, Number(process.env.TELEMETRY_POLL_INTERVAL_MS ?? 30_000));
+// Cap on in-flight /monitoring calls per cycle. Without a cap the burst grows
+// linearly with fleet size (200 devices × 2 plugins = 400 simultaneous HTTP
+// calls + DB writes), which spikes plugin event-loop lag and queues behind the
+// Postgres pool. 64 keeps the beat smooth at any scale; raise for fast fleets.
+const MAX_CONCURRENT_POLLS = Math.max(1, Number(process.env.TELEMETRY_MAX_CONCURRENCY ?? 64));
 // Inventory rows not refreshed within this window are swept away (offline
 // devices must not accumulate stale networks/hosts in the cross-device views).
 const INVENTORY_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 const INVENTORY_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+
+/**
+ * Runs `fn` over every item with at most `limit` invocations in flight.
+ * Items are consumed in order by a fixed pool of workers — no extra deps.
+ */
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>
+): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+}
 
 interface MonitoringResponse {
   health?: string;
@@ -742,15 +768,21 @@ async function pollAllDevices(): Promise<void> {
   }
 
   // Poll every assignment independently — one dead plugin must not take the
-  // whole device down. Device status is derived worst-wins afterwards.
-  await Promise.all(
-    Array.from(targetsByDevice.entries()).map(async ([deviceId, targets]) => {
+  // whole device down. Device status is derived worst-wins afterwards. The
+  // concurrency cap keeps the per-beat burst flat regardless of fleet size.
+  await runWithConcurrency(
+    Array.from(targetsByDevice.entries()),
+    MAX_CONCURRENT_POLLS,
+    async ([deviceId, targets]) => {
       const healths = await Promise.all(targets.map((t) => pollAssignment(t)));
       const status = deriveDeviceStatus(healths);
       await db.update(schema.devices).set({ status }).where(eq(schema.devices.id, deviceId));
-    })
+    }
   );
 }
+
+/** True while a poll cycle is in flight — the timer skips overlapping beats. */
+let pollCycleRunning = false;
 
 /**
  * Starts the telemetry polling loop. Every `POLL_INTERVAL_MS`, each device's
@@ -759,7 +791,9 @@ async function pollAllDevices(): Promise<void> {
  */
 export function startTelemetryWorker(): NodeJS.Timeout {
   // eslint-disable-next-line no-console
-  console.log(`[telemetry] worker started, polling every ${POLL_INTERVAL_MS / 1000}s`);
+  console.log(
+    `[telemetry] worker started, polling every ${POLL_INTERVAL_MS / 1000}s (max ${MAX_CONCURRENT_POLLS} concurrent polls)`
+  );
 
   // Stale-inventory sweep runs on its own cadence (cheap DELETEs) — counted in
   // poll cycles so the worker keeps a single timer.
@@ -774,9 +808,23 @@ export function startTelemetryWorker(): NodeJS.Timeout {
         console.error('[telemetry] inventory sweep failed:', err);
       });
     }
-    pollAllDevices().catch((err) => {
+    // Cycle guard: a slow cycle (dead devices hitting their timeouts, big
+    // fleet) must not stack on top of itself — overlapping cycles would poll
+    // unreachable devices at MORE than the configured cadence and double the
+    // write load. The next beat simply retries; no work is lost.
+    if (pollCycleRunning) {
       // eslint-disable-next-line no-console
-      console.error('[telemetry] poll cycle failed:', err);
-    });
+      console.warn('[telemetry] previous poll cycle still running — skipping this beat');
+      return;
+    }
+    pollCycleRunning = true;
+    void pollAllDevices()
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error('[telemetry] poll cycle failed:', err);
+      })
+      .finally(() => {
+        pollCycleRunning = false;
+      });
   }, POLL_INTERVAL_MS);
 }

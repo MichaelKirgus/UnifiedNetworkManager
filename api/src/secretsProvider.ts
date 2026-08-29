@@ -66,6 +66,27 @@ let cachedDefaultProvider: CachedProvider | null = null;
 /** Per-provider cache of the secret types declared in /discover. */
 const secretTypesCache = new Map<string, { types: SecretType[]; cachedAt: number }>();
 
+// --- Decrypted-secret cache (poll-path decoupling) ---------------------------
+// The telemetry worker fetches every assignment's decrypted secret on EVERY
+// poll cycle — at 200 devices that is ~400 round-trips to the secrets provider
+// per beat. Secrets rarely change, so we cache decrypted values briefly:
+//   - cuts secrets-provider load by orders of magnitude at scale;
+//   - if the provider plugin dies mid-cycle, in-flight polls keep working from
+//     cache instead of flipping the whole fleet to 'unknown'.
+// Invalidated on regenerate/delete (see routes/secrets.ts) so rotation is
+// visible within one beat. TTL is env-tunable for large fleets.
+const SECRET_CACHE_TTL_MS = Math.max(0, Number(process.env.SECRET_CACHE_TTL_MS ?? 60_000));
+const secretCache = new Map<string, { value: DecryptedSecret; cachedAt: number }>();
+
+/** Drops one (or all) cached decrypted secrets — call after rotation/deletion. */
+export function invalidateSecretCache(secretId?: string): void {
+  if (secretId === undefined) {
+    secretCache.clear();
+    return;
+  }
+  secretCache.delete(secretId);
+}
+
 function parseCapabilities(raw: string | null | undefined): string[] {
   if (!raw) return [];
   try {
@@ -299,8 +320,27 @@ async function providerForSecret(secretId: string): Promise<ProviderRecord> {
 
 /**
  * Retrieves a decrypted secret by id, routed to the provider that created it.
+ * Results are cached for SECRET_CACHE_TTL_MS (see above) — the poll path calls
+ * this once per assignment per beat and most assignments share few secrets.
  */
 export async function getSecret(id: string): Promise<DecryptedSecret> {
+  if (SECRET_CACHE_TTL_MS > 0) {
+    const hit = secretCache.get(id);
+    if (hit && Date.now() - hit.cachedAt < SECRET_CACHE_TTL_MS) return hit.value;
+  }
+  const provider = await providerForSecret(id);
+  const value = await callProvider<DecryptedSecret>(provider, `/secrets/${encodeURIComponent(id)}`, 'GET');
+  if (SECRET_CACHE_TTL_MS > 0) {
+    secretCache.set(id, { value, cachedAt: Date.now() });
+  }
+  return value;
+}
+
+/**
+ * Like getSecret but NEVER consults or fills the cache — for paths where a
+ * stale credential must not be tolerated (config application, plan steps).
+ */
+export async function getSecretFresh(id: string): Promise<DecryptedSecret> {
   const provider = await providerForSecret(id);
   return callProvider<DecryptedSecret>(provider, `/secrets/${encodeURIComponent(id)}`, 'GET');
 }

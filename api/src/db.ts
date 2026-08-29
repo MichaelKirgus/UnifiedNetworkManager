@@ -10,7 +10,12 @@ import * as schema from './db/schema';
 const DEFAULT_DATABASE_URL = 'postgresql://' + 'unm' + ':' + 'unm' + '@localhost:5432/unm';
 const DATABASE_URL = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
 
-export const pool = new Pool({ connectionString: DATABASE_URL });
+// Pool size scales with the deployment (see README "Scaling & HA"): the default
+// of 10 is fine for a few dozen devices, but at 100+ devices the telemetry
+// worker's write wave can queue behind it. Raise via DATABASE_POOL_MAX.
+const POOL_MAX = Math.max(1, Number(process.env.DATABASE_POOL_MAX ?? 20));
+
+export const pool = new Pool({ connectionString: DATABASE_URL, max: POOL_MAX });
 export const db = drizzle(pool, { schema });
 
 export type User = typeof schema.users.$inferSelect;
@@ -170,6 +175,12 @@ export async function initDb(): Promise<void> {
   await pool.query(
     `ALTER TABLE devices ADD COLUMN IF NOT EXISTS "enabled" BOOLEAN NOT NULL DEFAULT TRUE`
   );
+
+  // Telemetry retention sweep (workers/telemetryRetention.ts): a plain
+  // timestamp index makes the periodic DELETE WHERE collectedAt < cutoff cheap.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_telemetry_collected_at
+      ON telemetry ("collectedAt")`);
 
   // Execution plans (see workers/planExecutor.ts). Plans persist a plugin's
   // /plan output + its provisioned secrets; steps run in dependency order.

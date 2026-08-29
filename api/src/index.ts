@@ -19,11 +19,13 @@ import plansRouter from './routes/plans';
 import networksRouter from './routes/networks';
 import logsRouter from './routes/logs';
 import { startTelemetryWorker } from './workers/telemetry';
+import { startTelemetryRetentionWorker } from './workers/telemetryRetention';
 import { startPluginDiscovery } from './plugins/discovery';
 import { startConfigJobWorker } from './workers/configJob';
 import { startPlanExecutorWorker } from './workers/planExecutor';
 import { startLogRetentionWorker } from './workers/logRetention';
 import { startPluginMetricsWorker } from './workers/pluginMetrics';
+import { LEADER_KEYS, runAsLeader } from './workers/leader';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const API_PREFIX = '/v1';
@@ -125,31 +127,72 @@ async function main(): Promise<void> {
   // (or regardless of) a successful listen lets orphaned instances that fail to
   // bind (EADDRINUSE) keep polling and writing conflicting status updates —
   // which manifests as device status flapping between online/degraded.
+  //
+  // HA: every worker below is gated by Postgres advisory-lock leader election
+  // (workers/leader.ts). With N API replicas, exactly ONE runs each loop; the
+  // others stay standby and serve HTTP only. The config-job worker is NOT
+  // gated — it drains this instance's own in-process queue, so every replica
+  // must run one to process jobs its routes enqueued.
+  const workerStops: Array<() => Promise<void>> = [];
   app.listen(PORT, () => {
     // eslint-disable-next-line no-console
     console.log(`[api] UnifiedNetworkManager API listening on port ${PORT}`);
     // eslint-disable-next-line no-console
     console.log(`[api] OpenAPI spec loaded from ${specPath}`);
 
-    startTelemetryWorker();
     startConfigJobWorker();
-    startPlanExecutorWorker();
-    startLogRetentionWorker();
-    startPluginMetricsWorker();
+
+    void runAsLeader(LEADER_KEYS.telemetry, 'telemetry', () => {
+      const timer = startTelemetryWorker();
+      return () => clearInterval(timer);
+    });
+    void runAsLeader(LEADER_KEYS.planExecutor, 'planExecutor', () => {
+      const timer = startPlanExecutorWorker();
+      return () => clearInterval(timer);
+    });
+    void runAsLeader(LEADER_KEYS.retention, 'retention', async () => {
+      const logTimer = startLogRetentionWorker();
+      const telemetryTimer = startTelemetryRetentionWorker();
+      return () => {
+        clearInterval(logTimer);
+        clearInterval(telemetryTimer);
+      };
+    });
+    void runAsLeader(LEADER_KEYS.pluginMetrics, 'pluginMetrics', () => {
+      const timer = startPluginMetricsWorker();
+      return () => clearInterval(timer);
+    });
+
+    // Discover plugins via mDNS/DNS-SD, with HTTP polling as a fallback for
+    // Docker bridge networks where multicast is isolated. Leader-gated: the
+    // upserts are idempotent but N replicas would N× the /discover traffic and
+    // log noise; one discoverer keeps lastSeenAt fresh for everyone (it writes
+    // to Postgres, which all replicas read).
+    const pollEndpoints = (process.env.PLUGIN_POLL_ENDPOINTS ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    void runAsLeader(LEADER_KEYS.discovery, 'discovery', () => {
+      const stopDiscovery = startPluginDiscovery({
+        pollEndpoints,
+        pollIntervalMs: Number(process.env.PLUGIN_POLL_INTERVAL_MS ?? 60_000),
+      });
+      return stopDiscovery;
+    }).then((stop) => workerStops.push(stop));
   });
 
-  // Discover plugins via mDNS/DNS-SD, with HTTP polling as a fallback for
-  // Docker bridge networks where multicast is isolated.
-  const pollEndpoints = (process.env.PLUGIN_POLL_ENDPOINTS ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const stopDiscovery = startPluginDiscovery({
-    pollEndpoints,
-    pollIntervalMs: Number(process.env.PLUGIN_POLL_INTERVAL_MS ?? 60_000),
-  });
-  process.on('SIGTERM', () => stopDiscovery());
-  process.on('SIGINT', () => stopDiscovery());
+  // Graceful shutdown: step down from leadership so a standby takes over
+  // immediately (rolling deploys) instead of waiting for the lock to be
+  // released by process death.
+  let shuttingDown = false;
+  const stopAllWorkers = async (): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await Promise.allSettled(workerStops.map((stop) => stop()));
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => void stopAllWorkers());
+  process.on('SIGINT', () => void stopAllWorkers());
 }
 
 main().catch((err) => {

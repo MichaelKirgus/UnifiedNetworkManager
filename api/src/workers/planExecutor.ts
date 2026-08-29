@@ -3,7 +3,7 @@ import { db } from '../db';
 import { asc, eq } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { planQueue } from '../queue';
-import { getSecret } from '../secretsProvider';
+import { getSecretFresh } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
@@ -200,21 +200,22 @@ async function processPlan(planId: string): Promise<void> {
     // input.credentialRef → ctx.credentials[ref]).
     let credentials: Record<string, unknown> = {};
     try {
+      // FRESH (uncached) — plan steps apply config and must use current credentials.
       if (assignment.secretId) {
-        const decrypted = await getSecret(assignment.secretId);
+        const decrypted = await getSecretFresh(assignment.secretId);
         credentials = { ...decrypted.fields };
       }
       for (const ref of parseJson<string[]>(step.secretRefs, [])) {
         const secretId = provisionedSecrets[ref];
         if (!secretId) throw new Error(`No provisioned secret for ref "${ref}"`);
-        const material = await getSecret(secretId);
+        const material = await getSecretFresh(secretId);
         credentials[ref] = material.fields;
       }
       // The assignment's bound credential slots (e.g. a web-UI login distinct
       // from the primary SNMP secret) are passed under credentials.slots.<name>.
       credentials = withSlots(
         credentials,
-        await decryptCredentialSlots(parseExtraCredentials(assignment.extraCredentials))
+        await decryptCredentialSlots(parseExtraCredentials(assignment.extraCredentials), { fresh: true })
       );
     } catch (err) {
       await markStep(step.id, 'failed', { success: false, result: { error: `Credential resolution failed: ${(err as Error).message}` } });

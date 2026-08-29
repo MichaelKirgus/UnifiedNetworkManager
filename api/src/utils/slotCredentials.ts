@@ -1,4 +1,4 @@
-import { getSecret } from '../secretsProvider';
+import { getSecret, getSecretFresh } from '../secretsProvider';
 import type { ExtraCredentials } from '../types/credentialSlots';
 
 /**
@@ -8,14 +8,20 @@ import type { ExtraCredentials } from '../types/credentialSlots';
  * of `credentials`, unchanged (see workers/telemetry.ts, configJob.ts,
  * planExecutor.ts). A single failing slot never sinks the whole call: it is
  * logged and skipped so the plugin can still serve everything else.
+ *
+ * `fresh` bypasses the decrypted-secret cache — write paths (config jobs,
+ * plan steps) must apply with current credentials; the poll path may use the
+ * cached values to keep secrets-provider load flat at scale.
  */
 export async function decryptCredentialSlots(
-  extraCredentials: ExtraCredentials
+  extraCredentials: ExtraCredentials,
+  opts?: { fresh?: boolean }
 ): Promise<Record<string, Record<string, string>>> {
+  const fetch = opts?.fresh ? getSecretFresh : getSecret;
   const slots: Record<string, Record<string, string>> = {};
   for (const [name, secretId] of Object.entries(extraCredentials)) {
     try {
-      const material = await getSecret(secretId);
+      const material = await fetch(secretId);
       slots[name] = material.fields;
     } catch (err) {
       // eslint-disable-next-line no-console
