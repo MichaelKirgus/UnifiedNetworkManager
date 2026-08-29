@@ -16,7 +16,7 @@ setup:
 	  (cd plugins/generic-snmp && npm install) & \
 	  (cd plugins/lancom-lx && npm install) & \
 	  (cd plugins/lancom-lcos && npm install) & \
-	  (cd plugins/swos && npm install) & \
+	  (cd plugins/mikrotik-swos && npm install) & \
 	  (cd mcp && npm install) & \
 	  wait )
 	@echo "Dependencies installed successfully."
@@ -54,7 +54,7 @@ build:
 	  (cd plugins/lancom-lcos && npm run build) & \
 	  (cd plugins/basic-auth && npm run build) & \
 	  (cd plugins/secrets-provider && npm run build) & \
-	  (cd plugins/swos && npm run build) & \
+	  (cd plugins/mikrotik-swos && npm run build) & \
 	  (cd mcp && npm run build) & \
 	  wait )
 	@echo "Build complete."
@@ -65,9 +65,9 @@ build:
 up:
 	@echo "Starting infrastructure..."
 	@if command -v docker-compose &> /dev/null; then \
-		docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-lcos-plugin swos-plugin mcp; \
+		docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-lcos-plugin mikrotik-swos-plugin mcp; \
 	else \
-		docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-lcos-plugin swos-plugin mcp; \
+		docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-lcos-plugin mikrotik-swos-plugin mcp; \
 	fi
 	@echo "Infrastructure is up."
 
@@ -115,5 +115,5 @@ clean:
 		echo "Error: No docker-compose or docker compose found"; \
 		exit 1; \
 	fi
-	rm -rf api/node_modules webapp/node_modules mcp/node_modules plugins/opnsense/node_modules plugins/basic-auth/node_modules plugins/secrets-provider/node_modules plugins/icmp/node_modules plugins/generic-snmp/node_modules plugins/lancom-lx/node_modules plugins/lancom-lcos/node_modules
+	rm -rf api/node_modules webapp/node_modules mcp/node_modules plugins/opnsense/node_modules plugins/basic-auth/node_modules plugins/secrets-provider/node_modules plugins/icmp/node_modules plugins/generic-snmp/node_modules plugins/mikrotik-swos/node_modules plugins/lancom-lx/node_modules plugins/lancom-sx/node_modules plugins/lancom-lcos/node_modules
 	@echo "Cleanup complete."

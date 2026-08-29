@@ -80,7 +80,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 // — this file only registers its own routes.
 const server = createPluginServer({
   identity,
-  logTag: 'swos-plugin',
+  logTag: 'mikrotik-swos-plugin',
   jsonLimit: '32mb',
   // Static icon assets (plugin + per-model icons), advertised in /discover and
   // fetched by the API's icon proxy. dist/src/../../icons = <plugin root>/icons.
@@ -325,6 +325,6 @@ app.post('/plan', async (req, res) => {
 // listen() binds the conventional plugin port (4080 by default) and starts
 // mDNS advertising — both handled by @unm/plugin-sdk.
 server.listen().catch((err) => {
-  console.error('[swos-plugin] fatal startup error:', err);
+  console.error('[mikrotik-swos-plugin] fatal startup error:', err);
   process.exit(1);
 });

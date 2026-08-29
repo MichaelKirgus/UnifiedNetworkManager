@@ -1,5 +1,5 @@
 {
-  "name": "unm-plugin-swos",
+  "name": "unm-plugin-mikrotik-swos",
   "version": "0.1.0",
   "private": true,
   "description": "UnifiedNetworkManager plugin for MikroTik SwOS / SwOS Lite switches (CRS + CSS series): monitoring via the .b-file HTTP API with Digest auth, port/PoE/LAG/VLAN/SFP inventory propagation, and plan/config actions (port config, PoE, LAG, VLANs, SNMP, system identity/management access, backup download).",

@@ -39,7 +39,7 @@ services:
       # Docker bridge networks). Ensures the provider plugins are registered.
       # All plugins listen on the conventional internal port 4080 (see
       # docs/PLUGIN-DEVELOPMENT.md); compose maps distinct HOST ports to it.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://swos-plugin:4080,http://lancom-sx-plugin:4080}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080}
     depends_on:
       - postgres
     restart: unless-stopped
@@ -214,21 +214,21 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-  # SwOS plugin: MikroTik SwOS / SwOS Lite switch monitoring (system, ports,
-  # PoE, LAG/LACP, VLANs, SFP, SNMP) via the .b-file HTTP API with Digest auth,
-  # plus plan/config actions and network/MAC inventory propagation. SwOS only —
-  # RouterOS devices get their own plugin later.
-  swos-plugin:
+  # MikroTik SwOS plugin: MikroTik SwOS / SwOS Lite switch monitoring (system,
+  # ports, PoE, LAG/LACP, VLANs, SFP, SNMP) via the .b-file HTTP API with Digest
+  # auth, plus plan/config actions and network/MAC inventory propagation. SwOS
+  # only — RouterOS devices get their own plugin later.
+  mikrotik-swos-plugin:
     # Root context — the image also builds the shared @unm/plugin-sdk package.
     build:
       context: .
-      dockerfile: plugins/swos/Dockerfile
+      dockerfile: plugins/mikrotik-swos/Dockerfile
     ports:
       - "4007:4080"
     environment:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
-      - ADVERTISED_ENDPOINT=http://swos-plugin:4080
+      - ADVERTISED_ENDPOINT=http://mikrotik-swos-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -263,7 +263,7 @@ services:
       # Same database as the API — used by the debug SQL tool only.
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
       # Endpoints probed by the plugin_probe debug tool (same list as the api).
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://swos-plugin:4080,http://lancom-sx-plugin:4080}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080}
     depends_on:
       - api
     restart: unless-stopped

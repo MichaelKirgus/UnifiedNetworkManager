@@ -64,7 +64,7 @@ flowchart LR
 | `plugins/lancom-lx/` | LANCOM LCOS-LX access points — radios, SSIDs, stations, RF environment, WDS/CAPWAP; Wi-Fi client propagation |
 | `plugins/lancom-lcos/` | LANCOM LCOS routers — system/LAN/WAN metrics, VPN + firewall counters; config over SNMP SET (`lcsSetup`) with web-UI backup via a second credential slot |
 | `plugins/lancom-sx/` | LANCOM SX-Series switches (4.x unified MIB **and** legacy GS-2310 3.x tree, auto-detected) — ports, PoE, LAG/LACP; config over SNMP SET |
-| `plugins/swos/` | MikroTik SwOS / SwOS Lite switches via the `.b-file` HTTP API (Digest auth) — system, ports, PoE, SFP, VLANs; plan/config actions |
+| `plugins/mikrotik-swos/` | MikroTik SwOS Plugin — SwOS / SwOS Lite switches via the `.b-file` HTTP API (Digest auth): system, ports, PoE, SFP, VLANs; plan/config actions |
 | `plugins/basic-auth/` | Identity provider plugin — local users + TOTP verification on behalf of the API |
 | `plugins/secrets-provider/` | Secrets provider plugin — encryption at rest (owns `MASTER_KEY`) + key/cert generation |
 | `mcp/` | MCP server exposing the OpenAPI operations as tools (+ read-only SQL & plugin probes on a gated debug endpoint) |
@@ -98,7 +98,7 @@ On first boot the API seeds an **admin** user (password `admin`) and prints its 
 make setup                                  # install all deps
 docker compose up -d --build postgres api \
   opnsense-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin \
-  lancom-lcos-plugin swos-plugin basic-auth-plugin secrets-provider-plugin webapp mcp
+  lancom-lcos-plugin mikrotik-swos-plugin basic-auth-plugin secrets-provider-plugin webapp mcp
 ```
 
 Dev mode with hot reload (API + webapp on the host, plugins in Docker): `make api-dev` / `make web-dev`. Other targets: `make up|down|restart`, `make stop-api|stop-web`, `make clean` (removes containers **and** volumes).
@@ -213,7 +213,7 @@ The same server also runs in **stdio mode** without Docker (client-launched, pro
 - **Type-check**: `cd api && npx tsc --noEmit`, same for `webapp/` and each plugin; or just `make build`.
 - **OpenAPI is enforced**: every new public route must be added to `openapi/unified-network-manager.openapi.yaml` — the validator 404s undocumented paths. Structural check: `node validate-openapi.cjs`.
 - **Schema changes**: idempotent DDL in `initDb()` (`api/src/db.ts`) + `drizzle-kit push`; keep `schema.ts` composite-PK names equal to the live Postgres constraint names.
-- **Smoke tests**: `cd plugins/opnsense && ../../node_modules/.bin/tsx smoke-test.ts` (same for `plugins/swos`).
+- **Smoke tests**: `cd plugins/opnsense && ../../node_modules/.bin/tsx smoke-test.ts` (same for `plugins/mikrotik-swos`).
 - **Plugin images always rebuild from source** (`docker compose up -d --build <service>`) — reusing stale images silently serves old code.
 
 ### Key environment variables (API)

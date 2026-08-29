@@ -14,19 +14,19 @@ COPY packages/plugin-sdk/src/ packages/plugin-sdk/src/
 RUN cd packages/plugin-sdk && npm install --legacy-peer-deps && npm run build
 
 # Plugin: `npm install` links @unm/plugin-sdk → ../../packages/plugin-sdk.
-COPY plugins/swos/package*.json plugins/swos/tsconfig.json plugins/swos/
-RUN cd plugins/swos && npm install --legacy-peer-deps
+COPY plugins/mikrotik-swos/package*.json plugins/mikrotik-swos/tsconfig.json plugins/mikrotik-swos/
+RUN cd plugins/mikrotik-swos && npm install --legacy-peer-deps
 
-COPY plugins/swos/src/ plugins/swos/src/
-RUN cd plugins/swos && npm run build \
-    && node -e "require('/app/plugins/swos/node_modules/@unm/plugin-sdk')"
+COPY plugins/mikrotik-swos/src/ plugins/mikrotik-swos/src/
+RUN cd plugins/mikrotik-swos && npm run build \
+    && node -e "require('/app/plugins/mikrotik-swos/node_modules/@unm/plugin-sdk')"
 
 # Static icon assets served at /icons (proxied by the API's GET /plugins/:id/icon).
-COPY plugins/swos/icons/ plugins/swos/icons/
+COPY plugins/mikrotik-swos/icons/ plugins/mikrotik-swos/icons/
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: link in
 # node_modules resolve exactly like in local development.
-WORKDIR /app/plugins/swos
+WORKDIR /app/plugins/mikrotik-swos
 
 EXPOSE 4080
 

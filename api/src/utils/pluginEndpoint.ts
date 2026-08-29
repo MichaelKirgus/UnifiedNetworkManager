@@ -23,7 +23,7 @@ const SERVICE_HOST_PORTS: Record<string, number> = {
   'icmp-plugin': 4004,
   'generic-snmp-plugin': 4005,
   'lancom-lx-plugin': 4006,
-  'swos-plugin': 4007,
+  'mikrotik-swos-plugin': 4007,
   'lancom-lcos-plugin': 4008,
   'lancom-sx-plugin': 4009,
 };
