@@ -47,26 +47,42 @@ export const LEADER_KEYS = {
  */
 let pinnedClient: PoolClient | null = null;
 
-async function withPinnedConnection<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
-  if (!pinnedClient) {
-    // Fresh checkout — or reconnect after a dropped connection. A dead
-    // backend already had its locks released by Postgres, so re-acquiring on
-    // the new backend is safe (it only succeeds when nobody else holds it).
-    pinnedClient = await pool.connect();
-  }
-  try {
-    return await fn(pinnedClient);
-  } catch (err) {
-    const msg = (err as Error)?.message ?? '';
-    if (/terminat|closed|ECONNRESET|socket hang up/i.test(msg)) {
-      // Backend died under us — drop the dead client and retry ONCE on a
-      // fresh connection. Any locks it held were released by Postgres already.
+/**
+ * Global serialization over the pinned connection. node-postgres does NOT
+ * support concurrent queries on one client (pg@8 warns, pg@9 will throw) — and
+ * crossed responses on a shared socket are exactly what stalled every worker
+ * at once in 2026-08: all six verify timers start phase-aligned at boot and
+ * fire together every 60 s, racing each other's `pg_try_advisory_lock` calls.
+ * The corrupted client then failed every later query with a message that did
+ * not match the reconnect pattern below → all workers stayed standby forever
+ * while Postgres showed no advisory locks at all (the desynced backend had
+ * already been recycled by the pool). Every query funnels through this chain.
+ */
+let pinnedQueryChain: Promise<unknown> = Promise.resolve();
+
+function withPinnedConnection<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const run = async (): Promise<T> => {
+    if (!pinnedClient) {
+      // Fresh checkout — or reconnect after a dropped connection. A dead
+      // backend already had its locks released by Postgres, so re-acquiring on
+      // the new backend is safe (it only succeeds when nobody else holds it).
+      pinnedClient = await pool.connect();
+    }
+    try {
+      return await fn(pinnedClient);
+    } catch (err) {
       discardPinnedClient();
+      // ANY failed query leaves the session suspect (dead backend, protocol
+      // desync, …) — retry ONCE on a fresh connection. Locks held by a dead
+      // backend were released by Postgres already; if nobody else holds the
+      // key the re-acquire simply succeeds.
       pinnedClient = await pool.connect();
       return fn(pinnedClient);
     }
-    throw err;
-  }
+  };
+  const result = pinnedQueryChain.then(run, run);
+  pinnedQueryChain = result.catch(() => undefined);
+  return result;
 }
 
 function discardPinnedClient(): void {
@@ -102,7 +118,7 @@ export async function tryAcquireLeadership(key: number): Promise<boolean> {
 export async function releaseLeadership(key: number): Promise<void> {
   if (!pinnedClient) return; // no pinned connection — nothing to unlock
   try {
-    await pinnedClient.query('SELECT pg_advisory_unlock($1)', [key]);
+    await withPinnedConnection((client) => client.query('SELECT pg_advisory_unlock($1)', [key]));
   } catch {
     // Connection gone — Postgres released the lock with it.
   }
