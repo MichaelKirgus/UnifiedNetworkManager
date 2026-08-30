@@ -26,6 +26,7 @@ const SERVICE_HOST_PORTS: Record<string, number> = {
   'mikrotik-swos-plugin': 4007,
   'lancom-lcos-plugin': 4008,
   'lancom-sx-plugin': 4009,
+  'fbox-plugin': 4010,
 };
 
 /** True when the API is running on the host (not inside a Docker container). */

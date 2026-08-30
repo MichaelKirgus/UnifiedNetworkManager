@@ -2,7 +2,7 @@
 
 Open-source network management and monitoring platform for mixed-vendor environments. A central control plane that manages devices through **pluggable vendor adapters** — each plugin is a small microservice speaking one common contract, so adding a new device family never means touching the core.
 
-Currently supported vendors: **OPNsense** (routing/firewall), **LANCOM LCOS-LX** (Wi-Fi 6/7 access points), **LANCOM LCOS** (routers), **LANCOM SX-Series** (managed switches, both 4.x and legacy GS-2310 firmware lines), **MikroTik SwOS / SwOS Lite** (switches), plus generic **SNMP** and **ICMP ping** plugins for anything else.
+Currently supported vendors: **OPNsense** (routing/firewall), **LANCOM LCOS-LX** (Wi-Fi 6/7 access points), **LANCOM LCOS** (routers), **LANCOM SX-Series** (managed switches, both 4.x and legacy GS-2310 firmware lines), **MikroTik SwOS / SwOS Lite** (switches), **AVM FRITZ!Box-class routers** (FBox plugin — web-UI session monitoring + inventory), plus generic **SNMP** and **ICMP ping** plugins for anything else.
 
 ## Features
 
@@ -29,6 +29,7 @@ flowchart LR
         P2[ICMP / SNMP plugins]
         P3[LANCOM LX / LCOS / SX plugins]
         P4[SwOS plugin]
+        P5[FBox plugin<br/>AVM routers]
         BA[basic-auth plugin<br/>identity provider]
         SP[secrets-provider plugin<br/>crypto holder]
         M[MCP server :3901]
@@ -65,6 +66,7 @@ flowchart LR
 | `plugins/lancom-lcos/` | LANCOM LCOS routers — system/LAN/WAN metrics, VPN + firewall counters; config over SNMP SET (`lcsSetup`) with web-UI backup via a second credential slot |
 | `plugins/lancom-sx/` | LANCOM SX-Series switches (4.x unified MIB **and** legacy GS-2310 3.x tree, auto-detected) — ports, PoE, LAG/LACP; config over SNMP SET |
 | `plugins/mikrotik-swos/` | MikroTik SwOS Plugin — SwOS / SwOS Lite switches via the `.b-file` HTTP API (Digest auth): system, ports, PoE, SFP, VLANs; plan/config actions |
+| `plugins/fbox/` | FBox Plugin — AVM FRITZ!Box-class routers over the box's own web-UI session API: system/WAN/LAN/WiFi metrics + LAN-device/WLAN-client/SSID inventory propagation |
 | `plugins/basic-auth/` | Identity provider plugin — local users + TOTP verification on behalf of the API |
 | `plugins/secrets-provider/` | Secrets provider plugin — encryption at rest (owns `MASTER_KEY`) + key/cert generation |
 | `mcp/` | MCP server exposing the OpenAPI operations as tools (+ read-only SQL & plugin probes on a gated debug endpoint) |
@@ -98,7 +100,7 @@ On first boot the API seeds an **admin** user (password `admin`) and prints its 
 make setup                                  # install all deps
 docker compose up -d --build postgres api \
   opnsense-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin \
-  lancom-lcos-plugin mikrotik-swos-plugin basic-auth-plugin secrets-provider-plugin webapp mcp
+  lancom-lcos-plugin mikrotik-swos-plugin fbox-plugin basic-auth-plugin secrets-provider-plugin webapp mcp
 ```
 
 Dev mode with hot reload (API + webapp on the host, plugins in Docker): `make api-dev` / `make web-dev`. Other targets: `make up|down|restart`, `make stop-api|stop-web`, `make clean` (removes containers **and** volumes).

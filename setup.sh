@@ -15,7 +15,8 @@ SNMP_PORT=4005
 LANCOM_LX_PORT=4006
 LANCOM_LCOS_PORT=4008
 SWOS_PORT=4007
-ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}" "${ICMP_PORT}" "${SNMP_PORT}" "${LANCOM_LX_PORT}" "${LANCOM_LCOS_PORT}" "${SWOS_PORT}")
+FBOX_PORT=4010
+ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}" "${ICMP_PORT}" "${SNMP_PORT}" "${LANCOM_LX_PORT}" "${LANCOM_LCOS_PORT}" "${SWOS_PORT}" "${FBOX_PORT}")
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/unm-dev.XXXXXX")"
 DEV_PIDS=()
 
@@ -240,7 +241,7 @@ ok "Plugins + MCP server built (in parallel)."
 # 7. Start the plugin containers (--build: always reflect current source;
 #    reusing stale images silently serves old code — a past source of bugs)
 echo "🌐 Starting plugin containers..."
-docker_compose up -d --build opnsense-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-lcos-plugin mikrotik-swos-plugin basic-auth-plugin secrets-provider-plugin mcp
+docker_compose up -d --build opnsense-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-cos-plugin mikrotik-swos-plugin fbox-plugin basic-auth-plugin secrets-provider-plugin mcp
 ok "Plugin + MCP containers started."
 
 # 8. Wait for the plugins to be reachable (basic-auth must be up before the
@@ -253,6 +254,7 @@ wait_for_port "$SNMP_PORT" "generic-snmp-plugin"
 wait_for_port "$LANCOM_LX_PORT" "lancom-lx-plugin"
 wait_for_port "$LANCOM_LCOS_PORT" "lancom-lcos-plugin"
 wait_for_port "$SWOS_PORT" "mikrotik-swos-plugin"
+wait_for_port "$FBOX_PORT" "fbox-plugin"
 wait_for_port "$BASIC_AUTH_PORT" "basic-auth-plugin"
 wait_for_port "$SECRETS_PORT" "secrets-provider-plugin"
 ok "Plugins are reachable."

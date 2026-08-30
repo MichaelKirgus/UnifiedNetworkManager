@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- FBox DSL variant — original house-style glyph (no vendor art). -->
+  <rect x="8" y="30" width="48" height="20" rx="5" fill="#1e293b"/>
+  <rect x="12" y="34" width="26" height="3" rx="1.5" fill="#a78bfa"/>
+  <circle cx="47" cy="35.5" r="2.2" fill="#34d399"/>
+  <path d="M18 30 L14 16" stroke="#475569" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="13.5" cy="14" r="2.6" fill="#a78bfa"/>
+</svg>
