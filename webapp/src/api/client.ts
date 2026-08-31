@@ -239,8 +239,8 @@ export interface HostRow {
   mac: string;
   /** All known addresses of this host, IPv4 first. */
   ips: string[];
-  /** Discovery sources that reported this MAC anywhere on the network (e.g. arp + wlan). */
-  sources: ('arp' | 'ndp' | 'dhcp' | 'wlan')[];
+  /** Discovery sources that reported this MAC anywhere on the network (e.g. arp + wlan; 'self' = the appliance's own interfaces). */
+  sources: ('arp' | 'ndp' | 'dhcp' | 'wlan' | 'self')[];
   hostname?: string | null;
   manufacturer?: string | null;
   /** Lease expiry (when a DHCP lease is known for this MAC). */

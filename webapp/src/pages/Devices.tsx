@@ -726,7 +726,7 @@ export default function Devices() {
             <PluginAssignmentBuilder
               plugins={pluginsQuery.data ?? []}
               secrets={secretsQuery.data ?? []}
-              initial={editingId ? initialAssignments.map((a) => ({ pluginId: a.pluginId, secretId: a.secretId ?? null, isPrimary: a.isPrimary })) : undefined}
+              initial={editingId ? initialAssignments.map((a) => ({ pluginId: a.pluginId, secretId: a.secretId ?? null, isPrimary: a.isPrimary, extraCredentials: a.extraCredentials })) : undefined}
               onRowsChange={setSelectedPluginIds}
               onSubmit={(assignments) => {
                 if (!identity.name.trim() || !identity.vendor || !identity.managementAddress.trim()) {

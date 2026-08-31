@@ -1720,8 +1720,8 @@ paths:
           required: false
           schema:
             type: string
-            enum: [arp, ndp, dhcp, wlan]
-          description: Filter by discovery source
+            enum: [arp, ndp, dhcp, wlan, self]
+          description: "Filter by discovery source ('self' = the appliance's own interfaces)"
       responses:
         '200':
           description: Host rows (device + plugin identity included)
@@ -2917,8 +2917,8 @@ components:
           minItems: 1
           items:
             type: string
-            enum: [arp, ndp, dhcp, wlan]
-          description: "Discovery sources that reported this MAC anywhere on the network (e.g. arp + wlan)"
+            enum: [arp, ndp, dhcp, wlan, self]
+          description: "Discovery sources that reported this MAC anywhere on the network (e.g. arp + wlan; 'self' = the appliance's own interfaces)"
         hostname: { type: [string, 'null'], description: "Best-known hostname across all sources (DHCP leases first, then any reporter)" }
         manufacturer: { type: [string, 'null'], description: "Best-known MAC vendor across all sources" }
         expiry: { type: [string, 'null'], format: date-time, description: "Lease expiry (when a DHCP lease is known for this MAC)" }

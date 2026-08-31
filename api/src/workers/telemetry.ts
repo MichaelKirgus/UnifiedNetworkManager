@@ -80,7 +80,15 @@ interface AssignmentTarget {
   firmwareVersion: string | null;
 }
 
-async function pollAssignment(target: AssignmentTarget): Promise<string> {
+/** One assignment's poll outcome. `reachable` = the plugin answered at all
+ * (transport OK); a transport failure yields health 'unknown' + reachable false.
+ */
+interface PollOutcome {
+  health: string;
+  reachable: boolean;
+}
+
+async function pollAssignment(target: AssignmentTarget): Promise<PollOutcome> {
   try {
     // The secrets provider plugin owns the crypto; the broker fetches the
     // decrypted secret on our behalf. Secrets are typed: `fields` holds the
@@ -132,14 +140,14 @@ async function pollAssignment(target: AssignmentTarget): Promise<string> {
     // never break the telemetry cycle.
     ingestInventory(target.deviceId, target.pluginId, metrics, collectedAt);
 
-    return health;
+    return { health, reachable: true };
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error(
       `[telemetry] failed to poll device ${target.deviceId} via plugin ${target.pluginId}:`,
       (err as Error).message
     );
-    return 'unknown';
+    return { health: 'unknown', reachable: false };
   }
 }
 
@@ -220,6 +228,9 @@ async function ingestInventory(
       hostname: string | null; manufacturer: string | null; intf: string | null;
       expiry: string | null; lastSeenAt: string;
     }[] = [];
+    // Sources: arp/ndp/dhcp/wlan = neighbors observed by the device; 'self' =
+    // the appliance's OWN interfaces (plugins emit these with their hostname so
+    // cross-device MAC merging can name the box — neighbor tables carry no names).
     const pushHostRow = (source: string, raw: unknown): void => {
       if (!raw || typeof raw !== 'object') return;
       const r = raw as Record<string, unknown>;
@@ -249,6 +260,10 @@ async function ingestInventory(
       const rows = Array.isArray(metrics[source]) ? (metrics[source] as unknown[]) : [];
       for (const raw of rows) pushHostRow(source, raw);
     }
+    // The appliance's OWN interfaces — plugins emit these under `hosts` with
+    // source 'self' + their hostname so cross-device MAC merging can name the box.
+    const selfRows = Array.isArray(metrics['hosts']) ? (metrics['hosts'] as unknown[]) : [];
+    for (const raw of selfRows) pushHostRow('self', raw);
     const leases = Array.isArray(metrics['dhcpLeases']) ? (metrics['dhcpLeases'] as unknown[]) : [];
     for (const raw of leases) pushHostRow('dhcp', raw);
     // WLAN clients (e.g. LANCOM station table) — source 'wlan'.
@@ -349,8 +364,13 @@ async function ingestInventory(
     }
 
     // --- routes (static + dynamically-learned route entries) ----------------
-    const rawRoutes = Array.isArray(metrics['routes']) ? (metrics['routes'] as unknown[]) : [];
-    if (rawRoutes.length > 0) {
+    // The key is only processed when PRESENT in the snapshot: a present-but-EMPTY
+    // array is authoritative ("this device has no routes right now" — e.g. TrueNAS
+    // reports per-interface static_routes and emits [] once all are removed), so
+    // stale rows get wiped below. An ABSENT key means "plugin doesn't report
+    // routes at all" and must not touch the table (24h sweep still applies).
+    const rawRoutes = Array.isArray(metrics['routes']) ? (metrics['routes'] as unknown[]) : null;
+    if (rawRoutes !== null) {
       const ROUTE_PROTOCOLS = new Set(['static', 'connected', 'ospf', 'bgp', 'rip', 'other']);
       const values: {
         deviceId: string; pluginId: string; destination: string; gateway: string; protocol: string;
@@ -716,13 +736,17 @@ async function sweepStaleInventory(): Promise<void> {
 }
 
 /**
- * Overall device status from per-assignment health — worst-wins:
- *   any critical → offline; all ok → online; otherwise degraded.
+ * Overall device status from per-assignment poll outcomes — worst-wins:
+ *   any assignment UNREACHABLE → offline (transport failure / dead plugin);
+ *   reachable but critical health → critical (device answers, real problem
+ *     reported — e.g. a degraded pool; it is NOT offline);
+ *   all ok → online; otherwise degraded.
  */
-function deriveDeviceStatus(healths: string[]): string {
-  if (healths.length === 0) return 'unknown';
-  if (healths.some((h) => h === 'critical')) return 'offline';
-  if (healths.every((h) => h === 'ok')) return 'online';
+function deriveDeviceStatus(outcomes: PollOutcome[]): string {
+  if (outcomes.length === 0) return 'unknown';
+  if (outcomes.some((o) => !o.reachable)) return 'offline';
+  if (outcomes.some((o) => o.health === 'critical')) return 'critical';
+  if (outcomes.every((o) => o.health === 'ok')) return 'online';
   return 'degraded';
 }
 
@@ -788,8 +812,8 @@ async function pollAllDevices(): Promise<void> {
     entries,
     MAX_CONCURRENT_POLLS,
     async ([deviceId, targets]) => {
-      const healths = await Promise.all(targets.map((t) => pollAssignment(t)));
-      const status = deriveDeviceStatus(healths);
+      const outcomes = await Promise.all(targets.map((t) => pollAssignment(t)));
+      const status = deriveDeviceStatus(outcomes);
       await db.update(schema.devices).set({ status }).where(eq(schema.devices.id, deviceId));
     }
   );

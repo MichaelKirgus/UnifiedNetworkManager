@@ -182,7 +182,7 @@ function summaryMetricsFor(telemetry: { metrics: unknown; metricDescriptors: unk
 // Plugins report these under different metric keys:
 //   lancom-lx/lcos/sx → system.swVersion, mikrotik-swos → system.detectedFirmwareVersion,
 //   opnsense → version. Serial is system.serialNumber (lancom-*, swos).
-const FIRMWARE_METRIC_KEYS = ['system.swVersion', 'system.detectedFirmwareVersion', 'version'];
+const FIRMWARE_METRIC_KEYS = ['system.swVersion', 'system.detectedFirmwareVersion', 'system.version', 'version'];
 const SERIAL_METRIC_KEYS = ['system.serialNumber'];
 
 function parseTelemetryMetrics(row: { metrics: unknown } | undefined): Record<string, unknown> {

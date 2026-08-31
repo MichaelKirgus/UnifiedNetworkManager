@@ -491,8 +491,9 @@ router.get('/hosts', requireAuth, async (_req, res: Response) => {
   try {
     const { deviceId, siteId, source } = _req.query as Record<string, string | undefined>;
 
-    if (source && !['arp', 'ndp', 'dhcp', 'wlan'].includes(source)) {
-      res.status(400).json({ error: '"source" must be one of: arp, ndp, dhcp, wlan' });
+    // 'self' = the appliance's own interfaces (plugins emit them with their hostname).
+    if (source && !['arp', 'ndp', 'dhcp', 'wlan', 'self'].includes(source)) {
+      res.status(400).json({ error: '"source" must be one of: arp, ndp, dhcp, wlan, self' });
       return;
     }
 
