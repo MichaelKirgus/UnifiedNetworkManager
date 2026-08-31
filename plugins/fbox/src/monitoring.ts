@@ -9,7 +9,7 @@
  */
 
 import { MetricDescriptor, modelFirmwareDescriptors } from '@unm/plugin-sdk';
-import { FBoxClient, FBoxCredentials, FBoxTransport } from './fboxClient';
+import { FBoxClient, FBoxCredentials, FBoxTransport, getCachedFBoxClient } from './fboxClient';
 import {
   FBoxInternetInfo,
   FBoxLanPort,
@@ -76,7 +76,9 @@ export interface MonitoringResult {
  * are collected into `warnings` instead.
  */
 export async function getMonitoring(host: string, creds: FBoxCredentials, opts: FBoxOptions): Promise<MonitoringResult> {
-  const client = new FBoxClient(host, creds, { transport: opts.transport ?? 'auto', timeoutMs: opts.requestTimeoutMs });
+  // CACHED per (host, credentials) — a fresh client would force a full login
+  // on every poll and trip the box' web-UI rate limit (see fboxClient.ts).
+  const client = getCachedFBoxClient(host, creds, { transport: opts.transport ?? 'auto', timeoutMs: opts.requestTimeoutMs });
 
   // Login first — it also pins the transport scheme (auto: https→http) and
   // detects the UI generation. html2 boxes have NO classic endpoints at all.
