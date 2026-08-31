@@ -15,6 +15,7 @@ import Tunnels from './pages/Tunnels';
 import RoutesPage from './pages/Routes';
 import Logs from './pages/Logs';
 import Wifi from './pages/Wifi';
+import Topology from './pages/Topology';
 import Users from './pages/Users';
 import Roles from './pages/Roles';
 import Tokens from './pages/Tokens';
@@ -142,6 +143,15 @@ export default function App() {
         element={
           <RequireAuth>
             <Wifi />
+          </RequireAuth>
+        }
+      />
+      {/* Physical + logical network graph (inferred cables, per-VLAN segments). */}
+      <Route
+        path="/topology"
+        element={
+          <RequireAuth>
+            <Topology />
           </RequireAuth>
         }
       />

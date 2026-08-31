@@ -285,6 +285,60 @@ export interface TunnelRow {
   collectedAt: string;
 }
 
+/** A physical port as reported by a device's latest telemetry snapshot. */
+export interface TopologyPort {
+  name: string;
+  linkUp?: 'up' | 'down';
+  speed?: string | null;
+  /** access | trunk | hybrid (switches that report it). */
+  mode?: string | null;
+  pvid?: number | null;
+  /** VLANs traversing this port — drives the per-VLAN edge coloring. */
+  vlans: number[];
+  mac?: string | null;
+}
+
+/** One node of the topology graph (GET /topology). `kind` discriminates shape. */
+export type TopologyNode =
+  | {
+      id: string;
+      kind: 'device';
+      name: string;
+      status: string;
+      siteId: string | null;
+      managementAddress: string;
+      ports: TopologyPort[];
+      /** VLAN ids this device participates in. */
+      vlans: number[];
+    }
+  | { id: string; kind: 'segment'; label: string; vlanId: number | null; subnets: string[] }
+  | { id: string; kind: 'host'; mac: string; hostname: string | null; ips: string[] }
+  /** Tunnel peer that is not part of this inventory (e.g. public WireGuard endpoint). */
+  | { id: string; kind: 'remote'; label: string };
+
+/** One edge of the topology graph. `kind` discriminates shape. */
+export type TopologyEdge =
+  | {
+      id: string;
+      source: string;
+      target: string;
+      kind: 'cable';
+      /** Evidence the link was inferred from. */
+      via: 'mac-table' | 'lacp';
+      portA?: string | null;
+      portB?: string | null;
+      /** VLANs traversing the observing port (trunk coloring); empty = unknown. */
+      vlans: number[];
+    }
+  | { id: string; source: string; target: string; kind: 'tunnel'; type: string; status: string | null }
+  | { id: string; source: string; target: string; kind: 'membership'; vlanId: number | null };
+
+/** Response of GET /topology — the physical + logical network graph. */
+export interface TopologyResponse {
+  nodes: TopologyNode[];
+  edges: TopologyEdge[];
+}
+
 /** One route entry from the cross-device inventory view. Rows are NOT merged
  * across devices — a route row is one entry on one device. Static and
  * dynamically-learned routes to the same destination appear as separate rows
@@ -989,6 +1043,14 @@ export const api = {
     if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<WifiOverview>(`/wifi${suffix}`);
+  },
+  /** Physical + logical topology graph for the Topology page. */
+  topology: (params?: { siteId?: string; includeHosts?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.includeHosts) qs.set('includeHosts', 'true');
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<TopologyResponse>(`/topology${suffix}`);
   },
   // Plugin log entries (global Logs page + per-device section in DeviceDetail).
   logs: (params?: {

@@ -1736,6 +1736,39 @@ paths:
         '401':
           description: Authentication required
 
+  /topology:
+    get:
+      tags: [Inventory]
+      summary: Compute the physical + logical network topology graph
+      description: >-
+        Server-side computed device graph for the Topology page. Nodes are
+        devices, logical segments (merged networks/VLANs) and — when requested
+        via `includeHosts` — end-hosts. Edges are inferred physical cables
+        (`via: mac-table` from switch MAC tables / ARP observations,
+        `via: lacp` from LACP partner data), overlay tunnels, and segment
+        memberships. Cable edges carry the VLANs traversing the observing port
+        so trunk ports can be drawn with one colored line per VLAN.
+      parameters:
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: includeHosts
+          required: false
+          schema: { type: boolean }
+          description: "Add end-host nodes (ARP/MAC-table entries) to the logical segments; capped per segment"
+      responses:
+        '200':
+          description: Topology graph (nodes + edges)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopologyResponse'
+        '401':
+          description: Authentication required
+
   /tunnels:
     get:
       tags: [Inventory]
@@ -2940,6 +2973,100 @@ components:
                 type: array
                 items: { type: string }
                 description: "Interface(s) on the observing device where the host was seen (e.g. [lan], [wlan0])"
+
+    TopologyPort:
+      type: object
+      description: "A physical port as reported by the device's latest telemetry snapshot (switches/APs that report port detail)"
+      required: [name, vlans]
+      properties:
+        name: { type: string }
+        linkUp:
+          type: [string, 'null']
+          enum: [up, down, null]
+        speed: { type: [string, 'null'], description: "Speed label as reported by the plugin (e.g. '1 Gbit')" }
+        mode: { type: [string, 'null'], description: "Port VLAN mode when reported: access | trunk | hybrid" }
+        pvid: { type: [integer, 'null'], description: "Access (PVID) VLAN id when reported" }
+        vlans:
+          type: array
+          items: { type: integer }
+          description: "VLAN ids traversing this port — drives the per-VLAN edge coloring in trunk mode"
+        mac: { type: [string, 'null']}
+
+    TopologyNode:
+      type: object
+      description: >-
+        One node of the topology graph. `kind` discriminates the shape:
+        device nodes carry ports + VLAN participation; segment nodes are merged
+        logical networks (VLAN/subnet groups); host nodes are end-hosts
+        (only present when includeHosts was set); remote nodes are tunnel peers
+        that are not part of this inventory.
+      required: [id, kind]
+      properties:
+        id: { type: string, description: "Stable node id ('device:<id>', 'segment:<key>', 'host:<mac>' or 'remote:<address>')" }
+        kind:
+          type: string
+          enum: [device, segment, host, remote]
+        name: { type: [string, 'null'], description: "Device display name (kind=device)" }
+        status: { type: [string, 'null'], description: "Device status (kind=device): unknown | online | degraded | offline | critical" }
+        siteId: { type: [string, 'null']}
+        managementAddress: { type: [string, 'null']}
+        ports:
+          type: array
+          items:
+            $ref: '#/components/schemas/TopologyPort'
+          description: "Physical port detail (kind=device; empty when the plugin reports no port table)"
+        vlans:
+          type: array
+          items: { type: integer }
+          description: "VLAN ids this device participates in (kind=device)"
+        label: { type: [string, 'null'], description: "Display label — segment subnet/'VLAN <id>' (kind=segment) or '<type> → <address>' (kind=remote)" }
+        vlanId: { type: [integer, 'null']}
+        subnets:
+          type: array
+          items: { type: string }
+          description: "All real subnets of the segment, IPv4 first (kind=segment)"
+        mac: { type: [string, 'null'], description: "Host MAC (kind=host)" }
+        hostname: { type: [string, 'null']}
+
+    TopologyEdge:
+      type: object
+      description: >-
+        One edge of the topology graph. `kind` discriminates: cable = inferred
+        physical link (`via` records the evidence), tunnel = overlay link,
+        membership = device/host belongs to a logical segment.
+      required: [id, source, target, kind]
+      properties:
+        id: { type: string }
+        source: { type: string, description: "Source node id" }
+        target: { type: string, description: "Target node id" }
+        kind:
+          type: string
+          enum: [cable, tunnel, membership]
+        via:
+          type: [string, 'null']
+          enum: [mac-table, lacp, null]
+          description: "Evidence the cable was inferred from (kind=cable)"
+        portA: { type: [string, 'null'], description: "Port on the source device (kind=cable)" }
+        portB: { type: [string, 'null'], description: "Interface on the target device (kind=cable; null when unknown)" }
+        vlans:
+          type: array
+          items: { type: integer }
+          description: "VLANs traversing the observing port — one colored line per VLAN in trunk mode (kind=cable; empty = unknown)"
+        type: { type: [string, 'null'], description: "Tunnel technology (kind=tunnel): wireguard | openvpn | ipsec | pppoe | gre" }
+        status: { type: [string, 'null']}
+
+    TopologyResponse:
+      type: object
+      required: [nodes, edges]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/TopologyNode'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/TopologyEdge'
 
     TunnelRow:
       type: object

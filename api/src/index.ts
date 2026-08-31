@@ -17,6 +17,7 @@ import { internalRouter } from './routes/internal';
 import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import plansRouter from './routes/plans';
 import networksRouter from './routes/networks';
+import topologyRouter from './routes/topology';
 import logsRouter from './routes/logs';
 import systemRouter from './routes/system';
 import { startTelemetryWorker } from './workers/telemetry';
@@ -101,6 +102,8 @@ async function main(): Promise<void> {
   api.use(configJobsRouter);
   // Cross-device inventory views (/networks, /hosts) — self-defining paths.
   api.use(networksRouter);
+  // Physical + logical topology graph for the Topology page (self-defining path).
+  api.use(topologyRouter);
   // Plugin log entries (global view + per-device section in DeviceDetail).
   api.use(logsRouter);
   // System/HA observability + runtime tuning (/system/status, /system/settings).

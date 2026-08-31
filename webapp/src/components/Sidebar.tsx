@@ -13,6 +13,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Puzzle,
+  GitGraph,
   Route as RouteIcon,
   ScrollText,
   Server,
@@ -37,6 +38,8 @@ const NAV_ITEMS = [
   // Structured log entries shipped by plugins (gated — logs can carry critical details).
   { to: '/logs', label: 'Logs', icon: ScrollText, requiresPermission: 'logs:read' },
   { to: '/wifi', label: 'WiFi', icon: WifiIcon },
+  // Physical + logical network graph (inferred cables + per-VLAN segments).
+  { to: '/topology', label: 'Topology', icon: GitGraph },
   { to: '/sites', label: 'Sites', icon: MapPin },
   { to: '/secrets', label: 'Secrets', icon: KeyRound },
   { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks },
