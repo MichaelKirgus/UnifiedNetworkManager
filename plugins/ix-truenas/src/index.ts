@@ -1,0 +1,737 @@
+import path from 'path';
+import { Request, Response } from 'express';
+import {
+  Health,
+  MetricDescriptor,
+  PluginOptionDescriptor,
+  INVENTORY_INTERVAL_MS,
+  clampInt,
+  createPluginLogger,
+  createPluginServer,
+  gaugeMetric,
+  hostFromAddress,
+  pickNumber,
+  pickString,
+  readSettings,
+  resolvePluginIdentity,
+  textMetric,
+} from '@unm/plugin-sdk';
+import { TruenasAuthError, TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } from './client/truenasClient';
+
+export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000009';
+export const PLUGIN_NAME = 'TrueNAS Plugin';
+
+/**
+ * Multi-instance support: set `PLUGIN_INSTANCE_ID` (e.g. "site-a") to run several
+ * instances of the same plugin type — each advertises a distinct identity
+ * (`<uuid>:instanceId`) so the API registers them as separate plugins.
+ * `PLUGIN_DISPLAY_NAME` optionally overrides the advertised name; without it,
+ * the instance id is appended: "TrueNAS Plugin (site-a)". Unset = single-instance behavior.
+ */
+const identity = resolvePluginIdentity({
+  uuid: PLUGIN_UUID,
+  name: PLUGIN_NAME,
+  version: '0.1.0',
+  vendors: ['truenas'],
+  capabilities: ['monitoring'],
+});
+
+/**
+ * The options this plugin exposes for configuration. Declared in /discover so
+ * the API can persist + validate user-set values and the webapp can render a
+ * generic form — this plugin never stores settings itself; it receives them on
+ * every call via the `x-unm-settings` header (see readSettings()).
+ */
+const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
+  {
+    key: 'transport',
+    label: 'Transport',
+    type: 'string' as const,
+    default: 'auto',
+    pattern: '^(auto|http|https)$',
+    description:
+      'How to reach the appliance. auto = HTTPS with self-signed certificates accepted (default — TrueNAS ships a self-signed cert out of the box). https = force TLS. http = plaintext HTTP.',
+  },
+  {
+    key: 'timeoutMs',
+    label: 'Request timeout (ms)',
+    type: 'integer' as const,
+    default: 5000,
+    min: 500,
+    max: 60000,
+    description: 'Per-request timeout for TrueNAS API calls. The whole poll must fit the API\'s ~10 s budget.',
+  },
+  {
+    key: 'apiKeyUsername',
+    label: 'API key owner username',
+    type: 'string' as const,
+    default: 'root',
+    description:
+      "Username that owns the bound API key. TrueNAS 26+ requires it for API-key login (auth.login_ex API_KEY_PLAIN). Only used when an API key slot is bound.",
+  },
+  {
+    key: 'logToApi',
+    label: 'Send logs to UNM',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Ship structured log entries (poll failures, auth errors) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Metric descriptors — static part advertised in /discover. The webapp renders
+// from these; dynamic ones (pools table rows, error text) are echoed per poll.
+// ---------------------------------------------------------------------------
+
+const POOL_TABLE_COLUMNS = ['name', 'status', 'size', 'used', 'free', 'scrub'];
+
+function buildMetricDescriptors(): MetricDescriptor[] {
+  return [
+    gaugeMetric('system.cpuLoad', 'CPU Load (1-min avg)', { unit: '%', min: 0, max: 100, group: 'System', summary: true }),
+    { key: 'system.memoryTotal', label: 'Memory Total', type: 'number', visualization: 'text', unit: 'bytes', format: 'bytes', group: 'System' },
+    gaugeMetric('storage.poolUsedPct', 'Pool Usage (all pools)', { unit: '%', min: 0, max: 100, group: 'Storage', summary: true }),
+    textMetric('system.version', 'Version', { group: 'System', intervalMs: INVENTORY_INTERVAL_MS }),
+    textMetric('system.hostname', 'Hostname', { group: 'System', intervalMs: INVENTORY_INTERVAL_MS }),
+    textMetric('system.model', 'Model', { group: 'System', intervalMs: INVENTORY_INTERVAL_MS }),
+    textMetric('system.serialNumber', 'Serial Number', { group: 'System', intervalMs: INVENTORY_INTERVAL_MS }),
+    { key: 'system.uptime', label: 'Uptime', type: 'number', visualization: 'text', unit: 's', format: 'duration', group: 'System', intervalMs: INVENTORY_INTERVAL_MS },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Human-readable byte size ("8.0 TB") for pre-formatted table cells. */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${i === 0 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
+}
+
+/** Seconds → "15d 4h" / "3h 12m" / "45s" (duration format the webapp understands). */
+function formatUptime(totalSeconds: number): string {
+  if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return '—';
+  const d = Math.floor(totalSeconds / 86400);
+  const h = Math.floor((totalSeconds % 86400) / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${Math.floor(totalSeconds)}s`;
+}
+
+/** Extracts the effective transport option from injected settings. */
+function transportOf(settings: Record<string, unknown>): TruenasTransport {
+  const t = settings.transport;
+  return typeof t === 'string' && ['auto', 'http', 'https'].includes(t) ? (t as TruenasTransport) : 'auto';
+}
+
+/**
+ * Per-host client cache — the WebSocket transport keeps ONE authenticated
+ * socket per appliance, so we must NOT create a fresh client (and thus a new
+ * handshake + login exchange) on every 30 s poll. Keyed by host+transport.
+ */
+const clientCache = new Map<string, TruenasClient>();
+
+function getClient(host: string, transport: TruenasTransport, timeoutMs: number): TruenasClient {
+  const key = `${host}|${transport}`;
+  let c = clientCache.get(key);
+  if (!c) {
+    c = new TruenasClient(host, transport, timeoutMs);
+    clientCache.set(key, c);
+  }
+  return c;
+}
+
+/** Human-readable message from an unknown rejection reason. */
+function errMsg(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+/**
+ * Resolves the credentials for one poll. The assignment's primary secret is a
+ * `usernamePassword` type (fields at top level of `credentials`); an optional
+ * bound credential slot named `apiKey` (secret type `apiKey`) takes precedence
+ * when set — TrueNAS API keys are the vendor-recommended integration credential
+ * and avoid storing appliance passwords. TrueNAS 26+ requires the key's owner
+ * username for API-key login; it comes from the `apiKeyUsername` option.
+ */
+function resolveCredentials(
+  creds: Record<string, unknown> | undefined,
+  apiKeyUsername: string
+): { creds?: TruenasCredentials; error?: string } {
+  const c = creds && typeof creds === 'object' ? creds : {};
+  // Optional API-key slot (decrypted fields arrive under credentials.slots.apiKey).
+  const slots = c['slots'] as Record<string, Record<string, string>> | undefined;
+  const keySlot = slots?.['apiKey'];
+  if (keySlot && typeof keySlot === 'object') {
+    const apiKey = pickString(keySlot, ['apiKey']);
+    if (apiKey) return { creds: { kind: 'apiKey', username: apiKeyUsername || undefined, apiKey } };
+  }
+  // Primary username/password secret.
+  const username = pickString(c, ['username']);
+  const password = pickString(c, ['password']);
+  if (username && password) return { creds: { kind: 'password', username, password } };
+  return { error: 'No credentials — assign a Username/Password secret (or an API key slot) to this device' };
+}
+
+// ---------------------------------------------------------------------------
+// Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
+// Emission is gated per call by the `logToApi` option via setEnabled().
+// ---------------------------------------------------------------------------
+const logger = createPluginLogger(identity);
+
+// Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
+// listen) come from @unm/plugin-sdk — this file only registers its own routes.
+const server = createPluginServer({
+  identity,
+  logTag: 'ix-truenas-plugin',
+  // Static icon assets, advertised in /discover and fetched by the API's icon proxy.
+  iconsDir: path.join(__dirname, '../../icons'),
+  discovery: {
+    // Primary secret type for device credentials (username/password login).
+    requiredSecretType: 'usernamePassword',
+    // Optional second credential: a TrueNAS API key used INSTEAD of the
+    // username/password when bound to this slot. The webapp renders slot
+    // selectors automatically from this descriptor.
+    credentialSlots: [
+      {
+        name: 'apiKey',
+        secretType: 'apiKey',
+        required: false,
+        description:
+          'Optional TrueNAS API key — used instead of username/password when set (recommended). TrueNAS 26+ also needs the owner username from the "API key owner username" option.',
+      },
+    ],
+    metrics: buildMetricDescriptors(),
+    options: PLUGIN_OPTIONS,
+    iconUrl: '/icons/truenas.svg',
+  },
+});
+const app = server.app;
+
+// ---------------------------------------------------------------------------
+// POST /monitoring — the telemetry worker polls every ~30 s (10 s budget).
+// Three CORE documented calls in parallel: system.info (CPU load, memory total,
+// inventory text) + pool.query (pools table + aggregate usage)
+// + alert.list (active alerts drive health). Plus best-effort extras that never
+// affect health: interface.query (networks inventory), staticroute.query
+// (routes inventory; per-interface `static_routes` fallback on older releases)
+// and system.dmidecode_info (board serial/model). All fields are taken from the
+// appliance's own API docs — no undocumented surfaces.
+// ---------------------------------------------------------------------------
+
+interface PoolRow {
+  name: string;
+  status: string;
+  sizeBytes?: number;
+  usedBytes?: number;
+  freeBytes?: number;
+  scrubState?: string;
+}
+
+/** Maps one raw pool.query entry to a normalized row (defensive field reads). */
+function parsePool(p: Record<string, unknown>): PoolRow {
+  const name = pickString(p, ['name']) ?? 'unknown';
+  const statusRaw = pickString(p, ['status', 'state']);
+  const sizeBytes = pickNumber(p, ['size', 'size_bytes']);
+  const allocBytes = pickNumber(p, ['allocated', 'alloc', 'used', 'used_bytes']);
+  const freeBytes = pickNumber(p, ['free', 'available', 'free_bytes']);
+  // Scrub/scan state: v26 pool.query returns a `scan` object ({function, state,
+  // percentage, ...}); older releases used a string `scrub_state`. Handle both.
+  let scrubState: string | undefined;
+  const scan = p['scan'];
+  if (scan && typeof scan === 'object') {
+    const s = pickString(scan as Record<string, unknown>, ['state']);
+    const fn = pickString(scan as Record<string, unknown>, ['function']);
+    scrubState = s ? `${fn ?? ''} ${s}`.trim() : undefined;
+  } else if (typeof p['scrub_state'] === 'string') {
+    scrubState = p['scrub_state'];
+  }
+
+  return {
+    name,
+    status: statusRaw ? statusRaw.toUpperCase() : 'UNKNOWN',
+    sizeBytes,
+    usedBytes: allocBytes ?? (sizeBytes !== undefined && freeBytes !== undefined ? sizeBytes - freeBytes : undefined),
+    freeBytes,
+    scrubState,
+  };
+}
+
+/** Maps one raw alert.list entry to its severity (INFO/WARNING/CRITICAL). */
+function parseAlertSeverity(a: Record<string, unknown>): string {
+  const sev = pickString(a, ['severity', 'level']);
+  return sev ? sev.toUpperCase() : 'INFO';
+}
+
+/** One row of the networks inventory (shape consumed by the API's ingestInventory). */
+interface NetworkRow {
+  name: string;
+  ip: string;
+  prefix: number | null;
+  version: '4' | '6';
+  vlanId: number | null;
+  mac: string | null;
+  status: string | null;
+}
+
+/**
+ * Maps interface.query rows to networks-inventory rows — one row per IP alias.
+ * v26 encodes each alias as a JSON STRING inside the `aliases` array
+ * ({"type":"INET","address":"10.25.0.10","netmask":16}); older releases used
+ * plain objects — both are handled. Interfaces without IPs contribute nothing
+ * (the inventory is about addressable networks, not raw NICs).
+ */
+function parseNetworks(ifaces: Record<string, unknown>[]): NetworkRow[] {
+  const rows: NetworkRow[] = [];
+  for (const i of ifaces) {
+    const state = (i['state'] ?? {}) as Record<string, unknown>;
+    // Prefer the human description ("NET_MANAGEMENT") over the kernel name.
+    const name = pickString(i, ['description']) || pickString(i, ['name']) || '';
+    if (!name) continue;
+    const aliasesRaw = i['aliases'];
+    if (!Array.isArray(aliasesRaw)) continue;
+    const mac = typeof state['link_address'] === 'string' ? (state['link_address'] as string).toLowerCase() : null;
+    const status = state['link_state'] === 'LINK_STATE_UP' ? 'up' : 'down';
+    const vlanId = pickNumber(i, ['vlan_tag']);
+    for (const a of aliasesRaw) {
+      let alias: Record<string, unknown> | undefined;
+      if (typeof a === 'string') {
+        try { alias = JSON.parse(a) as Record<string, unknown>; } catch { continue; }
+      } else if (a && typeof a === 'object') {
+        alias = a as Record<string, unknown>;
+      }
+      if (!alias) continue;
+      const ip = pickString(alias, ['address']);
+      if (!ip) continue;
+      rows.push({
+        name,
+        ip,
+        prefix: pickNumber(alias, ['netmask', 'prefixlen']) ?? null,
+        version: pickString(alias, ['type']) === 'INET6' ? '6' : '4',
+        vlanId: vlanId ?? null,
+        mac,
+        status,
+      });
+    }
+  }
+  return rows;
+}
+
+/** One row of the hosts inventory for THIS appliance's own interfaces. */
+interface OwnHostRow {
+  mac: string;
+  ip: string;
+  hostname: string;
+  intf?: string;
+}
+
+/**
+ * Maps interface.query rows to host-inventory rows for the appliance's OWN
+ * interfaces — one row per (MAC, IP alias), carrying the system hostname.
+ * The API merges host rows by MAC across devices, so these 'self' rows merge
+ * with ARP/NDP entries other appliances see for this box and supply the name
+ * that neighbor tables never carry. Interfaces without IPs contribute nothing.
+ */
+function parseOwnHosts(ifaces: Record<string, unknown>[], hostname: string): OwnHostRow[] {
+  const rows: OwnHostRow[] = [];
+  if (!hostname) return rows;
+  for (const i of ifaces) {
+    const state = (i['state'] ?? {}) as Record<string, unknown>;
+    const macRaw = typeof state['link_address'] === 'string' ? (state['link_address'] as string).toLowerCase() : '';
+    if (!macRaw || !/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/.test(macRaw)) continue; // no real MAC → nothing to merge on
+    const aliasesRaw = i['aliases'];
+    if (!Array.isArray(aliasesRaw) || aliasesRaw.length === 0) continue;
+    const intf = pickString(i, ['description']) || pickString(i, ['name']) || '';
+    for (const a of aliasesRaw) {
+      let alias: Record<string, unknown> | undefined;
+      if (typeof a === 'string') {
+        try { alias = JSON.parse(a) as Record<string, unknown>; } catch { continue; }
+      } else if (a && typeof a === 'object') {
+        alias = a as Record<string, unknown>;
+      }
+      if (!alias) continue;
+      const ip = pickString(alias, ['address']);
+      if (!ip) continue;
+      rows.push({ mac: macRaw, ip, hostname, intf: intf || undefined });
+    }
+  }
+  return rows;
+}
+
+/** One row of the routes inventory (shape consumed by the API's ingestInventory). */
+interface RouteRow {
+  destination: string;
+  gateway: string;
+  protocol: 'static';
+  status: string;
+  extra?: Record<string, unknown>;
+}
+
+/**
+ * Maps `staticroute.query` entries (TrueNAS v26+ documented CRUD namespace) to
+ * route-inventory rows. Each entry is {id, destination: "CIDR", gateway: "IP",
+ * description}; `extra.peer` carries the human label so the Routes page can show it.
+ */
+function parseStaticRoutes(entries: Record<string, unknown>[]): RouteRow[] {
+  const rows: RouteRow[] = [];
+  for (const e of entries) {
+    const destination = pickString(e, ['destination']);
+    if (!destination) continue;
+    const description = pickString(e, ['description']) ?? '';
+    rows.push({
+      destination,
+      gateway: pickString(e, ['gateway']) ?? '',
+      protocol: 'static',
+      status: 'active', // configured static routes are applied by TrueNAS with the interface config
+      extra: description ? { peer: description } : undefined,
+    });
+  }
+  return rows;
+}
+
+/**
+ * Fallback for older releases WITHOUT the `staticroute.*` namespace: each
+ * interface's documented `static_routes` array of {destination, gateway} entries.
+ */
+function parseRoutes(ifaces: Record<string, unknown>[]): RouteRow[] {
+  const rows: RouteRow[] = [];
+  for (const i of ifaces) {
+    const sr = i['static_routes'];
+    if (!Array.isArray(sr)) continue;
+    // Prefer the human description ("NET_MONITORING") over the kernel name.
+    const label = pickString(i, ['description']) || pickString(i, ['name']) || '';
+    for (const r of sr) {
+      let entry: Record<string, unknown> | undefined;
+      if (typeof r === 'string') {
+        try { entry = JSON.parse(r) as Record<string, unknown>; } catch { continue; }
+      } else if (r && typeof r === 'object') {
+        entry = r as Record<string, unknown>;
+      }
+      if (!entry) continue;
+      const destination = pickString(entry, ['destination']);
+      if (!destination) continue;
+      rows.push({
+        destination,
+        gateway: pickString(entry, ['gateway']) ?? '',
+        protocol: 'static',
+        status: 'active', // configured static routes are applied by TrueNAS with the interface config
+        extra: label ? { peer: label } : undefined,
+      });
+    }
+  }
+  return rows;
+}
+
+/** True for DMI placeholder values ("To Be Filled By O.E.M.") — not real data. */
+function isPlaceholder(s: string | undefined): boolean {
+  return !s || /to be filled/i.test(s);
+}
+
+app.post('/monitoring', async (req, res) => {
+  try {
+    await handleMonitoring(req, res);
+  } catch (err) {
+    // Safety net: Express 4 does NOT catch rejections from async handlers —
+    // an unhandled one would crash the plugin process. Always answer 200 with
+    // health=critical so the API records a failed poll instead of losing us.
+    const body = req.body ?? {};
+    logger.error(`Monitoring poll crashed: ${errMsg(err)}`, {
+      deviceId: typeof body.deviceId === 'string' ? body.deviceId : undefined,
+      context: { host: typeof body.managementAddress === 'string' ? body.managementAddress : '' },
+    });
+    res.status(200).json({
+      deviceId: typeof body.deviceId === 'string' ? body.deviceId : null,
+      collectedAt: new Date().toISOString(),
+      health: 'critical',
+      metrics: { 'system.error': errMsg(err) },
+      metricDescriptors: [textMetric('system.error', 'Error', { group: 'System' })],
+    });
+  }
+});
+
+async function handleMonitoring(req: Request, res: Response): Promise<void> {
+  const body = req.body ?? {};
+  const deviceId: string | undefined = typeof body.deviceId === 'string' ? body.deviceId : undefined;
+  const managementAddress: unknown = body.managementAddress;
+  const host = hostFromAddress(typeof managementAddress === 'string' ? managementAddress : '');
+
+  // Effective settings injected by the API (defaults ⊕ user overrides).
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+  const transport = transportOf(settings);
+  const timeoutMs = clampInt(settings.timeoutMs, 500, 60000, 5000);
+
+  // Credentials: API-key slot (if bound) takes precedence over username/password.
+  const apiKeyUsername = typeof settings.apiKeyUsername === 'string' ? settings.apiKeyUsername.trim() : '';
+  const { creds, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined, apiKeyUsername);
+  if (!creds || !host) {
+    res.status(200).json({
+      deviceId: deviceId ?? null,
+      collectedAt: new Date().toISOString(),
+      health: 'critical',
+      metrics: { 'system.error': credError ?? 'Missing managementAddress' },
+      metricDescriptors: [textMetric('system.error', 'Error', { group: 'System' })],
+    });
+    return;
+  }
+
+  const client = getClient(host, transport, timeoutMs);
+  const metrics: Record<string, unknown> = {};
+  let failures = 0;
+  let firstError = '';
+
+  // Core calls in parallel (well under the 10 s budget). allSettled (NOT all):
+  // a failed login (unreachable host / bad credentials) must be handled per
+  // section, not reject the whole poll before error handling. The last three
+  // are best-effort extras (networks inventory + static routes + board
+  // serial/model) — their failure does NOT count toward health.
+  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes] = await Promise.allSettled([
+    client.call<Record<string, unknown>>('system.info', [], creds),
+    client.call<Record<string, unknown>[]>('pool.query', [], creds),
+    client.call<Record<string, unknown>[]>('alert.list', [], creds),
+    client.call<Record<string, unknown>[]>('interface.query', [], creds),
+    client.call<Record<string, unknown>>('system.dmidecode_info', [], creds),
+    client.call<Record<string, unknown>[]>('staticroute.query', [], creds),
+  ]);
+
+  // --- system.info: CPU load (loadavg/cores) + memory total + inventory text ---
+  let sysInfoOk = false;
+  if (sysInfoRes.status === 'rejected') {
+    failures++;
+    firstError ||= `system.info: ${errMsg(sysInfoRes.reason)}`;
+  } else {
+    const si = sysInfoRes.value as Record<string, unknown>;
+    if (si && typeof si === 'object') {
+      // CPU load % from the documented 1-minute load average vs core count.
+      const cores = pickNumber(si, ['cores', 'core_count']);
+      const loadavg = Array.isArray(si['loadavg']) ? (si['loadavg'] as unknown[])[0] : undefined;
+      if (typeof loadavg === 'number' && typeof cores === 'number' && cores > 0) {
+        metrics['system.cpuLoad'] = Math.max(0, Math.min(100, Math.round((loadavg / cores) * 1000) / 10));
+      }
+      const memTotal = pickNumber(si, ['physmem', 'mem_total']);
+      if (typeof memTotal === 'number' && memTotal > 0) metrics['system.memoryTotal'] = memTotal;
+      // Inventory text (changes rarely — cheap to re-read every poll).
+      const version = pickString(si, ['version']);
+      if (version) metrics['system.version'] = version;
+      const hostname = pickString(si, ['hostname']);
+      if (hostname) metrics['system.hostname'] = hostname;
+      const model = pickString(si, ['model', 'cpu_model']);
+      if (model) metrics['system.model'] = model;
+      const serial = pickString(si, ['system_serial', 'serial', 'serial_number']);
+      if (!isPlaceholder(serial)) metrics['system.serialNumber'] = serial;
+      const up = pickNumber(si, ['uptime_seconds', 'uptime']);
+      if (typeof up === 'number') metrics['system.uptime'] = formatUptime(up);
+      sysInfoOk = true;
+    } else {
+      failures++;
+      firstError ||= 'system.info returned no data';
+    }
+  }
+
+  // --- pool.query: per-pool table + aggregate usage gauge ---
+  let poolsOk = false;
+  if (poolsRes.status === 'rejected') {
+    failures++;
+    firstError ||= `pool.query: ${errMsg(poolsRes.reason)}`;
+  } else {
+    const rawPools = Array.isArray(poolsRes.value) ? (poolsRes.value as Record<string, unknown>[]) : [];
+    if (Array.isArray(poolsRes.value)) {
+      const rows: PoolRow[] = rawPools.map(parsePool);
+      let totalSize = 0;
+      let totalUsed = 0;
+      let haveSizes = false;
+      for (const r of rows) {
+        if (typeof r.sizeBytes === 'number' && r.sizeBytes > 0) {
+          totalSize += r.sizeBytes;
+          if (typeof r.usedBytes === 'number') totalUsed += r.usedBytes;
+          haveSizes = true;
+        }
+      }
+      metrics['pools'] = rows.map((r) => ({
+        name: r.name,
+        status: r.status,
+        size: formatBytes(r.sizeBytes ?? 0),
+        used: formatBytes(r.usedBytes ?? 0),
+        free: formatBytes(r.freeBytes ?? 0),
+        scrub: r.scrubState ? r.scrubState.toLowerCase() : '—',
+      }));
+      if (haveSizes && totalSize > 0) {
+        metrics['storage.poolUsedPct'] = Math.max(0, Math.min(100, Math.round((totalUsed / totalSize) * 1000) / 10));
+      }
+      poolsOk = true;
+    } else {
+      failures++;
+      firstError ||= 'pool.query returned no data';
+    }
+  }
+
+  // --- alert.list: active alerts drive health (CRITICAL/WARNING levels) ---
+  let alertsOk = false;
+  if (alertsRes.status === 'rejected') {
+    failures++;
+    firstError ||= `alert.list: ${errMsg(alertsRes.reason)}`;
+  } else {
+    const rawAlerts = Array.isArray(alertsRes.value) ? (alertsRes.value as Record<string, unknown>[]) : [];
+    // Dismissed alerts are acknowledged by the operator — they must not drive health.
+    const active = rawAlerts.filter((a) => a['dismissed'] !== true);
+    if (active.length > 0) {
+      metrics['alerts.active'] = active.length;
+      for (const a of active) {
+        const sev = parseAlertSeverity(a);
+        if (sev === 'CRITICAL') metrics['health.alertCritical'] = true;
+        else if (sev === 'WARNING' && !metrics['health.alertWarning']) metrics['health.alertWarning'] = true;
+      }
+    }
+    alertsOk = true;
+  }
+
+  // --- interface.query: networks inventory + own-interface host rows -------
+  // Networks: one row per IP alias. Hosts: the appliance's OWN interfaces as
+  // 'self' rows carrying system.hostname — merged by MAC with ARP/NDP entries
+  // other devices report for this box (neighbor tables never carry names).
+  if (ifacesRes.status === 'fulfilled' && Array.isArray(ifacesRes.value)) {
+    const ifaces = ifacesRes.value as Record<string, unknown>[];
+    const rows = parseNetworks(ifaces);
+    if (rows.length > 0) metrics['networks'] = rows;
+    // system.hostname was parsed from system.info in the section above.
+    const hostname = pickString(metrics, ['system.hostname']) ?? '';
+    const ownHosts = parseOwnHosts(ifaces, hostname);
+    if (ownHosts.length > 0) metrics['hosts'] = ownHosts;
+  }
+
+  // --- staticroute.query: routes inventory ---------------------------------
+  // v26+ has a dedicated documented CRUD namespace (`staticroute.*`); older
+  // releases carry per-interface `static_routes` in interface.query — fall
+  // back to that when the method doesn't exist (-32601). Emitted even when
+  // EMPTY so a route removed on the appliance vanishes from the Routes page
+  // on the next poll (the API treats a present-but-empty array as
+  // authoritative; an absent key would not wipe).
+  let routes: RouteRow[] | undefined;
+  if (staticRoutesRes.status === 'fulfilled' && Array.isArray(staticRoutesRes.value)) {
+    routes = parseStaticRoutes(staticRoutesRes.value as Record<string, unknown>[]);
+  } else if (
+    staticRoutesRes.status === 'rejected' &&
+    staticRoutesRes.reason instanceof TruenasRpcError &&
+    staticRoutesRes.reason.code === -32601 &&
+    ifacesRes.status === 'fulfilled' && Array.isArray(ifacesRes.value)
+  ) {
+    routes = parseRoutes(ifacesRes.value as Record<string, unknown>[]);
+  }
+  if (routes !== undefined) metrics['routes'] = routes;
+
+  // --- system.dmidecode_info: board serial + real hardware model fallback ---
+  // system.info's `model` is the CPU; the baseboard product name is the actual
+  // appliance model. Serial: DMI values are often placeholders — skip those.
+  if (dmiRes.status === 'fulfilled' && dmiRes.value && typeof dmiRes.value === 'object') {
+    const dmi = dmiRes.value as Record<string, unknown>;
+    const boardModel = pickString(dmi, ['baseboard-product-name', 'system-product-name']);
+    if (!isPlaceholder(boardModel)) metrics['system.model'] = boardModel;
+    const boardSerial = pickString(dmi, ['system-serial-number', 'baseboard-serial-number']);
+    if (!isPlaceholder(boardSerial) && !metrics['system.serialNumber']) {
+      metrics['system.serialNumber'] = boardSerial;
+    }
+  }
+
+  // --- Health mapping (only the three CORE calls count — networks/dmidecode
+  // are best-effort extras and never affect health) ---
+  let health: Health;
+  if (failures === 3) {
+    health = 'critical';
+    metrics['system.error'] = firstError || 'All TrueNAS API calls failed';
+  } else {
+    const poolRows = metrics['pools'] as { status?: string }[] | undefined;
+    const offlinePool = poolRows?.some((r) => r.status === 'OFFLINE');
+    const degradedPool = poolRows?.some((r) => r.status === 'DEGRADED' || r.status === 'FAULTED');
+    if (offlinePool || metrics['health.alertCritical']) health = 'critical';
+    else if (degradedPool || metrics['health.alertWarning'] || failures > 0) health = 'warning';
+    else health = sysInfoOk && poolsOk ? 'ok' : 'warning';
+  }
+
+  // Internal flags are not user-facing metrics.
+  delete metrics['health.alertCritical'];
+  delete metrics['health.alertWarning'];
+
+  if (health !== 'ok') {
+    logger.warn(`Monitoring poll for ${host} returned health=${health}${firstError ? ` (${firstError})` : ''}`, { deviceId, context: { host } });
+  }
+
+  res.status(200).json({
+    deviceId: deviceId ?? null,
+    collectedAt: new Date().toISOString(),
+    health,
+    metrics,
+    metricDescriptors: descriptorsFromMetrics(metrics),
+    // Echo of the effective settings — proof the API→plugin injection loop works.
+    activeSettings: { transport, timeoutMs, logToApi: settings.logToApi === true },
+  });
+}
+
+/**
+ * Descriptors generated DYNAMICALLY from the metrics actually collected, so the
+ * UI always matches the data (works across TrueNAS versions). Mirrors the
+ * OPNsense plugin's approach; static /discover descriptors cover the rest.
+ */
+function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescriptor[] {
+  const out: MetricDescriptor[] = [];
+  if ('system.cpuLoad' in metrics) out.push(gaugeMetric('system.cpuLoad', 'CPU Load (1-min avg)', { unit: '%', min: 0, max: 100, group: 'System', summary: true }));
+  if ('system.memoryTotal' in metrics)
+    out.push({ key: 'system.memoryTotal', label: 'Memory Total', type: 'number', visualization: 'text', unit: 'bytes', format: 'bytes', group: 'System' });
+  if ('storage.poolUsedPct' in metrics) out.push(gaugeMetric('storage.poolUsedPct', 'Pool Usage (all pools)', { unit: '%', min: 0, max: 100, group: 'Storage', summary: true }));
+  for (const key of ['system.version', 'system.hostname', 'system.model', 'system.serialNumber'] as const) {
+    if (key in metrics) out.push(textMetric(key, key.split('.')[1] ?? key, { group: 'System' }));
+  }
+  if ('system.uptime' in metrics)
+    out.push({ key: 'system.uptime', label: 'Uptime', type: 'number', visualization: 'text', unit: 's', format: 'duration', group: 'System' });
+  if ('alerts.active' in metrics) out.push(gaugeMetric('alerts.active', 'Active Alerts', { min: 0, group: 'Storage' }));
+  if (Array.isArray(metrics['networks'])) {
+    const rows = metrics['networks'] as Record<string, unknown>[];
+    out.push({
+      key: 'networks',
+      label: 'Network Configuration',
+      type: 'string',
+      visualization: 'table',
+      columns: ['name', 'ip', 'prefix', 'version', 'vlanId', 'mac', 'status'],
+      group: 'Storage',
+    });
+  }
+  if (Array.isArray(metrics['pools'])) {
+    const rows = metrics['pools'] as Record<string, unknown>[];
+    out.push({
+      key: 'pools',
+      label: 'Pools',
+      type: 'string',
+      visualization: 'table',
+      columns: POOL_TABLE_COLUMNS,
+      rows: rows.map((r) => String(r['name'] ?? '')),
+      group: 'Storage',
+    });
+  }
+  if (Array.isArray(metrics['routes']) && (metrics['routes'] as unknown[]).length > 0) {
+    out.push({
+      key: 'routes',
+      label: 'Static Routes',
+      type: 'string',
+      visualization: 'table',
+      columns: ['destination', 'gateway', 'protocol', 'status'],
+      group: 'Storage',
+    });
+  }
+  if ('system.error' in metrics) out.push(textMetric('system.error', 'Error', { group: 'System' }));
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Startup — bind the port + start mDNS advertising (SDK handles both).
+// ---------------------------------------------------------------------------
+server.listen();

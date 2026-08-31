@@ -17,6 +17,7 @@
         "/^node /tmp/unm-parity-diff\\.cjs 2>&1 \\| head -80$/": {
             "approve": true,
             "matchCommandLine": true
-        }
+        },
+        "docker compose": true
     }
 }
