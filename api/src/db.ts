@@ -194,6 +194,40 @@ export async function initDb(): Promise<void> {
       AND TRIM(COALESCE("deviceType", '')) <> ''`);
   await pool.query(`ALTER TABLE devices ALTER COLUMN "deviceType" DROP NOT NULL`);
 
+  // Network layers: registry for the topology view's horizontal bands. Seeded
+  // with four built-ins; users may add custom ones (see routes/layers.ts). The
+  // upsert only refreshes name/color of EXISTING built-in rows, so user edits
+  // to a built-in's color persist across restarts — but new built-ins added in
+  // future releases still appear.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS network_layers (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      sort INTEGER NOT NULL DEFAULT 0,
+      color TEXT NOT NULL,
+      is_builtin BOOLEAN NOT NULL DEFAULT FALSE
+    )`);
+  const BUILTIN_LAYERS: Array<{ id: string; name: string; sort: number; color: string }> = [
+    { id: 'core', name: 'Core', sort: 1, color: '#e11d48' },
+    { id: 'distribution', name: 'Distribution', sort: 2, color: '#f59e0b' },
+    { id: 'access', name: 'Access', sort: 3, color: '#10b981' },
+    { id: 'endpoint', name: 'Endpoint', sort: 4, color: '#6366f1' },
+  ];
+  for (const l of BUILTIN_LAYERS) {
+    await pool.query(
+      `INSERT INTO network_layers (id, name, sort, color, is_builtin)
+       VALUES ($1, $2, $3, $4, TRUE)
+       ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         color = EXCLUDED.color
+       WHERE network_layers.is_builtin = TRUE`,
+      [l.id, l.name, l.sort, l.color]
+    );
+  }
+
+  // Manual topology-layer override on devices (NULL = auto-classify).
+  await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS "layerOverride" TEXT`);
+
   // Telemetry retention sweep (workers/telemetryRetention.ts): a plain
   // timestamp index makes the periodic DELETE WHERE collectedAt < cutoff cheap.
   await pool.query(`

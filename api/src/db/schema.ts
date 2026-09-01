@@ -88,6 +88,9 @@ export const devices = pgTable('devices', {
   model: text('model'),
   // Firmware version for this device (from the selected model's firmwareVersions list).
   firmwareVersion: text('firmwareVersion'),
+  // Manual topology-layer override (network_layers.id). NULL = auto-classify
+  // (plugin-suggested default → type/vendor/port heuristic → 'access').
+  layerOverride: text('layerOverride'),
   // Disabled devices are NOT polled by the telemetry worker; their historical
   // data and last metrics stay preserved. Default enabled.
   enabled: boolean('enabled').notNull().default(true),
@@ -122,6 +125,22 @@ export const devicePlugins = pgTable(
     };
   }
 );
+
+// Network layers for the topology view's horizontal bands (core / distribution /
+// access / endpoint by default). Layers are DATA, not constants: users can add
+// custom ones (name + color + order) and re-color/reorder built-ins. Built-in ids
+// are stable strings referenced by the classification heuristic in utils/topology.ts;
+// custom layers are reachable via a device's manual override or a plugin-suggested
+// default only.
+export const networkLayers = pgTable('network_layers', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull().unique(),
+  // Display order of the bands (1 = topmost). New custom layers append after all.
+  sort: integer('sort').notNull().default(0),
+  // Band accent color (hex, e.g. "#e11d48") — used for band headers + device chips.
+  color: text('color').notNull(),
+  isBuiltin: boolean('is_builtin').notNull().default(false),
+});
 
 // Secondary IP addresses for a device. The PRIMARY address is the device's
 // `managementAddress` column (validated to IPv4/IPv6/DNS name); these rows are

@@ -47,13 +47,54 @@ router.get('/topology', requireAuth, async (req, res: Response) => {
     // All current-state inventory rows for these devices + the assignments we
     // need latest snapshots for. The tables hold only fresh data (24h sweep),
     // so this is a small working set even at large scale.
-    const [networks, hosts, tunnels, deviceIps, assignments] = await Promise.all([
+    const [networks, hosts, tunnels, deviceIps, assignments, layerRows] = await Promise.all([
       db.query.networks.findMany({ where: inArray(schema.networks.deviceId, deviceIds) }),
       db.query.hosts.findMany({ where: inArray(schema.hosts.deviceId, deviceIds) }),
       db.query.tunnels.findMany({ where: inArray(schema.tunnels.deviceId, deviceIds) }),
       db.query.deviceIps.findMany({ where: inArray(schema.deviceIps.deviceId, deviceIds) }),
       db.query.devicePlugins.findMany({ where: inArray(schema.devicePlugins.deviceId, deviceIds) }),
+      db.query.networkLayers.findMany(),
     ]);
+
+    // Layer ids that actually exist — an override or plugin suggestion pointing
+    // at a deleted/unknown layer falls through to the heuristic instead of
+    // producing a dangling band.
+    const validLayerIds = new Set(layerRows.map((l) => l.id));
+
+    // Plugin-suggested default layers: for each assignment, look up the device's
+    // selected model in that plugin's catalog (plugins.deviceModels JSON) and
+    // take its `defaultLayerId`. First matching assignment wins; a suggestion is
+    // only honored when it names an existing layer.
+    const suggestedByDevice = new Map<string, string>();
+    if (assignments.length > 0) {
+      const pluginRows = await db.query.plugins.findMany({
+        where: inArray(schema.plugins.id, Array.from(new Set(assignments.map((a) => a.pluginId)))),
+      });
+      const modelsByPlugin = new Map<string, Array<{ vendor: string; model: string; defaultLayerId?: string }>>();
+      for (const p of pluginRows) {
+        if (!p.deviceModels) continue;
+        try {
+          const parsed = JSON.parse(p.deviceModels);
+          if (Array.isArray(parsed)) modelsByPlugin.set(p.id, parsed);
+        } catch {
+          /* corrupt catalog — no suggestion from this plugin */
+        }
+      }
+      for (const a of assignments) {
+        const dev = deviceRows.find((d) => d.id === a.deviceId);
+        if (!dev || !dev.model) continue;
+        const models = modelsByPlugin.get(a.pluginId);
+        if (!models) continue;
+        const entry = models.find(
+          (m) => m && typeof m.vendor === 'string' && typeof m.model === 'string'
+            && m.vendor.toLowerCase() === dev.vendor.toLowerCase()
+            && m.model === dev.model
+        );
+        if (entry?.defaultLayerId && validLayerIds.has(entry.defaultLayerId)) {
+          suggestedByDevice.set(dev.id, entry.defaultLayerId);
+        }
+      }
+    }
 
     // ONE latest snapshot per assignment (index-backed findFirst each; the set
     // of assignments is small — a few dozen at most). Port-level detail lives
@@ -75,13 +116,27 @@ router.get('/topology', requireAuth, async (req, res: Response) => {
     );
 
     const payload = buildTopologyGraph({
-      devices: deviceRows.map((d) => ({
-        id: d.id,
-        name: d.name,
-        status: d.status,
-        siteId: d.siteId,
-        managementAddress: d.managementAddress,
-      })),
+      devices: deviceRows.map((d) => {
+        let types: string[] = [];
+        try {
+          const parsed = JSON.parse(d.deviceTypes);
+          if (Array.isArray(parsed)) types = parsed.filter((t): t is string => typeof t === 'string');
+        } catch {
+          /* malformed array — heuristic simply sees no types */
+        }
+        return {
+          id: d.id,
+          name: d.name,
+          status: d.status,
+          siteId: d.siteId,
+          managementAddress: d.managementAddress,
+          deviceTypes: types,
+          vendor: d.vendor,
+          model: d.model ?? null,
+          layerOverride: d.layerOverride && validLayerIds.has(d.layerOverride) ? d.layerOverride : null,
+          suggestedLayerId: suggestedByDevice.get(d.id) ?? null,
+        };
+      }),
       networks,
       hosts,
       tunnels,

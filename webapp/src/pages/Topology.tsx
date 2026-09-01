@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -12,34 +12,91 @@ import {
 import '@xyflow/react/dist/style.css';
 import clsx from 'clsx';
 import { Layout } from '../components/Layout';
-import { api, TopologyEdge as TopoEdge, TopologyNode as TopoNode } from '../api/client';
-import { DeviceNode } from '../components/topology/DeviceNode';
+import { api, NetworkLayer, TopologyEdge as TopoEdge, TopologyNode as TopoNode } from '../api/client';
+import { DeviceNode, setLayerRegistry } from '../components/topology/DeviceNode';
 import { SegmentNode } from '../components/topology/SegmentNode';
 import { HostNode } from '../components/topology/HostNode';
 import { RemoteNode } from '../components/topology/RemoteNode';
 import { TrunkEdge } from '../components/topology/TrunkEdge';
 
-const nodeTypes = { device: DeviceNode, segment: SegmentNode, host: HostNode, remote: RemoteNode };
+const nodeTypes = { device: DeviceNode, segment: SegmentNode, host: HostNode, remote: RemoteNode, band: BandNode };
+
+/** True when the straight segment between two card centers crosses any OTHER
+ * card's box (with a small margin). Same-row edges whose direct line passes
+ * through an intermediate node must detour around it instead of cutting across
+ * the card — that produced phantom "cables" over unrelated nodes. */
+function blockedByNode(
+  s: { x: number; y: number },
+  t: { x: number; y: number },
+  boxes: Map<string, { x: number; y: number; width: number; height: number }>,
+  sourceId: string,
+  targetId: string
+): boolean {
+  const M = 6;
+  const loX = Math.min(s.x, t.x) - M;
+  const hiX = Math.max(s.x, t.x) + M;
+  const loY = Math.min(s.y, t.y) - M;
+  const hiY = Math.max(s.y, t.y) + M;
+  for (const [id, b] of boxes) {
+    if (id === sourceId || id === targetId) continue;
+    if (b.x < hiX && b.x + b.width > loX && b.y < hiY && b.y + b.height > loY) return true;
+  }
+  return false;
+}
 
 /** Pick the wall handles an edge should attach to, from actual layout geometry.
  * Every topology node carries invisible centered anchors on all four walls
  * (ids `ts/tt/rs/rt/bs/bt/ls/lt` — see SideHandles in DeviceNode.tsx):
  * vertical neighbors use top/bottom walls, horizontal ones left/right, so the
  * orthogonal path always travels in its direction of travel and never loops
- * back through a node. */
+ * back through a node. Direction is decided from CARD CENTERS (pos + measured
+ * size / 2) — top-left positions alone flip for nodes with different heights,
+ * which produced Z-shaped paths on same-row bundles.
+ *
+ * DETOUR: when the direct segment would cross another card, both ends use the
+ * BOTTOM wall (or TOP near the diagram's top edge) so the path drops into the
+ * empty corridor below/above and travels there — it never cuts through a node. */
 function handlesFor(
   e: { source: string; target: string },
-  pos: Map<string, { x: number; y: number }>
-): { sourceHandle: string; targetHandle: string } {
+  pos: Map<string, { x: number; y: number }>,
+  dims: Map<string, { width: number; height: number }>,
+  boxes: Map<string, { x: number; y: number; width: number; height: number }>
+): { sourceHandle: string; targetHandle: string; corridorY?: number } {
   const s = pos.get(e.source);
   const t = pos.get(e.target);
   if (s && t) {
-    const dx = t.x - s.x;
-    const dy = t.y - s.y;
+    const sd = dims.get(e.source);
+    const td = dims.get(e.target);
+    const scx = s.x + (sd?.width ?? NODE_W) / 2;
+    const scy = s.y + (sd?.height ?? 90) / 2;
+    const tcx = t.x + (td?.width ?? NODE_W) / 2;
+    const tcy = t.y + (td?.height ?? 90) / 2;
+    const dx = tcx - scx;
+    const dy = tcy - scy;
     if (Math.abs(dy) > Math.abs(dx)) {
+      // Vertical neighbors — top/bottom walls.
       return dy > 0
         ? { sourceHandle: 'bs', targetHandle: 'tt' }
         : { sourceHandle: 'ts', targetHandle: 'bt' };
+    }
+    // Horizontal-dominant. If the straight line crosses another card, detour
+    // through a corridor instead of cutting across it. The corridor Y clears
+    // EVERY card in the span (intermediate cards can be taller than both ends)
+    // plus a small margin so the run never grazes a card edge.
+    if (blockedByNode({ x: scx, y: scy }, { x: tcx, y: tcy }, boxes, e.source, e.target)) {
+      const below = Math.max(s.y + (sd?.height ?? 90), t.y + (td?.height ?? 90));
+      const above = Math.min(s.y, t.y);
+      const loX = Math.min(s.x, t.x);
+      const hiX = Math.max(s.x + (sd?.width ?? NODE_W), t.x + (td?.width ?? NODE_W));
+      let corridorY = below;
+      for (const b of boxes.values()) {
+        if (b.x < hiX && b.x + b.width > loX) corridorY = Math.max(corridorY, b.y + b.height);
+      }
+      // Prefer the corridor with more room; default to below.
+      if (above > below - ROW_H * 1.2 && above > 40) {
+        return { sourceHandle: 'ts', targetHandle: 'tt', corridorY: above - 12 };
+      }
+      return { sourceHandle: 'bs', targetHandle: 'bt', corridorY: corridorY + 12 };
     }
     if (dx < 0) return { sourceHandle: 'ls', targetHandle: 'rt' };
   }
@@ -49,29 +106,168 @@ function handlesFor(
 /** Convert topology edges to React Flow edges. Edges sharing the SAME node
  * pair get a centered perpendicular offset index (0, ±1, ±2…) so parallel
  * cables run as distinct grid-aligned lines instead of overlapping; wall
- * handles come from layout geometry. */
-function assignParallel(edges: TopoEdge[], posMap: Map<string, { x: number; y: number }>): FlowEdge[] {
-  const counts = new Map<string, number>();
+ * handles come from layout geometry. Tunnels between the same pair collapse
+ * into ONE edge with a count label — dozens of individual WireGuard rows would
+ * otherwise render as an unreadable dashed fan. */
+function assignParallel(
+  edges: TopoEdge[],
+  posMap: Map<string, { x: number; y: number }>,
+  dims: Map<string, { width: number; height: number }>,
+  boxes: Map<string, { x: number; y: number; width: number; height: number }>
+): FlowEdge[] {
+  // Collapse same-pair tunnels into one representative edge (count in data).
+  const tunnelCounts = new Map<string, number>();
   for (const e of edges) {
-    const key = [e.source, e.target].sort().join('|');
-    counts.set(key, (counts.get(key) ?? 0) + 1);
+    if (e.kind !== 'tunnel') continue;
+    const k = [e.source, e.target].sort().join('|');
+    tunnelCounts.set(k, (tunnelCounts.get(k) ?? 0) + 1);
   }
-  const seen = new Map<string, number>();
-  return edges.map((e) => {
+  const out: FlowEdge[] = [];
+  const emittedTunnelPair = new Set<string>();
+  for (const e of edges) {
+    if (e.kind === 'tunnel') {
+      const k = [e.source, e.target].sort().join('|');
+      if (emittedTunnelPair.has(k)) continue;
+      emittedTunnelPair.add(k);
+    }
+    // Per-pair index in TARGET-ORDER — same-pair cables stay adjacent in the
+    // bend distribution below, so they run as a clean ladder instead of
+    // interleaving with other pairs' edges.
     const key = [e.source, e.target].sort().join('|');
-    const i = seen.get(key) ?? 0;
-    seen.set(key, i + 1);
-    const total = counts.get(key)!;
-    return {
+    const total = tunnelCounts.get(key) ?? 1;
+    const h = handlesFor(e, posMap, dims, boxes);
+    out.push({
       id: e.id,
       source: e.source,
       target: e.target,
       type: 'trunk',
-      data: { ...e, parallelIndex: i - (total - 1) / 2 },
-      ...handlesFor(e, posMap),
-    };
+      data: {
+        ...e,
+        parallelIndex: 0,
+        ...(h.corridorY !== undefined ? { corridorY: h.corridorY } : {}),
+        ...(e.kind === 'tunnel' && total > 1 ? { tunnelCount: total } : {}),
+      },
+      sourceHandle: h.sourceHandle,
+      targetHandle: h.targetHandle,
+    });
+  }
+  // Assign pair indices in target order (deterministic ladder).
+  const byPair = new Map<string, FlowEdge[]>();
+  for (const f of out) {
+    const k = [f.source, f.target].sort().join('|');
+    let list = byPair.get(k);
+    if (!list) {
+      list = [];
+      byPair.set(k, list);
+    }
+    list.push(f);
+  }
+  for (const list of byPair.values()) {
+    const n = list.length;
+    if (n < 2) continue;
+    // Order by the target node's position along the travel axis.
+    list.sort((a, b) => {
+      const pa = posMap.get(a.target);
+      const pb = posMap.get(b.target);
+      if (!pa || !pb) return a.id.localeCompare(b.id);
+      return Math.abs(pa.y - pb.y) > Math.abs(pa.x - pb.x) ? pa.y - pb.y : pa.x - pb.x;
+    });
+    list.forEach((f, i) => {
+      f.data = { ...(f.data as Record<string, unknown>), parallelIndex: i - (n - 1) / 2 };
+    });
+  }
+  return out;
+}
+/** Give every orthogonal edge its own jog position so cables never share a
+ * line. Same-pair parallel edges already get a perpendicular X/Y offset
+ * (assignParallel); without a distinct JOG coordinate their runs sit on the
+ * same midpoint and merge into one thick bar, and cross-pair edges in a band
+ * corridor each bend at their own midpoint → a tangle.
+ *
+ * Edges are bucketed by the corridor gap they cross (midpoint / pitch) AND by
+ * node pair; within each pair the jog positions are spread in parallel-index
+ * order, so same-pair cables form clean ladders and different pairs fan out
+ * through the empty corridor instead of stacking. Vertical-dominant edges get
+ * `bendOffset` (jog Y), horizontal-dominant ones `bendXOffset` (jog X). */
+function withBendOffsets(
+  edges: FlowEdge[],
+  posMap: Map<string, { x: number; y: number }>,
+  dims: Map<string, { width: number; height: number }>
+): FlowEdge[] {
+  const BEND_SPACING = 14; // px between adjacent jog positions in a corridor
+  type Item = { e: FlowEdge; vertical: boolean; lo: number; hi: number; otherLo: number; pairKey: string };
+  const items: Item[] = [];
+  for (const e of edges) {
+    const s = posMap.get(e.source);
+    const t = posMap.get(e.target);
+    if (!s || !t) continue;
+    const sd = dims.get(e.source);
+    const td = dims.get(e.target);
+    const scx = s.x + (sd?.width ?? NODE_W) / 2;
+    const scy = s.y + (sd?.height ?? 90) / 2;
+    const tcx = t.x + (td?.width ?? NODE_W) / 2;
+    const tcy = t.y + (td?.height ?? 90) / 2;
+    const vertical = Math.abs(tcy - scy) > Math.abs(tcx - scx);
+    if (!vertical && Math.abs(tcx - scx) < 1) continue; // straight horizontal
+    if (vertical && Math.abs(tcx - scx) < 1) continue; // straight vertical
+    const pairKey = [e.source, e.target].sort().join('|');
+    items.push(
+      vertical
+        ? { e, vertical, lo: Math.min(scy, tcy), hi: Math.max(scy, tcy), otherLo: Math.min(scx, tcx), pairKey }
+        : { e, vertical, lo: Math.min(scx, tcx), hi: Math.max(scx, tcx), otherLo: Math.min(scy, tcy), pairKey }
+    );
+  }
+  // Bucket by corridor gap crossed (midpoint / pitch) — long edges crossing
+  // several gaps land in the bucket of their midpoint.
+  const byCorridor = new Map<string, Item[]>();
+  for (const it of items) {
+    const mid = (it.lo + it.hi) / 2;
+    const key = `${it.vertical ? 'v' : 'h'}:${Math.round(mid / ROW_H)}`;
+    let list = byCorridor.get(key);
+    if (!list) {
+      list = [];
+      byCorridor.set(key, list);
+    }
+    list.push(it);
+  }
+  const offsets = new Map<string, number>();
+  for (const list of byCorridor.values()) {
+    // Per-pair sub-buckets: same-pair cables stay adjacent → ladder order.
+    const byPair = new Map<string, Item[]>();
+    for (const it of list) {
+      let pl = byPair.get(it.pairKey);
+      if (!pl) {
+        pl = [];
+        byPair.set(it.pairKey, pl);
+      }
+      pl.push(it);
+    }
+    // Pairs ordered by their position along the cross axis (deterministic).
+    const pairs = [...byPair.entries()].sort((a, b) => {
+      const alo = Math.min(...a[1].map((x) => x.otherLo));
+      const blo = Math.min(...b[1].map((x) => x.otherLo));
+      return alo - blo || a[0].localeCompare(b[0]);
+    });
+    let cursor = 0;
+    for (const [, pl] of pairs) {
+      if (pl.length < 2) continue; // single edge keeps the midpoint jog
+      pl.sort((a, b) => ((a.e.data?.parallelIndex as number) ?? 0) - ((b.e.data?.parallelIndex as number) ?? 0));
+      const n = pl.length;
+      const minSpan = Math.min(...pl.map((x) => x.hi - x.lo));
+      const step = Math.min(BEND_SPACING, (minSpan * 0.6) / (n - 1));
+      pl.forEach((it, i) => offsets.set(it.e.id, cursor + (i - (n - 1) / 2) * step));
+      cursor += n;
+    }
+  }
+  return edges.map((e) => {
+    const off = offsets.get(e.id);
+    if (off === undefined || off === 0) return e;
+    const it = items.find((x) => x.e === e);
+    const field = it?.vertical ? 'bendOffset' : 'bendXOffset';
+    return { ...e, data: { ...(e.data as Record<string, unknown>), [field]: off } };
   });
 }
+
 // One custom edge renderer handles all kinds (cable/tunnel/membership) — it
 // reads the kind + VLAN list from `data` and picks its rendering.
 const edgeTypes = { trunk: TrunkEdge };
@@ -80,57 +276,91 @@ type ViewMode = 'physical' | 'logical';
 
 type DeviceTopoNode = TopoNode & { kind: 'device' };
 
-/** Deterministic O(n) layout for the PHYSICAL view: one grid per site,
- * devices name-sorted within their cluster. No force simulation — stable
- * between refreshes and fast at any scale. */
-function layoutPhysical(devices: TopoNode[]): FlowNode[] {
-  const bySite = new Map<string, DeviceTopoNode[]>();
-  for (const d of devices) {
-    if (d.kind !== 'device') continue;
-    const key = d.siteId ?? '__none';
-    let list = bySite.get(key);
+/** Shared grid metrics for the physical layout (kept in sync with the node
+ * card size — see DeviceNode.tsx, which caps port chips to bound its height). */
+const NODE_W = 200;
+const GAP_X = 80;
+const ROW_H = 170;
+const COLS = 4;
+
+/** Band header node — a full-width colored strip above each layer's device row.
+ * Purely decorative (no handles); edges only ever attach to device/remote nodes. */
+function BandNode({ data }: { data: { label: string; color: string } }) {
+  return (
+    <div className="pointer-events-none flex items-center gap-2" style={{ width: COLS * NODE_W + (COLS - 1) * GAP_X }}>
+      <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: data.color }} />
+      <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: data.color }}>
+        {data.label}
+      </span>
+    </div>
+  );
+}
+
+/** Deterministic O(n) layout for the PHYSICAL view: one horizontal BAND per
+ * network layer (in registry sort order), devices name-sorted within their
+ * band, remote tunnel peers in a top strip. Cables between layers travel
+ * vertically through the corridor between bands — the diagram reads like a
+ * real core/distribution/access/endpoint hierarchy instead of site clusters.
+ * Empty bands are skipped; unknown layer ids (defensive) land in an
+ * "Unassigned" band so nothing disappears. */
+function layoutPhysical(nodes: TopoNode[], layers: NetworkLayer[]): FlowNode[] {
+  const layerById = new Map(layers.map((l) => [l.id, l]));
+
+  // Group device nodes by their resolved layer id.
+  const byLayer = new Map<string, DeviceTopoNode[]>();
+  for (const n of nodes) {
+    if (n.kind !== 'device') continue;
+    let list = byLayer.get(n.layer);
     if (!list) {
       list = [];
-      bySite.set(key, list);
+      byLayer.set(n.layer, list);
     }
-    list.push(d);
+    list.push(n);
   }
-  // Named sites alphabetically first (by their id — names are resolved in the
-  // header), unassigned cluster last.
-  const siteKeys = Array.from(bySite.keys()).sort((a, b) => {
-    if (a === '__none') return 1;
-    if (b === '__none') return -1;
-    return a.localeCompare(b);
-  });
 
-  const NODE_W = 200;
-  const GAP_X = 80;
-  const ROW_H = 170;
-  const COLS = 4;
-  let y = 0;
-  const nodes: FlowNode[] = [];
-  for (const key of siteKeys) {
-    const list = bySite.get(key)!;
-    list.sort((a, b) => a.name.localeCompare(b.name));
-    for (let i = 0; i < list.length; i++) {
-      const col = i % COLS;
-      nodes.push({ id: list[i].id, type: 'device', position: { x: col * (NODE_W + GAP_X), y }, data: list[i] });
-    }
-    const rows = Math.max(1, Math.ceil(list.length / COLS));
-    y += rows * ROW_H + 70; // cluster spacing
+  const orderedLayers: Array<{ id: string; name: string; color: string }> = layers.map((l) => ({
+    id: l.id,
+    name: l.name,
+    color: l.color,
+  }));
+  for (const id of byLayer.keys()) {
+    if (!layerById.has(id)) orderedLayers.push({ id, name: 'Unassigned', color: '#94a3b8' });
   }
-  // Remote (unmanaged) tunnel peers — one row below the site clusters so their
+
+  const out: FlowNode[] = [];
+  let y = 0;
+
+  // Remote (unmanaged) tunnel peers — one strip above the first band so their
   // dashed tunnel edges have something to attach to.
-  const remotes = devices.filter((d): d is TopoNode & { kind: 'remote' } => d.kind === 'remote');
+  const remotes = nodes.filter((n): n is TopoNode & { kind: 'remote' } => n.kind === 'remote');
   if (remotes.length > 0) {
-    y += 40;
+    out.push({ id: '__band-remote', type: 'band', position: { x: 0, y }, data: { label: 'Remote peers', color: '#64748b' } });
     for (let i = 0; i < remotes.length; i++) {
       const col = i % COLS;
       const row = Math.floor(i / COLS);
-      nodes.push({ id: remotes[i].id, type: 'remote', position: { x: col * (NODE_W + GAP_X), y: y + row * ROW_H }, data: remotes[i] });
+      out.push({ id: remotes[i].id, type: 'remote', position: { x: col * (NODE_W + GAP_X), y: y + 30 + row * ROW_H }, data: remotes[i] });
     }
+    const rows = Math.max(1, Math.ceil(remotes.length / COLS));
+    y += 30 + rows * ROW_H + 60; // corridor before the first layer band
   }
-  return nodes;
+
+  for (const l of orderedLayers) {
+    const list = byLayer.get(l.id);
+    if (!list || list.length === 0) continue; // skip empty bands
+    out.push({ id: `__band-${l.id}`, type: 'band', position: { x: 0, y }, data: { label: l.name, color: l.color } });
+    list.sort((a, b) => a.name.localeCompare(b.name));
+    for (let i = 0; i < list.length; i++) {
+      const col = i % COLS;
+      // Row offset — bands with more than COLS devices wrap to a second row
+      // instead of stacking overflow nodes on top of the first one.
+      const row = Math.floor(i / COLS);
+      out.push({ id: list[i].id, type: 'device', position: { x: col * (NODE_W + GAP_X), y: y + 30 + row * ROW_H }, data: list[i] });
+    }
+    const rows = Math.max(1, Math.ceil(list.length / COLS));
+    y += 30 + rows * ROW_H + 90; // band header + rows + cable corridor
+  }
+
+  return out;
 }
 
 /** Deterministic O(n) layout for the LOGICAL view: one block per segment —
@@ -182,10 +412,17 @@ export default function Topology() {
   const navigate = useNavigate();
   const [view, setView] = useState<ViewMode>('physical');
   const [showHosts, setShowHosts] = useState(false);
+  const [showTunnels, setShowTunnels] = useState(true);
   const [siteId, setSiteId] = useState('');
   const [segmentKey, setSegmentKey] = useState('all');
 
   const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: () => api.sites() });
+  // Layer registry — drives the physical view's bands (names/colors/order).
+  const layersQuery = useQuery({ queryKey: ['layers'], queryFn: () => api.layers(), refetchInterval: 60_000 });
+  // Feed the layer colors into the device-node chip/border registry.
+  useEffect(() => {
+    setLayerRegistry(layersQuery.data ?? []);
+  }, [layersQuery.data]);
   // includeHosts is only consumed in the logical view; requesting it always
   // keeps a single cache entry per (site, hosts) pair.
   const topoQuery = useQuery({
@@ -204,11 +441,32 @@ export default function Topology() {
     const posMap = new Map<string, { x: number; y: number }>();
 
     if (view === 'physical') {
-      const laidNodes = layoutPhysical(data.nodes);
+      let nodes = data.nodes;
+      let edges = data.edges;
+      // "Show tunnels" off → drop tunnel edges and their remote peer nodes for
+      // a physical-only view.
+      if (!showTunnels) {
+        const remoteIds = new Set(
+          edges.filter((e) => e.kind === 'tunnel').map((e) => (e.source.startsWith('remote:') ? e.source : e.target))
+        );
+        edges = edges.filter((e) => e.kind !== 'tunnel');
+        nodes = nodes.filter((n) => !(n.kind === 'remote' && remoteIds.has(n.id)));
+      }
+      const laidNodes = layoutPhysical(nodes, layersQuery.data ?? []);
       for (const n of laidNodes) posMap.set(n.id, n.position);
+      const dims = new Map(laidNodes.map((n) => [n.id, { width: n.measured?.width ?? NODE_W, height: n.measured?.height ?? 90 }]));
+      // Card boxes for collision detection (detour routing around nodes).
+      const boxes = new Map<string, { x: number; y: number; width: number; height: number }>();
+      for (const n of laidNodes) {
+        if (n.type === 'band') continue;
+        boxes.set(n.id, { x: n.position.x, y: n.position.y, width: dims.get(n.id)!.width, height: dims.get(n.id)!.height });
+      }
       return {
         rfNodes: laidNodes,
-        rfEdges: assignParallel(data.edges.filter((e) => e.kind === 'cable' || e.kind === 'tunnel'), posMap),
+        // Bend distribution AFTER parallel assignment — the perpendicular X/Y
+        // offset and the jog coordinate are independent and compose into clean
+        // ladders (same pair) and fans (cross-pair corridors).
+        rfEdges: withBendOffsets(assignParallel(edges.filter((e) => e.kind === 'cable' || e.kind === 'tunnel'), posMap, dims, boxes), posMap, dims),
       };
     }
 
@@ -243,13 +501,19 @@ export default function Topology() {
 
     const laid = layoutLogical(visibleSegments, membersBySegment);
     for (const n of laid.nodes) posMap.set(n.id, n.position);
+    const dims = new Map(laid.nodes.map((n) => [n.id, { width: n.measured?.width ?? NODE_W, height: n.measured?.height ?? 90 }]));
+    const boxes = new Map<string, { x: number; y: number; width: number; height: number }>();
+    for (const n of laid.nodes) {
+      if (n.type === 'band') continue;
+      boxes.set(n.id, { x: n.position.x, y: n.position.y, width: dims.get(n.id)!.width, height: dims.get(n.id)!.height });
+    }
     // Point each membership edge at the member's instance node in ITS block.
     const remapped = memberEdges.map((e) => ({ ...e, source: laid.memberSourceIds.get(`${e.target}|${e.source}`) ?? e.source }));
     return {
       rfNodes: laid.nodes,
-      rfEdges: assignParallel(remapped, posMap),
+      rfEdges: withBendOffsets(assignParallel(remapped, posMap, dims, boxes), posMap, dims),
     };
-  }, [topoQuery.data, view, segmentKey, showHosts]);
+  }, [topoQuery.data, view, segmentKey, showHosts, showTunnels, layersQuery.data]);
 
   const segments = useMemo(
     () => (topoQuery.data?.nodes ?? []).filter((n): n is TopoNode & { kind: 'segment' } => n.kind === 'segment'),
@@ -293,6 +557,14 @@ export default function Topology() {
             ))}
           </select>
 
+          {/* Tunnels toggle (physical view only — logical has no tunnels). */}
+          {view === 'physical' && (
+            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-600">
+              <input type="checkbox" checked={showTunnels} onChange={(e) => setShowTunnels(e.target.checked)} />
+              Show tunnels
+            </label>
+          )}
+
           {/* Segment focus (logical view only) */}
           {view === 'logical' && (
             <>
@@ -319,15 +591,17 @@ export default function Topology() {
           <div className="ml-auto flex items-center gap-3 text-[10px] text-slate-500">
             {view === 'physical' ? (
               <>
+                {(layersQuery.data ?? []).map((l) => (
+                  <span key={l.id} className="flex items-center gap-1" title={`Layer: ${l.name}`}>
+                    <span className="inline-block h-2 w-2 rounded-sm" style={{ backgroundColor: l.color }} />
+                    {l.name}
+                  </span>
+                ))}
                 <span className="flex items-center gap-1">
                   <span className="inline-block h-0.5 w-4 bg-slate-400" /> cable (inferred)
                 </span>
                 <span className="flex items-center gap-1">
                   <span className="inline-block h-0.5 w-4 border-t-2 border-dashed border-slate-500" /> tunnel
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-orange-500" /> per-VLAN trunk line
                 </span>
               </>
             ) : (
@@ -370,7 +644,9 @@ export default function Topology() {
                       ? '#cbd5e1'
                       : n.type === 'remote'
                         ? '#a5b4fc'
-                        : '#334155'
+                        : n.type === 'band'
+                          ? ((n.data as { color?: string }).color ?? '#94a3b8')
+                          : '#334155'
                 }
               />
             </ReactFlow>

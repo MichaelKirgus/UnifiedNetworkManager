@@ -17,6 +17,20 @@ export function vlanHue(vlanId: number): number {
   return Math.round((vlanId * 137.508) % 360);
 }
 
+/** Layer id → { name, color } registry for the device chip + border tint.
+ * Populated by the Topology page from GET /layers (module-level so plain node
+ * components can read it without prop drilling); empty = no styling. */
+const layerRegistry = new Map<string, { name: string; color: string }>();
+export function setLayerRegistry(layers: Array<{ id: string; name: string; color: string }>): void {
+  layerRegistry.clear();
+  for (const l of layers) layerRegistry.set(l.id, { name: l.name, color: l.color });
+}
+
+function layerInfo(layerId: string | undefined): { name: string; color: string } | null {
+  if (!layerId) return null;
+  return layerRegistry.get(layerId) ?? null;
+}
+
 function PortChip({ port }: { port: TopologyPort }) {
   const down = port.linkUp === 'down';
   return (
@@ -65,6 +79,7 @@ export function SideHandles() {
 }
 
 export function DeviceNode({ data }: { data: TopoNode & { kind: 'device' } }) {
+  const layer = layerInfo(data.layer);
   return (
     <div className="flex flex-col items-center gap-1">
       <SideHandles />
@@ -73,6 +88,7 @@ export function DeviceNode({ data }: { data: TopoNode & { kind: 'device' } }) {
           'flex w-44 flex-col items-start gap-1 rounded-lg border bg-white px-2.5 py-2 shadow-sm',
           data.status === 'offline' || data.status === 'critical' ? 'border-red-300' : 'border-slate-200'
         )}
+        style={layer ? { borderLeft: `3px solid ${layer.color}` } : undefined}
       >
         <div className="flex w-full items-center justify-between gap-1">
           <span className="truncate text-xs font-semibold text-slate-800" title={data.name}>
@@ -80,6 +96,14 @@ export function DeviceNode({ data }: { data: TopoNode & { kind: 'device' } }) {
           </span>
           <StatusBadge status={data.status} />
         </div>
+        {layer && (
+          <span
+            className="rounded px-1 py-px text-[9px] font-bold uppercase tracking-wide"
+            style={{ color: layer.color, backgroundColor: `${layer.color}1a` }}
+          >
+            {layer.name}
+          </span>
+        )}
         <span className="text-[10px] text-slate-400">{data.managementAddress}</span>
         {data.ports.length > 0 && (
           <div className="flex w-full flex-wrap gap-0.5">

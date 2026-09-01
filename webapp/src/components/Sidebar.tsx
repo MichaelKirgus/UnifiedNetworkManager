@@ -14,6 +14,7 @@ import {
   PanelLeftOpen,
   Puzzle,
   GitGraph,
+  Layers as LayersIcon,
   Route as RouteIcon,
   ScrollText,
   Server,
@@ -40,6 +41,8 @@ const NAV_ITEMS = [
   { to: '/wifi', label: 'WiFi', icon: WifiIcon },
   // Physical + logical network graph (inferred cables + per-VLAN segments).
   { to: '/topology', label: 'Topology', icon: GitGraph },
+  // Layer registry — the topology view's horizontal bands.
+  { to: '/layers', label: 'Layers', icon: LayersIcon },
   { to: '/sites', label: 'Sites', icon: MapPin },
   { to: '/secrets', label: 'Secrets', icon: KeyRound },
   { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks },

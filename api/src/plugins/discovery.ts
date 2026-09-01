@@ -50,6 +50,11 @@ function normalizeDeviceModels(raw: unknown): DeviceModelEntry[] | undefined {
     if (typeof e.model !== 'string' || e.model.trim() === '') continue;
     const entry: DeviceModelEntry = { vendor: e.vendor.trim(), model: e.model.trim() };
     if (typeof e.iconPath === 'string' && e.iconPath.trim() !== '') entry.iconPath = e.iconPath.trim();
+    // Suggested topology layer for this model — passed through as-is when a
+    // non-empty string. Deliberately NOT validated against the network_layers
+    // table here: layers may be added later, and resolution is lazy at
+    // topology-build time (an unknown id simply falls back to the heuristic).
+    if (typeof e.defaultLayerId === 'string' && e.defaultLayerId.trim() !== '') entry.defaultLayerId = e.defaultLayerId.trim();
     if (Array.isArray(e.firmwareVersions)) {
       const versions = e.firmwareVersions.filter((v): v is string => typeof v === 'string' && v.trim() !== '').map((v) => v.trim());
       if (versions.length > 0) entry.firmwareVersions = versions;

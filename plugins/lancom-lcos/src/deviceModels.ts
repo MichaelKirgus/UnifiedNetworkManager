@@ -24,6 +24,8 @@ export interface LancomDeviceModel {
   model: string;
   iconPath?: string;
   firmwareVersions?: string[];
+  /** Suggested topology layer (network_layers id) — see DeviceModelEntry in the plugin SDK. */
+  defaultLayerId?: string;
 }
 
 // Current LCOS release lines for routers (major.minor, as LANCOM names them):
@@ -31,7 +33,11 @@ const LINES_CURRENT = ['10.94']; // current line (2026)
 // Older/longer-supported models also run the previous line:
 const LINES_LEGACY = ['10.92', '10.94'];
 
-export const DEVICE_MODELS: LancomDeviceModel[] = [
+// LCOS routers are edge gateways — they sit in the CORE band of the topology
+// view. The suggestion rides on every model entry; a user's manual override
+// always wins, and devices without a selected model fall back to the
+// type/vendor heuristic (which also lands lancom router vendors in core).
+const RAW_MODELS: LancomDeviceModel[] = [
   // --- Entry / residential routers --------------------------------------
   { vendor: 'lancom', model: 'LC-730VA', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_LEGACY },
   { vendor: 'lancom', model: 'LC-883-VoIP', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_LEGACY },
@@ -82,3 +88,5 @@ export const DEVICE_MODELS: LancomDeviceModel[] = [
   // shared, so monitoring works; this entry just keeps the dropdown usable.
   { vendor: 'lancom', model: 'Other / custom LCOS router', iconPath: '/icons/lancom-lcos.svg', firmwareVersions: LINES_LEGACY },
 ];
+
+export const DEVICE_MODELS: LancomDeviceModel[] = RAW_MODELS.map((m) => ({ ...m, defaultLayerId: 'core' }));

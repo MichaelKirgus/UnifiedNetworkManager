@@ -9,6 +9,7 @@ import Plans from './pages/Plans';
 import PlanDetail from './pages/PlanDetail';
 import Plugins from './pages/Plugins';
 import Sites from './pages/Sites';
+import Layers from './pages/Layers';
 import Networks from './pages/Networks';
 import Hosts from './pages/Hosts';
 import Tunnels from './pages/Tunnels';
@@ -152,6 +153,15 @@ export default function App() {
         element={
           <RequireAuth>
             <Topology />
+          </RequireAuth>
+        }
+      />
+      {/* Network layer registry — the topology view's horizontal bands. */}
+      <Route
+        path="/layers"
+        element={
+          <RequireAuth>
+            <Layers />
           </RequireAuth>
         }
       />

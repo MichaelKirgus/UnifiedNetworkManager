@@ -307,6 +307,8 @@ export type TopologyNode =
       status: string;
       siteId: string | null;
       managementAddress: string;
+      /** Resolved network-layer id (manual override > plugin suggestion > heuristic). */
+      layer: string;
       ports: TopologyPort[];
       /** VLAN ids this device participates in. */
       vlans: number[];
@@ -337,6 +339,30 @@ export type TopologyEdge =
 export interface TopologyResponse {
   nodes: TopologyNode[];
   edges: TopologyEdge[];
+}
+
+/** One network layer — a horizontal band of the topology view (GET /layers).
+ * Built-ins (core/distribution/access/endpoint) are seeded at boot; custom
+ * layers are user-created and deletable when unreferenced. */
+export interface NetworkLayer {
+  id: string;
+  name: string;
+  /** Band order — 1 is topmost. */
+  sort: number;
+  /** Hex accent color (e.g. "#e11d48") used for band headers + device chips. */
+  color: string;
+  isBuiltin: boolean;
+}
+
+export interface LayerCreateRequest {
+  name: string;
+  color?: string;
+}
+
+export interface LayerUpdateRequest {
+  name?: string;
+  color?: string;
+  sort?: number;
 }
 
 /** One route entry from the cross-device inventory view. Rows are NOT merged
@@ -588,6 +614,8 @@ export interface DeviceCreateRequest {
   model?: string | null;
   /** Optional firmware version for the selected model. */
   firmwareVersion?: string | null;
+  /** Manual topology-layer override (a network_layers id); null/omitted = auto-classify. */
+  layerOverride?: string | null;
   /** Telemetry polling toggle (default true); disabled devices keep their history. */
   enabled?: boolean;
 }
@@ -617,6 +645,8 @@ export interface Device {
   model?: string | null;
   /** Firmware version for the selected model (null = unset). */
   firmwareVersion?: string | null;
+  /** Manual topology-layer override (a network_layers id); null = auto-classify. */
+  layerOverride?: string | null;
   /** Firmware version detected by the plugins' latest telemetry (list endpoints only; null = not reported). */
   detectedFirmwareVersion?: string | null;
   /** Serial number from the plugins' latest telemetry (list endpoints only; null = not reported). */
@@ -637,6 +667,8 @@ export interface DeviceModelEntry {
   iconPath?: string;
   /** Optional list of firmware versions for this model (plain strings). */
   firmwareVersions?: string[];
+  /** Suggested topology layer for devices of this model (a network_layers id). */
+  defaultLayerId?: string;
 }
 
 /** Builds the URL of a plugin's icon through the API proxy.
@@ -924,7 +956,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   /** Update identity fields of an existing device (plugins are managed separately). */
-  updateDevice: (deviceId: string, body: Partial<Pick<Device, 'name' | 'vendor' | 'deviceTypes' | 'tags' | 'managementAddress' | 'model' | 'firmwareVersion'>> & { siteId?: string | null; enabled?: boolean }) =>
+  updateDevice: (deviceId: string, body: Partial<Pick<Device, 'name' | 'vendor' | 'deviceTypes' | 'tags' | 'managementAddress' | 'model' | 'firmwareVersion' | 'layerOverride'>> & { siteId?: string | null; enabled?: boolean }) =>
     apiFetch<Device>(`/devices/${deviceId}`, { method: 'PATCH', body: JSON.stringify(body) }),
   /** Clone a device — all settings (plugins + credentials, IPs, per-device
    * overrides) are reused; the clone gets a fresh id and "(copy)" name. */
@@ -1006,6 +1038,13 @@ export const api = {
   updateSite: (id: string, body: Partial<SiteCreateRequest>) =>
     apiFetch<Site>(`/sites/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteSite: (id: string) => apiFetch<void>(`/sites/${id}`, { method: 'DELETE' }),
+  // Network layer registry (topology bands). Read is open; write needs layers:write.
+  layers: () => apiFetch<NetworkLayer[]>('/layers'),
+  createLayer: (body: LayerCreateRequest) =>
+    apiFetch<NetworkLayer>('/layers', { method: 'POST', body: JSON.stringify(body) }),
+  updateLayer: (id: string, body: LayerUpdateRequest) =>
+    apiFetch<NetworkLayer>(`/layers/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteLayer: (id: string) => apiFetch<void>(`/layers/${id}`, { method: 'DELETE' }),
   // Cross-device inventory views (Networks + Hosts pages).
   networks: (params?: { deviceId?: string; siteId?: string }) => {
     const qs = new URLSearchParams();

@@ -44,7 +44,7 @@ export default function Devices() {
   // firmwareVersion are optional — chosen from the assigned plugins' catalogs.
   // deviceTypes is a multi-value list (a box can be router AND firewall);
   // tags are free-form user labels for future filtering / plan targeting.
-  const emptyIdentity = { name: '', vendor: '', deviceTypes: ['firewall'] as string[], tags: [] as string[], managementAddress: '', siteId: '', model: '', firmwareVersion: '' };
+  const emptyIdentity = { name: '', vendor: '', deviceTypes: ['firewall'] as string[], tags: [] as string[], managementAddress: '', siteId: '', model: '', firmwareVersion: '', layerOverride: '' };
   const [identity, setIdentity] = useState(emptyIdentity);
 
   // Telemetry polling toggle (create + edit modes). Default enabled — disabled
@@ -68,6 +68,8 @@ export default function Devices() {
   const secretsQuery = useQuery({ queryKey: ['secrets'], queryFn: api.secrets });
   // Site picker options (the Sites page owns creation; this is read-only here).
   const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: api.sites });
+  // Layer registry — drives the manual topology-layer override select.
+  const layersQuery = useQuery({ queryKey: ['layers'], queryFn: () => api.layers() });
 
   // Clone handoff from DeviceDetail (?edit=<id>): once the device list has
   // loaded, open the edit form pre-filled with that (cloned) device so the
@@ -202,6 +204,7 @@ export default function Devices() {
         siteId: identity.siteId || null,
         model: identity.model.trim() || null,
         firmwareVersion: identity.firmwareVersion.trim() || null,
+        layerOverride: identity.layerOverride || null,
         enabled,
       });
       // Diff secondary IPs: add new, remove deleted.
@@ -268,6 +271,7 @@ export default function Devices() {
         plugins: assignments,
         model: identity.model.trim() || null,
         firmwareVersion: identity.firmwareVersion.trim() || null,
+        layerOverride: identity.layerOverride || null,
         enabled,
       });
     }
@@ -300,6 +304,7 @@ export default function Devices() {
       siteId: device.siteId ?? '',
       model: device.model ?? '',
       firmwareVersion: device.firmwareVersion ?? '',
+      layerOverride: device.layerOverride ?? '',
     });
     setEnabled(device.enabled !== false);
     const secondaries = (device.ips ?? []).filter((ip) => !ip.isPrimary);
@@ -388,6 +393,26 @@ export default function Devices() {
       render: (row) => row.serialNumber ? <span className="font-mono text-xs">{row.serialNumber}</span> : <span className="text-slate-400">—</span>,
     },
     { header: 'Site', key: 'siteName', render: (row) => row.siteName ?? <span className="text-slate-400">—</span> },
+    {
+      // Manual topology-layer override — most devices stay on "Auto" (the
+      // plugin suggestion / heuristic decides); a badge shows the pinned layer.
+      header: 'Layer',
+      key: 'layerOverride',
+      width: 120,
+      exportValue: (row) => row.layerOverride ?? 'auto',
+      render: (row) => {
+        const l = (layersQuery.data ?? []).find((x) => x.id === row.layerOverride);
+        if (!l) return <span className="text-xs text-slate-400">Auto</span>;
+        return (
+          <span
+            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide"
+            style={{ color: l.color, backgroundColor: `${l.color}1a` }}
+          >
+            {l.name}
+          </span>
+        );
+      },
+    },
     {
       header: 'IP',
       key: 'managementAddress',
@@ -601,7 +626,19 @@ export default function Devices() {
                 <select
                   className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
                   value={identity.model}
-                  onChange={(e) => setIdentity({ ...identity, model: e.target.value, firmwareVersion: '' })}
+                  onChange={(e) => {
+                    const nextModel = e.target.value;
+                    // When a model with a plugin-suggested default layer is picked
+                    // and the override is still "Auto", prefill that suggestion —
+                    // it stays fully overridable in the Layer select below.
+                    const suggested = modelEntries.find((m) => m.model === nextModel)?.defaultLayerId;
+                    setIdentity({
+                      ...identity,
+                      model: nextModel,
+                      firmwareVersion: '',
+                      layerOverride: identity.layerOverride === '' && suggested ? suggested : identity.layerOverride,
+                    });
+                  }}
                 >
                   <option value="">— not specified —</option>
                   {modelEntries.map((m) => (
@@ -631,6 +668,24 @@ export default function Devices() {
               )}
             </>
           )}
+          {/* Manual topology-layer override — "Auto" lets the plugin suggestion /
+              heuristic decide; picking a layer pins this device to that band. */}
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700">Topology layer</label>
+            <select
+              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              value={identity.layerOverride}
+              onChange={(e) => setIdentity({ ...identity, layerOverride: e.target.value })}
+            >
+              <option value="">Auto (plugin suggestion / heuristic)</option>
+              {(layersQuery.data ?? []).map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-slate-400">Which horizontal band the topology view draws this device in.</p>
+          </div>
           <div>
             <label className="mb-1 block text-sm font-medium text-slate-700">Primary IP / Address</label>
             <input

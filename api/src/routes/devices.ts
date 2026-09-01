@@ -78,6 +78,8 @@ function serializeDevice(row: Device, siteName?: string | null) {
     status: row.status,
     model: row.model ?? null,
     firmwareVersion: row.firmwareVersion ?? null,
+    // Manual topology-layer override (null = auto-classify).
+    layerOverride: row.layerOverride ?? null,
     enabled: row.enabled !== false,
   };
 }
@@ -104,6 +106,18 @@ async function siteNamesFor(devices: Device[]): Promise<Map<string, string>> {
   if (ids.length === 0) return new Map();
   const rows = await db.query.sites.findMany({ where: inArray(schema.sites.id, ids) });
   return new Map(rows.map((s) => [s.id, s.name]));
+}
+
+/** Validates a layerOverride reference: null/omitted = auto-classify, a
+ * string must name an existing network_layers row. Returns the id or an error. */
+async function validateLayerRef(layerId: unknown): Promise<{ value?: string | null; error?: string }> {
+  if (layerId === undefined || layerId === null) return { value: null };
+  if (typeof layerId !== 'string' || layerId.trim() === '') {
+    return { error: '"layerOverride" must be a non-empty string or null' };
+  }
+  const found = await db.query.networkLayers.findFirst({ where: eq(schema.networkLayers.id, layerId.trim()) });
+  if (!found) return { error: `Unknown layer: ${layerId}` };
+  return { value: layerId.trim() };
 }
 
 /** Validates a siteId reference; returns the id or an error message. */
@@ -339,6 +353,13 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
     return;
   }
 
+  // Optional manual topology-layer override (null/omitted = auto-classify).
+  const layerRef = await validateLayerRef(body.layerOverride);
+  if (layerRef.error) {
+    res.status(400).json({ error: layerRef.error });
+    return;
+  }
+
   // Optional secondary IPs (validated here; addDeviceIp re-checks + dedupes).
   const secondaryIps: string[] = [];
   if (ips !== undefined) {
@@ -368,6 +389,7 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
     status: 'unknown',
     model: modelRef.value ?? null,
     firmwareVersion: firmwareRef.value ?? null,
+    layerOverride: layerRef.value ?? null,
     createdAt: new Date().toISOString(),
   });
 
@@ -493,6 +515,16 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
     updates[field] = ref.value ?? null;
   }
 
+  // Manual topology-layer override — null clears it back to auto-classify.
+  if ('layerOverride' in body) {
+    const ref = await validateLayerRef(body.layerOverride);
+    if (ref.error) {
+      res.status(400).json({ error: ref.error });
+      return;
+    }
+    updates.layerOverride = ref.value ?? null;
+  }
+
   // enabled toggles telemetry polling for the device. Disabled devices keep
   // their historical data + last metrics; re-enabling resumes polling.
   if ('enabled' in body) {
@@ -504,7 +536,7 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
   }
 
   if (Object.keys(updates).length === 0) {
-    res.status(400).json({ error: `Provide at least one of: ${UPDATABLE_FIELDS.join(', ')}, deviceTypes, tags, siteId, model, firmwareVersion, enabled` });
+    res.status(400).json({ error: `Provide at least one of: ${UPDATABLE_FIELDS.join(', ')}, deviceTypes, tags, siteId, model, firmwareVersion, layerOverride, enabled` });
     return;
   }
 

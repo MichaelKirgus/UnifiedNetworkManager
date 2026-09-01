@@ -10,6 +10,7 @@ import devicesRouter from './routes/devices';
 import pluginsRouter from './routes/plugins';
 import secretsRouter from './routes/secrets';
 import sitesRouter from './routes/sites';
+import layersRouter from './routes/layers';
 import usersRouter from './routes/users';
 import rolesRouter from './routes/roles';
 import tokensRouter from './routes/tokens';
@@ -95,6 +96,8 @@ async function main(): Promise<void> {
   api.use(pluginsRouter);
   api.use('/secrets', secretsRouter);
   api.use(sitesRouter);
+  // Network layer registry (topology bands) — self-defining /layers paths.
+  api.use(layersRouter);
   api.use(usersRouter);
   api.use(rolesRouter);
   // API tokens (self-service + admin) — long-lived bearer credentials for agents.

@@ -20,6 +20,7 @@ tags:
   - name: Plugins
   - name: Secrets
   - name: Sites
+  - name: Layers
   - name: Inventory
   - name: Logs
   - name: Users
@@ -259,6 +260,8 @@ paths:
                 # Hardware model / firmware version — null clears the selection.
                 model: { type: [string, 'null'], description: "Hardware model from a plugin's catalog; null clears" }
                 firmwareVersion: { type: [string, 'null'], description: "Firmware version for the selected model; null clears" }
+                # Manual topology-layer override — null clears back to auto-classify.
+                layerOverride: { type: [string, 'null'], description: "A network_layers id; must exist (400 otherwise); null = auto-classify" }
                 # Toggles telemetry polling. Disabled devices keep their historical data + last metrics.
                 enabled: { type: boolean }
       responses:
@@ -1663,6 +1666,108 @@ paths:
         '409':
           description: Devices still reference this site
 
+  /layers:
+    get:
+      tags: [Layers]
+      summary: List all network layers in band order
+      description: >-
+        The registry behind the topology view's horizontal bands. Seeded with
+        four built-ins (core, distribution, access, endpoint); users may add
+        custom ones and re-color/reorder any of them.
+      responses:
+        '200':
+          description: Layer list (ordered by sort)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NetworkLayer'
+        '401':
+          description: Authentication required
+    post:
+      tags: [Layers]
+      summary: Create a custom layer
+      description: Requires permission `layers:write`. The id is a slug of the name; new layers append after all existing ones.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LayerCreateRequest'
+      responses:
+        '201':
+          description: Layer created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkLayer'
+        '400':
+          description: Invalid payload (missing name or bad color)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing layers:write permission
+        '409':
+          description: A layer with this name already exists
+
+  /layers/{id}:
+    patch:
+      tags: [Layers]
+      summary: Update a layer (name, color and/or sort)
+      description: Requires permission `layers:write`. Only the provided fields are changed.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LayerUpdateRequest'
+      responses:
+        '200':
+          description: Updated layer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkLayer'
+        '400':
+          description: No updatable fields provided or a field is invalid
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing layers:write permission
+        '404':
+          description: Layer not found
+        '409':
+          description: A layer with this name already exists
+    delete:
+      tags: [Layers]
+      summary: Delete a custom layer
+      description: >-
+        Requires permission `layers:write`. Built-in layers are never deletable
+        (the classification heuristic references their ids); custom layers are
+        refused with 409 while any device's manual override still points at them.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Layer deleted
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing layers:write permission
+        '404':
+          description: Layer not found
+        '409':
+          description: Built-in layer, or devices still reference it as an override
+
   /networks:
     get:
       tags: [Inventory]
@@ -2622,6 +2727,7 @@ components:
           enum: [online, degraded, offline, unknown]
         model: { type: [string, 'null'], description: "Hardware model selected from a plugin's advertised catalog (null = unset)" }
         firmwareVersion: { type: [string, 'null'], description: "Firmware version for the selected model (null = unset)" }
+        layerOverride: { type: [string, 'null'], description: "Manual topology-layer override (a network_layers id); null = auto-classify from plugin suggestion / heuristic" }
         detectedFirmwareVersion: { type: [string, 'null'], description: "Firmware version detected from the plugins' latest telemetry — primary plugin first; null when no assigned plugin reports it" }
         serialNumber: { type: [string, 'null'], description: "Serial number from the plugins' latest telemetry (system.serialNumber); null when not reported" }
         enabled: { type: boolean, default: true, description: "Disabled devices are not polled; historical data + last metrics stay preserved" }
@@ -2674,6 +2780,7 @@ components:
             $ref: '#/components/schemas/DevicePluginAssignmentInput'
         model: { type: [string, 'null'], description: "Optional hardware model (from a plugin's advertised catalog)" }
         firmwareVersion: { type: [string, 'null'], description: "Optional firmware version for the selected model" }
+        layerOverride: { type: [string, 'null'], description: "Optional manual topology-layer override (a network_layers id); null/omitted = auto-classify" }
 
     Site:
       type: object
@@ -2974,6 +3081,34 @@ components:
                 items: { type: string }
                 description: "Interface(s) on the observing device where the host was seen (e.g. [lan], [wlan0])"
 
+    NetworkLayer:
+      type: object
+      description: >-
+        One network layer — a horizontal band of the topology view. Built-ins
+        (core/distribution/access/endpoint) are seeded at boot; custom layers
+        are user-created and deletable when unreferenced.
+      required: [id, name, sort, color, isBuiltin]
+      properties:
+        id: { type: string, description: "Stable layer id (built-ins: core | distribution | access | endpoint)" }
+        name: { type: string, description: "Display name of the band" }
+        sort: { type: integer, description: "Band order — 1 is topmost" }
+        color: { type: string, description: "Hex accent color (e.g. \"#e11d48\") used for band headers + device chips" }
+        isBuiltin: { type: boolean, description: "Seeded at boot; cannot be deleted" }
+
+    LayerCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 64, description: "Display name of the new layer (unique)" }
+        color: { type: string, pattern: '^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$', default: '#8b5cf6', description: "Hex accent color" }
+
+    LayerUpdateRequest:
+      type: object
+      properties:
+        name: { type: string, maxLength: 64 }
+        color: { type: string, pattern: '^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$' }
+        sort: { type: integer, minimum: 1 }
+
     TopologyPort:
       type: object
       description: "A physical port as reported by the device's latest telemetry snapshot (switches/APs that report port detail)"
@@ -3010,6 +3145,9 @@ components:
         status: { type: [string, 'null'], description: "Device status (kind=device): unknown | online | degraded | offline | critical" }
         siteId: { type: [string, 'null']}
         managementAddress: { type: [string, 'null']}
+        layer:
+          type: string
+          description: "Resolved network-layer id this device is drawn in (kind=device) — manual override > plugin-suggested model default > heuristic > 'access'"
         ports:
           type: array
           items:

@@ -125,6 +125,15 @@ export interface DeviceModelEntry {
   iconPath?: string;
   /** Optional list of firmware versions for this model (plain strings). */
   firmwareVersions?: string[];
+  /**
+   * Optional suggested network layer for devices of this model (a
+   * `network_layers` id, e.g. "core" or a user-defined custom layer id).
+   * Used by the topology view's auto-classification: manual override > this
+   * suggestion > type/vendor/port heuristic > 'access'. Not validated against
+   * the layers table at discovery time — resolution is lazy, so a layer can be
+   * added after the fact.
+   */
+  defaultLayerId?: string;
 }
 
 /** One named credential slot beyond the primary secret (e.g. a web-UI login). */

@@ -33,6 +33,8 @@ export interface OpnsenseDeviceModel {
   model: string;
   iconPath?: string;
   firmwareVersions?: string[];
+  /** Suggested topology layer (network_layers id) — see DeviceModelEntry in the plugin SDK. */
+  defaultLayerId?: string;
 }
 
 // OPNsense release lines (year.month) currently published on the official
@@ -50,7 +52,11 @@ const RELEASES = [
   '26.7', // current (Jul 2026)
 ];
 
-export const DEVICE_MODELS: OpnsenseDeviceModel[] = [
+// OPNsense boxes are edge gateways/firewalls — they sit in the CORE band of
+// the topology view. The suggestion rides on every model entry; a user's
+// manual override always wins, and devices without a selected model fall back
+// to the type/vendor heuristic (which also lands opnsense vendors in core).
+const RAW_MODELS: OpnsenseDeviceModel[] = [
   // Deciso rack security appliances (deciso.com/hardware).
   { vendor: 'opnsense', model: 'DEC3920', iconPath: '/icons/dec-rack.svg', firmwareVersions: RELEASES },
   { vendor: 'opnsense', model: 'DEC3940', iconPath: '/icons/dec-rack.svg', firmwareVersions: RELEASES },
@@ -73,3 +79,5 @@ export const DEVICE_MODELS: OpnsenseDeviceModel[] = [
   // DeviceIcon falls back to the plugin icon automatically.
   { vendor: 'opnsense', model: 'Custom / DIY', firmwareVersions: RELEASES },
 ];
+
+export const DEVICE_MODELS: OpnsenseDeviceModel[] = RAW_MODELS.map((m) => ({ ...m, defaultLayerId: 'core' }));

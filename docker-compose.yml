@@ -39,7 +39,7 @@ services:
       # Docker bridge networks). Ensures the provider plugins are registered.
       # All plugins listen on the conventional internal port 4080 (see
       # docs/PLUGIN-DEVELOPMENT.md); compose maps distinct HOST ports to it.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-cos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080}
     depends_on:
       - postgres
     restart: unless-stopped
@@ -304,7 +304,7 @@ services:
       # Same database as the API — used by the debug SQL tool only.
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
       # Endpoints probed by the plugin_probe debug tool (same list as the api).
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-cos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080}
     depends_on:
       - api
     restart: unless-stopped

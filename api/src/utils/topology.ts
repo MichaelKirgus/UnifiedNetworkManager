@@ -18,6 +18,15 @@ export interface TopoDeviceInput {
   status: string;
   siteId: string | null;
   managementAddress: string;
+  /** Device roles (e.g. ["router", "firewall"]) — feeds the layer heuristic. */
+  deviceTypes: string[];
+  vendor: string;
+  /** Selected hardware model from a plugin catalog (null when unset). */
+  model: string | null;
+  /** Manual topology-layer override (validated network_layers id, or null = auto). */
+  layerOverride: string | null;
+  /** Plugin-suggested default layer for this device's model (or null). */
+  suggestedLayerId: string | null;
 }
 
 export interface TopoNetworkRow {
@@ -88,6 +97,8 @@ export type TopologyNode =
       status: string;
       siteId: string | null;
       managementAddress: string;
+      /** Resolved network-layer id (see classifyLayer) — drives the band layout. */
+      layer: string;
       ports: TopologyPort[];
       /** VLAN ids this device participates in (from its networks rows). */
       vlans: number[];
@@ -132,11 +143,16 @@ export interface TopologyResult {
 
 // ---------- small helpers ----------
 
-/** Normalizes a MAC for comparison: lowercase hex only (separators stripped). */
+/** Normalizes a MAC for comparison: lowercase hex only (separators stripped).
+ * All-zero MACs are treated as ABSENT — OPNsense registers its OVS/optical
+ * interfaces with `00:00:00:00:00:00` and SwOS reports the same value as the
+ * "partner" of every non-LAG port; letting them through turns one zero-MAC
+ * interface into a phantom cable to every port that sees it. */
 function normMac(mac: string | null | undefined): string | null {
   if (!mac) return null;
   const hex = mac.replace(/[^0-9a-f]/gi, '').toLowerCase();
-  return hex.length >= 6 ? hex : null;
+  if (hex.length < 6 || /^0+$/.test(hex)) return null;
+  return hex;
 }
 
 function toInt(v: unknown): number | null {
@@ -349,23 +365,32 @@ function vlansOf(ports: TopologyPort[]): number[] {
   return Array.from(set).sort((a, b) => a - b);
 }
 
-/** LACP partner hints from one snapshot (port + partner system MAC). */
-function parseLagPartners(metrics: Record<string, unknown>): Array<{ port: string; partnerMac: string | null }> {
-  const out: Array<{ port: string; partnerMac: string | null }> = [];
-  const sx = metrics['lag.members']; // lancom-sx: partnerSystemId / partnerPort
+/** LACP partner hints from one snapshot (port + partner system MAC + bond id).
+ * The bond id is the plugin's per-bond grouping field — SwOS numeric `group`
+ * (0 = not in a LAG), SX string `aggrId`/`key` — and lets the cable dedup
+ * below collapse all member-port evidence of one physical link into ONE edge. */
+function parseLagPartners(metrics: Record<string, unknown>): Array<{ port: string; partnerMac: string | null; bondId: string | null }> {
+  const out: Array<{ port: string; partnerMac: string | null; bondId: string | null }> = [];
+  // SX emits em-dash placeholders for unknown fields — treat them as null.
+  const sxStr = (v: unknown): string | null => {
+    const s = strOrNull(v);
+    return s && s !== '—' ? s : null;
+  };
+  const sx = metrics['lag.members']; // lancom-sx: partnerSystemId / aggrId per member port
   if (Array.isArray(sx)) {
     for (const r of sx) {
       if (!r || typeof r !== 'object') continue;
       const o = r as Record<string, unknown>;
-      out.push({ port: String(o.port ?? ''), partnerMac: strOrNull(o.partnerSystemId) });
+      out.push({ port: String(o.port ?? ''), partnerMac: strOrNull(o.partnerSystemId), bondId: sxStr(o.aggrId) ?? sxStr(o.key) });
     }
   }
-  const swos = metrics['lag.ports']; // mikrotik-swos: partnerMac
+  const swos = metrics['lag.ports']; // mikrotik-swos: partnerMac + numeric group per member port
   if (Array.isArray(swos)) {
     for (const r of swos) {
       if (!r || typeof r !== 'object') continue;
       const o = r as Record<string, unknown>;
-      out.push({ port: String(o.port ?? ''), partnerMac: strOrNull(o.partnerMac) });
+      const g = toInt(o.group);
+      out.push({ port: String(o.port ?? ''), partnerMac: strOrNull(o.partnerMac), bondId: g !== null && g > 0 ? `g${g}` : null });
     }
   }
   return out;
@@ -381,6 +406,56 @@ interface HostAccum {
   /** Where this MAC was observed (device + interface) — drives segment placement. */
   observedOn: Array<{ deviceId: string; intf: string }>;
   observedKeys: Set<string>;
+}
+
+// ---------- layer classification -------------------------------------------
+
+/** Fallback band when nothing else matches — access is the most common role. */
+const FALLBACK_LAYER = 'access';
+
+/**
+ * Resolves which network-layer band a device belongs to (returns a layer id).
+ * Precedence: manual override > plugin-suggested model default > heuristic on
+ * type/vendor/ports > 'access'. The caller validates `layerOverride` and
+ * `suggestedLayerId` against the loaded layers table before calling — an
+ * unknown id simply falls through to the next level.
+ *
+ * Heuristic (lowercased device types, then vendor):
+ *   truenas vendor or server/nas → endpoint
+ *   access point                 → access
+ *   wireless controller/controller/wlc → distribution (checked BEFORE router —
+ *     a WLC is often typed ["router","wlc"] and must not land in core)
+ *   firewall / router            → core
+ *   switch carrying >1 distinct VLAN across its ports → distribution, else
+ *     access. "Distinct VLANs" covers both trunk-style reports (one port with
+ *     many allowed VLANs — LANCOM) AND per-port single-VLAN reports where the
+ *     device as a whole spans several VLANs (SwOS `vlans.perPort` gives each
+ *     port exactly one defaultVlanId, so no single port ever has >1).
+ *   vendor opnsense/avm/lancom    → core (edge gateways)
+ */
+export function classifyLayer(d: TopoDeviceInput, ports: TopologyPort[]): string {
+  if (d.layerOverride) return d.layerOverride;
+  if (d.suggestedLayerId) return d.suggestedLayerId;
+
+  const types = d.deviceTypes.map((t) => t.toLowerCase());
+  const vendor = d.vendor.toLowerCase();
+  const hasType = (re: RegExp) => types.some((t) => re.test(t));
+
+  if (vendor === 'truenas' || hasType(/^server$|^nas$/)) return 'endpoint';
+  if (hasType(/access point/)) return 'access';
+  // Wireless controllers BEFORE the router rule — WLCs are frequently typed
+  // ["router", "wlc"] and belong in distribution, not core.
+  if (hasType(/wireless controller|^controller$|wlc/)) return 'distribution';
+  if (hasType(/firewall|router/)) return 'core';
+  if (hasType(/switch/)) {
+    // Distribution-tier when the switch carries more than one distinct VLAN
+    // across its ports (trunk or per-port single-VLAN reports alike).
+    const vlanSet = new Set<number>();
+    for (const p of ports) for (const v of p.vlans) vlanSet.add(v);
+    return vlanSet.size > 1 ? 'distribution' : 'access';
+  }
+  if (vendor === 'opnsense' || vendor === 'avm' || vendor === 'lancom') return 'core';
+  return FALLBACK_LAYER;
 }
 
 // ---------- the builder ----------
@@ -420,6 +495,61 @@ export function buildTopologyGraph(input: TopologyInput): TopologyResult {
   // thousands of observed interface names against these.
   const portIndexes = new Map<string, PortIndex>();
   for (const [devId, ports] of portsByDevice) portIndexes.set(devId, buildPortIndex(ports));
+
+  // --- per-device bond identity ---------------------------------------------
+  // One physical link must yield ONE cable edge no matter how many member
+  // ports report it: MAC tables name members individually ("port 4", "port 5")
+  // AND as combined bitmasks ("port 4+5"), and LACP partner rows repeat per
+  // member. The plugins carry a per-bond grouping id (SwOS numeric `group`,
+  // SX string `aggrId`) — index every member port name (and its bare numeric
+  // tail, so "port 4" ≡ "4") to the bond's canonical key.
+  const bondsByDevice = new Map<string, Map<string, string>>(); // deviceId → normPortName → bondKey
+  for (const s of input.snapshots) {
+    let idx: Map<string, string> | undefined;
+    for (const p of parseLagPartners(s.metrics)) {
+      const n = normMacMemo(p.partnerMac);
+      if (!n || !p.port || !p.bondId) continue; // non-member / unknown partner → not a bond
+      if (!idx) {
+        idx = new Map();
+        bondsByDevice.set(s.deviceId, idx);
+      }
+      const bondKey = `bond:${s.deviceId}:${p.bondId}`;
+      const names = [p.port.toLowerCase()];
+      const num = p.port.replace(/^[^0-9]*/, '');
+      if (num !== '' && num !== p.port) names.push(num);
+      for (const name of names) if (!idx.has(name)) idx.set(name, bondKey); // first bond wins per port
+    }
+  }
+
+  /** Canonical local-port identity for cable dedup: the BOND key when every
+   * part of an observed interface name belongs to one bond ("port 4", "5" and
+   * "port 4+5" all resolve to the same key), else the normalized name itself. */
+  const canonicalPort = (devId: string, intf: string): string => {
+    const idx = bondsByDevice.get(devId);
+    if (!idx) return intf.toLowerCase();
+    const i = intf.toLowerCase();
+    const direct = idx.get(i);
+    if (direct) return direct;
+    // Single token — try its numeric tail ("port 4" → "4").
+    const num = i.replace(/^[^0-9]*/, '');
+    if (num !== '' && num !== i) {
+      const b = idx.get(num);
+      if (b) return b;
+    }
+    // Combined bitmask ("port 4+5"): all parts in ONE bond → that bond.
+    const parts = i.split('+').map((s2) => s2.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+      let bond: string | null = null;
+      for (const part of parts) {
+        const pn = part.replace(/^[^0-9]*/, '');
+        const b = idx.get(part) ?? (pn !== '' && pn !== part ? idx.get(pn) : undefined);
+        if (!b || (bond !== null && b !== bond)) return i; // mixed/unknown → not one bond
+        bond = b;
+      }
+      return bond!;
+    }
+    return i;
+  };
 
   // --- device identity MACs: which interface on which device owns this MAC --
   const macToInterface = new Map<string, { deviceId: string; iface: string }>();
@@ -461,6 +591,7 @@ export function buildTopologyGraph(input: TopologyInput): TopologyResult {
     set.add(n.vlanId);
   }
   for (const d of input.devices) {
+    const ports = portsByDevice.get(d.id) ?? [];
     nodes.push({
       id: `device:${d.id}`,
       kind: 'device',
@@ -468,7 +599,8 @@ export function buildTopologyGraph(input: TopologyInput): TopologyResult {
       status: d.status,
       siteId: d.siteId,
       managementAddress: d.managementAddress,
-      ports: portsByDevice.get(d.id) ?? [],
+      layer: classifyLayer(d, ports),
+      ports,
       vlans: Array.from(vlansByDevice.get(d.id) ?? []).sort((a, b) => a - b),
     });
   }
@@ -476,9 +608,23 @@ export function buildTopologyGraph(input: TopologyInput): TopologyResult {
   // --- physical cable edges from MAC-table / ARP observations ----------------
   // "MAC X (owned by device B's interface Y) was seen on port P of device A"
   // ⇒ cable A:P ↔ B:Y. One port seeing several devices emits one edge each —
-  // a hub or miswire stays visible instead of being collapsed away.
+  // a hub or miswire stays visible instead of being collapsed away. LACP bond
+  // members collapse to ONE edge per physical link (canonicalPort above).
   const cableKeys = new Set<string>();
   const cableEdgesByPairPort = new Map<string, TopologyEdge & { kind: 'cable' }>();
+  // Pair + local canonical port → edges. The LACP loop looks this up WITHOUT
+  // the remote iface (the partner system MAC already pins the target device).
+  const cableEdgesByPairLocal = new Map<string, Array<TopologyEdge & { kind: 'cable' }>>();
+  // Raw member names observed per edge — finalized into a combined portA label
+  // ("port 4+5") once all evidence for the link has been merged.
+  const cablePortNames = new Map<string, Set<string>>();
+  // Raw far-end interface names observed per edge — finalized into a combined
+  // portB label. A single NIC with several VLAN sub-ifs (TrueNAS) shows up as
+  // MULTIPLE MACs on the same switch port; without this they would render as
+  // one cable line per sub-interface instead of ONE physical link.
+  const cableRemoteNames = new Map<string, Set<string>>();
+  // Edge id → its local canonical port (used by the opposite-direction merge).
+  const cableLocalCanonical = new Map<string, string>();
   // Trunk VLANs per observing port — cached because real MAC tables hold
   // hundreds of rows on the SAME port (e.g. "port 4+5" with 600 entries).
   const portVlanCache = new Map<string, number[]>();
@@ -491,6 +637,56 @@ export function buildTopologyGraph(input: TopologyInput): TopologyResult {
     }
     return v;
   };
+  /** Create-or-merge a cable edge. Merging unions VLANs and member names so
+   * every evidence row for one physical link lands on the SAME edge. */
+  const upsertCableEdge = (
+    a: string,
+    b: string,
+    localCanonical: string,
+    remoteIface: string | null,
+    rawIntf: string,
+    vlans: number[],
+    via: 'mac-table' | 'lacp'
+  ): TopologyEdge & { kind: 'cable' } => {
+    // Keyed by pair + LOCAL canonical port only — every observation on the
+    // same switch port (or bond) is ONE physical link, no matter how many
+    // remote interface names / MACs it carries. The far-end name is collected
+    // per edge and combined at finalize time.
+    const key = `${a}|${b}|${localCanonical}`;
+    let edge = cableEdgesByPairPort.get(key);
+    if (!edge) {
+      edge = { id: nextEdgeId(), source: a, target: b, kind: 'cable', via, portA: rawIntf, portB: remoteIface || null, vlans: [] };
+      edges.push(edge);
+      cableEdgesByPairPort.set(key, edge);
+      const pl = `${a}|${b}|${localCanonical}`;
+      let list = cableEdgesByPairLocal.get(pl);
+      if (!list) {
+        list = [];
+        cableEdgesByPairLocal.set(pl, list);
+      }
+      list.push(edge);
+      cableLocalCanonical.set(edge.id, localCanonical);
+    } else if (via === 'lacp') {
+      edge.via = 'lacp'; // LACP evidence upgrades MAC-table inference
+    }
+    let names = cablePortNames.get(edge.id);
+    if (!names) {
+      names = new Set();
+      cablePortNames.set(edge.id, names);
+    }
+    names.add(rawIntf);
+    if (remoteIface) {
+      let rn = cableRemoteNames.get(edge.id);
+      if (!rn) {
+        rn = new Set();
+        cableRemoteNames.set(edge.id, rn);
+      }
+      rn.add(remoteIface);
+    }
+    for (const v of vlans) if (!edge.vlans.includes(v)) edge.vlans.push(v);
+    edge.vlans.sort((x, y2) => x - y2);
+    return edge;
+  };
   for (const h of input.hosts) {
     if (!h.intf) continue;
     const n = normMacMemo(h.mac);
@@ -499,28 +695,18 @@ export function buildTopologyGraph(input: TopologyInput): TopologyResult {
     if (!target || target.deviceId === h.deviceId) continue; // self-loop / own table
     const a = `device:${h.deviceId}`;
     const b = `device:${target.deviceId}`;
-    const key = `${a}|${b}|${h.intf.toLowerCase()}|${(target.iface || '').toLowerCase()}`;
-      if (cableKeys.has(key)) continue;
-      cableKeys.add(key);
-      // Trunk coloring: VLANs traversing the OBSERVING port(s), when known.
-      // Runs once per unique cable — dedup above skips the hundreds of
-      // duplicate rows real MAC tables hold on a single port.
-    const edgeVlans = portVlansFor(h.deviceId, h.intf);
-    const edge: TopologyEdge & { kind: 'cable' } = {
-      id: nextEdgeId(),
-      source: a,
-      target: b,
-      kind: 'cable',
-      via: 'mac-table',
-      portA: h.intf,
-      portB: target.iface || null,
-      vlans: edgeVlans,
-    };
-    edges.push(edge);
-    cableEdgesByPairPort.set(key, edge);
+    const localCanonical = canonicalPort(h.deviceId, h.intf);
+    // Skip only true duplicate rows (same port + same link) — different member
+    // names of one bond must still merge into the shared edge.
+    const key = `${a}|${b}|${localCanonical}|${(target.iface || '').toLowerCase()}|${h.intf.toLowerCase()}`;
+    if (cableKeys.has(key)) continue;
+    cableKeys.add(key);
+    upsertCableEdge(a, b, localCanonical, target.iface || null, h.intf, portVlansFor(h.deviceId, h.intf), 'mac-table');
   }
 
   // --- LACP partner hints upgrade/add bond edges ------------------------------
+  // Plugins emit one row per MEMBER port (partner MAC repeated) — the pair +
+  // canonical-bond index collapses them onto a single edge per physical link.
   for (const s of input.snapshots) {
     const partners = parseLagPartners(s.metrics);
     if (partners.length === 0) continue;
@@ -531,25 +717,161 @@ export function buildTopologyGraph(input: TopologyInput): TopologyResult {
       if (!target || target.deviceId === s.deviceId) continue;
       const a = `device:${s.deviceId}`;
       const b = `device:${target.deviceId}`;
+      const localCanonical = canonicalPort(s.deviceId, p.port);
+      const memberVlans = vlansOf(matchPorts(portIndexes.get(s.deviceId), p.port));
       // If we already drew the same physical link from MAC-table evidence,
       // upgrade it instead of drawing a duplicate line.
-      const key = `${a}|${b}|${p.port.toLowerCase()}|${(target.iface || '').toLowerCase()}`;
-      const existing = cableEdgesByPairPort.get(key);
-      if (existing) {
-        existing.via = 'lacp';
+      const list = cableEdgesByPairLocal.get(`${a}|${b}|${localCanonical}`);
+      if (list && list.length > 0) {
+        for (const e of list) {
+          e.via = 'lacp';
+          let names = cablePortNames.get(e.id);
+          if (!names) {
+            names = new Set();
+            cablePortNames.set(e.id, names);
+          }
+          names.add(p.port);
+          for (const v of memberVlans) if (!e.vlans.includes(v)) e.vlans.push(v);
+          e.vlans.sort((x, y2) => x - y2);
+        }
         continue;
       }
-      edges.push({
-        id: nextEdgeId(),
-        source: a,
-        target: b,
-        kind: 'cable',
-        via: 'lacp',
-        portA: p.port,
-        portB: target.iface || null,
-        vlans: vlansOf(matchPorts(portIndexes.get(s.deviceId), p.port)),
-      });
+      upsertCableEdge(a, b, localCanonical, target.iface || null, p.port, memberVlans, 'lacp');
     }
+  }
+
+  // --- finalize cable edges ---------------------------------------------------
+  // Combined member display from every raw name observed for the link. Member
+  // aliases ("port 4" ≡ "4") collapse to one representative per port number;
+  // when a single observed name already covers all members (the combined
+  // bitmask form, e.g. "port 4+5"), it wins as-is.
+  const numParts = (s2: string): number[] => s2.split('+').map((t) => Number(t.replace(/^[^0-9]*/, '')) || 0).filter((n) => n > 0);
+  /** Combine the raw names observed for one end of a link into its label. */
+  const combineNames = (all: string[]): string | null => {
+    const union = new Set<number>();
+    for (const n of all) for (const v of numParts(n)) union.add(v);
+    if (union.size > 1) {
+      // A single name covering every member number → the combined form.
+      for (const n of all) {
+        const parts = new Set(numParts(n));
+        if (parts.size === union.size && [...union].every((v) => parts.has(v))) return n;
+      }
+    }
+    // One representative per port number — the most descriptive alias wins.
+    const byNum = new Map<number, string>();
+    for (const n of all) {
+      for (const v of numParts(n)) {
+        const cur = byNum.get(v);
+        if (!cur || n.length > cur.length) byNum.set(v, n);
+      }
+    }
+    if (byNum.size > 0) return [...byNum.entries()].sort((x, y2) => x[0] - y2[0]).map(([, name]) => name).join('+');
+    // Non-numeric names — plain sorted join.
+    return all.sort().join('+');
+  };
+  for (const e of edges) {
+    if (e.kind !== 'cable') continue;
+    // Near end: bond member names → combined label ("port 4+5").
+    const names = cablePortNames.get(e.id);
+    if (names && names.size > 1) {
+      const best = combineNames(Array.from(names));
+      if (best) e.portA = best;
+    }
+    // Far end: several interface names on ONE physical link (VLAN sub-ifs of a
+    // single NIC, or two NICs in one uplink) → combined label.
+    const rn = cableRemoteNames.get(e.id);
+    if (rn && rn.size > 1) {
+      const bestB = combineNames(Array.from(rn));
+      if (bestB) e.portB = bestB;
+    }
+  }
+  const cablesByPair = new Map<string, Array<TopologyEdge & { kind: 'cable' }>>();
+  for (const e of edges) {
+    if (e.kind !== 'cable') continue;
+    const k = [e.source, e.target].sort().join('|');
+    let list = cablesByPair.get(k);
+    if (!list) {
+      list = [];
+      cablesByPair.set(k, list);
+    }
+    list.push(e);
+  }
+  // Pass 1 — same direction, same local port: one physical link whose far end
+  // shows up under several interface names (multiple vNICs / VLAN sub-ifs on
+  // the trunk). Merge all of them into a single edge.
+  const byDirLocal = new Map<string, Array<TopologyEdge & { kind: 'cable' }>>();
+  for (const e of edges) {
+    if (e.kind !== 'cable') continue;
+    const lc = cableLocalCanonical.get(e.id);
+    if (!lc) continue;
+    const k = `${e.source}|${e.target}|${lc}`;
+    let g = byDirLocal.get(k);
+    if (!g) {
+      g = [];
+      byDirLocal.set(k, g);
+    }
+    g.push(e);
+  }
+  const droppedEdgeIds = new Set<string>();
+  for (const group of byDirLocal.values()) {
+    // With the pair+local-port upsert key each group holds a single edge —
+    // multi-edge groups are rare leftovers; their far-end names were already
+    // combined at finalize time.
+    if (group.length < 2) continue;
+    const keep = group[0];
+    for (let i = 1; i < group.length; i++) {
+      const drop = group[i];
+      droppedEdgeIds.add(drop.id);
+      // Combine the far-end interface names ("NET_MONITORING+NET_INTRANET").
+      if (drop.portB && keep.portB !== drop.portB) {
+        keep.portB = keep.portB ? `${keep.portB}+${drop.portB}` : drop.portB;
+      }
+      for (const v of drop.vlans) if (!keep.vlans.includes(v)) keep.vlans.push(v);
+    }
+    keep.vlans.sort((x, y2) => x - y2);
+  }
+
+  // Pass 2 — opposite directions between the same pair: the same LACP link
+  // reported from BOTH ends (each end's bond carries its own local member
+  // names, so pass 1 can't see them as one). Each forward edge is matched to
+  // its reverse counterpart by LOCAL member-set equality; when several
+  // candidates tie (two bonds with the same member numbers), the far-end
+  // interface name breaks the tie. Unmatched edges stay — two distinct bonds
+  // between a pair still yield two lines.
+  const portSetKey = (e: TopologyEdge & { kind: 'cable' }): string => {
+    const lc = cableLocalCanonical.get(e.id) ?? '';
+    return [...new Set(numParts(lc))].sort((x, y2) => x - y2).join(',');
+  };
+  for (const list of cablesByPair.values()) {
+    const live = list.filter((e) => !droppedEdgeIds.has(e.id));
+    if (live.length < 2) continue;
+    const consumed = new Set<string>();
+    // Deterministic order: forward edges first, then reverse.
+    const ordered = [...live].sort(
+      (x, y2) => (x.source === y2.target ? -1 : y2.source === x.target ? 1 : x.id.localeCompare(y2.id))
+    );
+    for (const f of ordered) {
+      if (consumed.has(f.id)) continue;
+      const revs = live.filter(
+        (r) => !consumed.has(r.id) && r.source === f.target && r.target === f.source && r.via === 'lacp' && f.via === 'lacp'
+      );
+      if (revs.length === 0) continue;
+      const sameSet = revs.filter((r) => portSetKey(r) === portSetKey(f));
+      // Tie-break: the reverse edge's local name appears in this edge's far-end label.
+      let best = sameSet.find((r) => (f.portB ?? '').includes(r.portA ?? '')) ?? sameSet[0];
+      if (!best && sameSet.length === 0) continue; // different member sets → distinct bonds
+      consumed.add(f.id);
+      consumed.add(best.id);
+      const keep = f.source < best.source ? f : best; // deterministic orientation
+      const drop = keep === f ? best : f;
+      droppedEdgeIds.add(drop.id);
+      if (keep.portB !== drop.portA) keep.portB = drop.portA ?? keep.portB; // far end, other side's view
+      for (const v of drop.vlans) if (!keep.vlans.includes(v)) keep.vlans.push(v);
+      keep.vlans.sort((x, y2) => x - y2);
+    }
+  }
+  for (let idx = edges.length - 1; idx >= 0; idx--) {
+    if (droppedEdgeIds.has(edges[idx].id)) edges.splice(idx, 1);
   }
 
   // --- tunnel edges (overlay links) --------------------------------------------

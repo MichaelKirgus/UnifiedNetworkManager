@@ -25,6 +25,9 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'secrets:write': 'Create and update secrets',
   'secrets:delete': 'Delete secrets',
   'sites:write': 'Create, update and delete sites',
+  // Topology layer registry (band names/colors/order) — read is open to any
+  // authenticated user (the topology page needs it), write is gated.
+  'layers:write': 'Add, edit or remove network layers used by the topology view',
   'tokens:manage': "Create, view and revoke your own API tokens",
   'users:read': 'View users and their roles/permissions',
   'users:write': 'Edit user roles/permissions, manage roles, and delete users',
