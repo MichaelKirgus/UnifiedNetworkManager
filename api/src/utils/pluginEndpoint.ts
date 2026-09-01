@@ -27,6 +27,8 @@ const SERVICE_HOST_PORTS: Record<string, number> = {
   'lancom-lcos-plugin': 4008,
   'lancom-sx-plugin': 4009,
   'fbox-plugin': 4010,
+  'ix-truenas-plugin': 4011, // pre-existing gap — added with the routeros entry
+  'mikrotik-routeros-plugin': 4012,
 };
 
 /** True when the API is running on the host (not inside a Docker container). */

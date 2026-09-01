@@ -39,7 +39,7 @@ services:
       # Docker bridge networks). Ensures the provider plugins are registered.
       # All plugins listen on the conventional internal port 4080 (see
       # docs/PLUGIN-DEVELOPMENT.md); compose maps distinct HOST ports to it.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080}
     depends_on:
       - postgres
     restart: unless-stopped
@@ -255,6 +255,28 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+  # MikroTik RouterOS plugin: RouterOS router monitoring via the REST API
+  # (/rest, HTTP Basic auth) — system resources (CPU/memory/uptime), interfaces
+  # + throughput rates, IP addresses, ARP, DHCP leases, routes, wireless clients,
+  # with network/host/route inventory propagation. Configuration + planning are
+  # planned for a later release.
+  mikrotik-routeros-plugin:
+    # Root context — the image also builds the shared @unm/plugin-sdk package.
+    build:
+      context: .
+      dockerfile: plugins/mikrotik-routeros/Dockerfile
+    ports:
+      - "4012:4080"
+    environment:
+      - PORT=4080
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://mikrotik-routeros-plugin:4080
+      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
+      - UNM_API_URL=http://api:3000/v1
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    depends_on:
+      - api
+    restart: unless-stopped
   # TrueNAS plugin: iXsystems TrueNAS SCALE appliance monitoring over the
   # JSON-RPC API (POST /api, bearer-token auth) — system CPU/memory/swap,
   # pool usage + status table, active alerts → health. Credentials:
@@ -304,7 +326,7 @@ services:
       # Same database as the API — used by the debug SQL tool only.
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
       # Endpoints probed by the plugin_probe debug tool (same list as the api).
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080}
     depends_on:
       - api
     restart: unless-stopped

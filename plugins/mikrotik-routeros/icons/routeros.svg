@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- MikroTik RouterOS plugin icon — house style: rounded router chassis with
+       port block + status LED, indigo/slate palette (matches the UNM icon set). -->
+  <rect x="4" y="18" width="56" height="28" rx="6" fill="#312e81"/>
+  <rect x="4" y="18" width="56" height="28" rx="6" fill="none" stroke="#6366f1" stroke-width="2"/>
+  <!-- port block -->
+  <g fill="#c7d2fe">
+    <rect x="10" y="26" width="6" height="12" rx="1.5"/>
+    <rect x="19" y="26" width="6" height="12" rx="1.5"/>
+    <rect x="28" y="26" width="6" height="12" rx="1.5"/>
+  </g>
+  <!-- status LED -->
+  <circle cx="47" cy="32" r="4" fill="#34d399"/>
+  <!-- uplink arrow (router = traffic between networks) -->
+  <path d="M32 6 L38 13 H34 V15 H30 V13 H26 Z" fill="#a5b4fc"/>
+</svg>
