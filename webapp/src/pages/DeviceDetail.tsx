@@ -22,6 +22,12 @@ export default function DeviceDetail() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
+  // Write gating — the page needs devices:read (route guard); mutating actions
+  // additionally need their own permission. Reference data for the add-plugin
+  // modal is only fetched when the user may actually write.
+  const canWriteDevices = can('devices:write');
+  const canManagePlugins = can('plugins:manage');
+
   // Which assignment's settings are being edited (null = closed).
   const [settingsPluginId, setSettingsPluginId] = useState<string | null>(null);
   const [showAddPlugin, setShowAddPlugin] = useState(false);
@@ -71,8 +77,10 @@ export default function DeviceDetail() {
     enabled: Boolean(deviceId),
   });
 
-  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, enabled: Boolean(deviceId) });
-  const secretsQuery = useQuery({ queryKey: ['secrets'], queryFn: api.secrets, enabled: Boolean(deviceId) });
+  // pluginsQuery feeds the header icon + add-plugin modal; secretsQuery only
+  // the modal. Both are gated on their read permissions (the API enforces them).
+  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, enabled: Boolean(deviceId) && can('plugins:read') });
+  const secretsQuery = useQuery({ queryKey: ['secrets'], queryFn: api.secrets, enabled: Boolean(deviceId) && canWriteDevices && can('secrets:read') });
 
   const monitoringQuery = useQuery({
     queryKey: ['monitoring', deviceId],
@@ -113,9 +121,10 @@ export default function DeviceDetail() {
   }, [assignments, pluginsQuery.data]);
 
   // Static descriptors (from /discover) as a fallback for plugins that have
-  // not reported live descriptors yet.
+  // not reported live descriptors yet. Needs plugins:read (API-gated).
   const [fallbackDescriptors, setFallbackDescriptors] = useState<Record<string, MetricDescriptor[]>>({});
   useEffect(() => {
+    if (!can('plugins:read')) return;
     let cancelled = false;
     Promise.all(
       assignments.map(async (a) => {
@@ -263,7 +272,7 @@ export default function DeviceDetail() {
             disabled
           </span>
         )}
-        {device && (
+        {device && canWriteDevices && (
           <div className="ml-auto flex items-center gap-2">
             <button
               onClick={() => {
@@ -335,13 +344,15 @@ export default function DeviceDetail() {
       <section className="mb-8 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Plugins</h2>
-          <button
-            onClick={() => setShowAddPlugin(true)}
-            className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
-          >
-            <Plus className="h-4 w-4" />
-            Add plugin
-          </button>
+          {canWriteDevices && (
+            <button
+              onClick={() => setShowAddPlugin(true)}
+              className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+            >
+              <Plus className="h-4 w-4" />
+              Add plugin
+            </button>
+          )}
         </div>
 
         {assignments.length === 0 ? (
@@ -400,7 +411,7 @@ export default function DeviceDetail() {
                   </td>
                   <td className="py-2 text-right">
                     <div className="inline-flex items-center gap-1">
-                      {!a.isPrimary && (
+                      {canWriteDevices && !a.isPrimary && (
                         <button
                           aria-label={`Make ${a.pluginName ?? a.pluginId} primary`}
                           title="Make primary plugin"
@@ -411,27 +422,31 @@ export default function DeviceDetail() {
                           <Star className="h-4 w-4" />
                         </button>
                       )}
-                      <button
-                        aria-label={`Settings for ${a.pluginName ?? a.pluginId}`}
-                        title="Device settings"
-                        onClick={() => setSettingsPluginId(a.pluginId)}
-                        className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-                      >
-                        <Settings className="h-4 w-4" />
-                      </button>
-                      <button
-                        aria-label={`Remove ${a.pluginName ?? a.pluginId}`}
-                        title="Remove assignment"
-                        disabled={removeAssignment.isPending}
-                        onClick={() => {
-                          if (window.confirm(`Remove ${a.pluginName ?? 'this plugin'} from this device?`)) {
-                            removeAssignment.mutate(a.pluginId);
-                          }
-                        }}
-                        className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      {canManagePlugins && (
+                        <button
+                          aria-label={`Settings for ${a.pluginName ?? a.pluginId}`}
+                          title="Device settings"
+                          onClick={() => setSettingsPluginId(a.pluginId)}
+                          className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                        >
+                          <Settings className="h-4 w-4" />
+                        </button>
+                      )}
+                      {canWriteDevices && (
+                        <button
+                          aria-label={`Remove ${a.pluginName ?? a.pluginId}`}
+                          title="Remove assignment"
+                          disabled={removeAssignment.isPending}
+                          onClick={() => {
+                            if (window.confirm(`Remove ${a.pluginName ?? 'this plugin'} from this device?`)) {
+                              removeAssignment.mutate(a.pluginId);
+                            }
+                          }}
+                          className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -445,13 +460,15 @@ export default function DeviceDetail() {
       <section className="mb-8 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">IP addresses</h2>
-          <button
-            onClick={() => { setShowAddIp(true); setNewIpInput(''); setIpError(null); }}
-            className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
-          >
-            <Plus className="h-4 w-4" />
-            Add IP
-          </button>
+          {canWriteDevices && (
+            <button
+              onClick={() => { setShowAddIp(true); setNewIpInput(''); setIpError(null); }}
+              className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+            >
+              <Plus className="h-4 w-4" />
+              Add IP
+            </button>
+          )}
         </div>
 
         {device?.ips && device.ips.length > 0 ? (
@@ -475,7 +492,7 @@ export default function DeviceDetail() {
                     )}
                   </td>
                   <td className="py-2 text-right">
-                    {!ip.isPrimary && ip.id && (
+                    {canWriteDevices && !ip.isPrimary && ip.id && (
                       <button
                         aria-label={`Remove ${ip.address}`}
                         title="Remove this IP"

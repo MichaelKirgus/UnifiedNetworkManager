@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
-import { requireAuth } from '../auth/middleware';
+import { requireAuth, requirePermission } from '../auth/middleware';
 import { subnetOf } from '../utils/address';
 
 /** One stored row of the `networks` table (per device + plugin instance). */
@@ -426,7 +426,7 @@ export function mergeNetworkRows(rows: StoredNetwork[]): MergedNetwork[] {
 
 // GET /networks - All configured networks across devices.
 // Query params: deviceId (exact), siteId (filter by device's site).
-router.get('/networks', requireAuth, async (_req, res: Response) => {
+router.get('/networks', requireAuth, requirePermission('networks:read'), async (_req, res: Response) => {
   try {
     const { deviceId, siteId } = _req.query as Record<string, string | undefined>;
 
@@ -487,7 +487,7 @@ router.get('/networks', requireAuth, async (_req, res: Response) => {
 
 // GET /hosts - All discovered hosts across devices (ARP/NDP neighbors + DHCP leases).
 // Query params: deviceId, siteId, source ('arp'|'ndp'|'dhcp'|'wlan').
-router.get('/hosts', requireAuth, async (_req, res: Response) => {
+router.get('/hosts', requireAuth, requirePermission('hosts:read'), async (_req, res: Response) => {
   try {
     const { deviceId, siteId, source } = _req.query as Record<string, string | undefined>;
 
@@ -560,7 +560,7 @@ router.get('/hosts', requireAuth, async (_req, res: Response) => {
 // type ('wireguard'|'openvpn'|'ipsec'|'pppoe'|'gre').
 // Unlike networks/hosts, no cross-device merge is needed — a tunnel row is
 // already one logical tunnel on one device.
-router.get('/tunnels', requireAuth, async (_req, res: Response) => {
+router.get('/tunnels', requireAuth, requirePermission('tunnels:read'), async (_req, res: Response) => {
   try {
     const { deviceId, siteId, type } = _req.query as Record<string, string | undefined>;
 
@@ -628,7 +628,7 @@ router.get('/tunnels', requireAuth, async (_req, res: Response) => {
 // No cross-device merge — a route row is one entry on one device. Static and
 // dynamically-learned routes to the same destination appear as separate rows
 // (protocol is part of the PK).
-router.get('/routes', requireAuth, async (_req, res: Response) => {
+router.get('/routes', requireAuth, requirePermission('routes:read'), async (_req, res: Response) => {
   try {
     const { deviceId, siteId, protocol } = _req.query as Record<string, string | undefined>;
 
@@ -695,7 +695,7 @@ router.get('/routes', requireAuth, async (_req, res: Response) => {
 // joins per-channel airtime (`wifi_channels`) + connected-client counts
 // (`wifi_clients`). Also returns a per-band entry list for the spectrum view.
 // Query params: siteId (filter to one site's devices).
-router.get('/wifi', requireAuth, async (_req, res: Response) => {
+router.get('/wifi', requireAuth, requirePermission('wifi:read'), async (_req, res: Response) => {
   try {
     const { siteId } = _req.query as Record<string, string | undefined>;
 

@@ -12,6 +12,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import clsx from 'clsx';
 import { Layout } from '../components/Layout';
+import { can } from '../auth/permissions';
 import { api, NetworkLayer, TopologyEdge as TopoEdge, TopologyNode as TopoNode } from '../api/client';
 import { DeviceNode, setLayerRegistry } from '../components/topology/DeviceNode';
 import { SegmentNode } from '../components/topology/SegmentNode';
@@ -416,7 +417,8 @@ export default function Topology() {
   const [siteId, setSiteId] = useState('');
   const [segmentKey, setSegmentKey] = useState('all');
 
-  const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: () => api.sites() });
+  // Site filter options — only fetched when allowed (API gates on sites:read).
+  const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: () => api.sites(), enabled: can('sites:read') });
   // Layer registry — drives the physical view's bands (names/colors/order).
   const layersQuery = useQuery({ queryKey: ['layers'], queryFn: () => api.layers(), refetchInterval: 60_000 });
   // Feed the layer colors into the device-node chip/border registry.

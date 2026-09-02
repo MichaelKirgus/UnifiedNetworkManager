@@ -129,7 +129,9 @@ router.get('/plugins/:id/icon', async (req, res) => {
   }
 });
 
-router.get('/plugins', requireAuth, async (_req, res) => {
+// All plugin read routes require plugins:read (the Plugins page + the
+// reference data it feeds — device forms, plan creation, DeviceDetail).
+router.get('/plugins', requireAuth, requirePermission('plugins:read'), async (_req, res) => {
   const result = await db.query.plugins.findMany({
     orderBy: [desc(schema.plugins.createdAt)],
   });
@@ -139,7 +141,7 @@ router.get('/plugins', requireAuth, async (_req, res) => {
 // GET /plugins/:id/required-secret-type - The secret type a device plugin
 // expects for its device credentials (read from the plugin's /discover), plus
 // any additional named credential slots it declares (drives per-slot pickers).
-router.get('/plugins/:id/required-secret-type', requireAuth, async (req, res) => {
+router.get('/plugins/:id/required-secret-type', requireAuth, requirePermission('plugins:read'), async (req, res) => {
   const { id } = req.params;
   const [requiredSecretType, row] = await Promise.all([
     getRequiredSecretType(id),
@@ -151,7 +153,7 @@ router.get('/plugins/:id/required-secret-type', requireAuth, async (req, res) =>
 // GET /plugins/:id/metrics - The metric descriptors a plugin declared in its
 // /discover endpoint. The webapp renders device metrics generically from these
 // (gauge/plot/text/table), so new plugins/metrics need no webapp changes.
-router.get('/plugins/:id/metrics', requireAuth, async (req, res) => {
+router.get('/plugins/:id/metrics', requireAuth, requirePermission('plugins:read'), async (req, res) => {
   const { id } = req.params;
   const row = await db.query.plugins.findFirst({
     where: (plugins, { eq }) => eq(plugins.id, id),
@@ -177,7 +179,7 @@ router.get('/plugins/:id/metrics', requireAuth, async (req, res) => {
 // metric count, log queue depth), collected by workers/pluginMetrics.ts from
 // the plugin's auto-mounted GET /metrics endpoint. `latest` is the most recent
 // sample; `history` carries up to `limit` samples newest-first for sparklines.
-router.get('/plugins/:id/self-metrics', requireAuth, async (req, res) => {
+router.get('/plugins/:id/self-metrics', requireAuth, requirePermission('plugins:read'), async (req, res) => {
   const { id } = req.params;
   const row = await db.query.plugins.findFirst({
     where: (plugins, { eq }) => eq(plugins.id, id),
@@ -206,7 +208,7 @@ router.get('/plugins/:id/self-metrics', requireAuth, async (req, res) => {
 // GET /plugins/:id/actions - The action catalog a plugin declared in its
 // /discover endpoint (single-device actions + multi-device intents with input
 // schemas). Drives plan creation: the webapp renders intent/step forms from it.
-router.get('/plugins/:id/actions', requireAuth, async (req, res) => {
+router.get('/plugins/:id/actions', requireAuth, requirePermission('plugins:read'), async (req, res) => {
   const { id } = req.params;
   const row = await db.query.plugins.findFirst({
     where: (plugins, { eq }) => eq(plugins.id, id),
@@ -233,7 +235,7 @@ router.get('/plugins/:id/actions', requireAuth, async (req, res) => {
 // the webapp renders a generic form from these descriptors.
 
 // GET /plugins/:id/options - descriptors + current overrides + effective values.
-router.get('/plugins/:id/options', requireAuth, async (req, res) => {
+router.get('/plugins/:id/options', requireAuth, requirePermission('plugins:read'), async (req, res) => {
   const { id } = req.params;
   try {
     const view = await getPluginOptions(id);

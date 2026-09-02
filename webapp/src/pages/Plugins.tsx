@@ -5,6 +5,7 @@ import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { OptionForm } from '../components/OptionForm';
 import { api, Plugin, PluginSelfMetricsSample } from '../api/client';
+import { can } from '../auth/permissions';
 
 // A plugin is considered online if it was seen within the last 5 minutes.
 const ONLINE_WINDOW_MS = 5 * 60 * 1000;
@@ -160,17 +161,20 @@ export default function Plugins() {
       excludeFromExport: true,
       width: 110,
       sortable: false,
-      render: (row) => (
-        <button
-          type="button"
-          aria-label={`Configure ${row.name}`}
-          title="Configure plugin settings"
-          className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-          onClick={() => setConfigureId(row.id)}
-        >
-          <Settings className="h-4 w-4" />
-        </button>
-      ),
+      render: (row) =>
+        can('plugins:manage') ? (
+          <button
+            type="button"
+            aria-label={`Configure ${row.name}`}
+            title="Configure plugin settings"
+            className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+            onClick={() => setConfigureId(row.id)}
+          >
+            <Settings className="h-4 w-4" />
+          </button>
+        ) : (
+          <span aria-hidden />
+        ),
     },
   ];
 

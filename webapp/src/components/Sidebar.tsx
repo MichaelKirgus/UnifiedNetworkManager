@@ -27,27 +27,30 @@ import {
 } from 'lucide-react';
 import { can, clearPermissions, clearUsername } from '../auth/permissions';
 
+// Every entry carries the read permission its page's route guard enforces —
+// keep in sync with PAGE_PERMISSIONS in App.tsx. Entries without a permission
+// (Layers) are visible to every signed-in user.
 const NAV_ITEMS = [
-  { to: '/devices', label: 'Devices', icon: Server },
+  { to: '/devices', label: 'Devices', icon: Server, requiresPermission: 'devices:read' },
   // Cross-device inventory views (populated by the telemetry worker).
-  { to: '/networks', label: 'Networks', icon: Network },
-  { to: '/hosts', label: 'Hosts', icon: Laptop },
+  { to: '/networks', label: 'Networks', icon: Network, requiresPermission: 'networks:read' },
+  { to: '/hosts', label: 'Hosts', icon: Laptop, requiresPermission: 'hosts:read' },
   // Cable stands in for a tunnel link (lucide's `Tunnel` icon is not in the installed version).
-  { to: '/tunnels', label: 'Tunnels', icon: Cable },
+  { to: '/tunnels', label: 'Tunnels', icon: Cable, requiresPermission: 'tunnels:read' },
   // Waypoints — Route is already used by the Plans item.
-  { to: '/routes', label: 'Routes', icon: Waypoints },
+  { to: '/routes', label: 'Routes', icon: Waypoints, requiresPermission: 'routes:read' },
   // Structured log entries shipped by plugins (gated — logs can carry critical details).
   { to: '/logs', label: 'Logs', icon: ScrollText, requiresPermission: 'logs:read' },
-  { to: '/wifi', label: 'WiFi', icon: WifiIcon },
+  { to: '/wifi', label: 'WiFi', icon: WifiIcon, requiresPermission: 'wifi:read' },
   // Physical + logical network graph (inferred cables + per-VLAN segments).
-  { to: '/topology', label: 'Topology', icon: GitGraph },
-  // Layer registry — the topology view's horizontal bands.
+  { to: '/topology', label: 'Topology', icon: GitGraph, requiresPermission: 'topology:read' },
+  // Layer registry — the topology view's horizontal bands (open to all users).
   { to: '/layers', label: 'Layers', icon: LayersIcon },
-  { to: '/sites', label: 'Sites', icon: MapPin },
-  { to: '/secrets', label: 'Secrets', icon: KeyRound },
-  { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks },
-  // Multi-device execution plans (create/execute require configs:apply + 2FA).
-  { to: '/plans', label: 'Plans', icon: RouteIcon, requiresPermission: 'configs:apply' },
+  { to: '/sites', label: 'Sites', icon: MapPin, requiresPermission: 'sites:read' },
+  { to: '/secrets', label: 'Secrets', icon: KeyRound, requiresPermission: 'secrets:read' },
+  { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks, requiresPermission: 'config-jobs:read' },
+  // Multi-device execution plans (create/execute additionally require configs:apply + 2FA).
+  { to: '/plans', label: 'Plans', icon: RouteIcon, requiresPermission: 'plans:read' },
   { to: '/plugins', label: 'Plugins', icon: Puzzle },
   // Only visible to users who may read user accounts/permissions.
   { to: '/users', label: 'Users', icon: UsersIcon, requiresPermission: 'users:read' },

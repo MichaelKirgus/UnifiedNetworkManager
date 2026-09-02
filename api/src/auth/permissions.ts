@@ -13,8 +13,22 @@
 
 /** Permission id → human-readable description (shown in the Users page). */
 export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
+  // --- Page-scoped read/write pairs -----------------------------------------
+  // Every webapp page has a dedicated read permission gating its data routes;
+  // write permissions gate the mutating routes of that area. The sidebar hides
+  // menu entries whose read permission is missing (see Sidebar.tsx).
   'devices:read': 'View devices, their plugins and telemetry',
   'devices:write': 'Create, update and delete devices and plugin assignments',
+  'networks:read': 'View the Networks inventory page (logical networks across devices)',
+  'hosts:read': 'View the Hosts inventory page (ARP/NDP/DHCP/WLAN clients)',
+  'tunnels:read': 'View the Tunnels page (configured + live tunnel state)',
+  'routes:read': 'View the Routes page (static and dynamic routes across devices)',
+  'wifi:read': 'View the WiFi page (SSIDs, spectrum and neighbors)',
+  'topology:read': 'View the Topology page (physical + logical network graph)',
+  'sites:read': 'View sites',
+  'config-jobs:read': 'View configuration jobs',
+  'plans:read': 'View execution plans and their steps',
+  'plugins:read': 'View plugins, their options and self-metrics',
   // Logs can carry critical details (endpoints, error payloads), so they get
   // their own permission instead of riding on devices:read. Gates both the
   // global /logs page and the per-device Logs section in DeviceDetail.

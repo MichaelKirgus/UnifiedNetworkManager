@@ -7,6 +7,7 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
 import { SchemaForm, validateSchema, defaultValues } from '../components/SchemaForm';
 import { api, ApiError, CatalogEntry, Device, Plan } from '../api/client';
+import { can } from '../auth/permissions';
 
 /** True when the user lacks a 2FA-completed session (server returns this on execute/create). */
 function isTwoFactorError(err: unknown): boolean {
@@ -16,15 +17,17 @@ function isTwoFactorError(err: unknown): boolean {
 export default function Plans() {
   const [mode, setMode] = useState<'list' | 'create'>('list');
 
+  // Creating plans needs configs:apply (+2FA server-side); viewing only plans:read.
   if (mode === 'create') {
     return <CreatePlan onDone={() => setMode('list')} onCancel={() => setMode('list')} />;
   }
-  return <PlansList onCreate={() => setMode('create')} />;
+  return <PlansList onCreate={can('configs:apply') ? () => setMode('create') : undefined} />;
 }
 
-function PlansList({ onCreate }: { onCreate: () => void }) {
+function PlansList({ onCreate }: { onCreate?: () => void }) {
   const plansQuery = useQuery({ queryKey: ['plans'], queryFn: api.plans, refetchInterval: 10_000 });
-  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
+  // Plugin names for the table — only fetched when allowed (API gates on plugins:read).
+  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, enabled: can('plugins:read') });
 
   const pluginName = (id: string) => pluginsQuery.data?.find((p) => p.id === id)?.name ?? id;
 
@@ -54,12 +57,14 @@ function PlansList({ onCreate }: { onCreate: () => void }) {
     <Layout>
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-bold text-slate-900">Plans</h1>
-        <button
-          className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
-          onClick={onCreate}
-        >
-          <Plus className="h-4 w-4" /> New Plan
-        </button>
+        {onCreate && (
+          <button
+            className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
+            onClick={onCreate}
+          >
+            <Plus className="h-4 w-4" /> New Plan
+          </button>
+        )}
       </div>
 
       {plansQuery.isLoading && <p className="text-sm text-slate-500">Loading plans…</p>}

@@ -5,6 +5,7 @@ import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
 import { api, ConfigJob, Device } from '../api/client';
+import { can } from '../auth/permissions';
 
 const ACTIONS = [
   { value: 'applyConfig', label: 'Apply configuration' },
@@ -13,6 +14,9 @@ const ACTIONS = [
 ] as const;
 
 export default function ConfigJobs() {
+  // Submitting a job needs configs:apply (+2FA server-side); the page itself
+  // only requires config-jobs:read.
+  const canApply = can('configs:apply');
   const jobsQuery = useQuery({
     queryKey: ['config-jobs'],
     queryFn: api.allConfigJobs,
@@ -97,16 +101,18 @@ export default function ConfigJobs() {
     <Layout>
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-bold text-slate-900">Config Jobs</h1>
-        <button
-          className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
-          onClick={() => setShowForm((v) => !v)}
-        >
-          {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-          {showForm ? 'Cancel' : 'New Job'}
-        </button>
+        {canApply && (
+          <button
+            className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
+            onClick={() => setShowForm((v) => !v)}
+          >
+            {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+            {showForm ? 'Cancel' : 'New Job'}
+          </button>
+        )}
       </div>
 
-      {showForm && (
+      {canApply && showForm && (
         <form
           onSubmit={handleSubmit}
           className="mb-6 grid grid-cols-1 gap-3 rounded-md border border-slate-200 bg-white p-4 shadow-sm sm:grid-cols-3"

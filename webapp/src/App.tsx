@@ -22,192 +22,80 @@ import Roles from './pages/Roles';
 import Tokens from './pages/Tokens';
 import Workers from './pages/Workers';
 import MyAccount from './pages/MyAccount';
+import { can } from './auth/permissions';
 
-function RequireAuth({ children }: { children: ReactNode }) {
+/**
+ * Read permission each page requires. Single source of truth for the route
+ * guards below AND the default-redirect priority — keep in sync with the
+ * sidebar's `requiresPermission` entries (components/Sidebar.tsx).
+ */
+const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
+  { path: '/devices', permission: 'devices:read' },
+  { path: '/networks', permission: 'networks:read' },
+  { path: '/hosts', permission: 'hosts:read' },
+  { path: '/tunnels', permission: 'tunnels:read' },
+  { path: '/routes', permission: 'routes:read' },
+  { path: '/logs', permission: 'logs:read' },
+  { path: '/wifi', permission: 'wifi:read' },
+  { path: '/topology', permission: 'topology:read' },
+  // Layers is open to every authenticated user (no read permission).
+  { path: '/layers' },
+  { path: '/sites', permission: 'sites:read' },
+  { path: '/secrets', permission: 'secrets:read' },
+  { path: '/config-jobs', permission: 'config-jobs:read' },
+  { path: '/plans', permission: 'plans:read' },
+  { path: '/plugins', permission: 'plugins:read' },
+  { path: '/users', permission: 'users:read' },
+  { path: '/roles', permission: 'users:write' },
+  { path: '/tokens', permission: 'tokens:manage' },
+  { path: '/workers', permission: 'system:read' },
+];
+
+/** Auth + page-read-permission guard (the sidebar hides what this blocks). */
+function Page({ permission, children }: { permission?: string; children: ReactNode }) {
   const token = localStorage.getItem('accessToken');
-  if (!token) {
-    return <Navigate to="/login" replace />;
-  }
+  if (!token) return <Navigate to="/login" replace />;
+  if (permission && !can(permission)) return <Navigate to="/" replace />;
   return <>{children}</>;
+}
+
+/** Landing redirect — first page the user may read, else My Account. */
+function HomeRedirect() {
+  const target = PAGE_PERMISSIONS.find((p) => !p.permission || can(p.permission))?.path ?? '/my-account';
+  return <Navigate to={target} replace />;
 }
 
 export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
-      <Route
-        path="/devices"
-        element={
-          <RequireAuth>
-            <Devices />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/secrets"
-        element={
-          <RequireAuth>
-            <Secrets />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/devices/:deviceId"
-        element={
-          <RequireAuth>
-            <DeviceDetail />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/config-jobs"
-        element={
-          <RequireAuth>
-            <ConfigJobs />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/plans"
-        element={
-          <RequireAuth>
-            <Plans />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/plans/:id"
-        element={
-          <RequireAuth>
-            <PlanDetail />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/plugins"
-        element={
-          <RequireAuth>
-            <Plugins />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/sites"
-        element={
-          <RequireAuth>
-            <Sites />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/networks"
-        element={
-          <RequireAuth>
-            <Networks />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/hosts"
-        element={
-          <RequireAuth>
-            <Hosts />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/tunnels"
-        element={
-          <RequireAuth>
-            <Tunnels />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/routes"
-        element={
-          <RequireAuth>
-            <RoutesPage />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/logs"
-        element={
-          <RequireAuth>
-            <Logs />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/wifi"
-        element={
-          <RequireAuth>
-            <Wifi />
-          </RequireAuth>
-        }
-      />
+      <Route path="/devices" element={<Page permission="devices:read"><Devices /></Page>} />
+      <Route path="/secrets" element={<Page permission="secrets:read"><Secrets /></Page>} />
+      {/* Device detail is part of the Devices page (same read permission). */}
+      <Route path="/devices/:deviceId" element={<Page permission="devices:read"><DeviceDetail /></Page>} />
+      <Route path="/config-jobs" element={<Page permission="config-jobs:read"><ConfigJobs /></Page>} />
+      <Route path="/plans" element={<Page permission="plans:read"><Plans /></Page>} />
+      <Route path="/plans/:id" element={<Page permission="plans:read"><PlanDetail /></Page>} />
+      <Route path="/plugins" element={<Page permission="plugins:read"><Plugins /></Page>} />
+      <Route path="/sites" element={<Page permission="sites:read"><Sites /></Page>} />
+      <Route path="/networks" element={<Page permission="networks:read"><Networks /></Page>} />
+      <Route path="/hosts" element={<Page permission="hosts:read"><Hosts /></Page>} />
+      <Route path="/tunnels" element={<Page permission="tunnels:read"><Tunnels /></Page>} />
+      <Route path="/routes" element={<Page permission="routes:read"><RoutesPage /></Page>} />
+      <Route path="/logs" element={<Page permission="logs:read"><Logs /></Page>} />
+      <Route path="/wifi" element={<Page permission="wifi:read"><Wifi /></Page>} />
       {/* Physical + logical network graph (inferred cables, per-VLAN segments). */}
-      <Route
-        path="/topology"
-        element={
-          <RequireAuth>
-            <Topology />
-          </RequireAuth>
-        }
-      />
-      {/* Network layer registry — the topology view's horizontal bands. */}
-      <Route
-        path="/layers"
-        element={
-          <RequireAuth>
-            <Layers />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/users"
-        element={
-          <RequireAuth>
-            <Users />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/roles"
-        element={
-          <RequireAuth>
-            <Roles />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/tokens"
-        element={
-          <RequireAuth>
-            <Tokens />
-          </RequireAuth>
-        }
-      />
+      <Route path="/topology" element={<Page permission="topology:read"><Topology /></Page>} />
+      {/* Network layer registry — open to every authenticated user. */}
+      <Route path="/layers" element={<Page><Layers /></Page>} />
+      <Route path="/users" element={<Page permission="users:read"><Users /></Page>} />
+      <Route path="/roles" element={<Page permission="users:write"><Roles /></Page>} />
+      <Route path="/tokens" element={<Page permission="tokens:manage"><Tokens /></Page>} />
       {/* Workers/HA monitoring — gated by system:read (nav item hidden without it). */}
-      <Route
-        path="/workers"
-        element={
-          <RequireAuth>
-            <Workers />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/my-account"
-        element={
-          <RequireAuth>
-            <MyAccount />
-          </RequireAuth>
-        }
-      />
-      <Route path="/" element={<Navigate to="/devices" replace />} />
-      <Route path="*" element={<Navigate to="/devices" replace />} />
+      <Route path="/workers" element={<Page permission="system:read"><Workers /></Page>} />
+      <Route path="/my-account" element={<Page><MyAccount /></Page>} />
+      <Route path="/" element={<HomeRedirect />} />
+      <Route path="*" element={<HomeRedirect />} />
     </Routes>
   );
 }

@@ -221,7 +221,8 @@ function firstMetricValue(rows: ({ metrics: unknown } | undefined)[], keys: stri
   return null;
 }
 
-router.get('/devices', requireAuth, async (req, res) => {
+// All device read routes require devices:read.
+router.get('/devices', requireAuth, requirePermission('devices:read'), async (req, res) => {
   const { vendor, siteId } = req.query;
 
   const filters = [];
@@ -720,7 +721,7 @@ router.delete('/devices/:deviceId', requireAuth, requirePermission('devices:writ
 // --- Device IP addresses (primary = managementAddress, secondaries here) --
 
 // GET /devices/:deviceId/ips - primary address first, then secondary IPs.
-router.get('/devices/:deviceId/ips', requireAuth, async (req, res) => {
+router.get('/devices/:deviceId/ips', requireAuth, requirePermission('devices:read'), async (req, res) => {
   const { deviceId } = req.params;
   try {
     const ips = await listDeviceAddresses(deviceId);
@@ -763,7 +764,7 @@ router.delete('/devices/:deviceId/ips/:ipId', requireAuth, requirePermission('de
 // --- Device ↔ plugin assignments -------------------------------------------
 
 // GET /devices/:deviceId/plugins - all plugin assignments with identity + online state.
-router.get('/devices/:deviceId/plugins', requireAuth, async (req, res) => {
+router.get('/devices/:deviceId/plugins', requireAuth, requirePermission('devices:read'), async (req, res) => {
   const { deviceId } = req.params;
   try {
     const plugins = await listAssignmentViews(deviceId);
@@ -844,7 +845,7 @@ router.delete('/devices/:deviceId/plugins/:pluginId', requireAuth, requirePermis
 // --- Per-device plugin settings (inherit global → override per device) ------
 
 // GET /devices/:deviceId/plugins/:pluginId/options - descriptors + this device's overrides.
-router.get('/devices/:deviceId/plugins/:pluginId/options', requireAuth, async (req, res) => {
+router.get('/devices/:deviceId/plugins/:pluginId/options', requireAuth, requirePermission('devices:read'), async (req, res) => {
   const { deviceId, pluginId } = req.params;
   try {
     const view = await getDevicePluginOptions(deviceId, pluginId);
@@ -893,7 +894,7 @@ router.delete('/devices/:deviceId/plugins/:pluginId/settings', requireAuth, requ
   }
 });
 
-router.get('/devices/:deviceId/monitoring', requireAuth, async (req, res) => {
+router.get('/devices/:deviceId/monitoring', requireAuth, requirePermission('devices:read'), async (req, res) => {
   const { deviceId } = req.params;
 
   const device = await db.query.devices.findFirst({
@@ -945,7 +946,7 @@ router.get('/devices/:deviceId/monitoring', requireAuth, async (req, res) => {
 });
 
 // GET /devices/:deviceId/telemetry - Recent telemetry history (for plot metrics).
-router.get('/devices/:deviceId/telemetry', requireAuth, async (req, res) => {
+router.get('/devices/:deviceId/telemetry', requireAuth, requirePermission('devices:read'), async (req, res) => {
   const { deviceId } = req.params;
   const limit = Math.min(Number(req.query.limit ?? 30) || 30, 200);
 

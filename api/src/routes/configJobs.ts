@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { db } from '../db';
 import { eq, desc } from 'drizzle-orm';
 import * as schema from '../db/schema';
-import { requireAuth } from '../auth/middleware';
+import { requireAuth, requirePermission } from '../auth/middleware';
 
 const router = Router();
 
@@ -19,7 +19,7 @@ function serializeConfigJob(row: any) {
   };
 }
 
-router.get('/config-jobs/:jobId', requireAuth, async (req, res) => {
+router.get('/config-jobs/:jobId', requireAuth, requirePermission('config-jobs:read'), async (req, res) => {
   const { jobId } = req.params;
   const job = await db.query.configJobs.findFirst({
     where: (configJobs, { eq }) => eq(configJobs.id, jobId),
@@ -39,7 +39,7 @@ router.get('/config-jobs/:jobId', requireAuth, async (req, res) => {
  * the validator middleware in index.ts.
  */
 export const configJobsListRouter = Router();
-configJobsListRouter.get('/config-jobs', requireAuth, async (_req, res) => {
+configJobsListRouter.get('/config-jobs', requireAuth, requirePermission('config-jobs:read'), async (_req, res) => {
   const jobs = await db.query.configJobs.findMany({
     orderBy: [desc(schema.configJobs.createdAt)],
     limit: 100,

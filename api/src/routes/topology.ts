@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
-import { requireAuth } from '../auth/middleware';
+import { requireAuth, requirePermission } from '../auth/middleware';
 import { buildTopologyGraph, TopologyResult } from '../utils/topology';
 
 const router = Router();
@@ -22,7 +22,7 @@ const router = Router();
 const CACHE_TTL_MS = 30_000; // matches the telemetry poll cadence
 let cache: { key: string; at: number; payload: TopologyResult } | null = null;
 
-router.get('/topology', requireAuth, async (req, res: Response) => {
+router.get('/topology', requireAuth, requirePermission('topology:read'), async (req, res: Response) => {
   try {
     // The OpenAPI validator coerces `includeHosts` to a real boolean (the spec
     // declares type: boolean), so accept both the coerced value and raw strings.

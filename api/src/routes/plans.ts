@@ -406,7 +406,7 @@ router.post(
 );
 
 // GET /plans — most recent plans (no steps; use the detail route for those).
-router.get('/plans', requireAuth, async (_req, res) => {
+router.get('/plans', requireAuth, requirePermission('plans:read'), async (_req, res) => {
   const rows = await db.query.plans.findMany({
     orderBy: [desc(schema.plans.createdAt)],
     limit: 100,
@@ -421,7 +421,7 @@ router.get('/plans', requireAuth, async (_req, res) => {
 });
 
 // GET /plans/:id — full plan with ordered steps + provisioned secret metadata.
-router.get('/plans/:id', requireAuth, async (req, res) => {
+router.get('/plans/:id', requireAuth, requirePermission('plans:read'), async (req, res) => {
   const out = await serializePlan(req.params.id, true);
   if (!out) {
     res.status(404).json({ error: 'Plan not found' });

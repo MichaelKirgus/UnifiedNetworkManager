@@ -147,9 +147,9 @@ function serializeSite(row: typeof schema.sites.$inferSelect) {
   };
 }
 
-// GET /sites — list all sites (open to any authenticated user; the site list
-// is needed by everyone for the device picker).
-router.get('/sites', requireAuth, async (_req: Request, res: Response) => {
+// GET /sites — list all sites (requires sites:read; the Sites page and the
+// site pickers on other pages gate their queries on this permission).
+router.get('/sites', requireAuth, requirePermission('sites:read'), async (_req: Request, res: Response) => {
   const rows = await db.query.sites.findMany({ orderBy: [schema.sites.name] });
   res.status(200).json(rows.map(serializeSite));
 });

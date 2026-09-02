@@ -17,9 +17,12 @@ import { Layout } from '../components/Layout';
 import { StatusBadge } from '../components/StatusBadge';
 import { SchemaForm, validateSchema, defaultValues } from '../components/SchemaForm';
 import { api, ApiError, CatalogEntry, Device, PlanDetail as PlanDetailType, PlanStep } from '../api/client';
+import { can } from '../auth/permissions';
 
 export default function PlanDetail() {
   const { id = '' } = useParams();
+  // Viewing needs plans:read (route guard); every mutation below needs configs:apply.
+  const canApply = can('configs:apply');
   const planQuery = useQuery({
     queryKey: ['plan', id],
     queryFn: () => api.getPlan(id),
@@ -29,8 +32,10 @@ export default function PlanDetail() {
     },
   });
 
-  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
-  const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
+  // Reference data — only fetched when the user may actually use it (the API
+  // gates these on plugins:read / devices:read).
+  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, enabled: can('plugins:read') });
+  const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices, enabled: can('devices:read') });
   const plan: PlanDetailType | undefined = planQuery.data;
 
   // Action catalog for labels + the step editor (single-device actions only).
@@ -38,7 +43,7 @@ export default function PlanDetail() {
   const parentActionsQuery = useQuery({
     queryKey: ['plugin-actions', plan?.pluginId ?? ''],
     queryFn: () => api.pluginActions(plan!.pluginId),
-    enabled: Boolean(plan?.pluginId),
+    enabled: Boolean(plan?.pluginId) && can('plugins:read'),
   });
   useEffect(() => {
     if (parentActionsQuery.data) setCatalog(parentActionsQuery.data.actions);
@@ -93,19 +98,19 @@ export default function PlanDetail() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {editable && (
+          {canApply && editable && (
             <button onClick={() => executeMutation.mutate()} disabled={executeMutation.isPending || steps.length === 0}
               className="flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50">
               <Play className="h-4 w-4" /> Execute
             </button>
           )}
-          {plan.status === 'executing' && (
+          {canApply && plan.status === 'executing' && (
             <button onClick={() => cancelMutation.mutate()} disabled={cancelMutation.isPending}
               className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50">
               <Square className="h-4 w-4" /> Cancel
             </button>
           )}
-          {plan.status !== 'executing' && (
+          {canApply && plan.status !== 'executing' && (
             <button onClick={() => { if (window.confirm('Delete this plan and its provisioned secrets?')) deleteMutation.mutate(); }}
               disabled={deleteMutation.isPending}
               className="flex items-center gap-1.5 rounded-md border border-red-200 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50">
@@ -137,13 +142,13 @@ export default function PlanDetail() {
       <section className="rounded-md border border-slate-200 bg-white shadow-sm">
         <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
           <h2 className="text-sm font-semibold text-slate-800">Steps</h2>
-          {editable && (
+          {canApply && editable && (
             <AddStepButton plan={plan} onAdded={() => planQuery.refetch()} />
           )}
         </div>
         <ol className="divide-y divide-slate-100">
           {steps.map((step, i) => (
-            <StepRow key={step.id} step={step} position={i} total={steps.length} editable={editable}
+            <StepRow key={step.id} step={step} position={i} total={steps.length} editable={canApply && editable}
               deviceName={deviceName(step.deviceId)} actionLabel={actionLabel(step.actionId)}
               onMutated={() => planQuery.refetch()} />
           ))}
@@ -172,10 +177,12 @@ function SecretCard({ planId, refName, label, type, secretId, onRegenerated }: {
         <p className="truncate text-sm font-medium text-slate-800" title={label}>{label}</p>
         <p className="font-mono text-xs text-slate-400">{type} · {secretId.slice(0, 8)}…</p>
       </div>
-      <button onClick={() => regenerate.mutate()} disabled={regenerate.isPending} title={`Re-roll ${refName} (same id preserved)`} aria-label="Regenerate secret"
-        className="rounded p-1.5 text-slate-400 hover:bg-white hover:text-slate-700 disabled:opacity-50">
-        <RefreshCw className={clsx('h-4 w-4', regenerate.isPending && 'animate-spin')} />
-      </button>
+      {can('secrets:write') && (
+        <button onClick={() => regenerate.mutate()} disabled={regenerate.isPending} title={`Re-roll ${refName} (same id preserved)`} aria-label="Regenerate secret"
+          className="rounded p-1.5 text-slate-400 hover:bg-white hover:text-slate-700 disabled:opacity-50">
+          <RefreshCw className={clsx('h-4 w-4', regenerate.isPending && 'animate-spin')} />
+        </button>
+      )}
     </div>
   );
 }

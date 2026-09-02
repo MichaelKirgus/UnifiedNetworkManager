@@ -3,8 +3,12 @@ import { Plus, Save, Trash2, X } from 'lucide-react';
 import { api, Secret, SecretProvider, SecretType } from '../api/client';
 import { DataTable } from '../components/DataTable';
 import { Layout } from '../components/Layout';
+import { can } from '../auth/permissions';
 
 export default function Secrets() {
+  // The page needs secrets:read (route guard); create/delete need their own perms.
+  const canWrite = can('secrets:write');
+  const canDelete = can('secrets:delete');
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [providers, setProviders] = useState<SecretProvider[]>([]);
   const [loading, setLoading] = useState(true);
@@ -106,16 +110,18 @@ export default function Secrets() {
           <h1 className="text-xl font-bold text-slate-900">Secrets Store</h1>
           <p className="text-sm text-slate-500">Manage credentials for network devices</p>
         </div>
-        <button
-          onClick={() => setShowForm(!showForm)}
-          className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
-        >
-          {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-          {showForm ? 'Cancel' : 'Add Secret'}
-        </button>
+        {canWrite && (
+          <button
+            onClick={() => setShowForm(!showForm)}
+            className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
+          >
+            {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+            {showForm ? 'Cancel' : 'Add Secret'}
+          </button>
+        )}
       </div>
 
-      {showForm && (
+      {canWrite && showForm && (
         <div className="mb-6 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
           <h2 className="mb-4 text-sm font-semibold text-slate-900">Create New Secret</h2>
           <form onSubmit={handleCreate} className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -229,16 +235,19 @@ export default function Secrets() {
               excludeFromExport: true,
               width: 100,
               sortable: false,
-              render: (s: Secret) => (
-                <button
-                  aria-label={`Delete secret ${s.label ?? s.id}`}
-                  title="Delete secret"
-                  onClick={() => handleDelete(s.id)}
-                  className="rounded-md p-1.5 text-red-600 hover:bg-red-50 hover:text-red-800"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              ) 
+              render: (s: Secret) =>
+                canDelete ? (
+                  <button
+                    aria-label={`Delete secret ${s.label ?? s.id}`}
+                    title="Delete secret"
+                    onClick={() => handleDelete(s.id)}
+                    className="rounded-md p-1.5 text-red-600 hover:bg-red-50 hover:text-red-800"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                ) : (
+                  <span aria-hidden />
+                )
             },
           ]}
           rows={secrets}

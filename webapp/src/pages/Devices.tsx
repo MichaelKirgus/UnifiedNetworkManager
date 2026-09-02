@@ -11,6 +11,7 @@ import { DeviceIcon } from '../components/DeviceIcon';
 import { PluginAssignmentBuilder } from '../components/PluginAssignmentBuilder';
 import { api, Device, DeviceCreateRequest, DeviceModelEntry, DevicePluginAssignmentInput, DevicePluginAssignment, Plugin } from '../api/client';
 import { OptionForm } from '../components/OptionForm';
+import { can } from '../auth/permissions';
 import { isValidAddress, addressError } from '../utils/address';
 
 // Derive the list of selectable vendors from the discovered plugins so that
@@ -31,6 +32,10 @@ function cap(s: string): string {
 export default function Devices() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  // Write gating — the page itself needs devices:read (route guard), every
+  // mutating action below additionally needs its own permission.
+  const canWriteDevices = can('devices:write');
+  const canManagePlugins = can('plugins:manage');
   const [showForm, setShowForm] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -64,10 +69,13 @@ export default function Devices() {
   const [initialAssignments, setInitialAssignments] = useState<DevicePluginAssignment[]>([]);
 
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
-  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
-  const secretsQuery = useQuery({ queryKey: ['secrets'], queryFn: api.secrets });
+  // Reference data for the create/edit form — only fetched when the user may
+  // actually write (the API gates these on plugins:read / secrets:read /
+  // sites:read). Read-only users get a placeholder icon and empty pickers.
+  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, enabled: canWriteDevices && can('plugins:read') });
+  const secretsQuery = useQuery({ queryKey: ['secrets'], queryFn: api.secrets, enabled: canWriteDevices && can('secrets:read') });
   // Site picker options (the Sites page owns creation; this is read-only here).
-  const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: api.sites });
+  const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: api.sites, enabled: can('sites:read') && canWriteDevices });
   // Layer registry — drives the manual topology-layer override select.
   const layersQuery = useQuery({ queryKey: ['layers'], queryFn: () => api.layers() });
 
@@ -506,30 +514,36 @@ export default function Devices() {
           >
             <Eye className="h-4 w-4" />
           </button>
-          <button
-            aria-label={`Edit ${row.name}`}
-            title="Edit device"
-            className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-            onClick={() => openEdit(row)}
-          >
-            <Pencil className="h-4 w-4" />
-          </button>
-          <button
-            aria-label={`Clone ${row.name}`}
-            title="Clone device (reuses all settings)"
-            className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-            onClick={() => handleClone(row)}
-          >
-            <Copy className="h-4 w-4" />
-          </button>
-          <button
-            aria-label={`Delete ${row.name}`}
-            title="Delete device"
-            className="rounded-md p-1.5 text-slate-600 hover:bg-red-50 hover:text-red-600"
-            onClick={() => handleDelete(row)}
-          >
-            <Trash2 className="h-4 w-4" />
-          </button>
+          {canWriteDevices && (
+            <>
+              <button
+                aria-label={`Edit ${row.name}`}
+                title="Edit device"
+                className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                onClick={() => openEdit(row)}
+              >
+                <Pencil className="h-4 w-4" />
+              </button>
+              <button
+                aria-label={`Clone ${row.name}`}
+                title="Clone device (reuses all settings)"
+                className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                onClick={() => handleClone(row)}
+              >
+                <Copy className="h-4 w-4" />
+              </button>
+            </>
+          )}
+          {canWriteDevices && (
+            <button
+              aria-label={`Delete ${row.name}`}
+              title="Delete device"
+              className="rounded-md p-1.5 text-slate-600 hover:bg-red-50 hover:text-red-600"
+              onClick={() => handleDelete(row)}
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          )}
         </div>
       ),
     },
@@ -539,13 +553,15 @@ export default function Devices() {
     <Layout>
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-bold text-slate-900">Devices</h1>
-        <button
-          className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
-          onClick={() => { setShowForm((v) => !v); if (showForm) resetForm(); }}
-        >
-          {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-          {showForm ? 'Cancel' : editingId ? 'Edit Device' : 'Register Device'}
-        </button>
+        {canWriteDevices && (
+          <button
+            className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
+            onClick={() => { setShowForm((v) => !v); if (showForm) resetForm(); }}
+          >
+            {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+            {showForm ? 'Cancel' : editingId ? 'Edit Device' : 'Register Device'}
+          </button>
+        )}
       </div>
 
       {deleteDevice.error && (
@@ -825,8 +841,8 @@ export default function Devices() {
           rowKey={(row) => row.id}
           storageKey="devices"
           emptyMessage="No devices registered yet."
-          selectable
-          bulkActions={[
+          selectable={canWriteDevices}
+          bulkActions={canWriteDevices ? [
             {
               label: 'Disable selected',
               confirm: (count) =>
@@ -852,7 +868,7 @@ export default function Devices() {
                 `Delete ${count} device(s)?\nTheir plugin assignments, secondary IPs and telemetry history are removed. Devices referenced by plans cannot be deleted — delete those plans first.`,
               onClick: (rows) => bulkDeleteDevices.mutate(rows),
             },
-          ]}
+          ] : undefined}
         />
       )}
 
