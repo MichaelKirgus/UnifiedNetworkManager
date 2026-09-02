@@ -10,6 +10,9 @@ import {
   pickString,
   readSettings,
   resolvePluginIdentity,
+  stateHandler,
+  PortRow,
+  StateRequestBody,
 } from '@unm/plugin-sdk';
 import {
   getSystemStatus,
@@ -34,6 +37,8 @@ import { collectRoutes, deriveConnectedAndDefaultRoutes, enrichRoutesWithGateway
 import { getAction, listModules } from './actions/registry';
 import { ActionContext, ActionResult, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest, listCatalog } from './plan';
+import { InventorySnapshot } from './inventoryTypes';
+import { buildOpnsenseState } from './state';
 
 export const PLUGIN_UUID = 'b0e6c8a2-4f1e-4a3d-9c7b-1a2b3c4d5e6f';
 export const PLUGIN_NAME = 'OPNsense Plugin';
@@ -53,7 +58,9 @@ const identity = resolvePluginIdentity({
   vendors: ['opnsense'],
   // 'planning' advertises the /plan endpoint (multi-device intents) so the API
   // can offer bulk rollout + tunnel provisioning flows in the webapp.
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning'],
+  // 'deviceState' advertises POST /state — the dynamic document behind the
+  // per-device Config page (interfaces with live status + system power actions).
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState'],
 });
 
 /**
@@ -106,26 +113,9 @@ const LIVE_INTERVAL_MS = 30_000; // (INVENTORY_INTERVAL_MS comes from @unm/plugi
  * In-memory inventory cache, keyed by management host. Holds the slow-changing
  * data (hostname, version, ARP table, NDP table, configured networks with
  * CIDR/VLAN info, DHCP leases) so repeated /monitoring polls within the TTL
- * don't re-fetch it from the appliance.
+ * don't re-fetch it from the appliance. The shape lives in ./inventoryTypes
+ * so the /state builder can share it without a circular import.
  */
-interface InventorySnapshot {
-  collectedAt: number;
-  hostname?: string;
-  version?: string;
-  arp: Record<string, unknown>[];
-  ndp: Record<string, unknown>[];
-  /** Configured networks: one row per interface IP address (see parseNetworkRows). */
-  networks: Record<string, unknown>[];
-  /** Active DHCP leases normalized across Kea/dnsmasq backends. */
-  dhcpLeases: Record<string, unknown>[];
-  /** Configured tunnels (WireGuard/OpenVPN/IPsec/PPPoE/GRE) — see collectTunnels. */
-  tunnels: TunnelRow[];
-  /** Configured static routes — see collectRoutes. */
-  routes: RouteRow[];
-  /** Configured gateways (routing/settings) — feeds the derived default-route rows. */
-  gateways: Record<string, unknown>[];
-}
-
 const inventoryCache = new Map<string, InventorySnapshot>();
 
 /**
@@ -855,6 +845,32 @@ async function collectMetrics(
   if (inventory.networks.length > 0) metrics['networks'] = inventory.networks;
   if (inventory.dhcpLeases.length > 0) metrics['dhcpLeases'] = inventory.dhcpLeases;
 
+  // Ports: one row per configured interface (the networks rows are one-per-IP,
+  // so dedupe by name). Consumed by the API's normalized device_ports table —
+  // this is what powers cross-device port views and the Config page fallback.
+  if (inventory.networks.length > 0) {
+    const seen = new Map<string, PortRow>();
+    for (const row of inventory.networks) {
+      const name = typeof row['name'] === 'string' ? (row['name'] as string).trim() : '';
+      if (!name || seen.has(name)) continue;
+      const mac = pickString(row, ['mac', 'macaddr']);
+      const statusRaw = typeof row['status'] === 'string' ? (row['status'] as string) : undefined;
+      const vlanId = pickNumber(row, ['vlanId', 'vlan_tag']);
+      const ip = typeof row['ip'] === 'string' ? (row['ip'] as string) : undefined;
+      const extra: Record<string, unknown> = {};
+      if (mac) extra.mac = mac;
+      if (ip) extra.ip = ip;
+      seen.set(name, {
+        name,
+        ...(statusRaw ? { status: statusRaw.toLowerCase() } : {}),
+        ...(Object.keys(extra).length > 0 ? { extra } : {}),
+        ...(vlanId !== undefined ? { vlanId } : {}),
+      });
+    }
+    const portRows = Array.from(seen.values());
+    if (portRows.length > 0) metrics['ports'] = portRows;
+  }
+
   // Interface names (for the traffic table rows)
   try {
     const ifaces = await getInterfaces(host, apiKey, apiSecret, transport);
@@ -1169,6 +1185,40 @@ app.post('/plan', async (req, res) => {
     res.status(500).json({ error: (err as Error).message });
   }
 });
+
+/**
+ * POST /state — dynamic device-state document for the UNM Config page.
+ * The API broker (api/src/deviceState.ts) calls this with fresh credentials +
+ * injected settings and returns the response verbatim to the webapp. Built
+ * from the cached inventory snapshot: one Interfaces section item per
+ * configured interface (MAC, IPs, live status) plus a System section with the
+ * power actions (system.reboot / system.halt are DANGEROUS catalog entries —
+ * executing them always flows through the plan workflow).
+ */
+app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+  const transport = transportOf(settings);
+
+  // Credentials: the assignment's decrypted fields are at top level of
+  // `credentials` (secret type `apiKey`) — same model as /config.
+  const creds = (body.credentials && typeof body.credentials === 'object' ? body.credentials : {}) as Record<string, unknown>;
+  const apiKey = typeof creds['apiKey'] === 'string' ? (creds['apiKey'] as string) : '';
+  const apiSecret = typeof creds['apiSecret'] === 'string' ? (creds['apiSecret'] as string) : '';
+
+  const snapshot = await getInventory(body.managementAddress, apiKey, apiSecret, transport);
+
+  // Interface MACs: the networks rows already carry `mac` from interfaces_info;
+  // fall back to the live interface-statistics MACs collected this poll.
+  const macs: { name: string; mac: string }[] = [];
+  for (const row of snapshot.networks) {
+    const name = typeof row['name'] === 'string' ? (row['name'] as string).trim() : '';
+    const mac = pickString(row, ['mac', 'macaddr']);
+    if (name && mac) macs.push({ name, mac });
+  }
+
+  return buildOpnsenseState(snapshot, macs);
+}, 'opnsense-plugin'));
 
 app.get('/inventory', async (req, res) => {
   const { apiKey, apiSecret, managementAddress } = req.query ?? {};

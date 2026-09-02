@@ -25,6 +25,11 @@ export const CAPABILITIES = [
   'inventory',
   'configuration',
   'planning',
+  // Serves GET /state — a dynamic, device-specific state document (ports with
+  // live states + per-port MACs, interfaces, ZFS pools, system info) that the
+  // webapp's per-device Config page renders. Actions referenced in it must be
+  // entries of this plugin's action catalog.
+  'deviceState',
   'secretsProvider',
   'identityProvider',
   // Reserved for future log-forwarder plugins (syslog daemon, OpenSearch, ...).
@@ -346,6 +351,64 @@ export interface ConfigResponseBody {
 }
 
 // ---------------------------------------------------------------------------
+// Device state — GET /state (API -> plugin), advertised via capability 'deviceState'
+// The webapp's per-device Config page renders this document verbatim: sections
+// of items (ports with live states, interfaces, ZFS pools, system info) plus
+// context-aware action references. Plugins own the shape; the API brokers it
+// without interpreting content and only validates that referenced action ids
+// exist in the plugin's persisted action catalog.
+// ---------------------------------------------------------------------------
+
+/** Body of GET /state as sent by the API broker (same credential model as /monitoring). */
+export interface StateRequestBody {
+  deviceId: string;
+  managementAddress: string;
+  ipAddresses?: DeviceAddress[];
+  /** User-selected hardware model from the device row (null = not set). */
+  model?: string | null;
+  firmwareVersion?: string | null;
+  credentials: StepCredentials;
+}
+
+/** A reference to an executable action of this plugin's catalog. */
+export interface StateActionRef {
+  /** Must match an id in the plugin's /discover `actions` (deviceCount 1). */
+  actionId: string;
+  /** Pre-filled input values (e.g. `{ port: 5 }`) — merged under schema defaults. */
+  prefill?: Record<string, unknown>;
+}
+
+/** One row of a state section — e.g. a switch port or an appliance interface. */
+export interface StateItem {
+  /** Stable key within the section (e.g. 'P1', 'opt0'). */
+  key: string;
+  title: string;
+  subtitle?: string | null;
+  /** up | down | enabled | disabled | ok | degraded | critical — free string, rendered as a badge. */
+  status?: string | null;
+  /** Display fields (label-ready values; the webapp renders them verbatim). Arrays render as chip lists (e.g. per-port MACs). */
+  fields: Record<string, string | number | null | unknown[]>;
+  /** Actions applicable to this item (e.g. shutdown port, set speed mode). */
+  actions?: StateActionRef[];
+}
+
+/** A horizontal band of the Config page — e.g. Ports, Interfaces, Pools, System. */
+export interface StateSection {
+  id: string;
+  label: string;
+  description?: string | null;
+  items?: StateItem[];
+  /** Section-level actions with no item context (e.g. reboot system). */
+  actions?: StateActionRef[];
+}
+
+/** Response of GET /state — the API returns it to the webapp verbatim. */
+export interface DeviceStateResponse {
+  collectedAt: string;
+  sections: StateSection[];
+}
+
+// ---------------------------------------------------------------------------
 // Inventory rows — arrays inside `metrics` consumed by the API's ingestInventory()
 // (api/src/workers/telemetry.ts). Each key upserts on its natural key and
 // deletes-on-absent when the key is present at all. Absent key = "plugin does
@@ -455,6 +518,19 @@ export interface WifiNeighborRow {
   signalDbm?: number | null;
 }
 
+/** `metrics['ports']` row → device_ports table, PK (deviceId, pluginId, name). */
+export interface PortRow {
+  /** Port/interface label (required — e.g. 'P1', 'opt0', 'port 4'). */
+  name: string;
+  /** up | down | enabled | disabled | unknown (lowercased by the API). */
+  status?: string;
+  speed?: string | null;
+  duplex?: string | null;
+  vlanId?: number | null;
+  poe?: string | null;
+  extra?: Record<string, unknown>;
+}
+
 /** All inventory keys the API's ingestInventory() understands. */
 export const INVENTORY_KEYS = [
   'networks',
@@ -469,4 +545,5 @@ export const INVENTORY_KEYS = [
   'wifiAirtime',
   'wifiRadios',
   'wifiNeighbors',
+  'ports',
 ] as const;

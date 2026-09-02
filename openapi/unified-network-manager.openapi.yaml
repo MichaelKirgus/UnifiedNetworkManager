@@ -875,6 +875,71 @@ paths:
         '404':
           description: Device not found
 
+  /devices/{deviceId}/state:
+    get:
+      tags: [Devices]
+      summary: Get live device state from a plugin (Config page)
+      description: >-
+        Fetches the DYNAMIC device-state document from one assigned plugin's
+        `GET /state` endpoint (capability `deviceState`). The response is
+        returned verbatim — sections of items (ports with live states,
+        interfaces, ZFS pools, system info) plus context-aware action
+        references. Advertised action ids are validated against the plugin's
+        persisted action catalog; unknown ones are stripped. Without a
+        `pluginId` query param the device's primary assignment is used.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: pluginId
+          required: false
+          description: "Assigned plugin to fetch state from (default = primary assignment)"
+          schema: { type: string }
+      responses:
+        '200':
+          description: Live device state document
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceState'
+        '400':
+          description: Plugin not assigned to this device / no assignment at all
+        '401':
+          description: Authentication required
+        '404':
+          description: Device or plugin endpoint not found
+        '501':
+          description: This plugin does not support device state
+        '502':
+          description: Plugin failed to report device state
+
+  /devices/{deviceId}/ports:
+    get:
+      tags: [Devices]
+      summary: Get normalized port inventory for a device
+      description: >-
+        Normalized network-port rows (device_ports table) across all of the
+        device's plugins. Fed by the telemetry worker from each plugin's
+        `metrics['ports']` array — upserted per poll, deleted-on-absent.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Port rows for this device
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DevicePorts'
+        '401':
+          description: Authentication required
+        '404':
+          description: Device not found
+
   /devices/{deviceId}/config-jobs:
     post:
       tags: [Configuration]
@@ -3803,6 +3868,102 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PluginTelemetrySnapshot'
+
+    # --- Device state (per-device Config page) ------------------------------
+    # The dynamic device-state document a plugin serves from GET /state. The
+    # API brokers it verbatim; plugins own the shape. Actions reference ids in
+    # the plugin's action catalog and are executed through the plan workflow.
+
+    StateActionRef:
+      type: object
+      required: [actionId]
+      properties:
+        actionId: { type: string, description: "Catalog entry id of this plugin (deviceCount 1)" }
+        prefill:
+          type: object
+          additionalProperties: true
+          description: "Pre-filled input values merged under the schema defaults"
+
+    StateItem:
+      type: object
+      required: [key, title, fields]
+      properties:
+        key: { type: string }
+        title: { type: string }
+        subtitle: { type: string, nullable: true }
+        status:
+          type: string
+          description: "up | down | enabled | disabled | ok | degraded | critical (free string)"
+          nullable: true
+        fields:
+          type: object
+          additionalProperties:
+            oneOf: [{ type: string }, { type: number }, { type: 'null' }]
+        actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/StateActionRef'
+
+    StateSection:
+      type: object
+      required: [id, label]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        description: { type: string, nullable: true }
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/StateItem'
+        actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/StateActionRef'
+
+    DeviceStateResponse:
+      type: object
+      required: [collectedAt, sections]
+      properties:
+        collectedAt: { type: string, format: date-time }
+        sections:
+          type: array
+          items:
+            $ref: '#/components/schemas/StateSection'
+
+    DeviceState:
+      type: object
+      required: [deviceId, pluginId, state]
+      properties:
+        deviceId: { type: string }
+        pluginId: { type: string }
+        state:
+          $ref: '#/components/schemas/DeviceStateResponse'
+
+    DevicePortRow:
+      type: object
+      required: [pluginId, name, status]
+      properties:
+        pluginId: { type: string }
+        name: { type: string }
+        status: { type: string, description: "up | down | enabled | disabled | unknown" }
+        speed: { type: string, nullable: true }
+        duplex: { type: string, nullable: true }
+        vlanId: { type: integer, nullable: true }
+        poe: { type: string, nullable: true }
+        extra:
+          type: object
+          additionalProperties: true
+        collectedAt: { type: string, format: date-time }
+
+    DevicePorts:
+      type: object
+      required: [deviceId, ports]
+      properties:
+        deviceId: { type: string }
+        ports:
+          type: array
+          items:
+            $ref: '#/components/schemas/DevicePortRow'
 
     ConfigJobRequest:
       type: object

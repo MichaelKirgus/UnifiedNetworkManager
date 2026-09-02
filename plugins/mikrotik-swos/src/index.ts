@@ -9,10 +9,13 @@ import {
   modelFirmwareDescriptors,
   readSettings,
   resolvePluginIdentity,
+  stateHandler,
+  StateRequestBody,
 } from '@unm/plugin-sdk';
 import { SwosClient, SwosAuthError } from './swosClient';
 import { createPlatform } from './platform';
 import { DEFAULT_OPTIONS, MonitoringResult, SwosOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
+import { buildSwosState } from './state';
 import { DEVICE_MODELS } from './deviceModels';
 import { getAction, listCatalog } from './actions/registry';
 import { ActionContext, ActionResult, validateInput } from './actions/types';
@@ -37,7 +40,9 @@ const identity = resolvePluginIdentity({
   // management access, backup download). SwOS only — RouterOS gets its own plugin.
   version: '0.1.0',
   vendors: ['mikrotik'],
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning'],
+  // 'deviceState' advertises POST /state — the dynamic document behind the
+  // per-device Config page (ports with live state + PoE/LAG/VLAN actions).
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState'],
 });
 
 /**
@@ -119,6 +124,28 @@ function resolveCredentials(body: Record<string, unknown>): { creds?: { username
   // An empty password is legitimate on SwOS (default admin has none).
   return { creds: { username, password } };
 }
+
+/**
+ * POST /state — dynamic device-state document for the UNM Config page.
+ * The API broker (api/src/deviceState.ts) calls this with fresh credentials +
+ * injected settings and returns the response verbatim to the webapp. Built
+ * from the TTL-cached snapshot: one Ports section item per physical port
+ * (link state, speed/duplex, PoE draw, LAG membership, per-port VLANs, learned
+ * MACs) with variant-aware action refs, plus a System summary.
+ */
+app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+  const opts = resolveOptions(settings);
+
+  // Credentials: the assignment's decrypted fields are at top level of
+  // `credentials` (secret type `usernamePassword`) — same model as /monitoring.
+  const { creds, error } = resolveCredentials(body as unknown as Record<string, unknown>);
+  if (error || !creds) throw new Error(error ?? 'Missing credentials.');
+
+  const result = await getMonitoring(body.managementAddress.trim(), creds, opts);
+  return buildSwosState(result.snapshot);
+}, 'mikrotik-swos-plugin'));
 
 app.post('/monitoring', async (req, res) => {
   const body = req.body ?? {};

@@ -10,7 +10,7 @@
  */
 
 import { createHash } from 'crypto';
-import type { MetricDescriptor } from '@unm/plugin-sdk';
+import type { MetricDescriptor, PortRow } from '@unm/plugin-sdk';
 import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 import { SwosClient, SwosData, decodeHexString, decodeMac, decodeIpLe, decodePortMask } from './swosClient';
 import { SwosPlatform, createPlatform, getField, hasField } from './platform';
@@ -793,6 +793,31 @@ export function buildMetrics(s: SwosSnapshot, selectedModel?: string | null, sel
   // macTable[] → hosts table with source 'mac' (API-side ingestion; IP-less rows).
   if (s.macs.length > 0) {
     m['macTable'] = s.macs.map((x) => ({ mac: x.mac, intf: x.intf || null }));
+  }
+
+  // ports[] → device_ports table (per-device Config page + cross-device views).
+  // One row per physical port with its live link state; learned MACs ride in
+  // extra.macs so the API can answer "which devices are on this port".
+  if (s.ports.length > 0) {
+    const poeByPort = new Map<number, { mode: string }>();
+    for (const p of s.poe ?? []) poeByPort.set(p.port, { mode: p.mode });
+    m['ports'] = s.ports.map((p): PortRow => {
+      const macs: string[] = [];
+      for (const x of s.macs) {
+        if (!x.intf.startsWith('port ')) continue;
+        const parts = x.intf.slice('port '.length).split('+');
+        if (parts.some((q) => Number(q.trim()) === p.port)) macs.push(x.mac);
+      }
+      const poe = poeByPort.get(p.port);
+      return {
+        name: `P${p.port}`,
+        status: !p.enabled ? 'disabled' : p.linkUp ? 'up' : 'down',
+        speed: p.speedLabel !== 'unknown' && p.speedLabel !== '' ? p.speedLabel : null,
+        duplex: p.duplex === 'unknown' ? null : p.duplex,
+        poe: poe ? poe.mode : null,
+        extra: macs.length > 0 ? { name: p.name, macs } : { name: p.name },
+      };
+    });
   }
 
   return m;

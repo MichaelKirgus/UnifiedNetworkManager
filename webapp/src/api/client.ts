@@ -148,6 +148,8 @@ export interface DevicePluginAssignment {
   pluginName?: string;
   pluginVersion?: string;
   pluginEndpoint?: string;
+  /** The assigned plugin's advertised capabilities (e.g. 'deviceState'). */
+  pluginCapabilities?: string[];
   pluginOnline?: boolean;
   secretLabel?: string | null;
   /** The plugin's declared slots with their bound secrets resolved. */
@@ -907,6 +909,67 @@ export interface CatalogEntry {
   inputSchema?: InputSchema;
 }
 
+// ---------------------------------------------------------------------------
+// Device state (per-device Config page) — mirrored from @unm/plugin-sdk.
+// The API brokers the plugin's GET /state document verbatim; actions reference
+// catalog ids and are executed through the plan workflow.
+// ---------------------------------------------------------------------------
+
+/** A reference to an executable action of a plugin's catalog. */
+export interface StateActionRef {
+  actionId: string;
+  /** Pre-filled input values merged under the schema defaults. */
+  prefill?: Record<string, unknown>;
+}
+
+/** One row of a state section — e.g. a switch port or an appliance interface. */
+export interface StateItem {
+  key: string;
+  title: string;
+  subtitle?: string | null;
+  /** up | down | enabled | disabled | ok | degraded | critical (free string). */
+  status?: string | null;
+  /** Label-ready values; arrays render as chip lists (e.g. per-port MACs). */
+  fields: Record<string, string | number | null | unknown[]>;
+  actions?: StateActionRef[];
+}
+
+/** A horizontal band of the Config page — e.g. Ports, Interfaces, Pools, System. */
+export interface StateSection {
+  id: string;
+  label: string;
+  description?: string | null;
+  items?: StateItem[];
+  /** Section-level actions with no item context (e.g. reboot system). */
+  actions?: StateActionRef[];
+}
+
+/** The dynamic device-state document a plugin serves from GET /state. */
+export interface DeviceStateResponse {
+  collectedAt: string;
+  sections: StateSection[];
+}
+
+/** GET /devices/:id/state response — the broker wraps the state with ids. */
+export interface DeviceState {
+  deviceId: string;
+  pluginId: string;
+  state: DeviceStateResponse;
+}
+
+/** One normalized port row (device_ports table). */
+export interface DevicePortRow {
+  pluginId: string;
+  name: string;
+  status: string;
+  speed?: string | null;
+  duplex?: string | null;
+  vlanId?: number | null;
+  poe?: string | null;
+  extra?: Record<string, unknown>;
+  collectedAt: string;
+}
+
 /** A provisioned secret attached to a plan (metadata only — never material). */
 export interface PlanProvisionedSecret {
   ref: string;
@@ -1065,6 +1128,12 @@ export const api = {
   resetDevicePluginSettings: (deviceId: string, pluginId: string) =>
     apiFetch<PluginOptionsResponse>(`/devices/${deviceId}/plugins/${pluginId}/settings`, { method: 'DELETE' }),
   monitoring: (deviceId: string) => apiFetch<DeviceMonitoring>(`/devices/${deviceId}/monitoring`),
+  // Live device state from one assigned plugin's GET /state endpoint.
+  deviceState: (deviceId: string, pluginId?: string) =>
+    apiFetch<DeviceState>(`/devices/${deviceId}/state${pluginId ? `?pluginId=${encodeURIComponent(pluginId)}` : ''}`),
+  // Normalized port inventory for a device across all plugins.
+  devicePorts: (deviceId: string) =>
+    apiFetch<{ deviceId: string; ports: DevicePortRow[] }>(`/devices/${deviceId}/ports`),
   deviceTelemetry: (deviceId: string, limit = 30) =>
     apiFetch<{ deviceId: string; history: { collectedAt: string; health: string; pluginId?: string; metrics: Record<string, unknown> }[] }>(
       `/devices/${deviceId}/telemetry?limit=${limit}`

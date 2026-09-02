@@ -47,6 +47,8 @@ export interface DevicePluginAssignmentView extends DevicePluginAssignment {
   pluginName?: string;
   pluginVersion?: string;
   pluginEndpoint?: string;
+  /** The assigned plugin's advertised capabilities (e.g. 'deviceState'). */
+  pluginCapabilities?: string[];
   /** True when the plugin was seen within the last 5 minutes. */
   pluginOnline?: boolean;
   secretLabel?: string | null;
@@ -203,11 +205,21 @@ export async function listAssignmentViews(deviceId: string): Promise<DevicePlugi
         /* malformed cache — skip slot display */
       }
     }
+    let capabilities: string[] | undefined;
+    if (plugin?.capabilities) {
+      try {
+        const parsed = JSON.parse(plugin.capabilities);
+        capabilities = Array.isArray(parsed) ? parsed.filter((c): c is string => typeof c === 'string') : [];
+      } catch {
+        /* malformed cache — skip capability display */
+      }
+    }
     return {
       ...a,
       pluginName: plugin?.name,
       pluginVersion: plugin?.version,
       pluginEndpoint: plugin?.endpoint,
+      pluginCapabilities: capabilities,
       pluginOnline:
         plugin?.lastSeenAt !== null &&
         plugin?.lastSeenAt !== undefined &&

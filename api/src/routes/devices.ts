@@ -3,8 +3,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { db, Device, Plugin, Telemetry, ConfigJob } from '../db';
 import { requireAuth, requirePermission, require2FA } from '../auth/middleware';
 import { configJobQueue } from '../queue';
-import { eq, and, desc, inArray } from 'drizzle-orm';
+import { asc, eq, and, desc, inArray } from 'drizzle-orm';
 import * as schema from '../db/schema';
+import { DeviceStateError, fetchDeviceState } from '../deviceState';
 import {
   AssignmentError,
   addAssignment,
@@ -707,6 +708,7 @@ router.delete('/devices/:deviceId', requireAuth, requirePermission('devices:writ
     await db.delete(schema.pluginSettings).where(eq(schema.pluginSettings.deviceId, deviceId));
     await db.delete(schema.networks).where(eq(schema.networks.deviceId, deviceId));
     await db.delete(schema.hosts).where(eq(schema.hosts.deviceId, deviceId));
+    await db.delete(schema.devicePorts).where(eq(schema.devicePorts.deviceId, deviceId));
     await db.delete(schema.deviceIps).where(eq(schema.deviceIps.deviceId, deviceId));
     await db.delete(schema.devicePlugins).where(eq(schema.devicePlugins.deviceId, deviceId));
     await db.delete(schema.devices).where(eq(schema.devices.id, deviceId));
@@ -943,6 +945,74 @@ router.get('/devices/:deviceId/monitoring', requireAuth, requirePermission('devi
   );
 
   res.status(200).json({ deviceId, health, snapshots });
+});
+
+// GET /devices/:deviceId/state - LIVE device state from one assigned plugin's
+// `GET /state` endpoint (capability 'deviceState'). The webapp's per-device
+// Config page renders this verbatim: sections of items (ports with live states,
+// interfaces, ZFS pools) + context-aware action references. The broker is
+// generic — it only resolves credentials and validates advertised action ids
+// against the plugin's persisted catalog (see deviceState.ts).
+router.get('/devices/:deviceId/state', requireAuth, requirePermission('devices:read'), async (req, res) => {
+  const { deviceId } = req.params;
+  const pluginId = typeof req.query.pluginId === 'string' ? req.query.pluginId : '';
+
+  try {
+    // No explicit plugin → the device's primary assignment.
+    let effectivePluginId = pluginId;
+    if (!effectivePluginId) {
+      const assignments = await db.query.devicePlugins.findMany({ where: eq(schema.devicePlugins.deviceId, deviceId) });
+      const primary = assignments.find((a) => a.isPrimary) ?? assignments[0];
+      if (!primary) {
+        res.status(400).json({ error: 'Device has no plugin assignment' });
+        return;
+      }
+      effectivePluginId = primary.pluginId;
+    }
+
+    const result = await fetchDeviceState(deviceId, effectivePluginId);
+    res.status(200).json({ deviceId, ...result });
+  } catch (err) {
+    if (err instanceof DeviceStateError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// GET /devices/:deviceId/ports - Normalized port inventory (device_ports table)
+// for this device across all plugins. Fed by the telemetry worker from each
+// plugin's `metrics['ports']` array — upserted per poll, deleted-on-absent.
+router.get('/devices/:deviceId/ports', requireAuth, requirePermission('devices:read'), async (req, res) => {
+  const { deviceId } = req.params;
+
+  const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+  if (!device) {
+    res.status(404).json({ error: 'Device not found' });
+    return;
+  }
+
+  const rows = await db.query.devicePorts.findMany({
+    where: eq(schema.devicePorts.deviceId, deviceId),
+    orderBy: [asc(schema.devicePorts.pluginId), asc(schema.devicePorts.name)],
+  });
+
+  res.status(200).json({
+    deviceId,
+    ports: rows.map((r) => ({
+      pluginId: r.pluginId,
+      name: r.name,
+      status: r.status,
+      speed: r.speed ?? undefined,
+      duplex: r.duplex ?? undefined,
+      vlanId: r.vlanId ?? undefined,
+      poe: r.poe ?? undefined,
+      extra: r.extra ? (typeof r.extra === 'string' ? JSON.parse(r.extra) : r.extra) : {},
+      collectedAt: r.collectedAt,
+    })),
+  });
 });
 
 // GET /devices/:deviceId/telemetry - Recent telemetry history (for plot metrics).

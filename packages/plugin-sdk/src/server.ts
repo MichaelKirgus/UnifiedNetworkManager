@@ -14,8 +14,10 @@ import {
   CatalogEntry,
   CredentialSlotDescriptor,
   DeviceModelEntry,
+  DeviceStateResponse,
   MetricDescriptor,
   PluginOptionDescriptor,
+  StateRequestBody,
 } from './types';
 
 /** Extra /discover fields beyond the identity core (all optional). */
@@ -170,4 +172,37 @@ export function requirePluginKey(req: express.Request, res: express.Response, ne
     return;
   }
   next();
+}
+
+/**
+ * Express-4-safe handler factory for the GET /state endpoint (capability
+ * 'deviceState'). Express 4 does NOT catch rejections from async handlers — an
+ * unhandled rejection crashes the process, so this wraps the plugin's state
+ * function in a try/catch and answers with a JSON error envelope instead.
+ *
+ * The callback receives BOTH the parsed body (deviceId/managementAddress/
+ * credentials) AND the raw request — plugins need `req` to read per-device
+ * settings from the `x-unm-settings` header via readSettings().
+ *
+ * Success: 200 + DeviceStateResponse ({ collectedAt, sections }).
+ * Failure: 502 + { error } (device unreachable / not recognized / auth failure).
+ */
+export function stateHandler(
+  fn: (body: StateRequestBody, req: express.Request) => Promise<DeviceStateResponse>,
+  logTag?: string
+): express.RequestHandler {
+  return async (req, res) => {
+    try {
+      const body = req.body as StateRequestBody;
+      if (!body || typeof body.managementAddress !== 'string' || !body.credentials) {
+        res.status(400).json({ error: 'Invalid state request: managementAddress + credentials required' });
+        return;
+      }
+      const state = await fn(body, req);
+      res.status(200).json(state);
+    } catch (err) {
+      console.error(`[${logTag ?? 'plugin'}] /state failed:`, err instanceof Error ? err.message : err);
+      res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  };
 }

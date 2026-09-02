@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
+import clsx from 'clsx';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { Copy, Power, Plus, Settings, Star, Trash2, X } from 'lucide-react';
+import { Copy, Power, Plus, Settings, Settings2, Star, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { StatusBadge } from '../components/StatusBadge';
 import { MetricView } from '../components/MetricView';
@@ -115,6 +116,18 @@ export default function DeviceDetail() {
 
   // Primary plugin (first after the sort above) as a full Plugin row — needed
   // for its icon + model catalog in the header.
+  // The Config page is available when ANY assigned plugin advertises the
+  // 'deviceState' capability (live device state + actions via plans).
+  const hasDeviceConfig = useMemo(
+    () =>
+      assignments.some((a) => {
+        if (a.pluginCapabilities?.includes('deviceState')) return true;
+        const p = (pluginsQuery.data ?? []).find((x) => x.id === a.pluginId);
+        return p?.capabilities?.includes('deviceState') ?? false;
+      }),
+    [assignments, pluginsQuery.data]
+  );
+
   const primaryPlugin: Plugin | null = useMemo(() => {
     if (assignments.length === 0) return null;
     return (pluginsQuery.data ?? []).find((p) => p.id === assignments[0].pluginId) ?? null;
@@ -272,8 +285,17 @@ export default function DeviceDetail() {
             disabled
           </span>
         )}
+        {device && hasDeviceConfig && (
+          <Link
+            to={`/devices/${device.id}/config`}
+            className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
+          >
+            <Settings2 className="h-4 w-4" />
+            Config
+          </Link>
+        )}
         {device && canWriteDevices && (
-          <div className="ml-auto flex items-center gap-2">
+          <div className={clsx('flex items-center gap-2', !hasDeviceConfig && 'ml-auto')}>
             <button
               onClick={() => {
                 const next = device.enabled === false;

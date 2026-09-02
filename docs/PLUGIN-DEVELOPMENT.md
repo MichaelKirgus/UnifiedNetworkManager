@@ -77,8 +77,8 @@ the shared SDK first — keep that structure when editing.
 | `CounterTracker` (`{toBitsPerSec?=true, staleMs?}`) | Counter-delta rate tracking: `.sample(key, value)` → bits/s (or Δ/s), null on first sample or counter reset; `.evictStale()`, `.clear()`. Use for any cumulative byte/packet counters. |
 | `TtlCache<V>` (`{isFresh?, maxSize?}`) | TTL cache with a quality gate + oldest-first eviction. Pair it with a plain `Map` "lastKnown" fallback to serve stale data on blips instead of flapping health. |
 | `createApiClient()` / `isNotFound(err)` | Axios bootstrap for plugins that call BACK into the API's internal `/plugin/*` routes (basic-auth, secrets-provider). Reads `UNM_API_URL` + `PLUGIN_API_KEY`. |
-| `createPluginLogger(identity)` | Structured log shipping to the API (`POST /plugin/logs`). Fire-and-forget batching with drop-on-failure — see §8 Logging. Its queue depth is automatically exposed in `GET /metrics`. |
-| `createSelfMetrics(opts?)` → `{trackMiddleware, handler, collect}` | The self-metrics collector behind the auto-mounted `GET /metrics` (CPU%, memory, event-loop lag, poll stats). Only needed if you build a server by hand instead of using `createPluginServer` — see §9. |
+| `createPluginLogger(identity)` | Structured log shipping to the API (`POST /plugin/logs`). Fire-and-forget batching with drop-on-failure — see §9 Logging. Its queue depth is automatically exposed in `GET /metrics`. |
+| `createSelfMetrics(opts?)` → `{trackMiddleware, handler, collect}` | The self-metrics collector behind the auto-mounted `GET /metrics` (CPU%, memory, event-loop lag, poll stats). Only needed if you build a server by hand instead of using `createPluginServer` — see §10. |
 | `requirePluginKey` | Middleware authenticating the calling API via `x-plugin-api-key` (skipped when unset = dev mode). |
 | Contract types | `Health`, `MetricDescriptor`, `PluginOptionDescriptor`, `DeviceModelEntry`, `CredentialSlotDescriptor`, `SecretField/SecretType`, `RiskLevel`, `InputSchema(Property)`, `CatalogEntry`, `ProvisionRequest`, `PlanStep`, `Plan`, `PlanDevice<C>`, `PlanRequest<C>`, `StepCredentials`, `MonitoringRequestBody/ResponseBody`, `ConfigRequestBody/ResponseBody`. |
 
@@ -148,7 +148,79 @@ Declare actions with the SDK registry (`createRegistry`), advertise them via
 
 ---
 
-## 7. Settings round-trip
+## 7. Device state — `POST /state` (the Config page)
+
+The webapp's per-device **Config** page renders a *dynamic* device-state
+document: sections of items (switch ports with live states + learned MACs,
+appliance interfaces, ZFS pools, system info) plus context-aware action
+references. **Plugins own the shape; the API is a generic broker.** New device
+kinds (file systems, ZFS pools, …) cost zero API or webapp changes — you just
+return more sections.
+
+**Advertise it:** add `'deviceState'` to your `capabilities`. The Config page's
+plugin selector only lists assignments whose plugin advertises this capability.
+
+**Request body** (`StateRequestBody`, credentials already decrypted — same
+model as `/monitoring`):
+```ts
+{ deviceId, managementAddress, ipAddresses?, model?, firmwareVersion?, credentials }
+```
+
+**Response** — `DeviceStateResponse`; the API returns it to the webapp verbatim:
+```ts
+{
+  collectedAt: string, // ISO timestamp
+  sections: [
+    {
+      id: 'ports',            // stable section key
+      label: 'Ports',         // rendered as the band title
+      description?: string,   // optional one-liner under the title
+      items: [
+        {
+          key: 'P1',                          // stable item key within the section
+          title: 'Port 1',                    // bold row header
+          subtitle?: 'port 1',                // small text next to the title
+          status?: 'up'|'down'|'disabled'|'ok'|'degraded'|'critical'|…, // badge (free string)
+          fields: { Speed: '1G', MACs: ['aa:bb:…'], PVID: 5 }, // arrays → chip lists
+          actions?: [{ actionId: 'port.config.set', prefill: { port: 1 } }],
+        },
+      ],
+      actions?: [{ actionId: 'system.reboot' }], // section-level, no item context
+    },
+  ],
+}
+```
+
+**Rules:**
+- Every `actionId` must be a **single-device** entry of YOUR persisted catalog —
+  the API validates against `/discover` and silently strips unknown refs (a
+  stale state document must never surface an unexecutable button).
+- `prefill` is merged UNDER your schema defaults in the action dialog, so it's
+  how "shutdown THIS port" carries `{port: 5}` into the form.
+- **Execution always flows through the plan workflow** — the webapp creates a
+  1-step plan and executes it immediately (2FA + `configs:apply` apply). You
+  never get a direct write call from the Config page; your `/config` handler is
+  the only execution path. Mark destructive actions `riskLevel: 'dangerous'` —
+  the dialog then shows a red confirm step.
+- Use the SDK's `stateHandler(fn, logTag)` wrapper: it validates the body and
+  converts thrown errors into a JSON error envelope (Express 4 does not catch
+  async rejections). Your callback receives `(body, req)` so you can call
+  `readSettings(req, …)`.
+
+**Inventory shortcut — `metrics['ports']`:** if your `/monitoring` also emits a
+`ports[]` array (`PortRow`: `{name, status?, speed?, duplex?, vlanId?, poe?, extra?}`),
+the API normalizes it into the cross-device `device_ports` table (upsert on
+deviceId+pluginId+name, delete-on-absent). That powers port views across devices
+and is a cheap fallback for plugins that don't implement `/state`.
+
+Reference implementations: `plugins/lancom-sx/src/state.ts` (switch ports +
+variant-aware actions), `plugins/opnsense/src/state.ts` (interfaces + system
+power actions), `plugins/mikrotik-swos/src/state.ts` (ports with PoE/LAG/VLANs +
+learned MACs), `plugins/ix-truenas/src/state.ts` (ZFS pools + interfaces).
+
+---
+
+## 8. Settings round-trip
 
 Declare options in `/discover`; read them on every request with
 `readSettings(req, PLUGIN_OPTIONS)`. The API persists user overrides and injects
@@ -157,7 +229,7 @@ Clamp integers with `clampInt` so a bad override can't break collection.
 
 ---
 
-## 8. Logging (ship structured logs to the API)
+## 9. Logging (ship structured logs to the API)
 
 Every plugin should emit its console-worthy events as structured log entries so
 they show up in the webapp — per device (DeviceDetail → Logs section) and
@@ -208,7 +280,7 @@ Log failures and state changes; keep messages short — details go in `context`.
 
 ---
 
-## 9. Self-metrics (your plugin's own runtime health)
+## 10. Self-metrics (your plugin's own runtime health)
 
 Every plugin built with `createPluginServer()` automatically serves **`GET /metrics`**
 — no code needed. The API polls it every 30 s and stores samples in
@@ -240,7 +312,7 @@ Samples are kept `LOG_RETENTION_DAYS` (default 7) and swept by the same retentio
 
 ---
 
-## 10. Verification checklist (per plugin)
+## 11. Verification checklist (per plugin)
 
 ```bash
 cd plugins/<your-plugin> && npx tsc --noEmit        # type-check

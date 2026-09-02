@@ -3,6 +3,7 @@ import {
   Health,
   MetricDescriptor,
   PluginOptionDescriptor,
+  StateRequestBody,
   clampInt,
   createPluginLogger,
   createPluginServer,
@@ -12,6 +13,7 @@ import {
   modelFirmwareDescriptors,
   readSettings,
   resolvePluginIdentity,
+  stateHandler,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 import { SxOptions, getSxInventory, walkSxCounters } from './sxClient';
@@ -20,6 +22,7 @@ import { DEVICE_MODELS } from './deviceModels';
 import { getAction, listCatalog, listModules } from './actions/registry';
 import { ActionContext, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest } from './plan';
+import { buildSxState } from './state';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000007';
 export const PLUGIN_NAME = 'LANCOM SX-Series Plugin';
@@ -39,9 +42,10 @@ const identity = resolvePluginIdentity({
   // propagation, plus config/planning actions over SNMP SET.
   version: '0.1.0',
   vendors: ['lancom'],
-  // All four capabilities: monitoring (SNMP walks), inventory (networks/hosts),
-  // configuration (SNMP SET actions) + planning (multi-device fan-out).
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning'],
+  // All four capabilities + deviceState (dynamic Config-page state document):
+  // monitoring (SNMP walks), inventory (networks/hosts/ports), configuration
+  // (SNMP SET actions) + planning (multi-device fan-out).
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState'],
 });
 
 /**
@@ -310,6 +314,20 @@ app.post('/monitoring', async (req, res) => {
       }));
     }
 
+    // ports[] → device_ports table (per-device Config page + cross-device views).
+    // One row per switch port with its live link state; MACs learned on the port
+    // ride in extra.macs when FDB enrichment is enabled.
+    metrics['ports'] = snapshot.ports.map((p) => {
+      const macs = snapshot.neighbors.filter((n) => n.port === p.port && n.mac !== '').map((n) => n.mac);
+      return {
+        name: `P${p.port}`,
+        status: p.linkUp === null ? 'unknown' : p.linkUp ? 'up' : 'down',
+        speed: p.speedStatus || (p.media && p.media !== '' ? `${p.speedStatus} (${p.media})` : '') || null,
+        vlanId: p.pvid,
+        extra: macs.length > 0 ? { macs } : {},
+      };
+    });
+
     // --- Health -------------------------------------------------------------
     let health: Health = 'ok';
     const warnings: string[] = [];
@@ -504,6 +522,34 @@ app.post('/plan', async (req, res) => {
     res.status(500).json({ error: (err as Error).message });
   }
 });
+
+/**
+ * GET /state — the dynamic device-state document for the UNM Config page.
+ * Reuses the TTL-cached slow-path inventory walk (same cache as /monitoring),
+ * so a state fetch is cheap right after a poll and bounded otherwise. The
+ * stateHandler wrapper guarantees an Express-4-safe JSON error envelope.
+ */
+app.post(
+  '/state',
+  stateHandler(async (body, req) => {
+    const settings = readSettings(req, PLUGIN_OPTIONS);
+    logger.setEnabled(settings.logToApi === true);
+    const opts = resolveOptions(settings);
+    const host = hostFromAddress(body.managementAddress);
+    if (!host) throw new Error('No target address — set the device management address.');
+
+    const { creds, error } = resolveCredentials((body.credentials ?? {}) as Record<string, unknown>);
+    if (error || !creds) throw new Error(error ?? 'Missing SNMP credentials.');
+
+    const inventory = await getSxInventory(host, creds, opts, {
+      log: (level, message, context) => logger.warn(message, { deviceId: body.deviceId, context }),
+    });
+    if (!inventory.snapshot) {
+      throw new Error(inventory.error ?? 'No LCOS-SX MIB data on this device.');
+    }
+    return buildSxState(inventory.snapshot);
+  }, 'lancom-sx')
+);
 
 // listen() binds the conventional plugin port (4080 by default) and starts
 // mDNS advertising — both handled by @unm/plugin-sdk.

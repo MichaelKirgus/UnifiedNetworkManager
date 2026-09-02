@@ -672,6 +672,41 @@ export const wifiClients = pgTable(
   }
 );
 
+// One row per network port/interface as reported by a plugin's `ports` metric.
+// Powers the per-device Config page (and future cross-device port views). Same
+// upsert-per-poll + delete-on-absent lifecycle as tunnels/routes: ports are
+// config objects, so a removed interface must vanish from the table, not linger
+// until the 24h sweep. `name` is part of the PK — one row per (device, plugin,
+// port-name). A device without port data contributes no rows.
+export const devicePorts = pgTable(
+  'device_ports',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Port/interface label on the device (e.g. "P1", "opt0", "port 4").
+    name: text('name').notNull(),
+    // up | down | enabled | disabled | unknown — normalized to lowercase at ingest.
+    status: text('status').notNull().default('unknown'),
+    speed: text('speed'),
+    duplex: text('duplex'),
+    vlanId: integer('vlanId'),
+    poe: text('poe'),
+    // Port-specific extras (JSON object): allowedVlans, lacpKey, macs[], ...
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      // Name matches Postgres' auto-generated <table>_pkey (see networks above).
+      pkDevicePorts: primaryKey({
+        name: 'device_ports_pkey',
+        columns: [table.deviceId, table.pluginId, table.name],
+      }),
+      idxDevicePortsDevice: index('idx_device_ports_device').on(table.deviceId),
+    };
+  }
+);
+
 // Execution plans produced by a plugin's /plan endpoint (e.g. an OPNsense
 // WireGuard tunnel spanning two firewalls). The API persists the plan and its
 // steps, fulfils the plan's provisionRequests via the secrets provider at

@@ -694,6 +694,65 @@ async function ingestInventory(
           ));
       }
     }
+
+    // --- ports (network interfaces with live state) -------------------------
+    // Ports are CONFIG objects — a removed interface must vanish from the table,
+    // not linger until the 24h sweep. Same upsert + delete-on-absent pattern as
+    // tunnels: an ABSENT key means "plugin doesn't report ports" (no wipe); a
+    // present-but-EMPTY array is authoritative (wipes this device+plugin's rows).
+    const rawPorts = Array.isArray(metrics['ports']) ? (metrics['ports'] as unknown[]) : null;
+    if (rawPorts !== null) {
+      const values: {
+        deviceId: string; pluginId: string; name: string; status: string; speed: string | null;
+        duplex: string | null; vlanId: number | null; poe: string | null; extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawPorts) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        if (!name) continue; // name is part of the conflict key
+        values.push({
+          deviceId,
+          pluginId,
+          name,
+          status: typeof r['status'] === 'string' && (r['status'] as string).trim() !== '' ? (r['status'] as string).trim().toLowerCase() : 'unknown',
+          speed: typeof r['speed'] === 'string' && (r['speed'] as string).trim() !== '' ? (r['speed'] as string).trim() : null,
+          duplex: typeof r['duplex'] === 'string' && (r['duplex'] as string).trim() !== '' ? (r['duplex'] as string).trim() : null,
+          vlanId: numOrNull(r['vlanId']),
+          poe: typeof r['poe'] === 'string' && (r['poe'] as string).trim() !== '' ? (r['poe'] as string).trim() : null,
+          extra: r['extra'] && typeof r['extra'] === 'object' ? JSON.stringify(r['extra']) : '{}',
+          collectedAt,
+        });
+      }
+      // Same de-dup guard as the other inventory blocks.
+      const portByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        portByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}`, v);
+      }
+      if (portByKey.size > 0) {
+        await db.insert(schema.devicePorts).values(Array.from(portByKey.values())).onConflictDoUpdate({
+          target: [schema.devicePorts.deviceId, schema.devicePorts.pluginId, schema.devicePorts.name],
+          set: {
+            status: sql`excluded.status`,
+            speed: sql`excluded.speed`,
+            duplex: sql`excluded.duplex`,
+            vlanId: sql`excluded."vlanId"`,
+            poe: sql`excluded.poe`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      const seenPortNames = new Set(values.map((v) => v.name));
+      if (seenPortNames.size > 0) {
+        await db.delete(schema.devicePorts)
+          .where(and(
+            eq(schema.devicePorts.deviceId, deviceId),
+            eq(schema.devicePorts.pluginId, pluginId),
+            notInArray(schema.devicePorts.name, Array.from(seenPortNames))
+          ));
+      }
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(
@@ -719,13 +778,14 @@ async function sweepStaleInventory(): Promise<void> {
   if (disabledIds.length > 0) {
     await db.delete(schema.hosts).where(and(lt(schema.hosts.lastSeenAt, cutoff), notInArray(schema.hosts.deviceId, disabledIds)));
     await db.delete(schema.networks).where(and(lt(schema.networks.collectedAt, cutoff), notInArray(schema.networks.deviceId, disabledIds)));
+    await db.delete(schema.devicePorts).where(and(lt(schema.devicePorts.collectedAt, cutoff), notInArray(schema.devicePorts.deviceId, disabledIds)));
   } else {
     await db.delete(schema.hosts).where(lt(schema.hosts.lastSeenAt, cutoff));
     await db.delete(schema.networks).where(lt(schema.networks.collectedAt, cutoff));
+    await db.delete(schema.devicePorts).where(lt(schema.devicePorts.collectedAt, cutoff));
   }
   // Tunnels/routes/Wi-Fi rows carry no deviceId — they are only ever refreshed
   // by polling enabled devices, so the plain stale sweep applies to them.
-  await db.delete(schema.tunnels).where(lt(schema.tunnels.collectedAt, cutoff));
   await db.delete(schema.tunnels).where(lt(schema.tunnels.collectedAt, cutoff));
   await db.delete(schema.routes).where(lt(schema.routes.collectedAt, cutoff));
   await db.delete(schema.wifiSsids).where(lt(schema.wifiSsids.collectedAt, cutoff));

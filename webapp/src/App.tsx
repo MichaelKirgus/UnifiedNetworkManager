@@ -3,6 +3,7 @@ import { ReactNode } from 'react';
 import Login from './pages/Login';
 import Devices from './pages/Devices';
 import DeviceDetail from './pages/DeviceDetail';
+import DeviceConfig from './pages/DeviceConfig';
 import Secrets from './pages/Secrets';
 import ConfigJobs from './pages/ConfigJobs';
 import Plans from './pages/Plans';
@@ -77,6 +78,8 @@ export default function App() {
       <Route path="/secrets" element={<Page permission="secrets:read"><Secrets /></Page>} />
       {/* Device detail is part of the Devices page (same read permission). */}
       <Route path="/devices/:deviceId" element={<Page permission="devices:read"><DeviceDetail /></Page>} />
+      {/* Per-device Config page — dynamic plugin state + actions via plans. */}
+      <Route path="/devices/:deviceId/config" element={<Page permission="devices:read"><DeviceConfig /></Page>} />
       <Route path="/config-jobs" element={<Page permission="config-jobs:read"><ConfigJobs /></Page>} />
       <Route path="/plans" element={<Page permission="plans:read"><Plans /></Page>} />
       <Route path="/plans/:id" element={<Page permission="plans:read"><PlanDetail /></Page>} />

@@ -9,14 +9,21 @@ import {
   createPluginLogger,
   createPluginServer,
   gaugeMetric,
-  hostFromAddress,
   pickNumber,
   pickString,
   readSettings,
   resolvePluginIdentity,
+  stateHandler,
   textMetric,
+  validateInput,
+  PortRow,
+  PlanRequest,
+  StateRequestBody,
 } from '@unm/plugin-sdk';
-import { TruenasAuthError, TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } from './client/truenasClient';
+import { TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } from './client/truenasClient';
+import { registry as actionRegistry, TruenasActionContext } from './actions';
+import { buildTruenasState } from './state';
+import { buildPlan, PlanningError } from './plan';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000009';
 export const PLUGIN_NAME = 'TrueNAS Plugin';
@@ -31,9 +38,13 @@ export const PLUGIN_NAME = 'TrueNAS Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
-  version: '0.1.0',
+  // 0.2.0 — first config-capable release: action catalog (system reads +
+  // DANGEROUS reboot/shutdown over the documented JSON-RPC API), the plan
+  // workflow (single-device fan-out) and the dynamic device-state document
+  // behind the per-device Config page.
+  version: '0.2.0',
   vendors: ['truenas'],
-  capabilities: ['monitoring'],
+  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState'],
 });
 
 /**
@@ -214,6 +225,10 @@ const server = createPluginServer({
     ],
     metrics: buildMetricDescriptors(),
     options: PLUGIN_OPTIONS,
+    // The full action catalog (single-device actions) — persisted by the API
+    // and validated against /config dispatches + state action refs.
+    actions: actionRegistry.listCatalog(),
+    modules: actionRegistry.listModules(),
     iconUrl: '/icons/truenas.svg',
   },
 });
@@ -463,8 +478,8 @@ app.post('/monitoring', async (req, res) => {
 async function handleMonitoring(req: Request, res: Response): Promise<void> {
   const body = req.body ?? {};
   const deviceId: string | undefined = typeof body.deviceId === 'string' ? body.deviceId : undefined;
-  const managementAddress: unknown = body.managementAddress;
-  const host = hostFromAddress(typeof managementAddress === 'string' ? managementAddress : '');
+  // Full address (host[:port]) — the WebSocket URL resolver needs the port.
+  const host = applianceHost(body.managementAddress);
 
   // Effective settings injected by the API (defaults ⊕ user overrides).
   const settings = readSettings(req, PLUGIN_OPTIONS);
@@ -608,6 +623,40 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     const hostname = pickString(metrics, ['system.hostname']) ?? '';
     const ownHosts = parseOwnHosts(ifaces, hostname);
     if (ownHosts.length > 0) metrics['hosts'] = ownHosts;
+
+    // ports[] → device_ports table (per-device Config page + cross-device views).
+    // One row per interface with its live link state; MAC + first IP alias ride
+    // in extra so the API can answer "which devices are on this port".
+    const portRows: PortRow[] = [];
+    for (const i of ifaces) {
+      const name = pickString(i, ['description']) || pickString(i, ['name']);
+      if (!name) continue;
+      const state = (i['state'] ?? {}) as Record<string, unknown>;
+      const linkUp = state['link_state'] === 'LINK_STATE_UP';
+      const macRaw = typeof state['link_address'] === 'string' ? (state['link_address'] as string).toLowerCase() : null;
+      const vlanId = pickNumber(i, ['vlan_tag']);
+      let firstIp: string | undefined;
+      const aliasesRaw = i['aliases'];
+      if (Array.isArray(aliasesRaw)) {
+        for (const a of aliasesRaw) {
+          let alias: Record<string, unknown> | undefined;
+          if (typeof a === 'string') { try { alias = JSON.parse(a) as Record<string, unknown>; } catch { continue; } }
+          else if (a && typeof a === 'object') alias = a as Record<string, unknown>;
+          const ip = pickString(alias ?? {}, ['address']);
+          if (ip) { firstIp = ip; break; }
+        }
+      }
+      portRows.push({
+        name,
+        status: linkUp ? 'up' : 'down',
+        vlanId: vlanId && vlanId > 0 ? vlanId : null,
+        extra: {
+          ...(macRaw ? { mac: macRaw } : {}),
+          ...(firstIp ? { ip: firstIp } : {}),
+        },
+      });
+    }
+    if (portRows.length > 0) metrics['ports'] = portRows;
   }
 
   // --- staticroute.query: routes inventory ---------------------------------
@@ -730,6 +779,154 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
   if ('system.error' in metrics) out.push(textMetric('system.error', 'Error', { group: 'System' }));
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// POST /config — executes ONE action step against one appliance. The API's
+// config-job worker dispatches here with {actionId, input, credentials}; the
+// plugin owns ALL logic (schema validation + JSON-RPC call). Same contract as
+// the other plugins: 200 + { success, result } on every path.
+// ---------------------------------------------------------------------------
+/**
+ * Resolves the appliance address for a client. Unlike hostFromAddress (which
+ * strips ports — fine for the conventional 443/80 case), the WebSocket URL
+ * resolver needs the FULL host:port, so we pass the trimmed management address
+ * through as-is (an explicit http(s) scheme is converted to ws(s) by the client).
+ */
+function applianceHost(managementAddress: unknown): string {
+  return typeof managementAddress === 'string' ? managementAddress.trim() : '';
+}
+
+app.post('/config', async (req, res) => {
+  const body = req.body ?? {};
+  const deviceId = typeof body.deviceId === 'string' ? body.deviceId : null;
+  const host = applianceHost(body.managementAddress);
+
+  // Registry shape preferred; legacy `{action, payload}` maps onto it.
+  const actionId: string | undefined = typeof body.actionId === 'string' ? body.actionId : (typeof body.action === 'string' ? body.action : undefined);
+  const input: Record<string, unknown> =
+    body.input && typeof body.input === 'object'
+      ? (body.input as Record<string, unknown>)
+      : body.payload && typeof body.payload === 'object'
+        ? (body.payload as Record<string, unknown>)
+        : {};
+
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+  const transport = transportOf(settings);
+  const timeoutMs = clampInt(settings.timeoutMs, 500, 60000, 5000);
+
+  if (!actionId) {
+    res.status(400).json({ success: false, result: { error: 'Missing actionId (or legacy "action")' } });
+    return;
+  }
+  if (!host) {
+    res.status(400).json({ success: false, result: { error: 'Missing managementAddress' } });
+    return;
+  }
+
+  const action = actionRegistry.getAction(actionId);
+  if (!action) {
+    res.status(400).json({ success: false, result: { error: `Unknown action "${actionId}"` } });
+    return;
+  }
+
+  // Credentials: API-key slot (if bound) takes precedence over username/password.
+  const apiKeyUsername = typeof settings.apiKeyUsername === 'string' ? settings.apiKeyUsername.trim() : '';
+  const { creds, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined, apiKeyUsername);
+  if (!creds) {
+    res.status(200).json({ success: false, result: { error: credError ?? 'Missing credentials' } });
+    return;
+  }
+
+  // Validate input against the action's declared schema — the plugin is the
+  // authority on what it accepts; the API only checks that the id exists.
+  const issues = validateInput(action.inputSchema, input);
+  if (issues.length > 0) {
+    res.status(200).json({ success: false, result: { error: `Invalid input for ${actionId}: ${issues.map((i) => `${i.path}: ${i.message}`).join('; ')}` } });
+    return;
+  }
+
+  try {
+    const ctx: TruenasActionContext = { client: getClient(host, transport, timeoutMs), creds };
+    const result = await action.execute(ctx, input);
+    res.status(200).json({ success: result.success, result });
+  } catch (err) {
+    logger.error(`Config action ${actionId} failed for ${host}: ${errMsg(err)}`, { deviceId, context: { host, actionId } });
+    res.status(200).json({ success: false, result: { error: errMsg(err) } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /state — dynamic device-state document for the UNM Config page. The API
+// broker (api/src/deviceState.ts) calls this with fresh credentials + injected
+// settings and returns the response verbatim to the webapp. All three reads are
+// best-effort: a failing endpoint yields an empty section, not an error.
+// ---------------------------------------------------------------------------
+app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+  const transport = transportOf(settings);
+  const timeoutMs = clampInt(settings.timeoutMs, 500, 60000, 5000);
+
+  const host = applianceHost(body.managementAddress);
+  if (!host) throw new Error('Missing managementAddress');
+
+  const apiKeyUsername = typeof settings.apiKeyUsername === 'string' ? settings.apiKeyUsername.trim() : '';
+  const { creds, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined, apiKeyUsername);
+  if (!creds) throw new Error(credError ?? 'Missing credentials');
+
+  const client = getClient(host, transport, timeoutMs);
+  const [sysInfoRes, poolsRes, ifacesRes] = await Promise.allSettled([
+    client.call<Record<string, unknown>>('system.info', [], creds),
+    client.call<Record<string, unknown>[]>('pool.query', [], creds),
+    client.call<Record<string, unknown>[]>('interface.query', [], creds),
+  ]);
+
+  return buildTruenasState({
+    sysInfo: sysInfoRes.status === 'fulfilled' ? sysInfoRes.value : undefined,
+    pools: poolsRes.status === 'fulfilled' && Array.isArray(poolsRes.value) ? poolsRes.value : [],
+    ifaces: ifacesRes.status === 'fulfilled' && Array.isArray(ifacesRes.value) ? ifacesRes.value : [],
+  });
+}, 'ix-truenas-plugin'));
+
+// ---------------------------------------------------------------------------
+// POST /plan — builds an execution plan for an intent across a device batch.
+// v1 has no multi-device intents: single-device actions fan out to one step
+// per device. The API persists the returned steps + provisionRequests and the
+// plan executor dispatches each step to /config.
+// ---------------------------------------------------------------------------
+app.post('/plan', async (req, res) => {
+  const body = req.body ?? {};
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
+
+  const planReq: PlanRequest = {
+    intent: {
+      actionId: typeof body.intent?.actionId === 'string' ? body.intent.actionId : '',
+      inputs: (body.intent?.inputs && typeof body.intent.inputs === 'object' ? body.intent.inputs : {}) as Record<string, unknown>,
+    },
+    devices: Array.isArray(body.devices)
+      ? (body.devices as PlanRequest['devices']).map((d) => ({
+          deviceId: String(d.deviceId),
+          managementAddress: String(d.managementAddress ?? ''),
+          credentials: d.credentials,
+        }))
+      : [],
+  };
+
+  try {
+    const plan = await buildPlan(planReq);
+    res.status(200).json({ plan });
+  } catch (err) {
+    if (err instanceof PlanningError) {
+      logger.error(`Planning ${planReq.intent.actionId} failed: ${err.message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    const message = errMsg(err);
+    logger.error(`Planning ${planReq.intent.actionId} failed unexpectedly: ${message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
+    res.status(500).json({ error: message });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Startup — bind the port + start mDNS advertising (SDK handles both).

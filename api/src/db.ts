@@ -461,6 +461,26 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_wifi_clients_device ON wifi_clients ("deviceId")`);
 
+  // Port inventory table (per-device Config page + future cross-device views).
+  // One row per port/interface as reported by a plugin's `ports` metric — same
+  // upsert-per-poll + delete-on-absent lifecycle as tunnels/routes.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_ports (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'unknown',
+      speed TEXT,
+      duplex TEXT,
+      "vlanId" INTEGER,
+      poe TEXT,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_ports_device ON device_ports ("deviceId")`);
+
   // Plugin log entries (see schema.pluginLogs). Pushed by plugins in batches
   // via POST /plugin/logs; swept by the retention worker after LOG_RETENTION_DAYS.
   await pool.query(`

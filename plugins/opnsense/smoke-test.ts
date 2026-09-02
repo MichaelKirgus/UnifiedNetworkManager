@@ -216,6 +216,24 @@ async function main(): Promise<void> {
   check('networks descriptor present', descriptors.some((d) => d.key === 'networks'));
   check('dhcpLeases descriptor present', descriptors.some((d) => d.key === 'dhcpLeases'));
 
+  // --- /state (device-state document for the Config page) ---------------------------
+  const stateRes = await fetch(`${BASE}/state`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: 'devA', managementAddress: `http://localhost:${MOCK_PORT}`, credentials: { apiKey: 'kA', apiSecret: 'sA' } }),
+  });
+  const stateJson = (await stateRes.json()) as { collectedAt?: string; sections?: { id: string; label: string; items?: { key: string; title: string; status?: string; fields?: Record<string, unknown>; actions?: { actionId: string }[] }[]; actions?: { actionId: string }[] }[] };
+  console.log('\n== /state ==');
+  check('HTTP 200', stateRes.status === 200);
+  check('collectedAt is ISO timestamp', typeof stateJson.collectedAt === 'string' && !Number.isNaN(Date.parse(stateJson.collectedAt!)), stateJson.collectedAt);
+  const sectionIds = (stateJson.sections ?? []).map((s) => s.id);
+  check('has interfaces + system sections', sectionIds.includes('interfaces') && sectionIds.includes('system'), sectionIds);
+  const ifSection = (stateJson.sections ?? []).find((s) => s.id === 'interfaces');
+  const lanItem = ifSection?.items?.find((i) => i.key === 'lan');
+  check('lan interface item present with MAC + IPs', !!lanItem && lanItem.fields?.MAC === 'aa:bb:cc:dd:ee:ff' && Array.isArray(lanItem.fields?.IPs), lanItem);
+  const sysSection = (stateJson.sections ?? []).find((s) => s.id === 'system');
+  check('system item advertises reboot/halt/service actions', !!sysSection?.items?.[0]?.actions && ['system.reboot', 'system.halt', 'system.service.restart'].every((id) => sysSection.items![0].actions!.some((a) => a.actionId === id)), sysSection?.items?.[0]?.actions);
+
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

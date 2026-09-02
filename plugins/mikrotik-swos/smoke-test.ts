@@ -619,6 +619,27 @@ async function main(): Promise<void> {
   });
   check('plan with missing required input → 400', badPlan.status === 400, await badPlan.clone().text());
 
+  // --- /state (device-state document for the Config page) -------------------------------------------------
+  const stateRes = await fetch(`${BASE}/state`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: 'dev-lite', managementAddress: `localhost:${LITE_PORT}`, credentials: creds }),
+  });
+  const stateJson = (await stateRes.json()) as { collectedAt?: string; sections?: { id: string; label: string; items?: { key: string; title: string; status?: string; fields?: Record<string, unknown>; actions?: { actionId: string; prefill?: Record<string, unknown> }[] }[] }[] };
+  console.log('\n== /state ==');
+  check('HTTP 200', stateRes.status === 200);
+  const sectionIds = (stateJson.sections ?? []).map((s) => s.id);
+  check('has ports + vlans + system sections', ['ports', 'vlans', 'system'].every((id) => sectionIds.includes(id)), sectionIds);
+  const portsSection = (stateJson.sections ?? []).find((s) => s.id === 'ports');
+  check('10 port items', portsSection?.items?.length === 10, `count=${portsSection?.items?.length}`);
+  const p1 = portsSection?.items?.find((i) => i.key === '1');
+  check('port 1 up with LAG group + learned MAC', p1?.status === 'up' && /group 5/.test(String(p1?.fields?.LAG)) && Array.isArray(p1?.fields?.MACs) && (p1.fields.MACs as string[]).includes('aa:bb:cc:dd:ee:ff'), p1);
+  check('port 1 actions prefill port number', p1?.actions?.some((a) => a.actionId === 'port.config.set' && a.prefill?.port === 1), p1?.actions);
+  const p3 = portsSection?.items?.find((i) => i.key === '3');
+  check('port 3 shows PoE draw + per-port VLAN PVID', /1\.3 W/.test(String(p3?.fields?.['PoE draw'])) && p3?.fields?.PVID === 10, p3);
+  const sysSection = (stateJson.sections ?? []).find((s) => s.id === 'system');
+  check('system item advertises info + backup actions', !!sysSection?.items?.[0]?.actions && ['swos.system.info', 'swos.backup.download'].every((id) => sysSection.items![0].actions!.some((a) => a.actionId === id)), sysSection?.items?.[0]?.actions);
+
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }
