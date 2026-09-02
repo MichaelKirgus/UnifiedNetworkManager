@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Copy, Eye, Pencil, Plus, Power, Tag, Trash2, X } from 'lucide-react';
+import { Copy, Eye, Pencil, Plus, Power, Settings2, Tag, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ChipInput } from '../components/ChipInput';
@@ -27,6 +27,15 @@ const TYPE_SUGGESTIONS = ['access point', 'controller', 'firewall', 'load balanc
 /** Capitalizes a stored vendor/type string for display ("opnsense" → "Opnsense"). */
 function cap(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** The Config page is available when ANY assigned plugin advertises the 'deviceState' capability. */
+function hasDeviceConfig(device: Device, plugins?: Plugin[]): boolean {
+  return (device.plugins ?? []).some((a) => {
+    if (a.pluginCapabilities?.includes('deviceState')) return true;
+    const p = plugins?.find((x) => x.id === a.pluginId);
+    return p?.capabilities?.includes('deviceState') ?? false;
+  });
 }
 
 export default function Devices() {
@@ -502,7 +511,7 @@ export default function Devices() {
       header: 'Actions',
       key: 'actions',
       excludeFromExport: true,
-      width: 180,
+      width: 210,
       sortable: false,
       render: (row) => (
         <div className="flex items-center gap-1">
@@ -514,6 +523,16 @@ export default function Devices() {
           >
             <Eye className="h-4 w-4" />
           </button>
+          {hasDeviceConfig(row, pluginsQuery.data) && (
+            <button
+              aria-label={`Configure ${row.name}`}
+              title="Open config page"
+              className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+              onClick={() => navigate(`/devices/${row.id}/config`)}
+            >
+              <Settings2 className="h-4 w-4" />
+            </button>
+          )}
           {canWriteDevices && (
             <>
               <button
