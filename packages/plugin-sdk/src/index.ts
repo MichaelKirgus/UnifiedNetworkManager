@@ -11,6 +11,7 @@ export type { PluginIdentity, PluginIdentityInput } from './identity';
 export { createPluginServer, buildDiscoverPayload, requirePluginKey, stateHandler } from './server';
 export type { PluginServerOptions, PluginServer, DiscoveryExtras } from './server';
 export { readSettings, clampInt, hostFromAddress, pickString, pickNumber } from './settings';
+export { suggestPortLayout, portNumberFromKey } from './portLayout';
 export { INVENTORY_INTERVAL_MS, errorDescriptor, modelFirmwareDescriptors, gaugeMetric, textMetric, tableMetric } from './metrics';
 export { validateInput, isValidInput, createRegistry } from './actions';
 export type { ValidationIssue, ActionDescriptor, ActionRegistry } from './actions';

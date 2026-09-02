@@ -1,4 +1,4 @@
-import { DeviceStateResponse, StateActionRef, StateItem } from '@unm/plugin-sdk';
+import { DeviceStateResponse, StateActionRef, StateItem, SwitchLayout } from '@unm/plugin-sdk';
 import { SxSwitchSnapshot } from './sxClient';
 
 /**
@@ -85,6 +85,10 @@ export function buildSxState(snapshot: SxSwitchSnapshot): DeviceStateResponse {
     };
   });
 
+  // Switch-face layout — SX models are compact all-RJ45 switches, so one
+  // unlabeled band in panel order (the webapp's generic fallback matches this).
+  const portsLayout: SwitchLayout = { groups: [{ id: 'row-1', portKeys: portItems.map((i) => i.key) }] };
+
   // --- System ------------------------------------------------------------------
   const sys = snapshot.system;
   const systemItem: StateItem = {
@@ -110,7 +114,9 @@ export function buildSxState(snapshot: SxSwitchSnapshot): DeviceStateResponse {
       {
         id: 'ports',
         label: 'Ports',
-        description: `Switch ports with live link state${sx4 ? ', VLAN, PoE and LACP' : ''}. MACs appear when FDB enrichment is enabled.`,
+        description: `Switch ports with live link state${sx4 ? ', VLAN, PoE and LACP' : ''}. MACs appear when FDB enrichment is enabled. Click ports to select them for bulk actions.`,
+        kind: 'switch',
+        layout: portsLayout,
         items: portItems,
       },
       {

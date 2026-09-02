@@ -10,7 +10,7 @@
  *                  through the plan workflow.
  */
 
-import { DeviceStateResponse, StateItem } from '@unm/plugin-sdk';
+import { DeviceStateResponse, StateItem, StateSection } from '@unm/plugin-sdk';
 import { pickNumber, pickString } from '@unm/plugin-sdk';
 
 /** Human-readable byte size ("8.0 TB") for state fields. */
@@ -163,15 +163,28 @@ export function buildTruenasState(args: {
   const mem = formatBytes(memTotal);
   if (mem) fields.Memory = mem;
 
+  // Interfaces render as a virtual switch face — one band in item order
+  // (name-based keys like 'em0'/'bridge0' keep their full label).
+  const ifaceItems = interfaceItems(ifaces);
+  const interfacesSection: StateSection | null =
+    ifaceItems.length > 0
+      ? {
+          id: 'interfaces',
+          label: 'Interfaces',
+          description: 'Network interfaces with link state, MACs and IP aliases. Click interfaces to select them for bulk actions.',
+          kind: 'switch',
+          layout: { groups: [{ id: 'row-1', portKeys: ifaceItems.map((i) => i.key) }] },
+          items: ifaceItems,
+        }
+      : null;
+
   return {
     collectedAt: new Date().toISOString(),
     sections: [
       ...(pools.length > 0
         ? [{ id: 'pools', label: 'ZFS Pools', description: 'Storage pools with capacity and scrub state.', items: poolItems(pools) }]
         : []),
-      ...(ifaces.length > 0
-        ? [{ id: 'interfaces', label: 'Interfaces', description: 'Network interfaces with link state, MACs and IP aliases.', items: interfaceItems(ifaces) }]
-        : []),
+      ...(interfacesSection ? [interfacesSection] : []),
       {
         id: 'system',
         label: 'System',

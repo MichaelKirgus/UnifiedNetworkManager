@@ -146,7 +146,7 @@ async function main(): Promise<void> {
 
   // --- /state --------------------------------------------------------------------------
   const stateRes = await post('/state', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds });
-  const stateJson = (await stateRes.json()) as { collectedAt?: string; sections?: { id: string; label: string; items?: { key: string; title: string; status?: string; fields?: Record<string, unknown>; actions?: { actionId: string }[] }[] }[] };
+  const stateJson = (await stateRes.json()) as { collectedAt?: string; sections?: { id: string; label: string; kind?: string; layout?: { groups: { id: string; portKeys: string[] }[] }; items?: { key: string; title: string; status?: string; fields?: Record<string, unknown>; actions?: { actionId: string }[] }[] }[] };
   console.log('\n== /state ==');
   check('HTTP 200', stateRes.status === 200);
   const sectionIds = (stateJson.sections ?? []).map((s) => s.id);
@@ -158,6 +158,14 @@ async function main(): Promise<void> {
   const ifSection = (stateJson.sections ?? []).find((s) => s.id === 'interfaces');
   const mgmtIface = ifSection?.items?.find((i) => i.key === 'NET_MANAGEMENT');
   check('management interface up with MAC + IP', mgmtIface?.status === 'up' && mgmtIface.fields?.MAC === 'aa:bb:cc:dd:ee:01' && Array.isArray(mgmtIface.fields?.IPs), mgmtIface);
+  // Virtual switch face: kind + layout must cover every interface exactly once.
+  const ifLayoutKeys = (ifSection?.layout?.groups ?? []).flatMap((g) => g.portKeys);
+  check('interfaces section is a virtual switch', ifSection?.kind === 'switch', ifSection?.kind);
+  check(
+    'interface layout covers all items exactly once',
+    ifLayoutKeys.length === (ifSection?.items?.length ?? 0) && new Set(ifLayoutKeys).size === ifLayoutKeys.length,
+    ifLayoutKeys
+  );
   const sysSection = (stateJson.sections ?? []).find((s) => s.id === 'system');
   check('system item advertises reboot + shutdown', !!sysSection?.items?.[0]?.actions && ['system.reboot', 'system.shutdown'].every((id) => sysSection.items![0].actions!.some((a) => a.actionId === id)), sysSection?.items?.[0]?.actions);
 

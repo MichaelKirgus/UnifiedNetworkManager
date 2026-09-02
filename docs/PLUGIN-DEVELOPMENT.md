@@ -175,6 +175,13 @@ model as `/monitoring`):
       id: 'ports',            // stable section key
       label: 'Ports',         // rendered as the band title
       description?: string,   // optional one-liner under the title
+      kind?: 'table'|'switch',// 'switch' → virtual switch face (see below); default 'table'
+      layout?: {              // only for kind:'switch' — bands top→bottom; absent = generic rows
+        groups: [
+          { id: 'row-rj45', label: 'RJ45', portKeys: ['1','2', …] },  // keys must match item.key
+          { id: 'row-sfp',  label: 'SFP+', portKeys: ['9','10'] },
+        ],
+      },
       items: [
         {
           key: 'P1',                          // stable item key within the section
@@ -190,6 +197,24 @@ model as `/monitoring`):
   ],
 }
 ```
+
+**Virtual switch face (`kind: 'switch'`):** sections with this kind render as a
+front-panel view instead of a table — one compact cell per port (LED colored by
+status, port number, one info line; full details incl. learned MACs in the
+tooltip). Clicking cells selects ports for **bulk actions**: the webapp shows an
+action bar with every catalog action at least one selected port supports and
+applies it to ALL of them as one plan (one step per port — 2FA + `configs:apply`
++ audit trail apply exactly like single-port actions).
+
+- Propagate a **model-specific layout** via `layout.groups`: bands top→bottom,
+  each with an optional label (`'RJ45'`, `'SFP+'`) and the item keys in panel
+  order. Items not referenced by any band are appended as a trailing unlabeled
+  band, so nothing is ever hidden.
+- **No layout?** The webapp falls back to a generic face: numeric port order
+  split into balanced rows (a 48-port switch becomes 3×16). Use the SDK helper
+  `suggestPortLayout(items, rows?)` if you want to emit that fallback yourself.
+- Keep per-item `actions` + `prefill` — bulk execution reuses each port's own
+  prefill (e.g. `{port: N}`) and merges in the shared values from the dialog.
 
 **Rules:**
 - Every `actionId` must be a **single-device** entry of YOUR persisted catalog —
@@ -214,9 +239,11 @@ deviceId+pluginId+name, delete-on-absent). That powers port views across devices
 and is a cheap fallback for plugins that don't implement `/state`.
 
 Reference implementations: `plugins/lancom-sx/src/state.ts` (switch ports +
-variant-aware actions), `plugins/opnsense/src/state.ts` (interfaces + system
-power actions), `plugins/mikrotik-swos/src/state.ts` (ports with PoE/LAG/VLANs +
-learned MACs), `plugins/ix-truenas/src/state.ts` (ZFS pools + interfaces).
+variant-aware actions, single-band layout), `plugins/opnsense/src/state.ts`
+(interfaces + system power actions), `plugins/mikrotik-swos/src/state.ts` (ports
+with PoE/LAG/VLANs + learned MACs, RJ45/SFP+ band layout from SFP diagnostics),
+`plugins/ix-truenas/src/state.ts` (ZFS pools + interfaces). The webapp's
+reusable face renderer lives in `webapp/src/components/VirtualSwitch.tsx`.
 
 ---
 

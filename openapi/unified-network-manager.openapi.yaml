@@ -3904,6 +3904,30 @@ components:
           items:
             $ref: '#/components/schemas/StateActionRef'
 
+    SwitchPortGroup:
+      type: object
+      required: [id, portKeys]
+      properties:
+        id: { type: string }
+        label:
+          type: string
+          nullable: true
+          description: "Band header rendered above the ports (e.g. 'RJ45', 'SFP+'); null/omitted = unlabeled band"
+        portKeys:
+          type: array
+          items: { type: string }
+          description: "Item keys in panel order (left → right); must match StateItem.key of this section's items"
+
+    SwitchLayout:
+      type: object
+      required: [groups]
+      properties:
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/SwitchPortGroup'
+          description: "Bands top → bottom. Items not referenced by any band are appended after all bands."
+
     StateSection:
       type: object
       required: [id, label]
@@ -3911,6 +3935,13 @@ components:
         id: { type: string }
         label: { type: string }
         description: { type: string, nullable: true }
+        kind:
+          type: string
+          enum: [table, switch]
+          default: table
+          description: "Rendering hint — 'switch' renders a virtual switch face with per-port selection for bulk actions"
+        layout:
+          $ref: '#/components/schemas/SwitchLayout'
         items:
           type: array
           items:

@@ -625,13 +625,22 @@ async function main(): Promise<void> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ deviceId: 'dev-lite', managementAddress: `localhost:${LITE_PORT}`, credentials: creds }),
   });
-  const stateJson = (await stateRes.json()) as { collectedAt?: string; sections?: { id: string; label: string; items?: { key: string; title: string; status?: string; fields?: Record<string, unknown>; actions?: { actionId: string; prefill?: Record<string, unknown> }[] }[] }[] };
+  const stateJson = (await stateRes.json()) as { collectedAt?: string; sections?: { id: string; label: string; kind?: string; layout?: { groups: { id: string; label?: string | null; portKeys: string[] }[] }; items?: { key: string; title: string; status?: string; fields?: Record<string, unknown>; actions?: { actionId: string; prefill?: Record<string, unknown> }[] }[] }[] };
   console.log('\n== /state ==');
   check('HTTP 200', stateRes.status === 200);
   const sectionIds = (stateJson.sections ?? []).map((s) => s.id);
   check('has ports + vlans + system sections', ['ports', 'vlans', 'system'].every((id) => sectionIds.includes(id)), sectionIds);
   const portsSection = (stateJson.sections ?? []).find((s) => s.id === 'ports');
   check('10 port items', portsSection?.items?.length === 10, `count=${portsSection?.items?.length}`);
+  // Virtual switch face: kind + propagated layout must cover every port exactly once.
+  const layoutGroups = portsSection?.layout?.groups ?? [];
+  check('ports section is a virtual switch', portsSection?.kind === 'switch', portsSection?.kind);
+  const layoutKeys = layoutGroups.flatMap((g) => g.portKeys);
+  check(
+    'layout covers all 10 ports exactly once',
+    layoutKeys.length === 10 && new Set(layoutKeys).size === 10 && (portsSection?.items ?? []).every((i) => layoutKeys.includes(i.key)),
+    layoutGroups.map((g) => `${g.label ?? g.id}:${g.portKeys.length}`).join(' ')
+  );
   const p1 = portsSection?.items?.find((i) => i.key === '1');
   check('port 1 up with LAG group + learned MAC', p1?.status === 'up' && /group 5/.test(String(p1?.fields?.LAG)) && Array.isArray(p1?.fields?.MACs) && (p1.fields.MACs as string[]).includes('aa:bb:cc:dd:ee:ff'), p1);
   check('port 1 actions prefill port number', p1?.actions?.some((a) => a.actionId === 'port.config.set' && a.prefill?.port === 1), p1?.actions);

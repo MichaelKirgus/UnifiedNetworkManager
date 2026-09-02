@@ -13,8 +13,34 @@
  * executing any of them always flows through the plan workflow.
  */
 
-import { DeviceStateResponse, StateActionRef, StateItem } from '@unm/plugin-sdk';
+import { DeviceStateResponse, StateActionRef, StateItem, SwitchLayout } from '@unm/plugin-sdk';
 import { LagPort, PoePort, PortInfo, SwosSnapshot, VlanRow } from './monitoring';
+
+/**
+ * Switch-face layout for the virtual switch view. Ports with SFP diagnostics
+ * (sfpRows carry a 'port' number per populated slot) form an "SFP+" band; all
+ * other ports form the "RJ45" band — mirroring how real SwOS front panels are
+ * laid out (e.g. CRS309-1G-8S+ = 8× RJ45 + 8× SFP+). No SFP data → one band.
+ */
+function buildSwosLayout(snapshot: SwosSnapshot): SwitchLayout {
+  const sfpPorts = new Set<number>();
+  for (const row of snapshot.sfpRows) {
+    const p = Number(row['port']);
+    if (Number.isFinite(p)) sfpPorts.add(p);
+  }
+  const keysOf = (pred: (p: PortInfo) => boolean) =>
+    snapshot.ports.filter(pred).map((p) => String(p.port));
+
+  if (sfpPorts.size === 0) {
+    return { groups: [{ id: 'row-1', label: 'RJ45', portKeys: keysOf(() => true) }] };
+  }
+  const groups: SwitchLayout['groups'] = [];
+  const rj45 = keysOf((p) => !sfpPorts.has(p.port));
+  if (rj45.length > 0) groups.push({ id: 'row-rj45', label: 'RJ45', portKeys: rj45 });
+  const sfp = keysOf((p) => sfpPorts.has(p.port));
+  if (sfp.length > 0) groups.push({ id: 'row-sfp', label: 'SFP+', portKeys: sfp });
+  return { groups };
+}
 
 /** MACs learned on one physical port (the mac table's `intf` is 'port N' or 'port 1+8'). */
 function macsForPort(snapshot: SwosSnapshot, port: number): string[] {
@@ -134,7 +160,9 @@ export function buildSwosState(snapshot: SwosSnapshot): DeviceStateResponse {
       {
         id: 'ports',
         label: 'Ports',
-        description: 'Physical ports with live link state, PoE, LAG and per-port VLANs. Learned MACs show which devices are on each port.',
+        description: 'Physical ports with live link state, PoE, LAG and per-port VLANs. Learned MACs show which devices are on each port. Click ports to select them for bulk actions.',
+        kind: 'switch',
+        layout: buildSwosLayout(snapshot),
         items: portItems,
       },
       ...(vlanItems.length > 0

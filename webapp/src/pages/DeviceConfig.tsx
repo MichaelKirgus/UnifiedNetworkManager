@@ -1,11 +1,13 @@
 import { ReactNode, useMemo, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, RefreshCw, Settings2 } from 'lucide-react';
+import { ArrowLeft, CheckSquare, RefreshCw, Settings2, X } from 'lucide-react';
 import clsx from 'clsx';
 import { Layout } from '../components/Layout';
 import { StatusBadge } from '../components/StatusBadge';
 import { ActionDialog } from '../components/ActionDialog';
+import { BulkActionDialog } from '../components/BulkActionDialog';
+import { VirtualSwitch } from '../components/VirtualSwitch';
 import { api, CatalogEntry, DeviceStateResponse, StateItem, StateSection } from '../api/client';
 import { can } from '../auth/permissions';
 
@@ -73,6 +75,8 @@ export default function DeviceConfig() {
   });
 
   const [dialog, setDialog] = useState<DialogTarget | null>(null);
+  // Bulk target: one action + the selected ports of a switch section.
+  const [bulkDialog, setBulkDialog] = useState<{ pluginId: string; entry: CatalogEntry; items: StateItem[] } | null>(null);
 
   if (!device) {
     return (
@@ -149,6 +153,7 @@ export default function DeviceConfig() {
               catalogById={catalogById}
               canApply={canApply}
               onAction={(entry, prefill) => setDialog({ pluginId: activePluginId as string, entry, prefill })}
+              onBulk={(entry, items) => setBulkDialog({ pluginId: activePluginId as string, entry, items })}
             />
           ))}
         </div>
@@ -163,34 +168,36 @@ export default function DeviceConfig() {
           onClose={() => setDialog(null)}
         />
       )}
+
+      {bulkDialog && (
+        <BulkActionDialog
+          deviceId={device.id}
+          pluginId={bulkDialog.pluginId}
+          entry={bulkDialog.entry}
+          items={bulkDialog.items}
+          onClose={() => setBulkDialog(null)}
+        />
+      )}
     </Layout>
   );
 }
 
-/** One section card: header + optional section-level actions + item table. */
+/** One section card: header + optional section-level actions + item table — or,
+ *  for `kind: 'switch'` sections, a virtual switch face with bulk selection. */
 function StateSectionCard({
   section,
   catalogById,
   canApply,
   onAction,
+  onBulk,
 }: {
   section: StateSection;
   catalogById: Map<string, CatalogEntry>;
   canApply: boolean;
   onAction: (entry: CatalogEntry, prefill?: Record<string, unknown>) => void;
+  onBulk: (entry: CatalogEntry, items: StateItem[]) => void;
 }) {
   const items = section.items ?? [];
-
-  // Column set = union of field keys across all items (stable insertion order).
-  const columns = useMemo(() => {
-    const cols: string[] = [];
-    for (const item of items) {
-      for (const key of Object.keys(item.fields)) {
-        if (!cols.includes(key)) cols.push(key);
-      }
-    }
-    return cols;
-  }, [items]);
 
   // Section-level actions whose catalog entry is known.
   const sectionActions = (section.actions ?? []).filter((a) => catalogById.has(a.actionId));
@@ -214,30 +221,149 @@ function StateSectionCard({
         )}
       </div>
 
-      {items.length === 0 ? (
-        <div className="px-4 py-3 text-xs text-slate-400">No items reported.</div>
+      {section.kind === 'switch' ? (
+        <SwitchSection section={section} catalogById={catalogById} canApply={canApply} onBulk={onBulk} />
       ) : (
-        <table className="w-full text-left text-sm">
-          <thead className="border-b border-slate-200 bg-white text-[11px] uppercase tracking-wide text-slate-500">
-            <tr>
-              <th className="px-4 py-2">Name</th>
-              {columns.map((c) => (
-                <th key={c} className="px-3 py-2 capitalize">
-                  {humanize(c)}
-                </th>
-              ))}
-              <th className="px-3 py-2">Status</th>
-              {canApply && <th className="w-40 px-3 py-2 text-right">Actions</th>}
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((item) => (
-              <StateItemRow key={item.key} item={item} columns={columns} catalogById={catalogById} canApply={canApply} onAction={onAction} />
-            ))}
-          </tbody>
-        </table>
+        <TableSection items={items} catalogById={catalogById} canApply={canApply} onAction={onAction} />
       )}
     </div>
+  );
+}
+
+/** The classic item table for `kind: 'table'` sections. */
+function TableSection({
+  items,
+  catalogById,
+  canApply,
+  onAction,
+}: {
+  items: StateItem[];
+  catalogById: Map<string, CatalogEntry>;
+  canApply: boolean;
+  onAction: (entry: CatalogEntry, prefill?: Record<string, unknown>) => void;
+}) {
+  // Column set = union of field keys across all items (stable insertion order).
+  const columns = useMemo(() => {
+    const cols: string[] = [];
+    for (const item of items) {
+      for (const key of Object.keys(item.fields)) {
+        if (!cols.includes(key)) cols.push(key);
+      }
+    }
+    return cols;
+  }, [items]);
+
+  if (items.length === 0) {
+    return <div className="px-4 py-3 text-xs text-slate-400">No items reported.</div>;
+  }
+
+  return (
+    <table className="w-full text-left text-sm">
+      <thead className="border-b border-slate-200 bg-white text-[11px] uppercase tracking-wide text-slate-500">
+        <tr>
+          <th className="px-4 py-2">Name</th>
+          {columns.map((c) => (
+            <th key={c} className="px-3 py-2 capitalize">
+              {humanize(c)}
+            </th>
+          ))}
+          <th className="px-3 py-2">Status</th>
+          {canApply && <th className="w-40 px-3 py-2 text-right">Actions</th>}
+        </tr>
+      </thead>
+      <tbody>
+        {items.map((item) => (
+          <StateItemRow key={item.key} item={item} columns={columns} catalogById={catalogById} canApply={canApply} onAction={onAction} />
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/** A `kind: 'switch'` section — virtual switch face + bulk action bar. Ports are
+ *  selected by clicking (checkbox overlay); the bar offers every catalog action
+ *  that at least one selected port supports, applied to all of them at once. */
+function SwitchSection({
+  section,
+  catalogById,
+  canApply,
+  onBulk,
+}: {
+  section: StateSection;
+  catalogById: Map<string, CatalogEntry>;
+  canApply: boolean;
+  onBulk: (entry: CatalogEntry, items: StateItem[]) => void;
+}) {
+  const items = section.items ?? [];
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+
+  // Selection survives state refreshes — drop keys that no longer exist.
+  const validSelected = useMemo(
+    () => new Set([...selectedKeys].filter((k) => items.some((i) => i.key === k))),
+    [selectedKeys, items]
+  );
+
+  function toggleKey(key: string) {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  // Actions offered in the bulk bar: catalog entries referenced by at least one
+  // selected item's action list. Order follows first appearance across items.
+  const bulkActions = useMemo(() => {
+    if (!canApply || validSelected.size === 0) return [];
+    const seen = new Map<string, CatalogEntry>();
+    for (const item of items) {
+      if (!validSelected.has(item.key)) continue;
+      for (const ref of item.actions ?? []) {
+        const entry = catalogById.get(ref.actionId);
+        if (entry && !seen.has(entry.id)) seen.set(entry.id, entry);
+      }
+    }
+    return Array.from(seen.values());
+  }, [canApply, validSelected, items, catalogById]);
+
+  const selectedItems = useMemo(
+    () => items.filter((i) => validSelected.has(i.key)),
+    [items, validSelected]
+  );
+
+  // Read-only faces (no item carries a known executable action) render without
+  // selection affordances — clicking would offer nothing to do.
+  const selectable = canApply && items.some((i) => (i.actions ?? []).some((a) => catalogById.has(a.actionId)));
+
+  if (items.length === 0) {
+    return <div className="px-4 py-3 text-xs text-slate-400">No ports reported.</div>;
+  }
+
+  return (
+    <>
+      <VirtualSwitch items={items} layout={section.layout} selectedKeys={validSelected} onToggleKey={toggleKey} selectable={selectable} />
+      {canApply && validSelected.size > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-slate-200 bg-indigo-50/60 px-4 py-2.5">
+          <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-800">
+            <CheckSquare className="h-3.5 w-3.5" />
+            {validSelected.size} port{validSelected.size === 1 ? '' : 's'} selected
+          </span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {bulkActions.map((entry) => (
+              <ActionButton key={entry.id} entry={entry} onClick={() => onBulk(entry, selectedItems)} />
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => setSelectedKeys(new Set())}
+            className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-slate-500 hover:bg-white/70 hover:text-slate-800"
+          >
+            <X className="h-3 w-3" /> Clear selection
+          </button>
+        </div>
+      )}
+    </>
   );
 }
 

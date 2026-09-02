@@ -392,11 +392,31 @@ export interface StateItem {
   actions?: StateActionRef[];
 }
 
+/** One band of ports on a virtual switch face — e.g. one physical row, or an SFP+/PoE section. */
+export interface SwitchPortGroup {
+  id: string;
+  /** Band header rendered above the ports (e.g. 'RJ45', 'SFP+'); null/omitted = unlabeled band. */
+  label?: string | null;
+  /** Item keys in panel order (left → right). Keys must match StateItem.key of this section's items. */
+  portKeys: string[];
+}
+
+/** Plugin-propagated switch-face layout for a `kind: 'switch'` state section.
+ *  When absent the webapp falls back to a generic layout (balanced rows, no labels). */
+export interface SwitchLayout {
+  /** Bands top → bottom. Items not referenced by any band are appended after all bands. */
+  groups: SwitchPortGroup[];
+}
+
 /** A horizontal band of the Config page — e.g. Ports, Interfaces, Pools, System. */
 export interface StateSection {
   id: string;
   label: string;
   description?: string | null;
+  /** Rendering hint: 'table' (default) renders the item table; 'switch' renders a virtual switch face with per-port selection for bulk actions. */
+  kind?: 'table' | 'switch';
+  /** Switch-face layout (only meaningful when kind === 'switch'). */
+  layout?: SwitchLayout | null;
   items?: StateItem[];
   /** Section-level actions with no item context (e.g. reboot system). */
   actions?: StateActionRef[];
