@@ -305,6 +305,54 @@ export function internalRouter() {
     }
   });
 
+  // --- WebAuthn credential data (identity provider access) ------------------
+  //
+  // The API owns the webauthn_credentials table; the basic-auth plugin reads a
+  // user's enrolled credentials to verify login assertions and bumps the
+  // signature counter after success. Same shared-key convention as /plugin/users.
+
+  // GET /plugin/webauthn/user/:userId - all passkeys of one user (login step 2).
+  router.get('/plugin/webauthn/user/:userId', pluginAuth, async (req: Request, res: Response) => {
+    const { userId } = req.params;
+    try {
+      const rows = await db.query.webauthnCredentials.findMany({
+        where: eq(schema.webauthnCredentials.userId, userId),
+      });
+      res.json(
+        rows.map((c) => ({
+          id: c.id,
+          credentialId: c.credentialId,
+          publicKey: c.publicKey,
+          counter: Number(c.counter ?? 0),
+          transports: c.transports ? JSON.parse(c.transports) : null,
+        }))
+      );
+    } catch (error) {
+      console.error('Error listing webauthn credentials:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // PATCH /plugin/webauthn/credentials/:id - bump the signature counter after a
+  // successful assertion (replay protection; SimpleWebAuthn requires the stored
+  // counter to be <= the reported one).
+  router.patch('/plugin/webauthn/credentials/:id', pluginAuth, async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { counter } = req.body ?? {};
+    if (!Number.isInteger(counter) || counter < 0) {
+      return res.status(400).json({ error: 'counter must be a non-negative integer' });
+    }
+    try {
+      await db.update(schema.webauthnCredentials)
+        .set({ counter })
+        .where(eq(schema.webauthnCredentials.id, id));
+      res.json({ id });
+    } catch (error) {
+      console.error('Error updating webauthn credential counter:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   // --- Plugin log ingestion -------------------------------------------------
   //
   // Plugins push structured log entries in batches (see the SDK's

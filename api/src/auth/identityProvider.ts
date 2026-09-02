@@ -2,6 +2,8 @@ import axios from 'axios';
 import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
+import { buildAuthenticationOptions, generateWebauthnNonce } from './webauthn';
+import { resolveCredentialPolicy } from './credentialPolicy';
 
 /**
  * Identity provider broker.
@@ -171,13 +173,31 @@ async function callProvider<T>(
 
 /**
  * Step 1: verify credentials. Returns a challenge token (2FA pending).
+ *
+ * The user's effective credential policy is resolved HERE and forwarded to the
+ * provider, which enforces it: if `requiredMethods` is non-empty but none of
+ * the allowed methods is enrolled, login fails with `no_2fa_enrolled`.
  */
 export async function login(username: string, password: string): Promise<LoginResult> {
   const provider = await resolveActiveProvider();
+
+  // Resolve the user's policy up-front (best-effort — an unknown username just
+  // gets the global default; the provider will reject the credentials anyway).
+  let requiredMethods: string[] | undefined;
+  try {
+    const row = await db.query.users.findFirst({ where: eq(schema.users.username, username) });
+    if (row) {
+      const policy = await resolveCredentialPolicy(row.id);
+      requiredMethods = [...policy.requiredMethods];
+    }
+  } catch {
+    // DB hiccup — let the provider decide with its own defaults.
+  }
+
   const data = await callProvider<{
     twoFactorRequired?: boolean;
     challengeToken?: string;
-  }>(provider, '/auth/login', { username, password });
+  }>(provider, '/auth/login', { username, password, policy: { requiredMethods } });
 
   if (!data.challengeToken) {
     throw Object.assign(new Error('Identity provider did not return a challenge token'), { status: 502 });
@@ -194,6 +214,71 @@ export async function verify2fa(challengeToken: string, code: string): Promise<I
   const data = await callProvider<{ identity?: IdentityAssertion }>(provider, '/auth/2fa/verify', {
     challengeToken,
     code,
+  });
+
+  if (!data.identity) {
+    throw Object.assign(new Error('Identity provider did not return a verified identity'), { status: 502 });
+  }
+
+  return data.identity;
+}
+
+/**
+ * Step 2 (passkey variant): fetch WebAuthn assertion options for a pending
+ * challenge. The API generates the nonce + options (it owns the RP identity);
+ * the provider binds the nonce to its in-memory challenge entry so the later
+ * verify call can reject replays/mismatches.
+ */
+export async function webauthnAssertionOptions(challengeToken: string): Promise<{
+  // PublicKeyCredentialRequestOptionsJSON from @simplewebauthn/server.
+  options: unknown;
+  nonce: string;
+}> {
+  const provider = await resolveActiveProvider();
+
+  // Generate the nonce FIRST so it can be both bound to the challenge entry
+  // (replay protection) and used as the WebAuthn challenge.
+  const nonce = generateWebauthnNonce();
+
+  // Ask the provider to validate the challenge and bind our nonce to it. It
+  // returns the user's enrolled credential ids so we can restrict the browser
+  // prompt to this account's passkeys (allowCredentials).
+  const data = await callProvider<{
+    userId?: string;
+    username?: string;
+    credentialIds?: string[];
+  }>(provider, '/auth/webauthn/assertion-options', { challengeToken, nonce });
+
+  if (!data.userId || !data.username) {
+    throw Object.assign(new Error('Identity provider did not accept the challenge token'), { status: 502 });
+  }
+
+  const options = await buildAuthenticationOptions({
+    userId: data.userId,
+    username: data.username,
+    allowCredentials: Array.isArray(data.credentialIds) ? data.credentialIds : [],
+    nonceOverride: nonce,
+  });
+
+  return { options, nonce };
+}
+
+/**
+ * Step 2 (passkey variant): verify a WebAuthn assertion for a pending
+ * challenge and return the verified identity. The provider checks the stored
+ * nonce, the credential policy, and the signature/counter; it bumps the
+ * counter through an internal API route.
+ */
+export async function verifyWebauthn(
+  challengeToken: string,
+  response: unknown,
+  nonce: string
+): Promise<IdentityAssertion> {
+  const provider = await resolveActiveProvider();
+  const data = await callProvider<{ identity?: IdentityAssertion }>(provider, '/auth/webauthn/verify', {
+    challengeToken,
+    response,
+    nonce,
   });
 
   if (!data.identity) {

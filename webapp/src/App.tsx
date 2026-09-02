@@ -21,6 +21,7 @@ import Users from './pages/Users';
 import Roles from './pages/Roles';
 import Tokens from './pages/Tokens';
 import Workers from './pages/Workers';
+import CredentialPolicies from './pages/CredentialPolicies';
 import MyAccount from './pages/MyAccount';
 import { can } from './auth/permissions';
 
@@ -40,6 +41,9 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
   { path: '/topology', permission: 'topology:read' },
   // Layers is open to every authenticated user (no read permission).
   { path: '/layers' },
+  // Credential policies are readable by everyone; editing is gated server-side
+  // on auth:policies:write (the page renders read-only without it).
+  { path: '/credential-policies' },
   { path: '/sites', permission: 'sites:read' },
   { path: '/secrets', permission: 'secrets:read' },
   { path: '/config-jobs', permission: 'config-jobs:read' },
@@ -88,6 +92,8 @@ export default function App() {
       <Route path="/topology" element={<Page permission="topology:read"><Topology /></Page>} />
       {/* Network layer registry — open to every authenticated user. */}
       <Route path="/layers" element={<Page><Layers /></Page>} />
+      {/* Credential policies — readable by everyone, editing gated in-page. */}
+      <Route path="/credential-policies" element={<Page><CredentialPolicies /></Page>} />
       <Route path="/users" element={<Page permission="users:read"><Users /></Page>} />
       <Route path="/roles" element={<Page permission="users:write"><Roles /></Page>} />
       <Route path="/tokens" element={<Page permission="tokens:manage"><Tokens /></Page>} />

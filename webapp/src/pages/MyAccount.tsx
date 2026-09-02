@@ -3,6 +3,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { ShieldCheck, ShieldOff } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { TotpEnrollmentDialog } from '../components/TotpEnrollmentDialog';
+import { PasskeyManager } from '../components/PasskeyManager';
 import { api, TotpEnrollment } from '../api/client';
 import { can } from '../auth/permissions';
 
@@ -154,13 +155,13 @@ export default function MyAccount() {
                   </button>
                 </form>
 
-                {/* 2FA management */}
+                {/* TOTP management */}
                 <div className="space-y-3">
-                  <h3 className="text-sm font-semibold text-slate-700">Two-factor authentication</h3>
-                  {me.twoFactorEnabled ? (
+                  <h3 className="text-sm font-semibold text-slate-700">Authenticator app (TOTP)</h3>
+                  {me.totpEnabled ? (
                     <>
                       <p className="flex items-center gap-2 text-sm text-green-700">
-                        <ShieldCheck className="h-4 w-4" /> 2FA is enabled on your account.
+                        <ShieldCheck className="h-4 w-4" /> TOTP is enrolled on your account.
                       </p>
                       <div className="flex flex-wrap gap-2">
                         <button
@@ -175,12 +176,12 @@ export default function MyAccount() {
                           type="button"
                           disabled={disableTotp.isPending}
                           onClick={() => {
-                            if (!window.confirm('Disable 2FA on your account?')) return;
+                            if (!window.confirm('Disable TOTP on your account?')) return;
                             disableTotp.mutate();
                           }}
                           className="inline-flex items-center gap-1.5 rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
                         >
-                          <ShieldOff className="h-4 w-4" /> Disable 2FA
+                          <ShieldOff className="h-4 w-4" /> Disable TOTP
                         </button>
                       </div>
                     </>
@@ -193,11 +194,21 @@ export default function MyAccount() {
                         onClick={() => enrollTotp.mutate()}
                         className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
                       >
-                        Enroll 2FA (show QR code)
+                        Enroll TOTP (show QR code)
                       </button>
                     </>
                   )}
                 </div>
+              </div>
+
+              {/* Passkeys (multiple allowed — one per device) */}
+              <div className="mt-6 border-t border-slate-100 pt-4">
+                <h3 className="mb-2 text-sm font-semibold text-slate-700">Passkeys</h3>
+                <p className="mb-3 text-xs text-slate-400">
+                  Sign in with your device's built-in authenticator instead of a TOTP code. You can enroll one per
+                  device — all of them work for this account.
+                </p>
+                <PasskeyManager userId={me.id} username={me.username} />
               </div>
             </div>
           ) : (

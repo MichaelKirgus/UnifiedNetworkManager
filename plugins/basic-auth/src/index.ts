@@ -9,7 +9,8 @@ import {
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { verifyTotp } from './totp';
-import { getUserByUsername, getUserById } from './apiClient';
+import { getUserByUsername, getUserById, getWebauthnCredentials, updateWebauthnCredentialCounter } from './apiClient';
+import { verifyAssertion } from './webauthn';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000001';
 export const PLUGIN_NAME = 'Basic Auth (Local Users + TOTP)';
@@ -72,6 +73,10 @@ const logger = createPluginLogger(identity);
 interface ChallengeEntry {
   userId: string;
   expiresAt: number;
+  // WebAuthn nonce bound to this challenge (set when assertion options are
+  // requested). The verify endpoint rejects any response whose challenge does
+  // not match — replay protection across the two-step flow.
+  webauthnNonce?: string;
 }
 const challenges = new Map<string, ChallengeEntry>();
 
@@ -87,9 +92,15 @@ function purgeExpiredChallenges(): void {
 /**
  * Step 1: verify credentials. On success, issues a single-use challenge token
  * (2FA pending). The API broker forwards this to the webapp.
+ *
+ * Credential policy enforcement: the API resolves the user's effective policy
+ * and passes `policy.requiredMethods` (which enrolled 2nd factors satisfy step
+ * 2; empty = no 2FA required). When non-empty but NONE of the allowed methods
+ * is enrolled, login fails with the distinct `no_2fa_enrolled` error so the UI
+ * can point to enrollment.
  */
 app.post('/auth/login', requirePluginKey, async (req, res) => {
-  const { username, password } = req.body ?? {};
+  const { username, password, policy } = req.body ?? {};
   logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
 
   let user;
@@ -105,6 +116,34 @@ app.post('/auth/login', requirePluginKey, async (req, res) => {
     logger.error(`User lookup failed during login for "${typeof username === 'string' ? username : '?'}": ${(err as Error).message}`, { context: { username } });
     res.status(502).json({ error: 'Identity backend unavailable' });
     return;
+  }
+
+  // Policy check (best-effort — a lookup failure must not lock everyone out).
+  const requiredMethods = Array.isArray(policy?.requiredMethods) ? policy.requiredMethods : [];
+  if (requiredMethods.length > 0) {
+    try {
+      const hasTotp = Boolean(user.totpSecret);
+      let passkeyCount = 0;
+      if (!hasTotp || !requiredMethods.includes('totp')) {
+        // Only fetch credentials when they could satisfy the policy.
+        if (requiredMethods.includes('webauthn')) {
+          const creds = await getWebauthnCredentials(user.id);
+          passkeyCount = creds.length;
+        }
+      }
+      const satisfies =
+        (requiredMethods.includes('totp') && hasTotp) ||
+        (requiredMethods.includes('webauthn') && passkeyCount > 0);
+      if (!satisfies) {
+        logger.warn(`Login blocked for "${user.username}": no enrolled second factor satisfies the credential policy`, { context: { username: user.username, requiredMethods } });
+        res.status(401).json({ error: 'no_2fa_enrolled' });
+        return;
+      }
+    } catch (err) {
+      logger.error(`Credential policy check failed during login for "${user.username}": ${(err as Error).message}`);
+      // Fail open on the 2FA-enrollment check — step 2 still requires a valid
+      // TOTP code or passkey assertion, so no security is lost.
+    }
   }
 
   purgeExpiredChallenges();
@@ -168,6 +207,143 @@ app.post('/auth/2fa/verify', requirePluginKey, async (req, res) => {
       roles,
       permissions,
       amr: totpVerified ? ['totp'] : ['pwd'],
+    },
+  });
+});
+
+/**
+ * Step 2 (passkey variant, part a): bind the WebAuthn nonce to a pending
+ * challenge. Called by the API broker AFTER it generated the assertion options
+ * (the nonce doubles as the WebAuthn challenge). Returns the user's enrolled
+ * credential ids so the browser prompt is restricted to this account.
+ */
+app.post('/auth/webauthn/assertion-options', requirePluginKey, async (req, res) => {
+  const { challengeToken, nonce } = req.body ?? {};
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
+
+  purgeExpiredChallenges();
+  const entry = typeof challengeToken === 'string' ? challenges.get(challengeToken) : undefined;
+  if (!entry || typeof nonce !== 'string' || !nonce) {
+    res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
+    return;
+  }
+
+  entry.webauthnNonce = nonce;
+
+  let credentialIds: string[] = [];
+  try {
+    const creds = await getWebauthnCredentials(entry.userId);
+    credentialIds = creds.map((c) => c.credentialId);
+  } catch (err) {
+    logger.error(`Passkey lookup failed during assertion-options for challenge: ${(err as Error).message}`);
+    res.status(502).json({ error: 'Identity backend unavailable' });
+    return;
+  }
+
+  let user;
+  try {
+    user = await getUserById(entry.userId);
+  } catch (err) {
+    logger.error(`User lookup failed during assertion-options: ${(err as Error).message}`);
+    res.status(502).json({ error: 'Identity backend unavailable' });
+    return;
+  }
+  if (!user) {
+    challenges.delete(challengeToken);
+    res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
+    return;
+  }
+
+  res.status(200).json({ userId: user.id, username: user.username, credentialIds });
+});
+
+/**
+ * Step 2 (passkey variant, part b): verify the WebAuthn assertion for a
+ * pending challenge and return the verified identity. The nonce must match the
+ * one bound in part a; the response is checked against every enrolled
+ * credential of the user (first valid one wins). On success the signature
+ * counter is bumped and the challenge consumed.
+ */
+app.post('/auth/webauthn/verify', requirePluginKey, async (req, res) => {
+  const { challengeToken, response, nonce } = req.body ?? {};
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
+
+  purgeExpiredChallenges();
+  const entry = typeof challengeToken === 'string' ? challenges.get(challengeToken) : undefined;
+  if (!entry || !entry.webauthnNonce || entry.webauthnNonce !== nonce) {
+    // Unknown/expired challenge OR nonce mismatch (replay attempt).
+    logger.warn('WebAuthn verification with an invalid, expired or replayed challenge/nonce');
+    res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
+    return;
+  }
+
+  let user;
+  try {
+    user = await getUserById(entry.userId);
+  } catch (err) {
+    logger.error(`User lookup failed during WebAuthn verification: ${(err as Error).message}`);
+    res.status(502).json({ error: 'Identity backend unavailable' });
+    return;
+  }
+  if (!user) {
+    challenges.delete(challengeToken);
+    res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
+    return;
+  }
+
+  let credentials;
+  try {
+    credentials = await getWebauthnCredentials(user.id);
+  } catch (err) {
+    logger.error(`Passkey lookup failed during WebAuthn verification: ${(err as Error).message}`);
+    res.status(502).json({ error: 'Identity backend unavailable' });
+    return;
+  }
+
+  if (response === undefined || response === null) {
+    challenges.delete(challengeToken);
+    res.status(401).json({ error: 'Passkey verification failed' });
+    return;
+  }
+
+  // Try each enrolled credential (multiple passkeys = multiple devices).
+  let verified: { credentialDbId: string; newCounter: number } | null = null;
+  for (const cred of credentials) {
+    try {
+      const result = await verifyAssertion({ response, expectedChallenge: entry.webauthnNonce, credential: cred });
+      verified = { credentialDbId: result.credentialDbId, newCounter: result.newCounter };
+      break;
+    } catch {
+      // Not this credential — try the next one.
+    }
+  }
+
+  if (!verified) {
+    logger.warn(`WebAuthn assertion rejected for "${user.username}" (no enrolled credential matched)`);
+    challenges.delete(challengeToken);
+    res.status(401).json({ error: 'Passkey verification failed' });
+    return;
+  }
+
+  // Bump the counter (best-effort — a failure here must not block login).
+  try {
+    await updateWebauthnCredentialCounter(verified.credentialDbId, verified.newCounter);
+  } catch (err) {
+    logger.error(`Failed to bump passkey counter after successful assertion: ${(err as Error).message}`);
+  }
+
+  challenges.delete(challengeToken);
+
+  const roles = JSON.parse(user.roles) as string[];
+  const permissions = JSON.parse(user.permissions) as string[];
+
+  res.status(200).json({
+    identity: {
+      userId: user.id,
+      username: user.username,
+      roles,
+      permissions,
+      amr: ['pwd', 'webauthn'],
     },
   });
 });

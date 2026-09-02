@@ -43,11 +43,13 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [flow]
+                required: [flow, supportsPasskey]
                 properties:
                   flow:
                     type: string
                     enum: [password, oauth2, ldap, saml]
+                  # True when the active provider supports passkey (WebAuthn) step-2.
+                  supportsPasskey: { type: boolean }
         '503':
           description: No identity provider available
 
@@ -105,8 +107,72 @@ paths:
                   twoFactorRequired: { type: boolean }
         '401':
           description: Invalid username or password
+        '403':
+          description: >-
+            No enrolled second factor satisfies the user's credential policy
+            (error code `no_2fa_enrolled`) — enroll TOTP/passkey first.
         '429':
           description: Too many login attempts
+
+  /auth/webauthn/assertion-options:
+    get:
+      tags: [Authentication]
+      summary: Fetch WebAuthn assertion options for a pending login challenge
+      description: >-
+        Step 2a of passkey sign-in. The API generates the nonce + options (it
+        owns the relying-party identity); the provider binds the nonce to its
+        in-memory challenge entry. The webapp then calls
+        navigator.credentials.get() with `options` and posts the result back to
+        /auth/webauthn/verify together with `nonce`.
+      security: []
+      parameters:
+        - in: query
+          name: challengeToken
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Assertion options + nonce
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebauthnAssertionOptionsResponse'
+        '401':
+          description: Invalid or expired challenge token
+        '503':
+          description: No identity provider available
+
+  /auth/webauthn/verify:
+    post:
+      tags: [Authentication]
+      summary: Complete login using a WebAuthn passkey assertion
+      description: >-
+        Step 2b of passkey sign-in. Verifies the browser's assertion against
+        one of the user's enrolled credentials (nonce must match the one bound
+        in /auth/webauthn/assertion-options) and mints the session JWT — same
+        response shape as /auth/2fa/verify, with amr ['pwd','webauthn'].
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challengeToken, response, nonce]
+              properties:
+                challengeToken: { type: string }
+                # PublicKeyCredentialAuthenticationResponse from the browser.
+                response: { type: object }
+                nonce: { type: string }
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginSessionResponse'
+        '401':
+          description: Invalid/expired challenge, nonce mismatch, or assertion rejected
 
   /auth/2fa/verify:
     post:
@@ -129,20 +195,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [accessToken, expiresIn, username, roles, permissions]
-                properties:
-                  accessToken: { type: string }
-                  expiresIn: { type: integer }
-                  username: { type: string }
-                  roles:
-                    type: array
-                    items: { type: string }
-                  # Effective permission set: the user's explicit grants unioned
-                  # with every permission of their assigned roles.
-                  permissions:
-                    type: array
-                    items: { type: string }
+                $ref: '#/components/schemas/LoginSessionResponse'
         '401':
           description: Invalid or expired 2FA challenge/token
 
@@ -170,6 +223,125 @@ paths:
                         items: { type: string }
         '401':
           description: Authentication required
+
+  # --- Credential policies (2FA requirements + gate AMRs) -------------------
+  # A per-user row overrides the global default entirely (user policy wins).
+  # The require2FA gate reads these rows LIVE on every privileged request.
+
+  /auth/policies/global:
+    get:
+      tags: [Authentication]
+      summary: Get the global credential policy
+      description: >-
+        The default policy applied to every user without a per-user override.
+        Readable by any authenticated user; editing requires auth:policies:write.
+      responses:
+        '200':
+          description: Global policy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [policy]
+                properties:
+                  policy: { $ref: '#/components/schemas/CredentialPolicy' }
+        '401':
+          description: Authentication required
+    put:
+      tags: [Authentication]
+      summary: Update the global credential policy
+      description: >-
+        Requires permission `auth:policies:write`. Partial updates are allowed —
+        only the provided fields change. gateAmrs must keep at least one entry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CredentialPolicyUpdateRequest' }
+      responses:
+        '200':
+          description: Updated global policy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [policy]
+                properties:
+                  policy: { $ref: '#/components/schemas/CredentialPolicy' }
+        '400':
+          description: Invalid payload (unknown method/amr, empty gateAmrs)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing auth:policies:write permission
+
+  /users/{id}/policy:
+    get:
+      tags: [Users]
+      summary: Get the effective credential policy for a user
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Effective policy + its source (user | global | default)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialPolicyWithSource' }
+        '401':
+          description: Authentication required
+    put:
+      tags: [Users]
+      summary: Set a per-user credential policy override
+      description: >-
+        Requires permission `auth:policies:write`. Creates or updates the
+        user's override, which wins over the global default. Partial updates are
+        allowed — only the provided fields change.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CredentialPolicyUpdateRequest' }
+      responses:
+        '200':
+          description: Updated per-user policy (source = user)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialPolicyWithSource' }
+        '400':
+          description: Invalid payload (unknown method/amr, empty gateAmrs)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing auth:policies:write permission
+    delete:
+      tags: [Users]
+      summary: Clear a per-user credential policy override
+      description: >-
+        Requires permission `auth:policies:write`. Removes the user's override so
+        the global default applies again. Returns the now-effective (global) policy.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Effective policy after clearing (source = global)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialPolicyWithSource' }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing auth:policies:write permission
 
   /devices:
     get:
@@ -2245,6 +2417,139 @@ paths:
         '404':
           description: User not found
 
+  # --- Passkeys (WebAuthn) — multiple per user, one row per device ----------
+
+  /users/{id}/passkeys:
+    get:
+      tags: [Users]
+      summary: List a user's enrolled passkeys
+      description: >-
+        Self requires `users:self-credentials`; another user requires
+        `users:manage-credentials`. Returns display metadata only (no key material).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Passkey list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PasskeyCredential' }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing users:self-credentials / users:manage-credentials permission
+    post:
+      tags: [Users]
+      summary: Start passkey enrollment (fetch registration options)
+      description: >-
+        Self requires `users:self-credentials`; another user requires
+        `users:manage-credentials`. Returns WebAuthn registration options for
+        navigator.credentials.create() plus the nonce to echo back on completion.
+        Already-enrolled credentials are excluded so each device gets a new one.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label: { type: string, maxLength: 120 }
+      responses:
+        '200':
+          description: Registration options + nonce
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebauthnRegistrationOptionsResponse' }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing users:self-credentials / users:manage-credentials permission
+        '404':
+          description: User not found
+
+  /users/{id}/passkeys/verify:
+    post:
+      tags: [Users]
+      summary: Complete passkey enrollment (verify attestation)
+      description: >-
+        Self requires `users:self-credentials`; another user requires
+        `users:manage-credentials`. Verifies the browser's creation response
+        against the nonce from /users/{id}/passkeys and stores the credential.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nonce, response]
+              properties:
+                nonce: { type: string }
+                # PublicKeyCredentialCreationResponse from the browser.
+                response: { type: object }
+                label: { type: string, maxLength: 120 }
+      responses:
+        '201':
+          description: Passkey enrolled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [credential]
+                properties:
+                  credential: { $ref: '#/components/schemas/PasskeyCredential' }
+        '400':
+          description: Missing nonce or response
+        '401':
+          description: Authentication required or attestation verification failed
+        '403':
+          description: Missing users:self-credentials / users:manage-credentials permission
+        '404':
+          description: User not found
+        '409':
+          description: This passkey is already enrolled
+
+  /users/{id}/passkeys/{credentialId}:
+    delete:
+      tags: [Users]
+      summary: Remove a passkey from a user
+      description: >-
+        Self requires `users:self-credentials`; another user requires
+        `users:manage-credentials`. Scoped by BOTH user and credential id — an
+        admin can revoke any device of any user. The device stops working immediately.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: credentialId
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Passkey removed
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing users:self-credentials / users:manage-credentials permission
+        '404':
+          description: Passkey not found
+
   /roles:
     get:
       tags: [Users]
@@ -2515,10 +2820,13 @@ components:
       bearerFormat: JWT
       description: >-
         Authenticated JWT used for RBAC protected endpoints. Privileged operations
-        marked with `x-2fa-required: true` additionally expect a token with a 2FA
-        completion claim (for example `amr` includes `totp`). Long-lived API tokens
-        (`unm_…`, created via POST /tokens) are also accepted as bearer credentials;
-        they can never satisfy a 2FA requirement.
+        marked with `x-2fa-required: true` additionally expect the session's `amr`
+        claim to intersect the user's credential-policy gate (`gateAmrs`, managed
+        via /auth/policies/global and /users/{id}/policy — default ['totp'], may
+        include 'webauthn' for passkey sessions). The policy is evaluated LIVE on
+        each request, so admin changes apply immediately to existing sessions.
+        Long-lived API tokens (`unm_…`, created via POST /tokens) are also accepted
+        as bearer credentials; they can never satisfy a 2FA requirement.
 
   schemas:
     Secret:
@@ -2822,7 +3130,7 @@ components:
 
     User:
       type: object
-      required: [id, username, roles, permissions, twoFactorEnabled, createdAt]
+      required: [id, username, roles, permissions, twoFactorEnabled, totpEnabled, passkeyCount, createdAt]
       properties:
         id: { type: string }
         username: { type: string }
@@ -2833,7 +3141,9 @@ components:
         permissions:
           type: array
           items: { type: string }
-        twoFactorEnabled: { type: boolean, description: "Whether a TOTP secret is enrolled" }
+        twoFactorEnabled: { type: boolean, description: "Whether ANY second factor is enrolled (TOTP or ≥1 passkey)" }
+        totpEnabled: { type: boolean, description: "Whether a TOTP secret is enrolled" }
+        passkeyCount: { type: integer, minimum: 0, description: "Number of enrolled passkeys (one per device)" }
         createdAt: { type: string, format: date-time }
 
     UserCreateRequest:
@@ -2881,6 +3191,89 @@ components:
           $ref: '#/components/schemas/User'
         enrollment:
           $ref: '#/components/schemas/TotpEnrollment'
+
+    # --- Passkeys (WebAuthn) + credential policies ---------------------------
+
+    LoginSessionResponse:
+      type: object
+      required: [accessToken, expiresIn, username, roles, permissions]
+      properties:
+        accessToken: { type: string }
+        expiresIn: { type: integer }
+        username: { type: string }
+        roles:
+          type: array
+          items: { type: string }
+        # Effective permission set: the user's explicit grants unioned with every
+        # permission of their assigned roles.
+        permissions:
+          type: array
+          items: { type: string }
+
+    WebauthnAssertionOptionsResponse:
+      type: object
+      required: [options, nonce]
+      properties:
+        # PublicKeyCredentialRequestOptionsJSON — pass straight to navigator.credentials.get().
+        options: { type: object }
+        # Echo back with the assertion response (replay protection).
+        nonce: { type: string }
+
+    WebauthnRegistrationOptionsResponse:
+      type: object
+      required: [options, nonce]
+      properties:
+        # PublicKeyCredentialCreationOptionsJSON — pass to navigator.credentials.create().
+        options: { type: object }
+        # Echo back with the creation response (attestation is verified against it).
+        nonce: { type: string }
+
+    PasskeyCredential:
+      type: object
+      required: [id, credentialId, createdAt]
+      properties:
+        id: { type: string }
+        credentialId: { type: string, description: "Base64url credential identifier from the authenticator" }
+        label: { type: [string, 'null'], description: "User-assigned display name (e.g. device name)" }
+        transports:
+          type: array
+          items: { type: string }
+          description: "Authenticator transports (platform | hybrid | roaming)"
+        createdAt: { type: string, format: date-time }
+
+    CredentialPolicy:
+      type: object
+      required: [requiredMethods, gateAmrs]
+      properties:
+        # Enrolled methods that satisfy login step 2; empty = no 2FA required.
+        requiredMethods:
+          type: array
+          items: { type: string, enum: [totp, webauthn] }
+        # Session AMRs that satisfy the require2FA gate (privileged endpoints).
+        gateAmrs:
+          type: array
+          minItems: 1
+          items: { type: string, enum: [pwd, totp, webauthn] }
+
+    CredentialPolicyUpdateRequest:
+      type: object
+      minProperties: 1
+      properties:
+        requiredMethods:
+          type: array
+          items: { type: string, enum: [totp, webauthn] }
+        gateAmrs:
+          type: array
+          minItems: 1
+          items: { type: string, enum: [pwd, totp, webauthn] }
+
+    CredentialPolicyWithSource:
+      type: object
+      required: [policy, source]
+      properties:
+        policy: { $ref: '#/components/schemas/CredentialPolicy' }
+        # Where the effective policy comes from.
+        source: { type: string, enum: [user, global, default] }
 
     UserUpdateRequest:
       type: object

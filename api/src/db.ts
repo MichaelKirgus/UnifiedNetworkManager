@@ -509,6 +509,45 @@ export async function initDb(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_plugin_metrics_timestamp
       ON plugin_metrics (timestamp)`);
 
+  // WebAuthn passkeys per user + credential policies (see schema.ts). The
+  // global policy row (userId IS NULL) is seeded once; it defaults to the
+  // pre-passkey behavior: TOTP required at login, only `totp` satisfies the
+  // require2FA gate.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS webauthn_credentials (
+      id TEXT PRIMARY KEY,
+      "userId" TEXT NOT NULL,
+      "credentialId" TEXT NOT NULL UNIQUE,
+      "publicKey" TEXT NOT NULL,
+      "counter" BIGINT NOT NULL DEFAULT 0,
+      "label" TEXT,
+      "transports" TEXT,
+      "createdAt" TEXT NOT NULL
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user
+      ON webauthn_credentials ("userId")`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS credential_policies (
+      id TEXT PRIMARY KEY,
+      "userId" TEXT UNIQUE,
+      "requiredMethods" TEXT NOT NULL DEFAULT '["totp"]',
+      "gateAmrs" TEXT NOT NULL DEFAULT '["totp"]',
+      "updatedAt" TEXT NOT NULL
+    )`);
+
+  const existingGlobalPolicy = await pool.query(
+    `SELECT id FROM credential_policies WHERE "userId" IS NULL LIMIT 1`
+  );
+  if (existingGlobalPolicy.rows.length === 0) {
+    await pool.query(
+      `INSERT INTO credential_policies (id, "userId", "requiredMethods", "gateAmrs", "updatedAt")
+       VALUES ($1, NULL, '["totp"]', '["totp"]', $2)`,
+      [uuidv4(), new Date().toISOString()]
+    );
+  }
+
   // The legacy singular columns are superseded by device_plugins. There is no
   // production data to migrate (confirmed), so drop them outright — any dev
   // devices must be recreated via the new multi-plugin create flow.

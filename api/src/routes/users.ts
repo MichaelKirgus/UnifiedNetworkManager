@@ -1,11 +1,12 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { generateSecret, buildOtpAuthUri } from '../auth/totp';
+import { buildRegistrationOptions, verifyRegistration } from '../auth/webauthn';
 import { ALL_PERMISSIONS, PERMISSION_DESCRIPTIONS, KNOWN_ROLES, INITIAL_ADMIN_USERNAME } from '../auth/permissions';
 
 const router = Router();
@@ -41,7 +42,7 @@ router.get('/permissions', requireAuth, async (_req: Request, res: Response) => 
 });
 
 /** Public user shape — never exposes passwordHash or totpSecret. */
-export function serializeUser(row: typeof schema.users.$inferSelect) {
+export async function serializeUser(row: typeof schema.users.$inferSelect) {
   let roles: string[] = [];
   let permissions: string[] = [];
   try {
@@ -54,13 +55,30 @@ export function serializeUser(row: typeof schema.users.$inferSelect) {
   } catch {
     /* keep [] */
   }
+
+  // Number of enrolled passkeys (the credentials themselves are listed via
+  // GET /users/:id/passkeys, gated by the same credential-access rules).
+  let passkeyCount = 0;
+  try {
+    const countRow = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM webauthn_credentials WHERE "userId" = $1`,
+      [row.id]
+    );
+    passkeyCount = Number(countRow.rows[0]?.n ?? 0);
+  } catch {
+    /* table missing pre-migration — treat as zero */
+  }
+
   return {
     id: row.id,
     username: row.username,
     roles: Array.isArray(roles) ? roles : [],
     permissions: Array.isArray(permissions) ? permissions : [],
-    // Whether a TOTP secret is enrolled (the secret itself never leaves the API).
-    twoFactorEnabled: Boolean(row.totpSecret),
+    // Whether ANY second factor is enrolled (TOTP secret or ≥1 passkey). The
+    // secrets themselves never leave the API.
+    twoFactorEnabled: Boolean(row.totpSecret) || passkeyCount > 0,
+    totpEnabled: Boolean(row.totpSecret),
+    passkeyCount,
     createdAt: row.createdAt,
   };
 }
@@ -114,7 +132,9 @@ function validateUserUpdate(body: Record<string, unknown>) {
 // GET /users — list all users (requires users:read).
 router.get('/users', requireAuth, requirePermission('users:read'), async (_req: Request, res: Response) => {
   const rows = await db.query.users.findMany({ orderBy: [schema.users.username] });
-  res.status(200).json(rows.map(serializeUser));
+  // serializeUser is async (passkey count query); run in parallel.
+  const serialized = await Promise.all(rows.map((row) => serializeUser(row)));
+  res.status(200).json(serialized);
 });
 
 // POST /users — create a user (requires users:create). The new account is
@@ -164,7 +184,7 @@ router.post('/users', requireAuth, requirePermission('users:create'), async (req
   });
 
   const created = await db.query.users.findFirst({ where: eq(schema.users.username, username) });
-  res.status(201).json({ user: serializeUser(created!), enrollment: enrollmentPayload(username, totpSecret) });
+  res.status(201).json({ user: await serializeUser(created!), enrollment: enrollmentPayload(username, totpSecret) });
 });
 
 // PATCH /users/:id — update roles/permissions (requires users:write).
@@ -223,7 +243,7 @@ router.patch('/users/:id', requireAuth, requirePermission('users:write'), async 
     res.status(500).json({ error: 'Failed to retrieve updated user' });
     return;
   }
-  res.status(200).json(serializeUser(updated));
+  res.status(200).json(await serializeUser(updated));
 });
 
 // DELETE /users/:id — remove a user (requires users:write). Refuses self-delete
@@ -323,7 +343,7 @@ router.post('/users/:id/password', requireAuth, async (req: Request, res: Respon
     .where(eq(schema.users.id, existing.id));
 
   const updated = await db.query.users.findFirst({ where: eq(schema.users.id, existing.id) });
-  res.status(200).json(serializeUser(updated!));
+  res.status(200).json(await serializeUser(updated!));
 });
 
 // POST /users/:id/totp/enroll — (re-)enroll TOTP for a user. Generates and
@@ -349,7 +369,7 @@ router.post('/users/:id/totp/enroll', requireAuth, async (req: Request, res: Res
     .where(eq(schema.users.id, existing.id));
 
   const updated = await db.query.users.findFirst({ where: eq(schema.users.id, existing.id) });
-  res.status(200).json({ user: serializeUser(updated!), enrollment: enrollmentPayload(existing.username, totpSecret) });
+  res.status(200).json({ user: await serializeUser(updated!), enrollment: enrollmentPayload(existing.username, totpSecret) });
 });
 
 // DELETE /users/:id/totp — disable TOTP for a user (clears the secret).
@@ -370,6 +390,187 @@ router.delete('/users/:id/totp', requireAuth, async (req: Request, res: Response
     .set({ totpSecret: null })
     .where(eq(schema.users.id, existing.id));
   res.status(204).send();
+});
+
+// --- Passkeys (WebAuthn) ----------------------------------------------------
+//
+// Multiple passkeys per user are allowed (one row per device). Enrollment is a
+// two-step browser flow: the UI fetches registration options here, runs
+// navigator.credentials.create(), and posts the response back for attestation
+// verification. Gating mirrors TOTP: self needs users:self-credentials, acting
+// on another user needs users:manage-credentials.
+
+/** Serializes a credential row (no public key material — display metadata only). */
+function serializeCredential(row: typeof schema.webauthnCredentials.$inferSelect) {
+  let transports: string[] | null = null;
+  try {
+    const parsed = row.transports ? JSON.parse(row.transports) : null;
+    if (Array.isArray(parsed)) transports = parsed.filter((t): t is string => typeof t === 'string');
+  } catch {
+    /* keep null */
+  }
+  return {
+    id: row.id,
+    credentialId: row.credentialId,
+    label: row.label ?? null,
+    transports,
+    createdAt: row.createdAt,
+  };
+}
+
+// GET /users/:id/passkeys — list a user's enrolled passkeys.
+router.get('/users/:id/passkeys', requireAuth, async (req: Request, res: Response) => {
+  const denied = checkCredentialAccess(req, req.params.id);
+  if (denied) {
+    res.status(403).json({ error: denied });
+    return;
+  }
+
+  try {
+    const rows = await db.query.webauthnCredentials.findMany({
+      where: eq(schema.webauthnCredentials.userId, req.params.id),
+      orderBy: [schema.webauthnCredentials.createdAt],
+    });
+    res.status(200).json(rows.map(serializeCredential));
+  } catch (error) {
+    console.error('Error listing passkeys:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /users/:id/passkeys — start passkey enrollment. Returns WebAuthn
+// registration options for navigator.credentials.create(). Body: { label? }.
+router.post('/users/:id/passkeys', requireAuth, async (req: Request, res: Response) => {
+  const denied = checkCredentialAccess(req, req.params.id);
+  if (denied) {
+    res.status(403).json({ error: denied });
+    return;
+  }
+
+  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, req.params.id) });
+  if (!existing) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+
+  try {
+    // Exclude already-enrolled credentials so the authenticator creates a NEW
+    // one (multiple passkeys per user = multiple devices).
+    const enrolled = await db.query.webauthnCredentials.findMany({
+      where: eq(schema.webauthnCredentials.userId, existing.id),
+    });
+    const options = await buildRegistrationOptions({
+      userId: existing.id,
+      username: existing.username,
+      excludeCredentials: enrolled.map((c) => c.credentialId),
+    });
+
+    res.status(200).json({
+      options,
+      // The challenge the UI must echo back on completion (attestation is
+      // verified against it in POST /users/:id/passkeys/verify).
+      nonce: String(options.challenge ?? ''),
+    });
+  } catch (error) {
+    console.error('Error generating passkey registration options:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /users/:id/passkeys/verify — complete enrollment. Body:
+// { nonce, response (PublicKeyCredentialCreationResponse), label? }. Verifies
+// the attestation and stores the credential on success.
+router.post('/users/:id/passkeys/verify', requireAuth, async (req: Request, res: Response) => {
+  const denied = checkCredentialAccess(req, req.params.id);
+  if (denied) {
+    res.status(403).json({ error: denied });
+    return;
+  }
+
+  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, req.params.id) });
+  if (!existing) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  if (typeof body.nonce !== 'string' || !body.nonce) {
+    res.status(400).json({ error: '"nonce" is required' });
+    return;
+  }
+  if (!body.response || typeof body.response !== 'object') {
+    res.status(400).json({ error: '"response" (the PublicKeyCredentialCreationResponse) is required' });
+    return;
+  }
+
+  try {
+    const verified = await verifyRegistration({ expectedChallenge: body.nonce, response: body.response });
+    if (!verified.verified || !verified.registrationInfo) {
+      res.status(401).json({ error: 'Passkey attestation verification failed' });
+      return;
+    }
+
+    // v13 shape: registrationInfo.credential = { id, publicKey (Uint8Array), counter }.
+    const cred = verified.registrationInfo.credential;
+    const credentialId = String(cred.id);
+
+    // Duplicate credentialId (same authenticator re-registered) → 409.
+    const dup = await db.query.webauthnCredentials.findFirst({
+      where: eq(schema.webauthnCredentials.credentialId, credentialId),
+    });
+    if (dup) {
+      res.status(409).json({ error: 'This passkey is already enrolled' });
+      return;
+    }
+
+    const label = typeof body.label === 'string' && body.label.trim() ? body.label.trim().slice(0, 120) : null;
+    await db.insert(schema.webauthnCredentials).values({
+      id: uuidv4(),
+      userId: existing.id,
+      credentialId,
+      // COSE public key as base64 (SimpleWebAuthn returns a Uint8Array).
+      publicKey: Buffer.from(cred.publicKey).toString('base64'),
+      counter: Number(cred.counter ?? 0),
+      label,
+      transports: null,
+      createdAt: new Date().toISOString(),
+    });
+
+    const row = await db.query.webauthnCredentials.findFirst({
+      where: eq(schema.webauthnCredentials.credentialId, credentialId),
+    });
+    res.status(201).json({ credential: serializeCredential(row!) });
+  } catch (error) {
+    console.error('Error verifying passkey registration:', error);
+    const message = error instanceof Error ? error.message : 'Passkey attestation verification failed';
+    res.status(401).json({ error: message });
+  }
+});
+
+// DELETE /users/:id/passkeys/:credentialId — remove a passkey (self or admin).
+router.delete('/users/:id/passkeys/:credentialId', requireAuth, async (req: Request, res: Response) => {
+  const denied = checkCredentialAccess(req, req.params.id);
+  if (denied) {
+    res.status(403).json({ error: denied });
+    return;
+  }
+
+  try {
+    // Scope by BOTH user and credential id — a credential can never be deleted
+    // "through" another user's account.
+    const result = await db.delete(schema.webauthnCredentials)
+      .where(and(eq(schema.webauthnCredentials.userId, req.params.id), eq(schema.webauthnCredentials.credentialId, req.params.credentialId)))
+      .returning({ id: schema.webauthnCredentials.id });
+
+    if (!result || result.length === 0) {
+      res.status(404).json({ error: 'Passkey not found' });
+      return;
+    }
+    res.status(204).send();
+  } catch (error) {
+    console.error('Error deleting passkey:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 export default router;

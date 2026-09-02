@@ -747,6 +747,53 @@ export const systemSettings = pgTable('system_settings', {
   updatedAt: text('updatedAt').notNull(),
 });
 
+// WebAuthn passkeys enrolled per user (multiple allowed — one row per device).
+// `credentialId` is the base64url-encoded credential identifier from the
+// authenticator; `publicKey` stores the COSE public key as a JSON string.
+// Verification happens in the basic-auth plugin via @simplewebauthn/server,
+// which fetches these rows through the internal /plugin/webauthn/* routes.
+export const webauthnCredentials = pgTable(
+  'webauthn_credentials',
+  {
+    id: text('id').primaryKey(),
+    userId: text('userId').notNull(),
+    credentialId: text('credentialId').notNull().unique(),
+    // COSE public key, serialized as a JSON string.
+    publicKey: text('publicKey').notNull(),
+    // Signature counter (clamped to 64-bit by WebAuthn); replay protection.
+    counter: bigint('counter', { mode: 'number' }).notNull().default(0),
+    // User-assigned label, e.g. "Michael's MacBook" — display only.
+    label: text('label'),
+    // JSON string array of transports (e.g. ["platform","hybrid"]).
+    transports: text('transports'),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => {
+    return {
+      idxWebauthnCredsUser: index('idx_webauthn_credentials_user').on(table.userId),
+    };
+  }
+);
+
+// Credential policies controlling 2FA requirements. One GLOBAL row
+// (`userId IS NULL`) acts as the default for everyone; a per-user row
+// (unique on userId) overrides it entirely — user policy wins over global.
+//   requiredMethods: which enrolled 2nd factors satisfy login step 2,
+//     JSON array of 'totp' | 'webauthn'. Empty = no 2FA required at all.
+//     If none of the allowed methods is enrolled, login is blocked with a
+//     distinct error so the UI can point to enrollment.
+//   gateAmrs: which JWT `amr` values satisfy require2FA (privileged endpoints
+//     like config-job submission). Evaluated LIVE per request against this
+//     table — admin changes apply immediately to existing sessions.
+export const credentialPolicies = pgTable('credential_policies', {
+  id: text('id').primaryKey(),
+  // NULL = the global default policy; otherwise the user id it applies to.
+  userId: text('userId').unique(),
+  requiredMethods: text('requiredMethods').notNull().default('["totp"]'),
+  gateAmrs: text('gateAmrs').notNull().default('["totp"]'),
+  updatedAt: text('updatedAt').notNull(),
+});
+
 // Add index for config_jobs
 // Note: Drizzle's index definition inside the table definition is 
 // usually the best way to handle this. I'll add it to configJobs.

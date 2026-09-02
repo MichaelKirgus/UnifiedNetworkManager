@@ -12,6 +12,7 @@ import secretsRouter from './routes/secrets';
 import sitesRouter from './routes/sites';
 import layersRouter from './routes/layers';
 import usersRouter from './routes/users';
+import credentialPoliciesRouter from './routes/credentialPolicies';
 import rolesRouter from './routes/roles';
 import tokensRouter from './routes/tokens';
 import { internalRouter } from './routes/internal';
@@ -99,6 +100,9 @@ async function main(): Promise<void> {
   // Network layer registry (topology bands) — self-defining /layers paths.
   api.use(layersRouter);
   api.use(usersRouter);
+  // Credential policies (2FA requirements + gate AMRs) — self-defining paths
+  // (/auth/policies/global, /users/:id/policy).
+  api.use(credentialPoliciesRouter);
   api.use(rolesRouter);
   // API tokens (self-service + admin) — long-lived bearer credentials for agents.
   api.use(tokensRouter);

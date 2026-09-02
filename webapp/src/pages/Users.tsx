@@ -4,7 +4,9 @@ import { KeyRound, Pencil, Plus, ShieldOff, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { TotpEnrollmentDialog } from '../components/TotpEnrollmentDialog';
-import { api, User, TotpEnrollment } from '../api/client';
+import { PasskeyManager } from '../components/PasskeyManager';
+import { PolicyEditor } from '../components/PolicyEditor';
+import { api, User, TotpEnrollment, CredentialPolicy } from '../api/client';
 import { can, getUsername } from '../auth/permissions';
 
 /** Username of the initial seeded admin — protected from deletion/demotion. */
@@ -89,6 +91,32 @@ export default function Users() {
   const disableTotp = useMutation({
     mutationFn: () => api.disableTotp(credsId!),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
+    onError: (err: unknown) => setFormError((err as Error).message),
+  });
+
+  // Per-user credential policy override (requires auth:policies:write).
+  const canEditPolicies = can('auth:policies:write');
+  const userPolicyQuery = useQuery({
+    queryKey: ['user-policy', credsId],
+    queryFn: () => api.userCredentialPolicy(credsId!),
+    enabled: Boolean(credsId) && canEditPolicies,
+  });
+
+  const saveUserPolicy = useMutation({
+    mutationFn: (body: Partial<CredentialPolicy>) => api.setUserCredentialPolicy(credsId!, body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['user-policy', credsId] });
+      setFormError(null);
+    },
+    onError: (err: unknown) => setFormError((err as Error).message),
+  });
+
+  const clearUserPolicy = useMutation({
+    mutationFn: () => api.clearUserCredentialPolicy(credsId!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['user-policy', credsId] });
+      setFormError(null);
+    },
     onError: (err: unknown) => setFormError((err as Error).message),
   });
 
@@ -442,6 +470,52 @@ export default function Users() {
               )}
             </div>
           </div>
+
+          {/* Passkeys — admin can add/remove any user's passkeys */}
+          <div className="mt-6 border-t border-slate-100 pt-4">
+            <h3 className="mb-2 text-sm font-semibold text-slate-700">Passkeys</h3>
+            <p className="mb-3 text-xs text-slate-400">
+              This user can sign in with any enrolled passkey. Removing one revokes that device immediately.
+            </p>
+            <PasskeyManager userId={credsUser.id} username={credsUser.username} />
+          </div>
+
+          {/* Per-user credential policy override */}
+          {canEditPolicies && (
+            <div className="mt-6 border-t border-slate-100 pt-4">
+              <h3 className="mb-2 text-sm font-semibold text-slate-700">Credential policy</h3>
+              {userPolicyQuery.isLoading ? (
+                <p className="text-sm text-slate-400">Loading policy…</p>
+              ) : userPolicyQuery.data ? (
+                <div className="space-y-3">
+                  <p className="text-xs text-slate-500">
+                    Effective source:{' '}
+                    <span className="font-medium text-slate-700">{userPolicyQuery.data.source}</span>
+                    {userPolicyQuery.data.source === 'global' && ' (no per-user override yet — saving creates one)'}
+                  </p>
+                  <PolicyEditor
+                    value={userPolicyQuery.data.policy}
+                    onChange={(body) => saveUserPolicy.mutate(body)}
+                  />
+                  {userPolicyQuery.data.source === 'user' && (
+                    <button
+                      type="button"
+                      disabled={clearUserPolicy.isPending}
+                      onClick={() => {
+                        if (!window.confirm(`Clear the per-user policy override for "${credsUser.username}"? The global default applies again.`)) return;
+                        clearUserPolicy.mutate();
+                      }}
+                      className="ml-2 rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+                    >
+                      Use global default
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-red-600">Failed to load policy: {(userPolicyQuery.error as Error).message}</p>
+              )}
+            </div>
+          )}
         </div>
       )}
 

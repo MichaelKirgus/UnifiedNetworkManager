@@ -3,12 +3,15 @@ const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3000/v1';
 /** API error that may carry per-field validation messages (e.g. plugin settings). */
 export class ApiError extends Error {
   status: number;
+  /** Machine-readable error code when the API provides one (e.g. 'no_2fa_enrolled'). */
+  code?: string;
   fieldErrors?: Record<string, string>;
-  constructor(message: string, status: number, fieldErrors?: Record<string, string>) {
+  constructor(message: string, status: number, fieldErrors?: Record<string, string>, code?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.fieldErrors = fieldErrors;
+    this.code = code;
   }
 }
 
@@ -53,6 +56,33 @@ export interface LoginResponse {
 
 export interface AuthFlow {
   flow: string;
+  /** True when the active provider supports passkey (WebAuthn) step-2. */
+  supportsPasskey?: boolean;
+}
+
+/** WebAuthn assertion options + nonce for a pending login challenge. */
+export interface WebauthnAssertionOptions {
+  /** PublicKeyCredentialRequestOptionsJSON — pass straight to navigator.credentials.get(). */
+  options: Record<string, unknown>;
+  /** Echo back with the assertion response (replay protection). */
+  nonce: string;
+}
+
+/** WebAuthn registration options + nonce for enrolling a new passkey. */
+export interface WebauthnRegistrationOptions {
+  /** PublicKeyCredentialCreationOptionsJSON — pass to navigator.credentials.create(). */
+  options: Record<string, unknown>;
+  /** Echo back with the creation response (attestation is verified against it). */
+  nonce: string;
+}
+
+/** An enrolled passkey (display metadata only — no key material). */
+export interface PasskeyCredential {
+  id: string;
+  credentialId: string;
+  label: string | null;
+  transports: string[] | null;
+  createdAt: string;
 }
 
 export interface AuthRedirect {
@@ -570,8 +600,25 @@ export interface User {
   roles: string[];
   /** Explicit permission grants only (role-derived ones are added at login). */
   permissions: string[];
+  /** True when ANY second factor is enrolled (TOTP or ≥1 passkey). */
   twoFactorEnabled: boolean;
+  totpEnabled?: boolean;
+  passkeyCount?: number;
   createdAt?: string;
+}
+
+/** Credential policy — which 2nd factors are required at login and which AMRs satisfy the privileged-action gate. */
+export interface CredentialPolicy {
+  /** Enrolled methods that satisfy login step 2 (empty = no 2FA). */
+  requiredMethods: ('totp' | 'webauthn')[];
+  /** Session AMRs that satisfy require2FA (config-job submission etc.). */
+  gateAmrs: string[];
+}
+
+export interface PolicyWithSource {
+  policy: CredentialPolicy;
+  /** Where the effective policy comes from. */
+  source: 'user' | 'global' | 'default';
 }
 
 /** TOTP enrollment payload returned by user-create / totp-enroll. */
@@ -925,14 +972,16 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   if (!res.ok) {
     let message = `API error ${res.status}`;
     let fieldErrors: Record<string, string> | undefined;
+    let code: string | undefined;
     try {
       const body = await res.json();
       if (body?.error) message = body.error;
       if (body?.fieldErrors && typeof body.fieldErrors === 'object') fieldErrors = body.fieldErrors;
+      if (typeof body?.code === 'string') code = body.code;
     } catch {
       // ignore body parse errors, fall back to generic message
     }
-    throw new ApiError(message, res.status, fieldErrors);
+    throw new ApiError(message, res.status, fieldErrors, code);
   }
   if (res.status === 204) {
     return undefined as T;
@@ -947,6 +996,11 @@ export const api = {
     apiFetch<LoginResponse>('/auth/login', { method: 'POST', body: JSON.stringify(body) }),
   verify2fa: (body: { challengeToken: string; totpCode: string }) =>
     apiFetch<VerifyResponse>('/auth/2fa/verify', { method: 'POST', body: JSON.stringify(body) }),
+  // Passkey (WebAuthn) step-2 — same session shape as verify2fa.
+  webauthnAssertionOptions: (challengeToken: string) =>
+    apiFetch<WebauthnAssertionOptions>(`/auth/webauthn/assertion-options?challengeToken=${encodeURIComponent(challengeToken)}`),
+  verifyWebauthn: (body: { challengeToken: string; response: unknown; nonce: string }) =>
+    apiFetch<VerifyResponse>('/auth/webauthn/verify', { method: 'POST', body: JSON.stringify(body) }),
   /** The caller's own profile (no users:read needed). */
   me: () => apiFetch<User & { effectivePermissions: string[] }>('/auth/me'),
   devices: () => apiFetch<Device[]>('/devices'),
@@ -1130,6 +1184,31 @@ export const api = {
   enrollTotp: (id: string) =>
     apiFetch<{ user: User; enrollment: TotpEnrollment }>(`/users/${id}/totp/enroll`, { method: 'POST' }),
   disableTotp: (id: string) => apiFetch<void>(`/users/${id}/totp`, { method: 'DELETE' }),
+  // Passkeys (multiple per user — one row per device).
+  passkeys: (userId: string) => apiFetch<PasskeyCredential[]>(`/users/${userId}/passkeys`),
+  /** Step 1 of enrollment: fetch registration options for navigator.credentials.create(). */
+  startPasskeyEnrollment: (userId: string, body?: { label?: string }) =>
+    apiFetch<WebauthnRegistrationOptions>(`/users/${userId}/passkeys`, {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    }),
+  /** Step 2 of enrollment: verify the attestation and store the credential. */
+  completePasskeyEnrollment: (userId: string, body: { nonce: string; response: unknown; label?: string }) =>
+    apiFetch<{ credential: PasskeyCredential }>(`/users/${userId}/passkeys/verify`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  deletePasskey: (userId: string, credentialId: string) =>
+    apiFetch<void>(`/users/${userId}/passkeys/${encodeURIComponent(credentialId)}`, { method: 'DELETE' }),
+  // Credential policies (global default + per-user overrides; user wins).
+  globalCredentialPolicy: () => apiFetch<{ policy: CredentialPolicy }>('/auth/policies/global'),
+  setGlobalCredentialPolicy: (body: Partial<CredentialPolicy>) =>
+    apiFetch<{ policy: CredentialPolicy }>('/auth/policies/global', { method: 'PUT', body: JSON.stringify(body) }),
+  userCredentialPolicy: (userId: string) => apiFetch<PolicyWithSource>(`/users/${userId}/policy`),
+  setUserCredentialPolicy: (userId: string, body: Partial<CredentialPolicy>) =>
+    apiFetch<PolicyWithSource>(`/users/${userId}/policy`, { method: 'PUT', body: JSON.stringify(body) }),
+  clearUserCredentialPolicy: (userId: string) =>
+    apiFetch<PolicyWithSource>(`/users/${userId}/policy`, { method: 'DELETE' }),
   permissionCatalog: () => apiFetch<PermissionCatalog>('/permissions'),
   // API tokens (self-service; ?all=true needs users:read).
   tokens: (all = false) =>

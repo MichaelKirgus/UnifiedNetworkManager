@@ -21,6 +21,7 @@ import {
   Waypoints,
   KeySquare,
   Shield,
+  ShieldCheck,
   UserRound,
   Users as UsersIcon,
   Wifi as WifiIcon,
@@ -56,6 +57,9 @@ const NAV_ITEMS = [
   { to: '/users', label: 'Users', icon: UsersIcon, requiresPermission: 'users:read' },
   // Role management (create/edit/delete roles + permission bundles).
   { to: '/roles', label: 'Roles', icon: Shield, requiresPermission: 'users:write' },
+  // Credential policies (2FA requirements + gate AMRs) — readable by everyone,
+  // editing is gated in-page on auth:policies:write.
+  { to: '/credential-policies', label: 'Credential Policies', icon: ShieldCheck },
   // Long-lived API tokens for agents/scripts (MCP server).
   { to: '/tokens', label: 'Tokens', icon: KeySquare, requiresPermission: 'tokens:manage' },
   // Worker/HA monitoring + runtime tuning (gated — exposes internal topology).

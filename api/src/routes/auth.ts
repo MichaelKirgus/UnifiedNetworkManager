@@ -4,13 +4,60 @@ import { db } from '../db';
 import * as schema from '../db/schema';
 import { signToken } from '../auth/jwt';
 import { requireAuth } from '../auth/middleware';
-import { login, verify2fa, getFlow, getRedirectUrl } from '../auth/identityProvider';
+import {
+  login,
+  verify2fa,
+  getFlow,
+  getRedirectUrl,
+  webauthnAssertionOptions,
+  verifyWebauthn,
+  resolveActiveProvider,
+  BASIC_AUTH_PLUGIN_UUID,
+} from '../auth/identityProvider';
 import { expandRolePermissions } from './roles';
 import { serializeUser } from './users';
 
 const router = Router();
 
 const TOKEN_TTL_SECONDS = 3600;
+
+/**
+ * Mints the platform JWT from a verified identity assertion (shared by the
+ * TOTP and WebAuthn completion paths). Effective permissions = explicit grants
+ * + every permission of the user's roles, computed here so role changes take
+ * effect at the next login.
+ */
+async function mintSession(identity: {
+  userId: string;
+  username: string;
+  roles: string[];
+  permissions: string[];
+  amr: string[];
+}) {
+  const effectivePermissions = await expandRolePermissions(
+    identity.roles,
+    Array.isArray(identity.permissions) ? identity.permissions : []
+  );
+
+  const accessToken = signToken(
+    {
+      sub: identity.userId,
+      username: identity.username,
+      roles: identity.roles,
+      permissions: effectivePermissions,
+      amr: identity.amr,
+    },
+    TOKEN_TTL_SECONDS
+  );
+
+  return {
+    accessToken,
+    expiresIn: TOKEN_TTL_SECONDS,
+    username: identity.username,
+    roles: identity.roles,
+    permissions: effectivePermissions,
+  };
+}
 
 /**
  * Returns the authenticated user's own profile (no users:read needed).
@@ -24,7 +71,7 @@ router.get('/auth/me', requireAuth, async (req, res) => {
     res.status(401).json({ error: 'User no longer exists' });
     return;
   }
-  res.status(200).json({ ...serializeUser(row), effectivePermissions: req.user?.permissions ?? [] });
+  res.status(200).json({ ...(await serializeUser(row)), effectivePermissions: req.user?.permissions ?? [] });
 });
 
 /**
@@ -35,7 +82,18 @@ router.get('/auth/me', requireAuth, async (req, res) => {
 router.get('/auth/flow', async (_req, res) => {
   try {
     const flow = await getFlow();
-    res.status(200).json({ flow });
+    // Passkey (WebAuthn) step-2 is supported by the built-in basic-auth
+    // provider (the only `password`-flow provider). External IdPs (OAuth2/
+    // SAML/LDAP) do not use it.
+    let supportsPasskey = false;
+    try {
+      const provider = await resolveActiveProvider();
+      supportsPasskey = flow === 'password' && provider.id === BASIC_AUTH_PLUGIN_UUID;
+    } catch {
+      // Provider resolution failed — the login itself will fail too, so just
+      // report no passkey support.
+    }
+    res.status(200).json({ flow, supportsPasskey });
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Unable to determine auth flow' });
@@ -81,6 +139,12 @@ router.post('/auth/login', async (req, res) => {
     });
   } catch (err) {
     const e = err as { status?: number; message?: string };
+    // Distinct code so the webapp can point to 2FA enrollment instead of
+    // showing a generic failure.
+    if (e.message === 'no_2fa_enrolled') {
+      res.status(403).json({ error: 'No enrolled second factor satisfies the credential policy', code: 'no_2fa_enrolled' });
+      return;
+    }
     res.status(e.status ?? 500).json({ error: e.message ?? 'Authentication failed' });
   }
 });
@@ -90,36 +154,49 @@ router.post('/auth/2fa/verify', async (req, res) => {
 
   try {
     const identity = await verify2fa(challengeToken ?? '', totpCode ?? '');
-
-    // Effective permissions = explicit grants + every permission of the user's
-    // roles (roles are bundles; enforcement stays on this flat claim). Role
-    // changes therefore take effect at the next login.
-    const effectivePermissions = await expandRolePermissions(
-      identity.roles,
-      Array.isArray(identity.permissions) ? identity.permissions : []
-    );
-
-    const accessToken = signToken(
-      {
-        sub: identity.userId,
-        username: identity.username,
-        roles: identity.roles,
-        permissions: effectivePermissions,
-        amr: identity.amr,
-      },
-      TOKEN_TTL_SECONDS
-    );
-
-    res.status(200).json({
-      accessToken,
-      expiresIn: TOKEN_TTL_SECONDS,
-      username: identity.username,
-      roles: identity.roles,
-      permissions: effectivePermissions,
-    });
+    res.status(200).json(await mintSession(identity));
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Authentication failed' });
+  }
+});
+
+/**
+ * WebAuthn step 2a: fetch assertion options for a pending challenge. The API
+ * generates the nonce + options (it owns the RP identity); the provider binds
+ * the nonce to its in-memory challenge entry. The webapp then calls
+ * navigator.credentials.get() with `options` and posts the result back to
+ * /auth/webauthn/verify together with `nonce`.
+ */
+router.get('/auth/webauthn/assertion-options', async (req, res) => {
+  const challengeToken = typeof req.query.challengeToken === 'string' ? req.query.challengeToken : '';
+
+  try {
+    const result = await webauthnAssertionOptions(challengeToken);
+    res.status(200).json(result);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Unable to fetch passkey options' });
+  }
+});
+
+/**
+ * WebAuthn step 2b: verify the assertion and mint the session JWT (same shape
+ * as /auth/2fa/verify; amr carries ['pwd','webauthn']).
+ */
+router.post('/auth/webauthn/verify', async (req, res) => {
+  const { challengeToken, response, nonce } = req.body ?? {};
+
+  try {
+    const identity = await verifyWebauthn(
+      typeof challengeToken === 'string' ? challengeToken : '',
+      response,
+      typeof nonce === 'string' ? nonce : ''
+    );
+    res.status(200).json(await mintSession(identity));
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Passkey verification failed' });
   }
 });
 

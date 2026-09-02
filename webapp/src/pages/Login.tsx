@@ -1,8 +1,9 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, ExternalLink, Loader2, ShieldCheck } from 'lucide-react';
-import { api } from '../api/client';
+import { ArrowLeft, ArrowRight, ExternalLink, KeyRound, Loader2, ShieldCheck } from 'lucide-react';
+import { api, ApiError } from '../api/client';
 import { setPermissions, setUsername } from '../auth/permissions';
+import { toRequestOptions } from '../utils/webauthn';
 
 type Flow = 'password' | 'oauth2' | 'ldap' | 'saml' | 'unknown';
 
@@ -25,6 +26,7 @@ export default function Login() {
 
   // The active identity provider's flow, resolved from the API on mount.
   const [flow, setFlow] = useState<Flow | null>(null);
+  const [supportsPasskey, setSupportsPasskey] = useState(false);
   const [flowError, setFlowError] = useState<string | null>(null);
 
   // Password-flow state.
@@ -41,7 +43,10 @@ export default function Login() {
     api
       .authFlow()
       .then((res) => {
-        if (!cancelled) setFlow((res.flow as Flow) ?? 'password');
+        if (!cancelled) {
+          setFlow((res.flow as Flow) ?? 'password');
+          setSupportsPasskey(Boolean(res.supportsPasskey));
+        }
       })
       .catch((err) => {
         if (!cancelled) {
@@ -63,6 +68,56 @@ export default function Login() {
     try {
       const res = await api.login({ username, password });
       setChallengeToken(res.challengeToken);
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'no_2fa_enrolled') {
+        setError(
+          'Your account requires a second factor that is not enrolled yet. Enroll TOTP or a passkey in My Account, or ask an administrator to adjust your credential policy.'
+        );
+      } else {
+        setError((err as Error).message);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Passkey (WebAuthn) step-2: fetch assertion options for the pending
+  // challenge, run the platform authenticator prompt, verify the response.
+  async function handlePasskeySignin() {
+    if (!challengeToken) return;
+    setError(null);
+    setLoading(true);
+    try {
+      const { options, nonce } = await api.webauthnAssertionOptions(challengeToken);
+
+      let assertion: unknown;
+      try {
+        assertion = await navigator.credentials.get({
+          // Convert base64url challenge/allowCredentials to binary before the prompt.
+          publicKey: toRequestOptions(options),
+        });
+      } catch (credErr) {
+        // User cancelled the prompt or no passkey is available on this device.
+        const name = credErr instanceof DOMException ? credErr.name : '';
+        if (name === 'NotAllowedError') setError('Passkey sign-in was cancelled.');
+        else if (name === 'InvalidStateError' || name === 'SecurityError') {
+          setError('No passkey is available on this device. Enroll one in My Account, or use your TOTP code.');
+        } else {
+          setError(`Passkey sign-in failed: ${(credErr as Error).message}`);
+        }
+        return;
+      }
+
+      if (!assertion) {
+        setError('No passkey was presented. Try again or use your TOTP code.');
+        return;
+      }
+
+      const res = await api.verifyWebauthn({ challengeToken, response: assertion, nonce });
+      localStorage.setItem('accessToken', res.accessToken);
+      setPermissions(res.permissions ?? []);
+      if (res.username) setUsername(res.username);
+      navigate('/devices');
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -189,6 +244,24 @@ export default function Login() {
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
                 {loading ? 'Verifying...' : 'Verify & Sign in'}
               </button>
+              {supportsPasskey && (
+                <>
+                  <div className="flex items-center gap-3">
+                    <div className="h-px flex-1 bg-slate-200" />
+                    <span className="text-xs uppercase tracking-wide text-slate-400">or</span>
+                    <div className="h-px flex-1 bg-slate-200" />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handlePasskeySignin}
+                    disabled={loading}
+                    className="flex w-full items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
+                    Sign in with passkey
+                  </button>
+                </>
+              )}
               <button
                 type="button"
                 className="flex w-full items-center justify-center gap-1.5 text-sm text-slate-500 hover:underline"

@@ -48,6 +48,9 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'users:create': 'Create new users with an initial password and TOTP enrollment',
   'users:manage-credentials': "Reset passwords and manage 2FA of other users",
   'users:self-credentials': 'Change own password and manage own 2FA',
+  // Credential policies (required 2nd factor at login + which AMRs satisfy the
+  // privileged-action gate) — global default and per-user overrides.
+  'auth:policies:write': 'Edit credential policies (2FA requirements and 2FA-gate satisfaction)',
   // System/HA observability + runtime tuning (Workers page): worker leadership,
   // poll-cycle stats, Postgres health, and the admin-tunable HA settings.
   'system:read': 'View system status — workers, leader election, database health',

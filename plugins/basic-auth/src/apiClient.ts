@@ -96,3 +96,25 @@ export async function updateUser(
 export async function deleteUser(id: string): Promise<void> {
   await http.delete(`/plugin/users/${encodeURIComponent(id)}`);
 }
+
+// --- WebAuthn credential data (internal /plugin/webauthn/* routes) ----------
+
+/** A passkey as returned by the API's internal webauthn endpoints. */
+export interface WebauthnCredentialRecord {
+  id: string;
+  credentialId: string; // base64url
+  publicKey: string; // base64 (COSE key bytes)
+  counter: number;
+  transports: string[] | null;
+}
+
+/** Lists all passkeys enrolled for a user (login step 2). */
+export async function getWebauthnCredentials(userId: string): Promise<WebauthnCredentialRecord[]> {
+  const res = await http.get<WebauthnCredentialRecord[]>(`/plugin/webauthn/user/${encodeURIComponent(userId)}`);
+  return Array.isArray(res.data) ? res.data : [];
+}
+
+/** Bumps a passkey's signature counter after a successful assertion. */
+export async function updateWebauthnCredentialCounter(credentialDbId: string, counter: number): Promise<void> {
+  await http.patch(`/plugin/webauthn/credentials/${encodeURIComponent(credentialDbId)}`, { counter });
+}
