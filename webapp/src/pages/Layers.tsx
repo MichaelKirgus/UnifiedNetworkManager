@@ -70,10 +70,10 @@ export default function Layers() {
 
   return (
     <Layout>
-      <div className="mx-auto flex h-full w-full max-w-3xl flex-col gap-4 overflow-y-auto p-6">
+      <div className="flex flex-col gap-4">
         <div>
-          <h1 className="text-lg font-bold text-slate-900">Layers</h1>
-          <p className="mt-1 text-xs text-slate-500">
+          <h1 className="text-xl font-bold text-slate-900">Layers</h1>
+          <p className="mt-1 text-sm text-slate-500">
             Horizontal bands of the topology view, top to bottom. Devices are auto-classified into a layer by their
             plugin's model suggestion or a type/vendor heuristic — and can be overridden per device on the Devices page.
           </p>
@@ -82,7 +82,7 @@ export default function Layers() {
         {/* Add custom layer */}
         {canWrite && (
           <form
-            className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white p-3"
+            className="flex items-center gap-2 rounded-md border border-slate-200 bg-white p-3 shadow-sm"
             onSubmit={(e) => {
               e.preventDefault();
               handleAdd();
@@ -116,7 +116,7 @@ export default function Layers() {
         )}
 
         {/* Layer list */}
-        <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+        <div className="overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm">
           {layers.length === 0 ? (
             <div className="p-6 text-center text-sm text-slate-400">Loading layers…</div>
           ) : (
