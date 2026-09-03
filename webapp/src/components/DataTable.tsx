@@ -1,7 +1,24 @@
 import { Fragment, MouseEvent as ReactMouseEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { Download, Filter, RefreshCw, RotateCcw, Search, SlidersHorizontal, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, Filter, RefreshCw, RotateCcw, Search, SlidersHorizontal, X } from 'lucide-react';
 import { useTablePrefs } from './useTablePrefs';
+
+/** Context handed to `expandable.renderChild` for one child row. The page uses
+ * this to build a FULL `<tr>` (one cell per visible column) so expanded children
+ * stay aligned with the header columns — not a single full-width detail cell. */
+export interface ExpandChildContext {
+  /** Nesting level (0 = direct child of a top-level row). */
+  depth: number;
+  /** True when the child itself has children (recursive expansion possible). */
+  hasChildren: boolean;
+  /** Current expanded state of THIS child — only meaningful when hasChildren. */
+  expanded: boolean;
+  /** Toggles the child's own expanded state — only meaningful when hasChildren. */
+  onToggle?: () => void;
+  /** The currently visible columns (same order/widths as the header) so the
+   * page can render one aligned `<td>` per column for each child row. */
+  columns: DataTableColumn<never>[];
+}
 
 export interface DataTableColumn<T> {
   header: string;
@@ -55,7 +72,24 @@ interface DataTableProps<T> {
    * Used e.g. by the WiFi page to highlight matching spectrum bars on hover. */
   onRowHover?: (row: T | null) => void;  /** Optional detail content rendered in a full-width row directly under each
    * data row (e.g. per-plugin self-metrics on the Plugins page). */
-  renderRowDetail?: (row: T) => ReactNode;  /** Fill the parent's height (parent must have a definite height, e.g. the
+  renderRowDetail?: (row: T) => ReactNode;
+  /** Optional expandable rows (e.g. ZFS datasets nested hierarchically under
+   * their pool on the Storage page). When set, a leading chevron column appears;
+   * rows whose `childrenOf` returns a non-empty array are toggleable and render
+   * each child via `renderChild`. Children can be nested recursively — a child
+   * that itself has children gets its own chevron. Expansion state is
+   * session-only (not persisted) and children are excluded from search/export
+   * like renderRowDetail. */
+  expandable?: {
+    /** Child rows for one parent; empty array = not expandable. */
+    childrenOf: (row: T) => T[];
+    /** Renders ONE child as a full `<tr>` under the expanded parent — a leading
+     * cell for its own chevron plus one cell per visible column (see
+     * `ctx.columns`) so it stays aligned with the header. The `ctx` carries
+     * nesting depth and, when the child itself has children, an `onToggle`
+     * so the page can draw a working chevron for recursive expansion. */
+    renderChild: (child: T, parent: T, ctx: ExpandChildContext) => ReactNode;
+  };  /** Fill the parent's height (parent must have a definite height, e.g. the
    * WiFi table pane behind the splitter). Without it the card grows with its
    * content up to a viewport-based cap; either way the header + filter rows
    * stay pinned while the body scrolls internally. */
@@ -76,6 +110,7 @@ const MIN_COL_WIDTH = 80;
 const MAX_COL_WIDTH = 640;
 const DEFAULT_COL_WIDTH = 160;
 const SELECT_COL_WIDTH = 40;
+const EXPAND_COL_WIDTH = 36;
 
 function clampWidth(w: number): number {
   return Math.min(MAX_COL_WIDTH, Math.max(MIN_COL_WIDTH, w));
@@ -169,6 +204,7 @@ export function DataTable<T>({
   bulkActions,
   onRowHover,
   renderRowDetail,
+  expandable,
   fillHeight = false,
   autoRefresh,
 }: DataTableProps<T>) {
@@ -180,6 +216,8 @@ export function DataTable<T>({
   const [colFilters, setColFilters] = useState<Record<string, string>>({});
   const [showFilters, setShowFilters] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  // Expanded parent rows (expandable prop) — session-only like selection.
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
 
   // Rows currently passing search + column filters (pre-sort) — used by select-all.
   const filteredRef = useRef<T[]>([]);
@@ -365,6 +403,40 @@ export function DataTable<T>({
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
   }
+
+  // Recursive renderer for expanded children (expandable prop). A child that
+  // itself has children gets its own chevron and renders ITS children below —
+  // this is what makes the Storage page's ZFS tree nest to arbitrary depth.
+  // `renderChild` returns a full `<tr>` with one cell per visible column, so
+  // expanded rows stay aligned with the header (not a single wide detail row).
+  const renderChildRows = (parent: T, parentKey: string, depth: number): ReactNode => {
+    if (!expandable) return null;
+    const kids = expandable.childrenOf(parent);
+    if (kids.length === 0) return null;
+    return kids.map((child) => {
+      const ckey = rowKey(child);
+      const childKids = expandable.childrenOf(child);
+      const hasChildren = childKids.length > 0;
+      const childExpanded = expandedKeys.has(ckey);
+      const ctx: ExpandChildContext = {
+        depth,
+        hasChildren,
+        expanded: childExpanded,
+        onToggle: hasChildren ? () => setExpandedKeys((prev) => {
+          const next = new Set(prev);
+          if (next.has(ckey)) next.delete(ckey); else next.add(ckey);
+          return next;
+        }) : undefined,
+        columns: visibleColumns as DataTableColumn<never>[],
+      };
+      return (
+        <Fragment key={`${parentKey}>${ckey}`}>
+          {expandable.renderChild(child, parent, ctx)}
+          {childExpanded && hasChildren ? renderChildRows(child, ckey, depth + 1) : null}
+        </Fragment>
+      );
+    });
+  };
 
   if (!rows || rows.length === 0) {
     return <div className="rounded-md border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">{emptyMessage}</div>;
@@ -585,6 +657,7 @@ export function DataTable<T>({
               the rest share the remaining space, so the table fits its container
               and no horizontal scrollbar appears unless the user resizes wider. */}
           <colgroup>
+            {expandable && <col key="__expand" style={{ width: EXPAND_COL_WIDTH }} />}
             {selectable && <col key="__select" style={{ width: SELECT_COL_WIDTH }} />}
             {visibleColumns.map((col) => {
               const w = explicitWidth(col.key);
@@ -593,6 +666,9 @@ export function DataTable<T>({
           </colgroup>
           <thead className="bg-slate-50">
             <tr>
+                {expandable && (
+                  <th scope="col" aria-label="Expand" className="border-r border-slate-200 px-1 py-2" />
+                )}
                 {selectable && (
                   <th scope="col" className="border-r border-slate-200 px-3 py-2">
                     <input
@@ -646,6 +722,7 @@ export function DataTable<T>({
                   {/* top-[37px] = header row height (py-2 + 20px line-height +
                       1px border) — keeps the filter inputs pinned directly
                       under the header with no gap or overlap. */}
+                  {expandable && <td className="sticky top-[37px] z-10 border-b border-r border-slate-200 bg-white" />}
                   {selectable && <td className="sticky top-[37px] z-10 border-b border-r border-slate-200 bg-white" />}
                   {visibleColumns.map((col) => (
                     <td key={col.key} className="sticky top-[37px] z-10 border-b border-r border-slate-200 bg-white px-2 py-1 last:border-r-0">
@@ -673,12 +750,39 @@ export function DataTable<T>({
             {viewRows.map((row) => {
               const key = rowKey(row);
               const detail = renderRowDetail ? renderRowDetail(row) : null;
+              // Expandable rows: children are computed per visible parent (cheap —
+              // the page's childrenOf is a Map lookup). Expansion state survives
+              // search/sort because it is keyed by rowKey. Children can nest
+              // recursively — each child with its own children gets a chevron too.
+              const children = expandable ? expandable.childrenOf(row) : [];
+              const expanded = expandedKeys.has(key);
               return (
                 <Fragment key={key}>
                   <tr
                     className={clsx('hover:bg-slate-50', selectable && selectedKeys.has(key) && 'bg-blue-50/40')}
                     onMouseEnter={() => onRowHover?.(row)}
                   >
+                    {expandable && (
+                      <td className="px-1 py-2">
+                        {children.length > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => setExpandedKeys((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(key)) next.delete(key); else next.add(key);
+                              return next;
+                            })}
+                            aria-expanded={expanded}
+                            title={expanded ? 'Collapse' : `Show ${children.length} item${children.length === 1 ? '' : 's'}`}
+                            className="flex h-6 w-6 items-center justify-center rounded text-slate-400 hover:bg-slate-200 hover:text-slate-600"
+                          >
+                            {expanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                          </button>
+                        ) : (
+                          <span className="inline-block h-6 w-6" />
+                        )}
+                      </td>
+                    )}
                     {selectable && (
                       <td className="px-3 py-2">
                         <input
@@ -696,10 +800,15 @@ export function DataTable<T>({
                       </td>
                     ))}
                   </tr>
+                  {/* Expanded children — each is a full <tr> built from the same
+                      visible columns (see renderChildRows), so it stays aligned
+                      with the header. Children nest recursively: a child with its
+                      own children gets a chevron and renders ITS children below. */}
+                  {expanded && expandable && renderChildRows(row, key, 0)}
                   {/* Full-width detail row directly under the data row. */}
                   {detail !== null && detail !== undefined && (
                     <tr className="bg-slate-50/70">
-                      <td colSpan={visibleColumns.length + (selectable ? 1 : 0)} className="px-4 py-2 text-xs text-slate-600">
+                      <td colSpan={visibleColumns.length + (selectable ? 1 : 0) + (expandable ? 1 : 0)} className="px-4 py-2 text-xs text-slate-600">
                         {detail}
                       </td>
                     </tr>

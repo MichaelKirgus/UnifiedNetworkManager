@@ -22,4 +22,8 @@ export interface InventorySnapshot {
   routes: RouteRow[];
   /** Configured gateways (routing/settings) — feeds the derived default-route rows. */
   gateways: Record<string, unknown>[];
+  /** Storage inventory for the cross-device Storage page (see collectStorage).
+   * Empty arrays = appliance has no ZFS/USB storage endpoints (404). */
+  filesystems: Record<string, unknown>[];
+  disks: Record<string, unknown>[];
 }

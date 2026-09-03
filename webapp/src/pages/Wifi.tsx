@@ -449,7 +449,9 @@ export default function Wifi() {
                   <WifiIcon size={16} className="text-slate-500" />
                   Spectrum view — all bands
                 </span>
-                {spectrumOpen ? <ChevronUp size={18} className="text-slate-400" /> : <ChevronDown size={18} className="text-slate-400" />}
+                {/* Expanded panel → chevron points DOWN (click collapses it);
+                    collapsed → UP (click expands). */}
+                {spectrumOpen ? <ChevronDown size={18} className="text-slate-400" /> : <ChevronUp size={18} className="text-slate-400" />}
               </button>
           {spectrumOpen && (
             <div className="flex min-h-0 flex-1 flex-col border-t border-slate-100 p-4">

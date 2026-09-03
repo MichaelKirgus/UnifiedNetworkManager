@@ -152,6 +152,9 @@ function transportOf(settings: Record<string, unknown>): TruenasTransport {
  */
 const clientCache = new Map<string, TruenasClient>();
 
+/** TEMP DEBUG (log-once): hosts+methods whose storage-extra outcome was already logged. */
+const storageDebugLogged = new Set<string>();
+
 function getClient(host: string, transport: TruenasTransport, timeoutMs: number): TruenasClient {
   const key = `${host}|${transport}`;
   let c = clientCache.get(key);
@@ -287,6 +290,305 @@ function parsePool(p: Record<string, unknown>): PoolRow {
 function parseAlertSeverity(a: Record<string, unknown>): string {
   const sev = pickString(a, ['severity', 'level']);
   return sev ? sev.toUpperCase() : 'INFO';
+}
+
+// ---------------------------------------------------------------------------
+// Storage inventory (cross-device Storage page): `filesystems[]` + `disks[]`
+// metrics. Pools come from pool.query (already polled); datasets + zvols from
+// pool.dataset.query; physical disks from disk.query (+ boot-pool members via
+// boot.get_disks, legacy system.datastore fallback). All three extras are
+// best-effort — their failure does NOT count toward health.
+// ---------------------------------------------------------------------------
+
+/** One row of the filesystems inventory (shape consumed by the API's ingestInventory). */
+interface FsRow {
+  name: string;
+  type: 'zfs-pool' | 'zfs-dataset' | 'zfs-zvol' | 'usb' | 'other';
+  mountpoint?: string | null;
+  sizeBytes?: number | null;
+  usedBytes?: number | null;
+  freeBytes?: number | null;
+  status?: string;
+  parent?: string | null;
+  /** Plugin-specific details (ZFS dataset props, ...) — stored in the API's
+   * `extra` JSON column for expandable rows + future config/state endpoints. */
+  extra?: Record<string, unknown>;
+}
+
+/** One row of the disks inventory (shape consumed by the API's ingestInventory). */
+interface DiskRow {
+  name: string;
+  model?: string | null;
+  serial?: string | null;
+  capacityBytes?: number | null;
+  rotationRate: 'hdd' | 'ssd' | 'flash' | 'unknown';
+  health?: string;
+  poolName?: string | null;
+  /** Plugin-specific details (temperature, power state) — stored in the API's
+   * `extra` JSON column for later config/state use. */
+  extra?: Record<string, unknown>;
+}
+
+/** ZFS dataset properties worth propagating for the Storage page's expandable
+ * rows and later config/state endpoints (quota management, mount control, ...). */
+const DATASET_EXTRA_PROPS = [
+  'used', 'referenced', 'usedbydataset', 'usedbychildren', 'usedbysnapshots',
+  'quota', 'reservation', 'volsize',
+  'compression', 'compressratio',
+  'mounted', 'readonly', 'atime', 'sync', 'xattr',
+  'creation', 'origin',
+] as const;
+
+/** True for system-managed datasets the UI hides from users (boot pool,
+ * sysdataset, apps/container internals) — mirrors middleware's INTERNAL_DATASETS. */
+function isInternalDataset(name: string): boolean {
+  if (name === '.system' || name.startsWith('.system/')) return true;
+  for (const p of ['ix-applications', 'ix-apps']) {
+    if (name === p || name.startsWith(`${p}/`) || name.includes(`/${p}`)) return true;
+  }
+  // Boot pool: `boot-pool` on modern releases, `freenas-boot` on legacy ones.
+  for (const bp of ['boot-pool', 'freenas-boot']) {
+    if (name === bp || name.startsWith(`${bp}/`)) return true;
+  }
+  return false;
+}
+
+/** Reads one ZFS property from a pool.dataset.query entry. Modern TrueNAS
+ * (25.10+/26) FLATTENS properties to top-level keys; older releases nest them
+ * under `properties`. Both shapes are handled: {value, parsed?, rawvalue?}
+ * objects and plain scalars. Returns the canonical value (`value`) plus a
+ * distinct human-readable variant (`parsed`) when one exists — for size props
+ * that is bytes + "5 GB", which downstream stores as extra[key] / extra[key+'Parsed']. */
+function propOf(d: Record<string, unknown>, key: string): { value?: unknown; parsed?: unknown } | undefined {
+  const nested = (d['properties'] as Record<string, unknown> | undefined)?.[key];
+  if (nested !== undefined) {
+    // Legacy shape — property lives under `properties`. Either an object
+    // ({value, parsed?}) or a plain scalar (e.g. mountpoint string).
+    if (typeof nested === 'object' && nested !== null) {
+      const n = nested as Record<string, unknown>;
+      return { value: n['value'], parsed: n['parsed'] };
+    }
+    return { value: nested };
+  }
+  const flat = d[key];
+  if (flat !== undefined) {
+    // Flattened shape — size props carry bytes in `parsed`, human text as the field.
+    if (typeof flat === 'object' && flat !== null) {
+      const f = flat as Record<string, unknown>;
+      const v = f['value'];
+      const p = f['parsed'];
+      // Canonical value: prefer an explicit numeric `value`, else bytes in `parsed`.
+      if (typeof v === 'number') return { value: v, parsed: typeof p === 'string' ? p : undefined };
+      if (typeof p === 'number') return { value: p, parsed: typeof v === 'string' ? v : undefined };
+      return { value: v ?? p, parsed: typeof p === 'string' && p !== v ? p : undefined };
+    }
+    // Plain scalar (e.g. mountpoint string, compression "lz4", readonly bool).
+    return { value: flat };
+  }
+  return undefined;
+}
+
+/** Numeric bytes from a property (prefers `parsed` — the real number). */
+function propBytes(d: Record<string, unknown>, key: string): number | null {
+  const p = propOf(d, key);
+  if (!p) return null;
+  for (const v of [p.parsed, p.value]) {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return null;
+}
+
+/** Maps one raw pool.dataset.query entry to a filesystem row. Pools themselves,
+ * snapshots and system-managed datasets are excluded — pools already have their
+ * own rows from pool.query (same natural key → an upsert would clobber the type).
+ * Both FILESYSTEMS and VOLUMES (zvols) are kept: zvols are block devices that
+ * hold data (VM disks, iSCSI LUNs) and belong on the Storage page. */
+function parseDataset(d: Record<string, unknown>): FsRow | null {
+  const name = pickString(d, ['name']);
+  if (!name) return null;
+  // Top-level entries ARE the pools — already represented by pool.query rows.
+  if (!name.includes('/')) return null;
+  if (isInternalDataset(name)) return null;
+  // Snapshots are per-dataset point-in-time copies — not mountable storage.
+  const dsType = typeof d['type'] === 'string' ? (d['type'] as string).toLowerCase() : '';
+  if (dsType !== 'filesystem' && dsType !== 'volume') return null;
+
+  // Mountpoint: modern shape is a plain top-level STRING; legacy nests it.
+  const mp = propOf(d, 'mountpoint');
+  let mountpoint: string | null = null;
+  const mpVal = mp?.value ?? (typeof d['mountpoint'] === 'string' ? d['mountpoint'] : undefined);
+  if (typeof mpVal === 'string' && mpVal !== 'legacy' && mpVal !== 'unmounted') mountpoint = mpVal;
+
+  // ZFS space accounting — differs by type:
+  //   FILESYSTEM: `referenced` = space this dataset itself consumes (the "used"
+  //     the UI shows); `used` also includes children. Capacity = quota if set,
+  //     else reservation, else null (unlimited → no bar). free = cap - used.
+  //   VOLUME:     `volsize` = provisioned size; `used` = space actually written.
+  const isVol = dsType === 'volume';
+  const referenced = propBytes(d, 'referenced');
+  const usedTotal = propBytes(d, 'used');
+  const volsize = propBytes(d, 'volsize');
+  const quota = propBytes(d, 'quota');
+  const reservation = propBytes(d, 'reservation');
+
+  let sizeBytes: number | null;
+  let usedBytes: number | null;
+  if (isVol) {
+    sizeBytes = volsize;
+    usedBytes = usedTotal ?? referenced;
+  } else {
+    sizeBytes = quota ?? reservation; // capacity ceiling (null = unlimited)
+    usedBytes = referenced ?? usedTotal;
+  }
+  const freeBytes =
+    sizeBytes !== null && usedBytes !== null ? Math.max(0, sizeBytes - usedBytes) : null;
+
+  // Detailed props for the expandable row + future config/state endpoints.
+  // `parsed` variants are included when present (e.g. quota "10 GB" → value is
+  // bytes, parsed is the human string) — both are useful downstream.
+  const extra: Record<string, unknown> = {};
+  for (const key of DATASET_EXTRA_PROPS) {
+    const p = propOf(d, key);
+    if (!p) continue;
+    const v = p.value ?? p.parsed;
+    if (v === undefined || v === null) continue;
+    extra[key] = v;
+    if (typeof p.parsed === 'string' && p.parsed !== '') extra[`${key}Parsed`] = p.parsed;
+  }
+
+  return {
+    name,
+    type: isVol ? 'zfs-zvol' : 'zfs-dataset',
+    mountpoint,
+    sizeBytes,
+    usedBytes,
+    freeBytes,
+    status: typeof d['state'] === 'string' ? (d['state'] as string).toUpperCase() : undefined,
+    // IMMEDIATE parent — the Storage page nests hierarchically (datasets under
+    // datasets, zvols under their dataset), not flat-under-pool.
+    parent: name.slice(0, name.lastIndexOf('/')) || null,
+    extra: Object.keys(extra).length > 0 ? extra : undefined,
+  };
+}
+
+/** Maps one raw hardware.disk.query entry to a disk row. */
+function parseDisk(d: Record<string, unknown>): DiskRow | null {
+  const name = pickString(d, ['name', 'identifier']);
+  if (!name) return null;
+  const modelRaw = pickString(d, ['model', 'description']);
+  const serial = pickString(d, ['serial', 'serial_number']);
+  const capacityBytes = pickNumber(d, ['size', 'capacity_bytes']);
+  // Media type: modern TrueNAS (24.10+) disk.query returns `type` ('HDD'|'SSD')
+  // and an integer `rotationrate` (RPM; null for SSDs). Older releases used a
+  // boolean `rotation_rate` (true = spinning media) — keep both shapes working.
+  let rotationRate: DiskRow['rotationRate'] = 'unknown';
+  const typeRaw = pickString(d, ['type']);
+  if (typeRaw === 'SSD') rotationRate = 'ssd';
+  else if (typeRaw === 'HDD') rotationRate = 'hdd';
+  else {
+    const rr = d['rotationrate'];
+    if (typeof rr === 'number' && rr > 0) rotationRate = 'hdd';
+    else if (rr === null) rotationRate = 'ssd';
+    else if (d['rotation_rate'] === true) rotationRate = 'hdd';
+    else if (d['rotation_rate'] === false) rotationRate = 'ssd';
+  }
+  const healthRaw = pickString(d, ['health', 'state']);
+  return {
+    name,
+    model: isPlaceholder(modelRaw ?? '') ? null : modelRaw,
+    serial: isPlaceholder(serial ?? '') ? null : serial,
+    capacityBytes,
+    rotationRate,
+    health: healthRaw ? healthRaw.toLowerCase() : undefined,
+  };
+}
+
+/**
+ * Maps active SMART alerts to the disks they describe. TrueNAS 25.10+ REMOVED
+ * the public SMART API (disk.smart_test is private/cron-only) — but the built-in
+ * SMART checker runs every 90 min and surfaces problems as alert.list entries,
+ * each carrying the bare disk name in args: WARNING = uncorrected errors /
+ * failed selftest, CRITICAL = low spare-block reserve / high erase count.
+ * No active alert for a disk ⇒ its last check found nothing ⇒ healthy.
+ */
+const SMART_ALERT_CLASSES = new Set([
+  'SMARTUncorrectedErrorsAlert',
+  'SMARTFailedSelfTestAlert',
+  'SMARTSpareBlockCountAlert',
+  'SMARTEraseCycleCountAlert',
+]);
+
+function smartAlertsOf(rawAlerts: Record<string, unknown>[]): Map<string, { level: string; text: string }> {
+  const map = new Map<string, { level: string; text: string }>();
+  for (const a of rawAlerts) {
+    if (a['dismissed'] === true) continue; // operator-acknowledged — not an active problem
+    const klass = pickString(a, ['klass']);
+    if (!klass || !SMART_ALERT_CLASSES.has(klass)) continue;
+    const args = (a['args'] ?? {}) as Record<string, unknown>;
+    const name = bareDiskName(pickString(args, ['name']) ?? '');
+    if (!name) continue;
+    map.set(name, { level: parseAlertSeverity(a), text: pickString(a, ['text']) ?? '' });
+  }
+  return map;
+}
+
+/** Disk details worth keeping for later config/state use (temperature, power). */
+function diskExtra(d: Record<string, unknown>): Record<string, unknown> | undefined {
+  const extra: Record<string, unknown> = {};
+  const temp = pickNumber(d, ['temperature', 'temp_celsius']);
+  if (typeof temp === 'number') extra.temperatureC = temp;
+  const powerState = pickString(d, ['power_state', 'standby']);
+  if (powerState) extra.powerState = powerState.toLowerCase();
+  return Object.keys(extra).length > 0 ? extra : undefined;
+}
+
+/** Strips a device prefix so `/dev/sda` and `sda` both match disk.query names. */
+function bareDiskName(raw: string): string {
+  const m = raw.match(/\/dev\/([A-Za-z0-9]+)$/);
+  return m ? m[1] : raw;
+}
+
+/**
+ * Walks a pool's vdev tree and returns the disk names it contains. TrueNAS
+ * `pool.query` returns topology as a DICT of vdev categories ({data, log,
+ * cache, spares, special, dedup}) — older releases used a plain array under
+ * `vdevs`. Each vdev is {type, path?, disk?, children[]}; leaf disks carry the
+ * name in `disk` (bare) or `path` (`/dev/sda`). Both shapes are handled.
+ */
+function collectPoolDisks(topology: unknown): Set<string> {
+  const found = new Set<string>();
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const v of node) walk(v);
+      return;
+    }
+    const n = node as Record<string, unknown>;
+    // Category dict ({data:[...], log:[...]}) — descend into the lists.
+    if (!n['type'] && !n['path']) {
+      for (const key of ['data', 'log', 'cache', 'spares', 'special', 'dedup']) {
+        const v = n[key];
+        if (Array.isArray(v)) walk(v);
+      }
+      return;
+    }
+    // Vdev node — leaf disks carry `disk` (bare name) or `path` (/dev/...).
+    for (const key of ['disk', 'path']) {
+      const v = pickString(n, [key]);
+      if (v) found.add(bareDiskName(v));
+    }
+    const children = n['children'];
+    if (Array.isArray(children)) for (const c of children) walk(c);
+  };
+  walk(topology);
+  return found;
+}
+
+/** Boot media from system.datastore — the disk TrueNAS itself runs on. */
+function parseBootDisk(datastore: Record<string, unknown>): DiskRow | null {
+  const name = pickString(datastore, ['disk', 'boot_disk']);
+  if (!name) return null;
+  return { name, rotationRate: 'unknown', health: undefined };
 }
 
 /** One row of the networks inventory (shape consumed by the API's ingestInventory). */
@@ -511,14 +813,44 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // section, not reject the whole poll before error handling. The last three
   // are best-effort extras (networks inventory + static routes + board
   // serial/model) — their failure does NOT count toward health.
-  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes] = await Promise.allSettled([
+  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('alert.list', [], creds),
     client.call<Record<string, unknown>[]>('interface.query', [], creds),
     client.call<Record<string, unknown>>('system.dmidecode_info', [], creds),
     client.call<Record<string, unknown>[]>('staticroute.query', [], creds),
+    // Storage-page extras (best-effort — never count toward health). Method
+    // names verified against truenas/middleware: pool.dataset.query (datasets,
+    // all releases), disk.query (physical disks incl. USB/NVMe), boot.get_disks
+    // (boot-pool members; 25.10+/26) with system.datastore as the legacy
+    // fallback for older releases.
+    client.call<Record<string, unknown>[]>('pool.dataset.query', [], creds),
+    client.call<Record<string, unknown>[]>('disk.query', [], creds),
+    client.call<Record<string, unknown>>('system.datastore', [], creds),
+    client.call<string[]>('boot.get_disks', [], creds),
   ]);
+
+  // TEMP DEBUG (log-once per host): the storage extras are best-effort — their
+  // failures never count toward health. Log each method's outcome ONCE so a
+  // wrong/renamed RPC surfaces in container logs without spamming every poll.
+  for (const [label, r] of [
+    ['pool.dataset.query', datasetsRes],
+    ['disk.query', disksRes],
+    ['system.datastore', datastoreRes],
+    ['boot.get_disks', bootDisksRes],
+  ] as const) {
+    if (storageDebugLogged.has(`${host}|${label}`)) continue;
+    storageDebugLogged.add(`${host}|${label}`);
+    if (r.status === 'rejected') {
+      console.warn(`[storage-debug] ${label} failed: ${errMsg(r.reason)}`);
+    } else if (!Array.isArray(r.value) && label !== 'system.datastore') {
+      console.warn(`[storage-debug] ${label} returned non-array: ${JSON.stringify(r.value).slice(0, 200)}`);
+    } else {
+      const n = Array.isArray(r.value) ? r.value.length : Object.keys((r.value ?? {}) as object).length;
+      console.log(`[storage-debug] ${label} ok (${n} entries)`);
+    }
+  }
 
   // --- system.info: CPU load (loadavg/cores) + memory total + inventory text ---
   let sysInfoOk = false;
@@ -554,15 +886,17 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     }
   }
 
-  // --- pool.query: per-pool table + aggregate usage gauge ---
+  // --- pool.query: per-pool table + aggregate usage gauge ------------------
   let poolsOk = false;
+  const rawPools: Record<string, unknown>[] =
+    poolsRes.status === 'fulfilled' && Array.isArray(poolsRes.value) ? (poolsRes.value as Record<string, unknown>[]) : [];
+  const poolRows: PoolRow[] = rawPools.map(parsePool); // [] when the call failed
   if (poolsRes.status === 'rejected') {
     failures++;
     firstError ||= `pool.query: ${errMsg(poolsRes.reason)}`;
   } else {
-    const rawPools = Array.isArray(poolsRes.value) ? (poolsRes.value as Record<string, unknown>[]) : [];
     if (Array.isArray(poolsRes.value)) {
-      const rows: PoolRow[] = rawPools.map(parsePool);
+      const rows = poolRows;
       let totalSize = 0;
       let totalUsed = 0;
       let haveSizes = false;
@@ -589,6 +923,76 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
       failures++;
       firstError ||= 'pool.query returned no data';
     }
+
+    // --- Storage inventory: filesystems[] (pools + datasets) + disks[] ------
+    // Emitted even when EMPTY so removed datasets/disks vanish from the page
+    // on the next poll (present-but-empty = authoritative; absent = no wipe).
+    const fsRows: FsRow[] = poolRows.map((r) => ({
+      name: r.name,
+      type: 'zfs-pool' as const,
+      mountpoint: null,
+      sizeBytes: r.sizeBytes ?? null,
+      usedBytes: r.usedBytes ?? null,
+      freeBytes: r.freeBytes ?? null,
+      status: r.status.toLowerCase(),
+    }));
+    if (datasetsRes.status === 'fulfilled' && Array.isArray(datasetsRes.value)) {
+      for (const d of datasetsRes.value as Record<string, unknown>[]) {
+        const row = parseDataset(d);
+        if (row) fsRows.push(row);
+      }
+    }
+    metrics['filesystems'] = fsRows;
+
+    const diskRows: DiskRow[] = [];
+    // Pool membership: walk each pool's vdev tree and tag its disks.
+    const disksByPool = new Map<string, Set<string>>();
+    for (const p of rawPools) {
+      const poolName = pickString(p, ['name']);
+      if (!poolName) continue;
+      disksByPool.set(poolName, collectPoolDisks(p['topology'] ?? p['vdevs']));
+    }
+    // SMART health: active SMART alerts (alert.list is already polled above).
+    const smartAlerts = alertsRes.status === 'fulfilled' && Array.isArray(alertsRes.value)
+      ? smartAlertsOf(alertsRes.value as Record<string, unknown>[])
+      : new Map<string, { level: string; text: string }>();
+    if (disksRes.status === 'fulfilled' && Array.isArray(disksRes.value)) {
+      for (const d of disksRes.value as Record<string, unknown>[]) {
+        const row = parseDisk(d);
+        if (!row) continue;
+        for (const [poolName, names] of disksByPool) {
+          if (names.has(row.name)) { row.poolName = poolName; break; }
+        }
+        // SMART state from active alerts: CRITICAL → failed, WARNING → degraded.
+        // No alert ⇒ the 90-min SMART check found nothing ⇒ healthy.
+        const smart = smartAlerts.get(row.name);
+        if (smart) {
+          row.health = smart.level === 'CRITICAL' ? 'failed' : 'degraded';
+          row.extra ??= {};
+          row.extra['smart'] = smart.text;
+        } else {
+          row.health = 'healthy';
+        }
+        // Detailed props (temperature, power state) for later config/state use.
+        const extra = diskExtra(d);
+        if (extra) Object.assign(row.extra ??= {}, extra);
+        diskRows.push(row);
+      }
+    }
+    // Boot media — the disks TrueNAS itself runs on (often a USB stick/SSD).
+    // 25.10+/26: boot.get_disks returns the boot pool's member names directly.
+    if (bootDisksRes.status === 'fulfilled' && Array.isArray(bootDisksRes.value)) {
+      for (const name of bootDisksRes.value as string[]) {
+        const existing = diskRows.find((r) => r.name === name);
+        if (existing) { existing.poolName ??= 'boot-pool'; continue; }
+        diskRows.push({ name, rotationRate: 'unknown', poolName: 'boot-pool' });
+      }
+    } else if (datastoreRes.status === 'fulfilled' && datastoreRes.value && typeof datastoreRes.value === 'object') {
+      // Legacy fallback for older releases without boot.get_disks.
+      const boot = parseBootDisk(datastoreRes.value as Record<string, unknown>);
+      if (boot && !diskRows.some((r) => r.name === boot.name)) diskRows.push(boot);
+    }
+    metrics['disks'] = diskRows;
   }
 
   // --- alert.list: active alerts drive health (CRITICAL/WARNING levels) ---
@@ -773,6 +1177,26 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
       type: 'string',
       visualization: 'table',
       columns: ['destination', 'gateway', 'protocol', 'status'],
+      group: 'Storage',
+    });
+  }
+  if (Array.isArray(metrics['filesystems']) && (metrics['filesystems'] as unknown[]).length > 0) {
+    out.push({
+      key: 'filesystems',
+      label: 'Filesystems',
+      type: 'string',
+      visualization: 'table',
+      columns: ['name', 'type', 'mountpoint', 'sizeBytes', 'usedBytes', 'freeBytes', 'status'],
+      group: 'Storage',
+    });
+  }
+  if (Array.isArray(metrics['disks']) && (metrics['disks'] as unknown[]).length > 0) {
+    out.push({
+      key: 'disks',
+      label: 'Physical Disks',
+      type: 'string',
+      visualization: 'table',
+      columns: ['name', 'model', 'serial', 'capacityBytes', 'rotationRate', 'health', 'poolName'],
       group: 'Storage',
     });
   }

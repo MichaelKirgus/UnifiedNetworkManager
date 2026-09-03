@@ -76,6 +76,8 @@ function makeRouterOsMock(port: number): http.Server & { state: MockState } {
             'cpu-load': '35', // string, percent
             'free-memory': '1500000000',
             'total-memory': '2000000000',
+            'free-disk-space': '4800000000',
+            'total-disk-space': '7600000000',
             uptime: '2d20h12m20s',
           },
         ]);
@@ -215,6 +217,9 @@ async function main(): Promise<void> {
   check('cpu load gauge value (string→number)', m['system.cpuLoad'] === 35, m['system.cpuLoad']);
   check('uptime parsed to seconds', m['system.uptime'] === 2 * 86_400 + 20 * 3_600 + 12 * 60 + 20, m['system.uptime']);
   check('memory used % computed', typeof m['system.memoryUsedPercent'] === 'number' && (m['system.memoryUsedPercent'] as number) > 0 && (m['system.memoryUsedPercent'] as number) < 100, m['system.memoryUsedPercent']);
+  // Storage page: root filesystem row from free/total-disk-space.
+  const fsRows: Record<string, any>[] = Array.isArray(m['filesystems']) ? m['filesystems'] : [];
+  check('filesystems[] has one root row (squashfs)', fsRows.length === 1 && fsRows[0].name === 'root' && fsRows[0].type === 'squashfs' && fsRows[0].sizeBytes === 7_600_000_000, fsRows);
   check('interfaces up count', m['router.interfacesUp'] === '3/3', m['router.interfacesUp']);
 
   const ifaces: Record<string, any>[] = Array.isArray(m['router.interfaces']) ? m['router.interfaces'] : [];

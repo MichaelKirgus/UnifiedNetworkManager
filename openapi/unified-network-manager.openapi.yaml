@@ -2227,6 +2227,39 @@ paths:
         '401':
           description: Authentication required
 
+  /storage:
+    get:
+      tags: [Inventory]
+      summary: Cross-device storage overview (filesystems + physical disks)
+      description: >-
+        Returns the normalized `storage_filesystems` rows (ZFS pools & datasets,
+        ext4/squashfs root filesystems, USB storage) and `storage_disks` rows
+        (physical disks / flash media with model, serial, capacity, pool
+        membership), both populated by the telemetry worker from each plugin's
+        /monitoring metrics (`filesystems[]` + `disks[]`). One row per
+        filesystem/disk on one device — no merging; devices without storage data
+        contribute no rows. Rows not refreshed within 24h are swept away.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+      responses:
+        '200':
+          description: Storage overview (filesystems + disks, device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StorageOverview'
+        '401':
+          description: Authentication required
+
   /logs:
     get:
       tags: [Logs]
@@ -3725,6 +3758,76 @@ components:
           additionalProperties: true
           description: "Protocol-specific extras (uuid, description, gatewayStatus, gatewayLatencyMs for OPNsense; rtgTag, peer, rawType for LCOS)"
         collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this route" }
+
+    StorageFilesystemRow:
+      type: object
+      required: [deviceId, pluginId, name, type, status, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this filesystem lives on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this filesystem" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        name: { type: string, description: "Filesystem/pool/dataset/zvol name (e.g. DATA01, tank/vm, tank/zvols/disk0)" }
+        type:
+          type: string
+          enum: [zfs-pool, zfs-dataset, zfs-zvol, ext4, squashfs, usb, other]
+          description: "Normalized filesystem class (lowercase at ingest; 'other' when the plugin does not classify). zfs-zvol = ZFS block device (VM disk / iSCSI LUN)"
+        mountpoint: { type: [string, 'null'], description: "Mountpoint (null for unmounted datasets / pools without a mount)" }
+        sizeBytes: { type: [number, 'null'] }
+        usedBytes: { type: [number, 'null'] }
+        freeBytes: { type: [number, 'null'] }
+        status:
+          type: string
+          description: "ONLINE/DEGRADED/OFFLINE (ZFS) or up/down/unknown — lowercase at ingest"
+        parent: { type: [string, 'null'], description: "IMMEDIATE parent name (pool or dataset) — the UI nests hierarchically via this field; null for top-level pools/filesystems" }
+        extra:
+          type: object
+          additionalProperties: true
+          description: "Plugin-specific details (ZFS dataset props — quota, used-bytes breakdown, compression, mount options — consumed by expandable rows and future config/state endpoints)"
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this filesystem" }
+
+    StorageDiskRow:
+      type: object
+      required: [deviceId, pluginId, name, rotationRate, health, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this disk is installed in" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this disk" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        name: { type: string, description: "Disk name/identifier (e.g. da0, sda)" }
+        model: { type: [string, 'null'] }
+        serial: { type: [string, 'null'] }
+        capacityBytes: { type: [number, 'null'] }
+        rotationRate:
+          type: string
+          enum: [hdd, ssd, flash, unknown]
+          description: "Rotation-rate class (lowercase at ingest)"
+        health:
+          type: string
+          description: "healthy | degraded | failed | unknown — lowercase at ingest"
+        poolName: { type: [string, 'null'], description: "Pool this disk belongs to; null for unassigned/boot disks" }
+        extra:
+          type: object
+          additionalProperties: true
+          description: "Plugin-specific details (temperature, power state, ...) — same contract as StorageFilesystemRow.extra"
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this disk" }
+
+    StorageOverview:
+      type: object
+      required: [filesystems, disks]
+      properties:
+        filesystems:
+          type: array
+          items:
+            $ref: '#/components/schemas/StorageFilesystemRow'
+        disks:
+          type: array
+          items:
+            $ref: '#/components/schemas/StorageDiskRow'
 
     WifiOverview:
       type: object

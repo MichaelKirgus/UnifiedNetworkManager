@@ -595,6 +595,60 @@ export interface WifiOverview {
   neighbors: WifiNeighborRef[];
 }
 
+// --- Storage (cross-device filesystems + physical disks) -------------------
+
+/** One filesystem/pool/dataset row from GET /storage. */
+export interface StorageFilesystemRow {
+  deviceId: string;
+  pluginId: string;
+  name: string;
+  /** zfs-pool | zfs-dataset | ext4 | squashfs | usb | other (lowercase). */
+  type: string;
+  mountpoint?: string | null;
+  sizeBytes?: number | null;
+  usedBytes?: number | null;
+  freeBytes?: number | null;
+  /** ONLINE/DEGRADED/OFFLINE (ZFS) or up/down/unknown — lowercase. */
+  status: string;
+  /** Parent pool name for datasets; null for top-level pools/filesystems. */
+  parent?: string | null;
+  /** Plugin-specific details (JSON object): ZFS dataset props (quota, used-bytes,
+   * compression, mount options), ... — consumed by expandable rows + future
+   * config/state endpoints. */
+  extra?: Record<string, unknown>;
+  collectedAt: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+/** One physical disk/flash row from GET /storage. */
+export interface StorageDiskRow {
+  deviceId: string;
+  pluginId: string;
+  name: string;
+  model?: string | null;
+  serial?: string | null;
+  capacityBytes?: number | null;
+  /** hdd | ssd | flash | unknown (lowercase). */
+  rotationRate: string;
+  /** healthy | degraded | failed | unknown (lowercase). */
+  health: string;
+  poolName?: string | null;
+  collectedAt: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+/** Response of GET /storage — filesystems (top table) + disks (bottom table). */
+export interface StorageOverview {
+  filesystems: StorageFilesystemRow[];
+  disks: StorageDiskRow[];
+}
+
 /** A user account (never includes password hashes or TOTP secrets). */
 export interface User {
   id: string;
@@ -1225,6 +1279,13 @@ export const api = {
     if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<WifiOverview>(`/wifi${suffix}`);
+  },
+  storage: (params?: { deviceId?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<StorageOverview>(`/storage${suffix}`);
   },
   /** Physical + logical topology graph for the Topology page. */
   topology: (params?: { siteId?: string; includeHosts?: boolean }) => {

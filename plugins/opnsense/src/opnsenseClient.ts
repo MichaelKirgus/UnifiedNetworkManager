@@ -38,6 +38,15 @@ export function getSystemResources(host: string, apiKey: string, apiSecret: stri
 }
 
 /**
+ * Fetches the mounted-filesystem overview (the ONLY storage data OPNsense's
+ * API exposes — there is no ZFS pool/dataset listing endpoint). Size fields
+ * are base-10 human strings. GET /api/diagnostics/system/system_disk/
+ */
+export function getSystemDisk(host: string, apiKey: string, apiSecret: string, transport?: http.OpnsenseTransport): Promise<http.OpnsenseApiResult> {
+  return system.getSystemDisk(clientFor(host, apiKey, apiSecret, transport));
+}
+
+/**
  * Fetches system information (hostname, versions).
  * GET /api/diagnostics/system/system_information
  */

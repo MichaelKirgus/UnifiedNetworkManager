@@ -24,6 +24,10 @@ const STATUS_STYLES: Record<string, string> = {
   // Route states (Routes page): installed/active vs. configured-but-inactive.
   active: 'bg-emerald-100 text-emerald-800 border-emerald-300',
   inactive: 'bg-slate-100 text-slate-500 border-slate-300 line-through',
+  // Storage states (Storage page): ZFS pool/dataset + disk health.
+  healthy: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+  faulted: 'bg-red-100 text-red-800 border-red-300',
+  unavail: 'bg-red-100 text-red-800 border-red-300',
   unknown: 'bg-slate-100 text-slate-600 border-slate-300',
 };
 

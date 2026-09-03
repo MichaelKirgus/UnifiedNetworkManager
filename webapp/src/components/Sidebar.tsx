@@ -17,6 +17,7 @@ import {
   Layers as LayersIcon,
   Route as RouteIcon,
   ScrollText,
+  HardDrive,
   Server,
   Waypoints,
   KeySquare,
@@ -43,6 +44,8 @@ const NAV_ITEMS = [
   // Structured log entries shipped by plugins (gated — logs can carry critical details).
   { to: '/logs', label: 'Logs', icon: ScrollText, requiresPermission: 'logs:read' },
   { to: '/wifi', label: 'WiFi', icon: WifiIcon, requiresPermission: 'wifi:read' },
+  // Cross-device storage inventory (filesystems/pools/datasets + physical disks).
+  { to: '/storage', label: 'Storage', icon: HardDrive, requiresPermission: 'storage:read' },
   // Physical + logical network graph (inferred cables + per-VLAN segments).
   { to: '/topology', label: 'Topology', icon: GitGraph, requiresPermission: 'topology:read' },
   // Layer registry — the topology view's horizontal bands (open to all users).

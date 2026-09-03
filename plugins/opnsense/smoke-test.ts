@@ -101,6 +101,15 @@ const mock = http.createServer((req, res) => {
       return json(res, 200, { uuid: 'peer-uuid-1' });
     case '/api/wireguard/service/reconfigure':
       return json(res, 200, {});
+    // --- Storage (mounted filesystems) — the ONLY storage endpoint OPNsense has.
+    // Size fields are BASE-10 human strings exactly as systemDiskAction returns them.
+    case '/api/diagnostics/system/system_disk/':
+      return json(res, 200, { devices: [
+        // ZFS root (the appliance's main pool) — surfaced as the top-level zfs-pool row.
+        { device: 'zroot', type: 'zfs', blocks: '107G', used: '5.4G', available: '102G', used_pct: 5, mountpoint: '/' },
+        // A UFS data partition mounted from a USB stick.
+        { device: '/dev/da1p1', type: 'ufs', blocks: '32G', used: '8G', available: '24G', used_pct: 25, mountpoint: '/mnt/data' },
+      ] });
     default:
       // Unknown endpoint → 404 (plugin treats as ok:false).
       return json(res, 404, { error: 'not found' });
@@ -215,6 +224,17 @@ async function main(): Promise<void> {
   const descriptors = (monJson.metricDescriptors ?? []) as { key: string }[];
   check('networks descriptor present', descriptors.some((d) => d.key === 'networks'));
   check('dhcpLeases descriptor present', descriptors.some((d) => d.key === 'dhcpLeases'));
+
+  // --- /monitoring storage (mounted filesystems via system_disk) --------------
+  const fsRows = (monJson.metrics?.['filesystems'] ?? []) as Record<string, unknown>[];
+  console.log('\n== /monitoring storage ==');
+  check('two mounted filesystems parsed', fsRows.length === 2, fsRows.map((r) => `${r.type}:${r.name}`));
+  const zroot = fsRows.find((r) => r.name === 'zroot');
+  // base-10: "107G" → 107e9 bytes; type zfs → surfaced as the top-level zfs-pool.
+  check('zfs root → zfs-pool row with size/used/free', zroot?.type === 'zfs-pool' && (zroot.sizeBytes as number) === 107 * 1e9 && (zroot.usedBytes as number) === 5.4 * 1e9 && (zroot.freeBytes as number) === 102 * 1e9, zroot);
+  check('zfs root mountpoint is /', zroot?.mountpoint === '/', zroot?.mountpoint);
+  const data = fsRows.find((r) => r.name === '/dev/da1p1');
+  check('ufs mount parsed (other type + base-10 sizes)', data?.type === 'other' && (data.sizeBytes as number) === 32 * 1e9 && (data.usedBytes as number) === 8 * 1e9, data);
 
   // --- /state (device-state document for the Config page) ---------------------------
   const stateRes = await fetch(`${BASE}/state`, {

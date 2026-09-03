@@ -8,6 +8,11 @@ import { settingsHeaders } from '../pluginSettings';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
 import { getSystemSettings } from '../systemSettings';
+import {
+  deviceStatusDedupeKey,
+  emitNotification,
+  statusToSeverity,
+} from '../notifications';
 import { LEADER_KEYS } from './leader';
 import {
   initWorker,
@@ -753,6 +758,138 @@ async function ingestInventory(
           ));
       }
     }
+
+    // --- Storage (filesystems/pools/datasets + physical disks) --------------
+    // Generic keys — any plugin may emit them:
+    //   filesystems[] { name, type?, mountpoint?, sizeBytes?, usedBytes?, freeBytes?, status?, parent?, extra? }
+    //   disks[]       { name, model?, serial?, capacityBytes?, rotationRate?, health?, poolName?, extra? }
+    // Both are CONFIG objects → upsert-per-poll + delete-on-absent (a removed
+    // dataset/disk must vanish from the page, not linger until the 24h sweep).
+    // `extra` is a plugin-specific JSON object stored verbatim for the webapp's
+    // expandable rows and future config/state endpoints; non-object values are
+    // dropped defensively (a corrupt row must not break ingestion).
+    const extraOf = (r: Record<string, unknown>): string => {
+      const e = r['extra'];
+      if (!e || typeof e !== 'object' || Array.isArray(e)) return '{}';
+      try {
+        return JSON.stringify(e);
+      } catch {
+        return '{}';
+      }
+    };
+    const rawFilesystems = Array.isArray(metrics['filesystems']) ? (metrics['filesystems'] as unknown[]) : null;
+    if (rawFilesystems !== null) {
+      const values: {
+        deviceId: string; pluginId: string; name: string; type: string; mountpoint: string | null;
+        sizeBytes: number | null; usedBytes: number | null; freeBytes: number | null;
+        status: string; parent: string | null; extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawFilesystems) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        if (!name) continue;
+        values.push({
+          deviceId,
+          pluginId,
+          name,
+          type: typeof r['type'] === 'string' && (r['type'] as string).trim() !== '' ? (r['type'] as string).trim().toLowerCase() : 'other',
+          mountpoint: typeof r['mountpoint'] === 'string' && (r['mountpoint'] as string).trim() !== '' ? (r['mountpoint'] as string).trim() : null,
+          sizeBytes: numOrNull(r['sizeBytes']),
+          usedBytes: numOrNull(r['usedBytes']),
+          freeBytes: numOrNull(r['freeBytes']),
+          status: typeof r['status'] === 'string' && (r['status'] as string).trim() !== '' ? (r['status'] as string).trim().toLowerCase() : 'unknown',
+          parent: typeof r['parent'] === 'string' && (r['parent'] as string).trim() !== '' ? (r['parent'] as string).trim() : null,
+          extra: extraOf(r),
+          collectedAt,
+        });
+      }
+      const fsByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        fsByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}`, v);
+      }
+      if (fsByKey.size > 0) {
+        await db.insert(schema.storageFilesystems).values(Array.from(fsByKey.values())).onConflictDoUpdate({
+          target: [schema.storageFilesystems.deviceId, schema.storageFilesystems.pluginId, schema.storageFilesystems.name],
+          set: {
+            type: sql`excluded.type`,
+            mountpoint: sql`excluded.mountpoint`,
+            sizeBytes: sql`excluded."sizeBytes"`,
+            usedBytes: sql`excluded."usedBytes"`,
+            freeBytes: sql`excluded."freeBytes"`,
+            status: sql`excluded.status`,
+            parent: sql`excluded.parent`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      const seenFsNames = new Set(values.map((v) => v.name));
+      if (seenFsNames.size > 0) {
+        await db.delete(schema.storageFilesystems)
+          .where(and(
+            eq(schema.storageFilesystems.deviceId, deviceId),
+            eq(schema.storageFilesystems.pluginId, pluginId),
+            notInArray(schema.storageFilesystems.name, Array.from(seenFsNames))
+          ));
+      }
+    }
+
+    const rawDisks = Array.isArray(metrics['disks']) ? (metrics['disks'] as unknown[]) : null;
+    if (rawDisks !== null) {
+      const values: {
+        deviceId: string; pluginId: string; name: string; model: string | null; serial: string | null;
+        capacityBytes: number | null; rotationRate: string; health: string; poolName: string | null;
+        extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawDisks) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        if (!name) continue;
+        values.push({
+          deviceId,
+          pluginId,
+          name,
+          model: typeof r['model'] === 'string' && (r['model'] as string).trim() !== '' ? (r['model'] as string).trim() : null,
+          serial: typeof r['serial'] === 'string' && (r['serial'] as string).trim() !== '' ? (r['serial'] as string).trim() : null,
+          capacityBytes: numOrNull(r['capacityBytes']),
+          rotationRate: typeof r['rotationRate'] === 'string' && (r['rotationRate'] as string).trim() !== '' ? (r['rotationRate'] as string).trim().toLowerCase() : 'unknown',
+          health: typeof r['health'] === 'string' && (r['health'] as string).trim() !== '' ? (r['health'] as string).trim().toLowerCase() : 'unknown',
+          poolName: typeof r['poolName'] === 'string' && (r['poolName'] as string).trim() !== '' ? (r['poolName'] as string).trim() : null,
+          extra: extraOf(r),
+          collectedAt,
+        });
+      }
+      const diskByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        diskByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}`, v);
+      }
+      if (diskByKey.size > 0) {
+        await db.insert(schema.storageDisks).values(Array.from(diskByKey.values())).onConflictDoUpdate({
+          target: [schema.storageDisks.deviceId, schema.storageDisks.pluginId, schema.storageDisks.name],
+          set: {
+            model: sql`excluded.model`,
+            serial: sql`excluded.serial`,
+            capacityBytes: sql`excluded."capacityBytes"`,
+            rotationRate: sql`excluded."rotationRate"`,
+            health: sql`excluded.health`,
+            poolName: sql`excluded."poolName"`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      const seenDiskNames = new Set(values.map((v) => v.name));
+      if (seenDiskNames.size > 0) {
+        await db.delete(schema.storageDisks)
+          .where(and(
+            eq(schema.storageDisks.deviceId, deviceId),
+            eq(schema.storageDisks.pluginId, pluginId),
+            notInArray(schema.storageDisks.name, Array.from(seenDiskNames))
+          ));
+      }
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(
@@ -793,6 +930,8 @@ async function sweepStaleInventory(): Promise<void> {
   await db.delete(schema.wifiRadios).where(lt(schema.wifiRadios.collectedAt, cutoff));
   await db.delete(schema.wifiNeighbors).where(lt(schema.wifiNeighbors.collectedAt, cutoff));
   await db.delete(schema.wifiClients).where(lt(schema.wifiClients.lastSeenAt, cutoff));
+  await db.delete(schema.storageFilesystems).where(lt(schema.storageFilesystems.collectedAt, cutoff));
+  await db.delete(schema.storageDisks).where(lt(schema.storageDisks.collectedAt, cutoff));
 }
 
 /**
@@ -808,6 +947,56 @@ function deriveDeviceStatus(outcomes: PollOutcome[]): string {
   if (outcomes.some((o) => o.health === 'critical')) return 'critical';
   if (outcomes.every((o) => o.health === 'ok')) return 'online';
   return 'degraded';
+}
+
+/**
+ * Mirror a device status transition into the notification center.
+ *   - degrading (offline/critical/degraded): one live row per condition via a
+ *     stable dedupe key — re-emissions while ongoing just bump occurrences,
+ *     and the notifications worker auto-resolves it when the device recovers;
+ *   - recovering to online: a one-shot info note (unique key, no recurrence).
+ * Never throws — notification failures must not break the poll cycle.
+ */
+async function emitDeviceStatusNotification(deviceId: string, prev: string, next: string): Promise<void> {
+  try {
+    const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+    const name = device?.name ?? deviceId;
+
+    if (next === 'online' && prev !== 'unknown') {
+      await emitNotification({
+        severity: 'info',
+        source: 'device',
+        title: `${name} is back online`,
+        message: `Device recovered from ${prev}.`,
+        deviceId,
+        context: { from: prev, to: next },
+      });
+      return;
+    }
+
+    const severity = statusToSeverity(next);
+    if (!severity) return; // unknown/online — nothing to report
+
+    await emitNotification({
+      severity,
+      source: 'device',
+      title:
+        next === 'offline'
+          ? `${name} is offline`
+          : next === 'critical'
+            ? `${name} reports a critical problem`
+            : `${name} is degraded`,
+      message:
+        next === 'offline'
+          ? `Device stopped responding to monitoring (was ${prev}).`
+          : `Health changed from ${prev} to ${next}.`,
+      dedupeKey: deviceStatusDedupeKey(deviceId, next),
+      deviceId,
+      context: { from: prev, to: next },
+    });
+  } catch {
+    // Best-effort by contract.
+  }
 }
 
 async function pollAllDevices(): Promise<void> {
@@ -867,6 +1056,10 @@ async function pollAllDevices(): Promise<void> {
   // Poll every assignment independently — one dead plugin must not take the
   // whole device down. Device status is derived worst-wins afterwards. The
   // concurrency cap keeps the per-beat burst flat regardless of fleet size.
+  // Previous statuses for transition detection (notification center mirrors
+  // state changes into the bell — see src/notifications.ts).
+  const prevStatusById = new Map(devices.map((d) => [d.id, d.status] as const));
+
   const entries = Array.from(targetsByDevice.entries());
   await runWithConcurrency(
     entries,
@@ -874,6 +1067,14 @@ async function pollAllDevices(): Promise<void> {
     async ([deviceId, targets]) => {
       const outcomes = await Promise.all(targets.map((t) => pollAssignment(t)));
       const status = deriveDeviceStatus(outcomes);
+      const prev = prevStatusById.get(deviceId) ?? 'unknown';
+      if (status !== prev) {
+        // Mirror the transition into the notification center. Degrading states
+        // carry a stable dedupe key so they upsert while ongoing and are
+        // auto-resolved by the notifications worker when the device recovers;
+        // recovery itself emits a one-shot info note.
+        void emitDeviceStatusNotification(deviceId, prev, status);
+      }
       await db.update(schema.devices).set({ status }).where(eq(schema.devices.id, deviceId));
     }
   );

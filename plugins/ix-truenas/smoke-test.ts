@@ -69,9 +69,22 @@ wss.on('connection', (ws: WebSocket) => {
         });
       case 'pool.query':
         if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // Topology is a DICT of vdev categories (real TrueNAS shape); leaf disks
+        // carry `disk` (bare name) + `path` (/dev/...). da0 → tank mirror,
+        // da1 → cache stripe.
         return reply([
-          { name: 'tank', status: 'ONLINE', size: 8_796_093_022_208, allocated: 4_398_046_511_104, free: 4_398_046_511_104, scan: { function: 'SCRUB', state: 'SCANNING', percentage: 42 } },
-          { name: 'cache', status: 'DEGRADED', size: 1_099_511_627_776, allocated: 549_755_813_888, free: 549_755_813_888 },
+          {
+            name: 'tank', status: 'ONLINE', size: 8_796_093_022_208, allocated: 4_398_046_511_104, free: 4_398_046_511_104,
+            scan: { function: 'SCRUB', state: 'SCANNING', percentage: 42 },
+            topology: { data: [{ type: 'MIRROR', children: [
+              { type: 'DISK', path: '/dev/da0', disk: 'da0' },
+              { type: 'DISK', path: '/dev/da3', disk: 'da3' },
+            ] }], log: [], cache: [], spares: [] },
+          },
+          {
+            name: 'cache', status: 'DEGRADED', size: 1_099_511_627_776, allocated: 549_755_813_888, free: 549_755_813_888,
+            topology: { data: [{ type: 'DISK', path: '/dev/da1', disk: 'da1' }], log: [], cache: [], spares: [] },
+          },
         ]);
       case 'interface.query':
         if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
@@ -80,9 +93,72 @@ wss.on('connection', (ws: WebSocket) => {
           { name: 'vnet1', description: 'LAN', state: { link_state: 'LINK_STATE_DOWN', link_address: 'aa:bb:cc:dd:ee:02' }, aliases: [JSON.stringify({ type: 'INET', address: '192.168.50.1', netmask: 24 })], vlan_tag: 50 },
         ]);
       case 'alert.list':
-        return reply([]);
+        // Active SMART alerts (25.10+ has no public SMART API — health comes
+        // from these): da1 failed a selftest, da3 uncorrected errors (both
+        // WARNING ⇒ device health stays 'warning'). A dismissed CRITICAL alert
+        // must NOT affect anything.
+        return reply([
+          { id: 'a1', klass: 'SMARTFailedSelfTestAlert', severity: 'WARNING', dismissed: false, args: { name: 'da1', serial: 'SAMSUNG-XYZ' }, text: 'da1 (SAMSUNG-XYZ) failed a SMART selftest.' },
+          { id: 'a2', klass: 'SMARTUncorrectedErrorsAlert', severity: 'WARNING', dismissed: false, args: { name: '/dev/da3', serial: 'WD-ABC456' }, text: '12 uncorrectable errors reported for /dev/da3 (WD-ABC456).' },
+          { id: 'a3', klass: 'SMARTSpareBlockCountAlert', severity: 'CRITICAL', dismissed: true, args: { name: 'da0', serial: 'WD-ABC123' }, text: 'dismissed — must not affect health' },
+        ]);
       case 'staticroute.query':
         return reply([{ id: 1, destination: '0.0.0.0/0', gateway: '10.25.0.1', description: 'default' }]);
+      case 'pool.dataset.query':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // MODERN shape (25.10+/26): properties FLATTENED to top-level keys; size
+        // props carry bytes in `parsed` + human text as the field value. One LEGACY
+        // nested entry is included too — both shapes must parse identically.
+        return reply([
+          {
+            name: 'tank/vm', type: 'filesystem', state: 'ONLINE',
+            referenced: { parsed: 1_073_741_824, value: '1 GB' },
+            used: { parsed: 1_509_949_440, value: '1.4 GB' },
+            quota: { parsed: 5_368_709_120, value: '5 GB' },
+            mountpoint: '/mnt/tank/vm',
+            compression: 'lz4', compressratio: '1.21x', readonly: false,
+          },
+          {
+            // Nested dataset — parent must be its IMMEDIATE parent (tank/vm), not the pool.
+            name: 'tank/vm/nested', type: 'filesystem', state: 'ONLINE',
+            referenced: { parsed: 104_857_600, value: '100 MB' },
+            mountpoint: '/mnt/tank/vm/nested',
+          },
+          {
+            // ZVOL — block device (VM disk / iSCSI LUN), must be propagated as zfs-zvol.
+            name: 'tank/zvols/disk0', type: 'volume', state: 'ONLINE',
+            volsize: { parsed: 8_589_934_592, value: '8 GB' },
+            used: { parsed: 2_147_483_648, value: '2 GB' },
+          },
+          {
+            // LEGACY nested shape (pre-25.10) — must still parse.
+            name: 'tank/legacy', type: 'filesystem', state: 'ONLINE',
+            properties: {
+              referenced: { value: 209_715_200 },
+              quota: { value: 1_073_741_824, parsed: '1 GB' },
+              mountpoint: '/mnt/tank/legacy',
+            },
+          },
+          { name: 'tank@snap-1', type: 'snapshot', state: 'ONLINE', properties: {} }, // must be excluded
+        ]);
+      case 'disk.query':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        return reply([
+          // Modern shape (24.10+): `type` + integer `rotationrate`.
+          { name: 'da0', model: 'WDC WD40EFRX-68N', serial: 'WD-ABC123', size: 4_000_787_035_008, type: 'HDD', rotationrate: 7200 },
+          // Legacy shape (older releases): boolean `rotation_rate`, no `type`.
+          { name: 'da1', model: 'Samsung SSD 970 EVO', serial: 'SAMSUNG-XYZ', size: 512_110_190_624, rotation_rate: false },
+          // Second tank mirror member (CRITICAL smart alert target).
+          { name: 'da3', model: 'WDC WD40EFRX-68N', serial: 'WD-ABC456', size: 4_000_787_035_008, type: 'HDD', rotationrate: 7200 },
+        ]);
+      case 'boot.get_disks':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // Boot media is a separate device (USB stick) not in disk.query.
+        return reply(['da2']);
+      case 'system.datastore':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // Boot media is a separate device (USB stick) not in hardware.disk.query.
+        return reply({ disk: 'da2', hostname: 'mock-truenas' });
       case 'system.dmidecode_info':
         return reply({ 'baseboard-product-name': 'To Be Filled By O.E.M.', 'system-serial-number': 'TN-SERIAL-001' });
       case 'system.reboot':
@@ -143,6 +219,33 @@ async function main(): Promise<void> {
   const ports = (m['ports'] ?? []) as Record<string, unknown>[];
   check('ports[] inventory emitted with live state + MAC', ports.length === 2 && ports.some((p) => p.name === 'NET_MANAGEMENT' && p.status === 'up' && (p.extra as Record<string, unknown>)?.mac === 'aa:bb:cc:dd:ee:01'), ports);
   check('ports[] carries vlanId for VLAN interfaces', ports.some((p) => p.name === 'LAN' && p.vlanId === 50), ports);
+
+  // --- Storage inventory (Storage page): filesystems[] + disks[] --------------
+  const fsRows = (m['filesystems'] ?? []) as Record<string, unknown>[];
+  check('filesystems[] emitted: 2 pools + 4 datasets/zvols (snapshot excluded)', fsRows.length === 6 && fsRows.some((r) => r.name === 'tank' && r.type === 'zfs-pool') && fsRows.some((r) => r.name === 'tank/vm' && r.type === 'zfs-dataset'), fsRows);
+  const dsRow = fsRows.find((r) => r.name === 'tank/vm');
+  check('dataset extra carries ZFS props for config/state use', !!dsRow && (dsRow.extra as Record<string, unknown>)?.quota === 5_368_709_120 && (dsRow.extra as Record<string, unknown>)?.compression === 'lz4' && (dsRow.extra as Record<string, unknown>)?.referenced === 1_073_741_824, dsRow?.extra);
+  check('dataset parent is the POOL for top-level datasets', dsRow?.parent === 'tank', dsRow?.parent);
+  // Per-dataset size/used/free (the user's ask): filesystems use referenced as
+  // used + quota as capacity; free = cap - used.
+  check('dataset carries its own size/used/free (quota-based)', !!dsRow && dsRow.sizeBytes === 5_368_709_120 && dsRow.usedBytes === 1_073_741_824 && dsRow.freeBytes === 4_294_967_296, { size: dsRow?.sizeBytes, used: dsRow?.usedBytes, free: dsRow?.freeBytes });
+  check('dataset mountpoint parsed from flattened string', dsRow?.mountpoint === '/mnt/tank/vm', dsRow?.mountpoint);
+  const nestedRow = fsRows.find((r) => r.name === 'tank/vm/nested');
+  check('nested dataset parent is its IMMEDIATE parent (hierarchy)', nestedRow?.type === 'zfs-dataset' && nestedRow?.parent === 'tank/vm', nestedRow);
+  check('dataset without quota: used set, size null (unlimited)', !!nestedRow && nestedRow.usedBytes === 104_857_600 && nestedRow.sizeBytes === null && nestedRow.freeBytes === null, { size: nestedRow?.sizeBytes, used: nestedRow?.usedBytes });
+  const zvolRow = fsRows.find((r) => r.name === 'tank/zvols/disk0');
+  check('zvols propagated as zfs-zvol with volsize-based capacity', !!zvolRow && zvolRow.type === 'zfs-zvol' && zvolRow.parent === 'tank/zvols' && zvolRow.sizeBytes === 8_589_934_592 && zvolRow.usedBytes === 2_147_483_648 && zvolRow.freeBytes === 6_442_450_944, { size: zvolRow?.sizeBytes, used: zvolRow?.usedBytes, free: zvolRow?.freeBytes });
+  const legacyRow = fsRows.find((r) => r.name === 'tank/legacy');
+  check('LEGACY nested property shape still parses', !!legacyRow && legacyRow.sizeBytes === 1_073_741_824 && legacyRow.usedBytes === 209_715_200 && legacyRow.mountpoint === '/mnt/tank/legacy', { size: legacyRow?.sizeBytes, used: legacyRow?.usedBytes });
+  const diskRows = (m['disks'] ?? []) as Record<string, unknown>[];
+  check('disks[] emitted: 3 disks + boot media', diskRows.length === 4 && diskRows.some((d) => d.name === 'da0' && d.rotationRate === 'hdd') && diskRows.some((d) => d.name === 'da1' && d.rotationRate === 'ssd'), diskRows);
+  check('boot media tagged with boot-pool', diskRows.some((d) => d.name === 'da2' && d.poolName === 'boot-pool'), diskRows);
+  // Pool membership from the pool.query topology dict (leaf `disk`/`path`).
+  check('disks tagged with their pool via topology walk', diskRows.some((d) => d.name === 'da0' && d.poolName === 'tank') && diskRows.some((d) => d.name === 'da1' && d.poolName === 'cache'), diskRows);
+  // SMART health from active alert.list entries (no public SMART API on 25.10+).
+  check('disk without ACTIVE smart alert → healthy (dismissed CRITICAL ignored)', diskRows.some((d) => d.name === 'da0' && d.health === 'healthy'), diskRows);
+  check('WARNING smart alert → degraded + text in extra', diskRows.some((d) => d.name === 'da1' && d.health === 'degraded' && typeof (d.extra as Record<string, unknown>)?.['smart'] === 'string'), diskRows);
+  check('WARNING smart alert with /dev/ prefix stripped → degraded', diskRows.some((d) => d.name === 'da3' && d.health === 'degraded'), diskRows);
 
   // --- /state --------------------------------------------------------------------------
   const stateRes = await post('/state', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds });

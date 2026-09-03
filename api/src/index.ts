@@ -21,7 +21,9 @@ import plansRouter from './routes/plans';
 import networksRouter from './routes/networks';
 import topologyRouter from './routes/topology';
 import logsRouter from './routes/logs';
+import notificationsRouter from './routes/notifications';
 import systemRouter from './routes/system';
+import { startNotificationsWorker } from './workers/notifications';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startTelemetryRetentionWorker } from './workers/telemetryRetention';
 import { startPluginDiscovery } from './plugins/discovery';
@@ -113,6 +115,8 @@ async function main(): Promise<void> {
   api.use(topologyRouter);
   // Plugin log entries (global view + per-device section in DeviceDetail).
   api.use(logsRouter);
+  // Notification center (bell badge, panel, full page with filters + prefs).
+  api.use(notificationsRouter);
   // System/HA observability + runtime tuning (/system/status, /system/settings).
   api.use(systemRouter);
   // The plans router defines its own /plans/... paths (like the devices router),
@@ -167,6 +171,8 @@ async function main(): Promise<void> {
       return () => clearInterval(timer);
     }).then((stop) => workerStops.push(stop));
     void runAsLeader(LEADER_KEYS.pluginMetrics, 'pluginMetrics', () => startPluginMetricsWorker()).then((stop) => workerStops.push(stop));
+    // Notification maintenance: auto-resolve recovered device states + retention.
+    void runAsLeader(LEADER_KEYS.notifications, 'notifications', () => startNotificationsWorker()).then((stop) => workerStops.push(stop));
 
     // Discover plugins via mDNS/DNS-SD, with HTTP polling as a fallback for
     // Docker bridge networks where multicast is isolated. Leader-gated: the

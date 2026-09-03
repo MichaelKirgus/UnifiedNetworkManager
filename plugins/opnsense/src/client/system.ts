@@ -35,6 +35,19 @@ export function getSystemResources(client: AxiosInstance): Promise<OpnsenseApiRe
   return get(client, '/api/diagnostics/system/system_resources');
 }
 
+// --- Storage (best-effort) --------------------------------------------------
+// OPNsense exposes NO ZFS pool/dataset listing API — the only storage data is
+// the mounted-filesystem overview below. Callers treat a missing endpoint as
+// "no data" — never an error (see collectStorage in index.ts).
+
+/** GET /api/diagnostics/system/system_disk/ — mounted filesystems.
+ * Returns `{ devices: [{ device, type, blocks, used, available, used_pct,
+ * mountpoint }] }` where the size fields are BASE-10 human strings ("5.2G")
+ * exactly as OPNsense's own Disk widget consumes them (`_convertToBytes`). */
+export function getSystemDisk(client: AxiosInstance): Promise<OpnsenseApiResult> {
+  return get(client, '/api/diagnostics/system/system_disk/');
+}
+
 // --- Service control (core/service) ---------------------------------------
 
 /** GET /api/core/service/search — all services + running state. */

@@ -122,8 +122,13 @@ The API's telemetry worker polls every ~30 s with a **hard 10 s budget**.
 - `metrics` keys must match your descriptor `key`s. Values are rendered by the
   webapp verbatim (pre-format table cells as strings).
 - **Inventory propagation** — arrays inside `metrics` that the API ingests into
-  its Networks/Hosts pages: `networks[]` (`{name, ip, vlanId?, status?}`),
-  `macTable[]` (`{mac, intf}`). A key present-but-empty upserts + deletes-on-absent; a key *absent* means "I don't report this" and never wipes data.
+  its cross-device pages:
+  - `networks[]` (`{name, ip?, prefix?, version?, vlanId?, mac?, status?}`) → Networks page
+  - `arp[]` / `ndp[]` / `dhcpLeases[]` / `wlanClients[]` / `macTable[]` → Hosts page
+  - `tunnels[]`, `routes[]`, `ports[]` → Tunnels/Routes/Config pages
+  - `wifiNetworks[]`, `wifiAirtime[]`, `wifiRadios[]`, `wifiNeighbors[]`, `wlanClients[]` → WiFi page
+  - **Storage page:** `filesystems[]` (`{name, type?, mountpoint?, sizeBytes?, usedBytes?, freeBytes?, status?, parent?, extra?}` — types: `zfs-pool`, `zfs-dataset`, `ext4`, `squashfs`, `usb`, `other`) and `disks[]` (`{name, model?, serial?, capacityBytes?, rotationRate?, health?, poolName?, extra?}` — rotation: `hdd|ssd|flash|unknown`). Emit them even when EMPTY so removed datasets/disks vanish on the next poll; omit the key entirely only if your device class has no storage at all. Datasets set `parent` to their pool name — the webapp nests them under the pool row (expander). The optional `extra` JSON object carries plugin-specific details (ZFS dataset props like quota/compression/mount options, disk temperature) stored verbatim for expandable rows and future config/state endpoints.
+  A key present-but-empty upserts + deletes-on-absent; a key *absent* means "I don't report this" and never wipes data.
 
 Health conventions: unreachable/bad creds → `critical`; stale snapshot or
 degraded state → `warning`; wrong device type → `unknown`.

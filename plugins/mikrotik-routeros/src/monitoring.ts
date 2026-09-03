@@ -98,6 +98,9 @@ export interface RouterOsSnapshot {
   cpuLoadPercent: number | null;
   freeMemoryBytes: number | null;
   totalMemoryBytes: number | null;
+  // Root filesystem (squashfs/ext4 on the router's flash) — /system/resource.
+  freeDiskBytes: number | null;
+  totalDiskBytes: number | null;
   uptimeSeconds: number | null;
   interfaces: RosInterfaceInfo[];
   addresses: RosAddressRow[];
@@ -191,6 +194,9 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
     cpuLoadPercent: cpuLoadRaw !== undefined && Number.isFinite(cpuLoadRaw) ? Math.round(cpuLoadRaw * 10) / 10 : null,
     freeMemoryBytes: rosNumber(resource, ['free-memory']) ?? null,
     totalMemoryBytes: rosNumber(resource, ['total-memory']) ?? null,
+    // RouterOS 7 exposes the flash filesystem as free-disk-space/total-disk-space.
+    freeDiskBytes: rosNumber(resource, ['free-disk-space', 'free-disk']) ?? null,
+    totalDiskBytes: rosNumber(resource, ['total-disk-space', 'total-disk']) ?? null,
     uptimeSeconds: parseUptimeSeconds(rosString(resource, ['uptime'])),
     interfaces: [],
     addresses: [],
@@ -542,6 +548,21 @@ export function buildMetrics(s: RouterOsSnapshot, selectedModel?: string | null,
 
   // routes[] → cross-device Routes page (present-but-empty is authoritative).
   m['routes'] = s.routes.map((r) => ({ destination: r.destination, gateway: r.gateway || null, protocol: r.protocol, distance: r.distance ?? undefined, status: r.status }));
+
+  // filesystems[] → cross-device Storage page. RouterOS runs from a single
+  // flash filesystem (squashfs on most boards) — one row when the resource
+  // endpoint reports disk space; absent otherwise (no wipe of other data).
+  if (s.totalDiskBytes !== null && s.totalDiskBytes > 0) {
+    m['filesystems'] = [{
+      name: 'root',
+      type: 'squashfs',
+      mountpoint: '/',
+      sizeBytes: s.totalDiskBytes,
+      usedBytes: s.freeDiskBytes !== null ? Math.max(0, s.totalDiskBytes - s.freeDiskBytes) : null,
+      freeBytes: s.freeDiskBytes ?? null,
+      status: 'up',
+    }];
+  }
 
   // wlanClients[] → hosts table with source 'wlan'.
   if (s.wlanClients.length > 0) {

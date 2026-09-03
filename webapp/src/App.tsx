@@ -17,6 +17,7 @@ import Tunnels from './pages/Tunnels';
 import RoutesPage from './pages/Routes';
 import Logs from './pages/Logs';
 import Wifi from './pages/Wifi';
+import Storage from './pages/Storage';
 import Topology from './pages/Topology';
 import Users from './pages/Users';
 import Roles from './pages/Roles';
@@ -39,6 +40,7 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
   { path: '/routes', permission: 'routes:read' },
   { path: '/logs', permission: 'logs:read' },
   { path: '/wifi', permission: 'wifi:read' },
+  { path: '/storage', permission: 'storage:read' },
   { path: '/topology', permission: 'topology:read' },
   // Layers is open to every authenticated user (no read permission).
   { path: '/layers' },
@@ -91,6 +93,7 @@ export default function App() {
       <Route path="/routes" element={<Page permission="routes:read"><RoutesPage /></Page>} />
       <Route path="/logs" element={<Page permission="logs:read"><Logs /></Page>} />
       <Route path="/wifi" element={<Page permission="wifi:read"><Wifi /></Page>} />
+      <Route path="/storage" element={<Page permission="storage:read"><Storage /></Page>} />
       {/* Physical + logical network graph (inferred cables, per-VLAN segments). */}
       <Route path="/topology" element={<Page permission="topology:read"><Topology /></Page>} />
       {/* Network layer registry — open to every authenticated user. */}

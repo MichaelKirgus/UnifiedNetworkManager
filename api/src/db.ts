@@ -481,6 +481,53 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_device_ports_device ON device_ports ("deviceId")`);
 
+  // Storage inventory tables (Storage page) — same lifecycle as tunnels/routes:
+  // one row per filesystem/pool/dataset and per physical disk, upserted per
+  // poll from the plugin's `filesystems` / `disks` metrics.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS storage_filesystems (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'other',
+      mountpoint TEXT,
+      "sizeBytes" DOUBLE PRECISION,
+      "usedBytes" DOUBLE PRECISION,
+      "freeBytes" DOUBLE PRECISION,
+      status TEXT NOT NULL DEFAULT 'unknown',
+      parent TEXT,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_storage_filesystems_device ON storage_filesystems ("deviceId")`);
+
+  // Plugin-specific details for filesystem rows (ZFS dataset props, ...) —
+  // added after the initial release; existing tables get it via ALTER.
+  await pool.query(`ALTER TABLE storage_filesystems ADD COLUMN IF NOT EXISTS extra TEXT NOT NULL DEFAULT '{}'`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS storage_disks (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      model TEXT,
+      serial TEXT,
+      "capacityBytes" DOUBLE PRECISION,
+      "rotationRate" TEXT NOT NULL DEFAULT 'unknown',
+      health TEXT NOT NULL DEFAULT 'unknown',
+      "poolName" TEXT,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_storage_disks_device ON storage_disks ("deviceId")`);
+
+  // Plugin-specific details for disk rows — added after the initial release.
+  await pool.query(`ALTER TABLE storage_disks ADD COLUMN IF NOT EXISTS extra TEXT NOT NULL DEFAULT '{}'`);
+
   // Plugin log entries (see schema.pluginLogs). Pushed by plugins in batches
   // via POST /plugin/logs; swept by the retention worker after LOG_RETENTION_DAYS.
   await pool.query(`
@@ -567,7 +614,45 @@ export async function initDb(): Promise<void> {
       [uuidv4(), new Date().toISOString()]
     );
   }
+  // Notification center (see schema.notifications / notificationPrefs). The
+  // partial unique index on dedupeKey is what makes the worker's upsert cheap:
+  // one live row per ongoing condition.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      "dedupeKey" TEXT,
+      severity TEXT NOT NULL DEFAULT 'info',
+      source TEXT NOT NULL DEFAULT 'system',
+      "pluginId" TEXT,
+      "deviceId" TEXT,
+      title TEXT NOT NULL,
+      message TEXT NOT NULL DEFAULT '',
+      context TEXT,
+      "createdAt" TEXT NOT NULL,
+      "lastSeenAt" TEXT NOT NULL,
+      occurrences INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'open',
+      "acknowledgedBy" TEXT,
+      "acknowledgedAt" TEXT,
+      "resolvedAt" TEXT
+    )`);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe_key
+      ON notifications ("dedupeKey")
+      WHERE "status" IN ('open', 'acknowledged') AND "dedupeKey" IS NOT NULL`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_notifications_status_created
+      ON notifications (status, "createdAt")`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_notifications_device_id
+      ON notifications ("deviceId")`);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS notification_prefs (
+      "userId" TEXT PRIMARY KEY,
+      visibility TEXT NOT NULL DEFAULT '{}',
+      "updatedAt" TEXT NOT NULL
+    )`);
   // The legacy singular columns are superseded by device_plugins. There is no
   // production data to migrate (confirmed), so drop them outright — any dev
   // devices must be recreated via the new multi-plugin create flow.

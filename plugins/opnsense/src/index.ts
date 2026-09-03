@@ -18,6 +18,7 @@ import {
   getSystemStatus,
   getSystemResources,
   getSystemInformation,
+  getSystemDisk,
   getInterfaces,
   getInterfaceStats,
   getCpuUsage,
@@ -253,6 +254,82 @@ function parseDhcpLeaseRows(rows: unknown[]): Record<string, unknown>[] {
 }
 
 /**
+ * Parses the ZFS pool status + USB storage responses into Storage-page rows.
+ * Both endpoints are version-dependent and only exist on appliances that have
+ * the respective hardware — a missing/404 response yields empty arrays (the
+ * caller then omits the metric keys entirely). Field names vary across
+ * OPNsense releases, so every read is defensive multi-key.
+ */
+/** Parses OPNsense's base-10 human size strings ("5.2G", "800M") into bytes —
+ * the SAME format + units (K=1000) the appliance's own Disk widget uses in
+ * `_convertToBytes`. Accepts a raw number too, for defensive multi-shape reads. */
+function parseBase10Bytes(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return Math.round(v);
+  if (typeof v !== 'string') return null;
+  const m = v.trim().match(/^(\d+(?:\.\d+)?)([BKMGTPE]?)$/i);
+  if (!m) return null;
+  const num = parseFloat(m[1]);
+  if (!Number.isFinite(num)) return null;
+  const unit = (m[2] ?? '').toUpperCase();
+  const mult: Record<string, number> = { '': 1, B: 1, K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18 };
+  return Math.round(num * (mult[unit] ?? 1));
+}
+
+/** Maps OPNsense's mounted-filesystem `type` to a Storage-page filesystem type.
+ * OPNsense exposes NO ZFS pool/dataset tree — only the mounted root (`zfs`) and
+ * any other mounts, so the zfs root is surfaced as the top-level `zfs-pool`. */
+function opnsenseFsType(raw: string | null): string {
+  switch ((raw ?? '').toLowerCase()) {
+    case 'zfs': return 'zfs-pool';
+    case 'ext2':
+    case 'ext3':
+    case 'ext4': return 'ext4';
+    case 'squashfs': return 'squashfs';
+    default: return 'other'; // ufs and anything else — no dedicated badge
+  }
+}
+
+/**
+ * Parses the mounted-filesystem overview (`/api/diagnostics/system/system_disk`)
+ * into Storage-page rows. This is the ONLY storage data OPNsense's API exposes
+ * (there is no ZFS pool/dataset listing endpoint). A missing/404 response yields
+ * empty arrays — the caller then omits the metric keys entirely. Size fields are
+ * base-10 human strings ("5.2G"); `blocks` = total capacity, `used`/`available`
+ * as consumed by OPNsense's own Disk widget.
+ */
+function collectStorage(
+  diskRes: { ok: boolean; data?: unknown } | undefined
+): { filesystems: Record<string, unknown>[]; disks: Record<string, unknown>[] } {
+  const filesystems: Record<string, unknown>[] = [];
+  if (!diskRes?.ok) return { filesystems, disks: [] };
+
+  // system_disk returns `{ devices: [...] }` (not a recordset). Be defensive.
+  const d = diskRes.data as Record<string, unknown> | undefined;
+  const rows = Array.isArray(d?.['devices']) ? (d!['devices'] as unknown[]) : [];
+  for (const raw of rows) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    const name = pickString(r, ['device', 'name']);
+    if (!name) continue;
+    // `blocks` = total capacity; `used`/`available` are base-10 human strings.
+    const sizeBytes = parseBase10Bytes(r['blocks']);
+    const usedBytes = parseBase10Bytes(r['used']);
+    const freeBytes = parseBase10Bytes(r['available']);
+    filesystems.push({
+      name,
+      type: opnsenseFsType(pickString(r, ['type']) ?? null),
+      mountpoint: pickString(r, ['mountpoint', 'mounted-on']) ?? null,
+      sizeBytes: sizeBytes ?? null,
+      usedBytes: usedBytes ?? (sizeBytes !== null && freeBytes !== null ? sizeBytes - freeBytes : null),
+      freeBytes: freeBytes ?? (sizeBytes !== null && usedBytes !== null ? Math.max(0, sizeBytes - usedBytes) : null),
+      status: 'online', // present in the mounted list = active + readable
+    });
+  }
+
+  return { filesystems, disks: [] };
+}
+
+/**
  * Returns the inventory snapshot for a host, fetching from the appliance only
  * when the cache is older than INVENTORY_INTERVAL_MS. All calls run in
  * parallel and are best-effort — a failing endpoint yields an empty field, not
@@ -272,19 +349,21 @@ async function getInventory(
   // The client-lib calls need a bound axios instance for this appliance.
   const client = createClient(host, { apiKey, apiSecret }, transport);
 
-  const [info, arp, ndp, ifInfo, vlanRes, gwRes] = await Promise.all([
+  const [info, arp, ndp, ifInfo, vlanRes, gwRes, diskRes] = await Promise.all([
     getSystemInformation(host, apiKey, apiSecret, transport).catch(() => undefined),
     getArpTable(host, apiKey, apiSecret, transport).catch(() => undefined),
     getNdpTable(host, apiKey, apiSecret, transport).catch(() => undefined),
     getInterfacesInfo(client).catch(() => undefined),
     vlans.get(client).catch(() => undefined),
     searchGateways(client).catch(() => undefined),
+    // Storage (best-effort — the only storage data OPNsense exposes):
+    getSystemDisk(host, apiKey, apiSecret, transport).catch(() => undefined),
   ]);
 
   // Raw interfaces_info entries — kept for the PPPoE tunnel detector (which
   // needs the interface TYPE fields that parseNetworkRows discards).
   let ifEntries: Record<string, unknown>[] = [];
-  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [], routes: [], gateways: [] };
+  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [], routes: [], gateways: [], filesystems: [], disks: [] };
   if (info?.ok && info.data && typeof info.data === 'object') {
     const d = info.data as Record<string, unknown>;
     if (d['name'] !== undefined) snap.hostname = String(d['name']);
@@ -384,6 +463,12 @@ async function getInventory(
     const rows = Array.isArray(d['rows']) ? d['rows'] : Array.isArray(gwRes.data) ? gwRes.data : Object.values(d);
     snap.gateways = (rows as unknown[]).filter((r): r is Record<string, unknown> => !!r && typeof r === 'object');
   }
+
+  // Storage (mounted filesystems) — the only storage data OPNsense exposes;
+  // empty array when the endpoint is missing/404 or the API key lacks access.
+  const storage = collectStorage(diskRes);
+  snap.filesystems = storage.filesystems;
+  snap.disks = storage.disks;
 
   inventoryCache.set(host, snap);
   return snap;
@@ -844,6 +929,12 @@ async function collectMetrics(
   // pages) in addition to being rendered as generic tables in the device view.
   if (inventory.networks.length > 0) metrics['networks'] = inventory.networks;
   if (inventory.dhcpLeases.length > 0) metrics['dhcpLeases'] = inventory.dhcpLeases;
+
+  // Storage inventory for the cross-device Storage page. Emitted ONLY when the
+  // appliance actually has ZFS pools / USB storage — an absent key means "no
+  // data" (the API must not wipe rows of other devices on this plugin).
+  if (inventory.filesystems.length > 0) metrics['filesystems'] = inventory.filesystems;
+  if (inventory.disks.length > 0) metrics['disks'] = inventory.disks;
 
   // Ports: one row per configured interface (the networks rows are one-per-IP,
   // so dedupe by name). Consumed by the API's normalized device_ports table —

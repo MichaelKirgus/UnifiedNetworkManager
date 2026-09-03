@@ -25,5 +25,7 @@ export { createApiClient, isNotFound } from './apiClient';
 export type { ApiClientOptions } from './apiClient';
 export { createPluginLogger, LOG_LEVELS } from './logging';
 export type { PluginLogger, PluginLoggerOptions, PluginLogEntry, LogLevel, LogCallOptions } from './logging';
+export { createNotifier, NOTIFICATION_SEVERITIES } from './notifications';
+export type { PluginNotifier, NotifierOptions, PluginNotification, NotificationSeverity } from './notifications';
 export { createSelfMetrics } from './selfMetrics';
 export type { PluginSelfMetrics, SelfMetricsOptions, SelfMetricsLoggerLike } from './selfMetrics';
