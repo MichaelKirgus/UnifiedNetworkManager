@@ -65,7 +65,7 @@ the shared SDK first — keep that structure when editing.
 | Export | Purpose |
 | --- | --- |
 | `resolvePluginIdentity({uuid,name,version,vendors,capabilities,authType?})` | Multi-instance identity from env (`PORT`, `ADVERTISED_ENDPOINT`, `PLUGIN_INSTANCE_ID`, `PLUGIN_DISPLAY_NAME`). Returns `{effectiveUuid, displayName, port, endpoint, …}`. |
-| `createPluginServer({identity, logTag?, jsonLimit?, iconsDir?, discovery?, selfMetricsExtra?})` | Pre-wired express app: cors + json + `/healthz` + `/discover` + **auto-mounted `GET /metrics`** (self-metrics — see §9) (+ static `/icons`). `.listen()` binds the port and starts mDNS advertising (service type `_unm-plugin._tcp`). Returns `{app, identity, listen()}`. |
+| `createPluginServer({identity, logTag?, jsonLimit?, iconsDir?, discovery?, selfMetricsExtra?})` | Pre-wired express app: cors + json + `/healthz` + `/discover` + **auto-mounted `GET /metrics`** (self-metrics — see §11) (+ static `/icons`). `.listen()` binds the port and starts mDNS advertising (service type `_unm-plugin._tcp`). Returns `{app, identity, listen()}`. |
 | `readSettings(req, options)` | Parses the `x-unm-settings` JSON header the API injects on every call, merged over your declared option defaults. Missing/malformed header → sane defaults. |
 | `clampInt(v,min,max,fallback)`, `hostFromAddress(addr)`, `pickString/pickNumber` | Small shared helpers. |
 | `MetricDescriptor` + factories `gaugeMetric/textMetric/tableMetric/errorDescriptor/modelFirmwareDescriptors` | The metric contract the webapp renders from, plus convenience builders. |
@@ -78,7 +78,8 @@ the shared SDK first — keep that structure when editing.
 | `TtlCache<V>` (`{isFresh?, maxSize?}`) | TTL cache with a quality gate + oldest-first eviction. Pair it with a plain `Map` "lastKnown" fallback to serve stale data on blips instead of flapping health. |
 | `createApiClient()` / `isNotFound(err)` | Axios bootstrap for plugins that call BACK into the API's internal `/plugin/*` routes (basic-auth, secrets-provider). Reads `UNM_API_URL` + `PLUGIN_API_KEY`. |
 | `createPluginLogger(identity)` | Structured log shipping to the API (`POST /plugin/logs`). Fire-and-forget batching with drop-on-failure — see §9 Logging. Its queue depth is automatically exposed in `GET /metrics`. |
-| `createSelfMetrics(opts?)` → `{trackMiddleware, handler, collect}` | The self-metrics collector behind the auto-mounted `GET /metrics` (CPU%, memory, event-loop lag, poll stats). Only needed if you build a server by hand instead of using `createPluginServer` — see §10. |
+| `createNotifier(identity)` | Notification-center pushes to the API (`POST /plugin/notifications`) — appliance-level events like vendor alerts. See §10 Notifications. |
+| `createSelfMetrics(opts?)` → `{trackMiddleware, handler, collect}` | The self-metrics collector behind the auto-mounted `GET /metrics` (CPU%, memory, event-loop lag, poll stats). Only needed if you build a server by hand instead of using `createPluginServer` — see §11. |
 | `requirePluginKey` | Middleware authenticating the calling API via `x-plugin-api-key` (skipped when unset = dev mode). |
 | Contract types | `Health`, `MetricDescriptor`, `PluginOptionDescriptor`, `DeviceModelEntry`, `CredentialSlotDescriptor`, `SecretField/SecretType`, `RiskLevel`, `InputSchema(Property)`, `CatalogEntry`, `ProvisionRequest`, `PlanStep`, `Plan`, `PlanDevice<C>`, `PlanRequest<C>`, `StepCredentials`, `MonitoringRequestBody/ResponseBody`, `ConfigRequestBody/ResponseBody`. |
 
@@ -312,7 +313,62 @@ Log failures and state changes; keep messages short — details go in `context`.
 
 ---
 
-## 10. Self-metrics (your plugin's own runtime health)
+## 10. Notifications (push appliance-level events to the notification center)
+
+The UNM webapp has a **notification center** — a bell in the top-right with an
+unread badge, plus a full Notifications page with filters. Three sources feed it:
+
+- **system** — the API itself (plan failures, config-job failures);
+- **device** — mirrored automatically from telemetry (a device going offline /
+critical / degraded notifies; recovery resolves it). You do NOT push these;
+- **plugin** — pushed by YOU via `createNotifier()` for events only your plugin
+  can see: vendor alert lists, firmware availability, pool scrub failures, …
+
+**Setup (once, at startup):**
+```ts
+import { createNotifier } from '@unm/plugin-sdk';
+const notifier = createNotifier(identity);
+```
+
+**Gate emission per call** with a conventional boolean option (default `true`),
+same pattern as `logToApi`:
+```ts
+{ key: 'notifyAlerts', label: 'Mirror alerts to notification center', type: 'boolean' as const, default: true,
+  description: 'Push active appliance alerts into the UNM notification center.' },
+
+// in each handler, right after readSettings():
+notifier.setEnabled(settings.notifyAlerts === true);
+```
+
+**Emit + resolve:** ongoing conditions MUST carry a stable `dedupeKey` — while
+the condition persists the API upserts the same row (occurrences bump), and when
+it clears you call `resolve()` with the same key so the row auto-resolves:
+```ts
+notifier.warning(`${hostname}: SMART uncorrected errors on da0`, {
+  dedupeKey: 'alert:smart-uncorrected:da0',   // stable per condition!
+  deviceId,
+  context: { klass: 'SMARTUncorrectedErrorsAlert' },
+});
+// …later, when the alert disappears from the appliance:
+notifier.resolve(['alert:smart-uncorrected:da0']);
+```
+One-shot events ("backup completed") omit `dedupeKey` — they stay until a user
+acknowledges/closes them or retention sweeps them.
+
+**Semantics:** fire-and-forget batching (~2 s flush, max 200 queued,
+drop-oldest on overflow) to the internal `POST /plugin/notifications` with the
+shared `x-plugin-api-key`; drop-on-failure (a notification must never break a
+poll). Severities: `info | warning | critical`. Without `PLUGIN_API_KEY` set the
+notifier degrades to a no-op. The API prefixes your dedupe keys with
+`plugin:<your-uuid>:` so different plugins can't collide.
+
+**What NOT to push:** per-poll success spam, raw log lines (use the logger),
+or device reachability — the API already mirrors offline/degraded/critical from
+telemetry. Push appliance-level state that telemetry health alone doesn't tell.
+
+---
+
+## 11. Self-metrics (your plugin's own runtime health)
 
 Every plugin built with `createPluginServer()` automatically serves **`GET /metrics`**
 — no code needed. The API polls it every 30 s and stores samples in

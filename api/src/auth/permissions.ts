@@ -24,6 +24,7 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'tunnels:read': 'View the Tunnels page (configured + live tunnel state)',
   'routes:read': 'View the Routes page (static and dynamic routes across devices)',
   'wifi:read': 'View the WiFi page (SSIDs, spectrum and neighbors)',
+  'storage:read': 'View the Storage page (filesystems, pools/datasets and physical disks across devices)',
   'topology:read': 'View the Topology page (physical + logical network graph)',
   'sites:read': 'View sites',
   'config-jobs:read': 'View configuration jobs',
@@ -33,6 +34,12 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // their own permission instead of riding on devices:read. Gates both the
   // global /logs page and the per-device Logs section in DeviceDetail.
   'logs:read': 'View plugin log entries (device and global)',
+  // Notification center — bell badge, dropdown panel and the full Notifications
+  // page with filters. Acknowledging/closing is a read-level action (it only
+  // affects the user's own view state); changing per-user visibility settings
+  // additionally requires notifications:write.
+  'notifications:read': 'View the notification center (bell, panel and Notifications page)',
+  'notifications:write': 'Change personal notification visibility settings',
   'configs:apply': 'Submit configuration jobs to devices (requires 2FA)',
   'plugins:manage': 'Change global plugin settings',
   'secrets:read': 'View secrets (metadata only — values stay encrypted)',

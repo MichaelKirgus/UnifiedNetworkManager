@@ -23,6 +23,7 @@ tags:
   - name: Layers
   - name: Inventory
   - name: Logs
+  - name: Notifications
   - name: Users
   - name: Tokens
   - name: System
@@ -2325,6 +2326,236 @@ paths:
         '403':
           description: Missing logs:read permission
 
+  /notifications:
+    get:
+      tags: [Notifications]
+      summary: List notifications (newest first)
+      description: >-
+        Notification center rows with optional filters. `status` defaults to
+        open,acknowledged; pass e.g. status=open,acknowledged,resolved,closed
+        for the full history. `all=true` ignores the caller's personal
+        visibility prefs (the Notifications page uses it); without it only
+        severities allowed by the user's prefs are returned. Requires
+        permission `notifications:read`.
+      parameters:
+        - in: query
+          name: status
+          required: false
+          allowReserved: true
+          schema: { type: string }
+          description: "Comma list of open,acknowledged,resolved,closed (default 'open,acknowledged')"
+        - in: query
+          name: severity
+          required: false
+          allowReserved: true
+          schema: { type: string }
+          description: "Comma list of info,warning,critical"
+        - in: query
+          name: source
+          required: false
+          allowReserved: true
+          schema: { type: string }
+          description: "Comma list of system,device,plugin"
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: pluginId
+          required: false
+          schema: { type: string }
+          description: Filter to one plugin instance
+        - in: query
+          name: search
+          required: false
+          schema: { type: string }
+          description: Case-insensitive substring match on title and message
+        - in: query
+          name: all
+          required: false
+          schema: { type: boolean }
+          description: "true = ignore personal visibility prefs (full history)"
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 200, maximum: 500 }
+          description: Max rows to return (default 200, hard cap 500)
+      responses:
+        '200':
+          description: Notifications, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Notification'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:read permission
+
+  /notifications/count:
+    get:
+      tags: [Notifications]
+      summary: Count open notifications visible to the caller (bell badge)
+      responses:
+        '200':
+          description: Open count after applying the caller's visibility prefs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count]
+                properties:
+                  count: { type: integer }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:read permission
+
+  /notifications/ack:
+    post:
+      tags: [Notifications]
+      summary: Acknowledge notifications (seen — leaves the list, drops out of the badge)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:
+                  type: array
+                  items: { type: string }
+                  description: Notification ids to acknowledge (max 500)
+                all:
+                  type: boolean
+                  description: true = acknowledge every currently-open notification
+      responses:
+        '200':
+          description: Number of rows acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [acknowledged]
+                properties:
+                  acknowledged: { type: integer }
+        '400':
+          description: Neither ids nor all:true provided
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:read permission
+
+  /notifications/close:
+    post:
+      tags: [Notifications]
+      summary: Close (dismiss) notifications from view
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { type: string }
+                  description: Notification ids to close (max 500)
+      responses:
+        '200':
+          description: Number of rows closed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [closed]
+                properties:
+                  closed: { type: integer }
+        '400':
+          description: ids array missing or empty
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:read permission
+
+  /notifications/{id}:
+    delete:
+      tags: [Notifications]
+      summary: Resolve one notification (condition fixed/cleared)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Resolved (no-op when already terminal)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:read permission
+
+  /notifications/prefs:
+    get:
+      tags: [Notifications]
+      summary: Get the caller's notification visibility prefs
+      responses:
+        '200':
+          description: Per-source severity allow-lists (defaults when never set)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationPrefs'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:read permission
+    put:
+      tags: [Notifications]
+      summary: Update the caller's notification visibility prefs
+      description: >-
+        Fine-grained control over which notifications show up in the bell and
+        panel. Omitting a source shows everything for that source; an empty
+        list hides it entirely. Requires `notifications:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [visibility]
+              properties:
+                visibility:
+                  type: object
+                  additionalProperties:
+                    type: array
+                    items:
+                      type: string
+                      enum: [info, warning, critical]
+      responses:
+        '200':
+          description: The stored (normalized) prefs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationPrefs'
+        '400':
+          description: Malformed body
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:write permission
+
   /users:
     get:
       tags: [Users]
@@ -3461,6 +3692,60 @@ components:
         message: { type: string, description: "Human-readable message (truncated at ~2KB on ingest)" }
         context: { type: object, additionalProperties: true, nullable: true, description: "Structured details; null when absent" }
         timestamp: { type: string, format: date-time, description: "ISO-8601 timestamp from the plugin's clock" }
+
+    Notification:
+      type: object
+      description: >-
+        One notification-center row. Ongoing conditions (device state changes,
+        appliance alerts) carry a stable dedupeKey and are upserted while they
+        persist — occurrences/lastSeenAt track recurrence; one-shot events use
+        unique keys. `status`: open = counts toward the badge; acknowledged =
+        seen by a user; resolved = condition cleared (auto or manual); closed
+        = dismissed from view.
+      required: [id, severity, source, title, message, createdAt, lastSeenAt, occurrences, status]
+      properties:
+        id: { type: string }
+        dedupeKey: { type: [string, 'null'], description: "Stable identity of an ongoing condition; null for one-shot events" }
+        severity:
+          type: string
+          enum: [info, warning, critical]
+        source:
+          type: string
+          enum: [system, device, plugin]
+          description: "system = the API itself (plans/config jobs); device = mirrored from telemetry; plugin = pushed by a plugin"
+        pluginId: { type: [string, 'null'] }
+        pluginName: { type: [string, 'null'], description: "Display name of the producing plugin instance" }
+        deviceId: { type: [string, 'null'] }
+        deviceName: { type: [string, 'null'] }
+        title: { type: string }
+        message: { type: string }
+        context: { type: object, additionalProperties: true, nullable: true, description: "Structured details ({from,to}, {planId}, ...); null when absent" }
+        createdAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time, description: "When the condition was last (re)observed" }
+        occurrences: { type: integer, description: "How many times the condition has been observed since creation" }
+        status:
+          type: string
+          enum: [open, acknowledged, resolved, closed]
+        acknowledgedBy: { type: [string, 'null'] }
+        acknowledgedAt: { type: [string, 'null'], format: date-time }
+        resolvedAt: { type: [string, 'null'], format: date-time }
+
+    NotificationPrefs:
+      type: object
+      description: >-
+        Per-user visibility prefs — which severities from each source show up
+        in the bell badge and dropdown panel. A missing/empty list hides that
+        source entirely; omitted sources default to showing everything.
+      required: [userId, visibility]
+      properties:
+        userId: { type: string }
+        visibility:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+              enum: [info, warning, critical]
 
     PluginSelfMetricsSample:
       type: object

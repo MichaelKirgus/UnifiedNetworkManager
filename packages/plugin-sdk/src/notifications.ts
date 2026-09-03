@@ -46,6 +46,11 @@ export interface PluginNotifier {
   info(title: string, opts?: Omit<PluginNotification, 'title' | 'severity'>): void;
   warning(title: string, opts?: Omit<PluginNotification, 'title' | 'severity'>): void;
   critical(title: string, opts?: Omit<PluginNotification, 'title' | 'severity'>): void;
+  /**
+   * Mark ongoing conditions as cleared — the API resolves their live rows.
+   * Pass the SAME dedupeKeys you used when notifying (without any prefix).
+   */
+  resolve(dedupeKeys: string[]): void;
   /** Runtime toggle (wire to a plugin option like `logToApi`). */
   setEnabled(enabled: boolean): void;
   enabled: boolean;
@@ -65,15 +70,22 @@ export function createNotifier(identity: PluginIdentity, opts: NotifierOptions =
 
   const http = createApiClient({ baseUrl: opts.baseUrl, apiKey });
   let queue: PluginNotification[] = [];
+  let resolveKeys = new Set<string>();
   let enabled = true;
   let flushing = false;
 
   async function flush(): Promise<void> {
-    if (flushing || queue.length === 0) return;
+    if (flushing || (queue.length === 0 && resolveKeys.size === 0)) return;
     flushing = true;
     const batch = queue.splice(0, MAX_BATCH);
+    const resolves = Array.from(resolveKeys).slice(0, 200);
+    resolveKeys.clear();
     try {
-      await http.post('/plugin/notifications', { pluginId: identity.effectiveUuid, notifications: batch });
+      await http.post('/plugin/notifications', {
+        pluginId: identity.effectiveUuid,
+        notifications: batch,
+        ...(resolves.length > 0 ? { resolve: resolves } : {}),
+      });
     } catch {
       // Drop-on-failure (one retry would re-order against newer entries — the
       // notification center is best-effort by contract).
@@ -97,8 +109,15 @@ export function createNotifier(identity: PluginIdentity, opts: NotifierOptions =
     info: (title, o = {}) => push({ title, severity: 'info', ...o }),
     warning: (title, o = {}) => push({ title, severity: 'warning', ...o }),
     critical: (title, o = {}) => push({ title, severity: 'critical', ...o }),
-    setEnabled(enabled: boolean) {
-      notifier.enabled = enabled;
+    resolve(dedupeKeys: string[]) {
+      if (!enabled || !apiKey) return;
+      for (const k of dedupeKeys) {
+        if (typeof k === 'string' && k) resolveKeys.add(k);
+      }
+    },
+    setEnabled(value: boolean) {
+      // Assign the CLOSURE variable — `notifier.enabled` is getter-only.
+      enabled = value;
     },
     get enabled() {
       return enabled;

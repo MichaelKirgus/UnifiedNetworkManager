@@ -4,6 +4,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { configJobQueue } from '../queue';
 import { getSecretFresh } from '../secretsProvider';
+import { emitNotification } from '../notifications';
 import { initWorker, trackBeat } from './stats';
 import { settingsHeaders } from '../pluginSettings';
 import { parseExtraCredentials } from '../types/credentialSlots';
@@ -135,6 +136,9 @@ async function processJob(jobId: string): Promise<void> {
         finishedAt: new Date().toISOString() 
       })
       .where(eq(schema.configJobs.id, jobId));
+    if (status === 'failed') {
+      await notifyConfigJobFailure(jobId, device.name, job.action, JSON.stringify(response.data?.result ?? response.data ?? {}));
+    }
   } catch (err) {
     await db.update(schema.configJobs)
       .set({ 
@@ -143,6 +147,28 @@ async function processJob(jobId: string): Promise<void> {
         finishedAt: new Date().toISOString() 
       })
       .where(eq(schema.configJobs.id, jobId));
+    await notifyConfigJobFailure(jobId, device.name, job.action, (err as Error).message);
+  }
+}
+
+/** Mirror a failed config job into the notification center (one-shot per job). */
+async function notifyConfigJobFailure(
+  jobId: string,
+  deviceName: string,
+  action: string,
+  detail: string
+): Promise<void> {
+  try {
+    await emitNotification({
+      severity: 'warning',
+      source: 'system',
+      title: `Config job failed on ${deviceName}`,
+      message: `${action}: ${String(detail).slice(0, 500)}`,
+      dedupeKey: `config-job:${jobId}`,
+      context: { jobId, action },
+    });
+  } catch {
+    // Best-effort by contract.
   }
 }
 

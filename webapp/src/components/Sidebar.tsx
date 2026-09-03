@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom';
 import clsx from 'clsx';
 import {
   Activity,
+  BellRing,
   Cable,
   KeyRound,
   Laptop,
@@ -43,6 +44,8 @@ const NAV_ITEMS = [
   { to: '/routes', label: 'Routes', icon: Waypoints, requiresPermission: 'routes:read' },
   // Structured log entries shipped by plugins (gated — logs can carry critical details).
   { to: '/logs', label: 'Logs', icon: ScrollText, requiresPermission: 'logs:read' },
+  // Notification center — full history + filters (the bell lives in the top bar).
+  { to: '/notifications', label: 'Notifications', icon: BellRing, requiresPermission: 'notifications:read' },
   { to: '/wifi', label: 'WiFi', icon: WifiIcon, requiresPermission: 'wifi:read' },
   // Cross-device storage inventory (filesystems/pools/datasets + physical disks).
   { to: '/storage', label: 'Storage', icon: HardDrive, requiresPermission: 'storage:read' },

@@ -898,6 +898,78 @@ router.get('/wifi', requireAuth, requirePermission('wifi:read'), async (_req, re
   }
 });
 
+// GET /storage - Cross-device storage overview (Storage page).
+// Returns the normalized `storage_filesystems` rows (pools, ZFS datasets,
+// ext4/squashfs/USB filesystems) and `storage_disks` rows (physical disks /
+// flash media) with device + plugin views joined. No cross-device merge — a
+// row is one filesystem/disk on one device.
+// Query params: deviceId (exact), siteId (filter by device's site).
+router.get('/storage', requireAuth, requirePermission('storage:read'), async (_req, res: Response) => {
+  try {
+    const { deviceId, siteId } = _req.query as Record<string, string | undefined>;
+
+    // Resolve the device filter once, then build per-table where clauses.
+    let fsWhere;
+    let diskWhere;
+    if (deviceId && siteId) {
+      // Both filters: verify the device belongs to the site first.
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) {
+        res.status(200).json({ filesystems: [], disks: [] });
+        return;
+      }
+      fsWhere = eq(schema.storageFilesystems.deviceId, deviceId);
+      diskWhere = eq(schema.storageDisks.deviceId, deviceId);
+    } else if (deviceId) {
+      fsWhere = eq(schema.storageFilesystems.deviceId, deviceId);
+      diskWhere = eq(schema.storageDisks.deviceId, deviceId);
+    } else if (siteId) {
+      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (deviceIds.length === 0) {
+        res.status(200).json({ filesystems: [], disks: [] });
+        return;
+      }
+      fsWhere = inArray(schema.storageFilesystems.deviceId, deviceIds);
+      diskWhere = inArray(schema.storageDisks.deviceId, deviceIds);
+    }
+
+    const [fsRows, diskRows] = await Promise.all([
+      db.query.storageFilesystems.findMany({
+        ...(fsWhere ? { where: fsWhere } : {}),
+        orderBy: [asc(schema.storageFilesystems.deviceId), asc(schema.storageFilesystems.parent), asc(schema.storageFilesystems.name)],
+      }),
+      db.query.storageDisks.findMany({
+        ...(diskWhere ? { where: diskWhere } : {}),
+        orderBy: [asc(schema.storageDisks.deviceId), asc(schema.storageDisks.poolName), asc(schema.storageDisks.name)],
+      }),
+    ]);
+
+    const [deviceViews, pluginNames] = await Promise.all([
+      loadDeviceViews(Array.from(new Set([...fsRows.map((r) => r.deviceId), ...diskRows.map((r) => r.deviceId)]))),
+      loadPluginNames(Array.from(new Set([...fsRows.map((r) => r.pluginId), ...diskRows.map((r) => r.pluginId)]))),
+    ]);
+
+    const decorate = <T extends { deviceId: string; pluginId: string }>(row: T) => {
+      const device = deviceViews.get(row.deviceId);
+      return {
+        ...row,
+        deviceName: device?.name ?? null,
+        managementAddress: device?.managementAddress ?? null,
+        siteName: device?.siteName ?? null,
+        pluginName: pluginNames.get(row.pluginId) ?? null,
+      };
+    };
+
+    res.status(200).json({
+      filesystems: fsRows.map(decorate),
+      disks: diskRows.map(decorate),
+    });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 /** Parses a JSON text column defensively — corrupt rows must not break the list. */
 function safeParseJson<T>(raw: string): T {
   try {

@@ -443,6 +443,41 @@ export interface LogEntry {
   timestamp: string;
 }
 
+// --- Notification center ------------------------------------------------------
+
+export type NotificationSeverity = 'info' | 'warning' | 'critical';
+export type NotificationSource = 'system' | 'device' | 'plugin';
+export type NotificationStatus = 'open' | 'acknowledged' | 'resolved' | 'closed';
+
+/** One notification-center row (see GET /notifications). */
+export interface Notification {
+  id: string;
+  /** Stable identity of an ongoing condition; null for one-shot events. */
+  dedupeKey?: string | null;
+  severity: NotificationSeverity;
+  source: NotificationSource;
+  pluginId?: string | null;
+  pluginName?: string | null;
+  deviceId?: string | null;
+  deviceName?: string | null;
+  title: string;
+  message: string;
+  context?: Record<string, unknown> | null;
+  createdAt: string;
+  lastSeenAt: string;
+  occurrences: number;
+  status: NotificationStatus;
+  acknowledgedBy?: string | null;
+  acknowledgedAt?: string | null;
+  resolvedAt?: string | null;
+}
+
+/** Per-user visibility prefs (source → allowed severities). */
+export interface NotificationPrefs {
+  userId: string;
+  visibility: Record<string, NotificationSeverity[]>;
+}
+
 // --- System/HA (Workers page) -------------------------------------------------
 
 /** Runtime state of one worker role on THIS instance (GET /system/status). */
@@ -1316,6 +1351,42 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<LogEntry[]>(`/logs${suffix}`);
   },
+  // Notification center (bell badge + panel + full page with filters).
+  notifications: (params?: {
+    status?: string;
+    severity?: string;
+    source?: string;
+    deviceId?: string;
+    pluginId?: string;
+    search?: string;
+    /** true = ignore personal visibility prefs (full history view). */
+    all?: boolean;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set('status', params.status);
+    if (params?.severity) qs.set('severity', params.severity);
+    if (params?.source) qs.set('source', params.source);
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.pluginId) qs.set('pluginId', params.pluginId);
+    if (params?.search) qs.set('search', params.search);
+    if (params?.all) qs.set('all', 'true');
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<Notification[]>(`/notifications${suffix}`);
+  },
+  notificationCount: () => apiFetch<{ count: number }>('/notifications/count'),
+  acknowledgeNotifications: (ids?: string[], all?: boolean) =>
+    apiFetch<{ acknowledged: number }>(
+      '/notifications/ack',
+      { method: 'POST', body: JSON.stringify(all ? { all: true } : { ids }) }
+    ),
+  closeNotifications: (ids: string[]) =>
+    apiFetch<{ closed: number }>('/notifications/close', { method: 'POST', body: JSON.stringify({ ids }) }),
+  resolveNotification: (id: string) => apiFetch<{ ok: boolean }>(`/notifications/${id}`, { method: 'DELETE' }),
+  notificationPrefs: () => apiFetch<NotificationPrefs>('/notifications/prefs'),
+  setNotificationPrefs: (visibility: Record<string, NotificationSeverity[]>) =>
+    apiFetch<NotificationPrefs>('/notifications/prefs', { method: 'PUT', body: JSON.stringify({ visibility }) }),
   // Runtime self-metrics of a plugin process (CPU/memory/lag/poll stats).
   pluginSelfMetrics: (pluginId: string, limit = 120) =>
     apiFetch<{ pluginId: string; latest: PluginSelfMetricsSample | null; history: PluginSelfMetricsSample[] }>(

@@ -38,6 +38,7 @@ export const LEADER_KEYS = {
   discovery: 9004,
   pluginMetrics: 9005,
   telemetryRetention: 9006,
+  notifications: 9007,
 } as const;
 
 /**

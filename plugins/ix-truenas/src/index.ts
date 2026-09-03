@@ -6,6 +6,7 @@ import {
   PluginOptionDescriptor,
   INVENTORY_INTERVAL_MS,
   clampInt,
+  createNotifier,
   createPluginLogger,
   createPluginServer,
   gaugeMetric,
@@ -87,6 +88,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       'Ship structured log entries (poll failures, auth errors) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
+  },
+  {
+    key: 'notifyAlerts',
+    label: 'Mirror alerts to notification center',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Push active TrueNAS alerts (alert.list) into the UNM notification center. Alerts that disappear are auto-resolved.',
   },
 ];
 
@@ -203,6 +212,17 @@ function resolveCredentials(
 // Emission is gated per call by the `logToApi` option via setEnabled().
 // ---------------------------------------------------------------------------
 const logger = createPluginLogger(identity);
+
+// Notification-center pushes for appliance-level events (alert.list diffing).
+// Gated per call by the `notifyAlerts` option, same pattern as logging.
+const notifier = createNotifier(identity);
+
+/**
+ * Per-host snapshot of the last-seen ACTIVE alerts — used to diff alert.list
+ * across polls so each alert notifies ONCE (dedupeKey upsert keeps it live)
+ * and is resolved when it disappears. Keyed by host; values are dedupe keys.
+ */
+const knownAlertsByHost = new Map<string, Set<string>>();
 
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
@@ -786,6 +806,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // Effective settings injected by the API (defaults ⊕ user overrides).
   const settings = readSettings(req, PLUGIN_OPTIONS);
   logger.setEnabled(settings.logToApi === true);
+  notifier.setEnabled(settings.notifyAlerts === true);
   const transport = transportOf(settings);
   const timeoutMs = clampInt(settings.timeoutMs, 500, 60000, 5000);
 
@@ -1013,6 +1034,46 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
       }
     }
     alertsOk = true;
+
+    // Mirror active alerts into the UNM notification center. Each alert gets a
+    // stable dedupe key (class + args) so re-polls upsert instead of flooding,
+    // and keys that vanished from this snapshot are resolved below.
+    if (settings.notifyAlerts !== false) {
+      const seen = new Set<string>();
+      for (const a of active) {
+        const klass = pickString(a, ['klass']) ?? 'Unknown';
+        const argsRaw = a['args'];
+        // Args are usually [diskName] or {name: ...} — take the first string-ish
+        // piece as the subject so "SMART uncorrected errors on da0" dedupes per disk.
+        let subject = '';
+        if (Array.isArray(argsRaw) && argsRaw.length > 0) {
+          const first = argsRaw[0];
+          subject = typeof first === 'string' ? first : pickString((first ?? {}) as Record<string, unknown>, ['name', 'disk']) ?? '';
+        } else if (argsRaw && typeof argsRaw === 'object') {
+          subject = pickString(argsRaw as Record<string, unknown>, ['name', 'disk']) ?? '';
+        }
+        const key = `alert:${klass}:${subject}`.toLowerCase();
+        seen.add(key);
+
+        const sev = parseAlertSeverity(a);
+        const text = pickString(a, ['text']) ?? klass;
+        const hostname = pickString(metrics, ['system.hostname']) ?? host;
+        notifier.notify({
+          severity: sev === 'CRITICAL' ? 'critical' : sev === 'WARNING' ? 'warning' : 'info',
+          title: `${hostname}: ${klass.replace(/Alert$/, '')}${subject ? ` (${subject})` : ''}`,
+          message: text.slice(0, 500),
+          dedupeKey: key,
+          deviceId,
+          context: { klass, subject: subject || null, severity: sev },
+        });
+      }
+
+      // Alerts that disappeared since the last poll → resolve their rows.
+      const prev = knownAlertsByHost.get(host) ?? new Set<string>();
+      const gone = Array.from(prev).filter((k) => !seen.has(k));
+      if (gone.length > 0) notifier.resolve(gone);
+      knownAlertsByHost.set(host, seen);
+    }
   }
 
   // --- interface.query: networks inventory + own-interface host rows -------
@@ -1126,7 +1187,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     metrics,
     metricDescriptors: descriptorsFromMetrics(metrics),
     // Echo of the effective settings — proof the API→plugin injection loop works.
-    activeSettings: { transport, timeoutMs, logToApi: settings.logToApi === true },
+    activeSettings: { transport, timeoutMs, logToApi: settings.logToApi === true, notifyAlerts: settings.notifyAlerts === true },
   });
 }
 

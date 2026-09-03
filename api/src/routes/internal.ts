@@ -428,5 +428,68 @@ export function internalRouter() {
     }
   });
 
+  // POST /plugin/notifications - accept notification pushes from one plugin.
+  // Body: { pluginId, notifications?: [ {severity?, title, message?, dedupeKey?, deviceId?, context?} ],
+  //         resolve?: string[] } — `resolve` lists (plugin-prefixed) dedupe keys
+  // whose conditions have cleared on the appliance; those rows auto-resolve.
+  // Plugins use this to surface appliance-level events (e.g. TrueNAS alerts);
+  // device-state mirroring happens API-side from telemetry instead.
+  router.post('/plugin/notifications', pluginAuth, async (req: Request, res: Response) => {
+    const { emitNotification, resolveNotificationsByDedupeKeys } = await import('../notifications');
+    const body = req.body ?? {};
+    const pluginId = typeof body.pluginId === 'string' ? body.pluginId : '';
+    if (!pluginId) {
+      return res.status(400).json({ error: 'pluginId is required' });
+    }
+
+    // Either a notifications batch OR resolve keys (or both) — plugins that
+    // only clear conditions send an empty/absent list.
+    let items: unknown[] = [];
+    if (Array.isArray(body.notifications)) items = body.notifications.slice(0, 100);
+    else if (body.notification && typeof body.notification === 'object') items = [body.notification];
+    const hasResolve = Array.isArray(body.resolve) && body.resolve.length > 0;
+    if (items.length === 0 && !hasResolve) {
+      return res.status(400).json({ error: '"notifications" array or "resolve" keys are required' });
+    }
+
+    try {
+      const plugin = await db.query.plugins.findFirst({ where: eq(schema.plugins.id, pluginId) });
+      if (!plugin) {
+        return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
+      }
+
+      let accepted = 0;
+      for (const item of items) {
+        const n = item as Record<string, unknown>;
+        if (!n || typeof n.title !== 'string' || !n.title.trim()) continue;
+        const id = await emitNotification({
+          severity: (['info', 'warning', 'critical'].includes(String(n.severity)) ? String(n.severity) : 'info') as never,
+          source: 'plugin',
+          title: n.title,
+          message: typeof n.message === 'string' ? n.message : '',
+          dedupeKey: typeof n.dedupeKey === 'string' && n.dedupeKey ? `plugin:${pluginId}:${n.dedupeKey}` : null,
+          pluginId,
+          deviceId: typeof n.deviceId === 'string' && n.deviceId ? n.deviceId : null,
+          context: n.context && typeof n.context === 'object' ? (n.context as Record<string, unknown>) : null,
+        });
+        if (id) accepted++;
+      }
+
+      // Conditions that cleared on the appliance → resolve their live rows.
+      let resolved = 0;
+      const resolveKeys: string[] = Array.isArray(body.resolve)
+        ? (body.resolve as unknown[]).filter((k): k is string => typeof k === 'string' && k.length > 0).slice(0, 200)
+        : [];
+      if (resolveKeys.length > 0) {
+        resolved = await resolveNotificationsByDedupeKeys(resolveKeys.map((k) => `plugin:${pluginId}:${k}`));
+      }
+
+      res.status(201).json({ accepted, resolved });
+    } catch (error) {
+      console.error('Error ingesting plugin notifications:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   return router;
 }

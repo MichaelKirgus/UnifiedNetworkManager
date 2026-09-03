@@ -7,6 +7,7 @@ import { getSecretFresh } from '../secretsProvider';
 import { LEADER_KEYS } from './leader';
 import { initWorker, trackBeat } from './stats';
 import { settingsHeaders } from '../pluginSettings';
+import { emitNotification } from '../notifications';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
 
@@ -107,6 +108,25 @@ async function finishPlan(planId: string, status: string, error?: string | null)
   await db.update(schema.plans)
     .set({ status, error: error ?? null, updatedAt: now, finishedAt: now })
     .where(eq(schema.plans.id, planId));
+
+  // Mirror failures into the notification center (one-shot per plan).
+  if (status === 'failed') {
+    try {
+      const plan = await db.query.plans.findFirst({ where: eq(schema.plans.id, planId) });
+      const plugin = plan ? await db.query.plugins.findFirst({ where: eq(schema.plugins.id, plan.pluginId) }) : null;
+      await emitNotification({
+        severity: 'critical',
+        source: 'system',
+        title: `Plan execution failed${plugin ? ` (${plugin.name})` : ''}`,
+        message: error ?? 'Unknown error',
+        dedupeKey: `plan-failed:${planId}`,
+        pluginId: plan?.pluginId ?? null,
+        context: { planId, intentActionId: plan?.intentActionId ?? null },
+      });
+    } catch {
+      // Best-effort by contract.
+    }
+  }
 }
 
 /** Marks every not-yet-run step of a plan as skipped (used on abort/cancel). */

@@ -707,6 +707,86 @@ export const devicePorts = pgTable(
   }
 );
 
+// One row per filesystem/pool/dataset as reported by a plugin's `filesystems`
+// metric. Powers the top table of the cross-device Storage page. Same
+// upsert-per-poll + delete-on-absent lifecycle as tunnels/routes: filesystems
+// are config objects, so a removed dataset must vanish from the table, not
+// linger until the 24h sweep. `name` is part of the PK — one row per
+// (device, plugin, filesystem-name). A device without storage data contributes
+// no rows.
+export const storageFilesystems = pgTable(
+  'storage_filesystems',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Filesystem/pool/dataset name as reported (e.g. "DATA01", "/mnt/tank/vm").
+    name: text('name').notNull(),
+    // zfs-pool | zfs-dataset | ext4 | squashfs | usb | other — normalized to
+    // lowercase at ingest; 'other' when the plugin does not classify.
+    type: text('type').notNull().default('other'),
+    // Mountpoint (null for unmounted datasets / pools without a mount).
+    mountpoint: text('mountpoint'),
+    sizeBytes: doublePrecision('sizeBytes'),
+    usedBytes: doublePrecision('usedBytes'),
+    freeBytes: doublePrecision('freeBytes'),
+    // ONLINE | DEGRADED | OFFLINE | ... (ZFS) or up/down/unknown — normalized
+    // to lowercase at ingest.
+    status: text('status').notNull().default('unknown'),
+    // Parent pool name for datasets (null for top-level pools/filesystems).
+    parent: text('parent'),
+    // Plugin-specific details (JSON object): ZFS dataset props (quota, used-bytes,
+    // compression, mount options), disk extras, ... — consumed by the webapp's
+    // expandable rows and later config/state endpoints. Never validated beyond
+    // being a JSON object; plugins evolve independently of the API.
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkStorageFilesystems: primaryKey({
+        name: 'storage_filesystems_pkey',
+        columns: [table.deviceId, table.pluginId, table.name],
+      }),
+      idxStorageFilesystemsDevice: index('idx_storage_filesystems_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per physical disk/flash device as reported by a plugin's `disks`
+// metric. Powers the bottom table of the cross-device Storage page (the media
+// the filesystems above are stored on). Same lifecycle as storage_filesystems.
+export const storageDisks = pgTable(
+  'storage_disks',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Disk name/identifier (e.g. "da0", "sda", serial-based id).
+    name: text('name').notNull(),
+    model: text('model'),
+    serial: text('serial'),
+    capacityBytes: doublePrecision('capacityBytes'),
+    // hdd | ssd | flash | unknown — rotation-rate class.
+    rotationRate: text('rotationRate').notNull().default('unknown'),
+    // healthy | degraded | failed | unknown (lowercase at ingest).
+    health: text('health').notNull().default('unknown'),
+    // Pool this disk belongs to (null for unassigned/boot disks).
+    poolName: text('poolName'),
+    // Plugin-specific details (JSON object): temperature, power state, ... —
+    // same contract as storage_filesystems.extra.
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkStorageDisks: primaryKey({
+        name: 'storage_disks_pkey',
+        columns: [table.deviceId, table.pluginId, table.name],
+      }),
+      idxStorageDisksDevice: index('idx_storage_disks_device').on(table.deviceId),
+    };
+  }
+);
+
 // Execution plans produced by a plugin's /plan endpoint (e.g. an OPNsense
 // WireGuard tunnel spanning two firewalls). The API persists the plan and its
 // steps, fulfils the plan's provisionRequests via the secrets provider at
@@ -828,6 +908,76 @@ export const credentialPolicies = pgTable('credential_policies', {
   gateAmrs: text('gateAmrs').notNull().default('["totp"]'),
   updatedAt: text('updatedAt').notNull(),
 });
+
+// Notification center (see workers/notifications.ts + routes/notifications.ts).
+// One row per distinct event. `dedupeKey` is the stable identity of an ongoing
+// condition (e.g. "device-status:<deviceId>:offline") — while the condition
+// persists, re-emissions UPSERT the existing row (occurrences++, lastSeenAt)
+// instead of creating new ones; when it clears, the worker auto-resolves the
+// row. One-off events (plan failed, plugin push) use a unique key and stay
+// until acknowledged/closed or swept by retention.
+export const notifications = pgTable(
+  'notifications',
+  {
+    id: text('id').primaryKey(),
+    // Stable identity of the condition — see dedupeKey above. NULL for rows
+    // that can never recur (one-shot events).
+    dedupeKey: text('dedupeKey'),
+    // info | warning | critical
+    severity: text('severity').notNull().default('info'),
+    // Source category: system (API itself) | device (mirrored from a device's
+    // state/telemetry) | plugin (pushed by a plugin via POST /plugin/notifications).
+    source: text('source').notNull().default('system'),
+    // The plugin instance that produced the notification (null for system/device).
+    pluginId: text('pluginId'),
+    // Device the notification relates to, when known.
+    deviceId: text('deviceId'),
+    title: text('title').notNull(),
+    message: text('message').notNull().default(''),
+    // JSON object with structured details (e.g. {from:'online',to:'offline'}).
+    context: text('context'),
+    createdAt: text('createdAt').notNull(),
+    lastSeenAt: text('lastSeenAt').notNull(),
+    occurrences: integer('occurrences').notNull().default(1),
+    // open | acknowledged | resolved | closed. Open = counts toward the badge;
+    // acknowledged = user saw it (stays in the list, no badge); resolved = the
+    // condition cleared on its own (worker) or was dismissed as fixed; closed =
+    // manually removed from view.
+    status: text('status').notNull().default('open'),
+    acknowledgedBy: text('acknowledgedBy'),
+    acknowledgedAt: text('acknowledgedAt'),
+    resolvedAt: text('resolvedAt'),
+  },
+  (table) => {
+    return {
+      // One live row per dedupe key — the upsert target. UNIQUE + partial so
+      // resolved/closed rows never block a new occurrence of the same condition,
+      // and only unresolved rows participate in dedup (matches initDb DDL).
+      idxNotificationsDedupeKey: uniqueIndex('idx_notifications_dedupe_key')
+        .on(table.dedupeKey)
+        .where(sql`"status" IN ('open', 'acknowledged') AND "dedupeKey" IS NOT NULL`),
+      idxNotificationsStatusCreated: index('idx_notifications_status_created').on(
+        table.status,
+        table.createdAt
+      ),
+      idxNotificationsDeviceId: index('idx_notifications_device_id').on(table.deviceId),
+    };
+  }
+);
+
+// Per-user notification preferences (fine-grained filtering of what shows up
+// in the bell + dropdown). One row per user; missing row = defaults.
+export const notificationPrefs = pgTable(
+  'notification_prefs',
+  {
+    userId: text('userId').primaryKey(),
+    // JSON object mapping source category -> allowed severities, e.g.
+    // {"system":["info","warning","critical"],"device":[...],"plugin":[...]}.
+    // A severity absent from a source's list is hidden for that user.
+    visibility: text('visibility').notNull().default('{}'),
+    updatedAt: text('updatedAt').notNull(),
+  }
+);
 
 // Add index for config_jobs
 // Note: Drizzle's index definition inside the table definition is 

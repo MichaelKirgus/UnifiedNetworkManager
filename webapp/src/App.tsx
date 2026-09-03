@@ -16,6 +16,7 @@ import Hosts from './pages/Hosts';
 import Tunnels from './pages/Tunnels';
 import RoutesPage from './pages/Routes';
 import Logs from './pages/Logs';
+import Notifications from './pages/Notifications';
 import Wifi from './pages/Wifi';
 import Storage from './pages/Storage';
 import Topology from './pages/Topology';
@@ -39,6 +40,9 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
   { path: '/tunnels', permission: 'tunnels:read' },
   { path: '/routes', permission: 'routes:read' },
   { path: '/logs', permission: 'logs:read' },
+  // Notification center — full history + filters (the bell is visible to everyone
+  // with the read permission; it lives in the app shell, not the sidebar).
+  { path: '/notifications', permission: 'notifications:read' },
   { path: '/wifi', permission: 'wifi:read' },
   { path: '/storage', permission: 'storage:read' },
   { path: '/topology', permission: 'topology:read' },
@@ -92,6 +96,8 @@ export default function App() {
       <Route path="/tunnels" element={<Page permission="tunnels:read"><Tunnels /></Page>} />
       <Route path="/routes" element={<Page permission="routes:read"><RoutesPage /></Page>} />
       <Route path="/logs" element={<Page permission="logs:read"><Logs /></Page>} />
+      {/* Notification center — full history with filters + visibility settings. */}
+      <Route path="/notifications" element={<Page permission="notifications:read"><Notifications /></Page>} />
       <Route path="/wifi" element={<Page permission="wifi:read"><Wifi /></Page>} />
       <Route path="/storage" element={<Page permission="storage:read"><Storage /></Page>} />
       {/* Physical + logical network graph (inferred cables, per-VLAN segments). */}
