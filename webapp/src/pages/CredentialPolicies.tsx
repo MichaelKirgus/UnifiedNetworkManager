@@ -52,14 +52,7 @@ export default function CredentialPolicies() {
   const overrides = (overrideQueries.data ?? []).filter((r) => r.policy.source === 'user');
 
   return (
-    <Layout>
-      <div className="mb-4">
-        <h1 className="text-xl font-bold text-slate-900">Credential Policies</h1>
-        <p className="mt-1 text-sm text-slate-500">
-          Control which second factors are required at login and which sessions may pass the privileged-action gate
-          (config jobs, plan execution). Per-user overrides win over the global default.
-        </p>
-      </div>
+    <Layout title="Credential Policies">
 
       {formError && (
         <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{formError}</div>

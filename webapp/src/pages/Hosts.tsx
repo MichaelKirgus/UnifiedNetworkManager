@@ -107,15 +107,7 @@ export default function Hosts() {
   ];
 
   return (
-    <Layout>
-      <div className="mb-4">
-        <h1 className="text-xl font-bold text-slate-900">Hosts</h1>
-        <p className="mt-1 text-sm text-slate-500">
-          Discovered hosts from all devices — ARP/NDP neighbor tables, DHCP leases and WLAN clients. The same MAC seen on several
-          devices (e.g. a WLAN client that is also in the router's ARP table) is merged into one row; hostname and manufacturer are
-          taken from whichever source reported them. Entries not seen for 24h are removed automatically.
-        </p>
-      </div>
+    <Layout title="Hosts">
 
       {hostsQuery.isLoading && <p className="text-sm text-slate-500">Loading hosts...</p>}
       {hostsQuery.isError && (

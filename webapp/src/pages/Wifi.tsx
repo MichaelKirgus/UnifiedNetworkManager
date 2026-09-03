@@ -376,20 +376,11 @@ export default function Wifi() {
   ];
 
   return (
-    <Layout>
-      {/* Full-height column: header, then table / spectrum split by a
-          horizontal splitter — collapsing the spectrum gives its space back to
-          the table instead of leaving it empty below. */}
+    <Layout title="WiFi">
+      {/* Full-height column: table / spectrum split by a horizontal splitter —
+          collapsing the spectrum gives its space back to the table instead of
+          leaving it empty below. */}
       <div className="flex h-full min-h-0 flex-col">
-        <div className="mb-3 shrink-0">
-          <h1 className="text-xl font-bold text-slate-900">WiFi</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            All SSIDs across your devices, grouped by name — channels, security, VLAN and the devices broadcasting each network.
-            The spectrum view shows one bar per channel (airtime), a noise-floor line and your own networks as colored dots;
-            hover a row, legend entry or dot to highlight that SSID in all bands. Drag the divider between table and diagram to resize.
-          </p>
-        </div>
-
         {wifiQuery.isLoading && <p className="shrink-0 text-sm text-slate-500">Loading WiFi networks...</p>}
         {wifiQuery.isError && (
           <p className="shrink-0 text-sm text-red-600">Failed to load WiFi data: {(wifiQuery.error as Error).message}</p>

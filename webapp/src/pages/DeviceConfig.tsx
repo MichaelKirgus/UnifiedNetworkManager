@@ -90,24 +90,11 @@ export default function DeviceConfig() {
   const catalogById = new Map((actionsQuery.data?.actions ?? []).map((a) => [a.id, a]));
 
   return (
-    <Layout>
-      <div className="mb-4 flex items-center justify-between">
-        <div>
-          <Link to={`/devices/${device.id}`} className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 hover:text-slate-800">
-            <ArrowLeft className="h-3.5 w-3.5" /> Back to {device.name}
-          </Link>
-          <div className="mt-1 flex items-center gap-2">
-            <Settings2 className="h-5 w-5 text-slate-400" />
-            <h1 className="text-xl font-bold text-slate-900">{device.name} — Config</h1>
-          </div>
-          <p className="mt-1 text-sm text-slate-500">
-            Live device state from the plugin. Changes run immediately as plan steps — dangerous actions require an
-            explicit confirmation and are recorded in the audit trail.
-          </p>
-        </div>
-
-        {/* Plugin selector (only when several config-capable plugins) + refresh. */}
-        <div className="flex items-center gap-2">
+    <Layout
+      title={`${device.name} — Config`}
+      actions={
+        <>
+          {/* Plugin selector (only when several config-capable plugins) + refresh. */}
           {configAssignments.length > 1 && (
             <select
               value={activePluginId ?? ''}
@@ -131,8 +118,12 @@ export default function DeviceConfig() {
               <RefreshCw className={clsx('h-3.5 w-3.5', stateQuery.isFetching && 'animate-spin')} /> Refresh
             </button>
           )}
-        </div>
-      </div>
+        </>
+      }
+    >
+      <Link to={`/devices/${device.id}`} className="mb-3 inline-flex items-center gap-1 text-xs font-medium text-slate-500 hover:text-slate-800">
+        <ArrowLeft className="h-3.5 w-3.5" /> Back to {device.name}
+      </Link>
 
       {configAssignments.length === 0 ? (
         <div className="rounded-md border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">

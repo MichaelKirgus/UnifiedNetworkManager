@@ -69,15 +69,8 @@ export default function Layers() {
   }
 
   return (
-    <Layout>
+    <Layout title="Layers">
       <div className="flex flex-col gap-4">
-        <div>
-          <h1 className="text-xl font-bold text-slate-900">Layers</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            Horizontal bands of the topology view, top to bottom. Devices are auto-classified into a layer by their
-            plugin's model suggestion or a type/vendor heuristic — and can be overridden per device on the Devices page.
-          </p>
-        </div>
 
         {/* Add custom layer */}
         {canWrite && (

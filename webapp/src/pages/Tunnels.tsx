@@ -153,13 +153,7 @@ export default function Tunnels() {
   ];
 
   return (
-    <Layout>
-      <div className="mb-4">
-        <h1 className="text-xl font-bold text-slate-900">Tunnels</h1>
-        <p className="mt-1 text-sm text-slate-500">
-          Configured tunnels across all devices — WireGuard, OpenVPN, IPsec, PPPoE and GRE. Devices without tunnels (e.g. switches) contribute no rows.
-        </p>
-      </div>
+    <Layout title="Tunnels">
 
       {tunnelsQuery.isLoading && <p className="text-sm text-slate-500">Loading tunnels...</p>}
       {tunnelsQuery.isError && (

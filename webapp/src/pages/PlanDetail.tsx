@@ -84,19 +84,14 @@ export default function PlanDetail() {
   const doneCount = steps.filter((s) => s.status === 'succeeded').length;
 
   return (
-    <Layout>
-      {/* Header */}
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <Link to="/plans" className="text-xs text-slate-400 hover:text-slate-600">← Plans</Link>
-          <h1 className="flex items-center gap-2 text-xl font-bold text-slate-900">
-            {plan.intentActionId}
-            <StatusBadge status={plan.status} />
-          </h1>
-          <p className="text-sm text-slate-500">
-            {pluginName} · {doneCount}/{steps.length} steps done · created {new Date(plan.createdAt).toLocaleString()}
-          </p>
-        </div>
+    <Layout
+      title={
+        <span className="flex items-center gap-2">
+          {plan.intentActionId}
+          <StatusBadge status={plan.status} />
+        </span>
+      }
+      actions={
         <div className="flex items-center gap-2">
           {canApply && editable && (
             <button onClick={() => executeMutation.mutate()} disabled={executeMutation.isPending || steps.length === 0}
@@ -118,7 +113,9 @@ export default function PlanDetail() {
             </button>
           )}
         </div>
-      </div>
+      }
+    >
+      <Link to="/plans" className="mb-3 inline-block text-xs text-slate-400 hover:text-slate-600">← Plans</Link>
 
       {(executeMutation.error || cancelMutation.error) && (
         <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">

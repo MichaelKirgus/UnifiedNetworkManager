@@ -51,11 +51,7 @@ export default function MyAccount() {
   const me = meQuery.data;
 
   return (
-    <Layout>
-      <div className="mb-4">
-        <h1 className="text-xl font-bold text-slate-900">My Account</h1>
-        <p className="mt-1 text-sm text-slate-500">Your profile and self-service settings.</p>
-      </div>
+    <Layout title="My Account">
 
       {formError && (
         <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{formError}</div>

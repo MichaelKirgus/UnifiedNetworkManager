@@ -569,10 +569,10 @@ export default function Devices() {
   ];
 
   return (
-    <Layout>
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-xl font-bold text-slate-900">Devices</h1>
-        {canWriteDevices && (
+    <Layout
+      title="Devices"
+      actions={
+        canWriteDevices && (
           <button
             className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
             onClick={() => { setShowForm((v) => !v); if (showForm) resetForm(); }}
@@ -580,8 +580,9 @@ export default function Devices() {
             {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
             {showForm ? 'Cancel' : editingId ? 'Edit Device' : 'Register Device'}
           </button>
-        )}
-      </div>
+        )
+      }
+    >
 
       {deleteDevice.error && (
         <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">

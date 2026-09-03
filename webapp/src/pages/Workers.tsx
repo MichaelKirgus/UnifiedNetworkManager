@@ -178,30 +178,25 @@ export default function Workers() {
   const connPct = pg && pg.maxConnections > 0 ? Math.min(100, Math.round((pg.connectionsTotal / pg.maxConnections) * 100)) : 0;
 
   return (
-    <Layout>
-      <div className="space-y-4">
-        {/* Header + instance info */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h1 className="text-xl font-bold text-slate-900">Workers & HA</h1>
-            <p className="mt-0.5 text-sm text-slate-500">
-              Background worker infrastructure, leader election and database health — this instance's view.
-            </p>
+    <Layout
+      title="Workers & HA"
+      actions={
+        status && (
+          <div className="flex items-center gap-4 rounded-md border border-slate-200 bg-white px-3 py-1.5 shadow-sm">
+            <span className="flex items-center gap-1.5 text-xs text-slate-600" title={`PID ${status.instance.pid}`}>
+              <ServerCog className="h-4 w-4 text-slate-400" />
+              {status.instance.hostname}
+            </span>
+            <span className="flex items-center gap-1.5 text-xs text-slate-600">
+              <TimerReset className="h-4 w-4 text-slate-400" />
+              up {fmtUptime(status.instance.uptimeSeconds)}
+            </span>
+            <span className="text-[11px] text-slate-400">{status.instance.nodeVersion}</span>
           </div>
-          {status && (
-            <div className="flex items-center gap-4 rounded-md border border-slate-200 bg-white px-4 py-2 shadow-sm">
-              <span className="flex items-center gap-1.5 text-slate-600" title={`PID ${status.instance.pid}`}>
-                <ServerCog className="h-4 w-4 text-slate-400" />
-                {status.instance.hostname}
-              </span>
-              <span className="flex items-center gap-1.5 text-slate-600">
-                <TimerReset className="h-4 w-4 text-slate-400" />
-                up {fmtUptime(status.instance.uptimeSeconds)}
-              </span>
-              <span className="text-xs text-slate-400">{status.instance.nodeVersion}</span>
-            </div>
-          )}
-        </div>
+        )
+      }
+    >
+      <div className="space-y-4">
 
         {/* Workers table */}
         <section className="rounded-md border border-slate-200 bg-white shadow-sm">

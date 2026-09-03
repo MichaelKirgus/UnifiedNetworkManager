@@ -259,43 +259,30 @@ export default function DeviceDetail() {
   }
 
   return (
-    <Layout>
-      <div className="mb-4">
-        <Link to="/devices" className="text-sm text-slate-500 hover:underline">
-          &larr; Back to devices
-        </Link>
-      </div>
-
-      <div className="mb-6 flex items-center gap-3">
-        <DeviceIcon plugin={primaryPlugin} model={device?.model} size="lg" />
-        <div>
-          <h1 className="text-xl font-bold text-slate-900">{device?.name ?? deviceId}</h1>
-          {device && (device.model || device.firmwareVersion) && (
-            <p className="mt-0.5 text-xs text-slate-400">
-              {[device.vendor, ...(device.deviceTypes ?? []), device.model, device.firmwareVersion].filter(Boolean).join(' · ')}
-            </p>
+    <Layout
+      title={device?.name ?? deviceId}
+      actions={
+        <>
+          {monitoringQuery.data && <StatusBadge status={monitoringQuery.data.health} />}
+          {device?.enabled === false && (
+            <span
+              title="Telemetry polling disabled — historical data and last metrics are preserved"
+              className="rounded-full bg-slate-200 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600"
+            >
+              disabled
+            </span>
           )}
-        </div>
-        {monitoringQuery.data && <StatusBadge status={monitoringQuery.data.health} />}
-        {device?.enabled === false && (
-          <span
-            title="Telemetry polling disabled — historical data and last metrics are preserved"
-            className="rounded-full bg-slate-200 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600"
-          >
-            disabled
-          </span>
-        )}
-        {device && hasDeviceConfig && (
-          <Link
-            to={`/devices/${device.id}/config`}
-            className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
-          >
-            <Settings2 className="h-4 w-4" />
-            Config
-          </Link>
-        )}
-        {device && canWriteDevices && (
-          <div className={clsx('flex items-center gap-2', !hasDeviceConfig && 'ml-auto')}>
+          {device && hasDeviceConfig && (
+            <Link
+              to={`/devices/${device.id}/config`}
+              className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
+            >
+              <Settings2 className="h-4 w-4" />
+              Config
+            </Link>
+          )}
+          {device && canWriteDevices && (
+          <div className="flex items-center gap-2">
             <button
               onClick={() => {
                 const next = device.enabled === false;
@@ -338,6 +325,19 @@ export default function DeviceDetail() {
               Delete device
             </button>
           </div>
+          )}
+        </>
+      }
+    >
+      <div className="mb-4 flex items-center gap-3">
+        <Link to="/devices" className="text-sm text-slate-500 hover:underline">
+          &larr; Back to devices
+        </Link>
+        <DeviceIcon plugin={primaryPlugin} model={device?.model} size="lg" />
+        {device && (device.model || device.firmwareVersion) && (
+          <p className="text-xs text-slate-400">
+            {[device.vendor, ...(device.deviceTypes ?? []), device.model, device.firmwareVersion].filter(Boolean).join(' · ')}
+          </p>
         )}
       </div>
 

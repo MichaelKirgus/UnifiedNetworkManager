@@ -104,13 +104,10 @@ export default function Secrets() {
   }
 
   return (
-    <Layout>
-      <div className="mb-4 flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-slate-900">Secrets Store</h1>
-          <p className="text-sm text-slate-500">Manage credentials for network devices</p>
-        </div>
-        {canWrite && (
+    <Layout
+      title="Secrets Store"
+      actions={
+        canWrite && (
           <button
             onClick={() => setShowForm(!showForm)}
             className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
@@ -118,8 +115,9 @@ export default function Secrets() {
             {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
             {showForm ? 'Cancel' : 'Add Secret'}
           </button>
-        )}
-      </div>
+        )
+      }
+    >
 
       {canWrite && showForm && (
         <div className="mb-6 rounded-md border border-slate-200 bg-white p-4 shadow-sm">

@@ -417,19 +417,11 @@ export default function Storage() {
   ];
 
   return (
-    <Layout>
-      {/* Full-height column: header, then filesystem / disk tables split by a
-          horizontal splitter — collapsing the disks gives its space back to the
-          table instead of leaving it empty below. */}
+    <Layout title="Storage">
+      {/* Full-height column: filesystem / disk tables split by a horizontal
+          splitter — collapsing the disks gives its space back to the table
+          instead of leaving it empty below. */}
       <div className="flex h-full min-h-0 flex-col">
-        <div className="mb-3 shrink-0">
-          <h1 className="text-xl font-bold text-slate-900">Storage</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            All filesystems (ZFS pools &amp; datasets, ext4/squashfs, USB storage) and the physical disks / flash media
-            they are stored on, across every device that reports them. Drag the divider between the two tables to resize.
-          </p>
-        </div>
-
         {storageQuery.isLoading && <p className="shrink-0 text-sm text-slate-500">Loading storage inventory...</p>}
         {storageQuery.isError && (
           <p className="shrink-0 text-sm text-red-600">Failed to load storage data: {(storageQuery.error as Error).message}</p>

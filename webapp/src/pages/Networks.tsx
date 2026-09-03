@@ -111,13 +111,7 @@ export default function Networks() {
   ];
 
   return (
-    <Layout>
-      <div className="mb-4">
-        <h1 className="text-xl font-bold text-slate-900">Networks</h1>
-        <p className="mt-1 text-sm text-slate-500">
-          Logical networks across all devices — interfaces sharing a subnet or VLAN are merged into one row (e.g. the same SSID on many APs).
-        </p>
-      </div>
+    <Layout title="Networks">
 
       {networksQuery.isLoading && <p className="text-sm text-slate-500">Loading networks...</p>}
       {networksQuery.isError && (

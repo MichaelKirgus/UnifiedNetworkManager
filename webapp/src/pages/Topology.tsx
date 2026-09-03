@@ -523,11 +523,10 @@ export default function Topology() {
   );
 
   return (
-    <Layout>
+    <Layout title="Topology">
       <div className="flex h-full flex-col gap-3">
         {/* Header controls */}
         <div className="flex flex-wrap items-center gap-2">
-          <h1 className="mr-2 text-lg font-bold text-slate-900">Topology</h1>
 
           {/* Physical | Logical toggle */}
           <div className="inline-flex rounded-md border border-slate-300 bg-white p-0.5">

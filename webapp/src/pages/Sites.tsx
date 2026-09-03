@@ -185,19 +185,20 @@ export default function Sites() {
   ];
 
   return (
-    <Layout>
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-xl font-bold text-slate-900">Sites</h1>
-        {canWrite && !showForm && (
+    <Layout
+      title="Sites"
+      actions={
+        canWrite && !showForm && (
           <button
             type="button"
             onClick={() => setShowForm(true)}
-            className="inline-flex items-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-700"
+            className="inline-flex items-center gap-2 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
           >
             <Plus className="h-4 w-4" /> New site
           </button>
-        )}
-      </div>
+        )
+      }
+    >
 
       {formError && (
         <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{formError}</div>

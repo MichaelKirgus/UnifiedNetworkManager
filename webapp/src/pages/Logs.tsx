@@ -151,13 +151,7 @@ export default function Logs() {
   ];
 
   return (
-    <Layout>
-      <div className="mb-4">
-        <h1 className="text-xl font-bold text-slate-900">Logs</h1>
-        <p className="mt-1 text-sm text-slate-500">
-          Structured log entries shipped by plugins (poll failures, config/plan errors). Kept for the API's retention window — newest first.
-        </p>
-      </div>
+    <Layout title="Logs">
 
       {/* Filter bar */}
       <div className="mb-4 grid grid-cols-1 gap-3 rounded-md border border-slate-200 bg-white p-3 shadow-sm sm:grid-cols-5">

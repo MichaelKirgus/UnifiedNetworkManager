@@ -181,11 +181,7 @@ export default function Plugins() {
   const configurePlugin = configureId ? (pluginsQuery.data ?? []).find((p) => p.id === configureId) : null;
 
   return (
-    <Layout>
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-xl font-bold text-slate-900">Plugins</h1>
-        <p className="text-sm text-slate-500">Automatically discovered via mDNS / polling</p>
-      </div>
+    <Layout title="Plugins">
 
       {pluginsQuery.isLoading && <p className="text-sm text-slate-500">Loading plugins...</p>}
       {pluginsQuery.isError && (

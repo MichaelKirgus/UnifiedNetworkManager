@@ -126,13 +126,7 @@ export default function Routes() {
   ];
 
   return (
-    <Layout>
-      <div className="mb-4">
-        <h1 className="text-xl font-bold text-slate-900">Routes</h1>
-        <p className="mt-1 text-sm text-slate-500">
-          Route entries across all devices — static and dynamically learned (OSPF, BGP, RIP). Devices without routing data contribute no rows.
-        </p>
-      </div>
+    <Layout title="Routes">
 
       {routesQuery.isLoading && <p className="text-sm text-slate-500">Loading routes...</p>}
       {routesQuery.isError && (

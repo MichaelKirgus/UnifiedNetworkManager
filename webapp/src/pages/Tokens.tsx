@@ -62,10 +62,7 @@ export default function Tokens() {
   // (After all hooks — hook order must stay stable across renders.)
   if (!canManageTokens) {
     return (
-      <Layout>
-        <div className="mb-4">
-          <h1 className="text-xl font-bold text-slate-900">API Tokens</h1>
-        </div>
+      <Layout title="API Tokens">
         <div className="rounded-md border border-slate-200 bg-white p-6 text-sm text-slate-500">
           You need the <code className="rounded bg-slate-100 px-1.5 py-0.5 text-xs">tokens:manage</code> permission to
           create and view API tokens. Ask an administrator to grant it (directly or via a role).
@@ -194,14 +191,9 @@ export default function Tokens() {
   ];
 
   return (
-    <Layout>
-      <div className="mb-4 flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-slate-900">API Tokens</h1>
-          <p className="text-sm text-slate-500">
-            Long-lived bearer credentials for agents and scripts (e.g. the MCP server)
-          </p>
-        </div>
+    <Layout
+      title="API Tokens"
+      actions={
         <div className="flex items-center gap-3">
           {canSeeAll && (
             <label className="flex items-center gap-1.5 text-sm text-slate-600">
@@ -217,7 +209,8 @@ export default function Tokens() {
             {showForm ? 'Cancel' : 'Create Token'}
           </button>
         </div>
-      </div>
+      }
+    >
 
       {createdToken && (
         <div className="mb-6 rounded-md border border-amber-300 bg-amber-50 p-4">

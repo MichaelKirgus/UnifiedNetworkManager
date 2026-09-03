@@ -227,29 +227,25 @@ export default function Notifications() {
   ];
 
   return (
-    <Layout>
-      <div className="mb-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-bold text-slate-900">Notifications</h1>
-            <p className="mt-0.5 text-sm text-slate-500">
-              Appliance, device and plugin events — full history with filters. The bell shows what your visibility settings allow.
-            </p>
-          </div>
-          {can('notifications:write') && (
-            <button
-              type="button"
-              onClick={() => setShowSettings((v) => !v)}
-              className={clsx(
-                'flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium',
-                showSettings
-                  ? 'border-slate-800 bg-slate-900 text-white'
-                  : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-100'
-              )}
-            >
-              <Settings2 className="h-4 w-4" /> Visibility settings
-            </button>
-          )}
-        </div>
+    <Layout
+      title="Notifications"
+      actions={
+        can('notifications:write') && (
+          <button
+            type="button"
+            onClick={() => setShowSettings((v) => !v)}
+            className={clsx(
+              'flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium',
+              showSettings
+                ? 'border-slate-800 bg-slate-900 text-white'
+                : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-100'
+            )}
+          >
+            <Settings2 className="h-4 w-4" /> Visibility settings
+          </button>
+        )
+      }
+    >
 
         {showSettings && can('notifications:write') && (
           <VisibilitySettings onDone={() => setShowSettings(false)} />

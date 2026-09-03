@@ -54,18 +54,19 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
   ];
 
   return (
-    <Layout>
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-xl font-bold text-slate-900">Plans</h1>
-        {onCreate && (
+    <Layout
+      title="Plans"
+      actions={
+        onCreate && (
           <button
             className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
             onClick={onCreate}
           >
             <Plus className="h-4 w-4" /> New Plan
           </button>
-        )}
-      </div>
+        )
+      }
+    >
 
       {plansQuery.isLoading && <p className="text-sm text-slate-500">Loading plans…</p>}
       {plansQuery.isError && (
