@@ -278,6 +278,30 @@ async function ingestInventory(
     const macRows = Array.isArray(metrics['macTable']) ? (metrics['macTable'] as unknown[]) : [];
     for (const raw of macRows) pushHostRow('mac', raw);
 
+    // Docker/container hosts (e.g. TrueNAS Apps) — source 'docker'. These carry a
+    // hostname + static IP but NO MAC: the appliance's public API exposes no
+    // per-container MAC, so we store them with an empty mac and let mergeHostRows()
+    // bridge them by IP into the MAC-carrying ARP/NDP group for the same address.
+    const dockerHosts = Array.isArray(metrics['dockerHosts']) ? (metrics['dockerHosts'] as unknown[]) : [];
+    for (const raw of dockerHosts) {
+      if (!raw || typeof raw !== 'object') continue;
+      const r = raw as Record<string, unknown>;
+      const ip = typeof r['ip'] === 'string' ? (r['ip'] as string).trim() : '';
+      if (!ip || ip === '0.0.0.0' || ip === '::') continue; // docker rows REQUIRE an IP to merge on
+      hostValues.push({
+        deviceId,
+        pluginId,
+        mac: '', // no MAC available — merged by IP in the response shaping
+        ip,
+        source: 'docker',
+        hostname: typeof r['hostname'] === 'string' && (r['hostname'] as string).trim() !== '' ? (r['hostname'] as string) : null,
+        manufacturer: null,
+        intf: null,
+        expiry: null,
+        lastSeenAt: collectedAt,
+      });
+    }
+
     // Same guard as above — one snapshot must not repeat a (mac, ip, source) row.
     const hostByKey = new Map<string, typeof hostValues[number]>();
     for (const v of hostValues) {
@@ -443,6 +467,106 @@ async function ingestInventory(
             eq(schema.routes.deviceId, deviceId),
             eq(schema.routes.pluginId, pluginId),
             or(...staleRoutes.map((k) => and(eq(schema.routes.destination, k.destination), eq(schema.routes.protocol, k.protocol))))
+          )
+        );
+      }
+    }
+
+    // --- firewall rules (filter + NAT kinds) ---------------------------------
+    // Same present-vs-absent contract as routes: a PRESENT-but-empty array is
+    // authoritative ("this device has no firewall rules right now") so stale rows
+    // are wiped; an ABSENT key means "plugin doesn't report firewall rules" and
+    // must not touch the table (24h sweep still applies). Identity is
+    // ruleType|vendorRuleId — NOT vendorRuleId alone — because RouterOS .ids are
+    // per-table (a filter rule and a NAT rule can share the same .id), so one
+    // rule type's snapshot must never wipe another type's rows.
+    const rawFirewallRules = Array.isArray(metrics['firewallRules']) ? (metrics['firewallRules'] as unknown[]) : null;
+    if (rawFirewallRules !== null) {
+      const FW_RULE_TYPES = new Set(['filter', 'dnat', 'snat', 'one-to-one', 'npt']);
+      const values: {
+        deviceId: string; pluginId: string; ruleType: string; vendorRuleId: string; position: number;
+        protocol: string; sourceIp: string; destIp: string; sourcePort: string | null; destPort: string | null;
+        action: string; enabled: boolean; description: string; scope: string; ipVersion: string;
+        packets: number | null; bytes: number | null; states: number | null;
+        extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawFirewallRules) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        let ruleType = typeof r['ruleType'] === 'string' ? (r['ruleType'] as string).trim().toLowerCase() : '';
+        if (!FW_RULE_TYPES.has(ruleType)) ruleType = 'filter'; // unknown labels never break the PK enum
+        const vendorRuleId = typeof r['vendorRuleId'] === 'string' ? (r['vendorRuleId'] as string).trim() : '';
+        if (!vendorRuleId) continue; // part of the conflict key
+        values.push({
+          deviceId,
+          pluginId,
+          ruleType,
+          vendorRuleId,
+          position: typeof r['position'] === 'number' && Number.isFinite(r['position']) ? Math.trunc(r['position']) : 0,
+          protocol: typeof r['protocol'] === 'string' ? (r['protocol'] as string).trim().toLowerCase() : '',
+          sourceIp: typeof r['sourceIp'] === 'string' ? (r['sourceIp'] as string).trim() : '',
+          destIp: typeof r['destIp'] === 'string' ? (r['destIp'] as string).trim() : '',
+          sourcePort: typeof r['sourcePort'] === 'string' && (r['sourcePort'] as string).trim() !== '' ? (r['sourcePort'] as string).trim() : null,
+          destPort: typeof r['destPort'] === 'string' && (r['destPort'] as string).trim() !== '' ? (r['destPort'] as string).trim() : null,
+          action: typeof r['action'] === 'string' && (r['action'] as string).trim() !== '' ? (r['action'] as string).trim().toLowerCase() : 'other',
+          enabled: r['enabled'] !== false, // absent/true = enabled; only explicit false disables
+          description: typeof r['description'] === 'string' ? (r['description'] as string).trim() : '',
+          scope: typeof r['scope'] === 'string' ? (r['scope'] as string).trim() : '',
+          ipVersion: (() => {
+            const v = typeof r['ipVersion'] === 'string' ? (r['ipVersion'] as string).trim().toLowerCase() : '';
+            return v === 'v6' || v === 'both' ? v : 'v4'; // default v4 when absent
+          })(),
+          packets: typeof r['packets'] === 'number' && Number.isFinite(r['packets']) ? Math.trunc(r['packets']) : null,
+          bytes: typeof r['bytes'] === 'number' && Number.isFinite(r['bytes']) ? Math.trunc(r['bytes']) : null,
+          states: typeof r['states'] === 'number' && Number.isFinite(r['states']) ? Math.trunc(r['states']) : null,
+          extra: r['extra'] && typeof r['extra'] === 'object' ? JSON.stringify(r['extra']) : '{}',
+          collectedAt,
+        });
+      }
+      // Same de-dup guard as the other inventory blocks.
+      const fwByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        fwByKey.set(`${v.deviceId}|${v.pluginId}|${v.ruleType}|${v.vendorRuleId}`, v);
+      }
+      if (fwByKey.size > 0) {
+        await db.insert(schema.firewallRules).values(Array.from(fwByKey.values())).onConflictDoUpdate({
+          target: [schema.firewallRules.deviceId, schema.firewallRules.pluginId, schema.firewallRules.ruleType, schema.firewallRules.vendorRuleId],
+          set: {
+            position: sql`excluded.position`,
+            protocol: sql`excluded.protocol`,
+            sourceIp: sql`excluded."sourceIp"`,
+            destIp: sql`excluded."destIp"`,
+            sourcePort: sql`excluded."sourcePort"`,
+            destPort: sql`excluded."destPort"`,
+            action: sql`excluded.action`,
+            enabled: sql`excluded.enabled`,
+            description: sql`excluded.description`,
+            scope: sql`excluded.scope`,
+            ipVersion: sql`excluded."ipVersion"`,
+            packets: sql`excluded.packets`,
+            bytes: sql`excluded.bytes`,
+            states: sql`excluded.states`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      // A rule deleted on the device must vanish from the page, not linger until
+      // the 24h sweep. Keyed on ruleType|vendorRuleId pairs (see note above).
+      const existingFwKeys = await db
+        .select({ ruleType: schema.firewallRules.ruleType, vendorRuleId: schema.firewallRules.vendorRuleId })
+        .from(schema.firewallRules)
+        .where(and(eq(schema.firewallRules.deviceId, deviceId), eq(schema.firewallRules.pluginId, pluginId)));
+      const seenFwKeys = new Set(values.map((v) => `${v.ruleType}|${v.vendorRuleId}`));
+      const staleFw = existingFwKeys.filter(
+        (k) => !seenFwKeys.has(`${k.ruleType}|${k.vendorRuleId}`)
+      );
+      if (staleFw.length > 0) {
+        await db.delete(schema.firewallRules).where(
+          and(
+            eq(schema.firewallRules.deviceId, deviceId),
+            eq(schema.firewallRules.pluginId, pluginId),
+            or(...staleFw.map((k) => and(eq(schema.firewallRules.ruleType, k.ruleType), eq(schema.firewallRules.vendorRuleId, k.vendorRuleId))))
           )
         );
       }
@@ -890,6 +1014,93 @@ async function ingestInventory(
           ));
       }
     }
+
+    // --- Containers (Apps) --------------------------------------------------
+    // Generic key — any plugin may emit it:
+    //   containers[] { name, state?, image?, version?, upgradeAvailable?, extra? }
+    // CONFIG objects → upsert-per-poll + delete-on-absent (an uninstalled app
+    // must vanish from the page, not linger until the 24h sweep). `extra` is a
+    // plugin-specific JSON object stored verbatim (networks[], ips[], ports[],
+    // per-service detail) — same contract as storage_filesystems.extra.
+    //
+    // startedAt: the TrueNAS public API exposes NO container start-time, so UNM
+    // tracks it from observed state transitions instead. When a row is RUNNING
+    // and was NOT RUNNING on the previous poll (a transition, or our first
+    // observation of it), we stamp collectedAt; while it stays RUNNING we keep
+    // the existing value; when it leaves RUNNING we clear it to NULL. The result
+    // is a lower-bound "running since" that resets correctly after restarts and
+    // grows toward accuracy for apps UNM started watching mid-run (the UI labels
+    // it as UNM-observed, not the container's true start time).
+    const rawContainers = Array.isArray(metrics['containers']) ? (metrics['containers'] as unknown[]) : null;
+    if (rawContainers !== null) {
+      // Previous state + startedAt per app name for THIS device+plugin — needed
+      // to detect RUNNING transitions without a second write round-trip.
+      const prevRows = await db.query.containers.findMany({
+        where: and(eq(schema.containers.deviceId, deviceId), eq(schema.containers.pluginId, pluginId)),
+      });
+      const prevByName = new Map<string, { state: string; startedAt: string | null }>();
+      for (const p of prevRows) prevByName.set(p.name, { state: p.state, startedAt: p.startedAt });
+
+      const values: {
+        deviceId: string; pluginId: string; name: string; state: string; image: string | null;
+        version: string | null; upgradeAvailable: boolean | null; startedAt: string | null;
+        extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawContainers) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        if (!name) continue;
+        const state = typeof r['state'] === 'string' && (r['state'] as string).trim() !== '' ? (r['state'] as string).trim().toUpperCase() : 'UNKNOWN';
+        const prev = prevByName.get(name);
+        let startedAt: string | null = null;
+        if (state === 'RUNNING') {
+          // Continuous RUNNING with an existing stamp → keep it. A fresh
+          // transition, a first observation, or a RUNNING row that has no stamp
+          // yet (e.g. right after the column was added) → stamp now.
+          startedAt = prev && prev.state === 'RUNNING' && prev.startedAt ? prev.startedAt : collectedAt;
+        }
+        values.push({
+          deviceId,
+          pluginId,
+          name,
+          state,
+          image: typeof r['image'] === 'string' && (r['image'] as string).trim() !== '' ? (r['image'] as string).trim() : null,
+          version: typeof r['version'] === 'string' && (r['version'] as string).trim() !== '' ? (r['version'] as string).trim() : null,
+          upgradeAvailable: typeof r['upgradeAvailable'] === 'boolean' ? (r['upgradeAvailable'] as boolean) : null,
+          startedAt,
+          extra: extraOf(r),
+          collectedAt,
+        });
+      }
+      const contByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        contByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}`, v);
+      }
+      if (contByKey.size > 0) {
+        await db.insert(schema.containers).values(Array.from(contByKey.values())).onConflictDoUpdate({
+          target: [schema.containers.deviceId, schema.containers.pluginId, schema.containers.name],
+          set: {
+            state: sql`excluded.state`,
+            image: sql`excluded.image`,
+            version: sql`excluded.version`,
+            upgradeAvailable: sql`excluded."upgradeAvailable"`,
+            startedAt: sql`excluded."startedAt"`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      const seenContNames = new Set(values.map((v) => v.name));
+      if (seenContNames.size > 0) {
+        await db.delete(schema.containers)
+          .where(and(
+            eq(schema.containers.deviceId, deviceId),
+            eq(schema.containers.pluginId, pluginId),
+            notInArray(schema.containers.name, Array.from(seenContNames))
+          ));
+      }
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(
@@ -925,6 +1136,7 @@ async function sweepStaleInventory(): Promise<void> {
   // by polling enabled devices, so the plain stale sweep applies to them.
   await db.delete(schema.tunnels).where(lt(schema.tunnels.collectedAt, cutoff));
   await db.delete(schema.routes).where(lt(schema.routes.collectedAt, cutoff));
+  await db.delete(schema.firewallRules).where(lt(schema.firewallRules.collectedAt, cutoff));
   await db.delete(schema.wifiSsids).where(lt(schema.wifiSsids.collectedAt, cutoff));
   await db.delete(schema.wifiChannels).where(lt(schema.wifiChannels.collectedAt, cutoff));
   await db.delete(schema.wifiRadios).where(lt(schema.wifiRadios.collectedAt, cutoff));
@@ -932,6 +1144,7 @@ async function sweepStaleInventory(): Promise<void> {
   await db.delete(schema.wifiClients).where(lt(schema.wifiClients.lastSeenAt, cutoff));
   await db.delete(schema.storageFilesystems).where(lt(schema.storageFilesystems.collectedAt, cutoff));
   await db.delete(schema.storageDisks).where(lt(schema.storageDisks.collectedAt, cutoff));
+  await db.delete(schema.containers).where(lt(schema.containers.collectedAt, cutoff));
 }
 
 /**

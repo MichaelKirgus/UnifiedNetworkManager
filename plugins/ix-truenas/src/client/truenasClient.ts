@@ -127,6 +127,14 @@ export class TruenasClient {
     if (this.connectPromise) return this.connectPromise;
 
     const ws = new WebSocket(this.wsUrl, { rejectUnauthorized: false });
+    // Permanent no-op error guard for the socket's WHOLE lifetime. resetAfterFailure()
+    // and close() call removeAllListeners(), which would strip the 'error' handler —
+    // any late socket error (e.g. a mid-session drop of an established connection)
+    // then becomes an UNHANDLED 'error' event that crashes the whole plugin process
+    // ("Unhandled 'error' event"). This guard is registered first and never removed,
+    // so an 'error' can never go unhandled regardless of listener cleanup. The real
+    // handler below still runs (multiple listeners are allowed) for handshake failures.
+    ws.on('error', () => { /* guarded — see above */ });
     this.ws = ws;
     this.state = 'connecting';
     let settled = false;
@@ -148,8 +156,12 @@ export class TruenasClient {
         resolve();
       });
       ws.on('message', (data: RawData) => this.onMessage(data));
+      // 'error' fires on EVERY socket failure — including mid-session drops of an
+      // ESTABLISHED connection (e.g. the appliance closing a busy socket). A
+      // 'close' event always follows; handleClosed() rejects pending calls and
+      // resets state for reconnection. When the handshake itself fails we reject
+      // here so the caller sees the reason.
       ws.on('error', (err: Error) => {
-        // A 'close' event always follows — handleClosed() cleans up pending calls.
         if (!settled) {
           settled = true;
           clearTimeout(timer);

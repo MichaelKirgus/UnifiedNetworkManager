@@ -2201,6 +2201,51 @@ paths:
         '401':
           description: Authentication required
 
+  /firewall-rules:
+    get:
+      tags: [Inventory]
+      summary: List all firewall rules across devices (filter + NAT)
+      description: >-
+        Cross-device view of the normalized `firewall_rules` inventory table,
+        populated by the telemetry worker from each plugin's /monitoring
+        metrics (`firewallRules[]`). Vendors normalize to one unified shape at
+        collection time — OPNsense filter rules plus its four NAT rule sets
+        (d_nat/source_nat/one_to_one/npt) and RouterOS firewall filter + nat
+        chains — so both vendors share the same columns; vendor-specific fields
+        live in `extra`. One row per rule on one device, no merging. Rows not
+        refreshed within 24h are swept away.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: ruleType
+          required: false
+          schema:
+            type: string
+            enum: [filter, dnat, snat, one-to-one, npt]
+          description: Filter by rule kind (filter rules vs. NAT kinds)
+      responses:
+        '200':
+          description: Firewall rule rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FirewallRuleRow'
+        '400':
+          description: Invalid ruleType filter value
+        '401':
+          description: Authentication required
+
   /wifi:
     get:
       tags: [Inventory]
@@ -2258,6 +2303,39 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StorageOverview'
+        '401':
+          description: Authentication required
+
+  /containers:
+    get:
+      tags: [Inventory]
+      summary: Cross-device container/App overview (Containers page)
+      description: >-
+        Returns the normalized `containers` rows (TrueNAS SCALE Apps today; any
+        plugin may emit the generic `containers[]` metric), populated by the
+        telemetry worker from each plugin's /monitoring metrics. One row per app
+        on one device — no merging; devices without container data contribute no
+        rows. The `extra` object carries networks[], ips[], ports[] and
+        per-service detail for expandable rows. Rows not refreshed within 24h are
+        swept away.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+      responses:
+        '200':
+          description: Container overview (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContainersOverview'
         '401':
           description: Authentication required
 
@@ -4044,6 +4122,98 @@ components:
           description: "Protocol-specific extras (uuid, description, gatewayStatus, gatewayLatencyMs for OPNsense; rtgTag, peer, rawType for LCOS)"
         collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this route" }
 
+    FirewallRuleRow:
+      type: object
+      required: [deviceId, pluginId, ruleType, vendorRuleId, position, action, enabled, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this firewall is configured on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this rule" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        ruleType:
+          type: string
+          enum: [filter, dnat, snat, one-to-one, npt]
+          description: "Normalized rule kind — filter rules vs. NAT kinds (RouterOS srcnat→snat, dstnat→dnat)"
+        vendorRuleId: { type: string, description: "Stable vendor-side identity (OPNsense uuid / RouterOS .id); part of the row key" }
+        position: { type: integer, description: "Order within its rule set on the device (0-based; display data only)" }
+        protocol: { type: string, description: "Normalized protocol name (tcp, udp, icmp, ...); '' = any/unknown" }
+        sourceIp: { type: string, description: "Source network/CIDR or alias name as configured; '' = any" }
+        destIp: { type: string, description: "Destination network/CIDR or alias name as configured; '' = any" }
+        sourcePort: { type: [string, 'null'], description: "Source port(s) — single port or range string (null when n/a)" }
+        destPort: { type: [string, 'null'], description: "Destination port(s) — single port or range string (null when n/a)" }
+        action:
+          type: string
+          enum: [allow, deny, other]
+          description: "Normalized verdict — allow/deny for filter rules; NAT actions map to 'other'"
+        enabled: { type: boolean, description: "Whether the rule is active on the device" }
+        description: { type: string, description: "Rule description / comment; '' = none" }
+        scope: { type: string, description: "Where the rule applies (OPNsense interface, RouterOS chain + iface lists)" }
+        ipVersion:
+          type: string
+          enum: [v4, v6, both]
+          description: "IP family the rule applies to — OPNsense `family`/`ipprotocol`, RouterOS derived from address text; 'both' when unconstrained"
+        packets: { type: [integer, 'null'], description: "Live hit counter — packets matched by this rule (RouterOS only; null when not reported)" }
+        bytes: { type: [integer, 'null'], description: "Live hit counter — bytes matched by this rule (RouterOS only; null when not reported)" }
+        states: { type: [integer, 'null'], description: "Current connection-state count for this rule (not yet reported by any vendor; reserved)" }
+        extra:
+          type: object
+          additionalProperties: true
+          description: "Vendor-specific extras (uuid, family, log, tag, quick, state, resolvedSource/resolvedDest for OPNsense; connection-state, time, address-list, srcAddressLists/dstAddressLists with list contents for RouterOS)"
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this rule" }
+        sourceResolved:
+          type: object
+          allOf:
+            - $ref: '#/components/schemas/FirewallAddressResolution'
+          nullable: true
+          description: "Cross-device resolution of the source address against the networks + hosts inventory (null when nothing matched — alias names without a known subnet or host)"
+        destResolved:
+          type: object
+          allOf:
+            - $ref: '#/components/schemas/FirewallAddressResolution'
+          nullable: true
+          description: "Cross-device resolution of the destination address against the networks + hosts inventory (null when nothing matched)"
+
+    FirewallResolvedHost:
+      type: object
+      required: [mac, ips]
+      properties:
+        mac: { type: string, description: "MAC address (canonical lowercase colon form)" }
+        ips:
+          type: array
+          items: { type: string }
+          description: "All known addresses of this host, IPv4 first"
+        hostname: { type: [string, 'null'], description: "Hostname when a DHCP/NDP source reported one" }
+        manufacturer: { type: [string, 'null'], description: "OUI-derived vendor name (ARP rows)" }
+        devices:
+          type: array
+          items: { type: string }
+          description: "Device names that observed this host (deduped)"
+
+    FirewallAddressResolution:
+      type: object
+      required: [subnets, interfaces, hostCount, hosts, unresolved]
+      properties:
+        subnets:
+          type: array
+          items: { type: string }
+          description: "Known subnets the address covers (e.g. 192.168.1.0/24), IPv4 first"
+        interfaces:
+          type: array
+          items: { type: string }
+          description: "Interfaces carrying those subnets, labeled 'DeviceName: iface'"
+        hostCount: { type: integer, description: "Number of discovered hosts inside the address (may exceed hosts.length)" }
+        hosts:
+          type: array
+          items:
+            $ref: '#/components/schemas/FirewallResolvedHost'
+          description: "Matched hosts, capped at 50 for payload size"
+        unresolved:
+          type: array
+          items: { type: string }
+          description: "Tokens that are neither IP literals nor CIDRs — alias names not expandable from the inventory"
+
     StorageFilesystemRow:
       type: object
       required: [deviceId, pluginId, name, type, status, collectedAt]
@@ -4113,6 +4283,50 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/StorageDiskRow'
+
+    ContainerRow:
+      type: object
+      required: [deviceId, pluginId, name, state, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this app runs on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this container" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        name: { type: string, description: "App/container name (e.g. radius05, zabbix05-proxy12)" }
+        state:
+          type: string
+          description: "RUNNING | STOPPED | ... — app-level workload state (uppercase at emit)"
+        image: { type: [string, 'null'], description: "Container image for single-container apps; null for multi-service workloads" }
+        version: { type: [string, 'null'], description: "Human version string from the app catalog (e.g. 1.0.0_custom)" }
+        upgradeAvailable: { type: [boolean, 'null'], description: "True when an app or image update is available on the appliance" }
+        startedAt:
+          type: [string, 'null']
+          format: date-time
+          description: >-
+            UNM-observed start of the current RUNNING period (ISO-8601). The TrueNAS
+            public API exposes no container start-time, so this is tracked by the
+            telemetry worker from state transitions — stamped when a row first appears
+            RUNNING and cleared when it leaves RUNNING. NULL for non-RUNNING rows or
+            apps observed already-running (true uptime unknown; UI shows "≥ X").
+        extra:
+          type: object
+          additionalProperties: true
+          description: >-
+            Plugin-specific details (JSON): networks[] {name, driver?, subnets?},
+            ips[] (static container IPs from the compose config), ports[] (published
+            host ports), containerCount, containers[] per-service detail, volumeMounts[].
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this app" }
+
+    ContainersOverview:
+      type: object
+      required: [containers]
+      properties:
+        containers:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContainerRow'
 
     WifiOverview:
       type: object

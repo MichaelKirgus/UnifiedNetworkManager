@@ -523,6 +523,67 @@ export const routes = pgTable(
   }
 );
 
+// One row per firewall rule (filter + NAT kinds) on one device, as reported by a
+// plugin's `firewallRules` metric. Powers the cross-device Firewall page with the
+// same upsert-per-poll + delete-on-absent + 24h-sweep lifecycle as tunnels/routes.
+// Vendors normalize to this unified shape at collection time (OPNsense filter/
+// dnat/snat/one-to-one/npt; RouterOS filter + nat chains). `vendorRuleId` is the
+// stable identity (OPNsense uuid / RouterOS .id); `position` is display data only,
+// so reordering rules on a device never churns rows.
+export const firewallRules = pgTable(
+  'firewall_rules',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // filter | dnat | snat | one-to-one | npt — normalized to lowercase at ingest.
+    ruleType: text('ruleType').notNull(),
+    // Stable vendor-side identity (OPNsense uuid, RouterOS .id). Part of the PK.
+    vendorRuleId: text('vendorRuleId').notNull(),
+    // Order within its rule set on the device (0-based array index at collection).
+    position: integer('position').notNull().default(0),
+    // IP family the rule applies to — v4 | v6 | both. OPNsense reports it directly
+    // (family/ipprotocol); RouterOS derives it from the address text.
+    ipVersion: text('ipVersion').notNull().default('v4'),
+    // Normalized protocol name ('tcp', 'udp', 'icmp', …; '' = any/unknown).
+    protocol: text('protocol').notNull().default(''),
+    // Source network/CIDR or alias name as configured. '' = any.
+    sourceIp: text('sourceIp').notNull().default(''),
+    // Destination network/CIDR or alias name as configured. '' = any.
+    destIp: text('destIp').notNull().default(''),
+    // Source port(s) — single port or range string (null when n/a).
+    sourcePort: text('sourcePort'),
+    // Destination port(s) — single port or range string (null when n/a).
+    destPort: text('destPort'),
+    // allow | deny | other — normalized at ingest (NAT actions map to 'other').
+    action: text('action').notNull().default('other'),
+    enabled: boolean('enabled').notNull().default(true),
+    // Rule description / comment ('' = none).
+    description: text('description').notNull().default(''),
+    // Where the rule applies (OPNsense interface, RouterOS chain + iface lists).
+    scope: text('scope').notNull().default(''),
+    // Live per-rule traffic counters (null when the vendor doesn't expose them):
+    // packets/bytes matched by this rule since boot; states = active pf states
+    // (OPNsense only — RouterOS/LCOS have no stateful counter).
+    packets: doublePrecision('packets'),
+    bytes: doublePrecision('bytes'),
+    states: integer('states'),
+    // Vendor-specific extras (JSON object): uuid, family, log, tag, quick, state,
+    // resolvedSource/resolvedDest (alias expansion), connection-state, time,
+    // address-list, to-addresses/to-ports …
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkFirewallRules: primaryKey({
+        name: 'firewall_rules_pkey',
+        columns: [table.deviceId, table.pluginId, table.ruleType, table.vendorRuleId],
+      }),
+      idxFirewallRulesDevice: index('idx_firewall_rules_device').on(table.deviceId),
+    };
+  }
+);
+
 // One row per SSID×band as reported by a plugin's `wifiNetworks` metric.
 // Powers the cross-device WiFi page (grouped by SSID name across devices).
 export const wifiSsids = pgTable(
@@ -783,6 +844,49 @@ export const storageDisks = pgTable(
         columns: [table.deviceId, table.pluginId, table.name],
       }),
       idxStorageDisksDevice: index('idx_storage_disks_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per App/container workload as reported by a plugin's `containers`
+// metric. Powers the cross-device Containers page (TrueNAS SCALE Apps today;
+// any plugin may emit the generic key). Same upsert-per-poll + delete-on-absent
+// lifecycle as storage_filesystems: an uninstalled app must vanish from the
+// table, not linger until the 24h sweep. `name` is part of the PK — one row per
+// (device, plugin, app-name). A device without container data contributes no rows.
+export const containers = pgTable(
+  'containers',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // App/container name as reported (e.g. "radius05", "zabbix05-proxy12").
+    name: text('name').notNull(),
+    // RUNNING | STOPPED | ... — normalized to uppercase at emit, kept verbatim.
+    state: text('state').notNull().default('UNKNOWN'),
+    // Container image (single-container apps; null for multi-service workloads).
+    image: text('image'),
+    // Human version string from the app catalog ("1.0.0_custom").
+    version: text('version'),
+    // True when an app or image update is available on the appliance.
+    upgradeAvailable: boolean('upgradeAvailable'),
+    // UNM-observed start of the current RUNNING period (ISO-8601). The TrueNAS
+    // public API exposes NO container start-time, so this is tracked by the
+    // telemetry worker from state transitions: stamped when a row first appears
+    // RUNNING and cleared when it leaves RUNNING. NULL for non-RUNNING rows or
+    // apps observed already-running (true uptime unknown — UI shows "≥ X").
+    startedAt: text('startedAt'),
+    // Plugin-specific details (JSON object): networks[] {name, driver?, subnets?},
+    // ips[], ports[], containerCount, containers[] per-service detail, volumeMounts[].
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkContainers: primaryKey({
+        name: 'containers_pkey',
+        columns: [table.deviceId, table.pluginId, table.name],
+      }),
+      idxContainersDevice: index('idx_containers_device').on(table.deviceId),
     };
   }
 );

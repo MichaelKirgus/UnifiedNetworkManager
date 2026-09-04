@@ -317,6 +317,80 @@ export interface TunnelRow {
   collectedAt: string;
 }
 
+/** One discovered host matched by a firewall rule address (merged across devices). */
+export interface FirewallResolvedHost {
+  mac: string;
+  /** All known addresses of this host, IPv4 first. */
+  ips: string[];
+  hostname?: string | null;
+  manufacturer?: string | null;
+  /** Device names that observed this host (deduped). */
+  devices: string[];
+}
+
+/** Cross-device resolution of a firewall rule address against the inventory. */
+export interface FirewallAddressResolution {
+  /** Known subnets the address covers ("192.168.1.0/24"), IPv4 first. */
+  subnets: string[];
+  /** Interfaces carrying those subnets, labeled "DeviceName: iface". */
+  interfaces: string[];
+  /** Number of discovered hosts inside the address (may exceed hosts.length). */
+  hostCount: number;
+  /** Matched hosts, capped at 50 for payload size. */
+  hosts: FirewallResolvedHost[];
+  /** Tokens that are neither IP literals nor CIDRs — alias names not expandable here. */
+  unresolved: string[];
+}
+
+/** One firewall rule (filter + NAT kinds) normalized across vendors by the plugins. */
+export interface FirewallRuleRow {
+  deviceId: string;
+  pluginId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  /** Display name of the reporting plugin instance (e.g. "OPNsense Plugin"). */
+  pluginName?: string | null;
+  /** Normalized rule kind — filter rules vs. NAT kinds. */
+  ruleType: 'filter' | 'dnat' | 'snat' | 'one-to-one' | 'npt';
+  /** Stable vendor-side identity (OPNsense uuid / RouterOS .id). */
+  vendorRuleId: string;
+  /** Order within its rule set on the device (0-based; display data only). */
+  position: number;
+  /** Normalized protocol name ('tcp', 'udp', …); '' = any/unknown. */
+  protocol?: string;
+  /** Source network/CIDR or alias name as configured; '' = any. */
+  sourceIp?: string;
+  /** Destination network/CIDR or alias name as configured; '' = any. */
+  destIp?: string;
+  /** Source port(s) — single port or range string (null when n/a). */
+  sourcePort?: string | null;
+  /** Destination port(s) — single port or range string (null when n/a). */
+  destPort?: string | null;
+  /** Normalized verdict — allow/deny for filter rules; NAT actions map to 'other'. */
+  action: 'allow' | 'deny' | 'other';
+  enabled: boolean;
+  /** Rule description / comment; '' = none. */
+  description?: string;
+  /** Where the rule applies (OPNsense interface, RouterOS chain + iface lists). */
+  scope?: string;
+  /** IP family the rule applies to — v4 / v6 / both. */
+  ipVersion?: 'v4' | 'v6' | 'both';
+  /** Live hit counter — packets matched (OPNsense + RouterOS; null when not reported). */
+  packets?: number | null;
+  /** Live hit counter — bytes matched (OPNsense + RouterOS; null when not reported). */
+  bytes?: number | null;
+  /** Current connection-state count (OPNsense pf states; null when not reported). */
+  states?: number | null;
+  /** Vendor-specific extras (uuid, family, log, tag, to-addresses, ...). */
+  extra?: Record<string, unknown>;
+  /** Cross-device resolution of the source address (null when nothing matched). */
+  sourceResolved?: FirewallAddressResolution | null;
+  /** Cross-device resolution of the destination address (null when nothing matched). */
+  destResolved?: FirewallAddressResolution | null;
+  collectedAt: string;
+}
+
 /** A physical port as reported by a device's latest telemetry snapshot. */
 export interface TopologyPort {
   name: string;
@@ -682,6 +756,52 @@ export interface StorageDiskRow {
 export interface StorageOverview {
   filesystems: StorageFilesystemRow[];
   disks: StorageDiskRow[];
+}
+
+// --- Containers (cross-device Apps/container workloads) --------------------
+
+/** One docker network as reported in a container row's `extra.networks`. */
+export interface ContainerNetwork {
+  name: string;
+  driver?: string | null;
+  subnets?: string[];
+}
+
+/** Per-service detail for multi-container apps (expandable rows). */
+export interface ContainerServiceDetail {
+  service?: string | null;
+  image?: string | null;
+  state?: string | null;
+}
+
+/** One App/container row from GET /containers. */
+export interface ContainerRow {
+  deviceId: string;
+  pluginId: string;
+  name: string;
+  /** RUNNING | STOPPED | ... (uppercase). */
+  state: string;
+  image?: string | null;
+  version?: string | null;
+  upgradeAvailable?: boolean | null;
+  /** UNM-observed start of the current RUNNING period (ISO-8601). The TrueNAS API
+   * exposes no container start-time, so this is tracked from state transitions —
+   * a lower bound that resets after restarts. Null for non-RUNNING rows or apps
+   * observed already-running (true uptime unknown → UI shows "≥ X"). */
+  startedAt?: string | null;
+  /** Plugin-specific details (JSON): networks[], ips[], ports[], containerCount,
+   * containers[] per-service detail, volumeMounts[]. */
+  extra?: Record<string, unknown>;
+  collectedAt: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+/** Response of GET /containers. */
+export interface ContainersOverview {
+  containers: ContainerRow[];
 }
 
 /** A user account (never includes password hashes or TOTP secrets). */
@@ -1301,6 +1421,14 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<TunnelRow[]>(`/tunnels${suffix}`);
   },
+  firewallRules: (params?: { deviceId?: string; siteId?: string; ruleType?: 'filter' | 'dnat' | 'snat' | 'one-to-one' | 'npt' }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.ruleType) qs.set('ruleType', params.ruleType);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<FirewallRuleRow[]>(`/firewall-rules${suffix}`);
+  },
   routes: (params?: { deviceId?: string; siteId?: string; protocol?: 'static' | 'connected' | 'ospf' | 'bgp' | 'rip' | 'other' }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);
@@ -1321,6 +1449,13 @@ export const api = {
     if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<StorageOverview>(`/storage${suffix}`);
+  },
+  containers: (params?: { deviceId?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<ContainersOverview>(`/containers${suffix}`);
   },
   /** Physical + logical topology graph for the Topology page. */
   topology: (params?: { siteId?: string; includeHosts?: boolean }) => {

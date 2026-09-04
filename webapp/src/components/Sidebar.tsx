@@ -4,6 +4,7 @@ import clsx from 'clsx';
 import {
   Activity,
   BellRing,
+  Box,
   Cable,
   KeyRound,
   Laptop,
@@ -23,6 +24,7 @@ import {
   Waypoints,
   KeySquare,
   Shield,
+  ShieldHalf,
   ShieldCheck,
   UserRound,
   Users as UsersIcon,
@@ -40,6 +42,9 @@ const NAV_ITEMS = [
   { to: '/hosts', label: 'Hosts', icon: Laptop, requiresPermission: 'hosts:read' },
   // Cable stands in for a tunnel link (lucide's `Tunnel` icon is not in the installed version).
   { to: '/tunnels', label: 'Tunnels', icon: Cable, requiresPermission: 'tunnels:read' },
+  // Firewall rules across devices (filter + NAT kinds) — ShieldHalf reads as a
+  // protective barrier and is distinct from the Roles (Shield) entry.
+  { to: '/firewall', label: 'Firewall', icon: ShieldHalf, requiresPermission: 'firewall:read' },
   // Waypoints — Route is already used by the Plans item.
   { to: '/routes', label: 'Routes', icon: Waypoints, requiresPermission: 'routes:read' },
   // Structured log entries shipped by plugins (gated — logs can carry critical details).
@@ -49,6 +54,8 @@ const NAV_ITEMS = [
   { to: '/wifi', label: 'WiFi', icon: WifiIcon, requiresPermission: 'wifi:read' },
   // Cross-device storage inventory (filesystems/pools/datasets + physical disks).
   { to: '/storage', label: 'Storage', icon: HardDrive, requiresPermission: 'storage:read' },
+  // Cross-device container/App workloads (TrueNAS SCALE Apps — docker under the hood).
+  { to: '/containers', label: 'Containers', icon: Box, requiresPermission: 'containers:read' },
   // Physical + logical network graph (inferred cables + per-VLAN segments).
   { to: '/topology', label: 'Topology', icon: GitGraph, requiresPermission: 'topology:read' },
   // Layer registry — the topology view's horizontal bands (open to all users).

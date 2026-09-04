@@ -4,6 +4,8 @@ import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { subnetOf } from '../utils/address';
+import { buildFirewallInventoryIndex, enrichFirewallAddress, getCachedFirewallIndex } from '../utils/firewallEnrichment';
+import type { FirewallAddressResolution } from '../utils/firewallEnrichment';
 
 /** One stored row of the `networks` table (per device + plugin instance). */
 type StoredNetwork = typeof schema.networks.$inferSelect;
@@ -690,6 +692,147 @@ router.get('/routes', requireAuth, requirePermission('routes:read'), async (_req
   }
 });
 
+// GET /firewall-rules - All firewall rules across devices (Firewall page).
+// Query params: deviceId (exact), siteId (filter by device's site),
+// ruleType ('filter'|'dnat'|'snat'|'one-to-one'|'npt').
+// No cross-device merge — a row is one rule on one device. Vendors normalize to
+// the unified shape at collection time, so OPNsense and RouterOS rules share the
+// same columns; vendor-specific fields live in `extra`.
+router.get('/firewall-rules', requireAuth, requirePermission('firewall:read'), async (_req, res: Response) => {
+  try {
+    const { deviceId, siteId, ruleType } = _req.query as Record<string, string | undefined>;
+
+    if (ruleType && !['filter', 'dnat', 'snat', 'one-to-one', 'npt'].includes(ruleType)) {
+      res.status(400).json({ error: '"ruleType" must be one of: filter, dnat, snat, one-to-one, npt' });
+      return;
+    }
+
+    let where;
+    const ruleTypeClause = ruleType ? eq(schema.firewallRules.ruleType, ruleType) : undefined;
+    if (deviceId && siteId) {
+      // Both filters: verify the device belongs to the site first.
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) {
+        res.status(200).json([]);
+        return;
+      }
+      where = ruleTypeClause ? and(eq(schema.firewallRules.deviceId, deviceId), ruleTypeClause) : eq(schema.firewallRules.deviceId, deviceId);
+    } else if (deviceId) {
+      where = ruleTypeClause ? and(eq(schema.firewallRules.deviceId, deviceId), ruleTypeClause) : eq(schema.firewallRules.deviceId, deviceId);
+    } else if (siteId) {
+      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (deviceIds.length === 0) {
+        res.status(200).json([]);
+        return;
+      }
+      const deviceClause = inArray(schema.firewallRules.deviceId, deviceIds);
+      where = ruleTypeClause ? and(deviceClause, ruleTypeClause) : deviceClause;
+    } else if (ruleTypeClause) {
+      where = ruleTypeClause;
+    }
+
+    const rows = await db.query.firewallRules.findMany({
+      ...(where ? { where } : {}),
+      orderBy: [asc(schema.firewallRules.deviceId), asc(schema.firewallRules.ruleType), asc(schema.firewallRules.position)],
+    });
+
+    // --- Cross-device address resolution -------------------------------------
+    // Resolve each rule's source/dest against the networks + hosts inventory so
+    // alias names and bare IPs become intuitive (real subnets, matched hostnames).
+    // The index is cached briefly; when a siteId filter is set we scope it to that
+    // site's devices (a smaller, more relevant resolution context).
+    const deviceViews = await loadDeviceViews(Array.from(new Set(rows.map((r) => r.deviceId))));
+    const pluginNames = await loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId))));
+
+    let indexScope: string[] | null = null; // null = all devices
+    if (siteId) {
+      const siteDeviceIds = new Set(
+        (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id)
+      );
+      indexScope = Array.from(siteDeviceIds);
+    }
+
+    // Device names for interface labels — ALL devices (the inventory may carry
+    // subnets/hosts from devices that have no firewall rules of their own).
+    const allDevices = await db.query.devices.findMany();
+    const deviceNameById = new Map(allDevices.map((d) => [d.id, d.name] as const));
+    const indexKey = `fw:${siteId ?? 'all'}`;
+    const index = await getCachedFirewallIndex(indexKey, async () => {
+      const scopeClause = indexScope ? inArray(schema.networks.deviceId, indexScope) : undefined;
+      const [networkRows, hostRows] = await Promise.all([
+        db.query.networks.findMany(scopeClause ? { where: scopeClause } : undefined),
+        db.query.hosts.findMany(indexScope ? { where: inArray(schema.hosts.deviceId, indexScope) } : undefined),
+      ]);
+      return buildFirewallInventoryIndex(networkRows, hostRows);
+    });
+
+    // Memoize per distinct (device, raw value) — most rules share a handful of
+    // addresses. The key includes the device because interface-name tokens are
+    // resolved against that specific device's inventory.
+    const resolutionMemo = new Map<string, FirewallAddressResolution | null>();
+    const resolveAddr = (raw: string, deviceId: string): FirewallAddressResolution | null => {
+      if (!raw || raw.trim() === '' || raw.trim().toLowerCase() === 'any') return null;
+      const key = `${deviceId}\u0000${raw}`;
+      let r = resolutionMemo.get(key);
+      if (r === undefined) {
+        // deviceId lets interface-name tokens ("lan", "opt26") and "(self)" resolve
+        // against the rule's own device.
+        r = enrichFirewallAddress(raw, index, deviceNameById, deviceId);
+        resolutionMemo.set(key, r);
+      }
+      return r;
+    };
+
+    // RouterOS rules often constrain via address LISTS instead of src/dst-address:
+    // the plugin stores the list contents in extra.srcAddressLists/dstAddressLists.
+    const listAddresses = (extra: Record<string, unknown>, key: 'srcAddressLists' | 'dstAddressLists'): string[] => {
+      const v = extra[key];
+      if (!v || typeof v !== 'object') return [];
+      return Object.values(v as Record<string, unknown>)
+        .flat()
+        .filter((x): x is string => typeof x === 'string' && x.trim() !== '');
+    };
+
+    // OPNsense rules reference alias names; the plugin already expanded them at
+    // collection time into extra.resolvedSource/resolvedDest (comma-joined address
+    // text — for interface-group aliases that's a list of INTERFACE NAMES, which
+    // the resolver then maps to real subnets/hosts). Fold both expansions in.
+    const aliasExpansion = (extra: Record<string, unknown>, key: 'resolvedSource' | 'resolvedDest'): string => {
+      const v = extra[key];
+      return typeof v === 'string' ? v : '';
+    };
+
+    res.status(200).json(
+      rows.map((r) => {
+        const device = deviceViews.get(r.deviceId);
+        const extra = safeParseJson<Record<string, unknown>>(r.extra);
+        // Attach only when something actually matched — keeps the payload lean.
+        const sourceResolved = resolveAddr(
+          [r.sourceIp, aliasExpansion(extra, 'resolvedSource'), ...listAddresses(extra, 'srcAddressLists')].filter(Boolean).join(', '),
+          r.deviceId
+        );
+        const destResolved = resolveAddr(
+          [r.destIp, aliasExpansion(extra, 'resolvedDest'), ...listAddresses(extra, 'dstAddressLists')].filter(Boolean).join(', '),
+          r.deviceId
+        );
+        return {
+          ...r,
+          extra,
+          deviceName: device?.name ?? null,
+          managementAddress: device?.managementAddress ?? null,
+          siteName: device?.siteName ?? null,
+          pluginName: pluginNames.get(r.pluginId) ?? null,
+          sourceResolved: sourceResolved && (sourceResolved.subnets.length > 0 || sourceResolved.hostCount > 0) ? sourceResolved : null,
+          destResolved: destResolved && (destResolved.subnets.length > 0 || destResolved.hostCount > 0) ? destResolved : null,
+        };
+      })
+    );
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 // GET /wifi - Cross-device WiFi overview (WiFi page).
 // Groups the normalized `wifi_ssids` rows by SSID name across all devices and
 // joins per-channel airtime (`wifi_channels`) + connected-client counts
@@ -963,6 +1106,65 @@ router.get('/storage', requireAuth, requirePermission('storage:read'), async (_r
     res.status(200).json({
       filesystems: fsRows.map(decorate),
       disks: diskRows.map(decorate),
+    });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// GET /containers - Cross-device container/App overview (Containers page).
+// Returns the normalized `containers` rows (TrueNAS SCALE Apps today; any plugin
+// may emit the generic `containers[]` metric) with device + plugin views joined.
+// One row per app on one device — no cross-device merge. The `extra` JSON column
+// carries networks[], ips[], ports[] and per-service detail for expandable rows.
+// Query params: deviceId (exact), siteId (filter by device's site).
+router.get('/containers', requireAuth, requirePermission('containers:read'), async (_req, res: Response) => {
+  try {
+    const { deviceId, siteId } = _req.query as Record<string, string | undefined>;
+
+    let contWhere;
+    if (deviceId && siteId) {
+      // Both filters: verify the device belongs to the site first.
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) {
+        res.status(200).json({ containers: [] });
+        return;
+      }
+      contWhere = eq(schema.containers.deviceId, deviceId);
+    } else if (deviceId) {
+      contWhere = eq(schema.containers.deviceId, deviceId);
+    } else if (siteId) {
+      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (deviceIds.length === 0) {
+        res.status(200).json({ containers: [] });
+        return;
+      }
+      contWhere = inArray(schema.containers.deviceId, deviceIds);
+    }
+
+    const rows = await db.query.containers.findMany({
+      ...(contWhere ? { where: contWhere } : {}),
+      orderBy: [asc(schema.containers.deviceId), asc(schema.containers.name)],
+    });
+
+    const [deviceViews, pluginNames] = await Promise.all([
+      loadDeviceViews(rows.map((r) => r.deviceId)),
+      loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId)))),
+    ]);
+
+    res.status(200).json({
+      containers: rows.map((row) => {
+        const device = deviceViews.get(row.deviceId);
+        return {
+          ...row,
+          extra: safeParseJson<Record<string, unknown>>(row.extra),
+          deviceName: device?.name ?? null,
+          managementAddress: device?.managementAddress ?? null,
+          siteName: device?.siteName ?? null,
+          pluginName: pluginNames.get(row.pluginId) ?? null,
+        };
+      }),
     });
   } catch (err) {
     const e = err as { status?: number; message?: string };

@@ -1,5 +1,6 @@
 import { TunnelRow } from './tunnels';
 import { RouteRow } from './routes';
+import { FirewallRuleRow } from './firewall';
 
 /**
  * The cached inventory snapshot for one appliance (see getInventory in index.ts).
@@ -20,6 +21,11 @@ export interface InventorySnapshot {
   tunnels: TunnelRow[];
   /** Configured static routes — see collectRoutes. */
   routes: RouteRow[];
+  /** Firewall rules (filter + NAT kinds), unified shape — see collectFirewallRules.
+   * null = collection failed this cycle → /monitoring must NOT emit the key, so a
+   * transient failure never wipes previously stored rows (present-but-empty is
+   * authoritative on the API side). */
+  firewallRules: FirewallRuleRow[] | null;
   /** Configured gateways (routing/settings) — feeds the derived default-route rows. */
   gateways: Record<string, unknown>[];
   /** Storage inventory for the cross-device Storage page (see collectStorage).

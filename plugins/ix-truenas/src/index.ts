@@ -770,6 +770,183 @@ function parseRoutes(ifaces: Record<string, unknown>[]): RouteRow[] {
   return rows;
 }
 
+// ---------------------------------------------------------------------------
+// Containers inventory (cross-device Containers page): `containers[]` metric.
+// Apps on TrueNAS SCALE are docker/k8s workloads exposed via app.query; their
+// network placement + static IPs come from the per-app compose config
+// (app.config) and the docker networks (docker.network.query). The public API
+// exposes NO per-container CPU/mem/IO stats or start times — this inventory is
+// about identity, state and network footprint only.
+// ---------------------------------------------------------------------------
+
+/** One row of the containers inventory (shape consumed by the API's ingestInventory). */
+interface ContainerRow {
+  name: string;
+  // RUNNING | STOPPED | ... (app-level state, uppercased at emit).
+  state: string;
+  image?: string | null;
+  version?: string | null;
+  upgradeAvailable?: boolean;
+  /** Structured details — stored in the API's `extra` JSON column:
+   *  networks[] {name, driver?, subnets?}, ips[], ports[], containerCount,
+   *  containers[] (per-service detail), volumeMounts[], customApp?. */
+  extra?: Record<string, unknown>;
+}
+
+/** One service's network placement from its compose config (app.config). */
+interface ServiceNetDetail {
+  /** Compose `hostname` — the container's L3 name (what other hosts see in ARP/NDP). */
+  hostname: string;
+  /** Static IPv4/IPv6 addresses assigned on the app's networks. */
+  ips: string[];
+  /** Network names this service is attached to. */
+  networks: string[];
+}
+
+/**
+ * Extracts per-service network detail from ONE app's compose config (app.config).
+ * The TrueNAS public API exposes NO per-container MAC — but the compose config
+ * carries each service's `hostname` + static `ipv4_address`/`ipv6_address`, which
+ * is exactly what other devices' ARP/NDP tables report for that container. UNM
+ * stores these as host rows (source 'docker') and merges them by IP with the
+ * MAC-carrying neighbor entries, so a container shows up in the Hosts inventory
+ * with its real name + address even though TrueNAS itself never sees its MAC.
+ */
+function serviceNetDetails(cfg: Record<string, unknown> | undefined): ServiceNetDetail[] {
+  const out: ServiceNetDetail[] = [];
+  if (!cfg || typeof cfg !== 'object') return out;
+  const svcs = cfg['services'];
+  if (!svcs || typeof svcs !== 'object' || Array.isArray(svcs)) return out;
+  for (const svc of Object.values(svcs as Record<string, unknown>)) {
+    const s = svc as Record<string, unknown>;
+    // Compose `hostname` is the container's L3 name. Fall back to container_name
+    // then the service key — but prefer an explicit hostname when present.
+    const hostname = pickString(s, ['hostname']) ?? pickString(s, ['container_name']) ?? '';
+    if (!hostname) continue;
+    const ips = new Set<string>();
+    const networks: string[] = [];
+    const svcNets = s['networks'];
+    if (svcNets && typeof svcNets === 'object' && !Array.isArray(svcNets)) {
+      for (const [netName, netCfg] of Object.entries(svcNets as Record<string, unknown>)) {
+        networks.push(netName);
+        const nc = (netCfg ?? {}) as Record<string, unknown>;
+        const ip4 = pickString(nc, ['ipv4_address']);
+        if (ip4) ips.add(ip4);
+        const ip6 = pickString(nc, ['ipv6_address']);
+        if (ip6) ips.add(ip6);
+      }
+    }
+    out.push({ hostname, ips: Array.from(ips).sort(), networks: networks.sort() });
+  }
+  return out;
+}
+
+/** Maps raw docker.network.query entries to name → {driver, subnets[]} for tooltips. */
+function parseDockerNetworks(nets: Record<string, unknown>[]): Map<string, { driver: string; subnets: string[] }> {
+  const map = new Map<string, { driver: string; subnets: string[] }>();
+  for (const n of nets) {
+    const name = pickString(n, ['name']);
+    if (!name) continue;
+    const ipam = (n['ipam'] ?? {}) as Record<string, unknown>;
+    const config = Array.isArray(ipam['config']) ? (ipam['config'] as Record<string, unknown>[]) : [];
+    const subnets: string[] = [];
+    for (const c of config) {
+      const s = pickString(c, ['subnet']);
+      if (s) subnets.push(s);
+    }
+    map.set(name, { driver: pickString(n, ['driver']) ?? 'unknown', subnets });
+  }
+  return map;
+}
+
+/**
+ * Maps app.query rows (+ per-service compose detail + docker networks) to container
+ * inventory rows — one row PER APP (the page's granularity). Multi-container apps
+ * carry their per-service detail in extra.containers. Static IPs come from the
+ * precomputed service details (`services.<svc>.networks.<net>.ipv4_address`);
+ * dynamic/bridge containers have no IP in the public API, so `ips` stays empty and
+ * the UI falls back to "on <network> (<subnet>)". serviceDetailsByApp is pre-fetched
+ * by the caller (app.config is a per-app call — fetched with bounded concurrency).
+ */
+function buildContainerRows(
+  apps: Record<string, unknown>[],
+  serviceDetailsByApp: Map<string, ServiceNetDetail[]>,
+  dockerNets: Map<string, { driver: string; subnets: string[] }>
+): ContainerRow[] {
+  const rows: ContainerRow[] = [];
+  for (const a of apps) {
+    const name = pickString(a, ['name', 'id']);
+    if (!name) continue;
+    const aw = (a['active_workloads'] ?? {}) as Record<string, unknown>;
+    const details = Array.isArray(aw['container_details']) ? (aw['container_details'] as Record<string, unknown>[]) : [];
+
+    // Networks: app-level `networks` array first, then the compose config's per-service networks.
+    const networkNames = new Set<string>();
+    if (Array.isArray(aw['networks'])) {
+      for (const n of aw['networks']) {
+        const s = typeof n === 'string' ? n : pickString((n ?? {}) as Record<string, unknown>, ['name']);
+        if (s) networkNames.add(s);
+      }
+    }
+
+    // Static IPs + per-service networks from the compose config (pre-fetched).
+    const ips = new Set<string>();
+    for (const d of serviceDetailsByApp.get(name) ?? []) {
+      for (const ip of d.ips) ips.add(ip);
+      for (const net of d.networks) networkNames.add(net);
+    }
+
+    // Enrich each network name with its driver + subnets from docker.network.query.
+    const networks: { name: string; driver?: string; subnets?: string[] }[] = Array.from(networkNames).sort().map((n) => {
+      const meta = dockerNets.get(n);
+      return meta ? { name: n, driver: meta.driver, subnets: meta.subnets.length > 0 ? meta.subnets : undefined } : { name: n };
+    });
+
+    // Published host ports (app-level used_ports; entries are numbers or "host:container" strings).
+    const ports: number[] = [];
+    if (Array.isArray(aw['used_ports'])) {
+      for (const p of aw['used_ports']) {
+        if (typeof p === 'number') ports.push(p);
+        else if (typeof p === 'string') {
+          const m = p.match(/^(\d+)(?::)/);
+          if (m) ports.push(Number(m[1]));
+        }
+      }
+    }
+
+    // Volume mounts (deduped by source path).
+    const volumes = Array.isArray(aw['volumes']) ? (aw['volumes'] as Record<string, unknown>[]) : [];
+    const volumeMounts = Array.from(new Set(volumes.map((v) => pickString(v, ['source']) ?? '').filter(Boolean))).sort();
+
+    // Per-service detail for the expandable row.
+    const containers = details
+      .map((d) => ({
+        service: pickString(d, ['service_name']),
+        image: pickString(d, ['image']),
+        state: pickString(d, ['state']) ?? undefined,
+      }))
+      .filter((c) => c.service || c.image);
+
+    rows.push({
+      name,
+      state: (pickString(a, ['state']) ?? 'UNKNOWN').toUpperCase(),
+      image: details.length === 1 ? pickString(details[0], ['image']) : null,
+      version: pickString(a, ['human_version', 'version']),
+      upgradeAvailable: a['upgrade_available'] === true || a['image_updates_available'] === true ? true : undefined,
+      extra: {
+        networks,
+        ips: Array.from(ips).sort(),
+        ports: ports.sort((x, y) => x - y),
+        containerCount: details.length,
+        ...(containers.length > 0 ? { containers } : {}),
+        ...(volumeMounts.length > 0 ? { volumeMounts } : {}),
+        customApp: a['custom_app'] === true ? true : undefined,
+      },
+    });
+  }
+  return rows;
+}
+
 /** True for DMI placeholder values ("To Be Filled By O.E.M.") — not real data. */
 function isPlaceholder(s: string | undefined): boolean {
   return !s || /to be filled/i.test(s);
@@ -834,7 +1011,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // section, not reject the whole poll before error handling. The last three
   // are best-effort extras (networks inventory + static routes + board
   // serial/model) — their failure does NOT count toward health.
-  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes] = await Promise.allSettled([
+  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('alert.list', [], creds),
@@ -850,6 +1027,12 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     client.call<Record<string, unknown>[]>('disk.query', [], creds),
     client.call<Record<string, unknown>>('system.datastore', [], creds),
     client.call<string[]>('boot.get_disks', [], creds),
+    // Containers-page extras (best-effort — never count toward health).
+    // app.query = one row per installed App (k8s workload); docker.network.query
+    // = the docker networks (macvlan/bridge) with their subnets. Per-app static
+    // IPs come from app.config(name) below (sequential, after this batch).
+    client.call<Record<string, unknown>[]>('app.query', [], creds),
+    client.call<Record<string, unknown>[]>('docker.network.query', [], creds),
   ]);
 
   // TEMP DEBUG (log-once per host): the storage extras are best-effort — their
@@ -860,6 +1043,8 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     ['disk.query', disksRes],
     ['system.datastore', datastoreRes],
     ['boot.get_disks', bootDisksRes],
+    ['app.query', appsRes],
+    ['docker.network.query', dockerNetsRes],
   ] as const) {
     if (storageDebugLogged.has(`${host}|${label}`)) continue;
     storageDebugLogged.add(`${host}|${label}`);
@@ -1144,6 +1329,62 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   }
   if (routes !== undefined) metrics['routes'] = routes;
 
+  // --- app.query (+ docker.network.query, app.config): containers inventory --
+  // Best-effort extra — never counts toward health. Emitted even when EMPTY so
+  // an uninstalled app vanishes from the Containers page on the next poll
+  // (present-but-empty is authoritative; absent key would not wipe). Per-app
+  // compose configs carry the static container IPs + service→network mapping that
+  // app.query's active_workloads does not. They are fetched with BOUNDED concurrency:
+  // firing all ~250+ at once on a single WebSocket makes TrueNAS close the socket
+  // mid-batch (and used to crash the plugin — see truenasClient error guard), so we
+  // cap in-flight calls and let the rest queue. A failed app.config just leaves that
+  // app's IPs empty for this poll; the next poll retries it.
+  if (appsRes.status === 'fulfilled' && Array.isArray(appsRes.value)) {
+    const apps = appsRes.value as Record<string, unknown>[];
+    const serviceDetailsByApp = new Map<string, ServiceNetDetail[]>();
+    if (apps.length > 0) {
+      // Bounded-concurrency wave: at most CONFIG_CONCURRENCY app.config calls in
+      // flight on the shared socket. Keeps TrueNAS happy and the poll under budget.
+      const CONFIG_CONCURRENCY = 8;
+      let cursor = 0;
+      async function worker(): Promise<void> {
+        while (cursor < apps.length) {
+          const i = cursor++;
+          const appName = pickString(apps[i], ['name', 'id']) ?? '';
+          try {
+            const cfg = await client.call<Record<string, unknown>>('app.config', [appName], creds);
+            if (cfg && typeof cfg === 'object') serviceDetailsByApp.set(appName, serviceNetDetails(cfg));
+          } catch { /* best-effort — leave this app's detail empty for this poll */ }
+        }
+      }
+      const workers: Promise<void>[] = [];
+      for (let w = 0; w < Math.min(CONFIG_CONCURRENCY, apps.length); w++) workers.push(worker());
+      await Promise.all(workers);
+    }
+    const dockerNets =
+      dockerNetsRes.status === 'fulfilled' && Array.isArray(dockerNetsRes.value)
+        ? parseDockerNetworks(dockerNetsRes.value as Record<string, unknown>[])
+        : new Map<string, { driver: string; subnets: string[] }>();
+    metrics['containers'] = buildContainerRows(apps, serviceDetailsByApp, dockerNets);
+
+    // Host inventory (source 'docker'): one row per container SERVICE with a static
+    // IP. TrueNAS exposes NO per-container MAC, so mac is omitted — UNM stores the
+    // hostname + IP and merges by IP with the MAC-carrying ARP/NDP entries other
+    // devices report for the same address (that's where the real MAC comes from).
+    const dockerHosts: { hostname: string; ip: string }[] = [];
+    const seenDockerIps = new Set<string>();
+    for (const details of serviceDetailsByApp.values()) {
+      for (const d of details) {
+        for (const ip of d.ips) {
+          if (!ip || seenDockerIps.has(ip)) continue;
+          seenDockerIps.add(ip);
+          dockerHosts.push({ hostname: d.hostname, ip });
+        }
+      }
+    }
+    metrics['dockerHosts'] = dockerHosts;
+  }
+
   // --- system.dmidecode_info: board serial + real hardware model fallback ---
   // system.info's `model` is the CPU; the baseboard product name is the actual
   // appliance model. Serial: DMI values are often placeholders — skip those.
@@ -1258,6 +1499,16 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
       type: 'string',
       visualization: 'table',
       columns: ['name', 'model', 'serial', 'capacityBytes', 'rotationRate', 'health', 'poolName'],
+      group: 'Storage',
+    });
+  }
+  if (Array.isArray(metrics['containers']) && (metrics['containers'] as unknown[]).length > 0) {
+    out.push({
+      key: 'containers',
+      label: 'Containers (Apps)',
+      type: 'string',
+      visualization: 'table',
+      columns: ['name', 'state', 'image', 'version'],
       group: 'Storage',
     });
   }

@@ -375,6 +375,43 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_routes_device ON routes ("deviceId")`);
 
+  // Firewall rules inventory table (Firewall page) — same lifecycle as tunnels/routes.
+  // One row per firewall rule (filter + NAT kinds) on one device, normalized by the
+  // plugin to a unified shape. PK = deviceId+pluginId+ruleType+vendorRuleId so
+  // reordering rules (position changes) never churns rows; delete-on-absent at
+  // ingest keys on vendorRuleId per ruleType.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS firewall_rules (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      "ruleType" TEXT NOT NULL,
+      "vendorRuleId" TEXT NOT NULL,
+      position INTEGER NOT NULL DEFAULT 0,
+      "ipVersion" TEXT NOT NULL DEFAULT 'v4',
+      protocol TEXT NOT NULL DEFAULT '',
+      "sourceIp" TEXT NOT NULL DEFAULT '',
+      "destIp" TEXT NOT NULL DEFAULT '',
+      "sourcePort" TEXT,
+      "destPort" TEXT,
+      action TEXT NOT NULL DEFAULT 'other',
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      description TEXT NOT NULL DEFAULT '',
+      scope TEXT NOT NULL DEFAULT '',
+      packets DOUBLE PRECISION,
+      bytes DOUBLE PRECISION,
+      states INTEGER,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", "ruleType", "vendorRuleId")
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_firewall_rules_device ON firewall_rules ("deviceId")`);
+  // Added after the initial release — existing deployments need the columns.
+  await pool.query(`ALTER TABLE firewall_rules ADD COLUMN IF NOT EXISTS "ipVersion" TEXT NOT NULL DEFAULT 'v4'`);
+  await pool.query(`ALTER TABLE firewall_rules ADD COLUMN IF NOT EXISTS packets DOUBLE PRECISION`);
+  await pool.query(`ALTER TABLE firewall_rules ADD COLUMN IF NOT EXISTS bytes DOUBLE PRECISION`);
+  await pool.query(`ALTER TABLE firewall_rules ADD COLUMN IF NOT EXISTS states INTEGER`);
+
   // WiFi inventory tables (WiFi page) — same lifecycle as networks/hosts/tunnels.
   // One row per SSID×band as reported by a plugin's `wifiNetworks` metric.
   await pool.query(`
@@ -527,6 +564,29 @@ export async function initDb(): Promise<void> {
 
   // Plugin-specific details for disk rows — added after the initial release.
   await pool.query(`ALTER TABLE storage_disks ADD COLUMN IF NOT EXISTS extra TEXT NOT NULL DEFAULT '{}'`);
+
+  // Containers inventory table (Containers page) — one row per App/container
+  // workload, upserted per poll from the plugin's `containers` metric. Same
+  // lifecycle as storage_filesystems (upsert + delete-on-absent + 24h sweep).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS containers (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'UNKNOWN',
+      image TEXT,
+      version TEXT,
+      "upgradeAvailable" BOOLEAN,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_containers_device ON containers ("deviceId")`);
+
+  // UNM-observed start of the current RUNNING period — added after the initial
+  // release (the TrueNAS API exposes no container start-time; see schema.ts).
+  await pool.query(`ALTER TABLE containers ADD COLUMN IF NOT EXISTS "startedAt" TEXT`);
 
   // Plugin log entries (see schema.pluginLogs). Pushed by plugins in batches
   // via POST /plugin/logs; swept by the retention worker after LOG_RETENTION_DAYS.

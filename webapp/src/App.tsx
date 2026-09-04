@@ -14,11 +14,13 @@ import Layers from './pages/Layers';
 import Networks from './pages/Networks';
 import Hosts from './pages/Hosts';
 import Tunnels from './pages/Tunnels';
+import Firewall from './pages/Firewall';
 import RoutesPage from './pages/Routes';
 import Logs from './pages/Logs';
 import Notifications from './pages/Notifications';
 import Wifi from './pages/Wifi';
 import Storage from './pages/Storage';
+import Containers from './pages/Containers';
 import Topology from './pages/Topology';
 import Users from './pages/Users';
 import Roles from './pages/Roles';
@@ -38,6 +40,7 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
   { path: '/networks', permission: 'networks:read' },
   { path: '/hosts', permission: 'hosts:read' },
   { path: '/tunnels', permission: 'tunnels:read' },
+  { path: '/firewall', permission: 'firewall:read' },
   { path: '/routes', permission: 'routes:read' },
   { path: '/logs', permission: 'logs:read' },
   // Notification center — full history + filters (the bell is visible to everyone
@@ -45,6 +48,7 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
   { path: '/notifications', permission: 'notifications:read' },
   { path: '/wifi', permission: 'wifi:read' },
   { path: '/storage', permission: 'storage:read' },
+  { path: '/containers', permission: 'containers:read' },
   { path: '/topology', permission: 'topology:read' },
   // Layers is open to every authenticated user (no read permission).
   { path: '/layers' },
@@ -94,12 +98,15 @@ export default function App() {
       <Route path="/networks" element={<Page permission="networks:read"><Networks /></Page>} />
       <Route path="/hosts" element={<Page permission="hosts:read"><Hosts /></Page>} />
       <Route path="/tunnels" element={<Page permission="tunnels:read"><Tunnels /></Page>} />
+      <Route path="/firewall" element={<Page permission="firewall:read"><Firewall /></Page>} />
       <Route path="/routes" element={<Page permission="routes:read"><RoutesPage /></Page>} />
       <Route path="/logs" element={<Page permission="logs:read"><Logs /></Page>} />
       {/* Notification center — full history with filters + visibility settings. */}
       <Route path="/notifications" element={<Page permission="notifications:read"><Notifications /></Page>} />
       <Route path="/wifi" element={<Page permission="wifi:read"><Wifi /></Page>} />
       <Route path="/storage" element={<Page permission="storage:read"><Storage /></Page>} />
+      {/* Cross-device container/App workloads (TrueNAS SCALE Apps). */}
+      <Route path="/containers" element={<Page permission="containers:read"><Containers /></Page>} />
       {/* Physical + logical network graph (inferred cables, per-VLAN segments). */}
       <Route path="/topology" element={<Page permission="topology:read"><Topology /></Page>} />
       {/* Network layer registry — open to every authenticated user. */}

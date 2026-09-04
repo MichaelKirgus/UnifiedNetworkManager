@@ -88,6 +88,28 @@ export interface RosWlanClientRow {
   intf: string; // radio name
 }
 
+/** One firewall rule (filter or NAT) normalized to the unified Firewall-page shape. */
+export interface RosFirewallRuleRow {
+  ruleType: 'filter' | 'dnat' | 'snat';
+  vendorRuleId: string; // RouterOS .id — stable per table
+  position: number;
+  protocol: string; // normalized name ('tcp', 'udp', …); '' = any
+  sourceIp: string;
+  destIp: string;
+  sourcePort: string | null;
+  destPort: string | null;
+  action: 'allow' | 'deny' | 'other';
+  enabled: boolean;
+  description: string; // rule comment
+  scope: string; // chain (+ interface lists)
+  /** IP family the rule applies to — derived from the address text. */
+  ipVersion: 'v4' | 'v6' | 'both';
+  /** Live hit counters (free in the same REST response); null when absent. */
+  packets: number | null;
+  bytes: number | null;
+  extra: Record<string, unknown>;
+}
+
 export interface RouterOsSnapshot {
   identity: string; // /system/identity
   version: string; // e.g. "7.14"
@@ -107,6 +129,7 @@ export interface RouterOsSnapshot {
   arp: RosArpRow[];
   dhcpLeases: RosDhcpLeaseRow[];
   routes: RosRouteRow[];
+  firewallRules: RosFirewallRuleRow[]; // /ip/firewall/filter + /ip/firewall/nat
   wlanClients: RosWlanClientRow[];
   totalRxBitsPerSec: number | null;
   totalTxBitsPerSec: number | null;
@@ -149,6 +172,180 @@ function routeProtocol(row: Record<string, unknown>): string {
   return 'other';
 }
 
+// --- Firewall rule parsing -----------------------------------------------------------
+
+/** RouterOS reports protocols as numbers or names ('6'/'tcp', '17'/'udp', …). */
+const ROS_PROTOCOL_NAMES: Record<string, string> = {
+  '1': 'icmp', '2': 'igmp', '6': 'tcp', '17': 'udp', '41': 'ipv6-encap',
+  '43': 'ipv6-route', '44': 'ipv6-frag', '47': 'gre', '50': 'esp', '51': 'ah',
+  '58': 'ipv6-icmp', '89': 'ospf', '132': 'sctp',
+};
+
+/** Normalizes a RouterOS protocol value to a lowercase name ('' = any/absent). */
+function normRosProtocol(raw: string | undefined): string {
+  if (!raw) return '';
+  const p = raw.trim().toLowerCase();
+  if (p === '') return '';
+  return ROS_PROTOCOL_NAMES[p] ?? p; // already a name ('tcp') or unknown number → keep as-is
+}
+
+/** Normalizes a RouterOS filter action to the unified allow/deny/other verdict. */
+function normFilterAction(raw: string | undefined): 'allow' | 'deny' | 'other' {
+  const a = (raw ?? '').trim().toLowerCase();
+  if (a === 'accept') return 'allow';
+  if (a === 'drop' || a === 'reject') return 'deny';
+  return 'other'; // passthrough, add-to-logging, …
+}
+
+/** Builds the scope label: chain + any interface lists that narrow it. */
+function ruleScope(row: Record<string, unknown>): string {
+  const parts = [rosString(row, ['chain']) ?? ''];
+  for (const k of ['in-interface-list', 'out-interface-list']) {
+    const v = rosString(row, [k]);
+    if (v) parts.push(`${k.replace('-interface-list', '')}: ${v}`);
+  }
+  return parts.filter(Boolean).join(' | ');
+}
+
+/** Derives the IP family from a rule's address text. RouterOS has no explicit
+ * family field — an IPv6 literal contains ':', CIDR suffixes like /128 are v6,
+ * everything else is treated as v4 (the common case). Empty addresses = any → 'both'. */
+function deriveIpVersion(src: string, dst: string): 'v4' | 'v6' | 'both' {
+  const fams = [src, dst].filter(Boolean).map((a) => (a.includes(':') ? 'v6' : 'v4'));
+  if (fams.length === 0) return 'both'; // no address constraint — matches both families
+  if (fams.every((f) => f === 'v4')) return 'v4';
+  if (fams.every((f) => f === 'v6')) return 'v6';
+  return 'both'; // mixed families in one rule
+}
+
+/** Expands a comma list of address-list names into name → contents entries. */
+function expandAddressLists(lists: Map<string, string[]>, raw: string | undefined): Record<string, string[]> {
+  if (!raw) return {};
+  const out: Record<string, string[]> = {};
+  for (const name of raw.split(',').map((n) => n.trim()).filter(Boolean)) {
+    const contents = lists.get(name);
+    if (contents) out[name] = contents; // unknown list → omitted (best-effort)
+  }
+  return out;
+}
+
+/** Maps one /ip/firewall/filter row onto the unified shape. */
+function parseFilterRule(row: Record<string, unknown>, position: number, addrLists?: Map<string, string[]>): RosFirewallRuleRow | null {
+  const id = rosString(row, ['.id']);
+  if (!id) return null;
+  const extra: Record<string, unknown> = { chain: rosString(row, ['chain']) ?? '' };
+  for (const k of ['connection-state', 'time', 'address-list', 'src-address-list', 'dst-address-list', 'in-interface', 'out-interface', 'log']) {
+    const v = rosString(row, [k]);
+    if (v) extra[k] = v;
+  }
+  // Expand referenced address lists to their contents — the Firewall page uses
+  // these for cross-device resolution (a list name alone is not intuitive).
+  const srcLists = expandAddressLists(addrLists ?? new Map(), rosString(row, ['src-address-list']));
+  if (Object.keys(srcLists).length > 0) extra['srcAddressLists'] = srcLists;
+  const dstLists = expandAddressLists(addrLists ?? new Map(), rosString(row, ['dst-address-list']));
+  if (Object.keys(dstLists).length > 0) extra['dstAddressLists'] = dstLists;
+  // Live hit counters — free in the same response; surfaced as first-class columns.
+  const packets = rosNumber(row, ['packets']) ?? null;
+  const bytes = rosNumber(row, ['bytes']) ?? null;
+  const sourceIp = rosString(row, ['src-address']) ?? '';
+  const destIp = rosString(row, ['dst-address']) ?? '';
+  return {
+    ruleType: 'filter',
+    vendorRuleId: id,
+    position,
+    protocol: normRosProtocol(rosString(row, ['protocol'])),
+    sourceIp,
+    destIp,
+    sourcePort: rosString(row, ['src-port']) || null,
+    destPort: rosString(row, ['dst-port']) || null,
+    action: normFilterAction(rosString(row, ['action'])),
+    enabled: rosString(row, ['disabled']) !== 'true', // key absent = enabled
+    description: rosString(row, ['comment']) ?? '',
+    scope: ruleScope(row),
+    ipVersion: deriveIpVersion(sourceIp, destIp),
+    packets,
+    bytes,
+    extra,
+  };
+}
+
+/** Maps one /ip/firewall/nat row (chain srcnat → snat, dstnat → dnat). */
+function parseNatRule(row: Record<string, unknown>, position: number, addrLists?: Map<string, string[]>): RosFirewallRuleRow | null {
+  const id = rosString(row, ['.id']);
+  if (!id) return null;
+  const chain = (rosString(row, ['chain']) ?? '').toLowerCase();
+  // srcnat/dstnat are the only NAT chains that carry per-rule address/port data.
+  if (chain !== 'srcnat' && chain !== 'dstnat') return null;
+  const ruleType: RosFirewallRuleRow['ruleType'] = chain === 'srcnat' ? 'snat' : 'dnat';
+  const extra: Record<string, unknown> = { chain };
+  for (const k of ['to-addresses', 'to-ports', 'address-list', 'in-interface', 'out-interface']) {
+    const v = rosString(row, [k]);
+    if (v) extra[k] = v;
+  }
+  // NAT rules can also reference address lists — expand them the same way.
+  const srcLists = expandAddressLists(addrLists ?? new Map(), rosString(row, ['src-address-list']));
+  if (Object.keys(srcLists).length > 0) extra['srcAddressLists'] = srcLists;
+  const dstLists = expandAddressLists(addrLists ?? new Map(), rosString(row, ['dst-address-list']));
+  if (Object.keys(dstLists).length > 0) extra['dstAddressLists'] = dstLists;
+  // Live hit counters — free in the same response; surfaced as first-class columns.
+  const packets = rosNumber(row, ['packets']) ?? null;
+  const bytes = rosNumber(row, ['bytes']) ?? null;
+  const sourceIp = rosString(row, ['src-address']) ?? '';
+  const destIp = rosString(row, ['dst-address']) ?? '';
+  return {
+    ruleType,
+    vendorRuleId: id,
+    position,
+    protocol: normRosProtocol(rosString(row, ['protocol'])),
+    sourceIp,
+    destIp,
+    sourcePort: rosString(row, ['src-port']) || null,
+    destPort: rosString(row, ['dst-port']) || null,
+    action: 'other', // NAT actions (masquerade/src-nat/dst-nat/redirect) have no allow/deny verdict
+    enabled: rosString(row, ['disabled']) !== 'true',
+    description: rosString(row, ['comment']) ?? '',
+    scope: ruleScope(row),
+    ipVersion: deriveIpVersion(sourceIp, destIp),
+    packets,
+    bytes,
+    extra,
+  };
+}
+
+/** Parses both firewall tables into unified rows (position = array index per table). */
+function parseFirewallRules(
+  filterRows: Record<string, unknown>[],
+  natRows: Record<string, unknown>[],
+  addrLists?: Map<string, string[]>
+): RosFirewallRuleRow[] {
+  const out: RosFirewallRuleRow[] = [];
+  filterRows.forEach((row, i) => {
+    const mapped = parseFilterRule(row, i, addrLists);
+    if (mapped) out.push(mapped);
+  });
+  natRows.forEach((row, i) => {
+    const mapped = parseNatRule(row, i, addrLists);
+    if (mapped) out.push(mapped);
+  });
+  return out;
+}
+
+/** Builds the address-list name → contents map from /ip/firewall/address-list rows. */
+function buildAddressListMap(raw: unknown): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  if (!Array.isArray(raw)) return map;
+  for (const row of raw) {
+    if (!row || typeof row !== 'object') continue;
+    const r = row as Record<string, unknown>;
+    const name = rosString(r, ['list']);
+    const address = rosString(r, ['address']);
+    if (!name || !address) continue;
+    // `address` is a comma-separated list of IPs/CIDRs.
+    map.set(name, address.split(',').map((a) => a.trim()).filter(Boolean));
+  }
+  return map;
+}
+
 // --- Collection ---------------------------------------------------------------------
 
 /** REST single-row tables (/system/resource, /system/identity) come back as a one-element array. */
@@ -170,13 +367,16 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
   // failing the whole poll. Total budget stays well under the API's 10 s cap:
   // per-request timeout × 2 (auto scheme fallback) ≈ 8 s worst case, and the
   // batch runs concurrently.
-  const [identityRes, ifaceRes, addrRes, arpRes, dhcpRes, routeRes, wlanRes] = await Promise.allSettled([
+  const [identityRes, ifaceRes, addrRes, arpRes, dhcpRes, routeRes, fwFilterRes, fwNatRes, fwAddrListRes, wlanRes] = await Promise.allSettled([
     client.get('/system/identity'),
     client.get<Record<string, unknown>[]>('/interface'),
     client.get<Record<string, unknown>[]>('/ip/address'),
     client.get<Record<string, unknown>[]>('/arp'),
     client.get<Record<string, unknown>[]>('/ip/dhcp-server/lease'),
     client.get<Record<string, unknown>[]>('/ip/route'),
+    client.get<Record<string, unknown>[]>('/ip/firewall/filter'), // firewall filter rules (forward/input/output)
+    client.get<Record<string, unknown>[]>('/ip/firewall/nat'), // NAT rules (srcnat/dstnat chains)
+    client.get<Record<string, unknown>[]>('/ip/firewall/address-list'), // list contents — expands rule src/dst-address-list refs
     client.get<Record<string, unknown>[]>('/interface/wifi/registration-table'), // ROS 7 WiFi; absent on legacy wireless stacks
   ]);
 
@@ -203,6 +403,7 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
     arp: [],
     dhcpLeases: [],
     routes: [],
+    firewallRules: [],
     wlanClients: [],
     totalRxBitsPerSec: null,
     totalTxBitsPerSec: null,
@@ -314,6 +515,18 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
       });
     }
   }
+
+  // --- firewall rules (filter + NAT; best-effort — a missing table degrades to []) ----
+  const fwFilterRows = fwFilterRes.status === 'fulfilled' && Array.isArray(fwFilterRes.value) ? fwFilterRes.value : [];
+  const fwNatRows = fwNatRes.status === 'fulfilled' && Array.isArray(fwNatRes.value) ? fwNatRes.value : [];
+  // Address-list contents (best-effort — the table exists on every ROS version,
+  // but a failure must not sink the firewall snapshot).
+  const addrLists = buildAddressListMap(fwAddrListRes.status === 'fulfilled' ? fwAddrListRes.value : undefined);
+  snapshot.firewallRules = parseFirewallRules(
+    fwFilterRows.filter((r): r is Record<string, unknown> => !!r && typeof r === 'object'),
+    fwNatRows.filter((r): r is Record<string, unknown> => !!r && typeof r === 'object'),
+    addrLists
+  );
 
   // --- wireless clients (ROS 7 WiFi registration table; best-effort) ------------------
   if (wlanRes.status === 'fulfilled' && Array.isArray(wlanRes.value)) {
@@ -548,6 +761,10 @@ export function buildMetrics(s: RouterOsSnapshot, selectedModel?: string | null,
 
   // routes[] → cross-device Routes page (present-but-empty is authoritative).
   m['routes'] = s.routes.map((r) => ({ destination: r.destination, gateway: r.gateway || null, protocol: r.protocol, distance: r.distance ?? undefined, status: r.status }));
+
+  // firewallRules[] → cross-device Firewall page (present-but-empty is
+  // authoritative — the REST tables always return the complete rule list).
+  m['firewallRules'] = s.firewallRules;
 
   // filesystems[] → cross-device Storage page. RouterOS runs from a single
   // flash filesystem (squashfs on most boards) — one row when the resource

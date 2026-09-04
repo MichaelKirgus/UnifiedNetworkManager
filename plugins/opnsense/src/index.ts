@@ -35,6 +35,7 @@ import { getInterfacesInfo, vlans } from './client/interfaces';
 import { searchGateways } from './client/routes';
 import { collectTunnels, attachTunnelRates, enrichTunnelsWithLiveState, TunnelRow } from './tunnels';
 import { collectRoutes, deriveConnectedAndDefaultRoutes, enrichRoutesWithGatewayStatus, RouteRow } from './routes';
+import { collectFirewallRules, fetchFilterRuleStats } from './firewall';
 import { getAction, listModules } from './actions/registry';
 import { ActionContext, ActionResult, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest, listCatalog } from './plan';
@@ -118,6 +119,9 @@ const LIVE_INTERVAL_MS = 30_000; // (INVENTORY_INTERVAL_MS comes from @unm/plugi
  * so the /state builder can share it without a circular import.
  */
 const inventoryCache = new Map<string, InventorySnapshot>();
+/** In-flight cold collections per host — concurrent /monitoring calls share ONE
+ * fetch instead of each starting its own (see getInventory). */
+const inventoryInFlight = new Map<string, Promise<InventorySnapshot>>();
 
 /**
  * Normalizes one interface entry from `interfaces_info?details=true` into zero
@@ -345,7 +349,27 @@ async function getInventory(
   if (cached && Date.now() - cached.collectedAt < INVENTORY_INTERVAL_MS) {
     return cached;
   }
+  // A cold collection on a busy appliance can take LONGER than the API's hard
+  // 10s poll budget — without this guard every timed-out poll would kick off its
+  // own full re-collection, stacking N concurrent fetches against one box (which
+  // only makes each of them slower). Share ONE in-flight promise per host so the
+  // slow collection completes and warms the cache; later polls are fast.
+  const inFlight = inventoryInFlight.get(host);
+  if (inFlight) return inFlight;
+  const p = collectInventory(host, apiKey, apiSecret, transport).finally(() => {
+    inventoryInFlight.delete(host);
+  });
+  inventoryInFlight.set(host, p);
+  return p;
+}
 
+/** Performs one full cold inventory collection (all endpoints, best-effort). */
+async function collectInventory(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  transport?: OpnsenseTransport
+): Promise<InventorySnapshot> {
   // The client-lib calls need a bound axios instance for this appliance.
   const client = createClient(host, { apiKey, apiSecret }, transport);
 
@@ -363,7 +387,7 @@ async function getInventory(
   // Raw interfaces_info entries — kept for the PPPoE tunnel detector (which
   // needs the interface TYPE fields that parseNetworkRows discards).
   let ifEntries: Record<string, unknown>[] = [];
-  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [], routes: [], gateways: [], filesystems: [], disks: [] };
+  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [], routes: [], firewallRules: null, gateways: [], filesystems: [], disks: [] };
   if (info?.ok && info.data && typeof info.data === 'object') {
     const d = info.data as Record<string, unknown>;
     if (d['name'] !== undefined) snap.hostname = String(d['name']);
@@ -454,6 +478,15 @@ async function getInventory(
     snap.routes = await collectRoutes(client);
   } catch {
     // best-effort — a failing route endpoint must not sink the inventory cache
+  }
+
+  // Firewall rules (filter + NAT kinds) — slow-changing config. null on failure:
+  // /monitoring then omits the key entirely so the API keeps previously stored
+  // rows instead of wiping them (present-but-empty is authoritative there).
+  try {
+    snap.firewallRules = await collectFirewallRules(client);
+  } catch {
+    // best-effort — a failing firewall endpoint must not sink the inventory cache
   }
 
   // Configured gateways (routing/settings) — used to derive default-route rows
@@ -696,6 +729,7 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
   // the API's cross-device `routes` table.
   if (Array.isArray(metrics['routes']) && (metrics['routes'] as unknown[]).length > 0) {
     push({ key: 'routes', label: 'Routes', type: 'string', visualization: 'table', group: 'Inventory', columns: ['destination', 'gateway', 'protocol', 'distance', 'status'], intervalMs: INVENTORY_INTERVAL_MS });
+    push({ key: 'firewallRules', label: 'Firewall Rules', type: 'string', visualization: 'table', group: 'Inventory', columns: ['ruleType', 'position', 'protocol', 'sourceIp', 'destIp', 'action', 'enabled'], intervalMs: INVENTORY_INTERVAL_MS });
   }
   // Interface MACs (name + mac per interface).
   if (Array.isArray(metrics['interfaces']) && (metrics['interfaces'] as unknown[]).length > 0) {
@@ -1016,26 +1050,48 @@ async function collectMetrics(
   // first poll after (re)start has no delta, so those rows simply carry no
   // rxRate/txRate (expected warm-up behavior). Emitted even when the stats
   // endpoint failed: tunnel inventory is independent of traffic data.
-  if (inventory.tunnels.length > 0) {
-    const tunnelClient = createClient(host, { apiKey, apiSecret }, transport);
-    // Enrichment hits live endpoints on every poll (not cached with inventory).
-    // Best-effort: a failure falls back to the config-level rows unchanged.
-    const liveTunnels = await enrichTunnelsWithLiveState(tunnelClient, inventory.tunnels)
-      .catch(() => inventory.tunnels);
-    metrics['tunnels'] = attachTunnelRates(host, liveTunnels, traffic);
-  }
-
-  // Routes: static-route config PLUS derived rows (connected subnets + default
-  // route per WAN gateway) so hosts without explicit static routes still show
-  // up on the Routes page. Enriched with LIVE gateway reachability (one extra
-  // endpoint call per poll — not cached). Best-effort: a failing status
-  // endpoint falls back to the config-level rows unchanged.
+  // Live enrichment (tunnels / routes / firewall counters) hits appliance
+  // endpoints on EVERY poll — not cached with the inventory. Each is independent
+  // and best-effort: a failure falls back to the config-level rows unchanged.
+  // They run in PARALLEL so their endpoint round-trips don't stack up against
+  // the API's hard 10s poll budget (sequential enrichment timed out on busy
+  // appliances with large rule sets).
   const allRoutes = [...inventory.routes, ...deriveConnectedAndDefaultRoutes(inventory.networks, inventory.gateways, inventory.routes)];
-  if (allRoutes.length > 0) {
-    const routeClient = createClient(host, { apiKey, apiSecret }, transport);
-    metrics['routes'] = await enrichRoutesWithGatewayStatus(routeClient, allRoutes, {
-      log: (_level, message, context) => logger.warn(message, { deviceId, context }),
-    }).catch(() => allRoutes);
+
+  const tunnelPromise: Promise<unknown> | null =
+    inventory.tunnels.length > 0
+      ? enrichTunnelsWithLiveState(createClient(host, { apiKey, apiSecret }, transport), inventory.tunnels).catch(() => inventory.tunnels)
+      : null;
+  const routePromise: Promise<unknown> | null =
+    allRoutes.length > 0
+      ? enrichRoutesWithGatewayStatus(createClient(host, { apiKey, apiSecret }, transport), allRoutes, {
+          log: (_level, message, context) => logger.warn(message, { deviceId, context }),
+        }).catch(() => allRoutes)
+      : null;
+  const fwStatsPromise: Promise<Map<string, { packets: number | null; bytes: number | null; states: number | null }>> | null =
+    inventory.firewallRules !== null && inventory.firewallRules.length > 0
+      ? fetchFilterRuleStats(createClient(host, { apiKey, apiSecret }, transport)).catch(() => new Map())
+      : null;
+
+  const [tunnelsOut, routesOut, fwStats] = await Promise.all([tunnelPromise, routePromise, fwStatsPromise]);
+
+  if (tunnelsOut) metrics['tunnels'] = attachTunnelRates(host, tunnelsOut as typeof inventory.tunnels, traffic);
+  if (routesOut) metrics['routes'] = routesOut;
+  // Firewall rules (filter + NAT kinds): emit the cached unified rows enriched
+  // with LIVE pf hit counters (rule_stats is keyed by rule uuid). The key is only
+  // present when collection SUCCEEDED — a failed cycle keeps the previous
+  // snapshot's rows alive on the API side; an appliance with genuinely zero
+  // rules emits [] which authoritatively clears stale rows.
+  if (inventory.firewallRules !== null) {
+    let fwRows = inventory.firewallRules;
+    if (fwStats && fwStats.size > 0) {
+      fwRows = fwRows.map((r) =>
+        r.ruleType === 'filter' && fwStats.has(r.vendorRuleId)
+          ? { ...r, ...(fwStats.get(r.vendorRuleId) as { packets: number | null; bytes: number | null; states: number | null }) }
+          : r
+      );
+    }
+    metrics['firewallRules'] = fwRows;
   }
 
   return { metrics, interfaces };
