@@ -28,4 +28,7 @@ export type { PluginLogger, PluginLoggerOptions, PluginLogEntry, LogLevel, LogCa
 export { createNotifier, NOTIFICATION_SEVERITIES } from './notifications';
 export type { PluginNotifier, NotifierOptions, PluginNotification, NotificationSeverity } from './notifications';
 export { createSelfMetrics } from './selfMetrics';
-export type { PluginSelfMetrics, SelfMetricsOptions, SelfMetricsLoggerLike } from './selfMetrics';
+export type { PluginSelfMetrics, SelfMetricsOptions, SelfMetricsLoggerLike } from './selfMetrics';// SSH access for plugins (shared transport + credential resolution). See ssh.ts.
+export { SshClient, createSshPool, resolveSshCredentials, normalizeFingerprint, fingerprintMatches, computeFingerprint } from './ssh';
+export type { SshCredentials, SshClientOptions, ExecResult, SshPool, SshPoolOptions, SshFingerprint } from './ssh';
+export { SshError, SshAuthError, SshHostKeyError, SshTimeoutError } from './ssh';

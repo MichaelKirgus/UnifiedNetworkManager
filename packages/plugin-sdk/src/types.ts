@@ -30,6 +30,12 @@ export const CAPABILITIES = [
   // webapp's per-device Config page renders. Actions referenced in it must be
   // entries of this plugin's action catalog.
   'deviceState',
+  // Can reach the device over SSH (see createSshClient / resolveSshCredentials).
+  // Advertise when the plugin uses SSH as a data path — e.g. for inventory the
+  // vendor API does not expose (per-container MACs via `docker inspect`). The
+  // plugin must declare an 'ssh' credential slot (secretType usernamePassword
+  // or sshKeyPair) in /discover so users can bind credentials to it.
+  'ssh',
   'secretsProvider',
   'identityProvider',
   // Reserved for future log-forwarder plugins (syslog daemon, OpenSearch, ...).
