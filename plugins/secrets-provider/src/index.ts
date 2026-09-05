@@ -117,6 +117,18 @@ export const SECRET_TYPES: SecretType[] = [
       { name: 'passphrase', label: 'Key Passphrase (optional)', input: 'password', secret: true, required: false },
     ],
   },
+  // --- Client-certificate bundles for outbound TLS connections ---------------
+  {
+    type: 'dockerTls',
+    label: 'Docker TLS Client Certificates (CA + cert + key)',
+    fields: [
+      { name: 'ca', label: 'CA Certificate (PEM)', input: 'textarea', secret: true, required: false },
+      // Optional so the form stays usable for CA-only verification; the docker
+      // plugin enforces client-cert completeness at runtime with a clear error.
+      { name: 'cert', label: 'Client Certificate (PEM)', input: 'textarea', secret: true, required: false },
+      { name: 'key', label: 'Client Private Key (PEM)', input: 'textarea', secret: true, required: false },
+    ],
+  },
 ];
 
 /**

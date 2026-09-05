@@ -1,0 +1,27 @@
+{
+  "name": "unm-plugin-docker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Generic Docker Engine monitoring plugin — containers over the Docker REST API (tcp/tls/local socket) emitted as the generic `containers[]` metric.",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn src/index.ts",
+    "build": "tsc",
+    "start": "node dist/src/index.js"
+  },
+  "dependencies": {
+    "@unm/plugin-sdk": "file:../../packages/plugin-sdk",
+    "axios": "^1.7.9",
+    "bonjour-service": "^1.2.1",
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/cors": "^2.8.17",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.2",
+    "ts-node-dev": "^2.0.0",
+    "ts-node": "^10.9.2"
+  }
+}

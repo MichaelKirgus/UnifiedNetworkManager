@@ -27,12 +27,20 @@ function UptimeCell({ row }: { row: ContainerRow }) {
   );
 }
 
-/** App workload state → badge style (TrueNAS SCALE states are uppercase). */
+/** App workload state → badge style (TrueNAS SCALE states are uppercase; the
+ * generic Docker plugin emits its own native states for child containers). */
 const STATE_STYLES: Record<string, string> = {
   RUNNING: 'bg-emerald-100 text-emerald-800 border-emerald-300',
   STOPPED: 'bg-slate-200 text-slate-600 border-slate-300',
   ERROR: 'bg-red-100 text-red-800 border-red-300',
   FAILED: 'bg-red-100 text-red-800 border-red-300',
+  // Docker-native states (generic docker plugin):
+  EXITED: 'bg-slate-200 text-slate-600 border-slate-300',
+  CREATED: 'bg-slate-200 text-slate-600 border-slate-300',
+  RESTARTING: 'bg-amber-100 text-amber-800 border-amber-300',
+  REMOVING: 'bg-amber-100 text-amber-800 border-amber-300',
+  PAUSED: 'bg-sky-100 text-sky-800 border-sky-300',
+  DEAD: 'bg-red-100 text-red-800 border-red-300',
 };
 
 function StateBadge({ state }: { state: string }) {
