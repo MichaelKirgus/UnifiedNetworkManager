@@ -107,6 +107,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     description:
       'Push active TrueNAS alerts (alert.list) into the UNM notification center. Alerts that disappear are auto-resolved.',
   },
+  {
+    key: 'collectApps',
+    label: 'Enable App/Container collection',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Collect installed Apps (app.query) and their containers for the Containers page — including background enrichment (per-app static IPs via app.config, real MACs/IPs/start times via docker inspect over SSH). Disable on hosts whose containers are monitored by another plugin (e.g. the generic Docker plugin): no container RPC traffic is sent to the appliance and previously collected rows are cleared.',
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -1017,6 +1025,9 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   notifier.setEnabled(settings.notifyAlerts === true);
   const transport = transportOf(settings);
   const timeoutMs = clampInt(settings.timeoutMs, 500, 60000, 5000);
+  // App/Container collection toggle — off = skip app.query/docker.network + all
+  // enrichment and emit empty containers[]/dockerHosts[] to clear stale rows.
+  const collectApps = settings.collectApps !== false;
 
   // Credentials: API-key slot (if bound) takes precedence over username/password.
   const apiKeyUsername = typeof settings.apiKeyUsername === 'string' ? settings.apiKeyUsername.trim() : '';
@@ -1062,8 +1073,10 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     // app.query = one row per installed App (k8s workload); docker.network.query
     // = the docker networks (macvlan/bridge) with their subnets. Per-app static
     // IPs come from app.config(name) below (sequential, after this batch).
-    client.call<Record<string, unknown>[]>('app.query', [], creds),
-    client.call<Record<string, unknown>[]>('docker.network.query', [], creds),
+    // Skipped entirely when the `collectApps` option is off — no container RPC
+    // traffic to the appliance at all.
+    collectApps ? client.call<Record<string, unknown>[]>('app.query', [], creds) : Promise.resolve(undefined),
+    collectApps ? client.call<Record<string, unknown>[]>('docker.network.query', [], creds) : Promise.resolve(undefined),
   ]);
 
   // TEMP DEBUG (log-once per host): the storage extras are best-effort — their
@@ -1077,6 +1090,8 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     ['app.query', appsRes],
     ['docker.network.query', dockerNetsRes],
   ] as const) {
+    // Not called when collection is disabled — don't log their "outcome".
+    if (!collectApps && (label === 'app.query' || label === 'docker.network.query')) continue;
     if (storageDebugLogged.has(`${host}|${label}`)) continue;
     storageDebugLogged.add(`${host}|${label}`);
     if (r.status === 'rejected') {
@@ -1369,7 +1384,15 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // runs in the BACKGROUND with a 15-min cache — this handler only SCHEDULES
   // stale parts and reads whatever cached state exists right now. The poll
   // itself stays within its budget no matter how many apps are installed.
-  if (appsRes.status === 'fulfilled' && Array.isArray(appsRes.value)) {
+  if (!collectApps) {
+    // Collection disabled by option — emit EMPTY arrays so previously collected
+    // apps/containers (and their docker host rows) are wiped on this poll: an
+    // ABSENT key would never clear stale rows, present-but-empty is the
+    // authoritative wipe. No app.query/docker.network RPCs were sent and no
+    // enrichment (app.config wave / SSH inspect) is scheduled while disabled.
+    metrics['containers'] = [];
+    metrics['dockerHosts'] = [];
+  } else if (appsRes.status === 'fulfilled' && Array.isArray(appsRes.value)) {
     const apps = appsRes.value as Record<string, unknown>[];
 
     // Optional SSH slot — the plugin's PRIMARY is a username/password that must

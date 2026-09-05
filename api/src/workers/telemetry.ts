@@ -1101,6 +1101,16 @@ async function ingestInventory(
             eq(schema.containers.pluginId, pluginId),
             notInArray(schema.containers.name, Array.from(seenContNames))
           ));
+      } else if (rawContainers.length === 0) {
+        // Present-but-EMPTY is the authoritative wipe: delete ALL rows for this
+        // device+plugin. (The size>0 guard above must NOT swallow this case —
+        // otherwise a plugin that stops reporting containers, e.g. via its
+        // "Enable App/Container collection" option off, would leave stale rows.)
+        await db.delete(schema.containers)
+          .where(and(
+            eq(schema.containers.deviceId, deviceId),
+            eq(schema.containers.pluginId, pluginId)
+          ));
       }
     }
   } catch (err) {
