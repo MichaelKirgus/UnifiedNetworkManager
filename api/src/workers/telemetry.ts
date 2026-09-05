@@ -4,10 +4,10 @@ import { db } from '../db';
 import { and, eq, inArray, lt, notInArray, or, sql } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { getSecret } from '../secretsProvider';
-import { settingsHeaders } from '../pluginSettings';
+import { getEffectiveSettings, settingsHeaders } from '../pluginSettings';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
-import { getSystemSettings } from '../systemSettings';
+import { getSystemSettings, type SystemSettings } from '../systemSettings';
 import {
   deviceStatusDedupeKey,
   emitNotification,
@@ -18,41 +18,70 @@ import {
   initWorker,
   recordSkippedTelemetryBeat,
   recordTelemetryCycle,
+  recordTelemetryPoll,
+  telemetryStats,
   trackBeat,
 } from './stats';
 
-// Poll cadence is env-tunable for large fleets (see README "Scaling & HA"):
-// more devices → longer beat, or raise TELEMETRY_MAX_CONCURRENCY instead.
-// These are the ENV defaults — the Workers page can override both at runtime
-// via system_settings (getSystemSettings), which wins over the environment.
-const POLL_INTERVAL_MS = Math.max(5_000, Number(process.env.TELEMETRY_POLL_INTERVAL_MS ?? 30_000));
-// Cap on in-flight /monitoring calls per cycle. Without a cap the burst grows
-// linearly with fleet size (200 devices × 2 plugins = 400 simultaneous HTTP
-// calls + DB writes), which spikes plugin event-loop lag and queues behind the
-// Postgres pool. 64 keeps the beat smooth at any scale; raise for fast fleets.
-const MAX_CONCURRENT_POLLS = Math.max(1, Number(process.env.TELEMETRY_MAX_CONCURRENCY ?? 64));
-// Inventory rows not refreshed within this window are swept away (offline
+// --- Window-based staggered scheduling --------------------------------------
+// Instead of polling every device on a fixed beat (a synchronized burst that
+// spikes API + plugin CPU, then sleeps), each assignment carries its own
+// next-due deadline inside a configurable WINDOW:
+//   - metrics window  (system setting telemetryPollIntervalMs, default 30 s):
+//     how often /monitoring is called at all;
+//   - inventory window (telemetryInventoryWindowMs, default 15 min): how often
+//     the slow/static collection runs — polls in between send
+//     collectInventory:false and plugins skip it.
+// Deadlines are spread across each window by a stable per-target hash + jitter
+// so fleet load stays flat instead of bursty; a global in-flight budget
+// (telemetryMaxConcurrency) caps parallelism during catch-up bursts. Env vars
+// only seed the defaults — system_settings (Workers page) wins at runtime.
+
+const DISPATCH_TICK_MS = 1_000; // dispatcher resolution (due-list scan cadence)
+const ROSTER_REFRESH_MS = 30_000; // re-read devices/assignments + windows this often
+// Inventory rows not refreshed within the cutoff are swept away (offline
 // devices must not accumulate stale networks/hosts in the cross-device views).
+// The effective cutoff is max(this, 3 × inventory window) — see sweepStaleInventory.
 const INVENTORY_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 const INVENTORY_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 
-/**
- * Runs `fn` over every item with at most `limit` invocations in flight.
- * Items are consumed in order by a fixed pool of workers — no extra deps.
- */
-async function runWithConcurrency<T>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<void>
-): Promise<void> {
-  let next = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const i = next++;
-      await fn(items[i]);
-    }
-  });
-  await Promise.all(workers);
+/** Metric keys that carry cross-device inventory (ingested into their own tables). */
+const INVENTORY_METRIC_KEYS = [
+  'networks', 'arp', 'ndp', 'hosts', 'dhcpLeases', 'wlanClients', 'macTable', 'dockerHosts',
+  'tunnels', 'routes', 'firewallRules',
+  'wifiNetworks', 'wifiAirtime', 'wifiRadios', 'wifiNeighbors',
+  'ports', 'filesystems', 'disks', 'containers', 'images',
+] as const;
+
+/** True when a snapshot carries at least one inventory array (any length). */
+function hasInventoryKeys(metrics: Record<string, unknown>): boolean {
+  for (const key of INVENTORY_METRIC_KEYS) {
+    if (Array.isArray(metrics[key])) return true;
+  }
+  return false;
+}
+
+/** FNV-1a — stable across restarts/processes, used to spread deadlines. */
+function stableHash(str: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function toIntOrNull(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return Math.round(v);
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    if (Number.isFinite(n)) return Math.round(n);
+  }
+  return null;
+}
+
+function clampInt(v: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Math.round(v)));
 }
 
 interface MonitoringResponse {
@@ -83,17 +112,32 @@ interface AssignmentTarget {
   // gathering to the specific device. Null when unset.
   model: string | null;
   firmwareVersion: string | null;
+  /** Per-device metrics-window override in ms (devices.pollIntervalMs); null = inherit. */
+  pollIntervalMs: number | null;
 }
 
 /** One assignment's poll outcome. `reachable` = the plugin answered at all
  * (transport OK); a transport failure yields health 'unknown' + reachable false.
+ * `inventoryEmitted` tells the dispatcher whether this snapshot carried any
+ * inventory arrays — used to decide if the inventory deadline may advance.
  */
 interface PollOutcome {
   health: string;
   reachable: boolean;
+  inventoryEmitted: boolean;
 }
 
-async function pollAssignment(target: AssignmentTarget): Promise<PollOutcome> {
+interface PollOptions {
+  /**
+   * Whether this poll is an INVENTORY-due one. When false the plugin skips its
+   * slow/static collection and omits inventory keys from `metrics` (absent key
+   * = no wipe, per the ingestion contract). Old plugin images ignore the flag
+   * and always answer with a full snapshot — harmless.
+   */
+  collectInventory: boolean;
+}
+
+async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Promise<PollOutcome> {
   try {
     // The secrets provider plugin owns the crypto; the broker fetches the
     // decrypted secret on our behalf. Secrets are typed: `fields` holds the
@@ -118,6 +162,9 @@ async function pollAssignment(target: AssignmentTarget): Promise<PollOutcome> {
         model: target.model,
         firmwareVersion: target.firmwareVersion,
         credentials,
+        // Window-based scheduling hint (see header comment): true only on
+        // inventory-due polls so plugins can skip slow collection in between.
+        collectInventory: opts.collectInventory,
         ...(decrypted?.type === 'apiKey'
           ? { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }
           : {})
@@ -141,18 +188,22 @@ async function pollAssignment(target: AssignmentTarget): Promise<PollOutcome> {
     });
 
     // Normalize the inventory parts of this snapshot into the cross-device
-    // tables (Networks + Hosts pages). Best-effort — a parse failure must
-    // never break the telemetry cycle.
-    ingestInventory(target.deviceId, target.pluginId, metrics, collectedAt);
+    // tables (Networks + Hosts pages) — ONLY on inventory-due polls. Metrics-
+    // only polls carry no inventory keys, so ingesting them would be a no-op;
+    // skipping saves the DB round-trips entirely. Best-effort — a parse failure
+    // must never break the telemetry cycle.
+    if (opts.collectInventory) {
+      ingestInventory(target.deviceId, target.pluginId, metrics, collectedAt);
+    }
 
-    return { health, reachable: true };
+    return { health, reachable: true, inventoryEmitted: hasInventoryKeys(metrics) };
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error(
       `[telemetry] failed to poll device ${target.deviceId} via plugin ${target.pluginId}:`,
       (err as Error).message
     );
-    return { health: 'unknown', reachable: false };
+    return { health: 'unknown', reachable: false, inventoryEmitted: false };
   }
 }
 
@@ -1192,8 +1243,12 @@ async function ingestInventory(
  * offline devices don't accumulate stale networks/hosts in the cross-device
  * views. ISO-8601 strings compare correctly lexicographically.
  */
-async function sweepStaleInventory(): Promise<void> {
-  const cutoff = new Date(Date.now() - INVENTORY_STALE_AFTER_MS).toISOString();
+async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
+  // Adaptive cutoff: with a long inventory window (e.g. 12 h) the plain 24 h
+  // floor would self-sweep rows of perfectly healthy devices — require at least
+  // three full windows of silence before a row counts as stale.
+  const staleAfterMs = Math.max(INVENTORY_STALE_AFTER_MS, 3 * inventoryWindowMs);
+  const cutoff = new Date(Date.now() - staleAfterMs).toISOString();
   // Disabled devices are intentionally not polled — their inventory rows must
   // survive the stale sweep (re-enabling a device restores its views without
   // waiting for fresh data).
@@ -1290,22 +1345,90 @@ async function emitDeviceStatusNotification(deviceId: string, prev: string, next
   }
 }
 
-async function pollAllDevices(): Promise<void> {
+// --- Dispatcher state -------------------------------------------------------
+
+/** Per-assignment scheduling state (in-memory; re-staggered on restart). */
+interface TargetState {
+  target: AssignmentTarget;
+  /** Stable identity `${deviceId}|${pluginId}` — survives roster refreshes. */
+  key: string;
+  metricsNextDueAt: number;
+  inventoryNextDueAt: number;
+  /** Effective windows (ms) resolved at the last roster refresh. */
+  metricsWindowMs: number;
+  inventoryWindowMs: number;
+  /** True once this plugin emitted any inventory array in a snapshot. */
+  everEmittedInventory: boolean;
+  /** Consecutive inventory-due polls that came back without inventory keys. */
+  inventoryMissStreak: number;
+}
+
+const targetStates = new Map<string, TargetState>();
+/** Assignments currently being polled — prevents double-dispatch. */
+const inFlightKeys = new Set<string>();
+/** Last-known poll outcome per assignment (device status is worst-wins over these). */
+const lastOutcomesByDevice = new Map<string, Map<string, PollOutcome>>();
+/** In-memory mirror of devices.status (avoids a DB read per poll). */
+const lastKnownStatus = new Map<string, string>();
+/** Assignment count per device — status is only derived once all are known. */
+const assignmentsPerDevice = new Map<string, number>();
+let lastRosterRefreshAt = 0;
+let lastSweepAt = 0;
+/** Global safety net: a wedged dispatcher tick must never stack on itself. */
+let dispatcherRunning = false;
+
+/**
+ * Effective windows for one assignment. Resolution order (most specific wins):
+ *   plugin option @device scope → devices.pollIntervalMs column
+ *   → plugin option @global scope → system setting.
+ * The device column overrides the metrics window only; the inventory window is
+ * then clamped to at least the metrics window (inventory can't refresh faster
+ * than the poll itself).
+ */
+async function resolveWindows(
+  target: AssignmentTarget,
+  settings: SystemSettings
+): Promise<{ metricsWindowMs: number; inventoryWindowMs: number }> {
+  const deviceOpts = await getEffectiveSettings(target.pluginId, target.deviceId).catch((): Record<string, unknown> => ({}));
+  const globalOpts = await getEffectiveSettings(target.pluginId).catch((): Record<string, unknown> => ({}));
+
+  let metricsWindowMs = toIntOrNull(deviceOpts['pollIntervalMs']);
+  if (metricsWindowMs === null) metricsWindowMs = toIntOrNull(target.pollIntervalMs);
+  if (metricsWindowMs === null) metricsWindowMs = toIntOrNull(globalOpts['pollIntervalMs']);
+  if (metricsWindowMs === null) metricsWindowMs = settings.telemetryPollIntervalMs;
+  metricsWindowMs = clampInt(metricsWindowMs, 5_000, 3_600_000);
+
+  let inventoryWindowMs = toIntOrNull(deviceOpts['inventoryWindowMs']);
+  if (inventoryWindowMs === null) inventoryWindowMs = toIntOrNull(globalOpts['inventoryWindowMs']);
+  if (inventoryWindowMs === null) inventoryWindowMs = settings.telemetryInventoryWindowMs;
+  inventoryWindowMs = clampInt(inventoryWindowMs, 30_000, 12 * 60 * 60_000);
+
+  return { metricsWindowMs, inventoryWindowMs: Math.max(inventoryWindowMs, metricsWindowMs) };
+}
+
+/**
+ * Re-reads enabled devices + assignments and (re)builds the scheduling state.
+ * New targets get their first deadline staggered across the window via a stable
+ * hash — a fleet boot or bulk import never produces a synchronized burst.
+ */
+async function refreshRoster(settings: SystemSettings): Promise<void> {
+  const startedAt = Date.now();
   // Disabled devices are not polled — their historical data and last metrics
   // stay preserved, and the status column keeps its last derived value.
-  const devices = await db.query.devices.findMany({
-    where: eq(schema.devices.enabled, true),
-  });
+  const devices = await db.query.devices.findMany({ where: eq(schema.devices.enabled, true) });
+  const deviceById = new Map(devices.map((d) => [d.id, d] as const));
+
   if (devices.length === 0) {
-    recordTelemetryCycle(0, 0, Date.now() - cycleStartedAt);
+    targetStates.clear();
+    lastOutcomesByDevice.clear();
+    assignmentsPerDevice.clear();
+    recordTelemetryCycle(0, 0, Date.now() - startedAt);
     return;
   }
 
   // Load every assignment with its plugin endpoint in one pass.
   const assignments = await db.query.devicePlugins.findMany({});
-  const pluginsById = new Map(
-    (await db.query.plugins.findMany()).map((p) => [p.id, p] as const)
-  );
+  const pluginsById = new Map((await db.query.plugins.findMany()).map((p) => [p.id, p] as const));
 
   // Secondary IPs per device (primary is always managementAddress). Batched.
   const deviceIds = devices.map((d) => d.id);
@@ -1320,125 +1443,226 @@ async function pollAllDevices(): Promise<void> {
     ipsByDevice.set(row.deviceId, list);
   }
 
-  const targetsByDevice = new Map<string, AssignmentTarget[]>();
+  const now = Date.now();
+  const seenKeys = new Set<string>();
   for (const a of assignments) {
-    const device = devices.find((d) => d.id === a.deviceId);
+    const device = deviceById.get(a.deviceId);
     const plugin = pluginsById.get(a.pluginId);
     if (!device || !plugin) continue; // stale assignment or unknown plugin: skip
-    const ipAddresses: DeviceAddressView[] = [
-      { address: device.managementAddress, isPrimary: true },
-      ...(ipsByDevice.get(device.id) ?? []).map((address) => ({ address, isPrimary: false })),
-    ];
-    const list = targetsByDevice.get(device.id) ?? [];
-    list.push({
+    const key = `${a.deviceId}|${a.pluginId}`;
+    seenKeys.add(key);
+
+    const target: AssignmentTarget = {
       deviceId: device.id,
       managementAddress: device.managementAddress,
-      ipAddresses,
+      ipAddresses: [
+        { address: device.managementAddress, isPrimary: true },
+        ...(ipsByDevice.get(device.id) ?? []).map((address) => ({ address, isPrimary: false })),
+      ],
       pluginId: a.pluginId,
       secretId: a.secretId,
       extraCredentials: parseExtraCredentials(a.extraCredentials),
       endpoint: plugin.endpoint,
       model: device.model ?? null,
       firmwareVersion: device.firmwareVersion ?? null,
-    });
-    targetsByDevice.set(device.id, list);
+      pollIntervalMs: device.pollIntervalMs ?? null,
+    };
+
+    const existing = targetStates.get(key);
+    if (!existing) {
+      // New assignment — stagger first deadlines across their windows.
+      const windows = await resolveWindows(target, settings);
+      targetStates.set(key, {
+        target,
+        key,
+        metricsNextDueAt: now + (stableHash(key) % Math.max(1, windows.metricsWindowMs)),
+        inventoryNextDueAt: now + (stableHash(`${key}:inv`) % Math.max(1, windows.inventoryWindowMs)),
+        metricsWindowMs: windows.metricsWindowMs,
+        inventoryWindowMs: windows.inventoryWindowMs,
+        everEmittedInventory: false,
+        inventoryMissStreak: 0,
+      });
+    } else {
+      // Existing — refresh the target (endpoint/credentials may have changed)
+      // and re-resolve windows; deadlines stay untouched.
+      existing.target = target;
+      const windows = await resolveWindows(target, settings);
+      existing.metricsWindowMs = windows.metricsWindowMs;
+      existing.inventoryWindowMs = windows.inventoryWindowMs;
+    }
   }
 
-  // Poll every assignment independently — one dead plugin must not take the
-  // whole device down. Device status is derived worst-wins afterwards. The
-  // concurrency cap keeps the per-beat burst flat regardless of fleet size.
-  // Previous statuses for transition detection (notification center mirrors
-  // state changes into the bell — see src/notifications.ts).
-  const prevStatusById = new Map(devices.map((d) => [d.id, d.status] as const));
+  // Drop state for assignments that no longer exist (device deleted/disabled).
+  for (const key of Array.from(targetStates.keys())) {
+    if (!seenKeys.has(key)) targetStates.delete(key);
+  }
+  const liveDeviceIds = new Set(Array.from(seenKeys).map((k) => k.split('|')[0]));
+  for (const deviceId of Array.from(lastOutcomesByDevice.keys())) {
+    if (!liveDeviceIds.has(deviceId)) lastOutcomesByDevice.delete(deviceId);
+  }
 
-  const entries = Array.from(targetsByDevice.entries());
-  await runWithConcurrency(
-    entries,
-    MAX_CONCURRENT_POLLS,
-    async ([deviceId, targets]) => {
-      const outcomes = await Promise.all(targets.map((t) => pollAssignment(t)));
-      const status = deriveDeviceStatus(outcomes);
-      const prev = prevStatusById.get(deviceId) ?? 'unknown';
-      if (status !== prev) {
-        // Mirror the transition into the notification center. Degrading states
-        // carry a stable dedupe key so they upsert while ongoing and are
-        // auto-resolved by the notifications worker when the device recovers;
-        // recovery itself emits a one-shot info note.
-        void emitDeviceStatusNotification(deviceId, prev, status);
-      }
-      await db.update(schema.devices).set({ status }).where(eq(schema.devices.id, deviceId));
-    }
-  );
+  // Per-device assignment counts + status mirror for transition detection.
+  assignmentsPerDevice.clear();
+  for (const state of targetStates.values()) {
+    assignmentsPerDevice.set(
+      state.target.deviceId,
+      (assignmentsPerDevice.get(state.target.deviceId) ?? 0) + 1
+    );
+  }
+  for (const d of devices) lastKnownStatus.set(d.id, d.status);
 
-  recordTelemetryCycle(
-    devices.length,
-    entries.reduce((sum, [, targets]) => sum + targets.length, 0),
-    Date.now() - cycleStartedAt
-  );
+  recordTelemetryCycle(devices.length, targetStates.size, Date.now() - startedAt);
 }
 
-/** True while a poll cycle is in flight — the timer skips overlapping beats. */
-let pollCycleRunning = false;
-/** Timestamp of the current (or last) cycle start — for duration stats. */
-let cycleStartedAt = Date.now();
+/** Dispatches one due assignment: poll → reschedule deadlines → update status. */
+async function dispatchPoll(state: TargetState, settings: SystemSettings): Promise<void> {
+  inFlightKeys.add(state.key);
+  telemetryStats.pollsInFlight = inFlightKeys.size;
+  const startedAt = Date.now();
+  try {
+    // Inventory-due? Checked at DISPATCH time — the deadline may have passed
+    // while this target waited for a free slot.
+    const collectInventory = Date.now() >= state.inventoryNextDueAt;
+
+    const outcome = await pollAssignment(state.target, { collectInventory });
+    recordTelemetryPoll(Date.now() - startedAt);
+
+    // Reschedule the metrics deadline from COMPLETION (not dispatch) so a slow
+    // device isn't double-polled back-to-back. Jitter decorrelates phases over
+    // time so targets never re-synchronize.
+    const jitter = 1 + (Math.random() * 2 - 1) * (settings.telemetryJitterPercent / 100);
+    state.metricsNextDueAt = Date.now() + Math.max(5_000, state.metricsWindowMs * jitter);
+
+    // Inventory deadline: advance only when the plugin actually delivered
+    // inventory this poll — a transient collection failure retries on the next
+    // metrics beat instead of waiting a full window. Plugins that never emit
+    // inventory (e.g. ICMP) always advance; after 5 consecutive misses we force-
+    // advance anyway so a permanently broken collector can't pin every poll to
+    // full-collection mode.
+    if (collectInventory) {
+      const delivered = outcome.reachable && (!state.everEmittedInventory || outcome.inventoryEmitted);
+      state.inventoryMissStreak = delivered ? 0 : state.inventoryMissStreak + 1;
+      if (delivered || state.inventoryMissStreak >= 5) {
+        state.inventoryNextDueAt = Date.now() + Math.max(30_000, state.inventoryWindowMs * jitter);
+      }
+    }
+    if (outcome.inventoryEmitted) state.everEmittedInventory = true;
+
+    await updateDeviceStatus(state.target.deviceId, state.key, outcome);
+  } finally {
+    inFlightKeys.delete(state.key);
+    telemetryStats.pollsInFlight = inFlightKeys.size;
+  }
+}
 
 /**
- * Starts the telemetry polling loop. Each device's assigned plugins are asked
- * for a monitoring snapshot which is normalized and persisted to the
- * `telemetry` table (one row per plugin per cycle). The beat cadence +
- * concurrency cap are re-read from system_settings every iteration, so an
- * admin can tune them live from the Workers page without a restart.
- * Returns a stop function (the loop self-reschedules with setTimeout so the
- * next beat always picks up the latest configured interval).
+ * Device status = worst-wins over the LAST KNOWN outcome of every assignment.
+ * With staggered deadlines each assignment polls at its own pace, so we keep a
+ * per-assignment outcome cache and only derive once all of the device's
+ * assignments have reported at least once (no boot-time flapping).
+ */
+async function updateDeviceStatus(
+  deviceId: string,
+  assignmentKey: string,
+  outcome: PollOutcome
+): Promise<void> {
+  let byAssignment = lastOutcomesByDevice.get(deviceId);
+  if (!byAssignment) {
+    byAssignment = new Map();
+    lastOutcomesByDevice.set(deviceId, byAssignment);
+  }
+  byAssignment.set(assignmentKey, outcome);
+
+  const expected = assignmentsPerDevice.get(deviceId) ?? 1;
+  if (byAssignment.size < expected) return; // wait for the full picture
+
+  const status = deriveDeviceStatus(Array.from(byAssignment.values()));
+  const prev = lastKnownStatus.get(deviceId) ?? 'unknown';
+  if (status === prev) return;
+  lastKnownStatus.set(deviceId, status);
+  // Mirror the transition into the notification center. Degrading states carry
+  // a stable dedupe key so they upsert while ongoing and are auto-resolved by
+  // the notifications worker when the device recovers; recovery emits one-shot.
+  void emitDeviceStatusNotification(deviceId, prev, status);
+  await db.update(schema.devices).set({ status }).where(eq(schema.devices.id, deviceId));
+}
+
+/** One dispatcher tick: roster/sweeps on their cadences + dispatch due targets. */
+async function dispatcherTick(): Promise<void> {
+  const settings = await getSystemSettings();
+
+  if (Date.now() - lastRosterRefreshAt >= ROSTER_REFRESH_MS) {
+    lastRosterRefreshAt = Date.now();
+    try {
+      await refreshRoster(settings);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[telemetry] roster refresh failed:', err);
+    }
+  }
+
+  if (Date.now() - lastSweepAt >= INVENTORY_SWEEP_INTERVAL_MS) {
+    lastSweepAt = Date.now();
+    void sweepStaleInventory(settings.telemetryInventoryWindowMs).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[telemetry] inventory sweep failed:', err);
+    });
+  }
+
+  const now = Date.now();
+  const budget = Math.max(1, settings.telemetryMaxConcurrency);
+
+  // Due targets (not already in flight), most-overdue first for fair catch-up.
+  const due: TargetState[] = [];
+  for (const state of targetStates.values()) {
+    if (!inFlightKeys.has(state.key) && now >= state.metricsNextDueAt) due.push(state);
+  }
+  telemetryStats.overdueWaiting = Math.max(0, due.length - (budget - inFlightKeys.size));
+
+  const slots = budget - inFlightKeys.size;
+  if (slots <= 0 || due.length === 0) return;
+  due.sort((a, b) => a.metricsNextDueAt - b.metricsNextDueAt);
+  for (const state of due.slice(0, slots)) {
+    void dispatchPoll(state, settings).catch(() => undefined); // dispatchPoll never throws
+  }
+}
+
+/**
+ * Starts the telemetry dispatcher. Each assignment is polled once per metrics
+ * window (staggered across the window) and carries a slower inventory deadline;
+ * windows + concurrency are re-read from system_settings every tick, so an
+ * admin can tune them live from the Workers page without a restart. Returns a
+ * stop function.
  */
 export function startTelemetryWorker(): () => void {
   initWorker('telemetry', LEADER_KEYS.telemetry);
   // eslint-disable-next-line no-console
-  console.log(
-    `[telemetry] worker started, polling every ${POLL_INTERVAL_MS / 1000}s (max ${MAX_CONCURRENT_POLLS} concurrent polls)`
-  );
+  console.log('[telemetry] worker started (window-based staggered dispatcher, 1 s resolution)');
 
-  let cycle = 0;
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
 
   const tick = async (): Promise<void> => {
     if (stopped) return;
-    // Runtime-tunable cadence (Workers page overrides the env default).
-    const settings = await getSystemSettings();
-    cycle += 1;
-    const sweepsPerCycle = Math.max(1, Math.round(INVENTORY_SWEEP_INTERVAL_MS / settings.telemetryPollIntervalMs));
-    if (cycle % sweepsPerCycle === 0) {
-      sweepStaleInventory().catch((err) => {
+    // Global safety net: a wedged tick must never stack on itself.
+    if (!dispatcherRunning) {
+      dispatcherRunning = true;
+      try {
+        await trackBeat('telemetry', () => dispatcherTick());
+      } catch (err) {
         // eslint-disable-next-line no-console
-        console.error('[telemetry] inventory sweep failed:', err);
-      });
-    }
-    // Cycle guard: a slow cycle (dead devices hitting their timeouts, big
-    // fleet) must not stack on top of itself — overlapping cycles would poll
-    // unreachable devices at MORE than the configured cadence and double the
-    // write load. The next beat simply retries; no work is lost.
-    if (pollCycleRunning) {
-      recordSkippedTelemetryBeat();
-      // eslint-disable-next-line no-console
-      console.warn('[telemetry] previous poll cycle still running — skipping this beat');
+        console.error('[telemetry] dispatcher tick failed:', err);
+      } finally {
+        dispatcherRunning = false;
+      }
     } else {
-      pollCycleRunning = true;
-      cycleStartedAt = Date.now();
-      void trackBeat('telemetry', () => pollAllDevices())
-        .catch((err) => {
-          // eslint-disable-next-line no-console
-          console.error('[telemetry] poll cycle failed:', err);
-        })
-        .finally(() => {
-          pollCycleRunning = false;
-        });
+      recordSkippedTelemetryBeat();
     }
-    timer = setTimeout(() => void tick(), settings.telemetryPollIntervalMs);
+    timer = setTimeout(() => void tick(), DISPATCH_TICK_MS);
   };
 
-  // First beat after one interval (same as the old setInterval behavior).
-  timer = setTimeout(() => void tick(), POLL_INTERVAL_MS);
+  // First tick shortly after start (the roster refresh happens inside it).
+  timer = setTimeout(() => void tick(), 500);
 
   return () => {
     stopped = true;

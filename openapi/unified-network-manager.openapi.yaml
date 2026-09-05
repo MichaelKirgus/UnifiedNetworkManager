@@ -435,6 +435,8 @@ paths:
                 firmwareVersion: { type: [string, 'null'], description: "Firmware version for the selected model; null clears" }
                 # Manual topology-layer override — null clears back to auto-classify.
                 layerOverride: { type: [string, 'null'], description: "A network_layers id; must exist (400 otherwise); null = auto-classify" }
+                # Per-device metrics poll window in ms — null clears back to the inherited value.
+                pollIntervalMs: { type: [integer, 'null'], minimum: 5000, maximum: 3600000, description: "Per-device metrics poll window (ms); null/omitted = inherit plugin option / system setting" }
                 # Toggles telemetry polling. Disabled devices keep their historical data + last metrics.
                 enabled: { type: boolean }
       responses:
@@ -3523,6 +3525,7 @@ components:
         model: { type: [string, 'null'], description: "Hardware model selected from a plugin's advertised catalog (null = unset)" }
         firmwareVersion: { type: [string, 'null'], description: "Firmware version for the selected model (null = unset)" }
         layerOverride: { type: [string, 'null'], description: "Manual topology-layer override (a network_layers id); null = auto-classify from plugin suggestion / heuristic" }
+        pollIntervalMs: { type: [integer, 'null'], minimum: 5000, maximum: 3600000, description: "Per-device metrics poll window in ms; null = inherit the plugin's global option or system setting" }
         detectedFirmwareVersion: { type: [string, 'null'], description: "Firmware version detected from the plugins' latest telemetry — primary plugin first; null when no assigned plugin reports it" }
         serialNumber: { type: [string, 'null'], description: "Serial number from the plugins' latest telemetry (system.serialNumber); null when not reported" }
         enabled: { type: boolean, default: true, description: "Disabled devices are not polled; historical data + last metrics stay preserved" }
@@ -3576,6 +3579,7 @@ components:
         model: { type: [string, 'null'], description: "Optional hardware model (from a plugin's advertised catalog)" }
         firmwareVersion: { type: [string, 'null'], description: "Optional firmware version for the selected model" }
         layerOverride: { type: [string, 'null'], description: "Optional manual topology-layer override (a network_layers id); null/omitted = auto-classify" }
+        pollIntervalMs: { type: [integer, 'null'], minimum: 5000, maximum: 3600000, description: "Optional per-device metrics poll window (ms); null/omitted = inherit" }
 
     Site:
       type: object
@@ -5153,8 +5157,10 @@ components:
     SystemSettingsUpdate:
       type: object
       properties:
-        telemetryPollIntervalMs: { type: integer, description: "Telemetry poll beat in ms (clamped 5000–3600000)" }
-        telemetryMaxConcurrency: { type: integer, description: "Max concurrent /monitoring calls per cycle (clamped 1–2000)" }
+        telemetryPollIntervalMs: { type: integer, description: "Metrics poll window in ms — how often /monitoring is called per assignment (clamped 5000–3600000)" }
+        telemetryInventoryWindowMs: { type: integer, description: "Inventory refresh window in ms — how often the slow/static collection runs (clamped 30000–43200000)" }
+        telemetryMaxConcurrency: { type: integer, description: "Max concurrent /monitoring calls in flight (clamped 1–2000)" }
+        telemetryJitterPercent: { type: integer, description: "Random spread applied to each rescheduled deadline, percent of the window (clamped 0–90)" }
 
     SystemSettingsResponse:
       allOf:
@@ -5163,9 +5169,13 @@ components:
           properties:
             limits:
               type: object
-              required: [MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS, MIN_CONCURRENCY, MAX_CONCURRENCY]
+              required: [MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS, MIN_INVENTORY_WINDOW_MS, MAX_INVENTORY_WINDOW_MS, MIN_CONCURRENCY, MAX_CONCURRENCY, MIN_JITTER_PERCENT, MAX_JITTER_PERCENT]
               properties:
                 MIN_POLL_INTERVAL_MS: { type: integer }
                 MAX_POLL_INTERVAL_MS: { type: integer }
+                MIN_INVENTORY_WINDOW_MS: { type: integer }
+                MAX_INVENTORY_WINDOW_MS: { type: integer }
                 MIN_CONCURRENCY: { type: integer }
                 MAX_CONCURRENCY: { type: integer }
+                MIN_JITTER_PERCENT: { type: integer }
+                MAX_JITTER_PERCENT: { type: integer }

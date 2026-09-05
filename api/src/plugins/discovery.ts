@@ -85,6 +85,47 @@ export interface DiscoveryOptions {
 const DISCOVERY_SERVICE_TYPE = 'unm-plugin';
 const DISCOVERY_POLL_TIMEOUT_MS = 3000;
 
+/**
+ * Standard scheduling options injected into EVERY plugin's option descriptors.
+ * They drive the window-based telemetry dispatcher (workers/telemetry.ts):
+ *   pollIntervalMs    — how often /monitoring is called for this plugin (ms);
+ *   inventoryWindowMs — how often the slow/static collection runs (ms).
+ * Injected API-side so no plugin code is needed; a plugin that declares its
+ * own option with the same key wins (dedup below). No `default` on purpose:
+ * unset = inherit the system setting, and effectiveValues only carries keys
+ * with an explicit default or a stored override.
+ */
+const STANDARD_SCHEDULING_OPTIONS: PluginOptionDescriptor[] = [
+  {
+    key: 'pollIntervalMs',
+    label: 'Poll interval (ms)',
+    type: 'integer',
+    min: 5_000,
+    max: 3_600_000,
+    description:
+      'How often this plugin polls /monitoring for live metrics. Leave unset to inherit the system default (Workers page).',
+  },
+  {
+    key: 'inventoryWindowMs',
+    label: 'Inventory refresh window (ms)',
+    type: 'integer',
+    min: 30_000,
+    max: 12 * 60 * 60_000,
+    description:
+      'How often the slow/static inventory collection runs (networks, hosts, routes, …). Leave unset to inherit the system default.',
+  },
+];
+
+/** Merges the standard scheduling options into a plugin's declared options —
+ * a plugin-declared option with the same key always wins. */
+function withStandardOptions(options: PluginOptionDescriptor[] | undefined): PluginOptionDescriptor[] {
+  const out = [...(options ?? [])];
+  for (const std of STANDARD_SCHEDULING_OPTIONS) {
+    if (!out.some((o) => o.key === std.key)) out.push(std);
+  }
+  return out;
+}
+
 function parseTxt(txt: Record<string, string> | undefined): Partial<PluginIdentity> {
   const raw = txt ?? {};
   const list = (v: string | undefined): string[] =>
@@ -120,7 +161,9 @@ async function fetchIdentity(endpoint: string): Promise<PluginIdentity | null> {
       endpoint: data.endpoint ?? endpoint,
       authType: data.authType ?? 'none',
       metrics: Array.isArray(data.metrics) ? data.metrics : undefined,
-      options: Array.isArray(data.options) ? (data.options as PluginOptionDescriptor[]) : undefined,
+      // Standard scheduling options are injected for every plugin so the
+      // Workers/Plugins settings UIs can tune per-plugin poll windows.
+      options: withStandardOptions(Array.isArray(data.options) ? (data.options as PluginOptionDescriptor[]) : undefined),
       actions: Array.isArray(data.actions) ? data.actions : undefined,
       iconUrl: normalizeIconPath(data.iconUrl),
       deviceModels: normalizeDeviceModels(data.deviceModels),

@@ -81,8 +81,25 @@ function serializeDevice(row: Device, siteName?: string | null) {
     firmwareVersion: row.firmwareVersion ?? null,
     // Manual topology-layer override (null = auto-classify).
     layerOverride: row.layerOverride ?? null,
+    // Per-device metrics poll window in ms (null = inherit plugin/system setting).
+    pollIntervalMs: row.pollIntervalMs ?? null,
     enabled: row.enabled !== false,
   };
+}
+
+/** Normalizes the per-device poll-window override. `undefined` = keep current
+ * value; `null`/empty = clear (inherit); a number must be 5000–3600000 ms.
+ */
+function normalizePollIntervalMs(raw: unknown): { value?: number | null; error?: string } {
+  if (raw === undefined) return {};
+  if (raw === null || raw === '') return { value: null };
+  const v = Number(raw);
+  if (!Number.isFinite(v)) return { error: '"pollIntervalMs" must be a number of milliseconds or null' };
+  const ms = Math.round(v);
+  if (ms < 5_000 || ms > 3_600_000) {
+    return { error: '"pollIntervalMs" must be between 5000 and 3600000 ms' };
+  }
+  return { value: ms };
 }
 
 /**
@@ -362,6 +379,13 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
     return;
   }
 
+  // Optional per-device metrics poll window override (null/omitted = inherit).
+  const pollIntervalRef = normalizePollIntervalMs(body.pollIntervalMs);
+  if (pollIntervalRef.error) {
+    res.status(400).json({ error: pollIntervalRef.error });
+    return;
+  }
+
   // Optional secondary IPs (validated here; addDeviceIp re-checks + dedupes).
   const secondaryIps: string[] = [];
   if (ips !== undefined) {
@@ -392,6 +416,7 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
     model: modelRef.value ?? null,
     firmwareVersion: firmwareRef.value ?? null,
     layerOverride: layerRef.value ?? null,
+    pollIntervalMs: pollIntervalRef.value ?? null,
     createdAt: new Date().toISOString(),
   });
 
@@ -527,6 +552,16 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
     updates.layerOverride = ref.value ?? null;
   }
 
+  // Per-device metrics poll window — null clears it back to the inherited value.
+  if ('pollIntervalMs' in body) {
+    const ref = normalizePollIntervalMs(body.pollIntervalMs);
+    if (ref.error) {
+      res.status(400).json({ error: ref.error });
+      return;
+    }
+    updates.pollIntervalMs = ref.value ?? null;
+  }
+
   // enabled toggles telemetry polling for the device. Disabled devices keep
   // their historical data + last metrics; re-enabling resumes polling.
   if ('enabled' in body) {
@@ -538,7 +573,7 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
   }
 
   if (Object.keys(updates).length === 0) {
-    res.status(400).json({ error: `Provide at least one of: ${UPDATABLE_FIELDS.join(', ')}, deviceTypes, tags, siteId, model, firmwareVersion, layerOverride, enabled` });
+    res.status(400).json({ error: `Provide at least one of: ${UPDATABLE_FIELDS.join(', ')}, deviceTypes, tags, siteId, model, firmwareVersion, layerOverride, pollIntervalMs, enabled` });
     return;
   }
 
@@ -610,6 +645,7 @@ router.post('/devices/:deviceId/clone', requireAuth, requirePermission('devices:
       status: 'unknown',
       model: source.model ?? null,
       firmwareVersion: source.firmwareVersion ?? null,
+      pollIntervalMs: source.pollIntervalMs ?? null,
       enabled: source.enabled !== false,
       createdAt: new Date().toISOString(),
     });

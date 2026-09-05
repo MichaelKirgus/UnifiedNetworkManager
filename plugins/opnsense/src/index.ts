@@ -935,13 +935,26 @@ async function resolveRuntimeContext(
  * memory usage, uptime, and per-interface traffic. Each sub-call is
  * best-effort so a single failing endpoint doesn't sink the whole poll.
  */
+/**
+ * Window-based scheduling flag from the API's telemetry worker:
+ *   true/absent → full collection (slow inventory + live enrichment);
+ *   false       → fast metrics only (status/cpu/mem/traffic). The plugin skips
+ *                 its slow config collection AND the tunnel/route/firewall live
+ *                 enrichment — those tables refresh at the inventory cadence.
+ * Absent must mean "collect" for backward compatibility with pre-scheduler APIs.
+ */
+function wantsInventory(collectInventory: unknown): boolean {
+  return collectInventory !== false;
+}
+
 async function collectMetrics(
   host: string,
   apiKey: string,
   apiSecret: string,
   transport?: OpnsenseTransport,
   deviceId?: string | null,
-  credentials?: Record<string, unknown>
+  credentials?: Record<string, unknown>,
+  collectInventory?: boolean
 ): Promise<{ metrics: Record<string, unknown>; interfaces: string[] }> {
   const metrics: Record<string, unknown> = {};
   const interfaces: string[] = [];
@@ -996,49 +1009,62 @@ async function collectMetrics(
 
   // Inventory (hostname, version, ARP + NDP neighbor tables) — slow-changing.
   // Served from the in-memory cache; the appliance is only re-polled when the
-  // 15-min TTL elapses (see getInventory), so the API's 30s poll is cheap.
-  // `credentials` carries bound slots (slots.ssh) for the optional ZFS path.
-  const inventory = await getInventory(host, apiKey, apiSecret, transport, credentials);
-  if (inventory.hostname) metrics['hostname'] = inventory.hostname;
-  if (inventory.version) metrics['version'] = inventory.version;
-  if (inventory.arp.length > 0) metrics['arp'] = inventory.arp;
-  if (inventory.ndp.length > 0) metrics['ndp'] = inventory.ndp;
-  // Configured networks (interface IPs with CIDR + VLAN id) and active DHCP
-  // leases — consumed by the API's normalized inventory tables (Networks/Hosts
-  // pages) in addition to being rendered as generic tables in the device view.
-  if (inventory.networks.length > 0) metrics['networks'] = inventory.networks;
-  if (inventory.dhcpLeases.length > 0) metrics['dhcpLeases'] = inventory.dhcpLeases;
-
-  // Storage inventory for the cross-device Storage page. Emitted ONLY when the
-  // appliance actually has ZFS pools / USB storage — an absent key means "no
-  // data" (the API must not wipe rows of other devices on this plugin).
-  if (inventory.filesystems.length > 0) metrics['filesystems'] = inventory.filesystems;
-  if (inventory.disks.length > 0) metrics['disks'] = inventory.disks;
-
-  // Ports: one row per configured interface (the networks rows are one-per-IP,
-  // so dedupe by name). Consumed by the API's normalized device_ports table —
-  // this is what powers cross-device port views and the Config page fallback.
-  if (inventory.networks.length > 0) {
-    const seen = new Map<string, PortRow>();
-    for (const row of inventory.networks) {
-      const name = typeof row['name'] === 'string' ? (row['name'] as string).trim() : '';
-      if (!name || seen.has(name)) continue;
-      const mac = pickString(row, ['mac', 'macaddr']);
-      const statusRaw = typeof row['status'] === 'string' ? (row['status'] as string) : undefined;
-      const vlanId = pickNumber(row, ['vlanId', 'vlan_tag']);
-      const ip = typeof row['ip'] === 'string' ? (row['ip'] as string) : undefined;
-      const extra: Record<string, unknown> = {};
-      if (mac) extra.mac = mac;
-      if (ip) extra.ip = ip;
-      seen.set(name, {
-        name,
-        ...(statusRaw ? { status: statusRaw.toLowerCase() } : {}),
-        ...(Object.keys(extra).length > 0 ? { extra } : {}),
-        ...(vlanId !== undefined ? { vlanId } : {}),
-      });
+  // TTL elapses (see getInventory). Gated by the API's collectInventory flag:
+  // metrics-only polls skip the heavy config collection (no arp/ndp/interfaces/
+  // gateways/disk, no SSH ZFS) but keep the identity scalars fresh with ONE
+  // cheap system-info call so the device view never blanks between windows.
+  let inventory: InventorySnapshot | null = null;
+  if (!wantsInventory(collectInventory)) {
+    const info = await getSystemInformation(host, apiKey, apiSecret, transport).catch(() => undefined);
+    if (info?.ok && info.data && typeof info.data === 'object') {
+      const d = info.data as Record<string, unknown>;
+      if (d['name'] !== undefined) metrics['hostname'] = String(d['name']);
+      const versions = d['versions'];
+      if (Array.isArray(versions) && versions.length > 0) metrics['version'] = String(versions[0]);
     }
-    const portRows = Array.from(seen.values());
-    if (portRows.length > 0) metrics['ports'] = portRows;
+  } else {
+    inventory = await getInventory(host, apiKey, apiSecret, transport, credentials);
+    if (inventory.hostname) metrics['hostname'] = inventory.hostname;
+    if (inventory.version) metrics['version'] = inventory.version;
+    if (inventory.arp.length > 0) metrics['arp'] = inventory.arp;
+    if (inventory.ndp.length > 0) metrics['ndp'] = inventory.ndp;
+    // Configured networks (interface IPs with CIDR + VLAN id) and active DHCP
+    // leases — consumed by the API's normalized inventory tables (Networks/Hosts
+    // pages) in addition to being rendered as generic tables in the device view.
+    if (inventory.networks.length > 0) metrics['networks'] = inventory.networks;
+    if (inventory.dhcpLeases.length > 0) metrics['dhcpLeases'] = inventory.dhcpLeases;
+
+    // Storage inventory for the cross-device Storage page. Emitted ONLY when the
+    // appliance actually has ZFS pools / USB storage — an absent key means "no
+    // data" (the API must not wipe rows of other devices on this plugin).
+    if (inventory.filesystems.length > 0) metrics['filesystems'] = inventory.filesystems;
+    if (inventory.disks.length > 0) metrics['disks'] = inventory.disks;
+
+    // Ports: one row per configured interface (the networks rows are one-per-IP,
+    // so dedupe by name). Consumed by the API's normalized device_ports table —
+    // this is what powers cross-device port views and the Config page fallback.
+    if (inventory.networks.length > 0) {
+      const seen = new Map<string, PortRow>();
+      for (const row of inventory.networks) {
+        const name = typeof row['name'] === 'string' ? (row['name'] as string).trim() : '';
+        if (!name || seen.has(name)) continue;
+        const mac = pickString(row, ['mac', 'macaddr']);
+        const statusRaw = typeof row['status'] === 'string' ? (row['status'] as string) : undefined;
+        const vlanId = pickNumber(row, ['vlanId', 'vlan_tag']);
+        const ip = typeof row['ip'] === 'string' ? (row['ip'] as string) : undefined;
+        const extra: Record<string, unknown> = {};
+        if (mac) extra.mac = mac;
+        if (ip) extra.ip = ip;
+        seen.set(name, {
+          name,
+          ...(statusRaw ? { status: statusRaw.toLowerCase() } : {}),
+          ...(Object.keys(extra).length > 0 ? { extra } : {}),
+          ...(vlanId !== undefined ? { vlanId } : {}),
+        });
+      }
+      const portRows = Array.from(seen.values());
+      if (portRows.length > 0) metrics['ports'] = portRows;
+    }
   }
 
   // Interface names (for the traffic table rows)
@@ -1101,42 +1127,48 @@ async function collectMetrics(
   // They run in PARALLEL so their endpoint round-trips don't stack up against
   // the API's hard 10s poll budget (sequential enrichment timed out on busy
   // appliances with large rule sets).
-  const allRoutes = [...inventory.routes, ...deriveConnectedAndDefaultRoutes(inventory.networks, inventory.gateways, inventory.routes)];
+  // Tunnels / routes / firewall rules — config rows from the cached inventory
+  // snapshot enriched with LIVE runtime state (WG handshake age, IPsec SAs,
+  // pf rule counters). Gated like the inventory itself: on metrics-only polls
+  // these tables simply refresh at the next inventory-due poll.
+  if (inventory !== null) {
+    const allRoutes = [...inventory.routes, ...deriveConnectedAndDefaultRoutes(inventory.networks, inventory.gateways, inventory.routes)];
 
-  const tunnelPromise: Promise<unknown> | null =
-    inventory.tunnels.length > 0
-      ? enrichTunnelsWithLiveState(createClient(host, { apiKey, apiSecret }, transport), inventory.tunnels).catch(() => inventory.tunnels)
-      : null;
-  const routePromise: Promise<unknown> | null =
-    allRoutes.length > 0
-      ? enrichRoutesWithGatewayStatus(createClient(host, { apiKey, apiSecret }, transport), allRoutes, {
-          log: (_level, message, context) => logger.warn(message, { deviceId, context }),
-        }).catch(() => allRoutes)
-      : null;
-  const fwStatsPromise: Promise<Map<string, { packets: number | null; bytes: number | null; states: number | null }>> | null =
-    inventory.firewallRules !== null && inventory.firewallRules.length > 0
-      ? fetchFilterRuleStats(createClient(host, { apiKey, apiSecret }, transport)).catch(() => new Map())
-      : null;
+    const tunnelPromise: Promise<unknown> | null =
+      inventory.tunnels.length > 0
+        ? enrichTunnelsWithLiveState(createClient(host, { apiKey, apiSecret }, transport), inventory.tunnels).catch(() => inventory.tunnels)
+        : null;
+    const routePromise: Promise<unknown> | null =
+      allRoutes.length > 0
+        ? enrichRoutesWithGatewayStatus(createClient(host, { apiKey, apiSecret }, transport), allRoutes, {
+            log: (_level, message, context) => logger.warn(message, { deviceId, context }),
+          }).catch(() => allRoutes)
+        : null;
+    const fwStatsPromise: Promise<Map<string, { packets: number | null; bytes: number | null; states: number | null }>> | null =
+      inventory.firewallRules !== null && inventory.firewallRules.length > 0
+        ? fetchFilterRuleStats(createClient(host, { apiKey, apiSecret }, transport)).catch(() => new Map())
+        : null;
 
-  const [tunnelsOut, routesOut, fwStats] = await Promise.all([tunnelPromise, routePromise, fwStatsPromise]);
+    const [tunnelsOut, routesOut, fwStats] = await Promise.all([tunnelPromise, routePromise, fwStatsPromise]);
 
-  if (tunnelsOut) metrics['tunnels'] = attachTunnelRates(host, tunnelsOut as typeof inventory.tunnels, traffic);
-  if (routesOut) metrics['routes'] = routesOut;
-  // Firewall rules (filter + NAT kinds): emit the cached unified rows enriched
-  // with LIVE pf hit counters (rule_stats is keyed by rule uuid). The key is only
-  // present when collection SUCCEEDED — a failed cycle keeps the previous
-  // snapshot's rows alive on the API side; an appliance with genuinely zero
-  // rules emits [] which authoritatively clears stale rows.
-  if (inventory.firewallRules !== null) {
-    let fwRows = inventory.firewallRules;
-    if (fwStats && fwStats.size > 0) {
-      fwRows = fwRows.map((r) =>
-        r.ruleType === 'filter' && fwStats.has(r.vendorRuleId)
-          ? { ...r, ...(fwStats.get(r.vendorRuleId) as { packets: number | null; bytes: number | null; states: number | null }) }
-          : r
-      );
+    if (tunnelsOut) metrics['tunnels'] = attachTunnelRates(host, tunnelsOut as typeof inventory.tunnels, traffic);
+    if (routesOut) metrics['routes'] = routesOut;
+    // Firewall rules (filter + NAT kinds): emit the cached unified rows enriched
+    // with LIVE pf hit counters (rule_stats is keyed by rule uuid). The key is only
+    // present when collection SUCCEEDED — a failed cycle keeps the previous
+    // snapshot's rows alive on the API side; an appliance with genuinely zero
+    // rules emits [] which authoritatively clears stale rows.
+    if (inventory.firewallRules !== null) {
+      let fwRows = inventory.firewallRules;
+      if (fwStats && fwStats.size > 0) {
+        fwRows = fwRows.map((r) =>
+          r.ruleType === 'filter' && fwStats.has(r.vendorRuleId)
+            ? { ...r, ...(fwStats.get(r.vendorRuleId) as { packets: number | null; bytes: number | null; states: number | null }) }
+            : r
+        );
+      }
+      metrics['firewallRules'] = fwRows;
     }
-    metrics['firewallRules'] = fwRows;
   }
 
   return { metrics, interfaces };
@@ -1163,8 +1195,12 @@ app.post('/monitoring', async (req, res) => {
   // bound an SSH credential) — forwarded to the inventory for ZFS enrichment.
   const credentials = (body.credentials && typeof body.credentials === 'object' ? body.credentials : {}) as Record<string, unknown>;
 
+  // Window-based scheduling: the API sends collectInventory=false on
+  // metrics-only polls (absent = full collection, old-API compatible).
+  const collectInventory = body.collectInventory !== false;
+
   try {
-    const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret, transport, deviceId, credentials);
+    const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret, transport, deviceId, credentials, collectInventory);
 
     // Echo of the user-selected model/firmware (mirrors the LANCOM plugin) —
     // informational only; shown as text cards in the device detail view.

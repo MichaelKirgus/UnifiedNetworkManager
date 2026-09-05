@@ -152,6 +152,12 @@ app.post('/monitoring', async (req, res) => {
   const opts = resolveOptions(settings);
   const host = hostFromAddress(managementAddress);
 
+  // Window-based scheduling: the API sends collectInventory=false on metrics-only
+  // polls. The slow walk stays TTL-cached (cheap between windows) and system
+  // scalars keep flowing; only the cross-device inventory keys are omitted so
+  // the response stays small until the next inventory-due poll.
+  const emitInventory = body.collectInventory !== false;
+
   const fail = (health: Health, error: string) => {
     res.status(200).json({
       deviceId,
@@ -372,12 +378,14 @@ app.post('/monitoring', async (req, res) => {
     // Safety net for the API's upsert key (name, ip): never emit two rows with
     // that key in one snapshot — Postgres would reject the whole batch.
     const emittedNetKeys = new Set<string>();
-    metrics['networks'] = networks.filter((n) => {
-      const k = `${n.name}|${n.ip}`;
-      if (emittedNetKeys.has(k)) return false;
-      emittedNetKeys.add(k);
-      return true;
-    });
+    if (emitInventory) {
+      metrics['networks'] = networks.filter((n) => {
+        const k = `${n.name}|${n.ip}`;
+        if (emittedNetKeys.has(k)) return false;
+        emittedNetKeys.add(k);
+        return true;
+      });
+    }
 
     // wlanClients[] → hosts table with source 'wlan' (API-side ingestion).
     // ALL associated stations are emitted — IP-less ones included — because the
@@ -390,7 +398,7 @@ app.post('/monitoring', async (req, res) => {
       intf: c.ifc || null,
       ssid: c.ssid || null,
     }));
-    if (wlanClients.length > 0) metrics['wlanClients'] = wlanClients;
+    if (emitInventory && wlanClients.length > 0) metrics['wlanClients'] = wlanClients;
 
     // wifiNetworks[] / wifiAirtime[] → cross-device WiFi page. One row per
     // SSID×band (per radio); the channel is joined from the radio table via the
@@ -416,12 +424,12 @@ app.post('/monitoring', async (req, res) => {
         vlanId: s.vlanId,
       });
     }
-    if (wifiNetworks.length > 0) metrics['wifiNetworks'] = wifiNetworks;
+    if (emitInventory && wifiNetworks.length > 0) metrics['wifiNetworks'] = wifiNetworks;
 
     const wifiAirtime = snapshot.channelUtilization
       .filter((c) => Number.isFinite(c.channel))
       .map((c) => ({ channel: c.channel, utilizationPct: c.utilizationPct }));
-    if (wifiAirtime.length > 0) metrics['wifiAirtime'] = wifiAirtime;
+    if (emitInventory && wifiAirtime.length > 0) metrics['wifiAirtime'] = wifiAirtime;
 
     // wifiRadios[] → per-radio RF context for the WiFi page spectrum view
     // (noise-floor line + bandwidth). One row per radio.
@@ -436,7 +444,7 @@ app.post('/monitoring', async (req, res) => {
       bandwidthMhz: mhzOf(r.bandwidth),
       noiseFloorDbm: r.noiseFloorDbm,
     }));
-    if (wifiRadios.length > 0) metrics['wifiRadios'] = wifiRadios;
+    if (emitInventory && wifiRadios.length > 0) metrics['wifiRadios'] = wifiRadios;
 
     // wifiNeighbors[] → neighbor scan results for the WiFi page's scanner list.
     // Same data as the `wifi.neighbors` device metric above, but in inventory
@@ -448,7 +456,7 @@ app.post('/monitoring', async (req, res) => {
       channel: n.channel,
       signalDbm: n.signalDbm,
     }));
-    if (wifiNeighbors.length > 0) metrics['wifiNeighbors'] = wifiNeighbors;
+    if (emitInventory && wifiNeighbors.length > 0) metrics['wifiNeighbors'] = wifiNeighbors;
 
     // --- Health -------------------------------------------------------------
     let health: Health = 'ok';

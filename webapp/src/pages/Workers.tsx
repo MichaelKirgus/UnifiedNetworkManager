@@ -13,6 +13,17 @@ function fmtMs(ms?: number | null): string {
   return `${(ms / 1000).toFixed(1)} s`;
 }
 
+/** Window duration in compact form (ms → "15 min" / "2 h" / "90 s"). */
+function fmtWindow(ms?: number | null): string {
+  if (ms === null || ms === undefined) return '—';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s} s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  const h = Math.round(m / 60);
+  return `${h} h`;
+}
+
 /** Uptime in compact form ("3 d 4 h"). */
 function fmtUptime(seconds: number): string {
   const d = Math.floor(seconds / 86_400);
@@ -67,18 +78,24 @@ export default function Workers() {
   });
 
   const [intervalMs, setIntervalMs] = useState<number | null>(null);
+  const [inventoryWindowMs, setInventoryWindowMs] = useState<number | null>(null);
   const [concurrency, setConcurrency] = useState<number | null>(null);
+  const [jitterPercent, setJitterPercent] = useState<number | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const effectiveInterval = intervalMs ?? settingsQuery.data?.telemetryPollIntervalMs ?? 30_000;
+  const effectiveInventoryWindow = inventoryWindowMs ?? settingsQuery.data?.telemetryInventoryWindowMs ?? 15 * 60_000;
   const effectiveConcurrency = concurrency ?? settingsQuery.data?.telemetryMaxConcurrency ?? 64;
+  const effectiveJitter = jitterPercent ?? settingsQuery.data?.telemetryJitterPercent ?? 20;
 
   const saveMutation = useMutation({
     mutationFn: api.saveSystemSettings,
     onSuccess: (data) => {
       queryClient.setQueryData(['system-settings'], data);
       setIntervalMs(null); // re-sync the form to the saved values
+      setInventoryWindowMs(null);
       setConcurrency(null);
+      setJitterPercent(null);
       setSaveError(null);
     },
     onError: (err: Error) => setSaveError(err.message),
@@ -215,22 +232,27 @@ export default function Workers() {
           />
         </section>
 
-        {/* Telemetry cycle stats */}
+        {/* Telemetry dispatcher stats */}
         {status && (
-          <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
-            <Stat label="Poll cycles" value={status.telemetry.cyclesCompleted.toLocaleString()} sub="completed since start" />
+          <section className="grid grid-cols-2 gap-3 md:grid-cols-6">
+            <Stat label="Polls completed" value={status.telemetry.cyclesCompleted.toLocaleString()} sub={`last took ${fmtMs(status.telemetry.lastPollDurationMs)}`} />
             <Stat
-              label="Skipped beats"
-              value={status.telemetry.cyclesSkippedOverlap}
-              sub="cycle guard (overlap)"
+              label="In flight"
+              value={status.telemetry.pollsInFlight ?? 0}
+              sub={`of ${effectiveConcurrency} max concurrent`}
             />
+            <Stat label="Poll rate" value={`${status.telemetry.pollsPerMinute ?? 0}/min`} sub="trailing 60 s" />
             <Stat
-              label="Last cycle"
-              value={`${status.telemetry.devicesPolledLastCycle} dev / ${status.telemetry.assignmentsPolledLastCycle} plugins`}
-              sub={`took ${fmtMs(status.telemetry.lastCycleDurationMs)}`}
+              label="Waiting on budget"
+              value={status.telemetry.overdueWaiting ?? 0}
+              sub="overdue, queued for a slot"
             />
-            <Stat label="Poll interval" value={`${Math.round(effectiveInterval / 1000)} s`} sub="effective (settings ⊕ env)" />
-            <Stat label="Max concurrency" value={effectiveConcurrency} sub="in-flight polls per cycle" />
+            <Stat label="Metrics window" value={`${Math.round(effectiveInterval / 1000)} s`} sub="effective (settings ⊕ env)" />
+            <Stat
+              label="Inventory window"
+              value={fmtWindow(effectiveInventoryWindow)}
+              sub={`jitter ±${effectiveJitter}%`}
+            />
           </section>
         )}
 
@@ -245,7 +267,7 @@ export default function Workers() {
           </div>
           <div className="grid gap-4 p-4 md:grid-cols-2">
             <label className="block">
-              <span className="text-sm font-medium text-slate-700">Telemetry poll interval (seconds)</span>
+              <span className="text-sm font-medium text-slate-700">Metrics poll window (seconds)</span>
               <input
                 type="number"
                 min={5}
@@ -257,7 +279,23 @@ export default function Workers() {
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none disabled:bg-slate-50"
               />
               <span className="mt-1 block text-xs text-slate-400">
-                Beat between poll cycles. Longer beat for large fleets, or raise concurrency instead. Takes effect on the next cycle — no restart.
+                Every device is polled at least once within this window — deadlines are staggered, so polls spread out instead of bursting. Takes effect immediately — no restart.
+              </span>
+            </label>
+            <label className="block">
+              <span className="text-sm font-medium text-slate-700">Inventory refresh window (seconds)</span>
+              <input
+                type="number"
+                min={30}
+                max={43200}
+                step={30}
+                disabled={!canWrite || saveMutation.isPending}
+                value={Math.round(effectiveInventoryWindow / 1000)}
+                onChange={(e) => setInventoryWindowMs(Number(e.target.value) * 1000)}
+                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none disabled:bg-slate-50"
+              />
+              <span className="mt-1 block text-xs text-slate-400">
+                How often the slow/static collection (networks, routes, WiFi clients, storage…) runs. Metrics-only polls in between are cheap.
               </span>
             </label>
             <label className="block">
@@ -273,14 +311,37 @@ export default function Workers() {
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none disabled:bg-slate-50"
               />
               <span className="mt-1 block text-xs text-slate-400">
-                In-flight /monitoring calls per cycle. Keeps the burst flat regardless of fleet size; raise for fast fleets.
+                Global in-flight /monitoring budget across all devices. Keeps the burst flat regardless of fleet size; raise for fast fleets.
+              </span>
+            </label>
+            <label className="block">
+              <span className="text-sm font-medium text-slate-700">Deadline jitter (percent)</span>
+              <input
+                type="number"
+                min={0}
+                max={90}
+                step={5}
+                disabled={!canWrite || saveMutation.isPending}
+                value={effectiveJitter}
+                onChange={(e) => setJitterPercent(Number(e.target.value))}
+                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none disabled:bg-slate-50"
+              />
+              <span className="mt-1 block text-xs text-slate-400">
+                Random spread (±%) applied to each rescheduled deadline so devices don't re-align into synchronized bursts.
               </span>
             </label>
           </div>
           {canWrite && (
             <div className="flex items-center gap-3 border-t border-slate-200 px-4 py-3">
               <button
-                onClick={() => saveMutation.mutate({ telemetryPollIntervalMs: effectiveInterval, telemetryMaxConcurrency: effectiveConcurrency })}
+                onClick={() =>
+                  saveMutation.mutate({
+                    telemetryPollIntervalMs: effectiveInterval,
+                    telemetryInventoryWindowMs: effectiveInventoryWindow,
+                    telemetryMaxConcurrency: effectiveConcurrency,
+                    telemetryJitterPercent: effectiveJitter,
+                  })
+                }
                 disabled={saveMutation.isPending}
                 className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
               >

@@ -160,6 +160,12 @@ app.post('/monitoring', async (req, res) => {
   const opts = resolveOptions(settings);
   const host = hostFromAddress(managementAddress);
 
+  // Window-based scheduling: the API sends collectInventory=false on metrics-only
+  // polls. The slow walk stays TTL-cached (cheap between windows) and system
+  // scalars keep flowing; only the cross-device inventory keys are omitted so
+  // the response stays small until the next inventory-due poll.
+  const emitInventory = body.collectInventory !== false;
+
   const fail = (health: Health, error: string) => {
     res.status(200).json({
       deviceId,
@@ -277,34 +283,36 @@ app.post('/monitoring', async (req, res) => {
     // --- Inventory propagation (consumed by the API's ingestInventory) -----
     // networks[]: configured IP rows from SVIs (4.x) / management address (3.x).
     const emittedNetKeys = new Set<string>();
-    metrics['networks'] = snapshot.networks.filter((n) => {
-      if (!n.ip) return false;
-      const k = `${n.name}|${n.ip}`; // safety net for the API's upsert key (name, ip)
-      if (emittedNetKeys.has(k)) return false;
-      emittedNetKeys.add(k);
-      return true;
-    }).map((n) => {
-      const row: Record<string, unknown> = { name: n.name, ip: n.ip, prefix: n.prefix, version: n.version, status: null };
-      if (n.vlanId !== null) row['vlanId'] = n.vlanId;
-      return row;
-    });
+    if (emitInventory) {
+      metrics['networks'] = snapshot.networks.filter((n) => {
+        if (!n.ip) return false;
+        const k = `${n.name}|${n.ip}`; // safety net for the API's upsert key (name, ip)
+        if (emittedNetKeys.has(k)) return false;
+        emittedNetKeys.add(k);
+        return true;
+      }).map((n) => {
+        const row: Record<string, unknown> = { name: n.name, ip: n.ip, prefix: n.prefix, version: n.version, status: null };
+        if (n.vlanId !== null) row['vlanId'] = n.vlanId;
+        return row;
+      });
+    }
 
     // arp[] / ndp[] → hosts table with source 'arp'/'ndp', split by IP family.
     const arpRows = snapshot.neighbors
       .filter((n) => n.version === 'v4' && n.mac !== '' && n.ip !== '')
       .map((n) => ({ mac: n.mac, ip: n.ip, intf: n.port !== null ? `P${n.port}` : null }));
-    if (arpRows.length > 0) metrics['arp'] = arpRows;
+    if (emitInventory && arpRows.length > 0) metrics['arp'] = arpRows;
 
     const ndpRows = snapshot.neighbors
       .filter((n) => n.version === 'v6' && n.mac !== '' && n.ip !== '')
       .map((n) => ({ mac: n.mac, ip: n.ip, intf: n.port !== null ? `P${n.port}` : null }));
-    if (ndpRows.length > 0) metrics['ndp'] = ndpRows;
+    if (emitInventory && ndpRows.length > 0) metrics['ndp'] = ndpRows;
 
     // NOTE: no dhcpLeases[] — the LCOS-SX MIB's DHCP binding table is commented
     // out in both firmware lines, so per-lease data is not available via SNMP.
 
     // routes[] → cross-device Routes page (4.x only; 3.x switches emit nothing).
-    if (snapshot.routes.length > 0) {
+    if (emitInventory && snapshot.routes.length > 0) {
       metrics['routes'] = snapshot.routes.map((r) => ({
         destination: r.destination,
         gateway: r.gateway,
@@ -317,16 +325,18 @@ app.post('/monitoring', async (req, res) => {
     // ports[] → device_ports table (per-device Config page + cross-device views).
     // One row per switch port with its live link state; MACs learned on the port
     // ride in extra.macs when FDB enrichment is enabled.
-    metrics['ports'] = snapshot.ports.map((p) => {
-      const macs = snapshot.neighbors.filter((n) => n.port === p.port && n.mac !== '').map((n) => n.mac);
-      return {
-        name: `P${p.port}`,
-        status: p.linkUp === null ? 'unknown' : p.linkUp ? 'up' : 'down',
-        speed: p.speedStatus || (p.media && p.media !== '' ? `${p.speedStatus} (${p.media})` : '') || null,
-        vlanId: p.pvid,
-        extra: macs.length > 0 ? { macs } : {},
-      };
-    });
+    if (emitInventory) {
+      metrics['ports'] = snapshot.ports.map((p) => {
+        const macs = snapshot.neighbors.filter((n) => n.port === p.port && n.mac !== '').map((n) => n.mac);
+        return {
+          name: `P${p.port}`,
+          status: p.linkUp === null ? 'unknown' : p.linkUp ? 'up' : 'down',
+          speed: p.speedStatus || (p.media && p.media !== '' ? `${p.speedStatus} (${p.media})` : '') || null,
+          vlanId: p.pvid,
+          extra: macs.length > 0 ? { macs } : {},
+        };
+      });
+    }
 
     // --- Health -------------------------------------------------------------
     let health: Health = 'ok';

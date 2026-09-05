@@ -26,12 +26,21 @@ export interface WorkerRuntime {
 }
 
 export interface TelemetryCycleStats {
+  /** Completed /monitoring polls (all time since worker start). */
   cyclesCompleted: number;
   /** Beats skipped because the previous cycle was still running (cycle guard). */
   cyclesSkippedOverlap: number;
   devicesPolledLastCycle: number;
   assignmentsPolledLastCycle: number;
   lastCycleDurationMs: number | null;
+  /** /monitoring calls currently in flight (dispatcher budget gauge). */
+  pollsInFlight: number;
+  /** Successful + failed polls completed in the trailing 60 s. */
+  pollsPerMinute: number;
+  /** Assignments whose metrics deadline has passed but are waiting for a free slot. */
+  overdueWaiting: number;
+  /** Duration of the most recent single /monitoring call (ms). */
+  lastPollDurationMs: number | null;
 }
 
 export type SystemEventType =
@@ -59,7 +68,27 @@ export const telemetryStats: TelemetryCycleStats = {
   devicesPolledLastCycle: 0,
   assignmentsPolledLastCycle: 0,
   lastCycleDurationMs: null,
+  pollsInFlight: 0,
+  pollsPerMinute: 0,
+  overdueWaiting: 0,
+  lastPollDurationMs: null,
 };
+
+/** Rolling window of poll completion timestamps (trailing-60s rate). */
+const pollCompletionTimes: number[] = [];
+
+/** Records one completed /monitoring call (success or failure). */
+export function recordTelemetryPoll(durationMs: number): void {
+  telemetryStats.cyclesCompleted += 1;
+  telemetryStats.lastPollDurationMs = durationMs;
+  const now = Date.now();
+  pollCompletionTimes.push(now);
+  // Drop timestamps older than the trailing window.
+  while (pollCompletionTimes.length > 0 && pollCompletionTimes[0] < now - 60_000) {
+    pollCompletionTimes.shift();
+  }
+  telemetryStats.pollsPerMinute = pollCompletionTimes.length;
+}
 
 /** Registers a worker (idempotent — restarts reset its counters). */
 export function initWorker(name: string, leaderKey: number): void {
@@ -115,7 +144,6 @@ export async function trackBeat<T>(name: string, fn: () => Promise<T>): Promise<
 
 /** Records a telemetry poll cycle's outcome (called by workers/telemetry.ts). */
 export function recordTelemetryCycle(devicesPolled: number, assignmentsPolled: number, durationMs: number): void {
-  telemetryStats.cyclesCompleted += 1;
   telemetryStats.devicesPolledLastCycle = devicesPolled;
   telemetryStats.assignmentsPolledLastCycle = assignmentsPolled;
   telemetryStats.lastCycleDurationMs = durationMs;

@@ -337,6 +337,15 @@ export interface MonitoringRequestBody {
   /** User-selected firmware version from the device row (null = not set). */
   firmwareVersion?: string | null;
   credentials: StepCredentials;
+  /**
+   * Window-based scheduling hint (API ≥ window-scheduler release): true only on
+   * INVENTORY-due polls. When false/absent, skip slow/static collection and
+   * OMIT the inventory metric keys from `metrics` — an absent key never wipes
+   * stored rows, so metrics-only polls are safe by contract. Old API versions
+   * omit this field entirely; treat absent as "collect everything" for
+   * backward compatibility with pre-scheduler APIs.
+   */
+  collectInventory?: boolean;
 }
 
 /** Response of POST /monitoring — the API reads exactly these three fields. */

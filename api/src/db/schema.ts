@@ -91,6 +91,10 @@ export const devices = pgTable('devices', {
   // Manual topology-layer override (network_layers.id). NULL = auto-classify
   // (plugin-suggested default → type/vendor/port heuristic → 'access').
   layerOverride: text('layerOverride'),
+  // Per-device metrics poll window in ms (window-based telemetry scheduling).
+  // NULL = inherit the plugin's global option / system setting. Overrides the
+  // METRICS window only; the inventory window is clamped to at least this value.
+  pollIntervalMs: integer('pollIntervalMs'),
   // Disabled devices are NOT polled by the telemetry worker; their historical
   // data and last metrics stay preserved. Default enabled.
   enabled: boolean('enabled').notNull().default(true),

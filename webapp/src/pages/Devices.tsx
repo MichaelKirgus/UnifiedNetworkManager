@@ -58,7 +58,7 @@ export default function Devices() {
   // firmwareVersion are optional — chosen from the assigned plugins' catalogs.
   // deviceTypes is a multi-value list (a box can be router AND firewall);
   // tags are free-form user labels for future filtering / plan targeting.
-  const emptyIdentity = { name: '', vendor: '', deviceTypes: ['firewall'] as string[], tags: [] as string[], managementAddress: '', siteId: '', model: '', firmwareVersion: '', layerOverride: '' };
+  const emptyIdentity = { name: '', vendor: '', deviceTypes: ['firewall'] as string[], tags: [] as string[], managementAddress: '', siteId: '', model: '', firmwareVersion: '', layerOverride: '', pollIntervalMs: '' };
   const [identity, setIdentity] = useState(emptyIdentity);
 
   // Telemetry polling toggle (create + edit modes). Default enabled — disabled
@@ -222,6 +222,7 @@ export default function Devices() {
         model: identity.model.trim() || null,
         firmwareVersion: identity.firmwareVersion.trim() || null,
         layerOverride: identity.layerOverride || null,
+        pollIntervalMs: identity.pollIntervalMs ? Number(identity.pollIntervalMs) : null,
         enabled,
       });
       // Diff secondary IPs: add new, remove deleted.
@@ -289,6 +290,7 @@ export default function Devices() {
         model: identity.model.trim() || null,
         firmwareVersion: identity.firmwareVersion.trim() || null,
         layerOverride: identity.layerOverride || null,
+        pollIntervalMs: identity.pollIntervalMs ? Number(identity.pollIntervalMs) : null,
         enabled,
       });
     }
@@ -322,6 +324,7 @@ export default function Devices() {
       model: device.model ?? '',
       firmwareVersion: device.firmwareVersion ?? '',
       layerOverride: device.layerOverride ?? '',
+      pollIntervalMs: device.pollIntervalMs != null ? String(device.pollIntervalMs) : '',
     });
     setEnabled(device.enabled !== false);
     const secondaries = (device.ips ?? []).filter((ip) => !ip.isPrimary);
@@ -754,6 +757,24 @@ export default function Devices() {
                 </option>
               ))}
             </select>
+          </div>
+
+          {/* Per-device metrics poll window — overrides the plugin/system default. */}
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700">Metrics poll interval (seconds, optional)</label>
+            <input
+              type="number"
+              min={5}
+              max={3600}
+              step={5}
+              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              value={identity.pollIntervalMs}
+              onChange={(e) => setIdentity({ ...identity, pollIntervalMs: e.target.value })}
+              placeholder="inherit default"
+            />
+            <p className="mt-1 text-xs text-slate-400">
+              How often this device's metrics are collected. Leave empty to inherit the plugin or system default.
+            </p>
           </div>
 
           <div className="col-span-full flex items-center gap-2">

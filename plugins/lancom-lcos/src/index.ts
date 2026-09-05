@@ -182,6 +182,12 @@ app.post('/monitoring', async (req, res) => {
   const opts = resolveOptions(settings);
   const host = hostFromAddress(managementAddress);
 
+  // Window-based scheduling: the API sends collectInventory=false on metrics-only
+  // polls. The slow walk stays TTL-cached (cheap between windows) and system
+  // scalars keep flowing; only the cross-device inventory keys are omitted so
+  // the response stays small until the next inventory-due poll.
+  const emitInventory = body.collectInventory !== false;
+
   const fail = (health: Health, error: string) => {
     res.status(200).json({
       deviceId,
@@ -320,13 +326,13 @@ app.post('/monitoring', async (req, res) => {
         ...(rate?.tx !== null && rate?.tx !== undefined ? { txRate: rate.tx / 8 } : {}),
       });
     }
-    if (tunnelRows.length > 0) metrics['tunnels'] = tunnelRows;
+    if (emitInventory && tunnelRows.length > 0) metrics['tunnels'] = tunnelRows;
 
     // --- Routes (normalized for the cross-device Routes page) ----------------
     // The active routing table carries static AND dynamically-learned routes in
     // one walk — the per-row Type enum is already mapped to a protocol by the
     // client. IPv4 only (the MIB has no v6 route table).
-    if (snapshot.routes.length > 0) {
+    if (emitInventory && snapshot.routes.length > 0) {
       metrics['routes'] = snapshot.routes.map((r) => ({
         destination: r.destination,
         gateway: r.gateway,
@@ -388,12 +394,12 @@ app.post('/monitoring', async (req, res) => {
           vlanId: s.vlanId,
         });
       }
-      if (wifiNetworks.length > 0) metrics['wifiNetworks'] = wifiNetworks;
+      if (emitInventory && wifiNetworks.length > 0) metrics['wifiNetworks'] = wifiNetworks;
 
       const wifiAirtime = snapshot.radios
         .filter((r) => r.channel !== null && Number.isFinite(r.channel))
         .map((r) => ({ channel: r.channel, utilizationPct: r.utilizationPct }));
-      if (wifiAirtime.length > 0) metrics['wifiAirtime'] = wifiAirtime;
+      if (emitInventory && wifiAirtime.length > 0) metrics['wifiAirtime'] = wifiAirtime;
 
       // wifiRadios[] → per-radio RF context for the WiFi page spectrum view
       // (noise-floor line + bandwidth). One row per radio.
@@ -404,7 +410,7 @@ app.post('/monitoring', async (req, res) => {
         bandwidthMhz: r.bandwidthMhz,
         noiseFloorDbm: r.noiseFloorDbm,
       }));
-      if (wifiRadios.length > 0) metrics['wifiRadios'] = wifiRadios;
+      if (emitInventory && wifiRadios.length > 0) metrics['wifiRadios'] = wifiRadios;
     }
 
     // --- Temperature --------------------------------------------------------
@@ -430,18 +436,20 @@ app.post('/monitoring', async (req, res) => {
     // Safety net for the API's upsert key (name, ip): never emit two rows with
     // that key in one snapshot — Postgres would reject the whole batch.
     const emittedNetKeys = new Set<string>();
-    metrics['networks'] = networks.filter((n) => {
-      const k = `${n.name}|${n.ip}`;
-      if (emittedNetKeys.has(k)) return false;
-      emittedNetKeys.add(k);
-      return true;
-    });
+    if (emitInventory) {
+      metrics['networks'] = networks.filter((n) => {
+        const k = `${n.name}|${n.ip}`;
+        if (emittedNetKeys.has(k)) return false;
+        emittedNetKeys.add(k);
+        return true;
+      });
+    }
 
     // arp[] → hosts table with source 'arp'.
     const arpRows = snapshot.arp
       .filter((a) => a.mac !== '' && a.ip !== '')
       .map((a) => ({ mac: a.mac, ip: a.ip, intf: a.portLabel || null }));
-    if (arpRows.length > 0) metrics['arp'] = arpRows;
+    if (emitInventory && arpRows.length > 0) metrics['arp'] = arpRows;
 
     // dhcpLeases[] → hosts table with source 'dhcp' (expiry as ISO timestamp).
     const nowMs = Date.now();
@@ -454,7 +462,7 @@ app.post('/monitoring', async (req, res) => {
         intf: d.networkName || null,
         expiry: d.expirySeconds !== null ? new Date(nowMs + d.expirySeconds * 1000).toISOString() : null,
       }));
-    if (leaseRows.length > 0) metrics['dhcpLeases'] = leaseRows;
+    if (emitInventory && leaseRows.length > 0) metrics['dhcpLeases'] = leaseRows;
 
     // wlanClients[] → hosts table with source 'wlan' + WiFi page client counts.
     // ALL associated stations are emitted — IP-less ones included; host
@@ -468,7 +476,7 @@ app.post('/monitoring', async (req, res) => {
       intf: c.ifc || null,
       ssid: (c.ifc ? ssidByIfc.get(c.ifc) : undefined) ?? null,
     }));
-    if (wlanClients.length > 0) metrics['wlanClients'] = wlanClients;
+    if (emitInventory && wlanClients.length > 0) metrics['wlanClients'] = wlanClients;
 
     // --- Health -------------------------------------------------------------
     let health: Health = 'ok';

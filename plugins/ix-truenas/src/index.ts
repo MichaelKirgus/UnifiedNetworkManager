@@ -1083,6 +1083,11 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // App/Container collection toggle — off = skip app.query/docker.network + all
   // enrichment and emit empty containers[]/dockerHosts[] to clear stale rows.
   const collectApps = settings.collectApps !== false;
+  // Window-based scheduling: the API sends collectInventory=false on metrics-only
+  // polls. The health trio (system.info / pool.query / alert.list) ALWAYS runs so
+  // device status stays live; the slow inventory RPCs + their metric keys are
+  // skipped until the next inventory-due poll. Absent = full collection.
+  const collectInventory = body.collectInventory !== false;
 
   // Credentials: API-key slot (if bound) takes precedence over username/password.
   const apiKeyUsername = typeof settings.apiKeyUsername === 'string' ? settings.apiKeyUsername.trim() : '';
@@ -1112,18 +1117,19 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('alert.list', [], creds),
-    client.call<Record<string, unknown>[]>('interface.query', [], creds),
-    client.call<Record<string, unknown>>('system.dmidecode_info', [], creds),
-    client.call<Record<string, unknown>[]>('staticroute.query', [], creds),
+    // Inventory RPCs — skipped on metrics-only polls (collectInventory=false).
+    collectInventory ? client.call<Record<string, unknown>[]>('interface.query', [], creds) : Promise.resolve(undefined),
+    collectInventory ? client.call<Record<string, unknown>>('system.dmidecode_info', [], creds) : Promise.resolve(undefined),
+    collectInventory ? client.call<Record<string, unknown>[]>('staticroute.query', [], creds) : Promise.resolve(undefined),
     // Storage-page extras (best-effort — never count toward health). Method
     // names verified against truenas/middleware: pool.dataset.query (datasets,
     // all releases), disk.query (physical disks incl. USB/NVMe), boot.get_disks
     // (boot-pool members; 25.10+/26) with system.datastore as the legacy
     // fallback for older releases.
-    client.call<Record<string, unknown>[]>('pool.dataset.query', [], creds),
-    client.call<Record<string, unknown>[]>('disk.query', [], creds),
-    client.call<Record<string, unknown>>('system.datastore', [], creds),
-    client.call<string[]>('boot.get_disks', [], creds),
+    collectInventory ? client.call<Record<string, unknown>[]>('pool.dataset.query', [], creds) : Promise.resolve(undefined),
+    collectInventory ? client.call<Record<string, unknown>[]>('disk.query', [], creds) : Promise.resolve(undefined),
+    collectInventory ? client.call<Record<string, unknown>>('system.datastore', [], creds) : Promise.resolve(undefined),
+    collectInventory ? client.call<string[]>('boot.get_disks', [], creds) : Promise.resolve(undefined),
     // Containers-page extras (best-effort — never count toward health).
     // app.query = one row per installed App (k8s workload); docker.network.query
     // = the docker networks (macvlan/bridge) with their subnets; app.image.query
@@ -1151,6 +1157,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   ] as const) {
     // Not called when collection is disabled — don't log their "outcome".
     if (!collectApps && (label === 'app.query' || label === 'docker.network.query' || label === 'app.image.query')) continue;
+    if (!collectInventory && ['interface.query', 'system.dmidecode_info', 'staticroute.query', 'pool.dataset.query', 'disk.query', 'system.datastore', 'boot.get_disks'].includes(label)) continue;
     if (storageDebugLogged.has(`${host}|${label}`)) continue;
     storageDebugLogged.add(`${host}|${label}`);
     if (r.status === 'rejected') {
@@ -1235,6 +1242,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
       firstError ||= 'pool.query returned no data';
     }
 
+    if (collectInventory) {
     // --- Storage inventory: filesystems[] (pools + datasets) + disks[] ------
     // Emitted even when EMPTY so removed datasets/disks vanish from the page
     // on the next poll (present-but-empty = authoritative; absent = no wipe).
@@ -1304,6 +1312,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
       if (boot && !diskRows.some((r) => r.name === boot.name)) diskRows.push(boot);
     }
     metrics['disks'] = diskRows;
+    }
   }
 
   // --- alert.list: active alerts drive health (CRITICAL/WARNING levels) ---
@@ -1370,7 +1379,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // Networks: one row per IP alias. Hosts: the appliance's OWN interfaces as
   // 'self' rows carrying system.hostname — merged by MAC with ARP/NDP entries
   // other devices report for this box (neighbor tables never carry names).
-  if (ifacesRes.status === 'fulfilled' && Array.isArray(ifacesRes.value)) {
+  if (collectInventory && ifacesRes.status === 'fulfilled' && Array.isArray(ifacesRes.value)) {
     const ifaces = ifacesRes.value as Record<string, unknown>[];
     const rows = parseNetworks(ifaces);
     if (rows.length > 0) metrics['networks'] = rows;
@@ -1432,7 +1441,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   ) {
     routes = parseRoutes(ifacesRes.value as Record<string, unknown>[]);
   }
-  if (routes !== undefined) metrics['routes'] = routes;
+  if (collectInventory && routes !== undefined) metrics['routes'] = routes;
 
   // --- app.query (+ docker.network.query): containers inventory --------------
   // Best-effort extra — never counts toward health. Emitted even when EMPTY so
@@ -1451,7 +1460,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     // enrichment (app.config wave / SSH inspect) is scheduled while disabled.
     metrics['containers'] = [];
     metrics['dockerHosts'] = [];
-  } else if (appsRes.status === 'fulfilled' && Array.isArray(appsRes.value)) {
+  } else if (collectInventory && appsRes.status === 'fulfilled' && Array.isArray(appsRes.value)) {
     const apps = appsRes.value as Record<string, unknown>[];
 
     // Optional SSH slot — the plugin's PRIMARY is a username/password that must
@@ -1518,7 +1527,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // off — no image RPC traffic to the appliance at all.
   if (!collectApps) {
     metrics['images'] = [];
-  } else if (appImagesRes.status === 'fulfilled' && Array.isArray(appImagesRes.value)) {
+  } else if (collectInventory && appImagesRes.status === 'fulfilled' && Array.isArray(appImagesRes.value)) {
     metrics['images'] = buildImageRows(appImagesRes.value as Record<string, unknown>[]);
   }
 

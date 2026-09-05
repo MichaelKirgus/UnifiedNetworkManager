@@ -176,6 +176,10 @@ export async function initDb(): Promise<void> {
     `ALTER TABLE devices ADD COLUMN IF NOT EXISTS "enabled" BOOLEAN NOT NULL DEFAULT TRUE`
   );
 
+  // Per-device metrics poll window in ms (window-based telemetry scheduling).
+  // NULL = inherit the plugin's global option / system setting.
+  await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS "pollIntervalMs" INTEGER`);
+
   // Multi-type device roles + free-form tags (JSON arrays of strings).
   // The legacy single `deviceType` column is kept for old clients but becomes
   // nullable; its value is split into the array below.

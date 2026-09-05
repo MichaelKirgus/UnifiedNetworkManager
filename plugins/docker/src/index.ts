@@ -137,11 +137,16 @@ function tlsMaterialFromCredentials(credentials: unknown): DockerTlsMaterial | u
 }
 
 /** One full collection: version + container list + image inventory → UNM rows. */
-async function collect(opts: DockerClientOptions): Promise<{
+/**
+ * Window-based scheduling: `full=false` on metrics-only polls — only the cheap
+ * engine liveness/version call runs; container + image listing (the slow part)
+  * is skipped and their metric keys are omitted until the next inventory-due poll.
+ */
+async function collect(opts: DockerClientOptions, full = true): Promise<{
   health: Health;
   error?: string;
   rows: UnmContainerRow[];
-  /** null = the /images/json call failed (key omitted from metrics — no wipe). */
+  /** null = not collected (key omitted from metrics — no wipe). */
   images: ImageRow[] | null;
   running: number;
   stopped: number;
@@ -150,6 +155,12 @@ async function collect(opts: DockerClientOptions): Promise<{
   const version = await engineVersion(opts);
   if (!version.ok) {
     return { health: 'critical', error: `Docker Engine unreachable via ${version.transportUsed ?? opts.transport}: ${version.error || `HTTP ${version.status}`}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText: null };
+  }
+
+  if (!full) {
+    // Liveness-only poll — the daemon answered /_ping + version; that IS the
+    // health signal. No container/image traffic to the engine.
+    return { health: 'ok', rows: [], images: null, running: 0, stopped: 0, engineVersionText: version.data?.Version ? `Docker ${version.data.Version}` : null };
   }
 
   // Containers are the core of this plugin; the image inventory is a best-
@@ -216,6 +227,10 @@ app.post('/monitoring', async (req, res) => {
     return fail('critical', 'No target address — set the device management address (or use transport=socket for a local daemon).');
   }
 
+  // Window-based scheduling: the API sends collectInventory=false on
+  // metrics-only polls → liveness + version only, no container/image listing.
+  const full = body.collectInventory !== false;
+
   try {
     const result = await collect({
       host: managementAddress,
@@ -224,21 +239,22 @@ app.post('/monitoring', async (req, res) => {
       tlsPort: 2376,
       localSocketPath,
       tls: tlsMaterialFromCredentials(body.credentials),
-    });
+    }, full);
 
     if (result.error) {
       logger.warn(`Docker poll for ${managementAddress} failed: ${result.error}`, { deviceId, context: { host: managementAddress } });
       return fail(result.health, result.error);
     }
 
-    const metrics: Record<string, unknown> = {
+    const metrics: Record<string, unknown> = {};
+    if (full) {
       // The generic containers[] key — ingested by the API's telemetry worker
       // into the cross-device `containers` table. Emitted even when empty so a
       // host that loses all containers clears its rows (authoritative wipe).
-      containers: result.rows,
-      'docker.containers.running': result.running,
-      'docker.containers.stopped': result.stopped,
-    };
+      metrics['containers'] = result.rows;
+      metrics['docker.containers.running'] = result.running;
+      metrics['docker.containers.stopped'] = result.stopped;
+    }
     if (result.engineVersionText) metrics['docker.version'] = result.engineVersionText;
     // The generic images[] key — ingested into the cross-device `docker_images`
     // table (Containers page → collapsible images panel). Emitted even when

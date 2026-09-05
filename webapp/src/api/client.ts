@@ -589,6 +589,14 @@ export interface TelemetryCycleStats {
   devicesPolledLastCycle: number;
   assignmentsPolledLastCycle: number;
   lastCycleDurationMs?: number | null;
+  /** /monitoring calls currently in flight (dispatcher budget gauge). */
+  pollsInFlight?: number;
+  /** Successful + failed polls completed in the trailing 60 s. */
+  pollsPerMinute?: number;
+  /** Assignments whose metrics deadline has passed but are waiting for a free slot. */
+  overdueWaiting?: number;
+  /** Duration of the most recent single /monitoring call (ms). */
+  lastPollDurationMs?: number | null;
 }
 
 /** Recent leadership/error event (ring buffer, newest first). */
@@ -632,11 +640,25 @@ export interface SystemStatus {
 /** Admin-tunable worker/HA settings (GET/PUT /system/settings). */
 export interface SystemSettings {
   telemetryPollIntervalMs?: number;
+  /** Inventory refresh window in ms — how often the slow/static collection runs. */
+  telemetryInventoryWindowMs?: number;
+  /** Max concurrent /monitoring calls in flight. */
   telemetryMaxConcurrency?: number;
+  /** Random spread applied to each rescheduled deadline, percent of the window (0–90). */
+  telemetryJitterPercent?: number;
 }
 
 export interface SystemSettingsResponse extends SystemSettings {
-  limits: { MIN_POLL_INTERVAL_MS: number; MAX_POLL_INTERVAL_MS: number; MIN_CONCURRENCY: number; MAX_CONCURRENCY: number };
+  limits: {
+    MIN_POLL_INTERVAL_MS: number;
+    MAX_POLL_INTERVAL_MS: number;
+    MIN_INVENTORY_WINDOW_MS: number;
+    MAX_INVENTORY_WINDOW_MS: number;
+    MIN_CONCURRENCY: number;
+    MAX_CONCURRENCY: number;
+    MIN_JITTER_PERCENT: number;
+    MAX_JITTER_PERCENT: number;
+  };
 }
 
 /** One distinct (band, channel) pair broadcasting an SSID. */
@@ -929,6 +951,8 @@ export interface DeviceCreateRequest {
   firmwareVersion?: string | null;
   /** Manual topology-layer override (a network_layers id); null/omitted = auto-classify. */
   layerOverride?: string | null;
+  /** Per-device metrics poll window in ms; null/omitted = inherit plugin/system default. */
+  pollIntervalMs?: number | null;
   /** Telemetry polling toggle (default true); disabled devices keep their history. */
   enabled?: boolean;
 }
@@ -960,6 +984,8 @@ export interface Device {
   firmwareVersion?: string | null;
   /** Manual topology-layer override (a network_layers id); null = auto-classify. */
   layerOverride?: string | null;
+  /** Per-device metrics poll window in ms (null = inherit plugin/system default). */
+  pollIntervalMs?: number | null;
   /** Firmware version detected by the plugins' latest telemetry (list endpoints only; null = not reported). */
   detectedFirmwareVersion?: string | null;
   /** Serial number from the plugins' latest telemetry (list endpoints only; null = not reported). */
@@ -1357,7 +1383,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   /** Update identity fields of an existing device (plugins are managed separately). */
-  updateDevice: (deviceId: string, body: Partial<Pick<Device, 'name' | 'vendor' | 'deviceTypes' | 'tags' | 'managementAddress' | 'model' | 'firmwareVersion' | 'layerOverride'>> & { siteId?: string | null; enabled?: boolean }) =>
+  updateDevice: (deviceId: string, body: Partial<Pick<Device, 'name' | 'vendor' | 'deviceTypes' | 'tags' | 'managementAddress' | 'model' | 'firmwareVersion' | 'layerOverride' | 'pollIntervalMs'>> & { siteId?: string | null; enabled?: boolean }) =>
     apiFetch<Device>(`/devices/${deviceId}`, { method: 'PATCH', body: JSON.stringify(body) }),
   /** Clone a device — all settings (plugins + credentials, IPs, per-device
    * overrides) are reused; the clone gets a fresh id and "(copy)" name. */
