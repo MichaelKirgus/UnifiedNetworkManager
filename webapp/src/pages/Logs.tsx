@@ -7,15 +7,15 @@ import { api, LogEntry } from '../api/client';
 
 /** Small colored pill for the log level. */
 const LEVEL_STYLES: Record<LogEntry['level'], string> = {
-  debug: 'bg-slate-100 text-slate-500',
-  info: 'bg-blue-100 text-blue-700',
-  warn: 'bg-amber-100 text-amber-800',
-  error: 'bg-red-100 text-red-700',
+  debug: 'bg-muted text-muted-foreground',
+  info: 'bg-info text-info-fg',
+  warn: 'bg-warning text-warning-fg',
+  error: 'bg-danger text-danger-fg',
 };
 
 function LevelBadge({ level }: { level: LogEntry['level'] }) {
   return (
-    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${LEVEL_STYLES[level] ?? 'bg-slate-100 text-slate-600'}`}>
+    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${LEVEL_STYLES[level] ?? 'bg-muted text-secondary'}`}>
       {level}
     </span>
   );
@@ -105,7 +105,7 @@ export default function Logs() {
       width: 200,
       exportValue: (row) => row.pluginName ?? row.pluginId,
       render: (row) => (
-        <span className="text-sm text-slate-700" title={row.pluginId}>
+        <span className="text-sm text-secondary" title={row.pluginId}>
           {row.pluginName ?? '—'}
         </span>
       ),
@@ -119,7 +119,7 @@ export default function Logs() {
         row.deviceId ? (
           <DeviceChip deviceName={row.deviceName} managementAddress={null} pluginName={null} siteName={null} interfaces={[]} />
         ) : (
-          <span className="text-xs text-slate-400">plugin-level</span>
+          <span className="text-xs text-faint">plugin-level</span>
         ),
     },
     {
@@ -128,18 +128,18 @@ export default function Logs() {
       width: 520,
       render: (row) => (
         <div className="flex flex-col gap-1">
-          <span className="break-words text-sm text-slate-800">{row.message}</span>
+          <span className="break-words text-sm text-foreground">{row.message}</span>
           {row.context && Object.keys(row.context).length > 0 && (
             <>
               <button
                 type="button"
                 onClick={() => toggleContext(row.id)}
-                className="self-start text-xs font-medium text-blue-600 hover:underline"
+                className="self-start text-xs font-medium text-info-fg hover:underline"
               >
                 {expanded.has(row.id) ? 'Hide details' : `Details (${Object.keys(row.context).length})`}
               </button>
               {expanded.has(row.id) && (
-                <pre className="max-h-48 overflow-auto rounded bg-slate-900 p-2 font-mono text-[11px] leading-relaxed text-slate-100">
+                <pre className="max-h-48 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-slate-100">
                   {JSON.stringify(row.context, null, 2)}
                 </pre>
               )}
@@ -154,10 +154,10 @@ export default function Logs() {
     <Layout title="Logs">
 
       {/* Filter bar */}
-      <div className="mb-4 grid grid-cols-1 gap-3 rounded-md border border-slate-200 bg-white p-3 shadow-sm sm:grid-cols-5">
+      <div className="mb-4 grid grid-cols-1 gap-3 rounded-md border border-border bg-card p-3 shadow-sm sm:grid-cols-5">
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600">Level</label>
-          <select className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm" value={level} onChange={(e) => setLevel(e.target.value)}>
+          <label className="mb-1 block text-xs font-medium text-secondary">Level</label>
+          <select className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm" value={level} onChange={(e) => setLevel(e.target.value)}>
             <option value="">All levels</option>
             <option value="debug">Debug</option>
             <option value="info">Info</option>
@@ -166,8 +166,8 @@ export default function Logs() {
           </select>
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600">Plugin</label>
-          <select className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm" value={pluginId} onChange={(e) => setPluginId(e.target.value)}>
+          <label className="mb-1 block text-xs font-medium text-secondary">Plugin</label>
+          <select className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm" value={pluginId} onChange={(e) => setPluginId(e.target.value)}>
             <option value="">All plugins</option>
             {plugins.map((p) => (
               <option key={p.id} value={p.id}>
@@ -177,8 +177,8 @@ export default function Logs() {
           </select>
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600">Device</label>
-          <select className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm" value={deviceId} onChange={(e) => setDeviceId(e.target.value)}>
+          <label className="mb-1 block text-xs font-medium text-secondary">Device</label>
+          <select className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm" value={deviceId} onChange={(e) => setDeviceId(e.target.value)}>
             <option value="">All devices</option>
             {devices.map((d) => (
               <option key={d.id} value={d.id}>
@@ -188,8 +188,8 @@ export default function Logs() {
           </select>
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600">Time range</label>
-          <select className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm" value={range} onChange={(e) => setRange(e.target.value as TimeRange)}>
+          <label className="mb-1 block text-xs font-medium text-secondary">Time range</label>
+          <select className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm" value={range} onChange={(e) => setRange(e.target.value as TimeRange)}>
             {TIME_RANGES.map((r) => (
               <option key={r.value} value={r.value}>
                 {r.label}
@@ -198,10 +198,10 @@ export default function Logs() {
           </select>
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600">Search</label>
+          <label className="mb-1 block text-xs font-medium text-secondary">Search</label>
           <input
             type="text"
-            className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm"
+            className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm"
             placeholder="Message or context…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -209,9 +209,9 @@ export default function Logs() {
         </div>
       </div>
 
-      {logsQuery.isLoading && <p className="text-sm text-slate-500">Loading logs...</p>}
+      {logsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading logs...</p>}
       {logsQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load logs: {(logsQuery.error as Error).message}</p>
+        <p className="text-sm text-danger-fg">Failed to load logs: {(logsQuery.error as Error).message}</p>
       )}
       {logsQuery.data && (
         <DataTable

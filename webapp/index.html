@@ -4,8 +4,29 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>UnifiedNetworkManager</title>
+    <script>
+      // Apply the saved theme preference before first paint so there is no
+      // flash on load. 'system' follows prefers-color-scheme; dark mode uses
+      // the stored dark style ('black' default, or 'slate').
+      (function () {
+        try {
+          var p = localStorage.getItem('unm-theme') || 'system';
+          var s = localStorage.getItem('unm-dark-style') || 'black';
+          if (s !== 'black' && s !== 'slate') s = 'black';
+          var dark =
+            p === 'dark' ||
+            (p !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          var root = document.documentElement;
+          if (dark) {
+            root.classList.add('dark', 'theme-' + s);
+          } else {
+            root.classList.remove('dark', 'theme-black', 'theme-slate');
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
-  <body class="bg-slate-50 text-slate-900">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

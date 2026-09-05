@@ -16,9 +16,9 @@ import { ipScopeGroup, IpScopeGroup } from '../utils/address';
  */
 
 const GROUP_STYLES: Record<IpScopeGroup, string> = {
-  private: 'bg-blue-100 text-blue-800',
+  private: 'bg-info text-info-fg',
   public: 'bg-teal-100 text-teal-800',
-  'link-local': 'bg-amber-100 text-amber-800',
+  'link-local': 'bg-warning text-warning-fg',
 };
 
 const GROUP_LABELS: Record<IpScopeGroup, string> = {
@@ -82,12 +82,12 @@ export function IpGroupChips({ ips }: { ips: string[] }) {
   }
   for (const ip of ungrouped) {
     chips.push(
-      <span key={ip} className={`whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-xs ${ip.includes(':') ? 'bg-purple-50 text-purple-700' : 'bg-slate-100 text-slate-700'}`}>
+      <span key={ip} className={`whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-xs ${ip.includes(':') ? 'bg-purple-50 text-purple-700' : 'bg-muted text-secondary'}`}>
         {ip}
       </span>
     );
   }
 
-  if (chips.length === 0) return <span className="text-slate-400">—</span>;
+  if (chips.length === 0) return <span className="text-faint">—</span>;
   return <div className="flex flex-wrap items-center gap-1">{chips}</div>;
 }

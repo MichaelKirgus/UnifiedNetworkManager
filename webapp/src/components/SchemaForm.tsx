@@ -90,7 +90,7 @@ export function defaultValues(schema: InputSchema): Record<string, unknown> {
 export function SchemaForm({ schema, values, onChange, fieldErrors }: SchemaFormProps) {
   const entries = Object.entries(schema);
   if (entries.length === 0) {
-    return <p className="px-1 py-2 text-sm text-slate-500">This action takes no input.</p>;
+    return <p className="px-1 py-2 text-sm text-muted-foreground">This action takes no input.</p>;
   }
 
   function setTop(key: string, value: unknown) {
@@ -118,17 +118,17 @@ function Field({ name, prop, value, error, onValue }: FieldProps) {
   const id = `schema-${name}`;
   return (
     <div>
-      <label htmlFor={id} className="mb-1 flex items-center gap-2 text-sm font-medium text-slate-700">
+      <label htmlFor={id} className="mb-1 flex items-center gap-2 text-sm font-medium text-secondary">
         {prop.label ?? name}
         {prop.required && <span className="text-red-500">*</span>}
       </label>
-      {prop.description && <p className="mb-1 text-xs text-slate-400">{prop.description}</p>}
+      {prop.description && <p className="mb-1 text-xs text-faint">{prop.description}</p>}
 
       {/* enum → select (any type) */}
       {prop.enum && prop.enum.length > 0 ? (
         <select id={id} value={value === undefined || value === null ? '' : String(value)}
           onChange={(e) => onValue(e.target.value === '' ? undefined : coerce(prop, e.target.value))}
-          className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm focus:border-slate-400 focus:ring-1 focus:ring-slate-400">
+          className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm focus:border-slate-400 focus:ring-1 focus:ring-slate-400">
           <option value="" disabled>— select —</option>
           {prop.enum.map((opt) => (
             <option key={String(opt)} value={String(opt)}>{String(opt)}</option>
@@ -137,18 +137,18 @@ function Field({ name, prop, value, error, onValue }: FieldProps) {
       ) : prop.type === 'boolean' ? (
         <div className="flex items-center gap-2">
           <input id={id} type="checkbox" checked={value === true} onChange={(e) => onValue(e.target.checked)}
-            className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400" />
-          <span className="text-sm text-slate-500">{value === true ? 'Enabled' : 'Disabled'}</span>
+            className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-400" />
+          <span className="text-sm text-muted-foreground">{value === true ? 'Enabled' : 'Disabled'}</span>
         </div>
       ) : prop.type === 'number' ? (
         <input id={id} type="number" step="any" inputMode="decimal" value={numToString(value)}
           placeholder={prop.default !== undefined ? `default: ${String(prop.default)}` : ''}
           onChange={(e) => onValue(e.target.value === '' ? undefined : Number(e.target.value))}
-          className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm focus:border-slate-400 focus:ring-1 focus:ring-slate-400" />
+          className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm focus:border-slate-400 focus:ring-1 focus:ring-slate-400" />
       ) : prop.type === 'array' ? (
         <ArrayField name={name} items={prop.items ?? { type: 'string' }} value={(value as unknown[]) ?? []} onValue={onValue} />
       ) : prop.type === 'object' && prop.properties ? (
-        <div className="rounded-md border border-slate-200 bg-slate-50/60 p-3">
+        <div className="rounded-md border border-border bg-background/60 p-3">
           {Object.entries(prop.properties).map(([subKey, subProp]) => (
             <Field key={subKey} name={`${name}.${subKey}`} prop={subProp}
               value={(value as Record<string, unknown> | undefined)?.[subKey]}
@@ -164,9 +164,9 @@ function Field({ name, prop, value, error, onValue }: FieldProps) {
         <input id={id} type="text" value={strToString(value)}
           placeholder={prop.default !== undefined ? `default: ${String(prop.default)}` : prop.pattern ?? ''}
           onChange={(e) => onValue(e.target.value === '' ? undefined : e.target.value)}
-          className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm focus:border-slate-400 focus:ring-1 focus:ring-slate-400" />
+          className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm focus:border-slate-400 focus:ring-1 focus:ring-slate-400" />
       )}
-      {error && <p className="mt-1 text-xs text-red-600">{error}</p>}
+      {error && <p className="mt-1 text-xs text-danger-fg">{error}</p>}
     </div>
   );
 }
@@ -180,7 +180,7 @@ function ArrayField({ name, items, value, onValue }: { name: string; items: Inpu
         onChange={(e) => {
           try { onValue(JSON.parse(e.target.value)); } catch { /* keep last valid */ }
         }}
-        className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 font-mono text-xs focus:border-slate-400 focus:ring-1 focus:ring-slate-400" />
+        className="w-full rounded-md border border-border px-2.5 py-1.5 font-mono text-xs focus:border-slate-400 focus:ring-1 focus:ring-slate-400" />
     );
   }
   return (
@@ -193,14 +193,14 @@ function ArrayField({ name, items, value, onValue }: { name: string; items: Inpu
               next[i] = items.type === 'number' ? (e.target.value === '' ? undefined : Number(e.target.value)) : e.target.value;
               onValue(next);
             }}
-            className="flex-1 rounded-md border border-slate-300 px-2.5 py-1 text-sm focus:border-slate-400 focus:ring-1 focus:ring-slate-400" />
+            className="flex-1 rounded-md border border-border px-2.5 py-1 text-sm focus:border-slate-400 focus:ring-1 focus:ring-slate-400" />
           <button type="button" aria-label={`Remove item ${i + 1}`} title="Remove"
             onClick={() => onValue(value.filter((_, j) => j !== i))}
-            className="rounded px-1.5 py-0.5 text-xs text-slate-400 hover:bg-red-50 hover:text-red-600">✕</button>
+            className="rounded px-1.5 py-0.5 text-xs text-faint hover:bg-danger hover:text-danger-fg">✕</button>
         </div>
       ))}
       <button type="button" onClick={() => onValue([...value, items.type === 'number' ? 0 : ''])}
-        className="text-xs font-medium text-slate-500 hover:text-slate-700">+ Add item</button>
+        className="text-xs font-medium text-muted-foreground hover:text-secondary">+ Add item</button>
     </div>
   );
 }

@@ -19,15 +19,15 @@ export function SegmentNode({ data }: { data: TopoNode & { kind: 'segment' } }) 
     <div className="flex flex-col items-center gap-1">
       <SideHandles />
       <div
-        className="flex w-48 flex-col items-start gap-0.5 rounded-lg border-2 bg-white px-2.5 py-2 shadow-sm"
+        className="flex w-48 flex-col items-start gap-0.5 rounded-lg border-2 bg-card px-2.5 py-2 shadow-sm"
         style={{ borderColor: `hsl(${hue}, 65%, 55%)` }}
       >
-        <span className="text-[9px] font-semibold uppercase tracking-wide text-slate-400">Logical network</span>
-        <span className="truncate text-xs font-semibold text-slate-800" title={data.label}>
+        <span className="text-[9px] font-semibold uppercase tracking-wide text-faint">Logical network</span>
+        <span className="truncate text-xs font-semibold text-foreground" title={data.label}>
           {data.vlanId !== null ? `VLAN ${data.vlanId}` : data.label}
         </span>
         {data.subnets.length > 0 && (
-          <span className="break-all text-[10px] leading-tight text-slate-500">{data.subnets.join(' · ')}</span>
+          <span className="break-all text-[10px] leading-tight text-muted-foreground">{data.subnets.join(' · ')}</span>
         )}
       </div>
     </div>

@@ -8,17 +8,17 @@ import { api, RouteRow } from '../api/client';
 
 /** Small colored pill for the route protocol. */
 const PROTOCOL_STYLES: Record<RouteRow['protocol'], string> = {
-  static: 'bg-slate-200 text-slate-700',
+  static: 'bg-muted text-secondary',
   connected: 'bg-cyan-100 text-cyan-800',
   ospf: 'bg-indigo-100 text-indigo-700',
   bgp: 'bg-purple-100 text-purple-700',
-  rip: 'bg-amber-100 text-amber-800',
-  other: 'bg-slate-100 text-slate-600',
+  rip: 'bg-warning text-warning-fg',
+  other: 'bg-muted text-secondary',
 };
 
 function ProtocolBadge({ protocol }: { protocol: RouteRow['protocol'] }) {
   return (
-    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${PROTOCOL_STYLES[protocol] ?? 'bg-slate-100 text-slate-600'}`}>
+    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${PROTOCOL_STYLES[protocol] ?? 'bg-muted text-secondary'}`}>
       {protocol}
     </span>
   );
@@ -58,7 +58,7 @@ export default function Routes() {
           <div className="flex flex-col gap-0.5">
             <span className="font-mono text-xs">{orDash(row.gateway)}</span>
             {gwStatus && gwStatus !== 'unknown' && (
-              <span className={`text-[11px] ${gwStatus === 'online' ? 'text-emerald-600' : 'text-red-600'}`}>
+              <span className={`text-[11px] ${gwStatus === 'online' ? 'text-emerald-600' : 'text-danger-fg'}`}>
                 gateway {gwStatus}
                 {latency !== null ? ` · ${Math.round(latency)} ms` : ''}
               </span>
@@ -86,7 +86,7 @@ export default function Routes() {
         return parts.length > 0 ? (
           <span className="font-mono text-xs">{parts.join(' · ')}</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         );
       },
     },
@@ -128,9 +128,9 @@ export default function Routes() {
   return (
     <Layout title="Routes">
 
-      {routesQuery.isLoading && <p className="text-sm text-slate-500">Loading routes...</p>}
+      {routesQuery.isLoading && <p className="text-sm text-muted-foreground">Loading routes...</p>}
       {routesQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load routes: {(routesQuery.error as Error).message}</p>
+        <p className="text-sm text-danger-fg">Failed to load routes: {(routesQuery.error as Error).message}</p>
       )}
       {routesQuery.data && (
         <DataTable

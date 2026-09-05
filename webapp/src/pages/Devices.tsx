@@ -398,11 +398,11 @@ export default function Devices() {
       exportValue: (row) => row.deviceTypes.join(', '),
       render: (row) => {
         const types = row.deviceTypes ?? [];
-        if (types.length === 0) return <span className="text-slate-400">—</span>;
+        if (types.length === 0) return <span className="text-faint">—</span>;
         return (
           <div className="flex flex-wrap gap-1">
             {types.map((t) => (
-              <span key={t} className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium capitalize text-slate-700">
+              <span key={t} className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium capitalize text-secondary">
                 {t}
               </span>
             ))}
@@ -418,7 +418,7 @@ export default function Devices() {
       exportValue: (row) => row.tags.join(', '),
       render: (row) => {
         const tags = row.tags ?? [];
-        if (tags.length === 0) return <span className="text-slate-400">—</span>;
+        if (tags.length === 0) return <span className="text-faint">—</span>;
         return (
           <div className="flex flex-wrap gap-1">
             {tags.map((t) => (
@@ -437,15 +437,15 @@ export default function Devices() {
       header: 'Software version',
       key: 'detectedFirmwareVersion',
       width: 170,
-      render: (row) => row.detectedFirmwareVersion ?? <span className="text-slate-400">—</span>,
+      render: (row) => row.detectedFirmwareVersion ?? <span className="text-faint">—</span>,
     },
     {
       header: 'Serial number',
       key: 'serialNumber',
       width: 150,
-      render: (row) => row.serialNumber ? <span className="font-mono text-xs">{row.serialNumber}</span> : <span className="text-slate-400">—</span>,
+      render: (row) => row.serialNumber ? <span className="font-mono text-xs">{row.serialNumber}</span> : <span className="text-faint">—</span>,
     },
-    { header: 'Site', key: 'siteName', render: (row) => row.siteName ?? <span className="text-slate-400">—</span> },
+    { header: 'Site', key: 'siteName', render: (row) => row.siteName ?? <span className="text-faint">—</span> },
     {
       // Manual topology-layer override — most devices stay on "Auto" (the
       // plugin suggestion / heuristic decides); a badge shows the pinned layer.
@@ -455,7 +455,7 @@ export default function Devices() {
       exportValue: (row) => row.layerOverride ?? 'auto',
       render: (row) => {
         const l = (layersQuery.data ?? []).find((x) => x.id === row.layerOverride);
-        if (!l) return <span className="text-xs text-slate-400">Auto</span>;
+        if (!l) return <span className="text-xs text-faint">Auto</span>;
         return (
           <span
             className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide"
@@ -478,7 +478,7 @@ export default function Devices() {
           <span className="font-mono text-xs">
             {row.managementAddress}
             {secondaryCount > 0 && (
-              <span className="ml-1 rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">+{secondaryCount}</span>
+              <span className="ml-1 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-secondary">+{secondaryCount}</span>
             )}
           </span>
         );
@@ -491,7 +491,7 @@ export default function Devices() {
       sortable: false,
       render: (row) => {
         const plugins = row.plugins ?? [];
-        if (plugins.length === 0) return <span className="text-slate-400">—</span>;
+        if (plugins.length === 0) return <span className="text-faint">—</span>;
         return (
           <div className="flex flex-wrap gap-1">
             {plugins.map((p) => (
@@ -499,7 +499,7 @@ export default function Devices() {
                 key={p.id}
                 title={`${p.pluginName ?? p.pluginId}${p.isPrimary ? ' (primary)' : ''}`}
                 className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
-                  p.isPrimary ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'
+                  p.isPrimary ? 'bg-primary text-white' : 'bg-muted text-secondary'
                 }`}
               >
                 {p.pluginName ?? p.pluginId}
@@ -518,7 +518,7 @@ export default function Devices() {
           {row.enabled === false && (
             <span
               title="Telemetry polling disabled — historical data and last metrics are preserved"
-              className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600"
+              className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-secondary"
             >
               disabled
             </span>
@@ -533,7 +533,7 @@ export default function Devices() {
       sortable: false,
       render: (row) => {
         const metrics = row.summaryMetrics ?? [];
-        if (metrics.length === 0) return <span className="text-slate-400">—</span>;
+        if (metrics.length === 0) return <span className="text-faint">—</span>;
         return (
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
             {metrics.map((m, i) => (
@@ -554,7 +554,7 @@ export default function Devices() {
           <button
             aria-label={`View ${row.name}`}
             title="View details"
-            className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+            className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
             onClick={() => navigate(`/devices/${row.id}`)}
           >
             <Eye className="h-4 w-4" />
@@ -563,7 +563,7 @@ export default function Devices() {
             <button
               aria-label={`Configure ${row.name}`}
               title="Open config page"
-              className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+              className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
               onClick={() => navigate(`/devices/${row.id}/config`)}
             >
               <Settings2 className="h-4 w-4" />
@@ -574,7 +574,7 @@ export default function Devices() {
               <button
                 aria-label={`Refresh ${row.name}`}
                 title="Force refresh — re-poll metrics + inventory now (diagnostics)"
-                className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-40"
+                className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground disabled:opacity-40"
                 onClick={() => handleRefresh(row)}
                 disabled={refreshDevices.isPending && refreshDevices.variables?.includes(row.id)}
               >
@@ -583,7 +583,7 @@ export default function Devices() {
               <button
                 aria-label={`Edit ${row.name}`}
                 title="Edit device"
-                className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
                 onClick={() => openEdit(row)}
               >
                 <Pencil className="h-4 w-4" />
@@ -591,7 +591,7 @@ export default function Devices() {
               <button
                 aria-label={`Clone ${row.name}`}
                 title="Clone device (reuses all settings)"
-                className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
                 onClick={() => handleClone(row)}
               >
                 <Copy className="h-4 w-4" />
@@ -602,7 +602,7 @@ export default function Devices() {
             <button
               aria-label={`Delete ${row.name}`}
               title="Delete device"
-              className="rounded-md p-1.5 text-slate-600 hover:bg-red-50 hover:text-red-600"
+              className="rounded-md p-1.5 text-secondary hover:bg-danger hover:text-danger-fg"
               onClick={() => handleDelete(row)}
             >
               <Trash2 className="h-4 w-4" />
@@ -619,7 +619,7 @@ export default function Devices() {
       actions={
         canWriteDevices && (
           <button
-            className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
+            className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover"
             onClick={() => { setShowForm((v) => !v); if (showForm) resetForm(); }}
           >
             {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
@@ -630,37 +630,37 @@ export default function Devices() {
     >
 
       {deleteDevice.error && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div className="mb-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
           {(deleteDevice.error as Error).message}
         </div>
       )}
 
       {showForm && (
         <div
-          className="mb-6 grid grid-cols-1 gap-3 rounded-md border border-slate-200 bg-white p-4 shadow-sm sm:grid-cols-2"
+          className="mb-6 grid grid-cols-1 gap-3 rounded-md border border-border bg-card p-4 shadow-sm sm:grid-cols-2"
         >
-          <h2 className="col-span-full text-sm font-semibold uppercase tracking-wide text-slate-500">
+          <h2 className="col-span-full text-sm font-semibold uppercase tracking-wide text-muted-foreground">
             {editingId ? `Edit device` : 'Register device'}
           </h2>
           {formError && (
-            <div className="col-span-full rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            <div className="col-span-full rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
               {formError}
             </div>
           )}
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Name</label>
+            <label className="mb-1 block text-sm font-medium text-secondary">Name</label>
             <input
               required
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              className="w-full rounded-md border border-border px-3 py-2 text-sm"
               value={identity.name}
               onChange={(e) => setIdentity({ ...identity, name: e.target.value })}
             />
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Vendor</label>
+            <label className="mb-1 block text-sm font-medium text-secondary">Vendor</label>
             <select
               required
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              className="w-full rounded-md border border-border px-3 py-2 text-sm"
               value={identity.vendor}
               // Changing the vendor invalidates any model/firmware selection.
               onChange={(e) => setIdentity({ ...identity, vendor: e.target.value, model: '', firmwareVersion: '' })}
@@ -676,7 +676,7 @@ export default function Devices() {
             </select>
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Device types</label>
+            <label className="mb-1 block text-sm font-medium text-secondary">Device types</label>
             <ChipInput
               values={identity.deviceTypes}
               onChange={(deviceTypes) => setIdentity({ ...identity, deviceTypes })}
@@ -684,17 +684,17 @@ export default function Devices() {
               placeholder="e.g. router, firewall — press Enter"
               ariaLabel="Device types"
             />
-            <p className="mt-1 text-xs text-slate-400">A device can have several roles (e.g. a routed switch is both).</p>
+            <p className="mt-1 text-xs text-faint">A device can have several roles (e.g. a routed switch is both).</p>
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Tags</label>
+            <label className="mb-1 block text-sm font-medium text-secondary">Tags</label>
             <ChipInput
               values={identity.tags}
               onChange={(tags) => setIdentity({ ...identity, tags })}
               placeholder="e.g. dmz, lab — press Enter"
               ariaLabel="Device tags"
             />
-            <p className="mt-1 text-xs text-slate-400">Optional free-form labels for filtering and targeted changes.</p>
+            <p className="mt-1 text-xs text-faint">Optional free-form labels for filtering and targeted changes.</p>
           </div>
 
           {/* Model + Firmware — only offered when an assigned plugin advertises a
@@ -703,9 +703,9 @@ export default function Devices() {
           {modelEntries.length > 0 && (
             <>
               <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700">Model</label>
+                <label className="mb-1 block text-sm font-medium text-secondary">Model</label>
                 <select
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm"
                   value={identity.model}
                   onChange={(e) => {
                     const nextModel = e.target.value;
@@ -728,13 +728,13 @@ export default function Devices() {
                     </option>
                   ))}
                 </select>
-                <p className="mt-1 text-xs text-slate-400">Optional — enables firmware-specific data collection.</p>
+                <p className="mt-1 text-xs text-faint">Optional — enables firmware-specific data collection.</p>
               </div>
               {firmwareOptions.length > 0 && (
                 <div>
-                  <label className="mb-1 block text-sm font-medium text-slate-700">Firmware version</label>
+                  <label className="mb-1 block text-sm font-medium text-secondary">Firmware version</label>
                   <select
-                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                    className="w-full rounded-md border border-border px-3 py-2 text-sm"
                     value={identity.firmwareVersion}
                     onChange={(e) => setIdentity({ ...identity, firmwareVersion: e.target.value })}
                   >
@@ -752,9 +752,9 @@ export default function Devices() {
           {/* Manual topology-layer override — "Auto" lets the plugin suggestion /
               heuristic decide; picking a layer pins this device to that band. */}
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Topology layer</label>
+            <label className="mb-1 block text-sm font-medium text-secondary">Topology layer</label>
             <select
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              className="w-full rounded-md border border-border px-3 py-2 text-sm"
               value={identity.layerOverride}
               onChange={(e) => setIdentity({ ...identity, layerOverride: e.target.value })}
             >
@@ -765,29 +765,29 @@ export default function Devices() {
                 </option>
               ))}
             </select>
-            <p className="mt-1 text-xs text-slate-400">Which horizontal band the topology view draws this device in.</p>
+            <p className="mt-1 text-xs text-faint">Which horizontal band the topology view draws this device in.</p>
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Primary IP / Address</label>
+            <label className="mb-1 block text-sm font-medium text-secondary">Primary IP / Address</label>
             <input
               required
               className={`w-full rounded-md border px-3 py-2 text-sm ${
                 identity.managementAddress.trim() && !isValidAddress(identity.managementAddress)
                   ? 'border-red-400'
-                  : 'border-slate-300'
+                  : 'border-border'
               }`}
               value={identity.managementAddress}
               onChange={(e) => setIdentity({ ...identity, managementAddress: e.target.value })}
               placeholder="10.0.0.1 or gw.local"
             />
             {identity.managementAddress.trim() && !isValidAddress(identity.managementAddress) && (
-              <p className="mt-1 text-xs text-red-600">{addressError(identity.managementAddress)}</p>
+              <p className="mt-1 text-xs text-danger-fg">{addressError(identity.managementAddress)}</p>
             )}
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Site</label>
+            <label className="mb-1 block text-sm font-medium text-secondary">Site</label>
             <select
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              className="w-full rounded-md border border-border px-3 py-2 text-sm"
               value={identity.siteId}
               onChange={(e) => setIdentity({ ...identity, siteId: e.target.value })}
             >
@@ -803,18 +803,18 @@ export default function Devices() {
 
           {/* Per-device metrics poll window — overrides the plugin/system default. */}
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Metrics poll interval (seconds, optional)</label>
+            <label className="mb-1 block text-sm font-medium text-secondary">Metrics poll interval (seconds, optional)</label>
             <input
               type="number"
               min={5}
               max={3600}
               step={5}
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              className="w-full rounded-md border border-border px-3 py-2 text-sm"
               value={identity.pollIntervalMs}
               onChange={(e) => setIdentity({ ...identity, pollIntervalMs: e.target.value })}
               placeholder="inherit default"
             />
-            <p className="mt-1 text-xs text-slate-400">
+            <p className="mt-1 text-xs text-faint">
               How often this device's metrics are collected. Leave empty to inherit the plugin or system default.
             </p>
           </div>
@@ -825,21 +825,21 @@ export default function Devices() {
               type="checkbox"
               checked={enabled}
               onChange={(e) => setEnabled(e.target.checked)}
-              className="h-4 w-4 rounded border-slate-300"
+              className="h-4 w-4 rounded border-border"
             />
-            <label htmlFor="device-enabled" className="text-sm font-medium text-slate-700">
+            <label htmlFor="device-enabled" className="text-sm font-medium text-secondary">
               Enabled (poll telemetry)
             </label>
-            <span className="text-xs text-slate-400">
+            <span className="text-xs text-faint">
               Disabled devices are not polled — their historical data and last metrics stay preserved.
             </span>
           </div>
 
           <div className="col-span-full">
-            <label className="mb-1 block text-sm font-medium text-slate-700">Additional IPs (optional)</label>
+            <label className="mb-1 block text-sm font-medium text-secondary">Additional IPs (optional)</label>
             <div className="flex gap-2">
               <input
-                className={`w-full rounded-md border px-3 py-2 text-sm ${ipError ? 'border-red-400' : 'border-slate-300'}`}
+                className={`w-full rounded-md border px-3 py-2 text-sm ${ipError ? 'border-red-400' : 'border-border'}`}
                 value={newIpInput}
                 onChange={(e) => { setNewIpInput(e.target.value); setIpError(null); }}
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSecondaryIp(); } }}
@@ -848,22 +848,22 @@ export default function Devices() {
               <button
                 type="button"
                 onClick={addSecondaryIp}
-                className="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                className="rounded-md border border-border px-3 py-2 text-sm font-medium text-secondary hover:bg-background"
               >
                 Add
               </button>
             </div>
-            {ipError && <p className="mt-1 text-xs text-red-600">{ipError}</p>}
+            {ipError && <p className="mt-1 text-xs text-danger-fg">{ipError}</p>}
             {additionalIps.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1">
                 {additionalIps.map((ip) => (
-                  <span key={ip} className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
+                  <span key={ip} className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-secondary">
                     {ip}
                     <button
                       type="button"
                       aria-label={`Remove ${ip}`}
                       onClick={() => setAdditionalIps(additionalIps.filter((x) => x !== ip))}
-                      className="text-slate-400 hover:text-red-600"
+                      className="text-faint hover:text-danger-fg"
                     >
                       <X className="h-3 w-3" />
                     </button>
@@ -874,7 +874,7 @@ export default function Devices() {
           </div>
 
           <div className="col-span-full">
-            <label className="mb-1 block text-sm font-medium text-slate-700">
+            <label className="mb-1 block text-sm font-medium text-secondary">
               Plugins (each with its own credentials — the first becomes primary)
             </label>
             <PluginAssignmentBuilder
@@ -901,10 +901,10 @@ export default function Devices() {
           {/* Per-plugin parameters — editable in edit mode only */}
           {editingId && initialAssignments.length > 0 && (
             <div className="col-span-full space-y-4">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-400">Plugin settings (per-device overrides)</h3>
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-faint">Plugin settings (per-device overrides)</h3>
               {initialAssignments.map((a) => (
-                <div key={a.pluginId} className="rounded-md border border-slate-200 bg-white p-3">
-                  <p className="mb-2 text-sm font-medium text-slate-700">{a.pluginName ?? a.pluginId}</p>
+                <div key={a.pluginId} className="rounded-md border border-border bg-card p-3">
+                  <p className="mb-2 text-sm font-medium text-secondary">{a.pluginName ?? a.pluginId}</p>
                   <OptionForm pluginId={a.pluginId} deviceId={editingId!} onSaved={() => queryClient.invalidateQueries({ queryKey: ['devices'] })} />
                 </div>
               ))}
@@ -913,9 +913,9 @@ export default function Devices() {
         </div>
       )}
 
-      {devicesQuery.isLoading && <p className="text-sm text-slate-500">Loading devices...</p>}
+      {devicesQuery.isLoading && <p className="text-sm text-muted-foreground">Loading devices...</p>}
       {devicesQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load devices: {(devicesQuery.error as Error).message}</p>
+        <p className="text-sm text-danger-fg">Failed to load devices: {(devicesQuery.error as Error).message}</p>
       )}
       {devicesQuery.data && (
         <DataTable

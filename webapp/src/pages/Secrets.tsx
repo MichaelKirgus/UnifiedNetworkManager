@@ -189,11 +189,11 @@ export default function Secrets() {
     const label = typeLabelFor(type) ?? type;
     const tone = generatableTypes.has(type)
       ? 'bg-indigo-100 text-indigo-800'
-      : 'bg-slate-100 text-slate-700';
+      : 'bg-muted text-secondary';
     return (
       <span
         title={label === type ? undefined : `Type id: ${type}`}
-        className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${tone} ${generatableTypes.has(type) ? 'border-indigo-300' : 'border-slate-300'}`}
+        className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${tone} ${generatableTypes.has(type) ? 'border-indigo-300' : 'border-border'}`}
       >
         {label}
       </span>
@@ -328,7 +328,7 @@ export default function Secrets() {
         canWrite && (
           <button
             onClick={() => (showForm ? closeForm() : openCreateForm())}
-            className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
+            className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover"
           >
             {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
             {showForm ? 'Cancel' : 'Add Secret'}
@@ -338,30 +338,30 @@ export default function Secrets() {
     >
 
       {canWrite && showForm && (
-        <div className="mb-6 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-          <h2 className="mb-4 text-sm font-semibold text-slate-900">{mode === 'edit' ? 'Edit Secret' : 'Create New Secret'}</h2>
+        <div className="mb-6 rounded-md border border-border bg-card p-4 shadow-sm">
+          <h2 className="mb-4 text-sm font-semibold text-foreground">{mode === 'edit' ? 'Edit Secret' : 'Create New Secret'}</h2>
           <form onSubmit={handleSubmit} className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             {mode === 'edit' && (
-              <p className="col-span-full -mt-2 text-xs text-slate-500">
+              <p className="col-span-full -mt-2 text-xs text-muted-foreground">
                 The secret keeps its ID — device assignments and plans referencing it keep working. Devices using the old
                 values will use the new ones on their next poll.
               </p>
             )}
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-700">Provider</label>
+              <label className="mb-1 block text-xs font-medium text-secondary">Provider</label>
               {mode === 'edit' ? (
                 <input
                   type="text"
                   value={providers.some((p) => p.id === editing?.providerId) ? (activeProvider?.name ?? '') : 'Unknown provider'}
                   disabled
                   title="The provider that created the secret cannot be changed"
-                  className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500"
+                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-muted-foreground"
                 />
               ) : (
                 <select
                   value={providerId}
                   onChange={(e) => handleProviderChange(e.target.value)}
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm"
                 >
                   {providers.map((p) => (
                     <option key={p.id} value={p.id} disabled={!p.online}>
@@ -372,20 +372,20 @@ export default function Secrets() {
               )}
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-700">Secret Type</label>
+              <label className="mb-1 block text-xs font-medium text-secondary">Secret Type</label>
               {mode === 'edit' ? (
                 <input
                   type="text"
                   value={formType?.label ?? editing?.type ?? ''}
                   disabled
                   title="The secret type cannot be changed — create a new secret instead"
-                  className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500"
+                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-muted-foreground"
                 />
               ) : (
                 <select
                   value={type}
                   onChange={(e) => handleTypeChange(e.target.value)}
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm"
                 >
                   {(activeProvider?.secretTypes ?? []).map((t) => (
                     <option key={t.type} value={t.type}>
@@ -396,33 +396,33 @@ export default function Secrets() {
               )}
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-700">Label</label>
+              <label className="mb-1 block text-xs font-medium text-secondary">Label</label>
               <input
                 type="text"
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                className="w-full rounded-md border border-border px-3 py-2 text-sm"
                 placeholder="e.g. OPNsense Core"
                 required
               />
             </div>
 
             {mode === 'edit' && !formType && (
-              <p className="col-span-full rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              <p className="col-span-full rounded-md border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
                 The owning provider is not reachable right now, so the field values can't be loaded. Label and
                 expiration can still be edited; try again once the provider is back online.
               </p>
             )}
             {(formType?.fields ?? []).map((f) => (
               <div key={f.name} className={f.input === 'textarea' ? 'col-span-full' : undefined}>
-                <label className="mb-1 block text-xs font-medium text-slate-700">
+                <label className="mb-1 block text-xs font-medium text-secondary">
                   {f.label} {f.required ? '*' : ''}
                 </label>
                 {f.input === 'select' ? (
                   <select
                     value={fields[f.name] ?? ''}
                     onChange={(e) => handleFieldChange(f.name, e.target.value)}
-                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                    className="w-full rounded-md border border-border px-3 py-2 text-sm"
                   >
                     <option value="">Select...</option>
                     {(f.options ?? []).map((opt) => (
@@ -440,7 +440,7 @@ export default function Secrets() {
                     spellCheck={false}
                     value={fields[f.name] ?? ''}
                     onChange={(e) => handleFieldChange(f.name, e.target.value)}
-                    className="w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-xs"
+                    className="w-full rounded-md border border-border px-3 py-2 font-mono text-xs"
                     required={f.required}
                   />
                 ) : (
@@ -448,7 +448,7 @@ export default function Secrets() {
                     type={f.input === 'password' ? 'password' : 'text'}
                     value={fields[f.name] ?? ''}
                     onChange={(e) => handleFieldChange(f.name, e.target.value)}
-                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                    className="w-full rounded-md border border-border px-3 py-2 text-sm"
                     required={f.required}
                   />
                 )}
@@ -456,12 +456,12 @@ export default function Secrets() {
             ))}
 
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-700">Expiration Date</label>
+              <label className="mb-1 block text-xs font-medium text-secondary">Expiration Date</label>
               <input
                 type="datetime-local"
                 value={expiresAt}
                 onChange={(e) => setExpiresAt(e.target.value)}
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                className="w-full rounded-md border border-border px-3 py-2 text-sm"
               />
             </div>
             <div className="col-span-full flex items-center justify-end gap-2">
@@ -470,7 +470,7 @@ export default function Secrets() {
                   type="submit"
                   disabled={savingEdit}
                   title="Saves in place — the secret keeps its ID, so bound assignments keep working"
-                  className="flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Save className="h-4 w-4" />
                   {savingEdit ? 'Saving…' : 'Save Changes'}
@@ -480,7 +480,7 @@ export default function Secrets() {
                   <button
                     type="submit"
                     title="Enter the key material yourself instead of generating it"
-                    className="flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                    className="flex items-center gap-1.5 rounded-md border border-border bg-card px-4 py-2 text-sm font-medium text-secondary hover:bg-background"
                   >
                     <Save className="h-4 w-4" />
                     Save Manually
@@ -490,7 +490,7 @@ export default function Secrets() {
                     onClick={handleGenerate}
                     disabled={generating || !label.trim()}
                     title="The provider creates the key material for you — no manual entry needed. Context fields (e.g. username) are kept."
-                    className="flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Wand2 className="h-4 w-4" />
                     {generating ? 'Generating…' : 'Generate Key Material'}
@@ -499,7 +499,7 @@ export default function Secrets() {
               ) : (
                 <button
                   type="submit"
-                  className="flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                  className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover"
                 >
                   <Save className="h-4 w-4" />
                   Save Secret
@@ -511,22 +511,22 @@ export default function Secrets() {
       )}
 
       {generatedInfo && (
-        <div className="mb-4 rounded-md border border-emerald-200 bg-emerald-50 p-3">
+        <div className="mb-4 rounded-md border border-success-border bg-success p-3">
           <div className="flex items-start justify-between gap-3">
             <p className="text-sm font-medium text-emerald-900">
               Secret “{generatedInfo.label}” created — the provider generated this public material. Copy it to the device
-              (e.g. append to <code className="rounded bg-emerald-100 px-1">~/.ssh/authorized_keys</code>).
+              (e.g. append to <code className="rounded bg-success px-1">~/.ssh/authorized_keys</code>).
             </p>
-            <button aria-label="Dismiss" title="Dismiss" onClick={() => setGeneratedInfo(null)} className="rounded p-1 text-emerald-700 hover:bg-emerald-100">
+            <button aria-label="Dismiss" title="Dismiss" onClick={() => setGeneratedInfo(null)} className="rounded p-1 text-success-fg hover:bg-success">
               <X className="h-4 w-4" />
             </button>
           </div>
           {Object.entries(generatedInfo.fields).map(([name, value]) => (
             <div key={name} className="mt-2 flex items-center gap-2">
-              <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded bg-white px-2 py-1.5 font-mono text-xs text-slate-800">{value}</code>
+              <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded bg-card px-2 py-1.5 font-mono text-xs text-foreground">{value}</code>
               <button
                 onClick={() => copyText(value)}
-                className="shrink-0 rounded-md border border-emerald-300 bg-white px-2.5 py-1.5 text-xs font-medium text-emerald-800 hover:bg-emerald-100"
+                className="shrink-0 rounded-md border border-success-border bg-card px-2.5 py-1.5 text-xs font-medium text-success-fg hover:bg-success"
               >
                 Copy
               </button>
@@ -535,8 +535,8 @@ export default function Secrets() {
         </div>
       )}
 
-      {loading && <div className="text-center text-slate-500">Loading secrets...</div>}
-      {error && <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{error}</div>}
+      {loading && <div className="text-center text-muted-foreground">Loading secrets...</div>}
+      {error && <div className="mb-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{error}</div>}
       
       {!loading && !error && (
         <DataTable
@@ -564,7 +564,7 @@ export default function Secrets() {
                         aria-label={`Edit secret ${s.label ?? s.id}`}
                         title="Edit secret fields"
                         onClick={() => openEdit(s)}
-                        className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                        className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
                       >
                         <Pencil className="h-4 w-4" />
                       </button>
@@ -574,7 +574,7 @@ export default function Secrets() {
                         aria-label={`Regenerate key material for ${s.label ?? s.id}`}
                         title="Re-generate key material (same ID — bound assignments keep working)"
                         onClick={() => handleRegenerate(s)}
-                        className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                        className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
                       >
                         <RefreshCw className="h-4 w-4" />
                       </button>
@@ -584,7 +584,7 @@ export default function Secrets() {
                         aria-label={`Delete secret ${s.label ?? s.id}`}
                         title="Delete secret"
                         onClick={() => handleDelete(s.id)}
-                        className="rounded-md p-1.5 text-red-600 hover:bg-red-50 hover:text-red-800"
+                        className="rounded-md p-1.5 text-danger-fg hover:bg-danger hover:text-danger-fg"
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>

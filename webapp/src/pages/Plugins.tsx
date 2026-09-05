@@ -79,7 +79,7 @@ function PluginMetricsRow({ plugin }: { plugin: Plugin }) {
 
   if (!latest) {
     return (
-      <span className="text-slate-400">
+      <span className="text-faint">
         {query.isLoading ? 'Loading self-metrics…' : 'No self-metrics yet — plugin offline or predates the /metrics endpoint.'}
       </span>
     );
@@ -87,8 +87,8 @@ function PluginMetricsRow({ plugin }: { plugin: Plugin }) {
 
   const stat = (label: string, value: string, spark?: number[]): ReactNode => (
     <span className="inline-flex items-center gap-1.5">
-      <span className="text-slate-400">{label}</span>
-      <span className="font-mono font-medium text-slate-800">{value}</span>
+      <span className="text-faint">{label}</span>
+      <span className="font-mono font-medium text-foreground">{value}</span>
       {spark && spark.length > 1 && <Sparkline values={spark} width={72} height={16} />}
     </span>
   );
@@ -133,9 +133,9 @@ export default function Plugins() {
       sortAccessor: (row) => row.declaredMetricCount ?? null,
       render: (row) =>
         row.declaredMetricCount !== null && row.declaredMetricCount !== undefined ? (
-          <span className="text-slate-600">{row.declaredMetricCount} declared</span>
+          <span className="text-secondary">{row.declaredMetricCount} declared</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         ),
     },
     { header: 'Endpoint', key: 'endpoint', width: 240, render: (row) => <span className="font-mono text-xs">{row.endpoint}</span> },
@@ -150,7 +150,7 @@ export default function Plugins() {
             online
           </span>
         ) : (
-          <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">
+          <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-secondary">
             offline
           </span>
         ),
@@ -167,7 +167,7 @@ export default function Plugins() {
             type="button"
             aria-label={`Configure ${row.name}`}
             title="Configure plugin settings"
-            className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+            className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
             onClick={() => setConfigureId(row.id)}
           >
             <Settings className="h-4 w-4" />
@@ -183,9 +183,9 @@ export default function Plugins() {
   return (
     <Layout title="Plugins">
 
-      {pluginsQuery.isLoading && <p className="text-sm text-slate-500">Loading plugins...</p>}
+      {pluginsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading plugins...</p>}
       {pluginsQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load plugins: {(pluginsQuery.error as Error).message}</p>
+        <p className="text-sm text-danger-fg">Failed to load plugins: {(pluginsQuery.error as Error).message}</p>
       )}
       {pluginsQuery.data && (
         <DataTable
@@ -201,21 +201,21 @@ export default function Plugins() {
 
       {/* Plugin settings modal — generic form rendered from the plugin's option descriptors. */}
       {configurePlugin && (
-        <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-4 sm:items-center" onClick={() => setConfigureId(null)}>
+        <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-primary/40 p-4 sm:items-center" onClick={() => setConfigureId(null)}>
           <div
-            className="w-full max-w-lg rounded-md border border-slate-200 bg-white shadow-xl"
+            className="w-full max-w-lg rounded-md border border-border bg-card shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h2 className="text-base font-semibold text-slate-900">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <h2 className="text-base font-semibold text-foreground">
                 Settings — {configurePlugin.name}
-                <span className="ml-2 text-xs font-normal text-slate-400">{configurePlugin.version}</span>
+                <span className="ml-2 text-xs font-normal text-faint">{configurePlugin.version}</span>
               </h2>
               <button
                 type="button"
                 aria-label="Close settings"
                 onClick={() => setConfigureId(null)}
-                className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                className="rounded p-1 text-faint hover:bg-muted hover:text-secondary"
               >
                 <X className="h-4 w-4" />
               </button>

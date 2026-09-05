@@ -200,13 +200,13 @@ export default function Users() {
         row.roles.length > 0 ? (
           <div className="flex flex-wrap gap-1">
             {row.roles.map((r) => (
-              <span key={r} className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${r === 'admin' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'}`}>
+              <span key={r} className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${r === 'admin' ? 'bg-primary text-white' : 'bg-muted text-secondary'}`}>
                 {r}
               </span>
             ))}
           </div>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         ),
     },
     { header: 'Permissions', key: 'permissions', render: (row) => `${row.permissions.length} granted` },
@@ -218,7 +218,7 @@ export default function Users() {
         row.twoFactorEnabled ? (
           <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">enabled</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         ),
     },
     ...(canWrite || canCreate || selfUsername
@@ -236,7 +236,7 @@ export default function Users() {
                     type="button"
                     aria-label={`Edit ${row.username}`}
                     title="Edit roles & permissions"
-                    className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                    className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
                     onClick={() => openEdit(row)}
                   >
                     <Pencil className="h-4 w-4" />
@@ -247,7 +247,7 @@ export default function Users() {
                     type="button"
                     aria-label={`Credentials for ${row.username}`}
                     title={selfUsername === row.username ? 'Change own password / 2FA' : 'Reset password / manage 2FA'}
-                    className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                    className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
                     onClick={() => openCreds(row)}
                   >
                     <KeyRound className="h-4 w-4" />
@@ -259,7 +259,7 @@ export default function Users() {
                     type="button"
                     aria-label={`Delete ${row.username}`}
                     title="Delete user"
-                    className="rounded-md p-1.5 text-slate-600 hover:bg-red-50 hover:text-red-700"
+                    className="rounded-md p-1.5 text-secondary hover:bg-danger hover:text-danger-fg"
                     onClick={() => handleDelete(row)}
                   >
                     <Trash2 className="h-4 w-4" />
@@ -280,7 +280,7 @@ export default function Users() {
           <button
             type="button"
             onClick={() => setShowCreate(true)}
-            className="inline-flex items-center gap-2 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
           >
             <Plus className="h-4 w-4" /> New user
           </button>
@@ -289,15 +289,15 @@ export default function Users() {
     >
 
       {formError && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{formError}</div>
+        <div className="mb-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{formError}</div>
       )}
 
       {/* Inline create panel */}
       {showCreate && canCreate && catalog && (
-        <div className="mb-4 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-4 rounded-md border border-border bg-card p-4 shadow-sm">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-slate-900">New user</h2>
-            <button type="button" aria-label="Close form" onClick={resetCreateForm} className="rounded p-1 text-slate-400 hover:bg-slate-100">
+            <h2 className="text-base font-semibold text-foreground">New user</h2>
+            <button type="button" aria-label="Close form" onClick={resetCreateForm} className="rounded p-1 text-faint hover:bg-muted">
               <X className="h-4 w-4" />
             </button>
           </div>
@@ -310,19 +310,19 @@ export default function Users() {
             className="grid grid-cols-1 gap-4 sm:grid-cols-2"
           >
             <div>
-              <label className="mb-1 block text-sm font-medium text-slate-700">Username *</label>
+              <label className="mb-1 block text-sm font-medium text-secondary">Username *</label>
               <input
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
                 value={createUsername}
                 onChange={(e) => setCreateUsername(e.target.value)}
                 required
               />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-slate-700">Initial password * (min 8 chars)</label>
+              <label className="mb-1 block text-sm font-medium text-secondary">Initial password * (min 8 chars)</label>
               <input
                 type="password"
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
                 value={createPassword}
                 onChange={(e) => setCreatePassword(e.target.value)}
                 required
@@ -330,9 +330,9 @@ export default function Users() {
             </div>
 
             <fieldset>
-              <legend className="mb-2 text-sm font-medium text-slate-700">Roles</legend>
+              <legend className="mb-2 text-sm font-medium text-secondary">Roles</legend>
               {catalog.roles.map((role) => (
-                <label key={role.name} title={role.description ?? undefined} className="flex items-center gap-2 py-1 text-sm text-slate-700">
+                <label key={role.name} title={role.description ?? undefined} className="flex items-center gap-2 py-1 text-sm text-secondary">
                   <input type="checkbox" checked={createRoles.includes(role.name)} onChange={() => toggleInList(createRoles, role.name, setCreateRoles)} />
                   {role.name}
                 </label>
@@ -340,14 +340,14 @@ export default function Users() {
             </fieldset>
 
             <fieldset>
-              <legend className="mb-2 text-sm font-medium text-slate-700">Permissions</legend>
+              <legend className="mb-2 text-sm font-medium text-secondary">Permissions</legend>
               <div className="max-h-64 space-y-1 overflow-y-auto pr-1">
                 {catalog.permissions.map((p) => (
-                  <label key={p.id} title={p.description} className="flex items-start gap-2 py-1 text-sm text-slate-700">
+                  <label key={p.id} title={p.description} className="flex items-start gap-2 py-1 text-sm text-secondary">
                     <input type="checkbox" className="mt-0.5" checked={createPermissions.includes(p.id)} onChange={() => toggleInList(createPermissions, p.id, setCreatePermissions)} />
                     <span>
                       {p.id}
-                      <span className="block text-xs font-normal text-slate-400">{p.description}</span>
+                      <span className="block text-xs font-normal text-faint">{p.description}</span>
                     </span>
                   </label>
                 ))}
@@ -358,11 +358,11 @@ export default function Users() {
               <button
                 type="submit"
                 disabled={createUser.isPending}
-                className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+                className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
               >
                 Create user
               </button>
-              <button type="button" onClick={resetCreateForm} className="rounded-md px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">
+              <button type="button" onClick={resetCreateForm} className="rounded-md px-4 py-2 text-sm font-medium text-secondary hover:bg-muted">
                 Cancel
               </button>
             </div>
@@ -372,10 +372,10 @@ export default function Users() {
 
       {/* Inline credentials panel (password reset + 2FA) */}
       {credsUser && canManageCredsOf(credsUser) && (
-        <div className="mb-4 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-4 rounded-md border border-border bg-card p-4 shadow-sm">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-slate-900">Credentials — {credsUser.username}</h2>
-            <button type="button" aria-label="Close panel" onClick={closeCreds} className="rounded p-1 text-slate-400 hover:bg-slate-100">
+            <h2 className="text-base font-semibold text-foreground">Credentials — {credsUser.username}</h2>
+            <button type="button" aria-label="Close panel" onClick={closeCreds} className="rounded p-1 text-faint hover:bg-muted">
               <X className="h-4 w-4" />
             </button>
           </div>
@@ -394,13 +394,13 @@ export default function Users() {
               }}
               className="space-y-3"
             >
-              <h3 className="text-sm font-semibold text-slate-700">Reset password</h3>
+              <h3 className="text-sm font-semibold text-secondary">Reset password</h3>
               {selfUsername === credsUser.username && (
                 <div>
-                  <label className="mb-1 block text-sm font-medium text-slate-700">Current password *</label>
+                  <label className="mb-1 block text-sm font-medium text-secondary">Current password *</label>
                   <input
                     type="password"
-                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                    className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
                     value={currentPassword}
                     onChange={(e) => setCurrentPassword(e.target.value)}
                     required
@@ -408,10 +408,10 @@ export default function Users() {
                 </div>
               )}
               <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700">New password * (min 8 chars)</label>
+                <label className="mb-1 block text-sm font-medium text-secondary">New password * (min 8 chars)</label>
                 <input
                   type="password"
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   required
@@ -420,7 +420,7 @@ export default function Users() {
               <button
                 type="submit"
                 disabled={resetPassword.isPending}
-                className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+                className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
               >
                 {selfUsername === credsUser.username ? 'Change my password' : 'Reset password'}
               </button>
@@ -428,7 +428,7 @@ export default function Users() {
 
             {/* 2FA management */}
             <div className="space-y-3">
-              <h3 className="text-sm font-semibold text-slate-700">Two-factor authentication</h3>
+              <h3 className="text-sm font-semibold text-secondary">Two-factor authentication</h3>
               {credsUser.twoFactorEnabled ? (
                 <>
                   <p className="flex items-center gap-2 text-sm text-green-700">
@@ -439,7 +439,7 @@ export default function Users() {
                       type="button"
                       disabled={enrollTotp.isPending}
                       onClick={() => enrollTotp.mutate()}
-                      className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                      className="rounded-md border border-border px-4 py-2 text-sm font-medium text-secondary hover:bg-muted disabled:opacity-50"
                     >
                       Re-enroll (new QR code)
                     </button>
@@ -450,7 +450,7 @@ export default function Users() {
                         if (!window.confirm(`Disable 2FA for "${credsUser.username}"?`)) return;
                         disableTotp.mutate();
                       }}
-                      className="inline-flex items-center gap-1.5 rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                      className="inline-flex items-center gap-1.5 rounded-md border border-danger-border px-4 py-2 text-sm font-medium text-danger-fg hover:bg-danger disabled:opacity-50"
                     >
                       <ShieldOff className="h-4 w-4" /> Disable 2FA
                     </button>
@@ -458,12 +458,12 @@ export default function Users() {
                 </>
               ) : (
                 <>
-                  <p className="text-sm text-slate-500">No TOTP secret is enrolled for this user.</p>
+                  <p className="text-sm text-muted-foreground">No TOTP secret is enrolled for this user.</p>
                   <button
                     type="button"
                     disabled={enrollTotp.isPending}
                     onClick={() => enrollTotp.mutate()}
-                    className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+                    className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
                   >
                     Enroll 2FA (show QR code)
                   </button>
@@ -473,9 +473,9 @@ export default function Users() {
           </div>
 
           {/* Passkeys — admin can add/remove any user's passkeys */}
-          <div className="mt-6 border-t border-slate-100 pt-4">
-            <h3 className="mb-2 text-sm font-semibold text-slate-700">Passkeys</h3>
-            <p className="mb-3 text-xs text-slate-400">
+          <div className="mt-6 border-t border-border pt-4">
+            <h3 className="mb-2 text-sm font-semibold text-secondary">Passkeys</h3>
+            <p className="mb-3 text-xs text-faint">
               This user can sign in with any enrolled passkey. Removing one revokes that device immediately.
             </p>
             <PasskeyManager userId={credsUser.id} username={credsUser.username} />
@@ -483,15 +483,15 @@ export default function Users() {
 
           {/* Per-user credential policy override */}
           {canEditPolicies && (
-            <div className="mt-6 border-t border-slate-100 pt-4">
-              <h3 className="mb-2 text-sm font-semibold text-slate-700">Credential policy</h3>
+            <div className="mt-6 border-t border-border pt-4">
+              <h3 className="mb-2 text-sm font-semibold text-secondary">Credential policy</h3>
               {userPolicyQuery.isLoading ? (
-                <p className="text-sm text-slate-400">Loading policy…</p>
+                <p className="text-sm text-faint">Loading policy…</p>
               ) : userPolicyQuery.data ? (
                 <div className="space-y-3">
-                  <p className="text-xs text-slate-500">
+                  <p className="text-xs text-muted-foreground">
                     Effective source:{' '}
-                    <span className="font-medium text-slate-700">{userPolicyQuery.data.source}</span>
+                    <span className="font-medium text-secondary">{userPolicyQuery.data.source}</span>
                     {userPolicyQuery.data.source === 'global' && ' (no per-user override yet — saving creates one)'}
                   </p>
                   <PolicyEditor
@@ -506,14 +506,14 @@ export default function Users() {
                         if (!window.confirm(`Clear the per-user policy override for "${credsUser.username}"? The global default applies again.`)) return;
                         clearUserPolicy.mutate();
                       }}
-                      className="ml-2 rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+                      className="ml-2 rounded-md border border-border px-4 py-2 text-sm font-medium text-secondary hover:bg-muted disabled:opacity-50"
                     >
                       Use global default
                     </button>
                   )}
                 </div>
               ) : (
-                <p className="text-sm text-red-600">Failed to load policy: {(userPolicyQuery.error as Error).message}</p>
+                <p className="text-sm text-danger-fg">Failed to load policy: {(userPolicyQuery.error as Error).message}</p>
               )}
             </div>
           )}
@@ -522,10 +522,10 @@ export default function Users() {
 
       {/* Inline edit panel */}
       {editingUser && canWrite && (
-        <div className="mb-4 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-4 rounded-md border border-border bg-card p-4 shadow-sm">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-slate-900">Edit — {editingUser.username}</h2>
-            <button type="button" aria-label="Close form" onClick={resetEditForm} className="rounded p-1 text-slate-400 hover:bg-slate-100">
+            <h2 className="text-base font-semibold text-foreground">Edit — {editingUser.username}</h2>
+            <button type="button" aria-label="Close form" onClick={resetEditForm} className="rounded p-1 text-faint hover:bg-muted">
               <X className="h-4 w-4" />
             </button>
           </div>
@@ -540,9 +540,9 @@ export default function Users() {
             >
               {/* Roles — the initial admin can never lose its admin role. */}
               <fieldset>
-                <legend className="mb-2 text-sm font-medium text-slate-700">Roles</legend>
+                <legend className="mb-2 text-sm font-medium text-secondary">Roles</legend>
                 {catalog.roles.map((role) => (
-                  <label key={role.name} title={role.description ?? undefined} className="flex items-center gap-2 py-1 text-sm text-slate-700">
+                  <label key={role.name} title={role.description ?? undefined} className="flex items-center gap-2 py-1 text-sm text-secondary">
                     <input
                       type="checkbox"
                       checked={draftRoles.includes(role.name)}
@@ -556,14 +556,14 @@ export default function Users() {
 
               {/* Permissions */}
               <fieldset>
-                <legend className="mb-2 text-sm font-medium text-slate-700">Permissions</legend>
+                <legend className="mb-2 text-sm font-medium text-secondary">Permissions</legend>
                 <div className="max-h-64 space-y-1 overflow-y-auto pr-1">
                   {catalog.permissions.map((p) => (
-                    <label key={p.id} title={p.description} className="flex items-start gap-2 py-1 text-sm text-slate-700">
+                    <label key={p.id} title={p.description} className="flex items-start gap-2 py-1 text-sm text-secondary">
                       <input type="checkbox" className="mt-0.5" checked={draftPermissions.includes(p.id)} onChange={() => toggleInList(draftPermissions, p.id, setDraftPermissions)} />
                       <span>
                         {p.id}
-                        <span className="block text-xs font-normal text-slate-400">{p.description}</span>
+                        <span className="block text-xs font-normal text-faint">{p.description}</span>
                       </span>
                     </label>
                   ))}
@@ -574,11 +574,11 @@ export default function Users() {
                 <button
                   type="submit"
                   disabled={updateUser.isPending}
-                  className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+                  className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
                 >
                   Save changes
                 </button>
-                <button type="button" onClick={resetEditForm} className="rounded-md px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">
+                <button type="button" onClick={resetEditForm} className="rounded-md px-4 py-2 text-sm font-medium text-secondary hover:bg-muted">
                   Cancel
                 </button>
               </div>
@@ -587,9 +587,9 @@ export default function Users() {
         </div>
       )}
 
-      {usersQuery.isLoading && <p className="text-sm text-slate-500">Loading users...</p>}
+      {usersQuery.isLoading && <p className="text-sm text-muted-foreground">Loading users...</p>}
       {usersQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load users: {(usersQuery.error as Error).message}</p>
+        <p className="text-sm text-danger-fg">Failed to load users: {(usersQuery.error as Error).message}</p>
       )}
       {usersQuery.data && (
         <DataTable columns={columns} rows={usersQuery.data} rowKey={(row) => row.id} storageKey="users" emptyMessage="No users." />

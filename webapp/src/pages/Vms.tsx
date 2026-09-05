@@ -11,15 +11,15 @@ import { api, VmDevice, VmNic, VmRow } from '../api/client';
 /** VM runtime state → badge style (TrueNAS/libvirt states are uppercase; other
  * hypervisor plugins may emit their own native states — unknown ones fall back). */
 const STATE_STYLES: Record<string, string> = {
-  RUNNING: 'bg-emerald-100 text-emerald-800 border-emerald-300',
-  STOPPED: 'bg-slate-200 text-slate-600 border-slate-300',
-  SUSPENDED: 'bg-amber-100 text-amber-800 border-amber-300',
+  RUNNING: 'bg-success text-success-fg border-success-border',
+  STOPPED: 'bg-muted text-secondary border-border',
+  SUSPENDED: 'bg-warning text-warning-fg border-warning-border',
   PAUSED: 'bg-sky-100 text-sky-800 border-sky-300',
-  ERROR: 'bg-red-100 text-red-800 border-red-300',
+  ERROR: 'bg-danger text-danger-fg border-danger-border',
 };
 
 function StateBadge({ state }: { state: string }) {
-  const style = STATE_STYLES[state] ?? 'bg-amber-100 text-amber-800 border-amber-300';
+  const style = STATE_STYLES[state] ?? 'bg-warning text-warning-fg border-warning-border';
   return (
     <span className={clsx('inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium', style)}>
       {state.toLowerCase()}
@@ -31,13 +31,13 @@ function StateBadge({ state }: { state: string }) {
  * or no stamp → "—". The value is UNM-tracked from state transitions (a lower
  * bound that resets after restarts). */
 function UptimeCell({ row }: { row: VmRow }) {
-  if (row.state !== 'RUNNING' || !row.startedAt) return <span className="text-slate-400">—</span>;
+  if (row.state !== 'RUNNING' || !row.startedAt) return <span className="text-faint">—</span>;
   const since = new Date(row.startedAt).getTime();
-  if (Number.isNaN(since)) return <span className="text-slate-400">—</span>;
+  if (Number.isNaN(since)) return <span className="text-faint">—</span>;
   const secs = Math.max(0, (Date.now() - since) / 1000);
   return (
     <span
-      className="font-mono text-xs text-slate-700"
+      className="font-mono text-xs text-secondary"
       title={`Running since ${new Date(row.startedAt).toLocaleString()}`}
     >
       {formatDuration(secs)}
@@ -98,14 +98,14 @@ function buildVm(row: VmRow): { vm: VmNode; devices: VmNode[] } {
  * 1 DISPLAY"); the full detail lives in the expandable child rows. */
 function DevicesCell({ row }: { row: VmRow }) {
   const devices = devicesOf(row);
-  if (devices.length === 0) return <span className="text-slate-400">—</span>;
+  if (devices.length === 0) return <span className="text-faint">—</span>;
   // Group by dtype, preserving first-seen order.
   const counts = new Map<string, number>();
   for (const d of devices) counts.set(d.dtype.toUpperCase(), (counts.get(d.dtype.toUpperCase()) ?? 0) + 1);
   return (
     <div className="flex flex-wrap items-center gap-1" title={`${devices.length} device(s) — expand for detail`}>
       {[...counts.entries()].map(([t, n]) => (
-        <span key={t} className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[11px] leading-4 text-slate-600">
+        <span key={t} className="rounded border border-border bg-background px-1.5 py-0.5 text-[11px] leading-4 text-secondary">
           {n > 1 ? `${n}× ` : ''}{t}
         </span>
       ))}
@@ -123,13 +123,13 @@ function nodeCell(key: string, node: VmNode, depth: number): ReactNode {
       // Device leaf — the label (MAC / disk path / display…) lives in the name
       // column, indented under its VM. MACs and paths read best monospaced.
       return (
-        <span className="block truncate font-mono text-xs text-slate-600" style={{ paddingLeft: 18 + depth * 14 }} title={node.label ?? node.dtype}>
+        <span className="block truncate font-mono text-xs text-secondary" style={{ paddingLeft: 18 + depth * 14 }} title={node.label ?? node.dtype}>
           {node.label ?? '—'}
         </span>
       );
     case 'devices': {
-      if (!node.detail) return <span className="text-slate-400">—</span>;
-      return <span className="font-mono text-[11px] text-slate-500">{node.detail}</span>;
+      if (!node.detail) return <span className="text-faint">—</span>;
+      return <span className="font-mono text-[11px] text-muted-foreground">{node.detail}</span>;
     }
     default:
       return null;
@@ -146,7 +146,7 @@ function ChildRow({ node, ctx }: { node: VmNode; ctx: ExpandChildContext }) {
         <span className="inline-block h-6 w-6" />
       </td>
       {ctx.columns.map((col) => (
-        <td key={col.key} className="overflow-hidden px-4 py-2 text-slate-700">
+        <td key={col.key} className="overflow-hidden px-4 py-2 text-secondary">
           {nodeCell(col.key, node, ctx.depth)}
         </td>
       ))}
@@ -188,9 +188,9 @@ export default function Vms() {
         const desc = extraOf(node.row)['description'];
         return (
           <div className="flex flex-col gap-0.5">
-            <span className="font-medium text-slate-800">{node.row.name}</span>
+            <span className="font-medium text-foreground">{node.row.name}</span>
             {typeof desc === 'string' && desc !== '' && (
-              <span className="truncate text-[11px] text-slate-400" title={desc}>{desc}</span>
+              <span className="truncate text-[11px] text-faint" title={desc}>{desc}</span>
             )}
           </div>
         );
@@ -224,7 +224,7 @@ export default function Vms() {
         node.row && node.row.vcpus !== null && node.row.vcpus !== undefined ? (
           <span className="font-mono text-xs">{node.row.vcpus}</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         ),
     },
     {
@@ -237,7 +237,7 @@ export default function Vms() {
         node.row && node.row.memoryMiB !== null && node.row.memoryMiB !== undefined ? (
           <span className="font-mono text-xs">{formatBytes((node.row.memoryMiB as number) * 1048576)}</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         ),
     },
     {
@@ -260,7 +260,7 @@ export default function Vms() {
       key: 'collectedAt',
       width: 170,
       sortAccessor: (node) => new Date(node.row?.collectedAt ?? '').getTime(),
-      render: (node) => (node.row ? <span className="text-xs text-slate-600">{new Date(node.row.collectedAt).toLocaleString()}</span> : null),
+      render: (node) => (node.row ? <span className="text-xs text-secondary">{new Date(node.row.collectedAt).toLocaleString()}</span> : null),
     },
   ];
 
@@ -272,28 +272,28 @@ export default function Vms() {
   return (
     <Layout title="VMs">
       <div className="flex h-full min-h-0 flex-col">
-        {vmsQuery.isLoading && <p className="shrink-0 text-sm text-slate-500">Loading VMs...</p>}
+        {vmsQuery.isLoading && <p className="shrink-0 text-sm text-muted-foreground">Loading VMs...</p>}
         {vmsQuery.isError && (
-          <p className="shrink-0 text-sm text-red-600">Failed to load VMs: {(vmsQuery.error as Error).message}</p>
+          <p className="shrink-0 text-sm text-danger-fg">Failed to load VMs: {(vmsQuery.error as Error).message}</p>
         )}
 
         {/* Summary strip — VM counts + allocated resources. */}
         {!vmsQuery.isLoading && !vmsQuery.isError && (
-          <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs">
-            <span className="flex items-center gap-2 text-slate-600">
+          <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-border bg-card px-4 py-2 text-xs">
+            <span className="flex items-center gap-2 text-secondary">
               <Monitor size={13} className="text-indigo-500" />
               {tree.roots.length} VM{tree.roots.length === 1 ? '' : 's'} · {running} running
             </span>
             {totalVcpus > 0 && (
-              <span className="flex items-center gap-2 text-slate-600">
-                <Monitor size={13} className="text-slate-500" />
+              <span className="flex items-center gap-2 text-secondary">
+                <Monitor size={13} className="text-muted-foreground" />
                 {totalVcpus} vCPU{totalVcpus === 1 ? '' : 's'} allocated
               </span>
             )}
             {totalMemMiB > 0 && (
-              <span className="flex items-center gap-2 text-slate-600">
-                <Monitor size={13} className="text-slate-500" />
-                <span className="font-mono text-slate-700">{formatBytes(totalMemMiB * 1048576)} memory allocated</span>
+              <span className="flex items-center gap-2 text-secondary">
+                <Monitor size={13} className="text-muted-foreground" />
+                <span className="font-mono text-secondary">{formatBytes(totalMemMiB * 1048576)} memory allocated</span>
               </span>
             )}
           </div>

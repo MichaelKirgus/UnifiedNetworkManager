@@ -1,3 +1,120 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+ * Design tokens — single source of truth for the app palette.
+ *
+ * Values are raw RGB triples so Tailwind can compose alpha:
+ *   rgb(var(--card) / 0.5)  →  bg-card/50
+ *
+ * Light values live on :root, dark overrides under .dark (the class is toggled
+ * on <html> by src/theme/useTheme.ts; index.html applies it pre-paint to avoid
+ * a flash). To add another theme in the future, define its variables in an
+ * additional selector block — no component changes needed.
+ * ------------------------------------------------------------------------- */
+
+:root {
+  color-scheme: light;
+
+  --background: 248 250 252; /* slate-50   page background            */
+  --foreground: 15 23 42;    /* slate-900  primary text               */
+  --card: 255 255 255;       /* white      cards, headers, modals     */
+  --muted: 241 245 249;      /* slate-100  subtle fills, hovers, rows */
+  --border: 226 232 240;     /* slate-200  borders & dividers         */
+  --secondary: 71 85 105;    /* slate-600  body / secondary text      */
+  --faint: 148 163 184;      /* slate-400  hints, placeholders        */
+
+  --primary: 15 23 42;       /* slate-900  primary button bg          */
+  --primary-hover: 30 41 59; /* slate-800                              */
+
+  --success: 209 250 229;    /* emerald-100 badge fill   */
+  --success-fg: 6 95 70;     /* emerald-800 badge text   */
+  --success-border: 110 231 183; /* emerald-300          */
+
+  --warning: 254 243 199;    /* amber-100                */
+  --warning-fg: 146 64 14;   /* amber-800                */
+  --warning-border: 252 211 77; /* amber-300             */
+
+  --danger: 254 226 226;     /* red-100                  */
+  --danger-fg: 153 27 27;    /* red-800                  */
+  --danger-border: 252 165 165; /* red-300               */
+
+  --info: 219 234 254;       /* blue-100                 */
+  --info-fg: 30 64 175;      /* blue-800                 */
+  --info-border: 147 197 253; /* blue-300                */
+}
+
+/* Dark styles — `.dark` enables dark mode; the paired style class selects the
+ * palette. Black (VS Code-like, the default) and Slate (the original). The
+ * pre-paint script in index.html applies both classes before first paint. */
+
+.dark {
+  color-scheme: dark;
+}
+
+/* Black — VS Code Dark+ inspired: near-black canvas, slightly lighter panels,
+ * blue primary buttons, translucent semantic badge fills. */
+.theme-black {
+  --background: 24 24 24;      /* #181818 page background        */
+  --foreground: 204 204 204;   /* #cccccc primary text           */
+  --card: 37 37 38;            /* #252526 panels, headers, modals */
+  --muted: 60 60 60;           /* #3c3c3c subtle fills, hovers    */
+  --border: 69 69 69;          /* #454545 borders & dividers      */
+  --secondary: 157 157 157;    /* #9d9d9d body / secondary text   */
+  --faint: 122 122 122;        /* #7a7a7a hints, placeholders     */
+
+  --primary: 14 99 156;        /* #0e639c VS Code button blue     */
+  --primary-hover: 17 119 187; /* #1177bb                        */
+
+  --success: 25 77 47;         /* rgba(78,154,6,.25) on card      */
+  --success-fg: 137 209 133;   /* #89d185                         */
+  --success-border: 45 108 64; /* rgba(78,154,6,.5)               */
+
+  --warning: 77 63 12;         /* rgba(204,167,0,.2) on card      */
+  --warning-fg: 204 167 0;     /* #cca700                         */
+  --warning-border: 115 93 18; /* rgba(204,167,0,.45)             */
+
+  --danger: 78 28 22;          /* rgba(244,71,58,.25) on card     */
+  --danger-fg: 244 135 113;    /* #f48771                         */
+  --danger-border: 109 46 38;  /* rgba(244,71,58,.5)              */
+
+  --info: 21 45 77;            /* rgba(0,127,212,.2) on card      */
+  --info-fg: 55 148 255;       /* #3794ff                         */
+  --info-border: 36 74 115;    /* rgba(0,127,212,.45)             */
+}
+
+/* Slate — the original dark palette (slate-950 canvas). */
+.theme-slate {
+  --background: 2 6 23;      /* slate-950                */
+  --foreground: 241 245 249; /* slate-100                */
+  --card: 15 23 42;          /* slate-900                */
+  --muted: 30 41 59;         /* slate-800                */
+  --border: 51 65 85;        /* slate-700                */
+  --secondary: 203 213 225;  /* slate-300                */
+  --faint: 100 116 139;      /* slate-500                */
+
+  --primary: 51 65 85;       /* slate-700 (white text stays readable) */
+  --primary-hover: 71 85 105; /* slate-600                          */
+
+  --success: 2 44 34;        /* emerald-950              */
+  --success-fg: 110 231 183; /* emerald-300              */
+  --success-border: 6 78 59; /* emerald-900              */
+
+  --warning: 69 26 3;        /* amber-950                */
+  --warning-fg: 252 211 77;  /* amber-300                */
+  --warning-border: 146 64 14; /* amber-800              */
+
+  --danger: 69 10 10;        /* red-950                  */
+  --danger-fg: 252 165 165;  /* red-300                  */
+  --danger-border: 153 27 27; /* red-800                 */
+
+  --info: 23 37 84;          /* blue-950                 */
+  --info-fg: 147 197 253;    /* blue-300                 */
+  --info-border: 30 64 175;  /* blue-800                 */
+}
+
+body {
+  background-color: rgb(var(--background));
+  color: rgb(var(--foreground));
+}

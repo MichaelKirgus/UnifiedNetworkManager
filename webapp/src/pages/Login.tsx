@@ -160,29 +160,29 @@ export default function Login() {
   // Still resolving the flow.
   if (flow === null) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50">
-        <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-8 text-center shadow-sm">
-          <h1 className="mb-1 text-xl font-bold text-slate-900">UnifiedNetworkManager</h1>
-          <p className="text-sm text-slate-500">Preparing sign-in…</p>
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <div className="w-full max-w-sm rounded-lg border border-border bg-card p-8 text-center shadow-sm">
+          <h1 className="mb-1 text-xl font-bold text-foreground">UnifiedNetworkManager</h1>
+          <p className="text-sm text-muted-foreground">Preparing sign-in…</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-50">
-      <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-8 shadow-sm">
-        <h1 className="mb-1 text-xl font-bold text-slate-900">UnifiedNetworkManager</h1>
-        <p className="mb-6 text-sm text-slate-500">Sign in to manage your network.</p>
+    <div className="flex min-h-screen items-center justify-center bg-background">
+      <div className="w-full max-w-sm rounded-lg border border-border bg-card p-8 shadow-sm">
+        <h1 className="mb-1 text-xl font-bold text-foreground">UnifiedNetworkManager</h1>
+        <p className="mb-6 text-sm text-muted-foreground">Sign in to manage your network.</p>
 
         {flowError && (
-          <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
+          <div className="mb-4 rounded-md border border-warning-border bg-warning px-3 py-2 text-sm text-warning-fg">
             {flowError}
           </div>
         )}
 
         {error && (
-          <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          <div className="mb-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
             {error}
           </div>
         )}
@@ -191,19 +191,19 @@ export default function Login() {
           !challengeToken ? (
             <form className="space-y-4" onSubmit={handleCredentials}>
               <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700">Username</label>
+                <label className="mb-1 block text-sm font-medium text-secondary">Username</label>
                 <input
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   autoComplete="username"
                 />
               </div>
               <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700">Password</label>
+                <label className="mb-1 block text-sm font-medium text-secondary">Password</label>
                 <input
                   type="password"
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   autoComplete="current-password"
@@ -212,7 +212,7 @@ export default function Login() {
               <button
                 type="submit"
                 disabled={loading}
-                className="flex w-full items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                className="flex w-full items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
               >
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
                 {loading ? 'Signing in...' : 'Continue'}
@@ -221,17 +221,17 @@ export default function Login() {
           ) : (
             <form className="space-y-4" onSubmit={handleVerify}>
               <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700">
+                <label className="mb-1 block text-sm font-medium text-secondary">
                   Two-factor authentication code
                 </label>
                 <input
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm tracking-widest focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm tracking-widest focus:border-slate-500 focus:outline-none"
                   value={totpCode}
                   maxLength={6}
                   onChange={(e) => setTotpCode(e.target.value)}
                   placeholder="000000"
                 />
-                <p className="mt-1 text-xs text-slate-400">
+                <p className="mt-1 text-xs text-faint">
                   Enter the 6-digit code from your authenticator app. Accounts without an
                   enrolled TOTP secret can complete sign-in with any 6-digit value (dev mode only).
                 </p>
@@ -239,7 +239,7 @@ export default function Login() {
               <button
                 type="submit"
                 disabled={loading}
-                className="flex w-full items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                className="flex w-full items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
               >
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
                 {loading ? 'Verifying...' : 'Verify & Sign in'}
@@ -247,15 +247,15 @@ export default function Login() {
               {supportsPasskey && (
                 <>
                   <div className="flex items-center gap-3">
-                    <div className="h-px flex-1 bg-slate-200" />
-                    <span className="text-xs uppercase tracking-wide text-slate-400">or</span>
-                    <div className="h-px flex-1 bg-slate-200" />
+                    <div className="h-px flex-1 bg-muted" />
+                    <span className="text-xs uppercase tracking-wide text-faint">or</span>
+                    <div className="h-px flex-1 bg-muted" />
                   </div>
                   <button
                     type="button"
                     onClick={handlePasskeySignin}
                     disabled={loading}
-                    className="flex w-full items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                    className="flex w-full items-center justify-center gap-2 rounded-md border border-border bg-card px-3 py-2 text-sm font-semibold text-secondary hover:bg-background disabled:opacity-50"
                   >
                     {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
                     Sign in with passkey
@@ -264,7 +264,7 @@ export default function Login() {
               )}
               <button
                 type="button"
-                className="flex w-full items-center justify-center gap-1.5 text-sm text-slate-500 hover:underline"
+                className="flex w-full items-center justify-center gap-1.5 text-sm text-muted-foreground hover:underline"
                 onClick={() => setChallengeToken(null)}
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
@@ -275,7 +275,7 @@ export default function Login() {
         ) : (
           // External identity provider (OAuth2 / SAML / LDAP web login).
           <div className="space-y-4">
-            <p className="text-sm text-slate-600">
+            <p className="text-sm text-secondary">
               This deployment uses an external identity provider. You will be redirected to
               complete sign-in.
             </p>
@@ -283,7 +283,7 @@ export default function Login() {
               type="button"
               onClick={handleExternalSignIn}
               disabled={loading}
-              className="flex w-full items-center justify-center gap-2 rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+              className="flex w-full items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
             >
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}
               {loading ? 'Redirecting…' : flowLabel(flow)}

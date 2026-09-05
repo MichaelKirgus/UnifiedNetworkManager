@@ -9,16 +9,16 @@ import { api, HostRow } from '../api/client';
 function SourceBadges({ sources }: { sources: HostRow['sources'] }) {
   const cls = (s: string) =>
     s === 'dhcp'
-      ? 'bg-emerald-100 text-emerald-700'
+      ? 'bg-success text-success-fg'
       : s === 'ndp'
         ? 'bg-purple-100 text-purple-700'
         : s === 'wlan'
-          ? 'bg-amber-100 text-amber-700'
+          ? 'bg-warning text-warning-fg'
           : s === 'self'
-            ? 'bg-slate-200 text-slate-700'
+            ? 'bg-muted text-secondary'
             : s === 'vm'
               ? 'bg-indigo-100 text-indigo-700'
-              : 'bg-blue-100 text-blue-700';
+              : 'bg-info text-info-fg';
   return (
     <span className="flex flex-wrap gap-1">
       {sources.map((s) => (
@@ -57,7 +57,7 @@ export default function Hosts() {
     {
       header: 'Hostname',
       key: 'hostname',
-      render: (row) => row.hostname ?? <span className="text-slate-400">—</span>,
+      render: (row) => row.hostname ?? <span className="text-faint">—</span>,
     },
     {
       header: 'Source',
@@ -69,7 +69,7 @@ export default function Hosts() {
     {
       header: 'Manufacturer',
       key: 'manufacturer',
-      render: (row) => row.manufacturer ?? <span className="text-slate-400">—</span>,
+      render: (row) => row.manufacturer ?? <span className="text-faint">—</span>,
     },
     {
       // Every device+plugin that observed this MAC, with the interface(s) seen on.
@@ -97,7 +97,7 @@ export default function Hosts() {
       key: 'expiry',
       width: 180,
       sortAccessor: (row) => (row.expiry ? new Date(row.expiry).getTime() : null),
-      render: (row) => (row.expiry ? new Date(row.expiry).toLocaleString() : <span className="text-slate-400">—</span>),
+      render: (row) => (row.expiry ? new Date(row.expiry).toLocaleString() : <span className="text-faint">—</span>),
     },
     {
       header: 'Last seen',
@@ -111,9 +111,9 @@ export default function Hosts() {
   return (
     <Layout title="Hosts">
 
-      {hostsQuery.isLoading && <p className="text-sm text-slate-500">Loading hosts...</p>}
+      {hostsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading hosts...</p>}
       {hostsQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load hosts: {(hostsQuery.error as Error).message}</p>
+        <p className="text-sm text-danger-fg">Failed to load hosts: {(hostsQuery.error as Error).message}</p>
       )}
       {hostsQuery.data && (
         <DataTable

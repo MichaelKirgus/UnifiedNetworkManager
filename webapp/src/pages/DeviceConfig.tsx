@@ -81,7 +81,7 @@ export default function DeviceConfig() {
   if (!device) {
     return (
       <Layout>
-        <div className="p-6 text-sm text-slate-500">Loading device…</div>
+        <div className="p-6 text-sm text-muted-foreground">Loading device…</div>
       </Layout>
     );
   }
@@ -99,7 +99,7 @@ export default function DeviceConfig() {
             <select
               value={activePluginId ?? ''}
               onChange={(e) => setSelectedPluginId(e.target.value)}
-              className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
+              className="rounded-md border border-border bg-card px-2 py-1.5 text-sm"
             >
               {configAssignments.map((a) => (
                 <option key={a.pluginId} value={a.pluginId}>
@@ -113,7 +113,7 @@ export default function DeviceConfig() {
               type="button"
               onClick={() => stateQuery.refetch()}
               disabled={stateQuery.isFetching}
-              className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background disabled:opacity-40"
             >
               <RefreshCw className={clsx('h-3.5 w-3.5', stateQuery.isFetching && 'animate-spin')} /> Refresh
             </button>
@@ -121,20 +121,20 @@ export default function DeviceConfig() {
         </>
       }
     >
-      <Link to={`/devices/${device.id}`} className="mb-3 inline-flex items-center gap-1 text-xs font-medium text-slate-500 hover:text-slate-800">
+      <Link to={`/devices/${device.id}`} className="mb-3 inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground">
         <ArrowLeft className="h-3.5 w-3.5" /> Back to {device.name}
       </Link>
 
       {configAssignments.length === 0 ? (
-        <div className="rounded-md border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">
+        <div className="rounded-md border border-border bg-card p-6 text-center text-sm text-muted-foreground">
           No assigned plugin supports live device configuration for this device.
         </div>
       ) : stateQuery.isError ? (
-        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
           {(stateQuery.error as Error).message}
         </div>
       ) : !state ? (
-        <div className="p-6 text-center text-sm text-slate-400">Loading device state…</div>
+        <div className="p-6 text-center text-sm text-faint">Loading device state…</div>
       ) : (
         <div className="flex flex-col gap-4">
           {state.sections.map((section) => (
@@ -194,11 +194,11 @@ function StateSectionCard({
   const sectionActions = (section.actions ?? []).filter((a) => catalogById.has(a.actionId));
 
   return (
-    <div className="overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm">
-      <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2.5">
+    <div className="overflow-hidden rounded-md border border-border bg-card shadow-sm">
+      <div className="flex items-center justify-between border-b border-border bg-background px-4 py-2.5">
         <div>
-          <h2 className="text-sm font-semibold text-slate-900">{section.label}</h2>
-          {section.description && <p className="mt-0.5 text-xs text-slate-500">{section.description}</p>}
+          <h2 className="text-sm font-semibold text-foreground">{section.label}</h2>
+          {section.description && <p className="mt-0.5 text-xs text-muted-foreground">{section.description}</p>}
         </div>
         {canApply && sectionActions.length > 0 && (
           <div className="flex items-center gap-1.5">
@@ -245,12 +245,12 @@ function TableSection({
   }, [items]);
 
   if (items.length === 0) {
-    return <div className="px-4 py-3 text-xs text-slate-400">No items reported.</div>;
+    return <div className="px-4 py-3 text-xs text-faint">No items reported.</div>;
   }
 
   return (
     <table className="w-full text-left text-sm">
-      <thead className="border-b border-slate-200 bg-white text-[11px] uppercase tracking-wide text-slate-500">
+      <thead className="border-b border-border bg-card text-[11px] uppercase tracking-wide text-muted-foreground">
         <tr>
           <th className="px-4 py-2">Name</th>
           {columns.map((c) => (
@@ -328,14 +328,14 @@ function SwitchSection({
   const selectable = canApply && items.some((i) => (i.actions ?? []).some((a) => catalogById.has(a.actionId)));
 
   if (items.length === 0) {
-    return <div className="px-4 py-3 text-xs text-slate-400">No ports reported.</div>;
+    return <div className="px-4 py-3 text-xs text-faint">No ports reported.</div>;
   }
 
   return (
     <>
       <VirtualSwitch items={items} layout={section.layout} selectedKeys={validSelected} onToggleKey={toggleKey} selectable={selectable} />
       {canApply && validSelected.size > 0 && (
-        <div className="flex flex-wrap items-center gap-2 border-t border-slate-200 bg-indigo-50/60 px-4 py-2.5">
+        <div className="flex flex-wrap items-center gap-2 border-t border-border bg-indigo-50/60 px-4 py-2.5">
           <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-800">
             <CheckSquare className="h-3.5 w-3.5" />
             {validSelected.size} port{validSelected.size === 1 ? '' : 's'} selected
@@ -348,7 +348,7 @@ function SwitchSection({
           <button
             type="button"
             onClick={() => setSelectedKeys(new Set())}
-            className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-slate-500 hover:bg-white/70 hover:text-slate-800"
+            className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-card/70 hover:text-foreground"
           >
             <X className="h-3 w-3" /> Clear selection
           </button>
@@ -375,22 +375,22 @@ function StateItemRow({
   const actions = (item.actions ?? []).filter((a) => catalogById.has(a.actionId));
 
   return (
-    <tr className="border-b border-slate-100 last:border-0">
-      <td className="px-4 py-2 font-medium text-slate-800">
+    <tr className="border-b border-border last:border-0">
+      <td className="px-4 py-2 font-medium text-foreground">
         {item.title}
-        {item.subtitle && <span className="ml-1.5 text-xs font-normal text-slate-400">{item.subtitle}</span>}
+        {item.subtitle && <span className="ml-1.5 text-xs font-normal text-faint">{item.subtitle}</span>}
       </td>
       {columns.map((c) => (
-        <td key={c} className="px-3 py-2 text-slate-600">
+        <td key={c} className="px-3 py-2 text-secondary">
           {formatField(item.fields[c])}
         </td>
       ))}
-      <td className="px-3 py-2">{item.status ? <StatusBadge status={item.status} /> : <span className="text-xs text-slate-400">—</span>}</td>
+      <td className="px-3 py-2">{item.status ? <StatusBadge status={item.status} /> : <span className="text-xs text-faint">—</span>}</td>
       {canApply && (
         <td className="px-3 py-2">
           <div className="flex flex-wrap items-center justify-end gap-1.5">
             {actions.length === 0 ? (
-              <span className="text-xs text-slate-400">—</span>
+              <span className="text-xs text-faint">—</span>
             ) : (
               actions.map((ref) => {
                 const entry = catalogById.get(ref.actionId)!;
@@ -415,8 +415,8 @@ function ActionButton({ entry, onClick }: { entry: CatalogEntry; onClick: () => 
       className={clsx(
         'rounded-md border px-2 py-1 text-xs font-medium',
         dangerous
-          ? 'border-red-200 bg-red-50 text-red-700 hover:bg-red-100'
-          : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+          ? 'border-danger-border bg-danger text-danger-fg hover:bg-danger'
+          : 'border-border bg-card text-secondary hover:bg-background'
       )}
     >
       {entry.label}
@@ -431,7 +431,7 @@ function humanize(key: string): string {
 
 /** Renders a field value verbatim; null/undefined → em dash. */
 function formatField(value: string | number | null | unknown[] | undefined): ReactNode {
-  if (value === null || value === undefined || value === '') return <span className="text-slate-400">—</span>;
+  if (value === null || value === undefined || value === '') return <span className="text-faint">—</span>;
   // Arrays (e.g. per-port MAC lists) render as a wrapped chip list.
   if (Array.isArray(value)) {
     const macs = value.filter((v): v is string => typeof v === 'string');
@@ -439,15 +439,15 @@ function formatField(value: string | number | null | unknown[] | undefined): Rea
       return (
         <span className="flex flex-wrap gap-1">
           {macs.slice(0, 6).map((m) => (
-            <span key={m} className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-600" title={m}>
+            <span key={m} className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-secondary" title={m}>
               {m}
             </span>
           ))}
-          {macs.length > 6 && <span className="text-[10px] text-slate-400">+{macs.length - 6}</span>}
+          {macs.length > 6 && <span className="text-[10px] text-faint">+{macs.length - 6}</span>}
         </span>
       );
     }
-    return <span className="text-slate-400">—</span>;
+    return <span className="text-faint">—</span>;
   }
   return String(value);
 }

@@ -13,13 +13,13 @@ import { api, ContainerNetwork, ContainerRow, ContainerServiceDetail, DockerImag
  * observed it via SSH (`docker inspect`), otherwise UNM-tracked from state
  * transitions (a lower bound that resets after restarts). */
 function UptimeCell({ row }: { row: ContainerRow }) {
-  if (row.state !== 'RUNNING' || !row.startedAt) return <span className="text-slate-400">—</span>;
+  if (row.state !== 'RUNNING' || !row.startedAt) return <span className="text-faint">—</span>;
   const since = new Date(row.startedAt).getTime();
-  if (Number.isNaN(since)) return <span className="text-slate-400">—</span>;
+  if (Number.isNaN(since)) return <span className="text-faint">—</span>;
   const secs = Math.max(0, (Date.now() - since) / 1000);
   return (
     <span
-      className="font-mono text-xs text-slate-700"
+      className="font-mono text-xs text-secondary"
       title={`Running since ${new Date(row.startedAt).toLocaleString()}`}
     >
       {formatDuration(secs)}
@@ -30,21 +30,21 @@ function UptimeCell({ row }: { row: ContainerRow }) {
 /** App workload state → badge style (TrueNAS SCALE states are uppercase; the
  * generic Docker plugin emits its own native states for child containers). */
 const STATE_STYLES: Record<string, string> = {
-  RUNNING: 'bg-emerald-100 text-emerald-800 border-emerald-300',
-  STOPPED: 'bg-slate-200 text-slate-600 border-slate-300',
-  ERROR: 'bg-red-100 text-red-800 border-red-300',
-  FAILED: 'bg-red-100 text-red-800 border-red-300',
+  RUNNING: 'bg-success text-success-fg border-success-border',
+  STOPPED: 'bg-muted text-secondary border-border',
+  ERROR: 'bg-danger text-danger-fg border-danger-border',
+  FAILED: 'bg-danger text-danger-fg border-danger-border',
   // Docker-native states (generic docker plugin):
-  EXITED: 'bg-slate-200 text-slate-600 border-slate-300',
-  CREATED: 'bg-slate-200 text-slate-600 border-slate-300',
-  RESTARTING: 'bg-amber-100 text-amber-800 border-amber-300',
-  REMOVING: 'bg-amber-100 text-amber-800 border-amber-300',
+  EXITED: 'bg-muted text-secondary border-border',
+  CREATED: 'bg-muted text-secondary border-border',
+  RESTARTING: 'bg-warning text-warning-fg border-warning-border',
+  REMOVING: 'bg-warning text-warning-fg border-warning-border',
   PAUSED: 'bg-sky-100 text-sky-800 border-sky-300',
-  DEAD: 'bg-red-100 text-red-800 border-red-300',
+  DEAD: 'bg-danger text-danger-fg border-danger-border',
 };
 
 function StateBadge({ state }: { state: string }) {
-  const style = STATE_STYLES[state] ?? 'bg-amber-100 text-amber-800 border-amber-300';
+  const style = STATE_STYLES[state] ?? 'bg-warning text-warning-fg border-warning-border';
   return (
     <span className={clsx('inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium', style)}>
       {state.toLowerCase()}
@@ -183,7 +183,7 @@ function NetworkChip({ net }: { net: ContainerNetwork }) {
 function IpChip({ ip }: { ip: string }) {
   const isV6 = ip.includes(':');
   return (
-    <span className={clsx('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[11px] leading-4', isV6 ? 'border-violet-200 bg-violet-50 text-violet-800' : 'border-blue-200 bg-blue-50 text-blue-800')}>
+    <span className={clsx('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[11px] leading-4', isV6 ? 'border-violet-200 bg-violet-50 text-violet-800' : 'border-info-border bg-info text-info-fg')}>
       {ip}
     </span>
   );
@@ -193,7 +193,7 @@ function IpChip({ ip }: { ip: string }) {
 function NetworkCell({ row }: { row: ContainerRow }) {
   const ips = ipsOf(row);
   const nets = networksOf(row);
-  if (ips.length === 0 && nets.length === 0) return <span className="text-slate-400">—</span>;
+  if (ips.length === 0 && nets.length === 0) return <span className="text-faint">—</span>;
   return (
     <div className="flex flex-col gap-1">
       {ips.length > 0 && (
@@ -202,7 +202,7 @@ function NetworkCell({ row }: { row: ContainerRow }) {
       {nets.length > 0 && (
         <span className="flex flex-wrap gap-x-1 gap-y-0.5">
           {nets.slice(0, 4).map((n) => <NetworkChip key={n.name} net={n} />)}
-          {nets.length > 4 && <span className="text-[11px] text-slate-400" title={nets.map((n) => n.name).join(', ')}>+{nets.length - 4}</span>}
+          {nets.length > 4 && <span className="text-[11px] text-faint" title={nets.map((n) => n.name).join(', ')}>+{nets.length - 4}</span>}
         </span>
       )}
     </div>
@@ -212,12 +212,12 @@ function NetworkCell({ row }: { row: ContainerRow }) {
 /** Published host ports — first three + "+N" overflow. */
 function PortsCell({ row }: { row: ContainerRow }) {
   const ports = portsOf(row);
-  if (ports.length === 0) return <span className="text-slate-400">—</span>;
+  if (ports.length === 0) return <span className="text-faint">—</span>;
   const shown = ports.slice(0, 3);
   return (
-    <span title={ports.join(', ')} className="font-mono text-xs text-slate-700">
+    <span title={ports.join(', ')} className="font-mono text-xs text-secondary">
       {shown.map((p) => p).join(', ')}
-      {ports.length > 3 && <span className="text-slate-400"> +{ports.length - 3}</span>}
+      {ports.length > 3 && <span className="text-faint"> +{ports.length - 3}</span>}
     </span>
   );
 }
@@ -227,27 +227,27 @@ function PortsCell({ row }: { row: ContainerRow }) {
 function ImageStatusBadge({ row }: { row: DockerImageRow }) {
   if (row.dangling) {
     return (
-      <span className="inline-flex items-center rounded-full border border-slate-300 bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600" title="Dangling image — no tag references it">
+      <span className="inline-flex items-center rounded-full border border-border bg-muted px-2.5 py-0.5 text-xs font-medium text-secondary" title="Dangling image — no tag references it">
         dangling
       </span>
     );
   }
   if (row.updateAvailable === true) {
     return (
-      <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800" title="A newer version of this image is available">
+      <span className="inline-flex items-center rounded-full border border-warning-border bg-warning px-2.5 py-0.5 text-xs font-medium text-warning-fg" title="A newer version of this image is available">
         update available
       </span>
     );
   }
-  return <span className="text-slate-400">—</span>;
+  return <span className="text-faint">—</span>;
 }
 
 /** Version cell with an amber "update available" dot. */
 function VersionCell({ row }: { row: ContainerRow }) {
   const v = row.version && row.version.trim() !== '' ? row.version : null;
-  if (!v) return <span className="text-slate-400">—</span>;
+  if (!v) return <span className="text-faint">—</span>;
   return (
-    <span className="inline-flex items-center gap-1.5 font-mono text-xs text-slate-700" title={row.upgradeAvailable ? 'Update available' : undefined}>
+    <span className="inline-flex items-center gap-1.5 font-mono text-xs text-secondary" title={row.upgradeAvailable ? 'Update available' : undefined}>
       {v}
       {row.upgradeAvailable && <span className="h-2 w-2 rounded-full bg-amber-400" title="Update available" />}
     </span>
@@ -259,9 +259,9 @@ function AppCell({ row }: { row?: ContainerRow }) {
   if (!row) return null;
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="font-medium text-slate-800">{row.name}</span>
+      <span className="font-medium text-foreground">{row.name}</span>
       {typeof extraOf(row)['customApp'] === 'boolean' && (extraOf(row)['customApp'] as boolean) && (
-        <span className="text-[10px] uppercase tracking-wide text-slate-400">custom</span>
+        <span className="text-[10px] uppercase tracking-wide text-faint">custom</span>
       )}
     </div>
   );
@@ -277,14 +277,14 @@ function nodeCell(key: string, node: TreeNode, depth: number): ReactNode {
     case 'name': {
       if (node.kind === 'container') {
         return (
-          <span className="block truncate font-medium text-slate-700" style={{ paddingLeft: 18 + depth * 14 }} title={node.service ?? undefined}>
+          <span className="block truncate font-medium text-secondary" style={{ paddingLeft: 18 + depth * 14 }} title={node.service ?? undefined}>
             {node.service ?? '—'}
           </span>
         );
       }
       // Volume leaf — the mount lives in the name column, indented under its container.
       return (
-        <span className="block truncate font-mono text-[11px] text-slate-500" style={{ paddingLeft: 32 + depth * 14 }} title={node.volumeText}>
+        <span className="block truncate font-mono text-[11px] text-muted-foreground" style={{ paddingLeft: 32 + depth * 14 }} title={node.volumeText}>
           {node.volumeText}
         </span>
       );
@@ -296,18 +296,18 @@ function nodeCell(key: string, node: TreeNode, depth: number): ReactNode {
       if (node.kind !== 'container') return null;
       const repo = splitImage(node.image).repo;
       return repo ? (
-        <span className="block truncate font-mono text-xs text-slate-700" title={node.image ?? undefined}>{repo}</span>
+        <span className="block truncate font-mono text-xs text-secondary" title={node.image ?? undefined}>{repo}</span>
       ) : (
-        <span className="text-slate-400">—</span>
+        <span className="text-faint">—</span>
       );
     }
     case 'tag': {
       if (node.kind !== 'container') return null;
       const tag = splitImage(node.image).tag;
       return tag ? (
-        <span className="inline-flex items-center rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-slate-600" title={tag}>{tag}</span>
+        <span className="inline-flex items-center rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[11px] leading-4 text-secondary" title={tag}>{tag}</span>
       ) : (
-        <span className="text-slate-400">—</span>
+        <span className="text-faint">—</span>
       );
     }
     case 'networks': {
@@ -315,13 +315,13 @@ function nodeCell(key: string, node: TreeNode, depth: number): ReactNode {
       const parts: ReactNode[] = [];
       if (node.ip) {
         parts.push(
-          <span key="ip" className={clsx('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[11px] leading-4', node.ip.includes(':') ? 'border-violet-200 bg-violet-50 text-violet-800' : 'border-blue-200 bg-blue-50 text-blue-800')} title="IP">
+          <span key="ip" className={clsx('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[11px] leading-4', node.ip.includes(':') ? 'border-violet-200 bg-violet-50 text-violet-800' : 'border-info-border bg-info text-info-fg')} title="IP">
             {node.ip}
           </span>
         );
       }
-      if (node.mac) parts.push(<span key="mac" className="font-mono text-[11px] text-slate-500" title="MAC address">MAC {node.mac}</span>);
-      if (parts.length === 0) return <span className="text-slate-400">—</span>;
+      if (node.mac) parts.push(<span key="mac" className="font-mono text-[11px] text-muted-foreground" title="MAC address">MAC {node.mac}</span>);
+      if (parts.length === 0) return <span className="text-faint">—</span>;
       return <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">{parts}</span>;
     }
     case 'startedAt': {
@@ -329,7 +329,7 @@ function nodeCell(key: string, node: TreeNode, depth: number): ReactNode {
       const since = new Date(node.startedAt).getTime();
       if (Number.isNaN(since)) return null;
       const secs = Math.max(0, (Date.now() - since) / 1000);
-      return <span className="font-mono text-xs text-slate-700" title={`Running since ${new Date(node.startedAt).toLocaleString()}`}>{formatDuration(secs)}</span>;
+      return <span className="font-mono text-xs text-secondary" title={`Running since ${new Date(node.startedAt).toLocaleString()}`}>{formatDuration(secs)}</span>;
     }
     default:
       return null;
@@ -341,7 +341,7 @@ function nodeCell(key: string, node: TreeNode, depth: number): ReactNode {
  * container that has volume mounts gets its own chevron for recursive expand. */
 function ChildRow({ node, ctx }: { node: TreeNode; ctx: ExpandChildContext }) {
   return (
-    <tr className={node.kind === 'volume' ? 'bg-slate-50/60' : 'bg-sky-50/40'}>
+    <tr className={node.kind === 'volume' ? 'bg-background/60' : 'bg-sky-50/40'}>
       <td className="px-1 py-2 align-middle">
         {ctx.hasChildren ? (
           <button
@@ -349,7 +349,7 @@ function ChildRow({ node, ctx }: { node: TreeNode; ctx: ExpandChildContext }) {
             onClick={ctx.onToggle}
             aria-expanded={ctx.expanded}
             title={ctx.expanded ? 'Collapse volume mounts' : 'Show volume mounts'}
-            className="flex h-6 w-6 items-center justify-center rounded text-slate-400 hover:bg-slate-200 hover:text-slate-600"
+            className="flex h-6 w-6 items-center justify-center rounded text-faint hover:bg-muted hover:text-secondary"
           >
             {ctx.expanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
           </button>
@@ -358,7 +358,7 @@ function ChildRow({ node, ctx }: { node: TreeNode; ctx: ExpandChildContext }) {
         )}
       </td>
       {ctx.columns.map((col) => (
-        <td key={col.key} className="overflow-hidden px-4 py-2 text-slate-700">
+        <td key={col.key} className="overflow-hidden px-4 py-2 text-secondary">
           {nodeCell(col.key, node, ctx.depth)}
         </td>
       ))}
@@ -465,9 +465,9 @@ export default function Containers() {
       render: (node) => {
         const repo = splitImage(node.row?.image).repo;
         return repo ? (
-          <span className="block truncate font-mono text-xs text-slate-700" title={node.row?.image ?? undefined}>{repo}</span>
+          <span className="block truncate font-mono text-xs text-secondary" title={node.row?.image ?? undefined}>{repo}</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         );
       },
     },
@@ -479,9 +479,9 @@ export default function Containers() {
       render: (node) => {
         const tag = splitImage(node.row?.image).tag;
         return tag ? (
-          <span className="inline-flex items-center rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-slate-600" title={tag}>{tag}</span>
+          <span className="inline-flex items-center rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[11px] leading-4 text-secondary" title={tag}>{tag}</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         );
       },
     },
@@ -537,9 +537,9 @@ export default function Containers() {
         const { repo, tag } = splitImage(row.name);
         return (
           <span className="flex items-center gap-1.5" title={row.name}>
-            <span className="block truncate font-mono text-xs text-slate-700">{repo || row.name}</span>
+            <span className="block truncate font-mono text-xs text-secondary">{repo || row.name}</span>
             {tag && tag !== 'latest' ? (
-              <span className="inline-flex shrink-0 items-center rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-slate-600">{tag}</span>
+              <span className="inline-flex shrink-0 items-center rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[11px] leading-4 text-secondary">{tag}</span>
             ) : (
               tag === 'latest' && <span className="inline-flex shrink-0 items-center rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-sky-700">latest</span>
             )}
@@ -564,7 +564,7 @@ export default function Containers() {
       key: 'createdAt',
       width: 170,
       sortAccessor: (row) => new Date(row.createdAt ?? '').getTime(),
-      render: (row) => (row.createdAt ? <span className="text-xs text-slate-600">{new Date(row.createdAt).toLocaleString()}</span> : <span className="text-slate-400">—</span>),
+      render: (row) => (row.createdAt ? <span className="text-xs text-secondary">{new Date(row.createdAt).toLocaleString()}</span> : <span className="text-faint">—</span>),
     },
     {
       header: 'Status',
@@ -589,25 +589,25 @@ export default function Containers() {
           splitter — collapsing the images gives its space back to the table
           instead of leaving it empty below. */}
       <div className="flex h-full min-h-0 flex-col">
-        {containersQuery.isLoading && <p className="shrink-0 text-sm text-slate-500">Loading containers...</p>}
+        {containersQuery.isLoading && <p className="shrink-0 text-sm text-muted-foreground">Loading containers...</p>}
         {containersQuery.isError && (
-          <p className="shrink-0 text-sm text-red-600">Failed to load containers: {(containersQuery.error as Error).message}</p>
+          <p className="shrink-0 text-sm text-danger-fg">Failed to load containers: {(containersQuery.error as Error).message}</p>
         )}
 
         {/* Summary strip — app/container counts + image inventory. */}
         {!containersQuery.isLoading && !containersQuery.isError && (
-          <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs">
-            <span className="flex items-center gap-2 text-slate-600">
+          <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-border bg-card px-4 py-2 text-xs">
+            <span className="flex items-center gap-2 text-secondary">
               <Container size={13} className="text-indigo-500" />
               {tree.roots.length} app{tree.roots.length === 1 ? '' : 's'} · {containerTotal} container{containerTotal === 1 ? '' : 's'}
             </span>
-            <span className="flex items-center gap-2 text-slate-600">
-              <Container size={13} className="text-slate-500" />
+            <span className="flex items-center gap-2 text-secondary">
+              <Container size={13} className="text-muted-foreground" />
               {images.length} image{images.length === 1 ? '' : 's'}
               {imageTotalBytes > 0 && (
-                <span className="font-mono text-slate-700">· {formatBytes(imageTotalBytes)} total</span>
+                <span className="font-mono text-secondary">· {formatBytes(imageTotalBytes)} total</span>
               )}
-              {danglingCount > 0 && <span className="text-slate-400">({danglingCount} dangling)</span>}
+              {danglingCount > 0 && <span className="text-faint">({danglingCount} dangling)</span>}
             </span>
           </div>
         )}
@@ -646,7 +646,7 @@ export default function Containers() {
               className="group relative -my-1 h-3 shrink-0 cursor-row-resize"
               title="Drag to resize — or collapse the image panel for full container height"
             >
-              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-slate-200 transition-colors group-hover:bg-indigo-400" />
+              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-muted transition-colors group-hover:bg-indigo-400" />
               <div className="absolute left-1/2 top-1/2 flex h-3 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center">
                 <span className="h-1 w-6 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400" />
               </div>
@@ -656,23 +656,23 @@ export default function Containers() {
           {/* Image panel (bottom) — takes the remaining height. The header stays
               mounted when collapsed so it can be re-opened. */}
           <div className={clsx('shrink-0 min-h-0 pl-1', imagesOpen && 'flex-1')}>
-            <div className="flex h-full min-h-0 flex-col rounded-lg border border-slate-200 bg-white">
+            <div className="flex h-full min-h-0 flex-col rounded-lg border border-border bg-card">
               <button
                 type="button"
                 onClick={() => setImagesOpen((o) => !o)}
                 className="flex w-full shrink-0 items-center justify-between px-4 py-3 text-left"
                 aria-expanded={imagesOpen}
               >
-                <span className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-                  <Container size={16} className="text-slate-500" />
+                <span className="flex items-center gap-2 text-sm font-semibold text-secondary">
+                  <Container size={16} className="text-muted-foreground" />
                   Docker images{containersQuery.data ? ` (${images.length})` : ''}
                 </span>
                 {/* Expanded panel → chevron points DOWN (click collapses it);
                     collapsed → UP (click expands). */}
-                {imagesOpen ? <ChevronDown size={18} className="text-slate-400" /> : <ChevronUp size={18} className="text-slate-400" />}
+                {imagesOpen ? <ChevronDown size={18} className="text-faint" /> : <ChevronUp size={18} className="text-faint" />}
               </button>
               {imagesOpen && containersQuery.data && (
-                <div className="min-h-0 flex-1 border-t border-slate-100 p-3">
+                <div className="min-h-0 flex-1 border-t border-border p-3">
                   <DataTable<DockerImageRow>
                     columns={imageColumns}
                     rows={images}

@@ -22,7 +22,7 @@ const SEVERITY_ICON: Record<NotificationSeverity, typeof Info> = {
 const SEVERITY_COLOR: Record<NotificationSeverity, string> = {
   info: 'text-blue-500',
   warning: 'text-amber-500',
-  critical: 'text-red-600',
+  critical: 'text-danger-fg',
 };
 
 function timeAgo(iso: string): string {
@@ -99,7 +99,7 @@ export function NotificationCenter() {
         aria-label={`Notifications${count > 0 ? ` (${count} open)` : ''}`}
         title="Notification center"
         onClick={() => setOpen((v) => !v)}
-        className="relative flex h-9 w-9 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+        className="relative flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-secondary"
       >
         <Bell className="h-5 w-5" />
         {count > 0 && (
@@ -110,10 +110,10 @@ export function NotificationCenter() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full z-50 mt-2 w-[420px] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
+        <div className="absolute right-0 top-full z-50 mt-2 w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-xl">
           {/* Header */}
-          <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2">
-            <span className="text-sm font-semibold text-slate-800">Notifications</span>
+          <div className="flex items-center justify-between border-b border-border px-3 py-2">
+            <span className="text-sm font-semibold text-foreground">Notifications</span>
             <div className="flex items-center gap-1">
               {count > 0 && (
                 <button
@@ -122,7 +122,7 @@ export function NotificationCenter() {
                   disabled={ackMut.isPending}
                   title="Mark all as seen"
                   aria-label="Mark all as seen"
-                  className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
+                  className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-secondary disabled:opacity-50"
                 >
                   <CheckCheck className="h-3.5 w-3.5" /> Mark all seen
                 </button>
@@ -132,7 +132,7 @@ export function NotificationCenter() {
                 onClick={() => setOpen(false)}
                 title="Open the full Notifications page (all history + filters)"
                 aria-label="Open notifications page"
-                className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-secondary"
               >
                 <Settings2 className="h-3.5 w-3.5" /> View all
               </a>
@@ -142,12 +142,12 @@ export function NotificationCenter() {
           {/* Rows */}
           <div className="max-h-[420px] overflow-y-auto">
             {listQuery.isLoading && (
-              <div className="px-3 py-6 text-center text-sm text-slate-400">Loading…</div>
+              <div className="px-3 py-6 text-center text-sm text-faint">Loading…</div>
             )}
             {!listQuery.isLoading && rows.length === 0 && (
               <div className="flex flex-col items-center gap-2 px-3 py-8 text-center">
-                <Bell className="h-6 w-6 text-slate-300" />
-                <span className="text-sm text-slate-400">No open notifications</span>
+                <Bell className="h-6 w-6 text-faint" />
+                <span className="text-sm text-faint">No open notifications</span>
               </div>
             )}
             {rows.map((n) => {
@@ -156,25 +156,25 @@ export function NotificationCenter() {
                 <div
                   key={n.id}
                   className={clsx(
-                    'group flex items-start gap-2.5 border-b border-slate-50 px-3 py-2.5 hover:bg-slate-50',
+                    'group flex items-start gap-2.5 border-b border-border px-3 py-2.5 hover:bg-background',
                     n.status === 'acknowledged' && 'opacity-60'
                   )}
                 >
                   <Icon className={clsx('mt-0.5 h-4 w-4 shrink-0', SEVERITY_COLOR[n.severity])} />
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-slate-800" title={n.title}>
+                    <p className="truncate text-sm font-medium text-foreground" title={n.title}>
                       {n.title}
                     </p>
                     {n.message && (
-                      <p className="mt-0.5 line-clamp-2 text-xs text-slate-500">{n.message}</p>
+                      <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{n.message}</p>
                     )}
-                    <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-400">
+                    <div className="mt-1 flex items-center gap-2 text-[11px] text-faint">
                       <span>{timeAgo(n.lastSeenAt)}</span>
                       {n.occurrences > 1 && (
-                        <span className="rounded bg-slate-100 px-1 font-medium text-slate-500">×{n.occurrences}</span>
+                        <span className="rounded bg-muted px-1 font-medium text-muted-foreground">×{n.occurrences}</span>
                       )}
                       {n.deviceName && (
-                        <a href={`/devices/${n.deviceId}`} onClick={() => setOpen(false)} className="flex items-center gap-0.5 hover:text-slate-600">
+                        <a href={`/devices/${n.deviceId}`} onClick={() => setOpen(false)} className="flex items-center gap-0.5 hover:text-secondary">
                           <LinkIcon className="h-3 w-3" /> {n.deviceName}
                         </a>
                       )}
@@ -188,7 +188,7 @@ export function NotificationCenter() {
                         title="Mark as seen"
                         aria-label="Mark as seen"
                         onClick={() => ackMut.mutate({ ids: [n.id] })}
-                        className="rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600"
+                        className="rounded p-1 text-faint hover:bg-muted hover:text-secondary"
                       >
                         <CheckCheck className="h-3.5 w-3.5" />
                       </button>
@@ -198,7 +198,7 @@ export function NotificationCenter() {
                       title="Resolve (condition fixed)"
                       aria-label="Resolve notification"
                       onClick={() => resolveMut.mutate(n.id)}
-                      className="rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-emerald-600"
+                      className="rounded p-1 text-faint hover:bg-muted hover:text-emerald-600"
                     >
                       <X className="h-3.5 w-3.5" />
                     </button>

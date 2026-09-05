@@ -26,10 +26,10 @@ function resolutionTooltip(resolution: FirewallAddressResolution): string {
 /** One small colored chip. */
 function Chip({ label, tone }: { label: string; tone: 'v4' | 'v6' | 'host' | 'alias' }) {
   const styles: Record<string, string> = {
-    v4: 'bg-blue-100 text-blue-700',
+    v4: 'bg-info text-info-fg',
     v6: 'bg-violet-100 text-violet-700',
-    host: 'bg-emerald-100 text-emerald-700',
-    alias: 'bg-amber-100 text-amber-800',
+    host: 'bg-success text-success-fg',
+    alias: 'bg-warning text-warning-fg',
   };
   return (
     <span className={`inline-flex max-w-[160px] truncate rounded px-1.5 py-0.5 font-mono text-xs ${styles[tone]}`}>
@@ -77,7 +77,7 @@ export function FirewallAddressCell({
     chips.push(
       <span
         key="__hosts"
-        className="inline-flex items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700"
+        className="inline-flex items-center gap-1 rounded bg-success px-1.5 py-0.5 text-xs font-medium text-success-fg"
       >
         <Users size={12} aria-hidden /> {resolution.hostCount}
       </span>
@@ -88,7 +88,7 @@ export function FirewallAddressCell({
   return (
     <div className="flex flex-wrap items-center gap-1" title={tooltip}>
       {chips}
-      {p && <span className="font-mono text-xs text-slate-500">:{p}</span>}
+      {p && <span className="font-mono text-xs text-muted-foreground">:{p}</span>}
     </div>
   );
 }

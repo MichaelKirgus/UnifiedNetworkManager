@@ -73,7 +73,7 @@ export default function Roles() {
 
   const columns: DataTableColumn<Role>[] = [
     { header: 'Name', key: 'name' },
-    { header: 'Description', key: 'description', render: (row) => row.description || <span className="text-slate-400">—</span> },
+    { header: 'Description', key: 'description', render: (row) => row.description || <span className="text-faint">—</span> },
     {
       header: 'Permissions',
       key: 'permissions',
@@ -81,13 +81,13 @@ export default function Roles() {
         row.permissions.length > 0 ? (
           <div className="flex max-w-md flex-wrap gap-1">
             {row.permissions.map((p) => (
-              <span key={p} className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">
+              <span key={p} className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-secondary">
                 {p}
               </span>
             ))}
           </div>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         ),
     },
     ...(canWrite
@@ -104,7 +104,7 @@ export default function Roles() {
                   type="button"
                   aria-label={`Edit ${row.name}`}
                   title="Edit role"
-                  className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                  className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
                   onClick={() => openEdit(row)}
                 >
                   <Pencil className="h-4 w-4" />
@@ -115,7 +115,7 @@ export default function Roles() {
                     type="button"
                     aria-label={`Delete ${row.name}`}
                     title="Delete role"
-                    className="rounded-md p-1.5 text-slate-600 hover:bg-red-50 hover:text-red-700"
+                    className="rounded-md p-1.5 text-secondary hover:bg-danger hover:text-danger-fg"
                     onClick={() => handleDelete(row)}
                   >
                     <Trash2 className="h-4 w-4" />
@@ -136,7 +136,7 @@ export default function Roles() {
           <button
             type="button"
             onClick={() => setShowForm(true)}
-            className="inline-flex items-center gap-2 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
           >
             <Plus className="h-4 w-4" /> New role
           </button>
@@ -145,15 +145,15 @@ export default function Roles() {
     >
 
       {formError && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{formError}</div>
+        <div className="mb-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{formError}</div>
       )}
 
       {/* Inline create/edit panel */}
       {showForm && canWrite && (
-        <div className="mb-4 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-4 rounded-md border border-border bg-card p-4 shadow-sm">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-slate-900">{editingName ? `Edit role — ${editingName}` : 'New role'}</h2>
-            <button type="button" aria-label="Close form" onClick={resetForm} className="rounded p-1 text-slate-400 hover:bg-slate-100">
+            <h2 className="text-base font-semibold text-foreground">{editingName ? `Edit role — ${editingName}` : 'New role'}</h2>
+            <button type="button" aria-label="Close form" onClick={resetForm} className="rounded p-1 text-faint hover:bg-muted">
               <X className="h-4 w-4" />
             </button>
           </div>
@@ -167,9 +167,9 @@ export default function Roles() {
               className="grid grid-cols-1 gap-4 sm:grid-cols-2"
             >
               <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700">Name *</label>
+                <label className="mb-1 block text-sm font-medium text-secondary">Name *</label>
                 <input
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
                   value={role.name}
                   onChange={(e) => setRole({ ...role, name: e.target.value })}
                   disabled={Boolean(editingName)}
@@ -177,22 +177,22 @@ export default function Roles() {
                 />
               </div>
               <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700">Description</label>
+                <label className="mb-1 block text-sm font-medium text-secondary">Description</label>
                 <input
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
                   value={role.description}
                   onChange={(e) => setRole({ ...role, description: e.target.value })}
                 />
               </div>
 
               <fieldset className="sm:col-span-2">
-                <legend className="mb-2 text-sm font-medium text-slate-700">Permissions</legend>
-                <p className="mb-2 text-xs text-slate-400">
+                <legend className="mb-2 text-sm font-medium text-secondary">Permissions</legend>
+                <p className="mb-2 text-xs text-faint">
                   Users with this role get these permissions in addition to their explicit grants (applied at next login).
                 </p>
                 <div className="max-h-64 space-y-1 overflow-y-auto pr-1">
                   {catalog.permissions.map((p) => (
-                    <label key={p.id} title={p.description} className="flex items-start gap-2 py-1 text-sm text-slate-700">
+                    <label key={p.id} title={p.description} className="flex items-start gap-2 py-1 text-sm text-secondary">
                       <input
                         type="checkbox"
                         className="mt-0.5"
@@ -203,7 +203,7 @@ export default function Roles() {
                       />
                       <span>
                         {p.id}
-                        <span className="block text-xs font-normal text-slate-400">{p.description}</span>
+                        <span className="block text-xs font-normal text-faint">{p.description}</span>
                       </span>
                     </label>
                   ))}
@@ -214,11 +214,11 @@ export default function Roles() {
                 <button
                   type="submit"
                   disabled={createRole.isPending || updateRole.isPending}
-                  className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+                  className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
                 >
                   {editingName ? 'Save changes' : 'Create role'}
                 </button>
-                <button type="button" onClick={resetForm} className="rounded-md px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">
+                <button type="button" onClick={resetForm} className="rounded-md px-4 py-2 text-sm font-medium text-secondary hover:bg-muted">
                   Cancel
                 </button>
               </div>
@@ -227,9 +227,9 @@ export default function Roles() {
         </div>
       )}
 
-      {rolesQuery.isLoading && <p className="text-sm text-slate-500">Loading roles...</p>}
+      {rolesQuery.isLoading && <p className="text-sm text-muted-foreground">Loading roles...</p>}
       {rolesQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load roles: {(rolesQuery.error as Error).message}</p>
+        <p className="text-sm text-danger-fg">Failed to load roles: {(rolesQuery.error as Error).message}</p>
       )}
       {rolesQuery.data && (
         <DataTable columns={columns} rows={rolesQuery.data} rowKey={(row) => row.name} storageKey="roles" emptyMessage="No roles yet." />

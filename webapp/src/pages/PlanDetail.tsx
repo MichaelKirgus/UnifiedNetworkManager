@@ -70,12 +70,12 @@ export default function PlanDetail() {
     },
   });
 
-  if (planQuery.isLoading) return <Layout><p className="text-sm text-slate-500">Loading plan…</p></Layout>;
+  if (planQuery.isLoading) return <Layout><p className="text-sm text-muted-foreground">Loading plan…</p></Layout>;
   if (planQuery.isError || !plan) {
     return (
       <Layout>
-        <p className="text-sm text-red-600">Failed to load plan: {(planQuery.error as Error)?.message ?? 'not found'}</p>
-        <Link to="/plans" className="mt-2 inline-block text-sm text-slate-500 hover:text-slate-700">← Back to plans</Link>
+        <p className="text-sm text-danger-fg">Failed to load plan: {(planQuery.error as Error)?.message ?? 'not found'}</p>
+        <Link to="/plans" className="mt-2 inline-block text-sm text-muted-foreground hover:text-secondary">← Back to plans</Link>
       </Layout>
     );
   }
@@ -101,32 +101,32 @@ export default function PlanDetail() {
           )}
           {canApply && plan.status === 'executing' && (
             <button onClick={() => cancelMutation.mutate()} disabled={cancelMutation.isPending}
-              className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50">
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted disabled:opacity-50">
               <Square className="h-4 w-4" /> Cancel
             </button>
           )}
           {canApply && plan.status !== 'executing' && (
             <button onClick={() => { if (window.confirm('Delete this plan and its provisioned secrets?')) deleteMutation.mutate(); }}
               disabled={deleteMutation.isPending}
-              className="flex items-center gap-1.5 rounded-md border border-red-200 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50">
+              className="flex items-center gap-1.5 rounded-md border border-danger-border px-3 py-1.5 text-sm font-medium text-danger-fg hover:bg-danger disabled:opacity-50">
               <Trash2 className="h-4 w-4" /> Delete
             </button>
           )}
         </div>
       }
     >
-      <Link to="/plans" className="mb-3 inline-block text-xs text-slate-400 hover:text-slate-600">← Plans</Link>
+      <Link to="/plans" className="mb-3 inline-block text-xs text-faint hover:text-secondary">← Plans</Link>
 
       {(executeMutation.error || cancelMutation.error) && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div className="mb-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
           {describeError(executeMutation.error ?? cancelMutation.error)}
         </div>
       )}
 
       {/* Provisioned secrets */}
       {plan.provisionedSecrets.length > 0 && (
-        <section className="mb-5 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-          <h2 className="mb-2 text-sm font-semibold text-slate-800">Provisioned secrets</h2>
+        <section className="mb-5 rounded-md border border-border bg-card p-4 shadow-sm">
+          <h2 className="mb-2 text-sm font-semibold text-foreground">Provisioned secrets</h2>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {plan.provisionedSecrets.map((ps) => (
               <SecretCard key={ps.ref} planId={plan.id} refName={ps.ref} label={ps.label ?? ps.type ?? ps.ref} type={ps.type ?? '—'} secretId={ps.secretId} onRegenerated={() => planQuery.refetch()} />
@@ -136,14 +136,14 @@ export default function PlanDetail() {
       )}
 
       {/* Steps */}
-      <section className="rounded-md border border-slate-200 bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-          <h2 className="text-sm font-semibold text-slate-800">Steps</h2>
+      <section className="rounded-md border border-border bg-card shadow-sm">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <h2 className="text-sm font-semibold text-foreground">Steps</h2>
           {canApply && editable && (
             <AddStepButton plan={plan} onAdded={() => planQuery.refetch()} />
           )}
         </div>
-        <ol className="divide-y divide-slate-100">
+        <ol className="divide-y divide-border">
           {steps.map((step, i) => (
             <StepRow key={step.id} step={step} position={i} total={steps.length} editable={canApply && editable}
               deviceName={deviceName(step.deviceId)} actionLabel={actionLabel(step.actionId)}
@@ -153,7 +153,7 @@ export default function PlanDetail() {
       </section>
 
       {plan.error && (
-        <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{plan.error}</div>
+        <div className="mt-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{plan.error}</div>
       )}
     </Layout>
   );
@@ -169,14 +169,14 @@ function SecretCard({ planId, refName, label, type, secretId, onRegenerated }: {
     onSuccess: onRegenerated,
   });
   return (
-    <div className="flex items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50/60 px-3 py-2">
+    <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-background/60 px-3 py-2">
       <div className="min-w-0">
-        <p className="truncate text-sm font-medium text-slate-800" title={label}>{label}</p>
-        <p className="font-mono text-xs text-slate-400">{type} · {secretId.slice(0, 8)}…</p>
+        <p className="truncate text-sm font-medium text-foreground" title={label}>{label}</p>
+        <p className="font-mono text-xs text-faint">{type} · {secretId.slice(0, 8)}…</p>
       </div>
       {can('secrets:write') && (
         <button onClick={() => regenerate.mutate()} disabled={regenerate.isPending} title={`Re-roll ${refName} (same id preserved)`} aria-label="Regenerate secret"
-          className="rounded p-1.5 text-slate-400 hover:bg-white hover:text-slate-700 disabled:opacity-50">
+          className="rounded p-1.5 text-faint hover:bg-card hover:text-secondary disabled:opacity-50">
           <RefreshCw className={clsx('h-4 w-4', regenerate.isPending && 'animate-spin')} />
         </button>
       )}
@@ -206,19 +206,19 @@ function StepRow({ step, position, total, editable, deviceName, actionLabel, onM
     <li className="px-4 py-3">
       <div className="flex items-center gap-3">
         <button onClick={() => setExpanded((v) => !v)} aria-label={expanded ? 'Collapse step' : 'Expand step'}
-          className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600">
+          className="rounded p-0.5 text-faint hover:bg-muted hover:text-secondary">
           <ChevronRight className={clsx('h-4 w-4 transition-transform', expanded && 'rotate-90')} />
         </button>
-        <span className="w-8 shrink-0 text-right font-mono text-xs text-slate-400">#{step.stepIndex}</span>
+        <span className="w-8 shrink-0 text-right font-mono text-xs text-faint">#{step.stepIndex}</span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-slate-800">{actionLabel}</p>
-          <p className="text-xs text-slate-500">
+          <p className="truncate text-sm font-medium text-foreground">{actionLabel}</p>
+          <p className="text-xs text-muted-foreground">
             {deviceName}
-            {step.bestEffort && <span className="ml-2 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">best effort</span>}
+            {step.bestEffort && <span className="ml-2 rounded bg-warning px-1.5 py-0.5 text-[10px] font-medium text-warning-fg">best effort</span>}
           </p>
         </div>
         {(step.dependsOn?.length ?? 0) > 0 && (
-          <span className="hidden shrink-0 rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-500 sm:inline">
+          <span className="hidden shrink-0 rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground sm:inline">
             after {step.dependsOn!.map((d) => `#${d}`).join(', ')}
           </span>
         )}
@@ -226,17 +226,17 @@ function StepRow({ step, position, total, editable, deviceName, actionLabel, onM
         {editable && (
           <div className="flex shrink-0 items-center gap-0.5">
             <button onClick={() => moveMutation.mutate(position - 1)} disabled={position === 0 || moveMutation.isPending} title="Move up" aria-label="Move step up"
-              className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-30">
+              className="rounded p-1 text-faint hover:bg-muted hover:text-secondary disabled:opacity-30">
               <ArrowUp className="h-3.5 w-3.5" />
             </button>
             <button onClick={() => moveMutation.mutate(position + 1)} disabled={position === total - 1 || moveMutation.isPending} title="Move down" aria-label="Move step down"
-              className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-30">
+              className="rounded p-1 text-faint hover:bg-muted hover:text-secondary disabled:opacity-30">
               <ArrowDown className="h-3.5 w-3.5" />
             </button>
             <button onClick={() => setEditing(true)} title="Edit step" aria-label="Edit step"
-              className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600">✎</button>
+              className="rounded p-1 text-faint hover:bg-muted hover:text-secondary">✎</button>
             <button onClick={() => { if (window.confirm('Remove this step?')) removeMutation.mutate(); }} title="Remove step" aria-label="Remove step"
-              className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600">
+              className="rounded p-1 text-faint hover:bg-danger hover:text-danger-fg">
               <Trash2 className="h-3.5 w-3.5" />
             </button>
           </div>
@@ -246,16 +246,16 @@ function StepRow({ step, position, total, editable, deviceName, actionLabel, onM
       {expanded && (
         <div className="ml-11 mt-2 space-y-2 text-xs">
           {(step.secretRefs?.length ?? 0) > 0 && (
-            <p className="text-slate-500">Secrets: {step.secretRefs!.join(', ')}</p>
+            <p className="text-muted-foreground">Secrets: {step.secretRefs!.join(', ')}</p>
           )}
           <details open={Boolean(step.result)}>
-            <summary className="cursor-pointer text-slate-400 hover:text-slate-600">Result</summary>
+            <summary className="cursor-pointer text-faint hover:text-secondary">Result</summary>
             {step.result ? (
-              <pre className="mt-1 max-h-64 overflow-auto rounded bg-slate-900 p-2 font-mono text-[11px] leading-relaxed text-slate-100">
+              <pre className="mt-1 max-h-64 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-slate-100">
                 {JSON.stringify(step.result, null, 2)}
               </pre>
             ) : (
-              <p className="mt-1 text-slate-400">No result yet.</p>
+              <p className="mt-1 text-faint">No result yet.</p>
             )}
           </details>
         </div>
@@ -295,20 +295,20 @@ function StepEditor({ step, planId, onSaved, onClose }: {
 
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={onClose}>
-      <div className="max-h-[85vh] w-full max-w-lg overflow-auto rounded-md border border-slate-200 bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-          <h3 className="text-sm font-semibold text-slate-800">Edit step #{step.stepIndex}</h3>
-          <button onClick={onClose} aria-label="Close" className="rounded p-1 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-primary/40 p-4" onClick={onClose}>
+      <div className="max-h-[85vh] w-full max-w-lg overflow-auto rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <h3 className="text-sm font-semibold text-foreground">Edit step #{step.stepIndex}</h3>
+          <button onClick={onClose} aria-label="Close" className="rounded p-1 text-faint hover:bg-muted"><X className="h-4 w-4" /></button>
         </div>
 
         <div className="space-y-4 px-4 py-3">
-          {error && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+          {error && <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{error}</div>}
 
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Action</label>
+            <label className="mb-1 block text-sm font-medium text-secondary">Action</label>
             <select value={actionId} onChange={(e) => { setActionId(e.target.value); setInput({}); }}
-              className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm">
+              className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm">
               {(actionsQuery.data ?? []).map((c) => (
                 <option key={c.id} value={c.id}>{c.label}</option>
               ))}
@@ -324,15 +324,15 @@ function StepEditor({ step, planId, onSaved, onClose }: {
 
           {(catalogQuery.data?.provisionedSecrets.length ?? 0) > 0 && (
             <div>
-              <label className="mb-1 block text-sm font-medium text-slate-700">Provisioned secrets</label>
+              <label className="mb-1 block text-sm font-medium text-secondary">Provisioned secrets</label>
               <div className="space-y-1">
                 {catalogQuery.data!.provisionedSecrets.map((ps) => (
-                  <label key={ps.ref} className="flex items-center gap-2 text-sm text-slate-600">
+                  <label key={ps.ref} className="flex items-center gap-2 text-sm text-secondary">
                     <input type="checkbox" checked={secretRefs.includes(ps.ref)}
                       onChange={(e) => setSecretRefs((prev) => e.target.checked ? [...prev, ps.ref] : prev.filter((r) => r !== ps.ref))}
-                      className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400" />
+                      className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-400" />
                     <span>{ps.label ?? ps.ref}</span>
-                    <span className="font-mono text-xs text-slate-400">({ps.type})</span>
+                    <span className="font-mono text-xs text-faint">({ps.type})</span>
                   </label>
                 ))}
               </div>
@@ -341,13 +341,13 @@ function StepEditor({ step, planId, onSaved, onClose }: {
 
           {(catalogQuery.data?.steps.length ?? 0) > 1 && (
             <div>
-              <label className="mb-1 block text-sm font-medium text-slate-700">Runs after</label>
+              <label className="mb-1 block text-sm font-medium text-secondary">Runs after</label>
               <div className="space-y-1">
                 {catalogQuery.data!.steps.filter((s) => s.id !== step.id).map((s) => (
-                  <label key={s.id} className="flex items-center gap-2 text-sm text-slate-600">
+                  <label key={s.id} className="flex items-center gap-2 text-sm text-secondary">
                     <input type="checkbox" checked={dependsOn.includes(s.stepIndex)}
                       onChange={(e) => setDependsOn((prev) => e.target.checked ? [...prev, s.stepIndex] : prev.filter((d) => d !== s.stepIndex))}
-                      className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400" />
+                      className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-400" />
                     <span>Step #{s.stepIndex}</span>
                   </label>
                 ))}
@@ -355,14 +355,14 @@ function StepEditor({ step, planId, onSaved, onClose }: {
             </div>
           )}
 
-          <label className="flex items-center gap-2 text-sm text-slate-600">
+          <label className="flex items-center gap-2 text-sm text-secondary">
             <input type="checkbox" checked={bestEffort} onChange={(e) => setBestEffort(e.target.checked)}
-              className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400" />
+              className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-400" />
             Best effort (failure does not abort the plan)
           </label>
 
-          <div className="flex justify-end gap-2 border-t border-slate-100 pt-3">
-            <button onClick={onClose} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-100">Cancel</button>
+          <div className="flex justify-end gap-2 border-t border-border pt-3">
+            <button onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">Cancel</button>
             <button
               onClick={() => {
                 const entry = (actionsQuery.data ?? []).find((c) => c.id === actionId);
@@ -373,7 +373,7 @@ function StepEditor({ step, planId, onSaved, onClose }: {
                 saveMutation.mutate();
               }}
               disabled={saveMutation.isPending}
-              className="rounded-md bg-slate-900 px-4 py-1.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50">
+              className="rounded-md bg-primary px-4 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50">
               {saveMutation.isPending ? 'Saving…' : 'Save'}
             </button>
           </div>
@@ -408,7 +408,7 @@ function AddStepButton({ plan, onAdded }: { plan: PlanDetailType; onAdded: () =>
   const [open, setOpen] = useState(false);
   return (
     <>
-      <button onClick={() => setOpen(true)} className="flex items-center gap-1 rounded-md border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100">
+      <button onClick={() => setOpen(true)} className="flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs font-medium text-secondary hover:bg-muted">
         <Plus className="h-3.5 w-3.5" /> Add step
       </button>
       {open && (
@@ -439,18 +439,18 @@ function AddStepModal({ plan, onDone, onClose }: { plan: PlanDetailType; onDone:
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={onClose}>
-      <div className="max-h-[85vh] w-full max-w-lg overflow-auto rounded-md border border-slate-200 bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-          <h3 className="text-sm font-semibold text-slate-800">Add step</h3>
-          <button onClick={onClose} aria-label="Close" className="rounded p-1 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-primary/40 p-4" onClick={onClose}>
+      <div className="max-h-[85vh] w-full max-w-lg overflow-auto rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <h3 className="text-sm font-semibold text-foreground">Add step</h3>
+          <button onClick={onClose} aria-label="Close" className="rounded p-1 text-faint hover:bg-muted"><X className="h-4 w-4" /></button>
         </div>
         <div className="space-y-4 px-4 py-3">
-          {error && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+          {error && <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{error}</div>}
 
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Device</label>
-            <select value={deviceId} onChange={(e) => setDeviceId(e.target.value)} className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm">
+            <label className="mb-1 block text-sm font-medium text-secondary">Device</label>
+            <select value={deviceId} onChange={(e) => setDeviceId(e.target.value)} className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm">
               <option value="" disabled>Select a device</option>
               {eligibleDevices.map((d) => (
                 <option key={d.id} value={d.id}>{d.name}</option>
@@ -459,8 +459,8 @@ function AddStepModal({ plan, onDone, onClose }: { plan: PlanDetailType; onDone:
           </div>
 
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Action</label>
-            <select value={actionId} onChange={(e) => { setActionId(e.target.value); setInput({}); }} className="w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm">
+            <label className="mb-1 block text-sm font-medium text-secondary">Action</label>
+            <select value={actionId} onChange={(e) => { setActionId(e.target.value); setInput({}); }} className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm">
               <option value="" disabled>Select an action</option>
               {(actionsQuery.data ?? []).map((c) => (
                 <option key={c.id} value={c.id}>{c.label}</option>
@@ -475,8 +475,8 @@ function AddStepModal({ plan, onDone, onClose }: { plan: PlanDetailType; onDone:
             ) : null;
           })()}
 
-          <div className="flex justify-end gap-2 border-t border-slate-100 pt-3">
-            <button onClick={onClose} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-100">Cancel</button>
+          <div className="flex justify-end gap-2 border-t border-border pt-3">
+            <button onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">Cancel</button>
             <button
               onClick={() => {
                 const entry = (actionsQuery.data ?? []).find((c) => c.id === actionId);
@@ -488,7 +488,7 @@ function AddStepModal({ plan, onDone, onClose }: { plan: PlanDetailType; onDone:
                 addMutation.mutate();
               }}
               disabled={addMutation.isPending || !deviceId || !actionId}
-              className="rounded-md bg-slate-900 px-4 py-1.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50">
+              className="rounded-md bg-primary px-4 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50">
               {addMutation.isPending ? 'Adding…' : 'Add Step'}
             </button>
           </div>

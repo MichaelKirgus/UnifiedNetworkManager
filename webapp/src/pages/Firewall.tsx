@@ -8,16 +8,16 @@ import { api, FirewallRuleRow } from '../api/client';
 
 /** Small colored pill for the rule kind (filter vs. NAT kinds). */
 const TYPE_STYLES: Record<FirewallRuleRow['ruleType'], string> = {
-  filter: 'bg-slate-200 text-slate-700',
+  filter: 'bg-muted text-secondary',
   dnat: 'bg-indigo-100 text-indigo-700',
   snat: 'bg-teal-100 text-teal-700',
   'one-to-one': 'bg-purple-100 text-purple-700',
-  npt: 'bg-amber-100 text-amber-800',
+  npt: 'bg-warning text-warning-fg',
 };
 
 function TypeBadge({ type }: { type: FirewallRuleRow['ruleType'] }) {
   return (
-    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${TYPE_STYLES[type] ?? 'bg-slate-100 text-slate-600'}`}>
+    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${TYPE_STYLES[type] ?? 'bg-muted text-secondary'}`}>
       {type}
     </span>
   );
@@ -25,14 +25,14 @@ function TypeBadge({ type }: { type: FirewallRuleRow['ruleType'] }) {
 
 /** Verdict pill — allow green, deny red, NAT/other slate. */
 const ACTION_STYLES: Record<FirewallRuleRow['action'], string> = {
-  allow: 'bg-emerald-100 text-emerald-700',
-  deny: 'bg-red-100 text-red-700',
-  other: 'bg-slate-100 text-slate-600',
+  allow: 'bg-success text-success-fg',
+  deny: 'bg-danger text-danger-fg',
+  other: 'bg-muted text-secondary',
 };
 
 function ActionBadge({ action }: { action: FirewallRuleRow['action'] }) {
   return (
-    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${ACTION_STYLES[action] ?? 'bg-slate-100 text-slate-600'}`}>
+    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${ACTION_STYLES[action] ?? 'bg-muted text-secondary'}`}>
       {action}
     </span>
   );
@@ -45,15 +45,15 @@ function orDash(v?: string | null): string {
 
 /** IP-family pill — v4 blue, v6 violet, both slate. */
 const IP_STYLES: Record<string, string> = {
-  v4: 'bg-blue-100 text-blue-700',
+  v4: 'bg-info text-info-fg',
   v6: 'bg-violet-100 text-violet-700',
-  both: 'bg-slate-200 text-slate-700',
+  both: 'bg-muted text-secondary',
 };
 
 function IpBadge({ version }: { version?: string }) {
   const v = (version ?? '').trim().toLowerCase();
   return (
-    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${IP_STYLES[v] ?? 'bg-slate-100 text-slate-600'}`}>
+    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${IP_STYLES[v] ?? 'bg-muted text-secondary'}`}>
       {v || '—'}
     </span>
   );
@@ -64,12 +64,12 @@ function StatsCell({ row }: { row: FirewallRuleRow }) {
   const hasPackets = typeof row.packets === 'number';
   const hasBytes = typeof row.bytes === 'number';
   const hasStates = typeof row.states === 'number' && (row.states ?? 0) > 0;
-  if (!hasPackets && !hasBytes && !hasStates) return <span className="text-slate-400">—</span>;
+  if (!hasPackets && !hasBytes && !hasStates) return <span className="text-faint">—</span>;
   return (
     <div className="flex flex-col text-xs leading-tight">
-      {hasPackets && <span className="font-mono text-slate-700" title="packets matched">{row.packets!.toLocaleString()} pkt</span>}
-      {hasBytes && <span className="font-mono text-slate-500" title="bytes matched">{formatBytes(row.bytes!)}</span>}
-      {hasStates && <span className="text-slate-400" title="active connection states">{row.states!.toLocaleString()} states</span>}
+      {hasPackets && <span className="font-mono text-secondary" title="packets matched">{row.packets!.toLocaleString()} pkt</span>}
+      {hasBytes && <span className="font-mono text-muted-foreground" title="bytes matched">{formatBytes(row.bytes!)}</span>}
+      {hasStates && <span className="text-faint" title="active connection states">{row.states!.toLocaleString()} states</span>}
     </div>
   );
 }
@@ -121,7 +121,7 @@ export default function Firewall() {
       key: 'position',
       width: 60,
       sortAccessor: (row) => row.position,
-      render: (row) => <span className="font-mono text-xs text-slate-500">{row.position + 1}</span>,
+      render: (row) => <span className="font-mono text-xs text-muted-foreground">{row.position + 1}</span>,
     },
     {
       // IP family the rule applies to — v4 / v6 / both.
@@ -163,7 +163,7 @@ export default function Firewall() {
       header: 'Scope',
       key: 'scope',
       width: 160,
-      render: (row) => <span className="text-xs text-slate-600">{orDash(row.scope)}</span>,
+      render: (row) => <span className="text-xs text-secondary">{orDash(row.scope)}</span>,
     },
     {
       // Live hit counters — both vendors report them now (OPNsense pf rule_stats
@@ -182,9 +182,9 @@ export default function Firewall() {
       width: 90,
       render: (row) =>
         row.enabled ? (
-          <span className="text-xs font-medium text-emerald-700">yes</span>
+          <span className="text-xs font-medium text-success-fg">yes</span>
         ) : (
-          <span className="text-xs font-medium text-slate-400">no</span>
+          <span className="text-xs font-medium text-faint">no</span>
         ),
     },
     {
@@ -193,9 +193,9 @@ export default function Firewall() {
       width: 260,
       render: (row) =>
         row.description && row.description.trim() !== '' ? (
-          <span className="text-xs text-slate-700">{row.description}</span>
+          <span className="text-xs text-secondary">{row.description}</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         ),
     },
   ];
@@ -203,9 +203,9 @@ export default function Firewall() {
   return (
     <Layout title="Firewall">
 
-      {firewallQuery.isLoading && <p className="text-sm text-slate-500">Loading firewall rules...</p>}
+      {firewallQuery.isLoading && <p className="text-sm text-muted-foreground">Loading firewall rules...</p>}
       {firewallQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load firewall rules: {(firewallQuery.error as Error).message}</p>
+        <p className="text-sm text-danger-fg">Failed to load firewall rules: {(firewallQuery.error as Error).message}</p>
       )}
       {firewallQuery.data && (
         <DataTable

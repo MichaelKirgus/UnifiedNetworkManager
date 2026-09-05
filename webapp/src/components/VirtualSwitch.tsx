@@ -131,7 +131,7 @@ export function VirtualSwitch({ items, layout, rows = 3, selectedKeys, onToggleK
   }, [layout, items, rows]);
 
   if (items.length === 0) {
-    return <div className="px-4 py-3 text-xs text-slate-400">No ports reported.</div>;
+    return <div className="px-4 py-3 text-xs text-faint">No ports reported.</div>;
   }
 
   return (
@@ -139,7 +139,7 @@ export function VirtualSwitch({ items, layout, rows = 3, selectedKeys, onToggleK
       {bands.map((band) => (
         <div key={band.id}>
           {band.label && (
-            <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">{band.label}</div>
+            <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-faint">{band.label}</div>
           )}
           <div className="flex flex-wrap gap-1.5">
             {band.portKeys.map((key) => {
@@ -175,26 +175,26 @@ function PortCell({ item, selected, onToggle, selectable }: { item: StateItem; s
         'relative flex h-[54px] w-[62px] shrink-0 flex-col items-center justify-center gap-1 rounded-md border transition-colors',
         selectable && selected
           ? 'border-indigo-400 bg-indigo-50 ring-1 ring-indigo-300'
-          : 'border-slate-200 bg-white',
-        selectable && !selected && 'hover:border-slate-300 hover:bg-slate-50'
+          : 'border-border bg-card',
+        selectable && !selected && 'hover:border-border hover:bg-background'
       )}
     >
       {selectable && (
         <span
           className={clsx(
             'absolute right-1 top-1 flex h-3.5 w-3.5 items-center justify-center rounded-sm border',
-            selected ? 'border-indigo-500 bg-indigo-500 text-white' : 'border-slate-300 bg-white'
+            selected ? 'border-indigo-500 bg-indigo-500 text-white' : 'border-border bg-card'
           )}
         >
           {selected && <Check className="h-2.5 w-2.5" />}
         </span>
       )}
       <span className={clsx('h-2 w-2 rounded-full', ledClass(item.status))} />
-      <span className="max-w-full truncate px-1 text-[11px] font-semibold leading-none text-slate-700" title={portLabel(item)}>
+      <span className="max-w-full truncate px-1 text-[11px] font-semibold leading-none text-secondary" title={portLabel(item)}>
         {portLabel(item)}
       </span>
       {info && (
-        <span className="max-w-full truncate px-1 text-[9px] leading-tight text-slate-400" title={info}>
+        <span className="max-w-full truncate px-1 text-[9px] leading-tight text-faint" title={info}>
           {info}
         </span>
       )}

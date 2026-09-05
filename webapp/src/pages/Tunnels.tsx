@@ -11,13 +11,13 @@ const TYPE_STYLES: Record<TunnelRow['type'], string> = {
   wireguard: 'bg-indigo-100 text-indigo-700',
   openvpn: 'bg-teal-100 text-teal-700',
   ipsec: 'bg-purple-100 text-purple-700',
-  pppoe: 'bg-amber-100 text-amber-800',
-  gre: 'bg-slate-200 text-slate-700',
+  pppoe: 'bg-warning text-warning-fg',
+  gre: 'bg-muted text-secondary',
 };
 
 function TypeBadge({ type }: { type: TunnelRow['type'] }) {
   return (
-    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${TYPE_STYLES[type] ?? 'bg-slate-100 text-slate-600'}`}>
+    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${TYPE_STYLES[type] ?? 'bg-muted text-secondary'}`}>
       {type}
     </span>
   );
@@ -42,7 +42,7 @@ export default function Tunnels() {
       header: 'Tunnel',
       key: 'name',
       width: 220,
-      render: (row) => <span className="font-medium text-slate-800">{row.name}</span>,
+      render: (row) => <span className="font-medium text-foreground">{row.name}</span>,
     },
     {
       header: 'Type',
@@ -82,11 +82,11 @@ export default function Tunnels() {
             <span className="font-mono text-xs">{row.localAddress}</span>
           )}
           {row.subnet && (
-            <span className="inline-flex w-fit rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-600">
+            <span className="inline-flex w-fit rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-secondary">
               {row.subnet}
             </span>
           )}
-          {!row.localAddress && !row.subnet && <span className="text-slate-400">—</span>}
+          {!row.localAddress && !row.subnet && <span className="text-faint">—</span>}
         </div>
       ),
     },
@@ -105,11 +105,11 @@ export default function Tunnels() {
       sortAccessor: (row) => row.lastHandshakeSeconds ?? Number.MAX_SAFE_INTEGER,
       render: (row) => {
         if (row.lastHandshakeSeconds === null || row.lastHandshakeSeconds === undefined) {
-          return <span className="text-slate-400">—</span>;
+          return <span className="text-faint">—</span>;
         }
         const stale = row.lastHandshakeSeconds > 120; // ~2 keepalives missed
         return (
-          <span className={`font-mono text-xs ${stale ? 'text-amber-600' : 'text-emerald-700'}`}>
+          <span className={`font-mono text-xs ${stale ? 'text-warning-fg' : 'text-success-fg'}`}>
             {formatDuration(row.lastHandshakeSeconds)} ago
           </span>
         );
@@ -124,7 +124,7 @@ export default function Tunnels() {
         row.uptimeSeconds !== null && row.uptimeSeconds !== undefined ? (
           formatDuration(row.uptimeSeconds)
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         ),
     },
     {
@@ -136,11 +136,11 @@ export default function Tunnels() {
         row.rxRate !== null && row.rxRate !== undefined || row.txRate !== null && row.txRate !== undefined ? (
           <span className="font-mono text-xs">
             {row.rxRate !== null && row.rxRate !== undefined ? `${formatBytes(row.rxRate)}/s` : '—'}{' '}
-            <span className="text-slate-400">/</span>{' '}
+            <span className="text-faint">/</span>{' '}
             {row.txRate !== null && row.txRate !== undefined ? `${formatBytes(row.txRate)}/s` : '—'}
           </span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         ),
     },
     {
@@ -155,9 +155,9 @@ export default function Tunnels() {
   return (
     <Layout title="Tunnels">
 
-      {tunnelsQuery.isLoading && <p className="text-sm text-slate-500">Loading tunnels...</p>}
+      {tunnelsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading tunnels...</p>}
       {tunnelsQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load tunnels: {(tunnelsQuery.error as Error).message}</p>
+        <p className="text-sm text-danger-fg">Failed to load tunnels: {(tunnelsQuery.error as Error).message}</p>
       )}
       {tunnelsQuery.data && (
         <DataTable

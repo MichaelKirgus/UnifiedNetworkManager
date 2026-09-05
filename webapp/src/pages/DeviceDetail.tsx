@@ -264,17 +264,17 @@ export default function DeviceDetail() {
   function IdentityRow({ label, info }: { label: string; info: { value: string; pluginName?: string } | null }) {
     return (
       <div className="flex items-center gap-3 py-2 first:pt-0 last:pb-0">
-        <dt className="w-40 shrink-0 text-sm font-medium text-slate-500">{label}</dt>
+        <dt className="w-40 shrink-0 text-sm font-medium text-muted-foreground">{label}</dt>
         <dd className="min-w-0 flex-1">
           {info ? (
             <span className="flex items-baseline gap-2">
-              <span className="break-all font-mono text-xs text-slate-800">{info.value}</span>
+              <span className="break-all font-mono text-xs text-foreground">{info.value}</span>
               {snapshots.length > 1 && info.pluginName && (
-                <span className="shrink-0 text-[11px] text-slate-400">via {info.pluginName}</span>
+                <span className="shrink-0 text-[11px] text-faint">via {info.pluginName}</span>
               )}
             </span>
           ) : (
-            <span className="text-sm text-slate-400">—</span>
+            <span className="text-sm text-faint">—</span>
           )}
         </dd>
       </div>
@@ -290,7 +290,7 @@ export default function DeviceDetail() {
           {device?.enabled === false && (
             <span
               title="Telemetry polling disabled — historical data and last metrics are preserved"
-              className="rounded-full bg-slate-200 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600"
+              className="rounded-full bg-muted px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-secondary"
             >
               disabled
             </span>
@@ -298,7 +298,7 @@ export default function DeviceDetail() {
           {device && hasDeviceConfig && (
             <Link
               to={`/devices/${device.id}/config`}
-              className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
+              className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
             >
               <Settings2 className="h-4 w-4" />
               Config
@@ -310,13 +310,13 @@ export default function DeviceDetail() {
               onClick={() => refreshDevice.mutate()}
               disabled={refreshDevice.isPending}
               title="Force an immediate re-poll — metrics + inventory now (diagnostics)"
-              className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background disabled:opacity-50"
             >
               <RefreshCw className={`h-4 w-4 ${refreshDevice.isPending ? 'animate-spin' : ''}`} />
               Refresh now
             </button>
             {refreshError && (
-              <span title={refreshError} className="max-w-xs truncate text-xs text-red-600">
+              <span title={refreshError} className="max-w-xs truncate text-xs text-danger-fg">
                 {refreshError}
               </span>
             )}
@@ -331,7 +331,7 @@ export default function DeviceDetail() {
               className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
                 device.enabled === false
                   ? 'border-green-200 text-green-700 hover:bg-green-50'
-                  : 'border-slate-300 text-slate-600 hover:bg-slate-50'
+                  : 'border-border text-secondary hover:bg-background'
               }`}
             >
               <Power className="h-4 w-4" />
@@ -344,7 +344,7 @@ export default function DeviceDetail() {
                 }
               }}
               disabled={cloneDevice.isPending}
-              className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background disabled:opacity-50"
             >
               <Copy className="h-4 w-4" />
               Clone
@@ -356,7 +356,7 @@ export default function DeviceDetail() {
                 }
               }}
               disabled={deleteDevice.isPending}
-              className="flex items-center gap-1.5 rounded-md border border-red-200 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-md border border-danger-border px-3 py-1.5 text-sm font-medium text-danger-fg hover:bg-danger disabled:opacity-50"
             >
               <Trash2 className="h-4 w-4" />
               Delete device
@@ -367,46 +367,46 @@ export default function DeviceDetail() {
       }
     >
       <div className="mb-4 flex items-center gap-3">
-        <Link to="/devices" className="text-sm text-slate-500 hover:underline">
+        <Link to="/devices" className="text-sm text-muted-foreground hover:underline">
           &larr; Back to devices
         </Link>
         <DeviceIcon plugin={primaryPlugin} model={device?.model} size="lg" />
         {device && (device.model || device.firmwareVersion) && (
-          <p className="text-xs text-slate-400">
+          <p className="text-xs text-faint">
             {[device.vendor, ...(device.deviceTypes ?? []), device.model, device.firmwareVersion].filter(Boolean).join(' · ')}
           </p>
         )}
       </div>
 
       {(toggleError || cloneError) && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div className="mb-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
           {toggleError ?? cloneError}
         </div>
       )}
 
       {deleteDevice.error && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div className="mb-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
           {(deleteDevice.error as Error).message}
         </div>
       )}
 
       {/* --- Identity: firmware + serial (from the plugins' monitoring data) */}
-      <section className="mb-8 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Identity</h2>
-        <dl className="divide-y divide-slate-100">
+      <section className="mb-8 rounded-md border border-border bg-card p-4 shadow-sm">
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">Identity</h2>
+        <dl className="divide-y divide-border">
           <IdentityRow label="Firmware version" info={firmwareInfo} />
           <IdentityRow label="Serial number" info={serialInfo} />
         </dl>
       </section>
 
       {/* --- Plugin assignments ------------------------------------------- */}
-      <section className="mb-8 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+      <section className="mb-8 rounded-md border border-border bg-card p-4 shadow-sm">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Plugins</h2>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Plugins</h2>
           {canWriteDevices && (
             <button
               onClick={() => setShowAddPlugin(true)}
-              className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background"
             >
               <Plus className="h-4 w-4" />
               Add plugin
@@ -415,11 +415,11 @@ export default function DeviceDetail() {
         </div>
 
         {assignments.length === 0 ? (
-          <p className="text-sm text-slate-500">No plugins assigned to this device yet.</p>
+          <p className="text-sm text-muted-foreground">No plugins assigned to this device yet.</p>
         ) : (
           <table className="w-full text-left text-sm">
             <thead>
-              <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-400">
+              <tr className="border-b border-border text-xs uppercase tracking-wide text-faint">
                 <th className="py-2 pr-3 font-medium">Plugin</th>
                 <th className="py-2 pr-3 font-medium">Status</th>
                 <th className="py-2 pr-3 font-medium">Credentials</th>
@@ -428,11 +428,11 @@ export default function DeviceDetail() {
             </thead>
             <tbody>
               {assignments.map((a) => (
-                <tr key={a.id} className="border-b border-slate-100 last:border-0">
+                <tr key={a.id} className="border-b border-border last:border-0">
                   <td className="py-2 pr-3">
-                    <span className="font-medium text-slate-800">{a.pluginName ?? a.pluginId}</span>
+                    <span className="font-medium text-foreground">{a.pluginName ?? a.pluginId}</span>
                     {a.isPrimary && (
-                      <span className="ml-2 rounded-full bg-slate-900 px-2 py-0.5 text-xs font-medium text-white">
+                      <span className="ml-2 rounded-full bg-primary px-2 py-0.5 text-xs font-medium text-white">
                         primary
                       </span>
                     )}
@@ -443,13 +443,13 @@ export default function DeviceDetail() {
                         <span className="h-2 w-2 rounded-full bg-green-500" /> online
                       </span>
                     ) : (
-                      <span className="inline-flex items-center gap-1.5 text-slate-400">
+                      <span className="inline-flex items-center gap-1.5 text-faint">
                         <span className="h-2 w-2 rounded-full bg-slate-300" /> offline
                       </span>
                     )}
                   </td>
                   <td className="py-2 pr-3">
-                    <span className="text-slate-600">{a.secretLabel ?? '—'}</span>
+                    <span className="text-secondary">{a.secretLabel ?? '—'}</span>
                     {a.credentialSlots && a.credentialSlots.length > 0 && (
                       <div className="mt-1 flex flex-wrap gap-1">
                         {a.credentialSlots.map((slot) => (
@@ -459,7 +459,7 @@ export default function DeviceDetail() {
                             className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
                               slot.secretId
                                 ? 'bg-indigo-50 text-indigo-700'
-                                : 'bg-slate-100 text-slate-400'
+                                : 'bg-muted text-faint'
                             }`}
                           >
                             {slot.name}: {slot.secretLabel ?? (slot.secretId ? '' : 'not set')}
@@ -476,7 +476,7 @@ export default function DeviceDetail() {
                           title="Make primary plugin"
                           disabled={setPrimary.isPending}
                           onClick={() => setPrimary.mutate(a.pluginId)}
-                          className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50"
+                          className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground disabled:opacity-50"
                         >
                           <Star className="h-4 w-4" />
                         </button>
@@ -486,7 +486,7 @@ export default function DeviceDetail() {
                           aria-label={`Settings for ${a.pluginName ?? a.pluginId}`}
                           title="Device settings"
                           onClick={() => setSettingsPluginId(a.pluginId)}
-                          className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                          className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
                         >
                           <Settings className="h-4 w-4" />
                         </button>
@@ -501,7 +501,7 @@ export default function DeviceDetail() {
                               removeAssignment.mutate(a.pluginId);
                             }
                           }}
-                          className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                          className="rounded-md p-1.5 text-faint hover:bg-danger hover:text-danger-fg disabled:opacity-50"
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
@@ -516,13 +516,13 @@ export default function DeviceDetail() {
       </section>
 
       {/* --- IP addresses (primary + secondaries) -------------------------- */}
-      <section className="mb-8 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+      <section className="mb-8 rounded-md border border-border bg-card p-4 shadow-sm">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">IP addresses</h2>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">IP addresses</h2>
           {canWriteDevices && (
             <button
               onClick={() => { setShowAddIp(true); setNewIpInput(''); setIpError(null); }}
-              className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background"
             >
               <Plus className="h-4 w-4" />
               Add IP
@@ -533,7 +533,7 @@ export default function DeviceDetail() {
         {device?.ips && device.ips.length > 0 ? (
           <table className="w-full text-left text-sm">
             <thead>
-              <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-400">
+              <tr className="border-b border-border text-xs uppercase tracking-wide text-faint">
                 <th className="py-2 pr-3 font-medium">Address</th>
                 <th className="py-2 pr-3 font-medium">Role</th>
                 <th className="py-2 text-right font-medium">Actions</th>
@@ -541,13 +541,13 @@ export default function DeviceDetail() {
             </thead>
             <tbody>
               {device.ips.map((ip: DeviceAddress) => (
-                <tr key={ip.id ?? ip.address} className="border-b border-slate-100 last:border-0">
+                <tr key={ip.id ?? ip.address} className="border-b border-border last:border-0">
                   <td className="py-2 pr-3 font-mono text-xs">{ip.address}</td>
                   <td className="py-2 pr-3">
                     {ip.isPrimary ? (
-                      <span className="rounded-full bg-slate-900 px-2 py-0.5 text-xs font-medium text-white">primary</span>
+                      <span className="rounded-full bg-primary px-2 py-0.5 text-xs font-medium text-white">primary</span>
                     ) : (
-                      <span className="text-slate-500">secondary</span>
+                      <span className="text-muted-foreground">secondary</span>
                     )}
                   </td>
                   <td className="py-2 text-right">
@@ -561,7 +561,7 @@ export default function DeviceDetail() {
                             removeIp.mutate(ip.id as string);
                           }
                         }}
-                        className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                        className="rounded-md p-1.5 text-faint hover:bg-danger hover:text-danger-fg disabled:opacity-50"
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>
@@ -572,14 +572,14 @@ export default function DeviceDetail() {
             </tbody>
           </table>
         ) : (
-          <p className="text-sm text-slate-500">No IP addresses registered yet.</p>
+          <p className="text-sm text-muted-foreground">No IP addresses registered yet.</p>
         )}
       </section>
 
       {/* --- Per-plugin metrics ------------------------------------------- */}
-      {monitoringQuery.isLoading && <p className="text-sm text-slate-500">Loading telemetry...</p>}
+      {monitoringQuery.isLoading && <p className="text-sm text-muted-foreground">Loading telemetry...</p>}
       {monitoringQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load telemetry: {(monitoringQuery.error as Error).message}</p>
+        <p className="text-sm text-danger-fg">Failed to load telemetry: {(monitoringQuery.error as Error).message}</p>
       )}
 
       {snapshots.map((snapshot) => {
@@ -602,22 +602,22 @@ export default function DeviceDetail() {
         return (
           <section key={snapshot.pluginId} className="mb-8">
             <div className="mb-3 flex items-center gap-2">
-              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
                 {assignment?.pluginName ?? snapshot.pluginId}
               </h2>
               <StatusBadge status={snapshot.health} />
             </div>
 
             {descriptors.length === 0 ? (
-              <p className="text-sm text-slate-500">
+              <p className="text-sm text-muted-foreground">
                 This plugin has not reported metric descriptors yet. Raw metrics:{' '}
-                <code className="break-all rounded bg-slate-100 px-1 py-0.5 text-xs">{JSON.stringify(snapshot.metrics)}</code>
+                <code className="break-all rounded bg-muted px-1 py-0.5 text-xs">{JSON.stringify(snapshot.metrics)}</code>
               </p>
             ) : (
               groups.map(([group, descs]) => (
                 <div key={group} className="mb-6">
                   {groups.length > 1 && (
-                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">{group}</h3>
+                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-faint">{group}</h3>
                   )}
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                     {descs.map((d) => (
@@ -634,7 +634,7 @@ export default function DeviceDetail() {
             )}
 
             {snapshot.collectedAt && (
-              <p className="text-xs text-slate-400">Last collected: {new Date(snapshot.collectedAt).toLocaleString()}</p>
+              <p className="text-xs text-faint">Last collected: {new Date(snapshot.collectedAt).toLocaleString()}</p>
             )}
           </section>
         );
@@ -644,9 +644,9 @@ export default function DeviceDetail() {
       {can('logs:read') && (
         <section className="mb-8">
           <div className="mb-3 flex items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Logs</h2>
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Logs</h2>
             <select
-              className="rounded-md border border-slate-300 px-2 py-1 text-xs"
+              className="rounded-md border border-border px-2 py-1 text-xs"
               value={logLevelFilter}
               onChange={(e) => setLogLevelFilter(e.target.value)}
             >
@@ -658,19 +658,19 @@ export default function DeviceDetail() {
             </select>
           </div>
 
-          {logsQuery.isLoading && <p className="text-sm text-slate-500">Loading logs...</p>}
+          {logsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading logs...</p>}
           {logsQuery.isError && (
-            <p className="text-sm text-red-600">Failed to load logs: {(logsQuery.error as Error).message}</p>
+            <p className="text-sm text-danger-fg">Failed to load logs: {(logsQuery.error as Error).message}</p>
           )}
           {logsQuery.data &&
             (logsQuery.data.length === 0 ? (
-              <p className="text-sm text-slate-500">
+              <p className="text-sm text-muted-foreground">
                 No log entries for this device yet — plugins ship failures and state changes here.
               </p>
             ) : (
-              <div className="overflow-x-auto rounded-md border border-slate-200 bg-white shadow-sm">
+              <div className="overflow-x-auto rounded-md border border-border bg-card shadow-sm">
                 <table className="w-full text-left text-sm">
-                  <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                  <thead className="border-b border-border bg-background text-xs uppercase tracking-wide text-muted-foreground">
                     <tr>
                       <th className="px-3 py-2">Time</th>
                       <th className="px-3 py-2">Level</th>
@@ -680,33 +680,33 @@ export default function DeviceDetail() {
                   </thead>
                   <tbody>
                     {logsQuery.data.map((entry) => (
-                      <tr key={entry.id} className="border-b border-slate-100 last:border-0">
-                        <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-500">
+                      <tr key={entry.id} className="border-b border-border last:border-0">
+                        <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-muted-foreground">
                           {new Date(entry.timestamp).toLocaleString()}
                         </td>
                         <td className="px-3 py-2">
                           <span
                             className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${
                               entry.level === 'error'
-                                ? 'bg-red-100 text-red-700'
+                                ? 'bg-danger text-danger-fg'
                                 : entry.level === 'warn'
-                                  ? 'bg-amber-100 text-amber-800'
+                                  ? 'bg-warning text-warning-fg'
                                   : entry.level === 'debug'
-                                    ? 'bg-slate-100 text-slate-500'
-                                    : 'bg-blue-100 text-blue-700'
+                                    ? 'bg-muted text-muted-foreground'
+                                    : 'bg-info text-info-fg'
                             }`}
                           >
                             {entry.level}
                           </span>
                         </td>
-                        <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-600">{entry.pluginName ?? entry.pluginId}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-xs text-secondary">{entry.pluginName ?? entry.pluginId}</td>
                         <td className="px-3 py-2">
                           <div className="flex flex-col gap-1">
-                            <span className="break-words text-slate-800">{entry.message}</span>
+                            <span className="break-words text-foreground">{entry.message}</span>
                             {entry.context && Object.keys(entry.context).length > 0 && (
                               <details className="text-xs">
-                                <summary className="cursor-pointer font-medium text-blue-600 hover:underline">Details</summary>
-                                <pre className="mt-1 max-h-48 overflow-auto rounded bg-slate-900 p-2 font-mono text-[11px] leading-relaxed text-slate-100">
+                                <summary className="cursor-pointer font-medium text-info-fg hover:underline">Details</summary>
+                                <pre className="mt-1 max-h-48 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-slate-100">
                                   {JSON.stringify(entry.context, null, 2)}
                                 </pre>
                               </details>
@@ -725,22 +725,22 @@ export default function DeviceDetail() {
       {/* --- Add plugin modal --------------------------------------------- */}
       {showAddPlugin && (
         <div
-          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-6"
+          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-primary/40 p-6"
           onClick={() => setShowAddPlugin(false)}
         >
           <div
-            className="mt-10 w-full max-w-lg rounded-md border border-slate-200 bg-white shadow-xl"
+            className="mt-10 w-full max-w-lg rounded-md border border-border bg-card shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <header className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h3 className="text-sm font-semibold text-slate-800">Add plugin to {device?.name ?? 'device'}</h3>
-              <button aria-label="Close" onClick={() => setShowAddPlugin(false)} className="rounded-md p-1 text-slate-400 hover:bg-slate-100">
+            <header className="flex items-center justify-between border-b border-border px-4 py-3">
+              <h3 className="text-sm font-semibold text-foreground">Add plugin to {device?.name ?? 'device'}</h3>
+              <button aria-label="Close" onClick={() => setShowAddPlugin(false)} className="rounded-md p-1 text-faint hover:bg-muted">
                 <X className="h-4 w-4" />
               </button>
             </header>
             <div className="p-4">
               {addAssignments.isError && (
-                <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                <div className="mb-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
                   {(addAssignments.error as Error).message}
                 </div>
               )}
@@ -760,7 +760,7 @@ export default function DeviceDetail() {
       {/* --- Add IP modal -------------------------------------------------- */}
       {showAddIp && (
         <div
-          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-6"
+          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-primary/40 p-6"
           onClick={() => setShowAddIp(false)}
         >
           <form
@@ -771,45 +771,45 @@ export default function DeviceDetail() {
               if (!isValidAddress(v)) { setIpError(addressError(v)); return; }
               addIp.mutate(v);
             }}
-            className="mt-10 w-full max-w-md rounded-md border border-slate-200 bg-white shadow-xl"
+            className="mt-10 w-full max-w-md rounded-md border border-border bg-card shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <header className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h3 className="text-sm font-semibold text-slate-800">Add IP to {device?.name ?? 'device'}</h3>
-              <button type="button" aria-label="Close" onClick={() => setShowAddIp(false)} className="rounded-md p-1 text-slate-400 hover:bg-slate-100">
+            <header className="flex items-center justify-between border-b border-border px-4 py-3">
+              <h3 className="text-sm font-semibold text-foreground">Add IP to {device?.name ?? 'device'}</h3>
+              <button type="button" aria-label="Close" onClick={() => setShowAddIp(false)} className="rounded-md p-1 text-faint hover:bg-muted">
                 <X className="h-4 w-4" />
               </button>
             </header>
             <div className="space-y-3 p-4">
               {addIp.isError && (
-                <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
                   {(addIp.error as Error).message}
                 </div>
               )}
               <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700">IP address</label>
+                <label className="mb-1 block text-sm font-medium text-secondary">IP address</label>
                 <input
                   autoFocus
-                  className={`w-full rounded-md border px-3 py-2 text-sm ${ipError ? 'border-red-400' : 'border-slate-300'}`}
+                  className={`w-full rounded-md border px-3 py-2 text-sm ${ipError ? 'border-red-400' : 'border-border'}`}
                   value={newIpInput}
                   onChange={(e) => { setNewIpInput(e.target.value); setIpError(null); }}
                   placeholder="10.0.0.2 or 2001:db8::1"
                 />
-                {ipError && <p className="mt-1 text-xs text-red-600">{ipError}</p>}
+                {ipError && <p className="mt-1 text-xs text-danger-fg">{ipError}</p>}
               </div>
             </div>
-            <footer className="flex items-center justify-end gap-2 border-t border-slate-200 px-4 py-3">
+            <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
               <button
                 type="button"
                 onClick={() => setShowAddIp(false)}
-                className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background"
               >
                 Cancel
               </button>
               <button
                 type="submit"
                 disabled={addIp.isPending}
-                className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
               >
                 Add IP
               </button>
@@ -821,18 +821,18 @@ export default function DeviceDetail() {
       {/* --- Per-device settings modal ------------------------------------- */}
       {settingsAssignment && (
         <div
-          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-6"
+          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-primary/40 p-6"
           onClick={() => setSettingsPluginId(null)}
         >
           <div
-            className="mt-10 w-full max-w-lg rounded-md border border-slate-200 bg-white shadow-xl"
+            className="mt-10 w-full max-w-lg rounded-md border border-border bg-card shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <header className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h3 className="text-sm font-semibold text-slate-800">
+            <header className="flex items-center justify-between border-b border-border px-4 py-3">
+              <h3 className="text-sm font-semibold text-foreground">
                 Settings — {settingsAssignment.pluginName ?? settingsAssignment.pluginId} on {device?.name ?? 'this device'}
               </h3>
-              <button aria-label="Close" onClick={() => setSettingsPluginId(null)} className="rounded-md p-1 text-slate-400 hover:bg-slate-100">
+              <button aria-label="Close" onClick={() => setSettingsPluginId(null)} className="rounded-md p-1 text-faint hover:bg-muted">
                 <X className="h-4 w-4" />
               </button>
             </header>

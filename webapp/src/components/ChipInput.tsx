@@ -56,18 +56,18 @@ export function ChipInput({ values, onChange, suggestions = [], placeholder = 'T
               type="button"
               onClick={() => addValue(s)}
               title={`Add "${s}"`}
-              className="rounded-full border border-dashed border-slate-300 px-2 py-0.5 text-xs text-slate-500 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-700"
+              className="rounded-full border border-dashed border-border px-2 py-0.5 text-xs text-muted-foreground hover:border-slate-400 hover:bg-background hover:text-secondary"
             >
               + {s}
             </button>
           ))}
         </div>
       )}
-      <div className="flex min-h-[38px] w-full flex-wrap items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2 py-1 focus-within:border-slate-400">
+      <div className="flex min-h-[38px] w-full flex-wrap items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 focus-within:border-slate-400">
         {values.map((v) => (
-          <span key={v} className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
+          <span key={v} className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-secondary">
             {v}
-            <button type="button" onClick={() => removeValue(v)} aria-label={`Remove ${v}`} className="text-slate-400 hover:text-red-600">
+            <button type="button" onClick={() => removeValue(v)} aria-label={`Remove ${v}`} className="text-faint hover:text-danger-fg">
               <X className="h-3 w-3" />
             </button>
           </span>

@@ -14,14 +14,14 @@ const FS_TYPE_STYLES: Record<string, string> = {
   'zfs-pool': 'bg-indigo-100 text-indigo-700',
   'zfs-dataset': 'bg-sky-100 text-sky-700',
   'zfs-zvol': 'bg-teal-100 text-teal-700',
-  ext4: 'bg-emerald-100 text-emerald-800',
+  ext4: 'bg-success text-success-fg',
   squashfs: 'bg-violet-100 text-violet-700',
-  usb: 'bg-amber-100 text-amber-800',
+  usb: 'bg-warning text-warning-fg',
 };
 
 function FsTypeBadge({ type }: { type: string }) {
   return (
-    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${FS_TYPE_STYLES[type] ?? 'bg-slate-100 text-slate-600'}`}>
+    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${FS_TYPE_STYLES[type] ?? 'bg-muted text-secondary'}`}>
       {type}
     </span>
   );
@@ -29,15 +29,15 @@ function FsTypeBadge({ type }: { type: string }) {
 
 /** Rotation-rate badge for physical disks. */
 const ROTATION_STYLES: Record<string, string> = {
-  hdd: 'bg-slate-200 text-slate-700',
-  ssd: 'bg-blue-100 text-blue-700',
+  hdd: 'bg-muted text-secondary',
+  ssd: 'bg-info text-info-fg',
   flash: 'bg-purple-100 text-purple-700',
 };
 
 function RotationBadge({ rate }: { rate: string }) {
-  if (rate === 'unknown') return <span className="text-slate-400">—</span>;
+  if (rate === 'unknown') return <span className="text-faint">—</span>;
   return (
-    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${ROTATION_STYLES[rate] ?? 'bg-slate-100 text-slate-600'}`}>
+    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${ROTATION_STYLES[rate] ?? 'bg-muted text-secondary'}`}>
       {rate}
     </span>
   );
@@ -52,10 +52,10 @@ function usagePct(row: { sizeBytes?: number | null; usedBytes?: number | null })
 }
 
 function usageColor(pct: number | null): string {
-  if (pct === null) return 'text-slate-400';
-  if (pct < 70) return 'text-emerald-700';
-  if (pct < 90) return 'text-amber-600';
-  return 'text-red-600';
+  if (pct === null) return 'text-faint';
+  if (pct < 70) return 'text-success-fg';
+  if (pct < 90) return 'text-warning-fg';
+  return 'text-danger-fg';
 }
 
 function usageBarColor(pct: number | null): string {
@@ -75,7 +75,7 @@ function UsageCell({ row }: { row: StorageFilesystemRow }) {
         {formatBytes(row.usedBytes)} used
       </span>
     ) : (
-      <span className="text-slate-400">—</span>
+      <span className="text-faint">—</span>
     );
   }
   return (
@@ -86,7 +86,7 @@ function UsageCell({ row }: { row: StorageFilesystemRow }) {
           {row.usedBytes !== null && row.usedBytes !== undefined ? formatBytes(row.usedBytes) : '—'} used
         </span>
       </div>
-      <div className="h-1.5 w-full overflow-hidden rounded bg-slate-100">
+      <div className="h-1.5 w-full overflow-hidden rounded bg-muted">
         <div className="h-full" style={{ width: `${pct ?? 0}%`, background: usageBarColor(pct) }} />
       </div>
     </div>
@@ -105,7 +105,7 @@ function childCell(key: string, child: StorageFilesystemRow, depth: number): Rea
       const basename = child.name.split('/').pop() ?? child.name;
       return (
         <span
-          className="block truncate font-medium text-slate-700"
+          className="block truncate font-medium text-secondary"
           style={{ paddingLeft: 18 + depth * 14 }}
           title={child.name}
         >
@@ -159,7 +159,7 @@ function DatasetChildRow({ child, ctx }: { child: StorageFilesystemRow; ctx: Exp
             onClick={ctx.onToggle}
             aria-expanded={ctx.expanded}
             title={ctx.expanded ? 'Collapse sub-datasets / zvols' : 'Expand sub-datasets / zvols'}
-            className="flex h-6 w-6 items-center justify-center rounded text-slate-400 hover:bg-slate-200 hover:text-slate-600"
+            className="flex h-6 w-6 items-center justify-center rounded text-faint hover:bg-muted hover:text-secondary"
           >
             {ctx.expanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
           </button>
@@ -168,7 +168,7 @@ function DatasetChildRow({ child, ctx }: { child: StorageFilesystemRow; ctx: Exp
         )}
       </td>
       {ctx.columns.map((col) => (
-        <td key={col.key} className="overflow-hidden px-4 py-2 text-slate-700">
+        <td key={col.key} className="overflow-hidden px-4 py-2 text-secondary">
           {childCell(col.key, child, ctx.depth)}
         </td>
       ))}
@@ -280,11 +280,11 @@ export default function Storage() {
       width: 260,
       render: (row) => (
         <div className="flex flex-col gap-0.5">
-          <span className="font-medium text-slate-800">{row.name}</span>
+          <span className="font-medium text-foreground">{row.name}</span>
           {row.parent && (
             // Only visible for orphaned datasets whose parent row is missing —
             // nested children get their context from the tree instead.
-            <span className="text-[10px] text-slate-400">in pool {row.parent}</span>
+            <span className="text-[10px] text-faint">in pool {row.parent}</span>
           )}
         </div>
       ),
@@ -349,13 +349,13 @@ export default function Storage() {
       header: 'Disk',
       key: 'name',
       width: 160,
-      render: (row) => <span className="font-medium text-slate-800">{row.name}</span>,
+      render: (row) => <span className="font-medium text-foreground">{row.name}</span>,
     },
     {
       header: 'Model',
       key: 'model',
       width: 240,
-      render: (row) => <span className="text-xs text-slate-600">{orDash(row.model)}</span>,
+      render: (row) => <span className="text-xs text-secondary">{orDash(row.model)}</span>,
     },
     {
       header: 'Serial',
@@ -395,7 +395,7 @@ export default function Storage() {
         row.poolName ? (
           <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-xs font-medium text-indigo-700">{row.poolName}</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         )
       ),
     },
@@ -422,14 +422,14 @@ export default function Storage() {
           splitter — collapsing the disks gives its space back to the table
           instead of leaving it empty below. */}
       <div className="flex h-full min-h-0 flex-col">
-        {storageQuery.isLoading && <p className="shrink-0 text-sm text-slate-500">Loading storage inventory...</p>}
+        {storageQuery.isLoading && <p className="shrink-0 text-sm text-muted-foreground">Loading storage inventory...</p>}
         {storageQuery.isError && (
-          <p className="shrink-0 text-sm text-red-600">Failed to load storage data: {(storageQuery.error as Error).message}</p>
+          <p className="shrink-0 text-sm text-danger-fg">Failed to load storage data: {(storageQuery.error as Error).message}</p>
         )}
 
         {/* Summary strip — aggregate capacity + counts. */}
         {!storageQuery.isLoading && !storageQuery.isError && (
-          <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs">
+          <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-border bg-card px-4 py-2 text-xs">
             {totalSize > 0 ? (
               <span className="flex items-center gap-2 font-mono">
                 <Database size={13} className="text-indigo-500" />
@@ -439,15 +439,15 @@ export default function Storage() {
                 </span>
               </span>
             ) : (
-              <span className="text-slate-400">No capacity data reported yet</span>
+              <span className="text-faint">No capacity data reported yet</span>
             )}
-            <span className="flex items-center gap-2 text-slate-600">
+            <span className="flex items-center gap-2 text-secondary">
               <Database size={13} className="text-indigo-500" />
               {poolCount} pool{poolCount === 1 ? '' : 's'} · {datasetCount} dataset{datasetCount === 1 ? '' : 's'} ·{' '}
               {filesystems.length - poolCount - datasetCount} other filesystem{filesystems.length - poolCount - datasetCount === 1 ? '' : 's'}
             </span>
-            <span className="flex items-center gap-2 text-slate-600">
-              <HardDrive size={13} className="text-slate-500" />
+            <span className="flex items-center gap-2 text-secondary">
+              <HardDrive size={13} className="text-muted-foreground" />
               {disks.length} disk{disks.length === 1 ? '' : 's'} / media device{disks.length === 1 ? '' : 's'}
             </span>
           </div>
@@ -486,7 +486,7 @@ export default function Storage() {
               className="group relative -my-1 h-3 shrink-0 cursor-row-resize"
               title="Drag to resize — or collapse the disk table for full filesystem height"
             >
-              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-slate-200 transition-colors group-hover:bg-indigo-400" />
+              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-muted transition-colors group-hover:bg-indigo-400" />
               <div className="absolute left-1/2 top-1/2 flex h-3 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center">
                 <span className="h-1 w-6 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400" />
               </div>
@@ -496,23 +496,23 @@ export default function Storage() {
           {/* Disk table (bottom) — takes the remaining height. The header stays
               mounted when collapsed so it can be re-opened. */}
           <div className={clsx('shrink-0 min-h-0 pl-1', disksOpen && 'flex-1')}>
-            <div className="flex h-full min-h-0 flex-col rounded-lg border border-slate-200 bg-white">
+            <div className="flex h-full min-h-0 flex-col rounded-lg border border-border bg-card">
               <button
                 type="button"
                 onClick={() => setDisksOpen((o) => !o)}
                 className="flex w-full shrink-0 items-center justify-between px-4 py-3 text-left"
                 aria-expanded={disksOpen}
               >
-                <span className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-                  <HardDrive size={16} className="text-slate-500" />
+                <span className="flex items-center gap-2 text-sm font-semibold text-secondary">
+                  <HardDrive size={16} className="text-muted-foreground" />
                   Physical disks &amp; media
                 </span>
                 {/* Expanded panel → chevron points DOWN (click collapses it);
                     collapsed → UP (click expands). */}
-                {disksOpen ? <ChevronDown size={18} className="text-slate-400" /> : <ChevronUp size={18} className="text-slate-400" />}
+                {disksOpen ? <ChevronDown size={18} className="text-faint" /> : <ChevronUp size={18} className="text-faint" />}
               </button>
               {disksOpen && (
-                <div className="min-h-0 flex-1 border-t border-slate-100 p-3">
+                <div className="min-h-0 flex-1 border-t border-border p-3">
                   <DataTable<StorageDiskRow>
                     columns={diskColumns}
                     rows={disks}

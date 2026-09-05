@@ -29,13 +29,13 @@ export function DeviceChip({
   return (
     <span
       title={title}
-      className="inline-flex max-w-[260px] flex-col gap-0.5 rounded border border-slate-200 bg-white px-1.5 py-1 text-xs"
+      className="inline-flex max-w-[260px] flex-col gap-0.5 rounded border border-border bg-card px-1.5 py-1 text-xs"
     >
-      <span className="truncate font-medium text-slate-700">{deviceName ?? '—'}</span>
+      <span className="truncate font-medium text-secondary">{deviceName ?? '—'}</span>
       {interfaces.length > 0 && (
         <span className="flex flex-wrap gap-x-1 gap-y-0.5">
           {interfaces.map((i) => (
-            <span key={i} className="rounded bg-slate-100 px-1 font-mono text-[10px] leading-4 text-slate-600">
+            <span key={i} className="rounded bg-muted px-1 font-mono text-[10px] leading-4 text-secondary">
               {i}
             </span>
           ))}

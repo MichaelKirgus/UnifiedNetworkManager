@@ -256,7 +256,7 @@ function EdgeChip({ cx, cy, full }: { cx: number; cy: number; full: string }) {
       onMouseLeave={() => setHover(false)}
     >
       {hover ? (
-        <div className="max-w-[300px] whitespace-nowrap rounded border border-slate-400 bg-white/95 px-1.5 py-0.5 text-[9px] leading-tight text-slate-700 shadow-sm">
+        <div className="max-w-[300px] whitespace-nowrap rounded border border-slate-400 bg-card/95 px-1.5 py-0.5 text-[9px] leading-tight text-secondary shadow-sm">
           {full}
         </div>
       ) : (

@@ -7,11 +7,11 @@ import { api, NetworkRow } from '../api/client';
 
 /** Small colored pill for the address family. */
 function VersionBadge({ version }: { version?: string | null }) {
-  if (!version) return <span className="text-slate-400">—</span>;
+  if (!version) return <span className="text-faint">—</span>;
   const cls =
     version === 'v6'
       ? 'bg-purple-100 text-purple-700'
-      : 'bg-blue-100 text-blue-700';
+      : 'bg-info text-info-fg';
   return (
     <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${cls}`}>
       {version}
@@ -41,7 +41,7 @@ export default function Networks() {
         // group, merged into one chip per scope type; fall back to the label
         // for VLAN/name rows.
         if ((row.subnets ?? []).length > 0) return <IpGroupChips ips={row.subnets ?? []} />;
-        return <span className="font-medium text-slate-800">{row.name}</span>;
+        return <span className="font-medium text-foreground">{row.name}</span>;
       },
     },
     {
@@ -50,11 +50,11 @@ export default function Networks() {
       width: 90,
       render: (row) =>
         row.vlanId !== null && row.vlanId !== undefined ? (
-          <span className="inline-flex rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-700">
+          <span className="inline-flex rounded bg-muted px-1.5 py-0.5 text-xs font-medium text-secondary">
             {row.vlanId}
           </span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         ),
     },
     {
@@ -113,9 +113,9 @@ export default function Networks() {
   return (
     <Layout title="Networks">
 
-      {networksQuery.isLoading && <p className="text-sm text-slate-500">Loading networks...</p>}
+      {networksQuery.isLoading && <p className="text-sm text-muted-foreground">Loading networks...</p>}
       {networksQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load networks: {(networksQuery.error as Error).message}</p>
+        <p className="text-sm text-danger-fg">Failed to load networks: {(networksQuery.error as Error).message}</p>
       )}
       {networksQuery.data && (
         <DataTable

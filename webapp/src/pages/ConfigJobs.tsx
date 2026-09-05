@@ -77,7 +77,7 @@ export default function ConfigJobs() {
       sortable: false,
       render: (row) => {
         const name = devices.find((d) => d.id === row.deviceId)?.plugins?.find((p) => p.pluginId === row.pluginId)?.pluginName;
-        return name ? <span className="text-slate-600">{name}</span> : <span className="font-mono text-xs text-slate-400">{row.pluginId ?? '—'}</span>;
+        return name ? <span className="text-secondary">{name}</span> : <span className="font-mono text-xs text-faint">{row.pluginId ?? '—'}</span>;
       },
     },
     { header: 'Action', key: 'action' },
@@ -103,7 +103,7 @@ export default function ConfigJobs() {
       actions={
         canApply && (
           <button
-            className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
+            className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover"
             onClick={() => setShowForm((v) => !v)}
           >
             {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
@@ -116,18 +116,18 @@ export default function ConfigJobs() {
       {canApply && showForm && (
         <form
           onSubmit={handleSubmit}
-          className="mb-6 grid grid-cols-1 gap-3 rounded-md border border-slate-200 bg-white p-4 shadow-sm sm:grid-cols-3"
+          className="mb-6 grid grid-cols-1 gap-3 rounded-md border border-border bg-card p-4 shadow-sm sm:grid-cols-3"
         >
           {formError && (
-            <div className="col-span-full rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            <div className="col-span-full rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
               {formError}
             </div>
           )}
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Device</label>
+            <label className="mb-1 block text-sm font-medium text-secondary">Device</label>
             <select
               required
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              className="w-full rounded-md border border-border px-3 py-2 text-sm"
               value={deviceId}
               onChange={(e) => handleDeviceChange(e.target.value)}
             >
@@ -142,11 +142,11 @@ export default function ConfigJobs() {
             </select>
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Plugin (applies the change)</label>
+            <label className="mb-1 block text-sm font-medium text-secondary">Plugin (applies the change)</label>
             <select
               required
               disabled={!deviceId}
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
+              className="w-full rounded-md border border-border px-3 py-2 text-sm disabled:opacity-50"
               value={pluginId}
               onChange={(e) => setPluginId(e.target.value)}
             >
@@ -162,10 +162,10 @@ export default function ConfigJobs() {
             </select>
           </div>
           <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">Action</label>
+            <label className="mb-1 block text-sm font-medium text-secondary">Action</label>
             <select
               required
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              className="w-full rounded-md border border-border px-3 py-2 text-sm"
               value={action}
               onChange={(e) => setAction(e.target.value)}
             >
@@ -180,7 +180,7 @@ export default function ConfigJobs() {
             <button
               type="submit"
               disabled={submitJob.isPending || !deviceId || !pluginId}
-              className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+              className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
             >
               {submitJob.isPending ? 'Submitting…' : 'Submit Job'}
             </button>
@@ -188,9 +188,9 @@ export default function ConfigJobs() {
         </form>
       )}
 
-      {jobsQuery.isLoading && <p className="text-sm text-slate-500">Loading config jobs...</p>}
+      {jobsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading config jobs...</p>}
       {jobsQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load config jobs: {(jobsQuery.error as Error).message}</p>
+        <p className="text-sm text-danger-fg">Failed to load config jobs: {(jobsQuery.error as Error).message}</p>
       )}
       {jobsQuery.data && (
         <DataTable columns={columns} rows={jobsQuery.data} rowKey={(row) => row.id} storageKey="config-jobs" autoRefresh={{ intervalMs: 10_000, queries: [jobsQuery] }} emptyMessage="No config jobs have been submitted yet." />

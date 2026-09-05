@@ -9,10 +9,10 @@ import { api, WifiBandView, WifiNeighborRef, WifiSsidGroup } from '../api/client
 
 /** Color scale for airtime utilization (green → amber → red). */
 function utilColor(pct: number | null): string {
-  if (pct === null) return 'text-slate-400';
-  if (pct < 30) return 'text-emerald-700';
-  if (pct < 70) return 'text-amber-600';
-  return 'text-red-600';
+  if (pct === null) return 'text-faint';
+  if (pct < 30) return 'text-success-fg';
+  if (pct < 70) return 'text-warning-fg';
+  return 'text-danger-fg';
 }
 
 /** Bar fill for airtime utilization (green → amber → red). */
@@ -87,10 +87,10 @@ function BandPanel({
   const empty = view.channels.length === 0 && view.markers.length === 0;
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-3">
+    <div className="rounded-lg border border-border bg-card p-3">
       <div className="mb-1 flex items-center justify-between">
-        <span className="text-sm font-semibold text-slate-700">{def.label}</span>
-        <span className="flex items-center gap-3 text-xs text-slate-400">
+        <span className="text-sm font-semibold text-secondary">{def.label}</span>
+        <span className="flex items-center gap-3 text-xs text-faint">
           {view.noiseFloorDbm !== null && view.noiseFloorDbm !== undefined && (
             <span title="Noisiest radio noise floor on this band" className="font-mono">noise {Math.round(view.noiseFloorDbm)} dBm</span>
           )}
@@ -99,13 +99,13 @@ function BandPanel({
       </div>
       <div className="relative h-32 w-full">
         {empty && (
-          <div className="flex h-full items-center justify-center text-xs text-slate-300">—</div>
+          <div className="flex h-full items-center justify-center text-xs text-faint">—</div>
         )}
         {/* Airtime gridlines — bar area = 76px above the axis (bottom-5). */}
         {[0, 50, 100].map((v) => (
           <div key={v} className="absolute left-0 right-0" style={{ bottom: 20 + (v / 100) * 76 }}>
-            <div className="h-px bg-slate-100" />
-            <span className="absolute -top-1.5 left-0 text-[9px] font-mono text-slate-300">{v}%</span>
+            <div className="h-px bg-muted" />
+            <span className="absolute -top-1.5 left-0 text-[9px] font-mono text-faint">{v}%</span>
           </div>
         ))}
         {/* One bar per channel — height ∝ airtime utilization (worst case across devices). */}
@@ -137,13 +137,13 @@ function BandPanel({
         {/* Noise floor line (annotation — dBm is not on the % axis). */}
         {view.noiseFloorDbm !== null && view.noiseFloorDbm !== undefined && !empty && (
           <div className="absolute left-0 right-0 border-t border-dashed border-amber-400/70" style={{ bottom: 21 }}>
-            <span className="absolute -top-3.5 right-0 text-[9px] font-mono text-amber-600">noise {Math.round(view.noiseFloorDbm)} dBm</span>
+            <span className="absolute -top-3.5 right-0 text-[9px] font-mono text-warning-fg">noise {Math.round(view.noiseFloorDbm)} dBm</span>
           </div>
         )}
         {/* Channel axis + ticks */}
-        <div className="absolute bottom-0 left-0 right-0 h-px bg-slate-200" />
+        <div className="absolute bottom-0 left-0 right-0 h-px bg-muted" />
         {ticks.map((ch) => (
-          <div key={ch} className="absolute -bottom-4 -translate-x-1/2 text-[9px] font-mono text-slate-400" style={{ left: leftPct(ch) }}>
+          <div key={ch} className="absolute -bottom-4 -translate-x-1/2 text-[9px] font-mono text-faint" style={{ left: leftPct(ch) }}>
             {ch}
           </div>
         ))}
@@ -157,40 +157,40 @@ function NeighborList({ neighbors }: { neighbors: WifiNeighborRef[] }) {
   const MAX_SHOWN = 30;
   const shown = neighbors.slice(0, MAX_SHOWN);
   return (
-    <div className="flex h-full flex-col rounded-lg border border-slate-200 bg-white p-3">
+    <div className="flex h-full flex-col rounded-lg border border-border bg-card p-3">
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-sm font-semibold text-slate-700">Neighbor networks</span>
-        <span className="text-xs text-slate-400">{neighbors.length} seen by your devices</span>
+        <span className="text-sm font-semibold text-secondary">Neighbor networks</span>
+        <span className="text-xs text-faint">{neighbors.length} seen by your devices</span>
       </div>
       {shown.length === 0 ? (
-        <p className="m-auto text-xs text-slate-300">No neighbor scan data yet — LANCOM LX APs populate this within a poll cycle.</p>
+        <p className="m-auto text-xs text-faint">No neighbor scan data yet — LANCOM LX APs populate this within a poll cycle.</p>
       ) : (
-        <ul className="-my-1 min-h-0 flex-1 divide-y divide-slate-50 overflow-y-auto">
+        <ul className="-my-1 min-h-0 flex-1 divide-y divide-border overflow-y-auto">
           {shown.map((n) => {
             const dbm = n.signalDbm ?? null;
             // Map -90…-30 dBm onto a 4–100% bar width.
             const pct = dbm === null ? 0 : Math.max(4, Math.min(100, ((dbm + 90) / 60) * 100));
-            const color = dbm === null ? 'bg-slate-200' : dbm >= -55 ? 'bg-emerald-500' : dbm >= -70 ? 'bg-amber-500' : 'bg-red-400';
+            const color = dbm === null ? 'bg-muted' : dbm >= -55 ? 'bg-emerald-500' : dbm >= -70 ? 'bg-amber-500' : 'bg-red-400';
             return (
               <li key={`${n.deviceId}-${n.bssid}`} className="flex items-center gap-2 py-1.5" title={`BSSID ${n.bssid}${n.siteName ? ` · site ${n.siteName}` : ''} — seen by ${n.deviceName ?? n.managementAddress ?? 'unknown device'}`}>
-                <div className="h-1.5 w-16 shrink-0 overflow-hidden rounded bg-slate-100">
+                <div className="h-1.5 w-16 shrink-0 overflow-hidden rounded bg-muted">
                   <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
                 </div>
-                <span className={clsx('w-40 truncate text-xs', n.ssid ? 'font-medium text-slate-700' : 'italic text-slate-400')}>
+                <span className={clsx('w-40 truncate text-xs', n.ssid ? 'font-medium text-secondary' : 'italic text-faint')}>
                   {n.ssid || `hidden (${n.bssid.slice(-5)})`}
                 </span>
-                <span className="whitespace-nowrap rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-600">
+                <span className="whitespace-nowrap rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-secondary">
                   {n.band || '—'}G · ch {n.channel ?? '?'}
                 </span>
-                <span className="w-12 shrink-0 text-right font-mono text-[10px] text-slate-500">{dbm !== null ? `${Math.round(dbm)} dBm` : '—'}</span>
-                <span className="min-w-0 flex-1 truncate text-right text-[10px] text-slate-400">{n.deviceName ?? n.managementAddress ?? ''}</span>
+                <span className="w-12 shrink-0 text-right font-mono text-[10px] text-muted-foreground">{dbm !== null ? `${Math.round(dbm)} dBm` : '—'}</span>
+                <span className="min-w-0 flex-1 truncate text-right text-[10px] text-faint">{n.deviceName ?? n.managementAddress ?? ''}</span>
               </li>
             );
           })}
         </ul>
       )}
       {neighbors.length > MAX_SHOWN && (
-        <p className="mt-2 text-center text-[10px] text-slate-400">+{neighbors.length - MAX_SHOWN} more (weakest signals hidden)</p>
+        <p className="mt-2 text-center text-[10px] text-faint">+{neighbors.length - MAX_SHOWN} more (weakest signals hidden)</p>
       )}
     </div>
   );
@@ -288,7 +288,7 @@ export default function Wifi() {
       header: 'SSID',
       key: 'name',
       width: 200,
-      render: (row) => <span className="font-medium text-slate-800">{row.name}</span>,
+      render: (row) => <span className="font-medium text-foreground">{row.name}</span>,
     },
     {
       header: 'Channels',
@@ -297,9 +297,9 @@ export default function Wifi() {
       exportValue: (row) => row.channels.map((c) => `ch ${c.channel ?? '?'} (${c.band || '?'})`).join(', '),
       render: (row) => (
         <div className="flex flex-wrap gap-1">
-          {row.channels.length === 0 && <span className="text-slate-400">—</span>}
+          {row.channels.length === 0 && <span className="text-faint">—</span>}
           {row.channels.map((c, i) => (
-            <span key={i} className="whitespace-nowrap rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-600">
+            <span key={i} className="whitespace-nowrap rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-secondary">
               ch {c.channel ?? '?'} · {c.band || '—'}G
             </span>
           ))}
@@ -314,7 +314,7 @@ export default function Wifi() {
         row.security.length > 0 ? (
           <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-xs font-medium text-indigo-700">{row.security.join(' · ')}</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         ),
     },
     {
@@ -324,9 +324,9 @@ export default function Wifi() {
       width: 80,
       render: (row) =>
         row.vlanId !== null && row.vlanId !== undefined ? (
-          <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-700">{row.vlanId}</span>
+          <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-secondary">{row.vlanId}</span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         ),
     },
     {
@@ -342,7 +342,7 @@ export default function Wifi() {
       width: 170,
       sortAccessor: (row) => row.airtimeMaxPct ?? -1,
       render: (row) => {
-        if (row.airtimeMeanPct === null || row.airtimeMeanPct === undefined) return <span className="text-slate-400">—</span>;
+        if (row.airtimeMeanPct === null || row.airtimeMeanPct === undefined) return <span className="text-faint">—</span>;
         const mean = Math.round(row.airtimeMeanPct * 10) / 10;
         const max = row.airtimeMaxPct ?? mean;
         return (
@@ -359,7 +359,7 @@ export default function Wifi() {
       exportValue: (row) => row.devices.map((d) => `${d.deviceName ?? '?'} [${d.interfaces.join(',')}]`).join('; '),
       render: (row) => (
         <div className="flex flex-col gap-1">
-          {row.devices.length === 0 && <span className="text-slate-400">—</span>}
+          {row.devices.length === 0 && <span className="text-faint">—</span>}
           {row.devices.map((d) => (
             <DeviceChip
               key={d.deviceId}
@@ -381,9 +381,9 @@ export default function Wifi() {
           collapsing the spectrum gives its space back to the table instead of
           leaving it empty below. */}
       <div className="flex h-full min-h-0 flex-col">
-        {wifiQuery.isLoading && <p className="shrink-0 text-sm text-slate-500">Loading WiFi networks...</p>}
+        {wifiQuery.isLoading && <p className="shrink-0 text-sm text-muted-foreground">Loading WiFi networks...</p>}
         {wifiQuery.isError && (
-          <p className="shrink-0 text-sm text-red-600">Failed to load WiFi data: {(wifiQuery.error as Error).message}</p>
+          <p className="shrink-0 text-sm text-danger-fg">Failed to load WiFi data: {(wifiQuery.error as Error).message}</p>
         )}
 
         <div ref={vSplitRef} className="flex min-h-0 flex-1 flex-col">
@@ -415,7 +415,7 @@ export default function Wifi() {
               className="group relative -my-1 h-3 shrink-0 cursor-row-resize"
               title="Drag to resize — or collapse the spectrum view for full table height"
             >
-              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-slate-200 transition-colors group-hover:bg-indigo-400" />
+              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-muted transition-colors group-hover:bg-indigo-400" />
               <div className="absolute left-1/2 top-1/2 flex h-3 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center">
                 <span className="h-1 w-6 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400" />
               </div>
@@ -429,23 +429,23 @@ export default function Wifi() {
             {/* Collapsible spectrum view — all three bands, WiFi-scanner style.
                 The header (with its toggle) stays mounted when collapsed so the
                 view can be re-opened; only the content below it is conditional. */}
-            <div className="flex h-full min-h-0 flex-col rounded-lg border border-slate-200 bg-white">
+            <div className="flex h-full min-h-0 flex-col rounded-lg border border-border bg-card">
               <button
                 type="button"
                 onClick={() => setSpectrumOpen((o) => !o)}
                 className="flex w-full shrink-0 items-center justify-between px-4 py-3 text-left"
                 aria-expanded={spectrumOpen}
               >
-                <span className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-                  <WifiIcon size={16} className="text-slate-500" />
+                <span className="flex items-center gap-2 text-sm font-semibold text-secondary">
+                  <WifiIcon size={16} className="text-muted-foreground" />
                   Spectrum view — all bands
                 </span>
                 {/* Expanded panel → chevron points DOWN (click collapses it);
                     collapsed → UP (click expands). */}
-                {spectrumOpen ? <ChevronDown size={18} className="text-slate-400" /> : <ChevronUp size={18} className="text-slate-400" />}
+                {spectrumOpen ? <ChevronDown size={18} className="text-faint" /> : <ChevronUp size={18} className="text-faint" />}
               </button>
           {spectrumOpen && (
-            <div className="flex min-h-0 flex-1 flex-col border-t border-slate-100 p-4">
+            <div className="flex min-h-0 flex-1 flex-col border-t border-border p-4">
               {/* Legend: one swatch per SSID (same colors as the marker dots).
                   Hovering a legend entry highlights that SSID in ALL bands. The
                   column toggles live here too, so they stay reachable even when
@@ -454,7 +454,7 @@ export default function Wifi() {
                 {groups.map((g) => (
                   <span
                     key={g.name}
-                    className="flex cursor-default items-center gap-1.5 text-xs text-slate-600"
+                    className="flex cursor-default items-center gap-1.5 text-xs text-secondary"
                     onMouseEnter={() => setHoveredSsid(g.name)}
                     onMouseLeave={() => setHoveredSsid(null)}
                   >
@@ -471,7 +471,7 @@ export default function Wifi() {
                     onClick={() => setBandsOpen((o) => !o)}
                     title={bandsOpen ? 'Collapse the band diagrams' : 'Show the band diagrams'}
                     aria-label={bandsOpen ? 'Collapse the band diagrams' : 'Show the band diagrams'}
-                    className={clsx('rounded px-1.5 py-0.5 text-[11px] font-medium', bandsOpen ? 'bg-slate-200 text-slate-700' : 'text-slate-400 hover:bg-slate-100')}
+                    className={clsx('rounded px-1.5 py-0.5 text-[11px] font-medium', bandsOpen ? 'bg-muted text-secondary' : 'text-faint hover:bg-muted')}
                   >
                     {bandsOpen ? '▸ Diagrams' : '◂ Diagrams'}
                   </button>
@@ -480,7 +480,7 @@ export default function Wifi() {
                     onClick={() => setNeighborsOpen((o) => !o)}
                     title={neighborsOpen ? 'Collapse the neighbor list' : 'Show the neighbor list'}
                     aria-label={neighborsOpen ? 'Collapse the neighbor list' : 'Show the neighbor list'}
-                    className={clsx('rounded px-1.5 py-0.5 text-[11px] font-medium', neighborsOpen ? 'bg-slate-200 text-slate-700' : 'text-slate-400 hover:bg-slate-100')}
+                    className={clsx('rounded px-1.5 py-0.5 text-[11px] font-medium', neighborsOpen ? 'bg-muted text-secondary' : 'text-faint hover:bg-muted')}
                   >
                     {neighborsOpen ? 'Neighbors ▸' : '◂ Neighbors'}
                   </button>
@@ -507,7 +507,7 @@ export default function Wifi() {
                     className="group relative -mx-1.5 my-0 w-3 shrink-0 cursor-col-resize"
                     title="Drag to resize — or collapse a column above for full width"
                   >
-                    <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-200 transition-colors group-hover:bg-indigo-400" />
+                    <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-muted transition-colors group-hover:bg-indigo-400" />
                     <div className="absolute inset-y-0 left-1/2 flex w-3 -translate-x-1/2 items-center justify-center">
                       <span className="h-8 w-1 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400" />
                     </div>

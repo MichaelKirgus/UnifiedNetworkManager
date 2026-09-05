@@ -40,21 +40,21 @@ export function PolicyEditor({
   return (
     <div className="space-y-4">
       <fieldset>
-        <legend className="mb-1.5 text-sm font-semibold text-slate-700">Required second factor at login</legend>
-        <p className="mb-2 text-xs text-slate-400">
+        <legend className="mb-1.5 text-sm font-semibold text-secondary">Required second factor at login</legend>
+        <p className="mb-2 text-xs text-faint">
           The user must complete sign-in with one of the enrolled methods below. Leave both unchecked to allow
           password-only sign-in (no 2FA). If none is enrolled, login is blocked until enrollment.
         </p>
         <div className="flex flex-wrap gap-4">
           {(['totp', 'webauthn'] as const).map((m) => (
-            <label key={m} className="inline-flex cursor-pointer items-center gap-2 text-sm text-slate-700">
+            <label key={m} className="inline-flex cursor-pointer items-center gap-2 text-sm text-secondary">
               <input
                 type="checkbox"
                 checked={draftRequired.has(m)}
                 onChange={() => {
                   toggle(draftRequired, m, false, setDraftRequired);
                 }}
-                className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-500"
+                className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-500"
               />
               {m === 'totp' ? 'Authenticator app (TOTP)' : 'Passkey (WebAuthn)'}
             </label>
@@ -63,21 +63,21 @@ export function PolicyEditor({
       </fieldset>
 
       <fieldset>
-        <legend className="mb-1.5 text-sm font-semibold text-slate-700">Satisfies the privileged-action gate</legend>
-        <p className="mb-2 text-xs text-slate-400">
+        <legend className="mb-1.5 text-sm font-semibold text-secondary">Satisfies the privileged-action gate</legend>
+        <p className="mb-2 text-xs text-faint">
           Sessions completed with one of these methods may submit configuration jobs and execute plans (the 2FA-gated
           endpoints). At least one must stay checked.
         </p>
         <div className="flex flex-wrap gap-4">
           {(['totp', 'webauthn'] as const).map((m) => (
-            <label key={m} className="inline-flex cursor-pointer items-center gap-2 text-sm text-slate-700">
+            <label key={m} className="inline-flex cursor-pointer items-center gap-2 text-sm text-secondary">
               <input
                 type="checkbox"
                 checked={draftGate.has(m)}
                 onChange={() => {
                   toggle(draftGate, m, true, setDraftGate);
                 }}
-                className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-500"
+                className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-500"
               />
               {m === 'totp' ? 'TOTP sessions' : 'Passkey sessions'}
             </label>
@@ -94,7 +94,7 @@ export function PolicyEditor({
             gateAmrs: [...draftGate].sort(),
           })
         }
-        className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+        className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
       >
         Save policy
       </button>

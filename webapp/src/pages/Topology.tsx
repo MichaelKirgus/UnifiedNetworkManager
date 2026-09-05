@@ -529,14 +529,14 @@ export default function Topology() {
         <div className="flex flex-wrap items-center gap-2">
 
           {/* Physical | Logical toggle */}
-          <div className="inline-flex rounded-md border border-slate-300 bg-white p-0.5">
+          <div className="inline-flex rounded-md border border-border bg-card p-0.5">
             {(['physical', 'logical'] as ViewMode[]).map((v) => (
               <button
                 key={v}
                 onClick={() => setView(v)}
                 className={clsx(
                   'rounded px-3 py-1 text-xs font-medium capitalize transition-colors',
-                  view === v ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
+                  view === v ? 'bg-primary text-white' : 'text-secondary hover:bg-muted'
                 )}
               >
                 {v}
@@ -548,7 +548,7 @@ export default function Topology() {
           <select
             value={siteId}
             onChange={(e) => setSiteId(e.target.value)}
-            className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700"
+            className="rounded-md border border-border bg-card px-2 py-1 text-xs text-secondary"
           >
             <option value="">All sites</option>
             {(sitesQuery.data ?? []).map((s) => (
@@ -560,7 +560,7 @@ export default function Topology() {
 
           {/* Tunnels toggle (physical view only — logical has no tunnels). */}
           {view === 'physical' && (
-            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-600">
+            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-secondary">
               <input type="checkbox" checked={showTunnels} onChange={(e) => setShowTunnels(e.target.checked)} />
               Show tunnels
             </label>
@@ -572,7 +572,7 @@ export default function Topology() {
               <select
                 value={segmentKey}
                 onChange={(e) => setSegmentKey(e.target.value)}
-                className="max-w-56 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700"
+                className="max-w-56 rounded-md border border-border bg-card px-2 py-1 text-xs text-secondary"
               >
                 <option value="all">All segments</option>
                 {segments.map((s) => (
@@ -581,7 +581,7 @@ export default function Topology() {
                   </option>
                 ))}
               </select>
-              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-600">
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-secondary">
                 <input type="checkbox" checked={showHosts} onChange={(e) => setShowHosts(e.target.checked)} />
                 Show hosts
               </label>
@@ -589,7 +589,7 @@ export default function Topology() {
           )}
 
           {/* Legend */}
-          <div className="ml-auto flex items-center gap-3 text-[10px] text-slate-500">
+          <div className="ml-auto flex items-center gap-3 text-[10px] text-muted-foreground">
             {view === 'physical' ? (
               <>
                 {(layersQuery.data ?? []).map((l) => (
@@ -612,11 +612,11 @@ export default function Topology() {
         </div>
 
         {/* Graph */}
-        <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-slate-200 bg-white">
+        <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-card">
           {topoQuery.isLoading ? (
-            <div className="flex h-full items-center justify-center text-sm text-slate-400">Computing topology…</div>
+            <div className="flex h-full items-center justify-center text-sm text-faint">Computing topology…</div>
           ) : rfNodes.length === 0 ? (
-            <div className="flex h-full items-center justify-center text-sm text-slate-400">No devices to display.</div>
+            <div className="flex h-full items-center justify-center text-sm text-faint">No devices to display.</div>
           ) : (
             <ReactFlow
               nodes={rfNodes}

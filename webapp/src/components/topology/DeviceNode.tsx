@@ -40,7 +40,7 @@ function PortChip({ port }: { port: TopologyPort }) {
       }${down ? ' (link down)' : ''}`}
       className={clsx(
         'flex items-center gap-1 rounded border px-1 py-px text-[9px] leading-tight',
-        down ? 'border-slate-200 bg-slate-50 text-slate-400' : 'border-slate-200 bg-white text-slate-600'
+        down ? 'border-border bg-background text-faint' : 'border-border bg-card text-secondary'
       )}
     >
       <span className="font-medium">{port.name}</span>
@@ -85,13 +85,13 @@ export function DeviceNode({ data }: { data: TopoNode & { kind: 'device' } }) {
       <SideHandles />
       <div
         className={clsx(
-          'flex w-44 flex-col items-start gap-1 rounded-lg border bg-white px-2.5 py-2 shadow-sm',
-          data.status === 'offline' || data.status === 'critical' ? 'border-red-300' : 'border-slate-200'
+          'flex w-44 flex-col items-start gap-1 rounded-lg border bg-card px-2.5 py-2 shadow-sm',
+          data.status === 'offline' || data.status === 'critical' ? 'border-danger-border' : 'border-border'
         )}
         style={layer ? { borderLeft: `3px solid ${layer.color}` } : undefined}
       >
         <div className="flex w-full items-center justify-between gap-1">
-          <span className="truncate text-xs font-semibold text-slate-800" title={data.name}>
+          <span className="truncate text-xs font-semibold text-foreground" title={data.name}>
             {data.name}
           </span>
           <StatusBadge status={data.status} />
@@ -104,7 +104,7 @@ export function DeviceNode({ data }: { data: TopoNode & { kind: 'device' } }) {
             {layer.name}
           </span>
         )}
-        <span className="text-[10px] text-slate-400">{data.managementAddress}</span>
+        <span className="text-[10px] text-faint">{data.managementAddress}</span>
         {data.ports.length > 0 && (
           <div className="flex w-full flex-wrap gap-0.5">
             {/* Cap at 8 chips: keeps the node height bounded so the
@@ -114,7 +114,7 @@ export function DeviceNode({ data }: { data: TopoNode & { kind: 'device' } }) {
               <PortChip key={p.name} port={p} />
             ))}
             {data.ports.length > 8 && (
-              <span className="text-[9px] text-slate-400" title={data.ports.slice(8).map((p) => p.name).join(', ')}>
+              <span className="text-[9px] text-faint" title={data.ports.slice(8).map((p) => p.name).join(', ')}>
                 +{data.ports.length - 8}
               </span>
             )}

@@ -128,25 +128,25 @@ export default function Sites() {
 
   const columns: DataTableColumn<Site>[] = [
     { header: 'Name', key: 'name' },
-    { header: 'Description', key: 'description', render: (row) => row.description || <span className="text-slate-400">—</span> },
-    { header: 'Address', key: 'address', render: (row) => row.address || <span className="text-slate-400">—</span> },
+    { header: 'Description', key: 'description', render: (row) => row.description || <span className="text-faint">—</span> },
+    { header: 'Address', key: 'address', render: (row) => row.address || <span className="text-faint">—</span> },
     {
       header: 'Country',
       key: 'country',
-      render: (row) => (row.country ? countryName(row.country) : <span className="text-slate-400">—</span>),
+      render: (row) => (row.country ? countryName(row.country) : <span className="text-faint">—</span>),
     },
-    { header: 'Timezone', key: 'timezone', render: (row) => row.timezone ?? <span className="text-slate-400">—</span> },
+    { header: 'Timezone', key: 'timezone', render: (row) => row.timezone ?? <span className="text-faint">—</span> },
     {
       header: 'GPS',
       key: 'gps',
       sortable: false as const,
       render: (row) =>
         row.latitude != null && row.longitude != null ? (
-          <span className="font-mono text-xs text-slate-500">
+          <span className="font-mono text-xs text-muted-foreground">
             {row.latitude.toFixed(4)}, {row.longitude.toFixed(4)}
           </span>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-faint">—</span>
         ),
     },
     ...(canWrite
@@ -163,7 +163,7 @@ export default function Sites() {
                   type="button"
                   aria-label={`Edit ${row.name}`}
                   title="Edit site"
-                  className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                  className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
                   onClick={() => openEdit(row)}
                 >
                   <Pencil className="h-4 w-4" />
@@ -172,7 +172,7 @@ export default function Sites() {
                   type="button"
                   aria-label={`Delete ${row.name}`}
                   title="Delete site"
-                  className="rounded-md p-1.5 text-slate-600 hover:bg-red-50 hover:text-red-700"
+                  className="rounded-md p-1.5 text-secondary hover:bg-danger hover:text-danger-fg"
                   onClick={() => handleDelete(row)}
                 >
                   <Trash2 className="h-4 w-4" />
@@ -192,7 +192,7 @@ export default function Sites() {
           <button
             type="button"
             onClick={() => setShowForm(true)}
-            className="inline-flex items-center gap-2 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
           >
             <Plus className="h-4 w-4" /> New site
           </button>
@@ -201,15 +201,15 @@ export default function Sites() {
     >
 
       {formError && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{formError}</div>
+        <div className="mb-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{formError}</div>
       )}
 
       {/* Inline create/edit panel */}
       {showForm && canWrite && (
-        <div className="mb-4 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-4 rounded-md border border-border bg-card p-4 shadow-sm">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-slate-900">{editingId ? 'Edit site' : 'New site'}</h2>
-            <button type="button" aria-label="Close form" onClick={resetForm} className="rounded p-1 text-slate-400 hover:bg-slate-100">
+            <h2 className="text-base font-semibold text-foreground">{editingId ? 'Edit site' : 'New site'}</h2>
+            <button type="button" aria-label="Close form" onClick={resetForm} className="rounded p-1 text-faint hover:bg-muted">
               <X className="h-4 w-4" />
             </button>
           </div>
@@ -222,18 +222,18 @@ export default function Sites() {
             className="grid grid-cols-1 gap-3 sm:grid-cols-2"
           >
             <div>
-              <label className="mb-1 block text-sm font-medium text-slate-700">Name *</label>
+              <label className="mb-1 block text-sm font-medium text-secondary">Name *</label>
               <input
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                className="w-full rounded-md border border-border px-3 py-2 text-sm"
                 value={site.name}
                 onChange={(e) => setSite({ ...site, name: e.target.value })}
                 required
               />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-slate-700">Country</label>
+              <label className="mb-1 block text-sm font-medium text-secondary">Country</label>
               <select
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                className="w-full rounded-md border border-border px-3 py-2 text-sm"
                 value={site.country}
                 onChange={(e) => setSite({ ...site, country: e.target.value })}
               >
@@ -246,26 +246,26 @@ export default function Sites() {
               </select>
             </div>
             <div className="sm:col-span-2">
-              <label className="mb-1 block text-sm font-medium text-slate-700">Address</label>
+              <label className="mb-1 block text-sm font-medium text-secondary">Address</label>
               <input
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                className="w-full rounded-md border border-border px-3 py-2 text-sm"
                 value={site.address}
                 onChange={(e) => setSite({ ...site, address: e.target.value })}
               />
             </div>
             <div className="sm:col-span-2">
-              <label className="mb-1 block text-sm font-medium text-slate-700">Description</label>
+              <label className="mb-1 block text-sm font-medium text-secondary">Description</label>
               <textarea
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                className="w-full rounded-md border border-border px-3 py-2 text-sm"
                 rows={2}
                 value={site.description}
                 onChange={(e) => setSite({ ...site, description: e.target.value })}
               />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium text-slate-700">Timezone</label>
+              <label className="mb-1 block text-sm font-medium text-secondary">Timezone</label>
               <select
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                className="w-full rounded-md border border-border px-3 py-2 text-sm"
                 value={site.timezone}
                 onChange={(e) => setSite({ ...site, timezone: e.target.value })}
               >
@@ -279,30 +279,30 @@ export default function Sites() {
             </div>
 
             {/* GPS location (all-or-nothing; stored for a future map view). */}
-            <fieldset className="rounded-md border border-slate-200 p-3 sm:col-span-2">
-              <legend className="px-1 text-sm font-medium text-slate-700">GPS location</legend>
+            <fieldset className="rounded-md border border-border p-3 sm:col-span-2">
+              <legend className="px-1 text-sm font-medium text-secondary">GPS location</legend>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-500">Latitude (−90…90)</label>
+                  <label className="mb-1 block text-xs font-medium text-muted-foreground">Latitude (−90…90)</label>
                   <input
                     type="number"
                     step="0.000001"
                     min={-90}
                     max={90}
-                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                    className="w-full rounded-md border border-border px-3 py-2 text-sm"
                     value={site.latitude}
                     onChange={(e) => setSite({ ...site, latitude: e.target.value })}
                     placeholder="51.165691"
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-500">Longitude (−180…180)</label>
+                  <label className="mb-1 block text-xs font-medium text-muted-foreground">Longitude (−180…180)</label>
                   <input
                     type="number"
                     step="0.000001"
                     min={-180}
                     max={180}
-                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                    className="w-full rounded-md border border-border px-3 py-2 text-sm"
                     value={site.longitude}
                     onChange={(e) => setSite({ ...site, longitude: e.target.value })}
                     placeholder="10.451526"
@@ -315,11 +315,11 @@ export default function Sites() {
               <button
                 type="submit"
                 disabled={createSite.isPending || updateSite.isPending}
-                className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+                className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
               >
                 {editingId ? 'Save changes' : 'Create site'}
               </button>
-              <button type="button" onClick={resetForm} className="rounded-md px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">
+              <button type="button" onClick={resetForm} className="rounded-md px-4 py-2 text-sm font-medium text-secondary hover:bg-muted">
                 Cancel
               </button>
             </div>
@@ -327,9 +327,9 @@ export default function Sites() {
         </div>
       )}
 
-      {sitesQuery.isLoading && <p className="text-sm text-slate-500">Loading sites...</p>}
+      {sitesQuery.isLoading && <p className="text-sm text-muted-foreground">Loading sites...</p>}
       {sitesQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load sites: {(sitesQuery.error as Error).message}</p>
+        <p className="text-sm text-danger-fg">Failed to load sites: {(sitesQuery.error as Error).message}</p>
       )}
       {sitesQuery.data && (
         <DataTable

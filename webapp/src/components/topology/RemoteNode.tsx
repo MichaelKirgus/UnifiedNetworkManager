@@ -11,7 +11,7 @@ export function RemoteNode({ data }: { data: TopoNode & { kind: 'remote' } }) {
           any side — a single top handle made same-row tunnels fall back to an
           implicit anchor and loop around the card. */}
       <SideHandles />
-      <Handle type="target" position={Position.Top} className="!h-1.5 !w-1.5 !border-slate-300 !bg-white" />
+      <Handle type="target" position={Position.Top} className="!h-1.5 !w-1.5 !border-border !bg-card" />
       <div className="flex w-40 flex-col items-start rounded-md border border-dashed border-indigo-300 bg-indigo-50 px-2 py-1">
         <span className="truncate text-[10px] font-medium text-indigo-700" title={data.label}>
           {data.label}

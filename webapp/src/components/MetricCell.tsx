@@ -30,8 +30,8 @@ function InlineText({ metric }: { metric: SummaryMetric }) {
   // width and wrapping their labels.
   return (
     <div className="flex min-w-[90px] flex-col gap-1">
-      <span className="text-[10px] uppercase tracking-wide text-slate-400">{metric.label}</span>
-      <span className="text-xs font-semibold text-slate-900">
+      <span className="text-[10px] uppercase tracking-wide text-faint">{metric.label}</span>
+      <span className="text-xs font-semibold text-foreground">
         {formatValue(metric.value, metric.unit, metric.format)}
       </span>
     </div>
@@ -48,12 +48,12 @@ function MiniGauge({ metric }: { metric: SummaryMetric }) {
   return (
     <div className="flex min-w-[90px] flex-col gap-1">
       <div className="flex items-baseline justify-between">
-        <span className="text-[10px] uppercase tracking-wide text-slate-400">{metric.label}</span>
-        <span className="text-xs font-semibold text-slate-900">
+        <span className="text-[10px] uppercase tracking-wide text-faint">{metric.label}</span>
+        <span className="text-xs font-semibold text-foreground">
           {formatValue(metric.value, metric.unit, metric.format)}
         </span>
       </div>
-      <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: color }} />
       </div>
     </div>

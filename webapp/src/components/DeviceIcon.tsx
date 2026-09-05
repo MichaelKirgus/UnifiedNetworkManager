@@ -33,7 +33,7 @@ export function DeviceIcon({
   const px = size === 'lg' ? 32 : 20;
 
   if (!src) {
-    return <span aria-hidden className="inline-block shrink-0 rounded bg-slate-100" style={{ width: px, height: px }} />;
+    return <span aria-hidden className="inline-block shrink-0 rounded bg-muted" style={{ width: px, height: px }} />;
   }
   return (
     <img

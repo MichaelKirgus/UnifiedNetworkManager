@@ -7,12 +7,12 @@ export function HostNode({ data }: { data: TopoNode & { kind: 'host' } }) {
   return (
     <div className="flex flex-col items-center gap-1">
       <SideHandles />
-      <div className="flex w-32 flex-col items-start rounded-md border border-dashed border-slate-300 bg-slate-50 px-2 py-1">
-        <span className="truncate text-[10px] font-medium text-slate-700" title={label}>
+      <div className="flex w-32 flex-col items-start rounded-md border border-dashed border-border bg-background px-2 py-1">
+        <span className="truncate text-[10px] font-medium text-secondary" title={label}>
           {label}
         </span>
         {data.ips.length > 0 && (
-          <span className="truncate text-[9px] text-slate-400" title={data.ips.join(', ')}>
+          <span className="truncate text-[9px] text-faint" title={data.ips.join(', ')}>
             {data.ips[0]}
             {data.ips.length > 1 ? ` +${data.ips.length - 1}` : ''}
           </span>

@@ -63,8 +63,8 @@ export default function Tokens() {
   if (!canManageTokens) {
     return (
       <Layout title="API Tokens">
-        <div className="rounded-md border border-slate-200 bg-white p-6 text-sm text-slate-500">
-          You need the <code className="rounded bg-slate-100 px-1.5 py-0.5 text-xs">tokens:manage</code> permission to
+        <div className="rounded-md border border-border bg-card p-6 text-sm text-muted-foreground">
+          You need the <code className="rounded bg-muted px-1.5 py-0.5 text-xs">tokens:manage</code> permission to
           create and view API tokens. Ask an administrator to grant it (directly or via a role).
         </div>
       </Layout>
@@ -124,21 +124,21 @@ export default function Tokens() {
       header: 'Label',
       key: 'label',
       width: 200,
-      render: (row) => <span className="font-medium text-slate-800">{row.label || '—'}</span>,
+      render: (row) => <span className="font-medium text-foreground">{row.label || '—'}</span>,
     },
     ...(seeAll
       ? [{
           header: 'User',
           key: 'username',
           width: 140,
-          render: (row: ApiToken) => <span className="text-slate-600">{row.username ?? row.userId}</span>,
+          render: (row: ApiToken) => <span className="text-secondary">{row.username ?? row.userId}</span>,
         }]
       : []),
     {
       header: 'Prefix',
       key: 'tokenPrefix',
       width: 140,
-      render: (row) => <code className="rounded bg-slate-100 px-1.5 py-0.5 text-xs">{row.tokenPrefix}…</code>,
+      render: (row) => <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{row.tokenPrefix}…</code>,
     },
     {
       header: 'Permissions',
@@ -150,7 +150,7 @@ export default function Tokens() {
         ) : (
           <div className="flex flex-wrap gap-1">
             {row.permissions.map((p) => (
-              <span key={p} title={permDescriptions.get(p)} className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
+              <span key={p} title={permDescriptions.get(p)} className="rounded-full bg-muted px-2 py-0.5 text-xs text-secondary">
                 {p}
               </span>
             ))}
@@ -162,13 +162,13 @@ export default function Tokens() {
       header: 'Expires',
       key: 'expiresAt',
       width: 160,
-      render: (row) => (row.expiresAt ? new Date(row.expiresAt).toLocaleString() : <span className="text-slate-400">never</span>),
+      render: (row) => (row.expiresAt ? new Date(row.expiresAt).toLocaleString() : <span className="text-faint">never</span>),
     },
     {
       header: 'Last used',
       key: 'lastUsedAt',
       width: 160,
-      render: (row) => (row.lastUsedAt ? new Date(row.lastUsedAt).toLocaleString() : <span className="text-slate-400">—</span>),
+      render: (row) => (row.lastUsedAt ? new Date(row.lastUsedAt).toLocaleString() : <span className="text-faint">—</span>),
     },
     {
       header: 'Actions',
@@ -182,7 +182,7 @@ export default function Tokens() {
           aria-label={`Revoke token ${row.label ?? row.tokenPrefix}`}
           title="Revoke token"
           onClick={() => handleRevoke(row.id, row)}
-          className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600"
+          className="rounded-md p-1.5 text-faint hover:bg-danger hover:text-danger-fg"
         >
           <Trash2 className="h-4 w-4" />
         </button>
@@ -196,14 +196,14 @@ export default function Tokens() {
       actions={
         <div className="flex items-center gap-3">
           {canSeeAll && (
-            <label className="flex items-center gap-1.5 text-sm text-slate-600">
+            <label className="flex items-center gap-1.5 text-sm text-secondary">
               <input type="checkbox" checked={seeAll} onChange={(e) => setSeeAll(e.target.checked)} />
               All users
             </label>
           )}
           <button
             onClick={() => setShowForm(!showForm)}
-            className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
+            className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover"
           >
             {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
             {showForm ? 'Cancel' : 'Create Token'}
@@ -213,55 +213,55 @@ export default function Tokens() {
     >
 
       {createdToken && (
-        <div className="mb-6 rounded-md border border-amber-300 bg-amber-50 p-4">
+        <div className="mb-6 rounded-md border border-warning-border bg-warning p-4">
           <h2 className="text-sm font-semibold text-amber-900">
             Token created{createdToken.label ? `: ${createdToken.label}` : ''} — copy it now, it is shown only once.
           </h2>
           <div className="mt-2 flex items-center gap-2">
-            <code className="flex-1 select-all break-all rounded-md border border-amber-300 bg-white px-3 py-2 text-sm">
+            <code className="flex-1 select-all break-all rounded-md border border-warning-border bg-card px-3 py-2 text-sm">
               {createdToken.rawToken}
             </code>
             <button
               onClick={copyRaw}
-              className="flex items-center gap-1.5 rounded-md border border-amber-300 bg-white px-3 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
+              className="flex items-center gap-1.5 rounded-md border border-warning-border bg-card px-3 py-2 text-sm font-medium text-amber-900 hover:bg-warning"
             >
               {copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
               {copied ? 'Copied' : 'Copy'}
             </button>
           </div>
-          <p className="mt-2 text-xs text-amber-800">
+          <p className="mt-2 text-xs text-warning-fg">
             Use it as the <code>UNM_API_TOKEN</code> environment variable of the MCP server, or as a Bearer token for direct API calls.
           </p>
         </div>
       )}
 
       {showForm && (
-        <form onSubmit={handleCreate} className="mb-6 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-          <h2 className="mb-4 text-sm font-semibold text-slate-900">New API Token</h2>
+        <form onSubmit={handleCreate} className="mb-6 rounded-md border border-border bg-card p-4 shadow-sm">
+          <h2 className="mb-4 text-sm font-semibold text-foreground">New API Token</h2>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">Label (purpose)</label>
+              <label className="mb-1 block text-xs font-medium text-secondary">Label (purpose)</label>
               <input
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
                 maxLength={120}
                 placeholder="e.g. MCP server"
-                className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm"
+                className="w-full rounded-md border border-border px-2 py-1.5 text-sm"
               />
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">Expires (optional)</label>
+              <label className="mb-1 block text-xs font-medium text-secondary">Expires (optional)</label>
               <input
                 type="datetime-local"
                 value={expiresAt}
                 onChange={(e) => setExpiresAt(e.target.value)}
-                className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm"
+                className="w-full rounded-md border border-border px-2 py-1.5 text-sm"
               />
             </div>
           </div>
 
           <div className="mt-4">
-            <label className="mb-1 flex items-center gap-1.5 text-xs font-medium text-slate-600">
+            <label className="mb-1 flex items-center gap-1.5 text-xs font-medium text-secondary">
               <input
                 type="checkbox"
                 checked={inheritAll}
@@ -270,18 +270,18 @@ export default function Tokens() {
               Inherit all my effective permissions (recommended for personal agents)
             </label>
             {!inheritAll && catalog && (
-              <div className="mt-2 grid max-h-56 grid-cols-1 gap-1 overflow-y-auto rounded-md border border-slate-200 bg-slate-50 p-3 sm:grid-cols-2">
+              <div className="mt-2 grid max-h-56 grid-cols-1 gap-1 overflow-y-auto rounded-md border border-border bg-background p-3 sm:grid-cols-2">
                 {catalog.permissions.map((p) => (
-                  <label key={p.id} className="flex items-start gap-2 text-sm text-slate-700" title={p.description}>
+                  <label key={p.id} className="flex items-start gap-2 text-sm text-secondary" title={p.description}>
                     <input
                       type="checkbox"
                       checked={selectedPerms.has(p.id)}
                       onChange={() => togglePerm(p.id)}
-                      className="mt-0.5 h-4 w-4 border-slate-300 text-slate-900 focus:ring-slate-400"
+                      className="mt-0.5 h-4 w-4 border-border text-foreground focus:ring-slate-400"
                     />
                     <span>
                       {p.id}
-                      <span className="block text-xs text-slate-400">{p.description}</span>
+                      <span className="block text-xs text-faint">{p.description}</span>
                     </span>
                   </label>
                 ))}
@@ -292,7 +292,7 @@ export default function Tokens() {
           <div className="mt-4 flex justify-end">
             <button
               type="submit"
-              className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+              className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover"
             >
               Create Token
             </button>
@@ -301,7 +301,7 @@ export default function Tokens() {
       )}
 
       {error && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>
+        <div className="mb-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{error}</div>
       )}
 
       <DataTable

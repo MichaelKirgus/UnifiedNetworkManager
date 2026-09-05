@@ -112,15 +112,15 @@ export function Sidebar() {
   return (
     <aside
       className={clsx(
-        'flex shrink-0 flex-col border-r border-slate-200 bg-white transition-[width] duration-200 ease-in-out',
+        'flex shrink-0 flex-col border-r border-border bg-card transition-[width] duration-200 ease-in-out',
         collapsed ? 'w-16' : 'w-56'
       )}
     >
       {/* Brand */}
-      <div className={clsx('flex h-14 items-center gap-2 border-b border-slate-200 px-3', collapsed && 'justify-center px-0')}>
-        <Network className="h-6 w-6 shrink-0 text-slate-900" />
+      <div className={clsx('flex h-14 items-center gap-2 border-b border-border px-3', collapsed && 'justify-center px-0')}>
+        <Network className="h-6 w-6 shrink-0 text-foreground" />
         {!collapsed && (
-          <span className="truncate text-sm font-bold text-slate-900">UnifiedNetworkManager</span>
+          <span className="truncate text-sm font-bold text-foreground">UnifiedNetworkManager</span>
         )}
       </div>
 
@@ -136,7 +136,7 @@ export function Sidebar() {
                 clsx(
                   'flex items-center gap-3 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
                   collapsed && 'justify-center px-0',
-                  isActive ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
+                  isActive ? 'bg-primary text-white' : 'text-secondary hover:bg-muted'
                 )
               }
             >
@@ -148,14 +148,14 @@ export function Sidebar() {
       </nav>
 
       {/* Footer: collapse toggle + sign out */}
-      <div className={clsx('flex gap-1 border-t border-slate-200 p-2', collapsed && 'flex-col items-center')}>
+      <div className={clsx('flex gap-1 border-t border-border p-2', collapsed && 'flex-col items-center')}>
         <button
           type="button"
           aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           onClick={() => setCollapsed((v) => !v)}
           className={clsx(
-            'flex items-center gap-2 rounded-md px-2.5 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100',
+            'flex items-center gap-2 rounded-md px-2.5 py-2 text-sm font-medium text-secondary hover:bg-muted',
             collapsed && 'justify-center px-0'
           )}
         >
@@ -173,7 +173,7 @@ export function Sidebar() {
             window.location.href = '/login';
           }}
           className={clsx(
-            'flex items-center gap-2 rounded-md px-2.5 py-2 text-sm font-medium text-slate-600 hover:bg-red-50 hover:text-red-700',
+            'flex items-center gap-2 rounded-md px-2.5 py-2 text-sm font-medium text-secondary hover:bg-danger hover:text-danger-fg',
             collapsed && 'justify-center px-0'
           )}
         >

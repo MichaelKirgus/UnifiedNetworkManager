@@ -158,12 +158,12 @@ export function PluginAssignmentBuilder({
         const required = meta?.requiredType ?? null;
         const slots = meta?.slots ?? [];
         return (
-          <div key={index} className="grid grid-cols-1 gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 sm:grid-cols-[1fr_1fr_auto_auto]">
+          <div key={index} className="grid grid-cols-1 gap-2 rounded-md border border-border bg-background p-3 sm:grid-cols-[1fr_1fr_auto_auto]">
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">Plugin</label>
+              <label className="mb-1 block text-xs font-medium text-secondary">Plugin</label>
               <select
                 required
-                className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
+                className="w-full rounded-md border border-border bg-card px-2 py-1.5 text-sm"
                 value={row.pluginId}
                 onChange={(e) => updateRow(index, { pluginId: e.target.value, secretId: '', slotSecrets: {} })}
               >
@@ -178,11 +178,11 @@ export function PluginAssignmentBuilder({
               </select>
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">
+              <label className="mb-1 block text-xs font-medium text-secondary">
                 Credentials{required ? ` (${required})` : ''}
               </label>
               <select
-                className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
+                className="w-full rounded-md border border-border bg-card px-2 py-1.5 text-sm"
                 value={row.secretId}
                 onChange={(e) => updateRow(index, { secretId: e.target.value })}
               >
@@ -197,14 +197,14 @@ export function PluginAssignmentBuilder({
             {slots.map((slot) => (
               <div key={slot.name} className="sm:col-span-2">
                 <label
-                  className="mb-1 block text-xs font-medium text-slate-600"
+                  className="mb-1 block text-xs font-medium text-secondary"
                   title={slot.description}
                 >
                   {slot.description || `Credential slot "${slot.name}"`} ({allowedSecretTypes(slot).join(' | ')})
-                  {!slot.required && <span className="ml-1 font-normal text-slate-400">optional</span>}
+                  {!slot.required && <span className="ml-1 font-normal text-faint">optional</span>}
                 </label>
                 <select
-                  className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
+                  className="w-full rounded-md border border-border bg-card px-2 py-1.5 text-sm"
                   value={row.slotSecrets[slot.name] ?? ''}
                   onChange={(e) => updateSlotSecret(index, slot.name, e.target.value)}
                 >
@@ -217,13 +217,13 @@ export function PluginAssignmentBuilder({
                 </select>
               </div>
             ))}
-            <label className="flex items-center gap-1.5 self-end pb-1 text-sm text-slate-600">
+            <label className="flex items-center gap-1.5 self-end pb-1 text-sm text-secondary">
               <input
                 type="radio"
                 name="primary-plugin"
                 checked={row.isPrimary}
                 onChange={() => makePrimary(index)}
-                className="h-4 w-4 border-slate-300 text-slate-900 focus:ring-slate-400"
+                className="h-4 w-4 border-border text-foreground focus:ring-slate-400"
               />
               Primary
             </label>
@@ -234,7 +234,7 @@ export function PluginAssignmentBuilder({
                   aria-label={`Remove plugin row ${index + 1}`}
                   title="Remove this plugin"
                   onClick={() => setRows((rs) => rs.filter((_, i) => i !== index))}
-                  className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                  className="rounded-md p-1.5 text-faint hover:bg-danger hover:text-danger-fg"
                 >
                   <X className="h-4 w-4" />
                 </button>
@@ -249,7 +249,7 @@ export function PluginAssignmentBuilder({
           type="button"
           onClick={() => setRows((rs) => [...rs, emptyRow()])}
           disabled={availablePlugins.length === 0 || usedPluginIds.size >= availablePlugins.length}
-          className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+          className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background disabled:opacity-40"
         >
           <Plus className="h-4 w-4" />
           Add plugin
@@ -257,7 +257,7 @@ export function PluginAssignmentBuilder({
         <button
           type="submit"
           disabled={busy}
-          className="flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
         >
           {busy ? 'Saving…' : submitLabel}
         </button>
