@@ -266,12 +266,14 @@ export function internalRouter() {
   });
 
   // PATCH /plugin/secrets/:id - update a secret IN PLACE (same id). Used for key
-  // rotation/regeneration so assignments + plans referencing the id keep working.
-  // The provider re-encrypts and sends the new ciphertext; only encryptedValue
-  // (and optionally label) are updatable — type/providerId/userId are immutable.
+  // rotation/regeneration and field edits so assignments + plans referencing the
+  // id keep working. The provider re-encrypts and sends the new ciphertext; only
+  // encryptedValue, label and expiresAt are updatable — type/providerId/userId
+  // are immutable. `expiresAt: null` clears the expiry (absence leaves it).
   router.patch('/plugin/secrets/:id', pluginAuth, async (req: Request, res: Response) => {
     const { id } = req.params;
-    const { encryptedValue, label } = req.body ?? {};
+    const body = req.body ?? {};
+    const { encryptedValue, label } = body;
     if (!encryptedValue || typeof encryptedValue !== 'string') {
       return res.status(400).json({ error: 'encryptedValue (string) is required' });
     }
@@ -285,6 +287,9 @@ export function internalRouter() {
 
       const patch: Record<string, unknown> = { encryptedValue };
       if (typeof label === 'string') patch.label = label;
+      if ('expiresAt' in body) {
+        patch.expiresAt = typeof body.expiresAt === 'string' ? body.expiresAt : null;
+      }
       await db.update(schema.secrets).set(patch).where(eq(schema.secrets.id, id));
       res.status(200).json({ id });
     } catch (error) {

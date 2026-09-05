@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, X } from 'lucide-react';
-import { api, CredentialSlotDescriptor, DevicePluginAssignmentInput, Plugin, Secret } from '../api/client';
+import { allowedSecretTypes, api, CredentialSlotDescriptor, DevicePluginAssignmentInput, Plugin, Secret } from '../api/client';
 
 interface RowState {
   pluginId: string;
@@ -88,6 +88,13 @@ export function PluginAssignmentBuilder({
   function secretsOfType(type: string): Secret[] {
     if (!type) return secrets;
     return secrets.filter((s) => s.type === type);
+  }
+
+  /** Secrets compatible with ANY of the slot's allowed types. */
+  function secretsOfSlot(slot: CredentialSlotDescriptor): Secret[] {
+    const types = allowedSecretTypes(slot);
+    if (types.length === 0) return [];
+    return secrets.filter((s) => types.includes(s.type));
   }
 
   function updateRow(index: number, patch: Partial<RowState>) {
@@ -193,7 +200,7 @@ export function PluginAssignmentBuilder({
                   className="mb-1 block text-xs font-medium text-slate-600"
                   title={slot.description}
                 >
-                  {slot.description || `Credential slot "${slot.name}"`} ({slot.secretType})
+                  {slot.description || `Credential slot "${slot.name}"`} ({allowedSecretTypes(slot).join(' | ')})
                   {!slot.required && <span className="ml-1 font-normal text-slate-400">optional</span>}
                 </label>
                 <select
@@ -202,7 +209,7 @@ export function PluginAssignmentBuilder({
                   onChange={(e) => updateSlotSecret(index, slot.name, e.target.value)}
                 >
                   <option value="">Not set</option>
-                  {secretsOfType(slot.secretType).map((s) => (
+                  {secretsOfSlot(slot).map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.label || s.id} [{s.type}]
                     </option>

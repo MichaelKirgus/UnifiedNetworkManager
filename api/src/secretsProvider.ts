@@ -191,7 +191,7 @@ export async function resolveSecretsProvider(providerId?: string): Promise<Provi
 async function callProvider<T>(
   provider: ProviderRecord,
   path: string,
-  method: 'GET' | 'POST' | 'DELETE',
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   body?: Record<string, unknown>
 ): Promise<T> {
   const base = provider.endpoint.replace(/\/+$/, '');
@@ -201,6 +201,10 @@ async function callProvider<T>(
   try {
     if (method === 'GET') {
       const res = await axios.get<T>(`${base}${path}`, { timeout: PROVIDER_TIMEOUT_MS, headers });
+      return res.data;
+    }
+    if (method === 'PATCH') {
+      const res = await axios.patch<T>(`${base}${path}`, body, { timeout: PROVIDER_TIMEOUT_MS, headers });
       return res.data;
     }
     if (method === 'DELETE') {
@@ -358,6 +362,16 @@ export async function deleteSecret(id: string): Promise<void> {
  * creates the key material itself). Returns the new id + createdAt. The API is
  * a pure broker — it never sees or stores the plaintext material.
  */
+/** Response of a generate call. `publicFields` = non-secret generated material
+ *  the provider echoes back for display (e.g. an ssh-ed25519 public key line);
+ *  secret fields never leave the provider. */
+export interface GeneratedSecret {
+  id: string;
+  createdAt: string;
+  type?: string;
+  publicFields?: Record<string, string>;
+}
+
 export async function generateSecret(input: {
   type: string;
   providerId?: string;
@@ -365,7 +379,7 @@ export async function generateSecret(input: {
   label?: string;
   expiresAt?: string;
   userId: string;
-}): Promise<{ id: string; createdAt: string; type?: string }> {
+}): Promise<GeneratedSecret> {
   const provider = await resolveSecretsProvider(input.providerId);
   return callProvider(provider, '/generate', 'POST', {
     type: input.type,
@@ -384,6 +398,36 @@ export async function generateSecret(input: {
 export async function regenerateSecret(id: string): Promise<{ id: string; type?: string }> {
   const provider = await providerForSecret(id);
   return callProvider(provider, '/regenerate', 'POST', { id });
+}
+
+/**
+ * Retrieves a secret's decrypted fields for editing (routed to the owning
+ * provider). Unlike getSecret this is NOT cached — an edit form must always
+ * show current values.
+ */
+export async function getSecretFields(id: string): Promise<DecryptedSecret> {
+  const provider = await providerForSecret(id);
+  return callProvider<DecryptedSecret>(provider, `/secrets/${encodeURIComponent(id)}`, 'GET');
+}
+
+/**
+ * Updates a secret's fields IN PLACE (same id preserved, so assignments and
+ * plans referencing it keep working). Works for ALL secret types — the owning
+ * provider re-encrypts the new field values. `label`/`expiresAt` are optional
+ * metadata updates applied alongside.
+ */
+export async function updateSecret(
+  id: string,
+  input: { fields?: Record<string, unknown>; label?: string | null; expiresAt?: string | null }
+): Promise<{ id: string }> {
+  const provider = await providerForSecret(id);
+  // POST /update (id in body) — same convention as the provider's /regenerate.
+  return callProvider(provider, '/update', 'POST', {
+    id,
+    fields: input.fields ?? {},
+    ...(input.label !== undefined ? { label: input.label } : {}),
+    ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+  });
 }
 
 /**

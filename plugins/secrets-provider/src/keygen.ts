@@ -102,6 +102,32 @@ function subjectKeyIdValue(cert: { generateSubjectKeyIdentifier: () => { getByte
   return forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OCTETSTRING, false, ski.getBytes());
 }
 
+/**
+ * Generates an ed25519 SSH key pair. The private key is stored in the secret
+ * (PKCS#8 PEM — accepted by both ssh2 and modern OpenSSH clients); the public
+ * key is a PASTE-READY `authorized_keys` line (`ssh-ed25519 <base64>`) so the
+ * user never needs any keygen toolchain. UNM never touches the device.
+ */
+export function generateSshKeyPair(): { publicKey: string; privateKey: string } {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  // Raw 32-byte ed25519 public key = tail of the SPKI DER (fixed 44-byte layout:
+  // AlgorithmIdentifier + BIT STRING wrapper around exactly 32 bytes).
+  const spkiDer = publicKey.export({ format: 'der', type: 'spki' });
+  if (spkiDer.length !== 44) throw new Error(`unexpected ed25519 SPKI DER length ${spkiDer.length}`);
+  const rawPub = spkiDer.subarray(spkiDer.length - 32);
+  // OpenSSH wire format: string "ssh-ed25519" + string <raw public key>.
+  const wire = Buffer.concat([
+    Buffer.from([0, 0, 0, 11]),
+    Buffer.from('ssh-ed25519', 'ascii'),
+    Buffer.from([0, 0, 0, 32]),
+    rawPub,
+  ]);
+  return {
+    publicKey: `ssh-ed25519 ${wire.toString('base64')}`,
+    privateKey: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+  };
+}
+
 export function generateOpenvpnProfile(fields?: Record<string, unknown>): { ca: string; cert: string; key: string } {
   const cn = typeof fields?.commonName === 'string' && fields.commonName ? (fields.commonName as string) : 'unm-openvpn';
 
@@ -173,4 +199,7 @@ export const GENERATABLE_TYPES: Record<string, GeneratableType> = {
   wireguardKeyPair: { type: 'wireguardKeyPair', generate: () => generateWireguardKeyPair() },
   tunnelPsk: { type: 'tunnelPsk', generate: () => generateTunnelPsk() },
   openvpnProfile: { type: 'openvpnProfile', generate: (fields) => generateOpenvpnProfile(fields) },
+  // Context fields (username, passphrase) are preserved across regeneration —
+  // only the key material itself is re-rolled.
+  sshKeyPair: { type: 'sshKeyPair', generate: () => generateSshKeyPair() },
 };

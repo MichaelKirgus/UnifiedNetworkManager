@@ -278,29 +278,13 @@ async function ingestInventory(
     const macRows = Array.isArray(metrics['macTable']) ? (metrics['macTable'] as unknown[]) : [];
     for (const raw of macRows) pushHostRow('mac', raw);
 
-    // Docker/container hosts (e.g. TrueNAS Apps) — source 'docker'. These carry a
-    // hostname + static IP but NO MAC: the appliance's public API exposes no
-    // per-container MAC, so we store them with an empty mac and let mergeHostRows()
-    // bridge them by IP into the MAC-carrying ARP/NDP group for the same address.
+    // Docker/container hosts (e.g. TrueNAS Apps via `docker inspect` over SSH)
+    // — source 'docker'. Rows carry a REAL MAC + IP + hostname, so they flow
+    // through the standard pushHostRow path and merge by MAC with ARP/NDP
+    // entries other devices report for the same container. Plugins only emit
+    // these when a real MAC was retrieved (no empty-MAC rows).
     const dockerHosts = Array.isArray(metrics['dockerHosts']) ? (metrics['dockerHosts'] as unknown[]) : [];
-    for (const raw of dockerHosts) {
-      if (!raw || typeof raw !== 'object') continue;
-      const r = raw as Record<string, unknown>;
-      const ip = typeof r['ip'] === 'string' ? (r['ip'] as string).trim() : '';
-      if (!ip || ip === '0.0.0.0' || ip === '::') continue; // docker rows REQUIRE an IP to merge on
-      hostValues.push({
-        deviceId,
-        pluginId,
-        mac: '', // no MAC available — merged by IP in the response shaping
-        ip,
-        source: 'docker',
-        hostname: typeof r['hostname'] === 'string' && (r['hostname'] as string).trim() !== '' ? (r['hostname'] as string) : null,
-        manufacturer: null,
-        intf: null,
-        expiry: null,
-        lastSeenAt: collectedAt,
-      });
-    }
+    for (const raw of dockerHosts) pushHostRow('docker', raw);
 
     // Same guard as above — one snapshot must not repeat a (mac, ip, source) row.
     const hostByKey = new Map<string, typeof hostValues[number]>();
@@ -1041,6 +1025,17 @@ async function ingestInventory(
       const prevByName = new Map<string, { state: string; startedAt: string | null }>();
       for (const p of prevRows) prevByName.set(p.name, { state: p.state, startedAt: p.startedAt });
 
+      // Plugin-provided start times (e.g. TrueNAS `docker inspect` over SSH)
+      // are the REAL container start — they win over transition tracking.
+      const pluginStartedAt = new Map<string, string>();
+      for (const raw of rawContainers) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const n = typeof r['name'] === 'string' ? r['name'].trim() : '';
+        const s = typeof r['startedAt'] === 'string' && (r['startedAt'] as string).trim() !== '' ? (r['startedAt'] as string) : null;
+        if (n && s) pluginStartedAt.set(n, s);
+      }
+
       const values: {
         deviceId: string; pluginId: string; name: string; state: string; image: string | null;
         version: string | null; upgradeAvailable: boolean | null; startedAt: string | null;
@@ -1055,10 +1050,17 @@ async function ingestInventory(
         const prev = prevByName.get(name);
         let startedAt: string | null = null;
         if (state === 'RUNNING') {
-          // Continuous RUNNING with an existing stamp → keep it. A fresh
-          // transition, a first observation, or a RUNNING row that has no stamp
-          // yet (e.g. right after the column was added) → stamp now.
-          startedAt = prev && prev.state === 'RUNNING' && prev.startedAt ? prev.startedAt : collectedAt;
+          // Priority 1: the plugin's REAL start time (docker inspect over SSH)
+          // — authoritative, resets correctly after restarts.
+          const realStart = pluginStartedAt.get(name);
+          if (realStart) {
+            startedAt = realStart;
+          } else {
+            // Priority 2: transition tracking fallback. Continuous RUNNING with
+            // an existing stamp → keep it; a fresh transition or first
+            // observation → stamp now.
+            startedAt = prev && prev.state === 'RUNNING' && prev.startedAt ? prev.startedAt : collectedAt;
+          }
         }
         values.push({
           deviceId,

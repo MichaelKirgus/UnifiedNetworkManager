@@ -20,8 +20,18 @@ import {
   PortRow,
   PlanRequest,
   StateRequestBody,
+  resolveSshCredentials,
 } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } from './client/truenasClient';
+import {
+  ensureEnrichment,
+  getEnrichment,
+  monitoringInFlight,
+  serviceNetDetails,
+  sshHostOf,
+  type DockerContainerInfo,
+  type ServiceNetDetail,
+} from './enrich';
 import { registry as actionRegistry, TruenasActionContext } from './actions';
 import { buildTruenasState } from './state';
 import { buildPlan, PlanningError } from './plan';
@@ -39,13 +49,12 @@ export const PLUGIN_NAME = 'TrueNAS Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
-  // 0.2.0 — first config-capable release: action catalog (system reads +
-  // DANGEROUS reboot/shutdown over the documented JSON-RPC API), the plan
-  // workflow (single-device fan-out) and the dynamic device-state document
-  // behind the per-device Config page.
-  version: '0.2.0',
+  // 0.3.0 — optional SSH data path (per-container MACs/IPs/start times via
+  // docker inspect) + background app.config enrichment (static container IPs)
+  // so the Containers/Hosts pages get real data without blowing the poll budget.
+  version: '0.3.0',
   vendors: ['truenas'],
-  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState'],
+  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh'],
 });
 
 /**
@@ -244,6 +253,13 @@ const server = createPluginServer({
         required: false,
         description:
           'Optional TrueNAS API key — used instead of username/password when set (recommended). TrueNAS 26+ also needs the owner username from the "API key owner username" option.',
+      },
+      {
+        name: 'ssh',
+        secretTypes: ['usernamePassword', 'sshKeyPair'],
+        required: false,
+        description:
+          'Optional SSH access for per-container details (real MAC addresses, live IPs and start times via docker inspect) — the public API exposes none of these. Read-only commands; runs at 15-min cadence in the background. Unbound = containers keep showing compose-config data only.',
       },
     ],
     metrics: buildMetricDescriptors(),
@@ -787,59 +803,19 @@ interface ContainerRow {
   image?: string | null;
   version?: string | null;
   upgradeAvailable?: boolean;
+  /** Real container start time (ISO) from `docker inspect` over SSH — only for
+   *  single-container apps whose container is running. The API prefers this
+   *  over its own transition tracking when present. */
+  startedAt?: string | null;
   /** Structured details — stored in the API's `extra` JSON column:
    *  networks[] {name, driver?, subnets?}, ips[], ports[], containerCount,
-   *  containers[] (per-service detail), volumeMounts[], customApp?. */
+   *  containers[] (per-service detail incl. mac/ip/startedAt when SSH-bound),
+   *  volumeMounts[], customApp?. */
   extra?: Record<string, unknown>;
 }
 
-/** One service's network placement from its compose config (app.config). */
-interface ServiceNetDetail {
-  /** Compose `hostname` — the container's L3 name (what other hosts see in ARP/NDP). */
-  hostname: string;
-  /** Static IPv4/IPv6 addresses assigned on the app's networks. */
-  ips: string[];
-  /** Network names this service is attached to. */
-  networks: string[];
-}
-
-/**
- * Extracts per-service network detail from ONE app's compose config (app.config).
- * The TrueNAS public API exposes NO per-container MAC — but the compose config
- * carries each service's `hostname` + static `ipv4_address`/`ipv6_address`, which
- * is exactly what other devices' ARP/NDP tables report for that container. UNM
- * stores these as host rows (source 'docker') and merges them by IP with the
- * MAC-carrying neighbor entries, so a container shows up in the Hosts inventory
- * with its real name + address even though TrueNAS itself never sees its MAC.
- */
-function serviceNetDetails(cfg: Record<string, unknown> | undefined): ServiceNetDetail[] {
-  const out: ServiceNetDetail[] = [];
-  if (!cfg || typeof cfg !== 'object') return out;
-  const svcs = cfg['services'];
-  if (!svcs || typeof svcs !== 'object' || Array.isArray(svcs)) return out;
-  for (const svc of Object.values(svcs as Record<string, unknown>)) {
-    const s = svc as Record<string, unknown>;
-    // Compose `hostname` is the container's L3 name. Fall back to container_name
-    // then the service key — but prefer an explicit hostname when present.
-    const hostname = pickString(s, ['hostname']) ?? pickString(s, ['container_name']) ?? '';
-    if (!hostname) continue;
-    const ips = new Set<string>();
-    const networks: string[] = [];
-    const svcNets = s['networks'];
-    if (svcNets && typeof svcNets === 'object' && !Array.isArray(svcNets)) {
-      for (const [netName, netCfg] of Object.entries(svcNets as Record<string, unknown>)) {
-        networks.push(netName);
-        const nc = (netCfg ?? {}) as Record<string, unknown>;
-        const ip4 = pickString(nc, ['ipv4_address']);
-        if (ip4) ips.add(ip4);
-        const ip6 = pickString(nc, ['ipv6_address']);
-        if (ip6) ips.add(ip6);
-      }
-    }
-    out.push({ hostname, ips: Array.from(ips).sort(), networks: networks.sort() });
-  }
-  return out;
-}
+// ServiceNetDetail + serviceNetDetails now live in ./enrich (shared with the
+// background app.config wave) — imported at the top of this file.
 
 /** Maps raw docker.network.query entries to name → {driver, subnets[]} for tooltips. */
 function parseDockerNetworks(nets: Record<string, unknown>[]): Map<string, { driver: string; subnets: string[] }> {
@@ -860,19 +836,28 @@ function parseDockerNetworks(nets: Record<string, unknown>[]): Map<string, { dri
 }
 
 /**
- * Maps app.query rows (+ per-service compose detail + docker networks) to container
- * inventory rows — one row PER APP (the page's granularity). Multi-container apps
- * carry their per-service detail in extra.containers. Static IPs come from the
- * precomputed service details (`services.<svc>.networks.<net>.ipv4_address`);
- * dynamic/bridge containers have no IP in the public API, so `ips` stays empty and
- * the UI falls back to "on <network> (<subnet>)". serviceDetailsByApp is pre-fetched
- * by the caller (app.config is a per-app call — fetched with bounded concurrency).
+ * Maps app.query rows (+ cached enrichment) to container inventory rows — one
+ * row PER APP (the page's granularity). Multi-container apps carry their
+ * per-service detail in extra.containers. Enrichment sources, in priority order:
+ *   1. docker inspect over SSH (when an ssh slot is bound): REAL MACs + live IPs
+ *      + start times — the public API exposes none of these.
+ *   2. app.config compose wave (background cache): static IPs + hostnames for
+ *      containers without a usable SSH observation.
  */
 function buildContainerRows(
   apps: Record<string, unknown>[],
   serviceDetailsByApp: Map<string, ServiceNetDetail[]>,
-  dockerNets: Map<string, { driver: string; subnets: string[] }>
+  dockerNets: Map<string, { driver: string; subnets: string[] }>,
+  dockerInfo?: DockerContainerInfo[] | null
 ): ContainerRow[] {
+  // Index the SSH observations by container id (and by name as a fallback).
+  const infoById = new Map<string, DockerContainerInfo>();
+  const infoByName = new Map<string, DockerContainerInfo>();
+  for (const d of dockerInfo ?? []) {
+    if (!infoById.has(d.id)) infoById.set(d.id, d);
+    if (d.name && !infoByName.has(d.name)) infoByName.set(d.name, d);
+  }
+
   const rows: ContainerRow[] = [];
   for (const a of apps) {
     const name = pickString(a, ['name', 'id']);
@@ -889,11 +874,48 @@ function buildContainerRows(
       }
     }
 
-    // Static IPs + per-service networks from the compose config (pre-fetched).
+    // Static IPs + per-service networks from the compose config (cached wave).
+    const svcDetails = serviceDetailsByApp.get(name) ?? [];
     const ips = new Set<string>();
-    for (const d of serviceDetailsByApp.get(name) ?? []) {
+    for (const d of svcDetails) {
       for (const ip of d.ips) ips.add(ip);
       for (const net of d.networks) networkNames.add(net);
+    }
+
+    // Per-service detail for the expandable row — enriched with SSH facts when
+    // available (real MAC + live IP beat the compose static config).
+    const containers: { service?: string; image?: string | null; state?: string; mac?: string; ip?: string; startedAt?: string }[] = [];
+    for (const d of details) {
+      const cid = pickString(d, ['id']);
+      const svcName = pickString(d, ['service_name']) ?? '';
+      const info = (cid ? infoById.get(cid) : undefined) ?? (svcName ? infoByName.get(svcName) : undefined);
+      // Compose detail for this service (hostname + static IPs).
+      const svc = svcDetails.find((s) => s.hostname === svcName || s.hostname === name);
+      let mac: string | undefined;
+      let ip: string | undefined;
+      if (info && info.nets.length > 0) {
+        // Prefer the first network with a real IP, else the first entry.
+        const primary = info.nets.find((n) => n.ip) ?? info.nets[0];
+        mac = primary.mac;
+        ip = primary.ip || undefined;
+      } else if (svc && svc.ips.length > 0) {
+        ip = svc.ips[0]; // static compose IP — no MAC available without SSH
+      }
+      containers.push({
+        service: svcName || undefined,
+        image: pickString(d, ['image']),
+        state: pickString(d, ['state']) ?? undefined,
+        ...(mac ? { mac } : {}),
+        ...(ip ? { ip } : {}),
+        ...(info?.startedAt && info.state === 'running' ? { startedAt: info.startedAt } : {}),
+      });
+    }
+
+    // SSH live IPs join the app-level IP set (real addresses beat compose-only).
+    for (const d of dockerInfo ?? []) {
+      const cid = details.find((x) => pickString(x, ['id']) === d.id);
+      if (!cid) continue; // not a container of THIS app
+      for (const n of d.nets) if (n.ip) ips.add(n.ip);
     }
 
     // Enrich each network name with its driver + subnets from docker.network.query.
@@ -918,14 +940,13 @@ function buildContainerRows(
     const volumes = Array.isArray(aw['volumes']) ? (aw['volumes'] as Record<string, unknown>[]) : [];
     const volumeMounts = Array.from(new Set(volumes.map((v) => pickString(v, ['source']) ?? '').filter(Boolean))).sort();
 
-    // Per-service detail for the expandable row.
-    const containers = details
-      .map((d) => ({
-        service: pickString(d, ['service_name']),
-        image: pickString(d, ['image']),
-        state: pickString(d, ['state']) ?? undefined,
-      }))
-      .filter((c) => c.service || c.image);
+    // Real start time for single-container apps (SSH only — the API has none).
+    let startedAt: string | null | undefined;
+    if (details.length === 1) {
+      const cid = pickString(details[0], ['id']);
+      const info = (cid ? infoById.get(cid) : undefined);
+      if (info?.startedAt && info.state === 'running') startedAt = info.startedAt;
+    }
 
     rows.push({
       name,
@@ -933,6 +954,7 @@ function buildContainerRows(
       image: details.length === 1 ? pickString(details[0], ['image']) : null,
       version: pickString(a, ['human_version', 'version']),
       upgradeAvailable: a['upgrade_available'] === true || a['image_updates_available'] === true ? true : undefined,
+      ...(startedAt !== undefined ? { startedAt } : {}),
       extra: {
         networks,
         ips: Array.from(ips).sort(),
@@ -953,13 +975,18 @@ function isPlaceholder(s: string | undefined): boolean {
 }
 
 app.post('/monitoring', async (req, res) => {
+  // Track in-flight polls per host — the background app.config wave must not
+  // overlap a live poll on the shared WebSocket (the appliance's socket closes
+  // under overlapping bursts; measured ~4 calls/s ceiling).
+  const body = req.body ?? {};
+  const hostForGuard = applianceHost(body.managementAddress);
+  if (hostForGuard) monitoringInFlight.add(hostForGuard);
   try {
     await handleMonitoring(req, res);
   } catch (err) {
     // Safety net: Express 4 does NOT catch rejections from async handlers —
     // an unhandled one would crash the plugin process. Always answer 200 with
     // health=critical so the API records a failed poll instead of losing us.
-    const body = req.body ?? {};
     logger.error(`Monitoring poll crashed: ${errMsg(err)}`, {
       deviceId: typeof body.deviceId === 'string' ? body.deviceId : undefined,
       context: { host: typeof body.managementAddress === 'string' ? body.managementAddress : '' },
@@ -971,6 +998,8 @@ app.post('/monitoring', async (req, res) => {
       metrics: { 'system.error': errMsg(err) },
       metricDescriptors: [textMetric('system.error', 'Error', { group: 'System' })],
     });
+  } finally {
+    if (hostForGuard) monitoringInFlight.delete(hostForGuard);
   }
 });
 
@@ -1329,56 +1358,68 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   }
   if (routes !== undefined) metrics['routes'] = routes;
 
-  // --- app.query (+ docker.network.query, app.config): containers inventory --
+  // --- app.query (+ docker.network.query): containers inventory --------------
   // Best-effort extra — never counts toward health. Emitted even when EMPTY so
   // an uninstalled app vanishes from the Containers page on the next poll
-  // (present-but-empty is authoritative; absent key would not wipe). Per-app
-  // compose configs carry the static container IPs + service→network mapping that
-  // app.query's active_workloads does not. They are fetched with BOUNDED concurrency:
-  // firing all ~250+ at once on a single WebSocket makes TrueNAS close the socket
-  // mid-batch (and used to crash the plugin — see truenasClient error guard), so we
-  // cap in-flight calls and let the rest queue. A failed app.config just leaves that
-  // app's IPs empty for this poll; the next poll retries it.
+  // (present-but-empty is authoritative; absent key would not wipe).
+  //
+  // Enrichment (static IPs via app.config, real MACs/IPs/start times via SSH)
+  // runs in the BACKGROUND with a 15-min cache — this handler only SCHEDULES
+  // stale parts and reads whatever cached state exists right now. The poll
+  // itself stays within its budget no matter how many apps are installed.
   if (appsRes.status === 'fulfilled' && Array.isArray(appsRes.value)) {
     const apps = appsRes.value as Record<string, unknown>[];
-    const serviceDetailsByApp = new Map<string, ServiceNetDetail[]>();
-    if (apps.length > 0) {
-      // Bounded-concurrency wave: at most CONFIG_CONCURRENCY app.config calls in
-      // flight on the shared socket. Keeps TrueNAS happy and the poll under budget.
-      const CONFIG_CONCURRENCY = 8;
-      let cursor = 0;
-      async function worker(): Promise<void> {
-        while (cursor < apps.length) {
-          const i = cursor++;
-          const appName = pickString(apps[i], ['name', 'id']) ?? '';
-          try {
-            const cfg = await client.call<Record<string, unknown>>('app.config', [appName], creds);
-            if (cfg && typeof cfg === 'object') serviceDetailsByApp.set(appName, serviceNetDetails(cfg));
-          } catch { /* best-effort — leave this app's detail empty for this poll */ }
-        }
-      }
-      const workers: Promise<void>[] = [];
-      for (let w = 0; w < Math.min(CONFIG_CONCURRENCY, apps.length); w++) workers.push(worker());
-      await Promise.all(workers);
-    }
+
+    // Optional SSH slot — the plugin's PRIMARY is a username/password that must
+    // NOT be reused for SSH, so only an explicitly bound ssh slot counts.
+    const sshCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
+
+    ensureEnrichment({
+      host,
+      client,
+      creds,
+      sshCreds,
+      apps,
+      log: (level, message) => (level === 'warn' ? logger.warn(message, { deviceId }) : logger.info(message, { deviceId })),
+    });
+
+    const enrichment = getEnrichment(host);
+    const serviceDetailsByApp = enrichment?.serviceDetails ?? new Map<string, ServiceNetDetail[]>();
+    const dockerInfo = enrichment?.dockerInfo; // undefined until the first SSH cycle completes
+
     const dockerNets =
       dockerNetsRes.status === 'fulfilled' && Array.isArray(dockerNetsRes.value)
         ? parseDockerNetworks(dockerNetsRes.value as Record<string, unknown>[])
         : new Map<string, { driver: string; subnets: string[] }>();
-    metrics['containers'] = buildContainerRows(apps, serviceDetailsByApp, dockerNets);
+    metrics['containers'] = buildContainerRows(apps, serviceDetailsByApp, dockerNets, dockerInfo);
 
-    // Host inventory (source 'docker'): one row per container SERVICE with a static
-    // IP. TrueNAS exposes NO per-container MAC, so mac is omitted — UNM stores the
-    // hostname + IP and merges by IP with the MAC-carrying ARP/NDP entries other
-    // devices report for the same address (that's where the real MAC comes from).
-    const dockerHosts: { hostname: string; ip: string }[] = [];
-    const seenDockerIps = new Set<string>();
-    for (const details of serviceDetailsByApp.values()) {
-      for (const d of details) {
-        for (const ip of d.ips) {
-          if (!ip || seenDockerIps.has(ip)) continue;
-          seenDockerIps.add(ip);
-          dockerHosts.push({ hostname: d.hostname, ip });
+    // Host inventory (source 'docker'): one row per container with a REAL MAC —
+    // only possible via `docker inspect` over SSH (the public API exposes no
+    // per-container MAC anywhere). Rows carry mac + ip + hostname so the API's
+    // merge-by-MAC joins them with ARP/NDP entries other devices report. When
+    // no ssh slot is bound (or before the first successful cycle) this stays
+    // empty — containers without a known MAC are NOT stored as host rows.
+    const dockerHosts: { mac: string; ip: string; hostname?: string }[] = [];
+    if (dockerInfo && Array.isArray(dockerInfo)) {
+      // Map container id → app name for the hostname label.
+      const appNameById = new Map<string, string>();
+      for (const a of apps) {
+        const aw = (a['active_workloads'] ?? {}) as Record<string, unknown>;
+        const details = Array.isArray(aw['container_details']) ? (aw['container_details'] as Record<string, unknown>[]) : [];
+        for (const d of details) {
+          const id = pickString(d, ['id']);
+          if (id && !appNameById.has(id)) appNameById.set(id, pickString(a, ['name', 'id']) ?? '');
+        }
+      }
+      const seenMacIps = new Set<string>();
+      for (const d of dockerInfo) {
+        if (d.state !== 'running') continue; // stopped containers have no live address
+        for (const n of d.nets) {
+          if (!n.ip || n.ip === '0.0.0.0' || n.ip === '::') continue;
+          const key = `${n.mac}|${n.ip}`;
+          if (seenMacIps.has(key)) continue;
+          seenMacIps.add(key);
+          dockerHosts.push({ mac: n.mac, ip: n.ip, hostname: appNameById.get(d.id) || d.name });
         }
       }
     }

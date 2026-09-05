@@ -6,6 +6,7 @@ import {
   CredentialSlotDescriptor,
   ExtraCredentials,
   parseExtraCredentials,
+  slotAcceptsType,
 } from './types/credentialSlots';
 
 /**
@@ -21,7 +22,10 @@ import {
 /** One bound credential slot: descriptor + resolved label for UI display. */
 export interface BoundCredentialSlot {
   name: string;
+  /** Legacy single allowed type (first of `secretTypes`). */
   secretType: string;
+  /** All allowed secret types for this slot (one or many). */
+  secretTypes?: string[];
   required?: boolean;
   description?: string;
   /** secrets.id bound to this slot (null = unbound). */
@@ -138,10 +142,11 @@ async function validateExtraCredentials(
       where: (secrets, { eq }) => eq(secrets.id, secretId),
     });
     if (!secret) throw new AssignmentError(404, `Referenced credentials for slot "${name}" not found`);
-    if (secret.type !== slot.secretType) {
+    if (!slotAcceptsType(slot, secret.type)) {
+      const allowed = (Array.isArray(slot.secretTypes) && slot.secretTypes.length > 0 ? slot.secretTypes : [slot.secretType]).join(' | ');
       throw new AssignmentError(
         400,
-        `Credential slot "${name}" requires secret type "${slot.secretType}", but the selected secret is of type "${secret.type}"`
+        `Credential slot "${name}" requires a secret of type ${allowed}, but the selected secret is of type "${secret.type}"`
       );
     }
     out[name] = secretId;
@@ -191,9 +196,11 @@ export async function listAssignmentViews(deviceId: string): Promise<DevicePlugi
           credentialSlots = declared.map((slot) => {
             const boundId = a.extraCredentials[slot.name] ?? null;
             const boundSecret = secrets.find((s) => s.id === boundId);
+            const types = Array.isArray(slot.secretTypes) && slot.secretTypes.length > 0 ? slot.secretTypes : undefined;
             return {
               name: slot.name,
-              secretType: slot.secretType,
+              secretType: slot.secretType ?? (types?.[0] ?? ''),
+              ...(types ? { secretTypes: types } : {}),
               required: slot.required,
               description: slot.description,
               secretId: boundId,

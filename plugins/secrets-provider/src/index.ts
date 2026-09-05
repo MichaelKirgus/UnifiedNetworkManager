@@ -8,7 +8,7 @@ import {
 } from '@unm/plugin-sdk';
 import { encrypt, decrypt } from './crypto';
 import { storeSecret, listSecrets, getSecret, deleteSecret, updateSecret } from './apiClient';
-import { GENERATABLE_TYPES } from './keygen';
+import { GENERATABLE_TYPES, generateSshKeyPair } from './keygen';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000002';
 export const PLUGIN_NAME = 'Secrets Provider (Device Credentials)';
@@ -103,6 +103,18 @@ export const SECRET_TYPES: SecretType[] = [
       { name: 'ca', label: 'CA Certificate (PEM)', input: 'password', secret: true, required: true },
       { name: 'cert', label: 'Certificate (PEM)', input: 'password', secret: true, required: true },
       { name: 'key', label: 'Private Key (PEM)', input: 'password', secret: true, required: true },
+    ],
+  },
+  {
+    type: 'sshKeyPair',
+    label: 'SSH Key Pair (ed25519 PEM)',
+    generatable: true,
+    fields: [
+      { name: 'username', label: 'Username', input: 'text', required: false },
+      // Multi-line — the field is a full PEM block. `secret` keeps it masked in
+      // any UI that renders secret fields; the value only ever leaves on submit.
+      { name: 'privateKey', label: 'Private Key (PEM)', input: 'textarea', secret: true, required: true },
+      { name: 'passphrase', label: 'Key Passphrase (optional)', input: 'password', secret: true, required: false },
     ],
   },
 ];
@@ -277,9 +289,70 @@ app.post('/generate', requirePluginKey, async (req, res) => {
       userId: uid,
       expiresAt: (typeof expiresAt === 'string' && expiresAt) || null,
     });
-    res.status(201).json({ id: record.id, createdAt: record.createdAt, type });
+    // Echo back NON-SECRET generated material so the UI can show it to the
+    // creator (e.g. the paste-ready ssh-ed25519 public key line). Secret fields
+    // NEVER leave the provider in any response.
+    const typeDef = SECRET_TYPES.find((t) => t.type === type);
+    const secretNames = new Set((typeDef?.fields ?? []).filter((f) => f.secret).map((f) => f.name));
+    const publicFields: Record<string, string> = {};
+    for (const [k, v] of Object.entries(generated)) {
+      if (!secretNames.has(k) && typeof v === 'string') publicFields[k] = v;
+    }
+    res.status(201).json({
+      id: record.id,
+      createdAt: record.createdAt,
+      type,
+      ...(Object.keys(publicFields).length > 0 ? { publicFields } : {}),
+    });
   } catch (err) {
     logger.error(`Failed to generate secret of type ${type}: ${(err as Error).message}`, { context: { type, userId: uid } });
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+/**
+ * Update a secret's fields IN PLACE — the SAME id is preserved so every
+ * assignment/plan referencing it keeps working. Works for ALL secret types:
+ * the caller sends the full new field map (as rendered by the type schema),
+ * this provider re-encrypts and stores it. `label` / `expiresAt` are optional
+ * metadata updates applied alongside.
+ *
+ * Body: { id, fields, label?, expiresAt? }  → 200 { id }   (404 if unknown)
+ */
+app.post('/update', requirePluginKey, async (req, res) => {
+  const { id, fields, label, expiresAt } = req.body ?? {};
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
+  if (!id || typeof id !== 'string') {
+    res.status(400).json({ error: 'id is required' });
+    return;
+  }
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    res.status(400).json({ error: 'fields object is required' });
+    return;
+  }
+
+  try {
+    const record = await getSecret(id);
+    if (!record) {
+      res.status(404).json({ error: 'Secret not found' });
+      return;
+    }
+
+    // Full replacement of the field map (the edit form always submits every
+    // declared field), re-encrypted under the SAME id. `expiresAt` is only
+    // forwarded when the API actually sent it — a fields-only update must not
+    // wipe an existing expiry.
+    const body = req.body ?? {};
+    const encryptedValue = encrypt(JSON.stringify(fields));
+    await updateSecret(
+      id,
+      encryptedValue,
+      typeof label === 'string' ? label : undefined,
+      'expiresAt' in body ? (typeof expiresAt === 'string' && expiresAt ? expiresAt : null) : undefined
+    );
+    res.status(200).json({ id: record.id });
+  } catch (err) {
+    logger.error(`Failed to update secret ${id}: ${(err as Error).message}`, { context: { id } });
     res.status(500).json({ error: (err as Error).message });
   }
 });

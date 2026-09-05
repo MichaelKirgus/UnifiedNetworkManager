@@ -6,11 +6,10 @@ import { DeviceChip } from '../components/DeviceChip';
 import { formatDuration } from '../components/formatMetric';
 import { api, ContainerNetwork, ContainerRow, ContainerServiceDetail } from '../api/client';
 
-/** Uptime cell — UNM-observed "running since" (the TrueNAS API exposes no real
- * container start-time). RUNNING + startedAt → duration; non-RUNNING or no stamp
- * → "—". The tooltip discloses the value is tracked by UNM from state transitions,
- * so it resets after restarts and underestimates true uptime for apps UNM only
- * started watching mid-run. */
+/** Uptime cell — "running since". RUNNING + startedAt → duration; non-RUNNING
+ * or no stamp → "—". The value is the real container start when the plugin
+ * observed it via SSH (`docker inspect`), otherwise UNM-tracked from state
+ * transitions (a lower bound that resets after restarts). */
 function UptimeCell({ row }: { row: ContainerRow }) {
   if (row.state !== 'RUNNING' || !row.startedAt) return <span className="text-slate-400">—</span>;
   const since = new Date(row.startedAt).getTime();
@@ -19,7 +18,7 @@ function UptimeCell({ row }: { row: ContainerRow }) {
   return (
     <span
       className="font-mono text-xs text-slate-700"
-      title={`Running since ${new Date(row.startedAt).toLocaleString()} — tracked by UNM from state transitions (resets after restarts; a lower bound if UNM started observing while it was already running)`}
+      title={`Running since ${new Date(row.startedAt).toLocaleString()}`}
     >
       {formatDuration(secs)}
     </span>
@@ -164,6 +163,22 @@ function RowDetail({ row }: { row: ContainerRow }) {
                   <span className={clsx('rounded px-1 py-0.5 text-[10px] font-medium uppercase', s.state === 'running' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600')}>{s.state}</span>
                 )}
                 {s.image && <span className="truncate font-mono text-[11px] text-slate-500" title={s.image}>{s.image}</span>}
+                {/* Real per-container facts (SSH `docker inspect` only). */}
+                {s.mac && (
+                  <span className="font-mono text-[11px] text-slate-500" title="MAC address">
+                    MAC {s.mac}
+                  </span>
+                )}
+                {s.ip && (
+                  <span
+                    className={clsx(
+                      'inline-flex items-center rounded border px-1 py-0.5 font-mono text-[11px] leading-4',
+                      s.ip.includes(':') ? 'border-violet-200 bg-violet-50 text-violet-800' : 'border-blue-200 bg-blue-50 text-blue-800'
+                    )}
+                  >
+                    {s.ip}
+                  </span>
+                )}
               </div>
             ))}
           </div>

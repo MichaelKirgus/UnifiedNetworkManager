@@ -1793,6 +1793,84 @@ paths:
           description: Device not found
 
   /secrets/{id}:
+    get:
+      tags: [Secrets]
+      summary: Get a secret's decrypted fields (for editing)
+      description: >-
+        Retrieves the secret's decrypted field values, routed to the provider
+        that created it. Used by the edit form — never served from cache so an
+        editor always sees current values. Requires `secrets:read`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Decrypted secret fields
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, fields]
+                properties:
+                  type: { type: string }
+                  fields:
+                    type: object
+                    additionalProperties: { type: string }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Secret not found
+    patch:
+      tags: [Secrets]
+      summary: Update a secret's fields in place
+      description: >-
+        Updates the field values of an existing secret while preserving its id,
+        so device assignments and plans referencing it keep working. Works for
+        ALL secret types — the owning provider re-encrypts the new field map.
+        `fields` is a full replacement of the type's declared fields; `label`
+        and `expiresAt` are optional metadata updates (`expiresAt: null` clears
+        the expiry). Requires `secrets:write`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fields]
+              properties:
+                fields:
+                  type: object
+                  additionalProperties: { type: string }
+                  description: "Full replacement of the secret's field values (as declared by its type schema)"
+                label: { type: string, nullable: true }
+                expiresAt: { type: string, format: date-time, nullable: true }
+      responses:
+        '200':
+          description: Secret updated (same id)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: { type: string }
+        '400':
+          description: Invalid request (missing fields)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Secret not found
     delete:
       tags: [Secrets]
       summary: Delete a secret
@@ -3256,7 +3334,7 @@ components:
         label: { type: string }
         input:
           type: string
-          enum: [text, password, select]
+          enum: [text, password, select, textarea]
         secret: { type: boolean, default: false }
         required: { type: boolean, default: false }
         options:

@@ -36,6 +36,7 @@ import { searchGateways } from './client/routes';
 import { collectTunnels, attachTunnelRates, enrichTunnelsWithLiveState, TunnelRow } from './tunnels';
 import { collectRoutes, deriveConnectedAndDefaultRoutes, enrichRoutesWithGatewayStatus, RouteRow } from './routes';
 import { collectFirewallRules, fetchFilterRuleStats } from './firewall';
+import { collectZfsViaSsh } from './zfsSsh';
 import { getAction, listModules } from './actions/registry';
 import { ActionContext, ActionResult, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest, listCatalog } from './plan';
@@ -62,7 +63,9 @@ const identity = resolvePluginIdentity({
   // can offer bulk rollout + tunnel provisioning flows in the webapp.
   // 'deviceState' advertises POST /state — the dynamic document behind the
   // per-device Config page (interfaces with live status + system power actions).
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState'],
+  // 'ssh' = optional SSH data path for ZFS pool/dataset inventory (the API has
+  // no ZFS listing) — only used when an `ssh` credential slot is bound.
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState', 'ssh'],
 });
 
 /**
@@ -343,7 +346,8 @@ async function getInventory(
   host: string,
   apiKey: string,
   apiSecret: string,
-  transport?: OpnsenseTransport
+  transport?: OpnsenseTransport,
+  credentials?: Record<string, unknown>
 ): Promise<InventorySnapshot> {
   const cached = inventoryCache.get(host);
   if (cached && Date.now() - cached.collectedAt < INVENTORY_INTERVAL_MS) {
@@ -356,19 +360,22 @@ async function getInventory(
   // slow collection completes and warms the cache; later polls are fast.
   const inFlight = inventoryInFlight.get(host);
   if (inFlight) return inFlight;
-  const p = collectInventory(host, apiKey, apiSecret, transport).finally(() => {
+  const p = collectInventory(host, apiKey, apiSecret, transport, credentials).finally(() => {
     inventoryInFlight.delete(host);
   });
   inventoryInFlight.set(host, p);
   return p;
 }
 
-/** Performs one full cold inventory collection (all endpoints, best-effort). */
+/** Performs one full cold inventory collection (all endpoints, best-effort).
+ * `credentials` carries the assignment's decrypted fields incl. bound slots —
+ * used ONLY for the optional SSH ZFS enrichment (slots.ssh). */
 async function collectInventory(
   host: string,
   apiKey: string,
   apiSecret: string,
-  transport?: OpnsenseTransport
+  transport?: OpnsenseTransport,
+  credentials?: Record<string, unknown>
 ): Promise<InventorySnapshot> {
   // The client-lib calls need a bound axios instance for this appliance.
   const client = createClient(host, { apiKey, apiSecret }, transport);
@@ -497,11 +504,35 @@ async function collectInventory(
     snap.gateways = (rows as unknown[]).filter((r): r is Record<string, unknown> => !!r && typeof r === 'object');
   }
 
-  // Storage (mounted filesystems) — the only storage data OPNsense exposes;
-  // empty array when the endpoint is missing/404 or the API key lacks access.
+  // Storage (mounted filesystems) — the only storage data OPNsense's API
+  // exposes; empty array when the endpoint is missing/404 or the key lacks access.
   const storage = collectStorage(diskRes);
   snap.filesystems = storage.filesystems;
   snap.disks = storage.disks;
+
+  // Optional SSH ZFS enrichment (best-effort, inventory cadence): when an `ssh`
+  // slot is bound, the full pool/dataset tree REPLACES the API's single zfs-root
+  // row; non-ZFS mounts from system_disk are kept. A failed/absent SSH path
+  // leaves the API-only rows untouched (null = keep previous data).
+  const sshZfs = await collectZfsViaSsh(host, credentials, (level, message) => {
+    if (level === 'warn') logger.warn(message);
+    else logger.info(message);
+  });
+  if (sshZfs && sshZfs.filesystems.length > 0) {
+    // Keep non-ZFS API rows; SSH rows win on name collisions (the zroot pool).
+    const apiNonZfs = snap.filesystems.filter((f) => f['type'] !== 'zfs-pool');
+    const fsByName = new Map<string, Record<string, unknown>>();
+    for (const row of [...apiNonZfs, ...sshZfs.filesystems]) {
+      fsByName.set(String(row['name']), row as Record<string, unknown>);
+    }
+    snap.filesystems = Array.from(fsByName.values());
+    // Disks: SSH vdev leaves + any API disk rows (deduped by name).
+    const diskByName = new Map<string, Record<string, unknown>>();
+    for (const d of [...snap.disks, ...sshZfs.disks]) {
+      diskByName.set(String(d['name']), d as Record<string, unknown>);
+    }
+    snap.disks = Array.from(diskByName.values());
+  }
 
   inventoryCache.set(host, snap);
   return snap;
@@ -835,6 +866,18 @@ const server = createPluginServer({
     // broker reads this to filter which secrets/providers are applicable to
     // devices managed by this plugin.
     requiredSecretType: 'apiKey',
+    // Optional SSH slot — unlocks the ZFS pool/dataset inventory (the OPNsense
+    // API exposes no ZFS listing at all). Accepts BOTH credential styles:
+    // a username/password login OR an ed25519 key pair. Unbound = API-only mode.
+    credentialSlots: [
+      {
+        name: 'ssh',
+        secretTypes: ['usernamePassword', 'sshKeyPair'],
+        required: false,
+        description:
+          'Optional SSH access for ZFS pool/dataset inventory (pools, datasets, zvols, scrub state, snapshots, per-disk health). The OPNsense API has no ZFS listing — without this slot only the mounted-root overview is collected. Read-only commands; runs at 15-min inventory cadence.',
+      },
+    ],
     // Static metric descriptors (system metrics). The traffic table descriptor
     // is emitted dynamically from /monitoring (it needs the live interface
     // list, which is only available when polling a specific device).
@@ -897,7 +940,8 @@ async function collectMetrics(
   apiKey: string,
   apiSecret: string,
   transport?: OpnsenseTransport,
-  deviceId?: string | null
+  deviceId?: string | null,
+  credentials?: Record<string, unknown>
 ): Promise<{ metrics: Record<string, unknown>; interfaces: string[] }> {
   const metrics: Record<string, unknown> = {};
   const interfaces: string[] = [];
@@ -953,7 +997,8 @@ async function collectMetrics(
   // Inventory (hostname, version, ARP + NDP neighbor tables) — slow-changing.
   // Served from the in-memory cache; the appliance is only re-polled when the
   // 15-min TTL elapses (see getInventory), so the API's 30s poll is cheap.
-  const inventory = await getInventory(host, apiKey, apiSecret, transport);
+  // `credentials` carries bound slots (slots.ssh) for the optional ZFS path.
+  const inventory = await getInventory(host, apiKey, apiSecret, transport, credentials);
   if (inventory.hostname) metrics['hostname'] = inventory.hostname;
   if (inventory.version) metrics['version'] = inventory.version;
   if (inventory.arp.length > 0) metrics['arp'] = inventory.arp;
@@ -1114,8 +1159,12 @@ app.post('/monitoring', async (req, res) => {
       ? (settings.transport as OpnsenseTransport)
       : 'auto';
 
+  // Decrypted assignment fields incl. bound slots (slots.ssh when the user
+  // bound an SSH credential) — forwarded to the inventory for ZFS enrichment.
+  const credentials = (body.credentials && typeof body.credentials === 'object' ? body.credentials : {}) as Record<string, unknown>;
+
   try {
-    const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret, transport, deviceId);
+    const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret, transport, deviceId, credentials);
 
     // Echo of the user-selected model/firmware (mirrors the LANCOM plugin) —
     // informational only; shown as text cards in the device detail view.
@@ -1353,7 +1402,8 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   const apiKey = typeof creds['apiKey'] === 'string' ? (creds['apiKey'] as string) : '';
   const apiSecret = typeof creds['apiSecret'] === 'string' ? (creds['apiSecret'] as string) : '';
 
-  const snapshot = await getInventory(body.managementAddress, apiKey, apiSecret, transport);
+  // `creds` also carries bound slots (slots.ssh) for the optional ZFS path.
+  const snapshot = await getInventory(body.managementAddress, apiKey, apiSecret, transport, creds);
 
   // Interface MACs: the networks rows already carry `mac` from interfaces_info;
   // fall back to the live interface-statistics MACs collected this poll.

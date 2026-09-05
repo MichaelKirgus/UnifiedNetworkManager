@@ -9,6 +9,8 @@ import {
   deleteSecret,
   listSecretProviders,
   generateSecret,
+  getSecretFields,
+  updateSecret,
   invalidateSecretCache,
   regenerateSecret,
 } from '../secretsProvider';
@@ -38,6 +40,8 @@ interface SecretMeta {
  *   GET    /secrets            -> metadata list (incl. type + providerId)
  *   GET    /secrets/providers  -> registered providers + their secret types
  *   POST   /secrets            -> { type, providerId?, fields, label?, expiresAt? } -> { id, createdAt }
+ *   GET    /secrets/:id        -> decrypted fields (for the edit form)
+ *   PATCH  /secrets/:id        -> { fields?, label?, expiresAt? } — update in place (all types)
  *   DELETE /secrets/:id        -> 204
  */
 
@@ -160,6 +164,46 @@ router.post('/:id/regenerate', requireAuth, requirePermission('secrets:write'), 
   try {
     const result = await regenerateSecret(id);
     invalidateSecretCache(id); // rotated key material must not be served from cache
+    res.status(200).json(result);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// GET /secrets/:id - Retrieve a secret's decrypted fields (for the edit form).
+// Routed to the provider that created it; never served from cache.
+router.get('/:id', requireAuth, requirePermission('secrets:read'), async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await getSecretFields(id);
+    res.status(200).json(result);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// PATCH /secrets/:id - Update a secret's fields IN PLACE (same id preserved, so
+// assignments and plans referencing it keep working). Works for ALL secret
+// types — the owning provider re-encrypts the new field values. `fields` is a
+// full replacement of the type's field map; label/expiresAt are optional.
+router.patch('/:id', requireAuth, requirePermission('secrets:write'), async (req, res) => {
+  const { id } = req.params;
+  const { fields, label, expiresAt } = req.body ?? {};
+
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    res.status(400).json({ error: 'fields object is required' });
+    return;
+  }
+
+  try {
+    const result = await updateSecret(id, {
+      fields,
+      ...(typeof label === 'string' ? { label } : {}),
+      ...(typeof expiresAt === 'string' || expiresAt === null ? { expiresAt } : {}),
+    });
+    invalidateSecretCache(id); // edited values must not be served from cache
     res.status(200).json(result);
   } catch (err) {
     const e = err as { status?: number; message?: string };

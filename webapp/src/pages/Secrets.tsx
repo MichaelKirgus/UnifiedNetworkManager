@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Plus, Save, Trash2, X } from 'lucide-react';
+import { Pencil, Plus, RefreshCw, Save, Trash2, Wand2, X } from 'lucide-react';
 import { api, Secret, SecretProvider, SecretType } from '../api/client';
 import { DataTable } from '../components/DataTable';
 import { Layout } from '../components/Layout';
@@ -19,6 +19,114 @@ export default function Secrets() {
   const [fields, setFields] = useState<Record<string, string>>({});
   const [label, setLabel] = useState('');
   const [expiresAt, setExpiresAt] = useState('');
+  const [generating, setGenerating] = useState(false);
+  /** Non-secret material echoed back after a generate (e.g. public key line). */
+  const [generatedInfo, setGeneratedInfo] = useState<{ label: string; fields: Record<string, string> } | null>(null);
+
+  // --- Edit state (works for ALL secret types) -------------------------------
+  /** The inline form works in two modes: create a new secret, or edit an
+   *  existing one in place (same id — bound assignments keep working). */
+  const [mode, setMode] = useState<'create' | 'edit'>('create');
+  /** The secret being edited (metadata snapshot from the table row). */
+  const [editing, setEditing] = useState<Secret | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+
+
+
+  /** Opens the inline form in create mode with a clean slate. */
+  function openCreateForm() {
+    setMode('create');
+    setEditing(null);
+    setFields({});
+    setLabel('');
+    setExpiresAt('');
+    setShowForm(true);
+  }
+
+  /** Opens the inline form in edit mode and loads the secret's decrypted fields. */
+  async function openEdit(s: Secret) {
+    setMode('edit');
+    setEditing(s);
+    // Point the shared form at this secret's provider + type so it renders
+    // the right field schema (both are shown read-only in edit mode).
+    const owner = providers.find((p) => p.id === s.providerId);
+    if (owner) {
+      setProviderId(owner.id);
+      setType(s.type);
+    }
+    setLabel(s.label ?? '');
+    // datetime-local needs "YYYY-MM-DDTHH:mm" — trim seconds/timezone from ISO.
+    setExpiresAt(s.expiresAt ? s.expiresAt.slice(0, 16) : '');
+    setFields({});
+    setShowForm(true);
+    try {
+      const data = await api.getSecret(s.id);
+      // Only keep fields the type schema declares (defensive against drift).
+      // If the schema is unknown (provider offline), fall back to all values.
+      const declaredFields = editTypeFor(s.type)?.fields ?? null;
+      const clean: Record<string, string> = {};
+      for (const [k, v] of Object.entries(data.fields)) {
+        if (typeof v !== 'string') continue;
+        if (declaredFields && !declaredFields.some((f) => f.name === k)) continue;
+        clean[k] = v;
+      }
+      setFields(clean);
+    } catch (err) {
+      alert(`Failed to load secret for editing: ${(err as Error).message}`);
+      setShowForm(false);
+      setEditing(null);
+    }
+  }
+
+  function editTypeFor(typeName: string): SecretType | undefined {
+    return providers.flatMap((p) => p.secretTypes).find((t) => t.type === typeName);
+  }
+
+  /** Closes the inline form and resets it to a clean create-mode slate. */
+  function closeForm() {
+    setShowForm(false);
+    setMode('create');
+    setEditing(null);
+    setFields({});
+    setLabel('');
+    setExpiresAt('');
+  }
+
+  /** Submits the inline form — creates a new secret or updates it in place
+   *  (same id, so bound assignments keep working). */
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (mode === 'edit' && editing) {
+      setSavingEdit(true);
+      try {
+        await api.updateSecret(editing.id, {
+          fields,
+          label: label.trim(),
+          expiresAt: expiresAt || null,
+        });
+        closeForm();
+        await loadSecrets();
+      } catch (err) {
+        alert(`Failed to save secret: ${(err as Error).message}`);
+      } finally {
+        setSavingEdit(false);
+      }
+      return;
+    }
+    try {
+      const response = await api.createSecret({
+        type: activeType?.type ?? type,
+        providerId: activeProvider?.id,
+        fields,
+        label,
+        expiresAt: expiresAt || undefined,
+      });
+      closeForm();
+      await loadSecrets();
+    } catch (err) {
+      alert(`Failed to save secret: ${(err as Error).message}`);
+    }
+  }
 
   async function loadSecrets() {
     setLoading(true);
@@ -57,6 +165,20 @@ export default function Secrets() {
     [activeProvider, type]
   );
 
+  /** The field schema the form renders — in edit mode resolved directly by
+   *  name (the owning provider may be offline/unknown, so the activeProvider
+   *  fallback must not leak another provider's types into the form). */
+  const formType: SecretType | undefined = useMemo(
+    () => (mode === 'edit' ? editTypeFor(editing?.type ?? '') : activeType),
+    [mode, editing, providers, activeType]
+  );
+
+  /** All secret types any provider marks generatable — drives the per-row regenerate action. */
+  const generatableTypes = useMemo(
+    () => new Set(providers.flatMap((p) => p.secretTypes.filter((t) => t.generatable).map((t) => t.type))),
+    [providers]
+  );
+
   function handleProviderChange(id: string) {
     setProviderId(id);
     const provider = providers.find((p) => p.id === id);
@@ -73,23 +195,46 @@ export default function Secrets() {
     setFields((prev) => ({ ...prev, [name]: value }));
   }
 
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
+  /** Let the provider create the key material — only non-material context fields are sent. */
+  async function handleGenerate() {
+    if (!activeType?.generatable) return;
+    setGenerating(true);
     try {
-      const response = await api.createSecret({
-        type: activeType?.type ?? type,
+      const context: Record<string, string> = {};
+      for (const f of activeType.fields ?? []) {
+        if (!f.secret && fields[f.name]) context[f.name] = fields[f.name];
+      }
+      const result = await api.generateSecret({
+        type: activeType.type,
         providerId: activeProvider?.id,
-        fields,
+        fields: context,
         label,
         expiresAt: expiresAt || undefined,
       });
-      setLabel('');
-      setFields({});
-      setExpiresAt('');
-      setShowForm(false);
+      const generatedLabel = label;
+      closeForm();
+      await loadSecrets();
+      // Non-secret generated material (e.g. the paste-ready public key line) —
+      // show it so no external tooling is needed to deploy the key.
+      const pub = result.publicFields;
+      if (pub && Object.keys(pub).length > 0) {
+        setGeneratedInfo({ label: generatedLabel || activeType.label, fields: pub });
+      }
+    } catch (err) {
+      alert(`Failed to generate secret: ${(err as Error).message}`);
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  /** Re-roll key material in place — same id, so bound assignments keep working. */
+  async function handleRegenerate(s: Secret) {
+    if (!confirm(`Re-generate the key material for "${s.label || s.id}"?\nThe secret keeps its ID (assignments stay valid), but devices still holding the OLD key will stop authenticating.`)) return;
+    try {
+      await api.regenerateSecret(s.id);
       await loadSecrets();
     } catch (err) {
-      alert(`Failed to save secret: ${(err as Error).message}`);
+      alert((err as Error).message);
     }
   }
 
@@ -103,13 +248,24 @@ export default function Secrets() {
     }
   }
 
+  async function copyText(text: string): Promise<boolean> {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Clipboard API unavailable (non-secure context) — fall back to a prompt.
+      window.prompt('Copy the value below:', text);
+      return false;
+    }
+  }
+
   return (
     <Layout
       title="Secrets Store"
       actions={
         canWrite && (
           <button
-            onClick={() => setShowForm(!showForm)}
+            onClick={() => (showForm ? closeForm() : openCreateForm())}
             className="flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
           >
             {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
@@ -121,35 +277,61 @@ export default function Secrets() {
 
       {canWrite && showForm && (
         <div className="mb-6 rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-          <h2 className="mb-4 text-sm font-semibold text-slate-900">Create New Secret</h2>
-          <form onSubmit={handleCreate} className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <h2 className="mb-4 text-sm font-semibold text-slate-900">{mode === 'edit' ? 'Edit Secret' : 'Create New Secret'}</h2>
+          <form onSubmit={handleSubmit} className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            {mode === 'edit' && (
+              <p className="col-span-full -mt-2 text-xs text-slate-500">
+                The secret keeps its ID — device assignments and plans referencing it keep working. Devices using the old
+                values will use the new ones on their next poll.
+              </p>
+            )}
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-700">Provider</label>
-              <select
-                value={providerId}
-                onChange={(e) => handleProviderChange(e.target.value)}
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-              >
-                {providers.map((p) => (
-                  <option key={p.id} value={p.id} disabled={!p.online}>
-                    {p.name} {p.online ? '' : '(offline)'}
-                  </option>
-                ))}
-              </select>
+              {mode === 'edit' ? (
+                <input
+                  type="text"
+                  value={providers.some((p) => p.id === editing?.providerId) ? (activeProvider?.name ?? '') : 'Unknown provider'}
+                  disabled
+                  title="The provider that created the secret cannot be changed"
+                  className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500"
+                />
+              ) : (
+                <select
+                  value={providerId}
+                  onChange={(e) => handleProviderChange(e.target.value)}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                >
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id} disabled={!p.online}>
+                      {p.name} {p.online ? '' : '(offline)'}
+                    </option>
+                  ))}
+                </select>
+              )}
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-700">Secret Type</label>
-              <select
-                value={type}
-                onChange={(e) => handleTypeChange(e.target.value)}
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-              >
-                {(activeProvider?.secretTypes ?? []).map((t) => (
-                  <option key={t.type} value={t.type}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
+              {mode === 'edit' ? (
+                <input
+                  type="text"
+                  value={formType?.label ?? editing?.type ?? ''}
+                  disabled
+                  title="The secret type cannot be changed — create a new secret instead"
+                  className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500"
+                />
+              ) : (
+                <select
+                  value={type}
+                  onChange={(e) => handleTypeChange(e.target.value)}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                >
+                  {(activeProvider?.secretTypes ?? []).map((t) => (
+                    <option key={t.type} value={t.type}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              )}
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-700">Label</label>
@@ -163,8 +345,14 @@ export default function Secrets() {
               />
             </div>
 
-            {(activeType?.fields ?? []).map((f) => (
-              <div key={f.name}>
+            {mode === 'edit' && !formType && (
+              <p className="col-span-full rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                The owning provider is not reachable right now, so the field values can't be loaded. Label and
+                expiration can still be edited; try again once the provider is back online.
+              </p>
+            )}
+            {(formType?.fields ?? []).map((f) => (
+              <div key={f.name} className={f.input === 'textarea' ? 'col-span-full' : undefined}>
                 <label className="mb-1 block text-xs font-medium text-slate-700">
                   {f.label} {f.required ? '*' : ''}
                 </label>
@@ -181,6 +369,18 @@ export default function Secrets() {
                       </option>
                     ))}
                   </select>
+                ) : f.input === 'textarea' ? (
+                  // Multi-line material (PEM private keys, cert bundles). A secret
+                  // textarea stays a real <input type="password">-style field: the
+                  // value is only ever sent to the API on submit.
+                  <textarea
+                    rows={6}
+                    spellCheck={false}
+                    value={fields[f.name] ?? ''}
+                    onChange={(e) => handleFieldChange(f.name, e.target.value)}
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-xs"
+                    required={f.required}
+                  />
                 ) : (
                   <input
                     type={f.input === 'password' ? 'password' : 'text'}
@@ -202,16 +402,74 @@ export default function Secrets() {
                 className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
               />
             </div>
-            <div className="col-span-full flex justify-end">
-              <button
-                type="submit"
-                className="flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-              >
-                <Save className="h-4 w-4" />
-                Save Secret
-              </button>
+            <div className="col-span-full flex items-center justify-end gap-2">
+              {mode === 'edit' ? (
+                <button
+                  type="submit"
+                  disabled={savingEdit}
+                  title="Saves in place — the secret keeps its ID, so bound assignments keep working"
+                  className="flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Save className="h-4 w-4" />
+                  {savingEdit ? 'Saving…' : 'Save Changes'}
+                </button>
+              ) : activeType?.generatable ? (
+                <>
+                  <button
+                    type="submit"
+                    title="Enter the key material yourself instead of generating it"
+                    className="flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    <Save className="h-4 w-4" />
+                    Save Manually
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleGenerate}
+                    disabled={generating || !label.trim()}
+                    title="The provider creates the key material for you — no manual entry needed. Context fields (e.g. username) are kept."
+                    className="flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Wand2 className="h-4 w-4" />
+                    {generating ? 'Generating…' : 'Generate Key Material'}
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="submit"
+                  className="flex items-center gap-1.5 rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                >
+                  <Save className="h-4 w-4" />
+                  Save Secret
+                </button>
+              )}
             </div>
           </form>
+        </div>
+      )}
+
+      {generatedInfo && (
+        <div className="mb-4 rounded-md border border-emerald-200 bg-emerald-50 p-3">
+          <div className="flex items-start justify-between gap-3">
+            <p className="text-sm font-medium text-emerald-900">
+              Secret “{generatedInfo.label}” created — the provider generated this public material. Copy it to the device
+              (e.g. append to <code className="rounded bg-emerald-100 px-1">~/.ssh/authorized_keys</code>).
+            </p>
+            <button aria-label="Dismiss" title="Dismiss" onClick={() => setGeneratedInfo(null)} className="rounded p-1 text-emerald-700 hover:bg-emerald-100">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          {Object.entries(generatedInfo.fields).map(([name, value]) => (
+            <div key={name} className="mt-2 flex items-center gap-2">
+              <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded bg-white px-2 py-1.5 font-mono text-xs text-slate-800">{value}</code>
+              <button
+                onClick={() => copyText(value)}
+                className="shrink-0 rounded-md border border-emerald-300 bg-white px-2.5 py-1.5 text-xs font-medium text-emerald-800 hover:bg-emerald-100"
+              >
+                Copy
+              </button>
+            </div>
+          ))}
         </div>
       )}
 
@@ -231,18 +489,42 @@ export default function Secrets() {
               header: 'Actions', 
               key: 'actions',
               excludeFromExport: true,
-              width: 100,
+              width: 130,
               sortable: false,
               render: (s: Secret) =>
-                canDelete ? (
-                  <button
-                    aria-label={`Delete secret ${s.label ?? s.id}`}
-                    title="Delete secret"
-                    onClick={() => handleDelete(s.id)}
-                    className="rounded-md p-1.5 text-red-600 hover:bg-red-50 hover:text-red-800"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
+                canWrite || canDelete ? (
+                  <div className="flex items-center gap-1">
+                    {canWrite && (
+                      <button
+                        aria-label={`Edit secret ${s.label ?? s.id}`}
+                        title="Edit secret fields"
+                        onClick={() => openEdit(s)}
+                        className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </button>
+                    )}
+                    {canWrite && generatableTypes.has(s.type) && (
+                      <button
+                        aria-label={`Regenerate key material for ${s.label ?? s.id}`}
+                        title="Re-generate key material (same ID — bound assignments keep working)"
+                        onClick={() => handleRegenerate(s)}
+                        className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                      </button>
+                    )}
+                    {canDelete && (
+                      <button
+                        aria-label={`Delete secret ${s.label ?? s.id}`}
+                        title="Delete secret"
+                        onClick={() => handleDelete(s.id)}
+                        className="rounded-md p-1.5 text-red-600 hover:bg-red-50 hover:text-red-800"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    )}
+                  </div>
                 ) : (
                   <span aria-hidden />
                 )

@@ -94,23 +94,17 @@ export interface SshCredentials {
   passphrase?: string;
 }
 
-/**
- * Resolves SSH credentials from a StepCredentials body (the `credentials` field
- * of POST /monitoring or POST /config). Preference order:
- *   1. A bound credential slot named 'ssh' (fields under slots.ssh) — this is
- *      the documented convention; use it whenever the plugin declares an ssh slot.
- *   2. The PRIMARY secret fields at top level, but only when they actually look
- *      like SSH credentials (a privateKey, or username+password). A primary of a
- *      different type (apiKey, snmp, ...) yields undefined — never misread.
- * Returns undefined when no usable SSH credential is present; callers treat the
- * whole SSH path as best-effort and skip it.
- */
-export function resolveSshCredentials(creds?: Record<string, unknown> | null): SshCredentials | undefined {
-  if (!creds || typeof creds !== 'object') return undefined;
-  const slots = (creds['slots'] ?? {}) as Record<string, Record<string, string>>;
-  // Slot wins over primary — a plugin whose PRIMARY is an API key must not be
-  // authenticated to the device with that key.
-  const src: Record<string, unknown> = slots['ssh'] && typeof slots['ssh'] === 'object' ? slots['ssh'] : creds;
+/** Options for resolveSshCredentials. */
+export interface ResolveSshOptions {
+  /** When true, ONLY a bound `ssh` slot is considered — the primary secret is
+   *  NEVER used as an SSH credential. Use this when the plugin's PRIMARY type
+   *  itself looks like SSH credentials (e.g. TrueNAS username/password login):
+   *  the user must explicitly bind an ssh slot to enable the SSH data path. */
+  slotOnly?: boolean;
+}
+
+/** Extracts normalized SshCredentials from one field map (or undefined). */
+function resolveFromFields(src: Record<string, unknown>): SshCredentials | undefined {
   const username = pickString(src, ['username']);
   const password = pickString(src, ['password']);
   const privateKey = pickString(src, ['privateKey']);
@@ -122,6 +116,36 @@ export function resolveSshCredentials(creds?: Record<string, unknown> | null): S
     return { username, password };
   }
   return undefined;
+}
+
+/**
+ * Resolves SSH credentials from a StepCredentials body (the `credentials` field
+ * of POST /monitoring or POST /config). Preference order:
+ *   1. A bound credential slot named 'ssh' (fields under slots.ssh) — this is
+ *      the documented convention; use it whenever the plugin declares an ssh slot.
+ *   2. The PRIMARY secret fields at top level, but only when they actually look
+ *      like SSH credentials (a privateKey, or username+password). A primary of a
+ *      different type (apiKey, snmp, ...) yields undefined — never misread.
+ * Pass `{ slotOnly: true }` to enforce rule 1 exclusively (skip the primary
+ * fallback) — required when the plugin's primary secret is itself a
+ * username/password that must NOT be reused for SSH.
+ * Returns undefined when no usable SSH credential is present; callers treat the
+ * whole SSH path as best-effort and skip it.
+ */
+export function resolveSshCredentials(
+  creds?: Record<string, unknown> | null,
+  opts?: ResolveSshOptions
+): SshCredentials | undefined {
+  if (!creds || typeof creds !== 'object') return undefined;
+  const slots = (creds['slots'] ?? {}) as Record<string, Record<string, string>>;
+  // Slot wins over primary — a plugin whose PRIMARY is an API key must not be
+  // authenticated to the device with that key.
+  const sshSlot: unknown = slots['ssh'];
+  if (opts?.slotOnly) {
+    return sshSlot && typeof sshSlot === 'object' ? resolveFromFields(sshSlot as Record<string, unknown>) : undefined;
+  }
+  const src: Record<string, unknown> = sshSlot && typeof sshSlot === 'object' ? (sshSlot as Record<string, unknown>) : creds;
+  return resolveFromFields(src);
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +189,84 @@ export function fingerprintMatches(a?: string | null, b?: string | null): boolea
  */
 export function computeFingerprint(keyBlob: Buffer): SshFingerprint {
   return `SHA256:${crypto.createHash('sha256').update(keyBlob).digest('base64').replace(/=+$/, '')}`;
+}
+
+/** One length-prefixed string in the OpenSSH key wire format. */
+function sshString(b: Buffer): Buffer {
+  const len = b.length >>> 0;
+  return Buffer.concat([Buffer.from([(len >>> 24) & 0xff, (len >>> 16) & 0xff, (len >>> 8) & 0xff, len & 0xff]), b]);
+}
+
+/**
+ * Normalizes a PEM private key into a format ssh2 can parse.
+ *
+ * ssh2's built-in parser handles OpenSSH-format keys and RSA/ECDSA PKCS#1/PKCS#8 —
+ * but NOT raw PKCS#8 ed25519 (the "BEGIN PRIVATE KEY" form that Node crypto, the
+ * UNM secrets provider and most generators emit). For ed25519 we re-encode the
+ * key into OpenSSH's private-key format ("BEGIN OPENSSH PRIVATE KEY") so ssh2
+ * accepts it. Everything else is passed through untouched; keys Node cannot parse
+ * are also passed through (ssh2 surfaces its own error in that case).
+ */
+export function normalizePrivateKey(privateKey: string, passphrase?: string): string {
+  if (!privateKey || /OPENSSH PRIVATE KEY/.test(privateKey)) return privateKey;
+  let keyObj: crypto.KeyObject | null = null;
+  try {
+    keyObj = crypto.createPrivateKey(privateKey);
+  } catch {
+    // Possibly a passphrase-protected PKCS#8 — retry with the provided passphrase.
+    if (passphrase) {
+      try {
+        keyObj = crypto.createPrivateKey({ key: privateKey, format: 'pem', type: 'pkcs8', passphrase });
+      } catch { /* unparseable — pass through */ }
+    }
+  }
+  if (!keyObj || keyObj.asymmetricKeyType !== 'ed25519') return privateKey;
+  try {
+    const jwk = keyObj.export({ format: 'jwk' }) as { kty?: string; crv?: string; d?: string; x?: string };
+    if (jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' || !jwk.d || !jwk.x) return privateKey;
+    const seed = Buffer.from(jwk.d, 'base64url');
+    const pub = Buffer.from(jwk.x, 'base64url');
+    if (seed.length !== 32 || pub.length !== 32) return privateKey;
+    // OpenSSH private-key file layout (verified against ssh-keygen output AND
+    // ssh2's own keyParser.js):
+    //   "openssh-key-v1\0"            fixed magic, NOT length-prefixed
+    //   string ciphername ("none") | string kdfname ("none") | string kdfoptions ("")
+    //   uint32 keyCount (1)
+    //   string pubData[keyCount]      each = string type + string pubkey(32)
+    //   string privBlob               the ENTIRE private section, length-prefixed:
+    //     uint32 checkint x2          must be equal
+    //     per key: string type | (ed25519: string edpub(32) + string edpriv(seed||pub=64)) | string comment
+    //     padding bytes 1,2,3,… to an 8-byte boundary
+    const pubBlob = Buffer.concat([sshString(Buffer.from('ssh-ed25519', 'ascii')), sshString(pub)]);
+    const check = crypto.randomBytes(4);
+    let privSection = Buffer.concat([
+      check,
+      check,
+      sshString(Buffer.from('ssh-ed25519', 'ascii')),
+      sshString(pub), // edpub — 32-byte public key (repeated in the private section)
+      sshString(Buffer.concat([seed, pub])), // edpriv — seed || pubkey (64 bytes)
+      sshString(Buffer.alloc(0)), // comment
+    ]);
+    const padLen = (8 - (privSection.length % 8)) % 8;
+    if (padLen > 0) {
+      const pad = Buffer.alloc(padLen);
+      for (let i = 0; i < padLen; i++) pad[i] = i + 1;
+      privSection = Buffer.concat([privSection, pad]);
+    }
+    const body = Buffer.concat([
+      Buffer.from('openssh-key-v1\0'), // fixed magic (15 bytes incl. NUL)
+      sshString(Buffer.from('none', 'ascii')), // ciphername
+      sshString(Buffer.from('none', 'ascii')), // kdfname
+      sshString(Buffer.alloc(0)), // kdfoptions
+      Buffer.from([0, 0, 0, 1]), // keyCount = 1
+      sshString(pubBlob), // public blob[0]
+      sshString(privSection), // privBlob — length-prefixed private section
+    ]);
+    const b64 = body.toString('base64').match(/.{1,70}/g)?.join('\n') ?? '';
+    return `-----BEGIN OPENSSH PRIVATE KEY-----\n${b64}\n-----END OPENSSH PRIVATE KEY-----\n`;
+  } catch {
+    return privateKey;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +379,9 @@ export class SshClient {
       keepaliveCountMax: 3,
       // No agent / known-hosts files — credentials come exclusively from the
       // UNM secrets pipeline (ssh2 only consults agents when explicitly configured).
-      ...(creds.privateKey ? { privateKey: creds.privateKey as Buffer | string } : {}),
+      // normalizePrivateKey re-encodes ed25519 PKCS#8 → OpenSSH format, which is
+      // the ONLY ed25519 form ssh2's parser accepts.
+      ...(creds.privateKey ? { privateKey: normalizePrivateKey(creds.privateKey, creds.passphrase) as Buffer | string } : {}),
       ...(creds.passphrase ? { passphrase: creds.passphrase } : {}),
       ...(creds.password ? { password: creds.password } : {}),
       hostVerifier,

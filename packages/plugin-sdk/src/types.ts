@@ -151,10 +151,26 @@ export interface DeviceModelEntry {
 export interface CredentialSlotDescriptor {
   /** Slot key (e.g. "web"). Unique per plugin; used as the map key everywhere. */
   name: string;
-  /** Secret type the bound secret must have (e.g. "usernamePassword", "snmp"). */
-  secretType: string;
+  /** Secret type the bound secret must have (e.g. "usernamePassword", "snmp").
+   *  Legacy single-type form — declare `secretTypes` when a slot accepts several,
+   *  and repeat its first entry here for backward compatibility with older APIs. */
+  secretType?: string;
+  /** Allowed secret types for this slot (one or many). Wins over `secretType`
+   *  when present and non-empty — e.g. an SSH slot that accepts BOTH a
+   *  username/password login AND a key pair: ['usernamePassword', 'sshKeyPair']. */
+  secretTypes?: string[];
   required?: boolean;
+  /** Info text shown in the UI: what this credential is used for on the device
+   *  (which data path it unlocks), so users can decide whether to bind one. */
   description?: string;
+}
+
+/** Effective allowed types of a slot — `secretTypes` wins over legacy `secretType`. */
+export function allowedSecretTypes(
+  slot: Pick<CredentialSlotDescriptor, 'secretType' | 'secretTypes'>
+): string[] {
+  if (Array.isArray(slot.secretTypes) && slot.secretTypes.length > 0) return slot.secretTypes;
+  return typeof slot.secretType === 'string' && slot.secretType !== '' ? [slot.secretType] : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +181,8 @@ export interface CredentialSlotDescriptor {
 export interface SecretField {
   name: string;
   label: string;
-  input: 'text' | 'password' | 'select';
+  /** textarea = multi-line input (PEM private keys, certificate bundles). */
+  input: 'text' | 'password' | 'select' | 'textarea';
   /** true = rendered as a password input / never echoed back in plaintext. */
   secret?: boolean;
   required?: boolean;

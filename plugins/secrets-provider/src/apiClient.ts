@@ -79,10 +79,21 @@ export async function getSecret(id: string): Promise<SecretRecord | null> {
 
 /**
  * Updates an existing secret's ciphertext IN PLACE (same id). Used for key
- * rotation / regeneration so references to the id keep working.
+ * rotation / regeneration and field edits so references to the id keep working.
+ * `label` is applied when provided; `expiresAt` (string or null) replaces the
+ * expiry — pass undefined to leave it untouched, null to clear it.
  */
-export async function updateSecret(id: string, encryptedValue: string): Promise<void> {
-  await http.patch(`/plugin/secrets/${encodeURIComponent(id)}`, { encryptedValue });
+export async function updateSecret(
+  id: string,
+  encryptedValue: string,
+  label?: string,
+  expiresAt?: string | null
+): Promise<void> {
+  await http.patch(`/plugin/secrets/${encodeURIComponent(id)}`, {
+    encryptedValue,
+    ...(label !== undefined ? { label } : {}),
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
+  });
 }
 
 /**

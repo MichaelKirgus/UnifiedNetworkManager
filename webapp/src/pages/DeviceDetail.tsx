@@ -418,7 +418,7 @@ export default function DeviceDetail() {
                         {a.credentialSlots.map((slot) => (
                           <span
                             key={slot.name}
-                            title={`${slot.description ?? `Credential slot "${slot.name}"`} (${slot.secretType})`}
+                            title={`${slot.description ?? `Credential slot "${slot.name}"`} (${slot.secretTypes?.length ? slot.secretTypes.join(' | ') : slot.secretType})`}
                             className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
                               slot.secretId
                                 ? 'bg-indigo-50 text-indigo-700'

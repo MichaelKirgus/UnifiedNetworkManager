@@ -28,7 +28,8 @@ export interface Secret {
 export interface SecretField {
   name: string;
   label: string;
-  input: 'text' | 'password' | 'select';
+  /** textarea = multi-line (PEM keys, cert bundles). */
+  input: 'text' | 'password' | 'select' | 'textarea';
   secret?: boolean;
   required?: boolean;
   options?: string[];
@@ -37,6 +38,8 @@ export interface SecretField {
 export interface SecretType {
   type: string;
   label: string;
+  /** True when the provider can create/rotate this type's key material itself (POST /secrets/generate). */
+  generatable?: boolean;
   fields: SecretField[];
 }
 
@@ -122,9 +125,18 @@ export interface ApiTokenCreated extends ApiToken {
 /** One named credential slot a plugin declares in /discover (beyond its primary secret). */
 export interface CredentialSlotDescriptor {
   name: string;
-  secretType: string;
+  /** Legacy single allowed type; `secretTypes` wins when present. */
+  secretType?: string;
+  /** All allowed secret types for this slot (one or many). */
+  secretTypes?: string[];
   required?: boolean;
   description?: string;
+}
+
+/** Effective allowed types of a slot — `secretTypes` wins over legacy `secretType`. */
+export function allowedSecretTypes(slot: Pick<CredentialSlotDescriptor, 'secretType' | 'secretTypes'>): string[] {
+  if (slot.secretTypes && slot.secretTypes.length > 0) return slot.secretTypes;
+  return slot.secretType ? [slot.secretType] : [];
 }
 
 /** A declared slot with the secret bound to it on an assignment (list views). */
@@ -767,11 +779,19 @@ export interface ContainerNetwork {
   subnets?: string[];
 }
 
-/** Per-service detail for multi-container apps (expandable rows). */
+/** Per-service detail for multi-container apps (expandable rows).
+ * mac/ip/startedAt are present when the plugin observed them via SSH
+ * (`docker inspect`) — the vendor API exposes none of these. */
 export interface ContainerServiceDetail {
   service?: string | null;
   image?: string | null;
   state?: string | null;
+  /** Real container MAC (SSH `docker inspect` only). */
+  mac?: string | null;
+  /** Live IP on the primary network (SSH; falls back to compose static IP). */
+  ip?: string | null;
+  /** ISO start of the current RUNNING period (SSH only). */
+  startedAt?: string | null;
 }
 
 /** One App/container row from GET /containers. */
@@ -784,10 +804,10 @@ export interface ContainerRow {
   image?: string | null;
   version?: string | null;
   upgradeAvailable?: boolean | null;
-  /** UNM-observed start of the current RUNNING period (ISO-8601). The TrueNAS API
-   * exposes no container start-time, so this is tracked from state transitions —
-   * a lower bound that resets after restarts. Null for non-RUNNING rows or apps
-   * observed already-running (true uptime unknown → UI shows "≥ X"). */
+  /** Start of the current RUNNING period (ISO-8601). Real container start when
+   * the plugin observed it via SSH (`docker inspect`); otherwise UNM-tracked from
+   * state transitions — a lower bound that resets after restarts. Null for
+   * non-RUNNING rows or apps observed already-running (UI shows "≥ X"). */
   startedAt?: string | null;
   /** Plugin-specific details (JSON): networks[], ips[], ports[], containerCount,
    * containers[] per-service detail, volumeMounts[]. */
@@ -1381,6 +1401,24 @@ export const api = {
     label: string;
     expiresAt?: string;
   }) => apiFetch<Secret>('/secrets', { method: 'POST', body: JSON.stringify(body) }),
+  /** Provider creates the key material itself (generatable types only). `fields` carries non-material context.
+   *  Response may include `publicFields` = non-secret generated values to show the user (e.g. public key line). */
+  generateSecret: (body: {
+    type: string;
+    providerId?: string;
+    fields?: Record<string, string>;
+    label?: string;
+    expiresAt?: string;
+  }) => apiFetch<{ id: string; createdAt?: string; type?: string; publicFields?: Record<string, string> }>('/secrets/generate', { method: 'POST', body: JSON.stringify(body) }),
+  /** Re-roll a generatable secret's key material in place — same id, references keep working. */
+  regenerateSecret: (id: string) =>
+    apiFetch<Secret>(`/secrets/${id}/regenerate`, { method: 'POST' }),
+  /** Fetch a secret's decrypted fields for editing (works for all types). */
+  getSecret: (id: string) =>
+    apiFetch<{ type: string; fields: Record<string, string> }>(`/secrets/${id}`),
+  /** Update a secret's fields in place — same id, references keep working. All types supported. */
+  updateSecret: (id: string, body: { fields: Record<string, string>; label?: string; expiresAt?: string | null }) =>
+    apiFetch<{ id: string }>(`/secrets/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteSecret: (id: string) =>
     apiFetch<void>(`/secrets/${id}`, { method: 'DELETE' }),
   // Sites.
