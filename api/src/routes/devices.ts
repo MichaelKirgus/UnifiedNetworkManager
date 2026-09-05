@@ -28,6 +28,7 @@ import {
 } from '../deviceIps';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { isValidAddress, addressError } from '../utils/address';
+import { forceRefreshDevices } from '../workers/telemetry';
 
 const router = Router();
 
@@ -750,6 +751,7 @@ router.delete('/devices/:deviceId', requireAuth, requirePermission('devices:writ
     // pluginId, no FK to devices).
     await db.delete(schema.containers).where(eq(schema.containers.deviceId, deviceId));
     await db.delete(schema.dockerImages).where(eq(schema.dockerImages.deviceId, deviceId));
+    await db.delete(schema.vms).where(eq(schema.vms.deviceId, deviceId));
     await db.delete(schema.storageFilesystems).where(eq(schema.storageFilesystems.deviceId, deviceId));
     await db.delete(schema.storageDisks).where(eq(schema.storageDisks.deviceId, deviceId));
     await db.delete(schema.deviceIps).where(eq(schema.deviceIps.deviceId, deviceId));
@@ -1158,5 +1160,33 @@ router.post(
     });
   }
 );
+
+// POST /devices/refresh - Force an immediate re-poll of one or more devices.
+// Bypasses the staggered scheduling windows (metrics AND inventory), so both
+// live metrics and the cross-device inventory tables refresh right away — the
+// diagnostic path for "is this device reachable NOW?". Requires devices:write
+// because it triggers real plugin calls with the device's credentials.
+router.post('/devices/refresh', requireAuth, requirePermission('devices:write'), async (req, res) => {
+  const body = req.body ?? {};
+  // Accept { deviceIds: [...] } or a bare array of ids.
+  let rawIds: unknown = Array.isArray(body) ? body : body.deviceIds;
+  if (!Array.isArray(rawIds)) {
+    res.status(400).json({ error: '"deviceIds" must be an array of device id strings' });
+    return;
+  }
+  const ids = rawIds.filter((v): v is string => typeof v === 'string' && v.trim() !== '').map((v) => v.trim());
+  if (ids.length === 0) {
+    res.status(400).json({ error: '"deviceIds" must contain at least one device id' });
+    return;
+  }
+
+  try {
+    const results = await forceRefreshDevices(ids);
+    res.status(200).json({ results });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
 
 export default router;

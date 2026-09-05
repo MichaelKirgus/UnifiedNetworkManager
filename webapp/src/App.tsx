@@ -21,6 +21,7 @@ import Notifications from './pages/Notifications';
 import Wifi from './pages/Wifi';
 import Storage from './pages/Storage';
 import Containers from './pages/Containers';
+import Vms from './pages/Vms';
 import Topology from './pages/Topology';
 import Users from './pages/Users';
 import Roles from './pages/Roles';
@@ -49,6 +50,7 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
   { path: '/wifi', permission: 'wifi:read' },
   { path: '/storage', permission: 'storage:read' },
   { path: '/containers', permission: 'containers:read' },
+  { path: '/vms', permission: 'vms:read' },
   { path: '/topology', permission: 'topology:read' },
   // Layers is open to every authenticated user (no read permission).
   { path: '/layers' },
@@ -107,6 +109,8 @@ export default function App() {
       <Route path="/storage" element={<Page permission="storage:read"><Storage /></Page>} />
       {/* Cross-device container/App workloads (TrueNAS SCALE Apps). */}
       <Route path="/containers" element={<Page permission="containers:read"><Containers /></Page>} />
+      {/* Cross-device virtual machines (TrueNAS SCALE VMs today; generic key for future hypervisor plugins). */}
+      <Route path="/vms" element={<Page permission="vms:read"><Vms /></Page>} />
       {/* Physical + logical network graph (inferred cables, per-VLAN segments). */}
       <Route path="/topology" element={<Page permission="topology:read"><Topology /></Page>} />
       {/* Network layer registry — open to every authenticated user. */}

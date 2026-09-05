@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import clsx from 'clsx';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { Copy, Power, Plus, Settings, Settings2, Star, Trash2, X } from 'lucide-react';
+import { Copy, Power, Plus, RefreshCw, Settings, Settings2, Star, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { StatusBadge } from '../components/StatusBadge';
 import { MetricView } from '../components/MetricView';
@@ -70,6 +70,29 @@ export default function DeviceDetail() {
       navigate(`/devices?edit=${encodeURIComponent(cloned.id)}`);
     },
     onError: (err: Error) => setCloneError(err.message),
+  });
+
+  // Force an immediate re-poll of THIS device — bypasses the staggered windows
+  // and refreshes both live metrics and inventory now. Diagnostic path for
+  // "is this device reachable right now?"; regular deadlines stay untouched.
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const refreshDevice = useMutation({
+    mutationFn: () => api.refreshDevices([deviceId as string]),
+    onSuccess: (data) => {
+      setRefreshError(null);
+      invalidateDevice();
+      queryClient.invalidateQueries({ queryKey: ['deviceTelemetry', deviceId] });
+      // Inventory tables were re-ingested — refresh the cross-device views too.
+      for (const key of ['networks', 'hosts', 'tunnels', 'routes', 'firewall-rules', 'wifi', 'storage', 'containers', 'vms']) {
+        queryClient.invalidateQueries({ queryKey: [key] });
+      }
+      const r = data.results[0];
+      if (r && !r.ok) {
+        const detail = r.error ?? r.results.filter((x) => !x.reachable).map((x) => x.error ?? 'unreachable').join('; ') ?? 'no plugin reachable';
+        setRefreshError(`Refresh finished with problems: ${detail}`);
+      }
+    },
+    onError: (err: Error) => setRefreshError(err.message),
   });
 
   const devicesQuery = useQuery({
@@ -283,6 +306,20 @@ export default function DeviceDetail() {
           )}
           {device && canWriteDevices && (
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => refreshDevice.mutate()}
+              disabled={refreshDevice.isPending}
+              title="Force an immediate re-poll — metrics + inventory now (diagnostics)"
+              className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-4 w-4 ${refreshDevice.isPending ? 'animate-spin' : ''}`} />
+              Refresh now
+            </button>
+            {refreshError && (
+              <span title={refreshError} className="max-w-xs truncate text-xs text-red-600">
+                {refreshError}
+              </span>
+            )}
             <button
               onClick={() => {
                 const next = device.enabled === false;

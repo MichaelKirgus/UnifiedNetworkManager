@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Copy, Eye, Pencil, Plus, Power, Settings2, Tag, Trash2, X } from 'lucide-react';
+import { Copy, Eye, Pencil, Plus, Power, RefreshCw, Settings2, Tag, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ChipInput } from '../components/ChipInput';
@@ -9,7 +9,7 @@ import { StatusBadge } from '../components/StatusBadge';
 import { MetricCell } from '../components/MetricCell';
 import { DeviceIcon } from '../components/DeviceIcon';
 import { PluginAssignmentBuilder } from '../components/PluginAssignmentBuilder';
-import { api, Device, DeviceCreateRequest, DeviceModelEntry, DevicePluginAssignmentInput, DevicePluginAssignment, Plugin } from '../api/client';
+import { api, Device, DeviceCreateRequest, DeviceModelEntry, DevicePluginAssignmentInput, DevicePluginAssignment, DeviceRefreshResult, Plugin } from '../api/client';
 import { OptionForm } from '../components/OptionForm';
 import { can } from '../auth/permissions';
 import { isValidAddress, addressError } from '../utils/address';
@@ -208,6 +208,39 @@ export default function Devices() {
       }
     },
   });
+
+  // Force an immediate re-poll of one or more devices — bypasses the
+  // staggered windows and refreshes BOTH live metrics and inventory now.
+  // Diagnostic path for "is this device reachable right now?"; the regular
+  // poll deadlines stay untouched server-side.
+  const refreshDevices = useMutation({
+    mutationFn: (ids: string[]) => api.refreshDevices(ids),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['devices'] });
+      // Inventory tables were re-ingested — refresh the cross-device views too.
+      for (const key of ['networks', 'hosts', 'tunnels', 'routes', 'firewall-rules', 'wifi', 'storage', 'containers', 'vms']) {
+        queryClient.invalidateQueries({ queryKey: [key] });
+      }
+    },
+  });
+
+  /** Reports per-device refresh problems (unreachable plugins, disabled devices). */
+  function reportRefreshResults(results: DeviceRefreshResult[]) {
+    const problems = results.filter((r) => !r.ok);
+    if (problems.length === 0) return; // all good — no noise
+    const lines = problems.map((r) => {
+      const label = r.name || r.deviceId;
+      if (r.error) return `${label}: ${r.error}`;
+      const bad = r.results.filter((x) => !x.reachable);
+      if (bad.length === 0) return `${label}: no plugin reachable`;
+      return `${label}: ${bad.map((x) => x.error ?? 'unreachable').join('; ')}`;
+    });
+    window.alert(`Refresh finished with problems:\n${lines.join('\n')}`);
+  }
+
+  function handleRefresh(row: Device) {
+    refreshDevices.mutate([row.id], { onSuccess: (data) => reportRefreshResults(data.results) });
+  }
 
   const updateDevice = useMutation({
     mutationFn: async (assignments?: DevicePluginAssignmentInput[]) => {
@@ -538,6 +571,15 @@ export default function Devices() {
           )}
           {canWriteDevices && (
             <>
+              <button
+                aria-label={`Refresh ${row.name}`}
+                title="Force refresh — re-poll metrics + inventory now (diagnostics)"
+                className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-40"
+                onClick={() => handleRefresh(row)}
+                disabled={refreshDevices.isPending && refreshDevices.variables?.includes(row.id)}
+              >
+                <RefreshCw className={`h-4 w-4 ${refreshDevices.isPending && refreshDevices.variables?.includes(row.id) ? 'animate-spin' : ''}`} />
+              </button>
               <button
                 aria-label={`Edit ${row.name}`}
                 title="Edit device"
@@ -901,6 +943,19 @@ export default function Devices() {
                 const { errors } = await api.setDevicesEnabled(rows.map((r) => r.id), true);
                 queryClient.invalidateQueries({ queryKey: ['devices'] });
                 if (errors.length > 0) window.alert(`Some devices could not be enabled:\n${errors.join('\n')}`);
+              },
+            },
+            {
+              label: 'Refresh selected',
+              confirm: (count) =>
+                `Force an immediate re-poll of ${count} device(s)?\nLive metrics AND inventory are refreshed now; the regular poll schedule is unaffected.`,
+              onClick: async (rows) => {
+                try {
+                  const data = await refreshDevices.mutateAsync(rows.map((r) => r.id));
+                  reportRefreshResults(data.results);
+                } catch (err) {
+                  window.alert(`Refresh failed: ${(err as Error).message}`);
+                }
               },
             },
             {

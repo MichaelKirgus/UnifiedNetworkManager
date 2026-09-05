@@ -47,10 +47,10 @@ const INVENTORY_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 
 /** Metric keys that carry cross-device inventory (ingested into their own tables). */
 const INVENTORY_METRIC_KEYS = [
-  'networks', 'arp', 'ndp', 'hosts', 'dhcpLeases', 'wlanClients', 'macTable', 'dockerHosts',
+  'networks', 'arp', 'ndp', 'hosts', 'dhcpLeases', 'wlanClients', 'macTable', 'dockerHosts', 'vmHosts',
   'tunnels', 'routes', 'firewallRules',
   'wifiNetworks', 'wifiAirtime', 'wifiRadios', 'wifiNeighbors',
-  'ports', 'filesystems', 'disks', 'containers', 'images',
+  'ports', 'filesystems', 'disks', 'containers', 'images', 'vms',
 ] as const;
 
 /** True when a snapshot carries at least one inventory array (any length). */
@@ -120,11 +120,15 @@ interface AssignmentTarget {
  * (transport OK); a transport failure yields health 'unknown' + reachable false.
  * `inventoryEmitted` tells the dispatcher whether this snapshot carried any
  * inventory arrays — used to decide if the inventory deadline may advance.
+ * `error` carries the transport/credential error message for diagnostics
+ * (forced refresh reports it back to the caller; the scheduler ignores it).
  */
 interface PollOutcome {
   health: string;
   reachable: boolean;
   inventoryEmitted: boolean;
+  /** Transport-level failure reason (set when `reachable` is false). */
+  error?: string;
 }
 
 interface PollOptions {
@@ -203,7 +207,7 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
       `[telemetry] failed to poll device ${target.deviceId} via plugin ${target.pluginId}:`,
       (err as Error).message
     );
-    return { health: 'unknown', reachable: false, inventoryEmitted: false };
+    return { health: 'unknown', reachable: false, inventoryEmitted: false, error: (err as Error).message };
   }
 }
 
@@ -296,9 +300,11 @@ async function ingestInventory(
       // for hosts without an address yet; they are not joinable IPs.
       if (!mac) return;
       if (ip === '0.0.0.0' || ip === '::') return;
-      // IP-less rows are allowed ONLY for source 'mac' — switch MAC tables
-      // (e.g. SwOS !dhost.b) report learned MAC + port with no address.
-      if (!ip && source !== 'mac') return;
+      // IP-less rows are allowed ONLY for sources that legitimately have no
+      // address: 'mac' — switch MAC tables (e.g. SwOS !dhost.b) report learned
+      // MAC + port with no address; 'vm' — VM NIC MACs exist even when the
+      // guest has no live IP yet (stopped VM, or no SSH enrichment for IPs).
+      if (!ip && source !== 'mac' && source !== 'vm') return;
       hostValues.push({
         deviceId,
         pluginId,
@@ -336,6 +342,13 @@ async function ingestInventory(
     // these when a real MAC was retrieved (no empty-MAC rows).
     const dockerHosts = Array.isArray(metrics['dockerHosts']) ? (metrics['dockerHosts'] as unknown[]) : [];
     for (const raw of dockerHosts) pushHostRow('docker', raw);
+
+    // VM guests (e.g. TrueNAS SCALE VM NIC MACs, live IPs via `virsh domifaddr`
+    // over SSH) — source 'vm'. Same contract as dockerHosts: only rows with a
+    // REAL MAC are emitted; they merge by MAC with ARP/NDP entries other
+    // devices report for the same guest.
+    const vmHosts = Array.isArray(metrics['vmHosts']) ? (metrics['vmHosts'] as unknown[]) : [];
+    for (const raw of vmHosts) pushHostRow('vm', raw);
 
     // Same guard as above — one snapshot must not repeat a (mac, ip, source) row.
     const hostByKey = new Map<string, typeof hostValues[number]>();
@@ -1229,6 +1242,94 @@ async function ingestInventory(
           ));
       }
     }
+
+    // --- VMs -----------------------------------------------------------------
+    // Generic key — any plugin may emit it (TrueNAS SCALE today; a future
+    // Proxmox or other hypervisor plugin can ingest the same table):
+    //   vms[] { name, state?, vcpus?, memoryMiB?, archType?, extra? }
+    // Same CONFIG-object lifecycle as containers: upsert-per-poll +
+    // delete-on-absent (a deleted VM must vanish from the page), present-but-
+    // empty = authoritative wipe. `extra` is a plugin-specific JSON object
+    // stored verbatim — nics[] {mac, type?, nicAttach?}, disks[], description,
+    // uuid, autostart, ... The NIC MACs are what feed the Hosts page (source
+    // 'vm', via the vmHosts key above).
+    const rawVms = Array.isArray(metrics['vms']) ? (metrics['vms'] as unknown[]) : null;
+    if (rawVms !== null) {
+      // Previous state per VM name for THIS device+plugin — needed to track
+      // RUNNING transitions the same way containers do.
+      const prevVmRows = await db.query.vms.findMany({
+        where: and(eq(schema.vms.deviceId, deviceId), eq(schema.vms.pluginId, pluginId)),
+      });
+      const prevVmByName = new Map<string, { state: string; startedAt: string | null }>();
+      for (const p of prevVmRows) prevVmByName.set(p.name, { state: p.state, startedAt: p.startedAt });
+
+      const values: {
+        deviceId: string; pluginId: string; name: string; state: string; vcpus: number | null;
+        memoryMiB: number | null; archType: string | null; startedAt: string | null;
+        extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawVms) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        if (!name) continue; // name is part of the conflict key
+        const state = typeof r['state'] === 'string' && (r['state'] as string).trim() !== '' ? (r['state'] as string).trim().toUpperCase() : 'UNKNOWN';
+        // RUNNING-period tracking — same contract as containers: stamp on a
+        // fresh transition / first observation, keep while continuously
+        // RUNNING, clear when it leaves RUNNING.
+        const prev = prevVmByName.get(name);
+        let startedAt: string | null = null;
+        if (state === 'RUNNING') {
+          startedAt = prev && prev.state === 'RUNNING' && prev.startedAt ? prev.startedAt : collectedAt;
+        }
+        values.push({
+          deviceId,
+          pluginId,
+          name,
+          state,
+          vcpus: numOrNull(r['vcpus']),
+          memoryMiB: numOrNull(r['memoryMiB']),
+          archType: typeof r['archType'] === 'string' && (r['archType'] as string).trim() !== '' ? (r['archType'] as string).trim() : null,
+          startedAt,
+          extra: extraOf(r),
+          collectedAt,
+        });
+      }
+      const vmByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        vmByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}`, v);
+      }
+      if (vmByKey.size > 0) {
+        await db.insert(schema.vms).values(Array.from(vmByKey.values())).onConflictDoUpdate({
+          target: [schema.vms.deviceId, schema.vms.pluginId, schema.vms.name],
+          set: {
+            state: sql`excluded.state`,
+            vcpus: sql`excluded.vcpus`,
+            memoryMiB: sql`excluded."memoryMiB"`,
+            archType: sql`excluded."archType"`,
+            startedAt: sql`excluded."startedAt"`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      const seenVmNames = new Set(values.map((v) => v.name));
+      if (seenVmNames.size > 0) {
+        await db.delete(schema.vms)
+          .where(and(
+            eq(schema.vms.deviceId, deviceId),
+            eq(schema.vms.pluginId, pluginId),
+            notInArray(schema.vms.name, Array.from(seenVmNames))
+          ));
+      } else if (rawVms.length === 0) {
+        // Present-but-EMPTY is the authoritative wipe — same contract as containers.
+        await db.delete(schema.vms)
+          .where(and(
+            eq(schema.vms.deviceId, deviceId),
+            eq(schema.vms.pluginId, pluginId)
+          ));
+      }
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(
@@ -1278,6 +1379,7 @@ async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
   await db.delete(schema.storageDisks).where(lt(schema.storageDisks.collectedAt, cutoff));
   await db.delete(schema.containers).where(lt(schema.containers.collectedAt, cutoff));
   await db.delete(schema.dockerImages).where(lt(schema.dockerImages.collectedAt, cutoff));
+  await db.delete(schema.vms).where(lt(schema.vms.collectedAt, cutoff));
 }
 
 /**
@@ -1668,5 +1770,141 @@ export function startTelemetryWorker(): () => void {
     stopped = true;
     if (timer) clearTimeout(timer);
   };
+}
+
+// --- Forced refresh (manual re-poll) ----------------------------------------
+
+/** Per-device result of a forced refresh. */
+export interface ForceRefreshDeviceResult {
+  deviceId: string;
+  name: string;
+  /** True when at least one assignment was polled successfully. */
+  ok: boolean;
+  /** Number of plugin assignments that were re-polled (0 = none possible). */
+  assignmentsPolled: number;
+  /** Per-assignment outcomes (plugin id + health, or the transport error). */
+  results: { pluginId: string; health: string; reachable: boolean; error?: string }[];
+  /** Device-level problem (unknown device / polling disabled) — no polls ran. */
+  error?: string;
+}
+
+/**
+ * Forces an immediate re-poll of one or more devices, bypassing the staggered
+ * scheduling windows entirely. Every assignment is polled with
+ * collectInventory=true (full snapshot + inventory ingestion), so BOTH live
+ * metrics and the cross-device inventory tables refresh in one shot — this is
+ * the diagnostic path for "is this device reachable right now?" and whenever
+ * fresh data is essential without waiting up to a full window.
+ *
+ * The regular deadlines stay untouched: after a forced poll the next scheduled
+ * beat still fires at its original time (no double-poll, no re-stagger). A
+ * forced poll also does NOT touch in-flight bookkeeping — if the dispatcher
+ * happens to be polling the same assignment concurrently, both snapshots are
+ * simply appended to telemetry history (last write wins per row key).
+ *
+ * Devices are processed sequentially (their assignments in parallel) so a big
+ * bulk request can't fan out into hundreds of concurrent plugin calls. Unknown
+ * ids and disabled devices come back with ok=false + an error, never throw.
+ */
+export async function forceRefreshDevices(
+  deviceIds: string[]
+): Promise<ForceRefreshDeviceResult[]> {
+  const ids = Array.from(new Set(deviceIds.filter((id) => typeof id === 'string' && id !== '')));
+  if (ids.length === 0) return [];
+
+  const devices = await db.query.devices.findMany({ where: inArray(schema.devices.id, ids) });
+  const deviceById = new Map(devices.map((d) => [d.id, d] as const));
+  const pluginsById = new Map(
+    (await db.query.plugins.findMany()).map((p) => [p.id, p] as const)
+  );
+
+  // Secondary IPs per requested device (primary is always managementAddress).
+  const secondaryIps = await db.query.deviceIps.findMany({ where: inArray(schema.deviceIps.deviceId, ids) });
+  const ipsByDevice = new Map<string, string[]>();
+  for (const row of secondaryIps) {
+    const list = ipsByDevice.get(row.deviceId) ?? [];
+    list.push(row.address);
+    ipsByDevice.set(row.deviceId, list);
+  }
+
+  // Preserve the caller's device order in the response.
+  const results: ForceRefreshDeviceResult[] = [];
+  for (const id of ids) {
+    const device = deviceById.get(id);
+    if (!device) {
+      results.push({
+        deviceId: id,
+        name: '',
+        ok: false,
+        assignmentsPolled: 0,
+        results: [],
+        error: 'Device not found',
+      });
+      continue;
+    }
+
+    if (device.enabled === false) {
+      results.push({
+        deviceId: id,
+        name: device.name,
+        ok: false,
+        assignmentsPolled: 0,
+        results: [],
+        error: 'Device polling is disabled — enable the device first',
+      });
+      continue;
+    }
+
+    const assignments = await db.query.devicePlugins.findMany({ where: eq(schema.devicePlugins.deviceId, id) });
+    const targets: AssignmentTarget[] = [];
+    for (const a of assignments) {
+      const plugin = pluginsById.get(a.pluginId);
+      if (!plugin) continue; // stale assignment — skip
+      targets.push({
+        deviceId: device.id,
+        managementAddress: device.managementAddress,
+        ipAddresses: [
+          { address: device.managementAddress, isPrimary: true },
+          ...(ipsByDevice.get(device.id) ?? []).map((address) => ({ address, isPrimary: false })),
+        ],
+        pluginId: a.pluginId,
+        secretId: a.secretId,
+        extraCredentials: parseExtraCredentials(a.extraCredentials),
+        endpoint: plugin.endpoint,
+        model: device.model ?? null,
+        firmwareVersion: device.firmwareVersion ?? null,
+        pollIntervalMs: device.pollIntervalMs ?? null,
+      });
+    }
+
+    if (targets.length === 0) {
+      results.push({
+        deviceId: id,
+        name: device.name,
+        ok: false,
+        assignmentsPolled: 0,
+        results: [],
+        error: 'Device has no plugin assignment',
+      });
+      continue;
+    }
+
+    const outcomes = await Promise.all(
+      targets.map((target) => pollAssignment(target, { collectInventory: true }))
+    );
+    results.push({
+      deviceId: id,
+      name: device.name,
+      ok: outcomes.some((o) => o.reachable),
+      assignmentsPolled: targets.length,
+      results: outcomes.map((o, i) => ({
+        pluginId: targets[i].pluginId,
+        health: o.health,
+        reachable: o.reachable,
+        ...(o.error ? { error: o.error } : {}),
+      })),
+    });
+  }
+  return results;
 }
 

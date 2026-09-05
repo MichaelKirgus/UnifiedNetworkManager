@@ -83,7 +83,7 @@ interface MergedHost {
 }
 
 /** Canonical display order for discovery sources. */
-const SOURCE_ORDER: Record<string, number> = { arp: 0, ndp: 1, dhcp: 2, wlan: 3 };
+const SOURCE_ORDER: Record<string, number> = { arp: 0, ndp: 1, dhcp: 2, wlan: 3, docker: 4, vm: 5 };
 
 /**
  * Merges stored host rows into one row per physical host: the same MAC seen
@@ -1178,6 +1178,67 @@ router.get('/containers', requireAuth, requirePermission('containers:read'), asy
       containers: rows.map((row) => decorate(row, row.extra)),
       images: imageRows.map((row) => decorate(row, row.extra)),
     });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// GET /vms - Cross-device virtual machine overview (VMs page).
+// Returns the normalized `vms` rows (TrueNAS SCALE VMs today; any plugin may
+// emit the generic `vms[]` metric — e.g. a future Proxmox plugin) with device +
+// plugin views joined. One row per VM on one device — no cross-device merge.
+// The `extra` JSON column carries nics[] {mac, type?, nicAttach?}, disks[],
+// description and other plugin-specific detail for expandable rows (the NICs
+// render as child rows under the collapsed-by-default parent). Query params:
+// deviceId (exact), siteId (filter by device's site).
+router.get('/vms', requireAuth, requirePermission('vms:read'), async (_req, res: Response) => {
+  try {
+    const { deviceId, siteId } = _req.query as Record<string, string | undefined>;
+
+    let vmWhere;
+    if (deviceId && siteId) {
+      // Both filters: verify the device belongs to the site first.
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) {
+        res.status(200).json({ vms: [] });
+        return;
+      }
+      vmWhere = eq(schema.vms.deviceId, deviceId);
+    } else if (deviceId) {
+      vmWhere = eq(schema.vms.deviceId, deviceId);
+    } else if (siteId) {
+      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (deviceIds.length === 0) {
+        res.status(200).json({ vms: [] });
+        return;
+      }
+      vmWhere = inArray(schema.vms.deviceId, deviceIds);
+    }
+
+    const rows = await db.query.vms.findMany({
+      ...(vmWhere ? { where: vmWhere } : {}),
+      orderBy: [asc(schema.vms.deviceId), asc(schema.vms.name)],
+    });
+
+    const [deviceViews, pluginNames] = await Promise.all([
+      loadDeviceViews(Array.from(new Set(rows.map((r) => r.deviceId)))),
+      loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId)))),
+    ]);
+
+    const decorate = <T extends { deviceId: string; pluginId: string }>(row: T, extra?: string) => {
+      const device = deviceViews.get(row.deviceId);
+      return {
+        ...row,
+        ...(extra !== undefined ? { extra: safeParseJson<Record<string, unknown>>(extra) } : {}),
+        deviceName: device?.name ?? null,
+        managementAddress: device?.managementAddress ?? null,
+        siteName: device?.siteName ?? null,
+        pluginName: pluginNames.get(row.pluginId) ?? null,
+      };
+    };
+
+    res.status(200).json({ vms: rows.map((row) => decorate(row, row.extra)) });
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

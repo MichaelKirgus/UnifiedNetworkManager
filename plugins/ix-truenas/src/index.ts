@@ -25,8 +25,11 @@ import {
 import { TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } from './client/truenasClient';
 import {
   ensureEnrichment,
+  ensureVmEnrichment,
   getEnrichment,
+  getVmEnrichment,
   monitoringInFlight,
+  normalizeVmDevice,
   serviceNetDetails,
   sshHostOf,
   type ContainerVolume,
@@ -50,10 +53,11 @@ export const PLUGIN_NAME = 'TrueNAS Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
-  // 0.3.0 — optional SSH data path (per-container MACs/IPs/start times via
-  // docker inspect) + background app.config enrichment (static container IPs)
-  // so the Containers/Hosts pages get real data without blowing the poll budget.
-  version: '0.3.0',
+  // 0.4.0 — VM collection (vm.query → vms[] + vmHosts for the Hosts page,
+  // live guest IPs via `virsh domifaddr` over SSH) on top of the 0.3.0 SSH
+  // data path (per-container MACs/IPs/start times via docker inspect) and
+  // background app.config enrichment (static container IPs).
+  version: '0.4.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh'],
 });
@@ -114,6 +118,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       'Collect installed Apps (app.query) and their containers for the Containers page — including background enrichment (per-app static IPs via app.config, real MACs/IPs/start times via docker inspect over SSH). Disable on hosts whose containers are monitored by another plugin (e.g. the generic Docker plugin): no container RPC traffic is sent to the appliance and previously collected rows are cleared.',
+  },
+  {
+    key: 'collectVms',
+    label: 'Enable VM collection',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Collect virtual machines (vm.query) for the VMs page — including their NIC MAC addresses (inserted into the Hosts page with source "VM") and live guest IPs via `virsh domifaddr` over SSH when an ssh slot is bound. Disable on hosts whose VMs are monitored by another plugin: no vm.query RPC traffic is sent to the appliance and previously collected rows are cleared.',
   },
 ];
 
@@ -1034,6 +1046,128 @@ function buildImageRows(appImages: Record<string, unknown>[]): ImageRow[] {
   return rows.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// ---------------------------------------------------------------------------
+// VM inventory (VMs page): the generic `vms[]` metric. Source is vm.query —
+// TrueNAS SCALE's view of its libvirt guests (one entry per VM with devices[],
+// status.state, vcpus, memory in MiB). Same upsert + delete-on-absent
+// lifecycle as containers at ingest. The NIC MACs are what feed the Hosts page
+// (source 'vm', via the vmHosts key) — TrueNAS assigns every VM NIC a real
+// 00:a0:98:* MAC, so guests merge by MAC with ARP/NDP entries other devices
+// report for them. Live guest IPs are NOT in the public API; when an ssh slot
+// is bound they come from `virsh domifaddr` over SSH (background enrichment).
+// ---------------------------------------------------------------------------
+
+/** One row of the VMs inventory (shape consumed by the API's ingestInventory). */
+interface VmRow {
+  name: string;
+  state?: string;
+  vcpus?: number | null;
+  memoryMiB?: number | null;
+  archType?: string | null;
+  extra?: Record<string, unknown>;
+}
+
+/** One attached device of a VM — NIC, disk, display, CD-ROM, PCIe passthrough,
+ * or any other dtype the appliance reports. GENERIC shape so ANY hypervisor
+ * plugin (TrueNAS today, Proxmox later) can emit the same list: `dtype` is the
+ * appliance's native type string; `label`/`detail` are pre-formatted for display
+ * so the webapp never has to know a specific appliance's attribute schema. */
+interface VmDevice {
+  dtype: string;
+  label?: string;
+  detail?: string;
+}
+
+/** Formats ONE normalized VM device into a generic display entry. Known TrueNAS
+ * dtypes get tailored labels (MAC, disk path, display resolution…); unknown ones
+ * fall back to `dtype` + a compact dump of their scalar attributes so no data is
+ * ever silently dropped when a new dtype appears on a future release. */
+function formatVmDevice(dev: { dtype: string; attrs: Record<string, unknown> }): VmDevice {
+  const a = dev.attrs;
+  const s = (k: string): string | undefined => {
+    const v = a[k];
+    if (typeof v === 'string' && v !== '') return v;
+    if (typeof v === 'number') return String(v);
+    return undefined;
+  };
+  switch (dev.dtype) {
+    case 'NIC': {
+      const mac = s('mac');
+      const parts: string[] = [];
+      if (s('type')) parts.push(s('type') as string);
+      if (s('nic_attach')) parts.push(`→ ${s('nic_attach')}`);
+      return { dtype: 'NIC', label: mac ?? 'no MAC assigned', detail: parts.join(' ') || undefined };
+    }
+    case 'DISK':
+    case 'RAW': {
+      const path = s('path');
+      return { dtype: dev.dtype, label: path ?? 'disk', detail: s('type') };
+    }
+    case 'CDROM': {
+      const path = s('path');
+      return { dtype: 'CDROM', label: path && path !== '' ? path : 'CD-ROM drive', detail: s('type') };
+    }
+    case 'DISPLAY': {
+      const type = s('type');
+      const parts: string[] = [];
+      if (s('resolution')) parts.push(s('resolution') as string);
+      if (s('port')) parts.push(`:${s('port')}`);
+      return { dtype: 'DISPLAY', label: `Display${type ? ` (${type})` : ''}`, detail: parts.join(' ') || undefined };
+    }
+    case 'PCI': {
+      const hostdev = s('hostdev');
+      return { dtype: 'PCI', label: hostdev ?? 'PCI passthrough', detail: s('rombar') ? `rombar=${a['rombar']}` : undefined };
+    }
+    default: {
+      // Unknown / future dtype — surface it generically so nothing is lost.
+      const interesting = Object.entries(a)
+        .filter(([k, v]) => k !== 'dtype' && (typeof v === 'string' || typeof v === 'number') && v !== '' && v !== null)
+        .slice(0, 4);
+      return { dtype: dev.dtype, label: dev.dtype.toLowerCase(), detail: interesting.map(([k, v]) => `${k}=${v}`).join(' ') || undefined };
+    }
+  }
+}
+
+/** Maps raw vm.query entries to UNM VM rows. EVERY attached device (NICs with
+ * their MACs, disks, displays, CD-ROMs, PCIe passthrough…) rides in `extra.devices`
+ * — the webapp renders each as a child row under the collapsed parent. */
+function buildVmRows(vms: Record<string, unknown>[]): VmRow[] {
+  const rows: VmRow[] = [];
+  for (const v of vms) {
+    if (!v || typeof v !== 'object') continue;
+    const name = pickString(v, ['name']);
+    if (!name) continue;
+
+    // status.state — RUNNING | STOPPED | SUSPENDED | PAUSED | ... (libvirt).
+    const status = (v['status'] ?? {}) as Record<string, unknown>;
+    const state = typeof status['state'] === 'string' && (status['state'] as string) !== '' ? (status['state'] as string).toUpperCase() : 'UNKNOWN';
+
+    // Every attached device → one generic display entry (any dtype is kept).
+    const devices: VmDevice[] = [];
+    const devicesRaw = Array.isArray(v['devices']) ? (v['devices'] as Record<string, unknown>[]) : [];
+    for (const d of devicesRaw) {
+      const dev = normalizeVmDevice(d);
+      if (!dev) continue;
+      devices.push(formatVmDevice(dev));
+    }
+
+    rows.push({
+      name,
+      state,
+      vcpus: pickNumber(v, ['vcpus']),
+      memoryMiB: pickNumber(v, ['memory']), // TrueNAS reports MiB
+      archType: pickString(v, ['arch_type']) ?? pickString(v, ['machine_type']) ?? null,
+      extra: {
+        devices,
+        ...(pickString(v, ['description']) && (v['description'] as string) !== '' ? { description: v['description'] } : {}),
+        ...(pickString(v, ['uuid']) ? { uuid: v['uuid'] } : {}),
+        autostart: typeof v['autostart'] === 'boolean' ? (v['autostart'] as boolean) : undefined,
+      },
+    });
+  }
+  return rows.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** True for DMI placeholder values ("To Be Filled By O.E.M.") — not real data. */
 function isPlaceholder(s: string | undefined): boolean {
   return !s || /to be filled/i.test(s);
@@ -1083,6 +1217,9 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // App/Container collection toggle — off = skip app.query/docker.network + all
   // enrichment and emit empty containers[]/dockerHosts[] to clear stale rows.
   const collectApps = settings.collectApps !== false;
+  // VM collection toggle — off = skip vm.query + the SSH virsh enrichment and
+  // emit empty vms[]/vmHosts[] to clear stale rows (same contract as apps).
+  const collectVms = settings.collectVms !== false;
   // Window-based scheduling: the API sends collectInventory=false on metrics-only
   // polls. The health trio (system.info / pool.query / alert.list) ALWAYS runs so
   // device status stays live; the slow inventory RPCs + their metric keys are
@@ -1113,7 +1250,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // section, not reject the whole poll before error handling. The last three
   // are best-effort extras (networks inventory + static routes + board
   // serial/model) — their failure does NOT count toward health.
-  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes] = await Promise.allSettled([
+  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes, vmsRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('alert.list', [], creds),
@@ -1141,6 +1278,10 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     collectApps ? client.call<Record<string, unknown>[]>('app.query', [], creds) : Promise.resolve(undefined),
     collectApps ? client.call<Record<string, unknown>[]>('docker.network.query', [], creds) : Promise.resolve(undefined),
     collectApps ? client.call<Record<string, unknown>[]>('app.image.query', [], creds) : Promise.resolve(undefined),
+    // VMs-page extra (best-effort — never count toward health). vm.query = one
+    // row per libvirt guest with devices[] (NIC MACs!) + status.state. Skipped
+    // entirely when the `collectVms` option is off — no VM RPC traffic at all.
+    collectVms ? client.call<Record<string, unknown>[]>('vm.query', [], creds) : Promise.resolve(undefined),
   ]);
 
   // TEMP DEBUG (log-once per host): the storage extras are best-effort — their
@@ -1154,9 +1295,11 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     ['app.query', appsRes],
     ['docker.network.query', dockerNetsRes],
     ['app.image.query', appImagesRes],
+    ['vm.query', vmsRes],
   ] as const) {
     // Not called when collection is disabled — don't log their "outcome".
     if (!collectApps && (label === 'app.query' || label === 'docker.network.query' || label === 'app.image.query')) continue;
+    if (!collectVms && label === 'vm.query') continue;
     if (!collectInventory && ['interface.query', 'system.dmidecode_info', 'staticroute.query', 'pool.dataset.query', 'disk.query', 'system.datastore', 'boot.get_disks'].includes(label)) continue;
     if (storageDebugLogged.has(`${host}|${label}`)) continue;
     storageDebugLogged.add(`${host}|${label}`);
@@ -1529,6 +1672,60 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     metrics['images'] = [];
   } else if (collectInventory && appImagesRes.status === 'fulfilled' && Array.isArray(appImagesRes.value)) {
     metrics['images'] = buildImageRows(appImagesRes.value as Record<string, unknown>[]);
+  }
+
+  // --- vm.query: VMs inventory ---------------------------------------------
+  // Best-effort extra — never counts toward health. Emitted even when EMPTY so
+  // a deleted VM vanishes from the VMs page on the next poll (present-but-
+  // empty is authoritative; an absent key would not wipe). Skipped while
+  // collectVms is off — no vm.query RPC traffic to the appliance at all.
+  if (!collectVms) {
+    metrics['vms'] = [];
+    metrics['vmHosts'] = [];
+  } else if (collectInventory && vmsRes.status === 'fulfilled' && Array.isArray(vmsRes.value)) {
+    const rawVms = vmsRes.value as Record<string, unknown>[];
+
+    // Schedule the background SSH enrichment for live guest IPs — /monitoring
+    // never blocks on it; reads whatever cached state exists right now.
+    ensureVmEnrichment({
+      host,
+      sshCreds: resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true }),
+      vms: rawVms,
+      log: (level, message) => (level === 'warn' ? logger.warn(message, { deviceId }) : logger.info(message, { deviceId })),
+    });
+
+    const vmIps = getVmEnrichment(host)?.ipsByMac ?? new Map<string, string>();
+    metrics['vms'] = buildVmRows(rawVms);
+
+    // Host inventory (source 'vm'): one row per VM NIC with a REAL MAC. TrueNAS
+    // assigns every VM NIC a real 00:a0:98:* MAC at creation time — no SSH
+    // needed for the MAC itself. The live IP comes from `virsh domifaddr` over
+    // SSH (cached); without it the row is emitted with an empty IP and the API
+    // merges it by MAC once any device's ARP/NDP table reports the address.
+    const vmHosts: { mac: string; ip?: string; hostname?: string }[] = [];
+    for (const v of rawVms) {
+      if (!v || typeof v !== 'object') continue;
+      const name = pickString(v, ['name']);
+      if (!name) continue;
+      const status = (v['status'] ?? {}) as Record<string, unknown>;
+      // Stopped VMs have no live address — their NIC MACs are still valid host
+      // rows (the guest exists on the network fabric), but only RUNNING guests
+      // get an IP attached.
+      const running = status['state'] === 'RUNNING';
+      const devicesRaw = Array.isArray(v['devices']) ? (v['devices'] as Record<string, unknown>[]) : [];
+      for (const d of devicesRaw) {
+        const dev = normalizeVmDevice(d);
+        if (!dev || dev.dtype !== 'NIC') continue;
+        const mac = pickString(dev.attrs, ['mac']);
+        if (!mac) continue; // no MAC assigned yet — nothing to insert into hosts
+        vmHosts.push({
+          mac: mac.toLowerCase(),
+          ...(running && vmIps.get(mac.toLowerCase()) ? { ip: vmIps.get(mac.toLowerCase()) as string } : {}),
+          hostname: name,
+        });
+      }
+    }
+    metrics['vmHosts'] = vmHosts;
   }
 
   // --- system.dmidecode_info: board serial + real hardware model fallback ---

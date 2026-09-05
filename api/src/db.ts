@@ -611,6 +611,27 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_docker_images_device ON docker_images ("deviceId")`);
 
+  // VMs inventory table (VMs page) — one row per virtual machine, upserted per
+  // poll from the plugin's `vms` metric. Same lifecycle as containers
+  // (upsert + delete-on-absent + 24h sweep). TrueNAS SCALE VMs today; any
+  // plugin may emit the generic key (e.g. a future Proxmox plugin).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS vms (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'UNKNOWN',
+      vcpus INTEGER,
+      "memoryMiB" DOUBLE PRECISION,
+      "archType" TEXT,
+      "startedAt" TEXT,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_vms_device ON vms ("deviceId")`);
+
   // Plugin log entries (see schema.pluginLogs). Pushed by plugins in batches
   // via POST /plugin/logs; swept by the retention worker after LOG_RETENTION_DAYS.
   await pool.query(`

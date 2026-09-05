@@ -881,6 +881,56 @@ export interface ContainersOverview {
   images: DockerImageRow[];
 }
 
+/** One device attached to a VM — NIC, disk, display, CD-ROM, PCIe passthrough…
+ * (from the plugin's `vms` metric, extra.devices[]). Generic across hypervisor
+ * plugins: `dtype` is the appliance-native type; `label`/`detail` are pre-formatted. */
+export interface VmDevice {
+  /** Appliance-native device type (NIC | DISK | DISPLAY | CDROM | PCI | …). */
+  dtype: string;
+  /** Primary display value (MAC, disk path, "Display (SPICE)", …). */
+  label?: string;
+  /** Secondary detail (model → bridge, controller type, resolution:port, …). */
+  detail?: string;
+}
+
+/** @deprecated legacy shape — replaced by VmDevice[] in extra.devices. Kept so
+ * older plugin versions' rows still parse (extra.nics) without breaking the UI. */
+export interface VmNic {
+  mac?: string;
+  type?: string;
+  nicAttach?: string;
+}
+
+/** One VM row from GET /vms. */
+export interface VmRow {
+  deviceId: string;
+  pluginId: string;
+  name: string;
+  /** RUNNING | STOPPED | SUSPENDED | ... (uppercase). */
+  state: string;
+  vcpus?: number | null;
+  /** Memory allocated in MiB. */
+  memoryMiB?: number | null;
+  /** Guest architecture / machine type when reported. */
+  archType?: string | null;
+  /** Start of the current RUNNING period (ISO-8601) — UNM-tracked from state
+   * transitions, a lower bound that resets after restarts. Null for non-RUNNING rows. */
+  startedAt?: string | null;
+  /** Plugin-specific details (JSON): devices[] VmDevice (every attached device —
+   * NICs, disks, displays, CD-ROMs, PCIe…), description, uuid, autostart. */
+  extra?: Record<string, unknown>;
+  collectedAt: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+/** Response of GET /vms — one row per VM on one device (no cross-device merge). */
+export interface VmsOverview {
+  vms: VmRow[];
+}
+
 /** A user account (never includes password hashes or TOTP secrets). */
 export interface User {
   id: string;
@@ -993,6 +1043,20 @@ export interface Device {
   /** Telemetry polling toggle — disabled devices are not polled; their historical
    * data and last metrics stay preserved. Defaults to true when absent. */
   enabled?: boolean;
+}
+
+/** Per-device outcome of a forced refresh (POST /devices/refresh). */
+export interface DeviceRefreshResult {
+  deviceId: string;
+  /** Device display name (empty for unknown ids). */
+  name: string;
+  /** True when at least one assignment was polled successfully. */
+  ok: boolean;
+  /** Number of plugin assignments re-polled (0 = none possible). */
+  assignmentsPolled: number;
+  results: { pluginId: string; health: string; reachable: boolean; error?: string }[];
+  /** Device-level problem (unknown device / polling disabled) — no polls ran. */
+  error?: string;
 }
 
 /** One supported device model as advertised by a plugin in /discover.
@@ -1427,6 +1491,15 @@ export const api = {
     }
     return { total: deviceIds.length, errors };
   },
+  /** Force an immediate re-poll of one or more devices — bypasses the
+   * staggered windows and refreshes BOTH live metrics and inventory now.
+   * Requires devices:write. Returns per-device outcomes (reachability +
+   * transport errors) for diagnostics. */
+  refreshDevices: (deviceIds: string[]) =>
+    apiFetch<{ results: DeviceRefreshResult[] }>('/devices/refresh', {
+      method: 'POST',
+      body: JSON.stringify({ deviceIds }),
+    }),
   // Per-device settings overrides (inherit global → override per device).
   devicePluginOptions: (deviceId: string, pluginId: string) =>
     apiFetch<PluginOptionsResponse>(`/devices/${deviceId}/plugins/${pluginId}/options`),
@@ -1555,6 +1628,13 @@ export const api = {
     if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<ContainersOverview>(`/containers${suffix}`);
+  },
+  vms: (params?: { deviceId?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<VmsOverview>(`/vms${suffix}`);
   },
   /** Physical + logical topology graph for the Topology page. */
   topology: (params?: { siteId?: string; includeHosts?: boolean }) => {

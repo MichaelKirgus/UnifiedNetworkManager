@@ -16,7 +16,9 @@ function SourceBadges({ sources }: { sources: HostRow['sources'] }) {
           ? 'bg-amber-100 text-amber-700'
           : s === 'self'
             ? 'bg-slate-200 text-slate-700'
-            : 'bg-blue-100 text-blue-700';
+            : s === 'vm'
+              ? 'bg-indigo-100 text-indigo-700'
+              : 'bg-blue-100 text-blue-700';
   return (
     <span className="flex flex-wrap gap-1">
       {sources.map((s) => (

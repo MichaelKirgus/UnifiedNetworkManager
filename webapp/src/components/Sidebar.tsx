@@ -20,6 +20,7 @@ import {
   Route as RouteIcon,
   ScrollText,
   HardDrive,
+  Monitor,
   Server,
   Waypoints,
   KeySquare,
@@ -56,6 +57,8 @@ const NAV_ITEMS = [
   { to: '/storage', label: 'Storage', icon: HardDrive, requiresPermission: 'storage:read' },
   // Cross-device container/App workloads (TrueNAS SCALE Apps — docker under the hood).
   { to: '/containers', label: 'Containers', icon: Box, requiresPermission: 'containers:read' },
+  // Cross-device virtual machines (TrueNAS SCALE VMs today; generic key for future hypervisor plugins).
+  { to: '/vms', label: 'VMs', icon: Monitor, requiresPermission: 'vms:read' },
   // Physical + logical network graph (inferred cables + per-VLAN segments).
   { to: '/topology', label: 'Topology', icon: GitGraph, requiresPermission: 'topology:read' },
   // Layer registry — the topology view's horizontal bands (open to all users).

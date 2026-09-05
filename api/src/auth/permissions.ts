@@ -27,6 +27,7 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'wifi:read': 'View the WiFi page (SSIDs, spectrum and neighbors)',
   'storage:read': 'View the Storage page (filesystems, pools/datasets and physical disks across devices)',
   'containers:read': 'View the Containers page (Apps/container workloads across devices)',
+  'vms:read': 'View the VMs page (virtual machines and their NICs across devices)',
   'topology:read': 'View the Topology page (physical + logical network graph)',
   'sites:read': 'View sites',
   'config-jobs:read': 'View configuration jobs',

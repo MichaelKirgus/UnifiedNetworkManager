@@ -511,6 +511,51 @@ paths:
         '404':
           description: Source device not found
 
+  /devices/refresh:
+    post:
+      tags: [Devices]
+      summary: Force an immediate re-poll of one or more devices (metrics + inventory)
+      description: >-
+        Requires permission `devices:write`. Bypasses the staggered scheduling
+        windows and polls every assignment of each requested device right now,
+        with full inventory collection — so both live metrics AND the
+        cross-device inventory tables (networks, hosts, ports, storage, …)
+        refresh immediately. The regular poll deadlines stay untouched.
+        Devices are processed sequentially; per-assignment outcomes report
+        reachability and transport errors for diagnostics. Unknown ids and
+        disabled devices come back with `ok: false` + an error message.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceIds]
+              properties:
+                deviceIds:
+                  type: array
+                  items: { type: string }
+                  description: Device ids to re-poll (1..N)
+      responses:
+        '200':
+          description: Per-device refresh outcomes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DeviceRefreshResult'
+        '400':
+          description: Missing or empty deviceIds
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing devices:write permission
+
   /devices/{deviceId}/plugins:
     get:
       tags: [Devices]
@@ -2421,6 +2466,40 @@ paths:
         '401':
           description: Authentication required
 
+  /vms:
+    get:
+      tags: [Inventory]
+      summary: Cross-device virtual machine overview (VMs page)
+      description: >-
+        Returns the normalized `vms` rows (TrueNAS SCALE VMs today; any plugin
+        may emit the generic `vms[]` metric — e.g. a future Proxmox plugin),
+        populated by the telemetry worker from each plugin's /monitoring
+        metrics. One row per VM on one device — no merging; devices without VM
+        data contribute no rows. The `extra` object carries nics[] {mac, type?,
+        nicAttach?}, disks[], description and other plugin-specific detail for
+        expandable rows (NICs render as child rows under the parent). Rows not
+        refreshed within 24h are swept away.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+      responses:
+        '200':
+          description: VM overview (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VmsOverview'
+        '401':
+          description: Authentication required
+
   /logs:
     get:
       tags: [Logs]
@@ -3546,6 +3625,26 @@ components:
             additionalProperties: true
           description: "Headline metrics from the latest telemetry of each assignment"
 
+    DeviceRefreshResult:
+      type: object
+      required: [deviceId, ok, assignmentsPolled, results]
+      properties:
+        deviceId: { type: string }
+        name: { type: string, description: "Device display name (empty for unknown ids)" }
+        ok: { type: boolean, description: "True when at least one assignment was polled successfully" }
+        assignmentsPolled: { type: integer, description: "Number of plugin assignments re-polled (0 = none possible)" }
+        results:
+          type: array
+          items:
+            type: object
+            required: [pluginId, health, reachable]
+            properties:
+              pluginId: { type: string }
+              health: { type: string, description: "Plugin-reported health (ok/degraded/critical/unknown)" }
+              reachable: { type: boolean, description: "True when the plugin answered at all (transport OK)" }
+              error: { type: [string, 'null'], description: "Transport-level failure reason (only on unreachable)" }
+        error: { type: [string, 'null'], description: "Device-level problem (unknown device / polling disabled); no polls ran when set" }
+
     DeviceCreateRequest:
       type: object
       required: [name, vendor, deviceTypes, managementAddress, plugins]
@@ -4437,6 +4536,49 @@ components:
           description: "Docker image inventory for the page's collapsible images panel (generic `images[]` metric)"
           items:
             $ref: '#/components/schemas/DockerImageRow'
+
+    VmRow:
+      type: object
+      required: [deviceId, pluginId, name, state, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the hypervisor this VM runs on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this VM" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        name: { type: string, description: "VM name as reported (e.g. win11-01)" }
+        state:
+          type: string
+          description: "RUNNING | STOPPED | SUSPENDED | ... — VM runtime state (uppercase at emit)"
+        vcpus: { type: [integer, 'null'], description: "Number of virtual CPUs allocated to the VM" }
+        memoryMiB: { type: [number, 'null'], description: "Memory allocated in MiB" }
+        archType: { type: [string, 'null'], description: "Guest architecture / machine type when reported (e.g. x86_64)" }
+        startedAt:
+          type: [string, 'null']
+          format: date-time
+          description: >-
+            UNM-observed start of the current RUNNING period (ISO-8601), tracked by
+            the telemetry worker from state transitions — stamped when a row first
+            appears RUNNING and cleared when it leaves RUNNING. NULL for non-RUNNING
+            rows or VMs observed already-running (true uptime unknown).
+        extra:
+          type: object
+          additionalProperties: true
+          description: >-
+            Plugin-specific details (JSON): nics[] {mac, type?, nicAttach?} (the NIC
+            MACs feed the Hosts page with source 'vm'), disks[], description, uuid,
+            autostart, ...
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this VM" }
+
+    VmsOverview:
+      type: object
+      required: [vms]
+      properties:
+        vms:
+          type: array
+          items:
+            $ref: '#/components/schemas/VmRow'
 
     WifiOverview:
       type: object

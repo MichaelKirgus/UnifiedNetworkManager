@@ -933,6 +933,46 @@ export const dockerImages = pgTable(
   }
 );
 
+// One row per virtual machine as reported by a plugin's `vms` metric. Powers
+// the cross-device VMs page (TrueNAS SCALE VMs today; any plugin may emit the
+// generic key — e.g. a future Proxmox plugin). Same upsert-per-poll +
+// delete-on-absent lifecycle as containers: a deleted VM must vanish from the
+// table, not linger until the 24h sweep. `name` is part of the PK — one row
+// per (device, plugin, vm-name). A device without VM data contributes no rows.
+export const vms = pgTable(
+  'vms',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // VM name as reported (e.g. "win11-01").
+    name: text('name').notNull(),
+    // RUNNING | STOPPED | SUSPENDED | ... — normalized to uppercase at emit, kept verbatim.
+    state: text('state').notNull().default('UNKNOWN'),
+    // Number of virtual CPUs allocated to the VM.
+    vcpus: integer('vcpus'),
+    // Memory allocated in MiB (TrueNAS reports MiB; plugins convert as needed).
+    memoryMiB: doublePrecision('memoryMiB'),
+    // Guest architecture / machine type when reported (e.g. "x86_64", "q35").
+    archType: text('archType'),
+    // UNM-observed start of the current RUNNING period (ISO-8601) — tracked by
+    // the telemetry worker from state transitions, same contract as containers.
+    startedAt: text('startedAt'),
+    // Plugin-specific details (JSON object): nics[] {mac, type?, nicAttach?},
+    // disks[], description, uuid, autostart, ...
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkVms: primaryKey({
+        name: 'vms_pkey',
+        columns: [table.deviceId, table.pluginId, table.name],
+      }),
+      idxVmsDevice: index('idx_vms_device').on(table.deviceId),
+    };
+  }
+);
+
 // Execution plans produced by a plugin's /plan endpoint (e.g. an OPNsense
 // WireGuard tunnel spanning two firewalls). The API persists the plan and its
 // steps, fulfils the plan's provisionRequests via the secrets provider at

@@ -240,6 +240,192 @@ export interface EnrichmentState {
   atDockerInfo?: number;
 }
 
+/** Per-host VM enrichment state — live guest IPs from `virsh domifaddr`
+ * (guest agent) and the host's neighbor table over SSH. */
+export interface VmEnrichmentState {
+  /** NIC MAC (lowercase) → best live IP (IPv4 preferred, else first address). */
+  ipsByMac?: Map<string, string>;
+  atVmIps?: number;
+}
+
+/** Candidate libvirt socket paths probed when the stock `virsh` cannot reach its
+ * daemon. TrueNAS SCALE runs libvirtd on a NON-standard socket and the stock
+ * virsh binary ignores both `-c` URI overrides in some positions AND the
+ * LIBVIRT_DEFAULT_URI env var — but the query-parameter form
+ * `qemu+unix:///system?socket=<path>` works (verified live on 26.0 BETA). */
+const LIBVIRT_SOCKET_CANDIDATES = [
+  '/var/run/libvirt/libvirt-sock',
+  '/run/truenas_libvirt/libvirt-sock',
+];
+
+/** Normalizes ONE vm.query devices[] entry to its dtype + attribute map. The
+ * shape differs by release: TrueNAS 26+ nests everything under `attributes`
+ * (`{id, attributes:{dtype,...}, vm, order}` — verified live on 26.0 BETA),
+ * older releases carry the fields flat at the top level. Both are handled so a
+ * mixed fleet parses identically. */
+export function normalizeVmDevice(d: unknown): { dtype: string; attrs: Record<string, unknown> } | null {
+  if (!d || typeof d !== 'object') return null;
+  const obj = d as Record<string, unknown>;
+  const topDtype = pickString(obj, ['dtype']);
+  if (topDtype) return { dtype: topDtype, attrs: obj }; // legacy flat shape
+  const attrs = (obj['attributes'] ?? {}) as Record<string, unknown>;
+  const attrDtype = pickString(attrs, ['dtype']);
+  return attrDtype ? { dtype: attrDtype, attrs } : null;
+}
+
+const vmEnrichmentCache = new Map<string, VmEnrichmentState>();
+/** In-flight VM enrichment per host. */
+const vmInFlight = new Set<string>();
+
+/**
+ * Builds ONE combined read-only shell command that dumps every libvirt guest's
+ * interface addresses in a single pass. Output contract (parsed by
+ * parseVmIpLines): one `source|MAC|proto|address` line per entry, source ∈
+ * {domifaddr, arp}. The domain name is irrelevant — we key everything by MAC,
+ * which is what the VMs page and Hosts ingestion need.
+ *
+ * Two IP sources are merged (guest agent first, ARP as fallback):
+ *   - `virsh domifaddr` — authoritative when the guest runs qemu-guest-agent;
+ *     EMPTY otherwise (verified: most TrueNAS VMs don't ship the agent).
+ *   - host `ip neigh show` — the appliance has seen traffic from its bridged
+ *     VMs and learned their MAC→IP bindings; works WITHOUT any guest agent.
+ *
+ * Socket detection runs first: stock `virsh` hardcodes /var/run/libvirt/
+ * libvirt-sock on some appliances (TrueNAS SCALE uses a custom socket), so we
+ * probe the known candidate paths with the working query-parameter URI form.
+ */
+function buildVirshCommand(): string {
+  const candidates = LIBVIRT_SOCKET_CANDIDATES.map((s) => `'${s}'`).join(' ');
+  return [
+    // run_virsh: plain `virsh` when its stock socket works, otherwise the
+    // query-parameter URI against the first candidate socket that answers.
+    'run_virsh() { if [ -n "$VIRSH_URI" ]; then virsh -c "$VIRSH_URI" "$@"; else virsh "$@"; fi; }',
+    'VIRSH_URI=',
+    `if ! run_virsh list --name >/dev/null 2>&1; then`,
+    `  for s in ${candidates}; do`,
+    `    if [ -S "$s" ] && virsh -c "qemu+unix:///system?socket=$s" list --name >/dev/null 2>&1; then VIRSH_URI="qemu+unix:///system?socket=$s"; break; fi`,
+    '  done',
+    'fi',
+    'for d in $(run_virsh list --name 2>/dev/null); do',
+    "  run_virsh domifaddr \"$d\" 2>/dev/null | awk -v OFS='|' 'NR>1 && NF>=4 {print \"domifaddr|\" $2, $3, $4}'",
+    'done',
+    // Host neighbor table: MAC→IP bindings the appliance learned from bridged
+    // VM traffic — works without any guest agent. FAILED entries are dropped.
+    "ip neigh show 2>/dev/null | awk '$NF!=\"FAILED\" {for(i=1;i<=NF;i++) if($i==\"lladdr\") print \"arp|\" $(i+1) \"|\" (($1 ~ /:/)?\"ipv6\":\"ipv4\") \"|\" $1}'",
+  ].join('\n');
+}
+
+/** Parses the combined enrichment output into a MAC → IP map. Priority per MAC:
+ * guest-agent IPv4 > host-ARP IPv4 > guest-agent IPv6 > host-ARP IPv6 (a real
+ * IPv4 is more useful than any IPv6; the first address of each kind is kept —
+ * multi-homed guests are rare and one representative suffices for Hosts). */
+export function parseVmIpLines(stdout: string): Map<string, string> {
+  const gaV4 = new Map<string, string>();
+  const gaV6 = new Map<string, string>();
+  const arpV4 = new Map<string, string>();
+  const arpV6 = new Map<string, string>();
+  for (const line of stdout.split('\n')) {
+    if (!line) continue;
+    const parts = line.split('|');
+    if (parts.length < 4) continue;
+    const source = parts[0].trim(); // 'domifaddr' | 'arp'
+    const mac = (parts[1] ?? '').trim().toLowerCase();
+    const proto = (parts[2] ?? '').trim().toLowerCase();
+    // Strip a CIDR suffix ("192.168.1.10/24") — the Hosts page stores bare IPs.
+    const ip = ((parts[3] ?? '').trim()).split('/')[0];
+    if (!MAC_RE.test(mac) || !ip || ip === '0.0.0.0' || ip === '::') continue;
+    if (source === 'domifaddr') {
+      if (proto === 'ipv4' && !gaV4.has(mac)) gaV4.set(mac, ip);
+      else if (proto === 'ipv6' && !gaV6.has(mac)) gaV6.set(mac, ip);
+    } else if (source === 'arp') {
+      if (proto === 'ipv4' && !arpV4.has(mac)) arpV4.set(mac, ip);
+      else if (proto === 'ipv6' && !arpV6.has(mac)) arpV6.set(mac, ip);
+    }
+  }
+  const out = new Map<string, string>();
+  for (const [mac, ip] of gaV4) out.set(mac, ip);
+  for (const [mac, ip] of arpV4) if (!out.has(mac)) out.set(mac, ip);
+  for (const [mac, ip] of gaV6) if (!out.has(mac)) out.set(mac, ip);
+  for (const [mac, ip] of arpV6) if (!out.has(mac)) out.set(mac, ip);
+  return out;
+}
+
+/** Collects live VM guest IPs over SSH (null when no slot / on failure).
+ * Merges `virsh domifaddr` (guest agent) with the host's neighbor table so a
+ * missing qemu-guest-agent doesn't leave every row MAC-only. */
+async function collectVmIpsViaSsh(
+  host: string,
+  sshCreds: ReturnType<typeof resolveSshCredentials>,
+  log?: (level: 'info' | 'warn', message: string) => void
+): Promise<Map<string, string> | null> {
+  if (!sshCreds) return null; // no ssh slot bound — API-only mode
+  try {
+    const client = await sshPool.get(host, 22, sshCreds);
+    const r = await client.exec(buildVirshCommand(), sshCreds);
+    if (r.code !== 0 && !r.stdout) {
+      log?.('warn', `SSH VM IP collection on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`);
+      return null;
+    }
+    return parseVmIpLines(r.stdout);
+  } catch (e) {
+    if (e instanceof SshError) log?.('warn', `SSH VM IP collection on ${host} failed: ${e.message}`);
+    else log?.('warn', `SSH VM IP collection on ${host} unexpected error: ${(e as Error).message}`);
+    return null; // best-effort — keep previous data, never sink the poll
+  }
+}
+
+/**
+ * Schedules a background refresh of live VM guest IPs when stale and returns
+ * immediately — /monitoring NEVER awaits the work. Safe to call on every poll:
+ * fresh parts are skipped, in-flight parts dedupe. No-op when no ssh slot is
+ * bound or the appliance reports no VM NIC MACs at all (nothing to enrich).
+ */
+export function ensureVmEnrichment(args: {
+  host: string;
+  sshCreds?: ReturnType<typeof resolveSshCredentials>;
+  /** Fresh vm.query rows — used only to detect whether any NIC MAC exists. */
+  vms: Record<string, unknown>[];
+  log?: (level: 'info' | 'warn', message: string) => void;
+}): void {
+  const { host, sshCreds, vms, log } = args;
+  if (!sshCreds || !vms || vms.length === 0) return; // nothing to enrich
+
+  let hasNicMac = false;
+  for (const v of vms) {
+    const devicesRaw = Array.isArray(v['devices']) ? (v['devices'] as Record<string, unknown>[]) : [];
+    for (const d of devicesRaw) {
+      const dev = normalizeVmDevice(d);
+      if (!dev || dev.dtype !== 'NIC') continue;
+      const mac = pickString(dev.attrs, ['mac']);
+      if (mac && mac !== '') { hasNicMac = true; break; }
+    }
+    if (hasNicMac) break;
+  }
+  if (!hasNicMac) return;
+
+  const state = vmEnrichmentCache.get(host);
+  if (state?.atVmIps && Date.now() - state.atVmIps < ENRICHMENT_TTL_MS) return; // fresh
+  if (vmInFlight.has(host)) return; // already running — dedupe
+  vmInFlight.add(host);
+  void collectVmIpsViaSsh(host, sshCreds, log)
+    .then((ips) => {
+      const s = vmEnrichmentCache.get(host) ?? {};
+      // Only overwrite on SUCCESS — a failed cycle keeps the last good data.
+      if (ips !== null) {
+        s.ipsByMac = ips;
+        s.atVmIps = Date.now();
+        vmEnrichmentCache.set(host, s);
+      }
+    })
+    .catch((e) => log?.('warn', `SSH virsh refresh for ${host} crashed: ${(e as Error).message}`))
+    .finally(() => vmInFlight.delete(host));
+}
+
+/** Current (possibly stale/empty) VM enrichment state for a host. */
+export function getVmEnrichment(host: string): VmEnrichmentState | undefined {
+  return vmEnrichmentCache.get(host);
+}
+
 const ENRICHMENT_TTL_MS = 15 * 60_000; // same cadence as the OPNsense inventory cache
 /** Bounded concurrency for the app.config wave (measured safe on real boxes). */
 const CONFIG_CONCURRENCY = 8;
