@@ -179,6 +179,27 @@ export default function Secrets() {
     [providers]
   );
 
+  /** Human-readable label for a secret type (from the provider schema), if known. */
+  const typeLabelFor = (typeName: string): string | undefined =>
+    providers.flatMap((p) => p.secretTypes).find((t) => t.type === typeName)?.label;
+
+  /** Type chip — human label from the provider schema, indigo when generatable,
+   * slate otherwise; falls back to the raw type id if no provider declares it. */
+  function TypeChip({ type }: { type: string }) {
+    const label = typeLabelFor(type) ?? type;
+    const tone = generatableTypes.has(type)
+      ? 'bg-indigo-100 text-indigo-800'
+      : 'bg-slate-100 text-slate-700';
+    return (
+      <span
+        title={label === type ? undefined : `Type id: ${type}`}
+        className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${tone} ${generatableTypes.has(type) ? 'border-indigo-300' : 'border-slate-300'}`}
+      >
+        {label}
+      </span>
+    );
+  }
+
   function handleProviderChange(id: string) {
     setProviderId(id);
     const provider = providers.find((p) => p.id === id);
@@ -246,6 +267,47 @@ export default function Secrets() {
     } catch (err) {
       alert((err as Error).message);
     }
+  }
+
+  /** Bulk: re-roll key material for every SELECTED generatable secret in place.
+   *  Same ids, so bound assignments keep working — but devices holding the old
+   *  keys stop authenticating until they receive the new ones. */
+  async function handleBulkRegenerate(selected: Secret[]) {
+    const targets = selected.filter((s) => generatableTypes.has(s.type));
+    if (targets.length === 0) {
+      alert('None of the selected secrets are generatable types — there is no key material to re-roll.');
+      return;
+    }
+    const skipped = selected.length - targets.length;
+    const msg = `Re-generate the key material for ${targets.length} secret${targets.length === 1 ? '' : 's'}?\nThe secrets keep their IDs (assignments stay valid), but devices still holding the OLD keys will stop authenticating.` +
+      (skipped > 0 ? `\n\n(${skipped} non-generatable selection${skipped === 1 ? '' : 's'} skipped.)` : '');
+    if (!confirm(msg)) return;
+    const errors: string[] = [];
+    for (const s of targets) {
+      try {
+        await api.regenerateSecret(s.id);
+      } catch (err) {
+        errors.push(`${s.label ?? s.id}: ${(err as Error).message}`);
+      }
+    }
+    await loadSecrets();
+    if (errors.length > 0) alert(`Regenerated ${targets.length - errors.length} of ${targets.length}.\n${errors.join('\n')}`);
+  }
+
+  /** Bulk: delete every selected secret. No FK cascade — devices still bound to
+   *  a deleted secret will fail authentication on their next poll, so the
+   *  confirm warns to unbind/reassign first. */
+  async function handleBulkDelete(selected: Secret[]) {
+    const errors: string[] = [];
+    for (const s of selected) {
+      try {
+        await api.deleteSecret(s.id);
+      } catch (err) {
+        errors.push(`${s.label ?? s.id}: ${(err as Error).message}`);
+      }
+    }
+    await loadSecrets();
+    if (errors.length > 0) alert(`Deleted ${selected.length - errors.length} of ${selected.length}.\n${errors.join('\n')}`);
   }
 
   async function copyText(text: string): Promise<boolean> {
@@ -480,9 +542,12 @@ export default function Secrets() {
         <DataTable
           columns={[
             { header: 'Label', key: 'label', render: (s: Secret) => s.label },
-            { header: 'Type', key: 'type', render: (s: Secret) => s.type },
-            { header: 'User', key: 'username', render: (s: Secret) => s.username },
-            { header: 'ID', key: 'id', width: 240, render: (s: Secret) => s.id },
+            // Width fits the longest provider label ("OpenVPN Certificate Bundle (CA + cert + key)").
+            { header: 'Type', key: 'type', width: 260, render: (s: Secret) => <TypeChip type={s.type} /> },
+            { header: 'Created by user', key: 'username', render: (s: Secret) => s.username },
+            // Diagnostic detail — available via the Columns picker but not worth
+            // default screen space.
+            { header: 'ID', key: 'id', width: 240, hiddenByDefault: true, render: (s: Secret) => s.id },
             { header: 'Created At', key: 'createdAt', sortAccessor: (s: Secret) => new Date(s.createdAt).getTime(), render: (s: Secret) => new Date(s.createdAt).toLocaleString() },
             { header: 'Expires At', key: 'expiresAt', width: 180, sortAccessor: (s: Secret) => (s.expiresAt ? new Date(s.expiresAt).getTime() : null), render: (s: Secret) => (s.expiresAt ? new Date(s.expiresAt).toLocaleString() : 'Never') },
             { 
@@ -533,6 +598,30 @@ export default function Secrets() {
           rows={secrets}
           rowKey={(s) => s.id}
           storageKey="secrets"
+          selectable={canWrite || canDelete}
+          bulkActions={
+            canWrite || canDelete
+              ? [
+                  ...(canWrite
+                    ? [
+                        // No declarative confirm — the handler confirms itself with a
+                        // richer message (it knows how many selections are skipped).
+                        { label: 'Regenerate key material', onClick: handleBulkRegenerate },
+                      ]
+                    : []),
+                  ...(canDelete
+                    ? [
+                        {
+                          label: 'Delete',
+                          confirm: (count: number) =>
+                            `Delete ${count} secret${count === 1 ? '' : 's'}?\nDevices still bound to a deleted secret will fail authentication on their next poll — unbind or reassign them first.`,
+                          onClick: handleBulkDelete,
+                        },
+                      ]
+                    : []),
+                ]
+              : undefined
+          }
         />
       )}
     </Layout>
