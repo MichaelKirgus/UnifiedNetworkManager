@@ -779,9 +779,20 @@ export interface ContainerNetwork {
   subnets?: string[];
 }
 
+/** One volume mount as declared in a container's compose config. */
+export interface ContainerVolume {
+  /** Host path or named volume (the source). */
+  source: string;
+  /** Path inside the container (the target); omitted when not resolvable. */
+  target?: string;
+  /** 'ro' | 'rw'. */
+  mode?: string;
+}
+
 /** Per-service detail for multi-container apps (expandable rows).
  * mac/ip/startedAt are present when the plugin observed them via SSH
- * (`docker inspect`) — the vendor API exposes none of these. */
+ * (`docker inspect`) — the vendor API exposes none of these. `volumes` come
+ * from the compose config (app.config) and list this container's mounts. */
 export interface ContainerServiceDetail {
   service?: string | null;
   image?: string | null;
@@ -792,6 +803,8 @@ export interface ContainerServiceDetail {
   ip?: string | null;
   /** ISO start of the current RUNNING period (SSH only). */
   startedAt?: string | null;
+  /** Volume mounts declared for this container (compose config). */
+  volumes?: ContainerVolume[];
 }
 
 /** One App/container row from GET /containers. */

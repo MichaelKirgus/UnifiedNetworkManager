@@ -29,6 +29,7 @@ import {
   monitoringInFlight,
   serviceNetDetails,
   sshHostOf,
+  type ContainerVolume,
   type DockerContainerInfo,
   type ServiceNetDetail,
 } from './enrich';
@@ -809,8 +810,8 @@ interface ContainerRow {
   startedAt?: string | null;
   /** Structured details — stored in the API's `extra` JSON column:
    *  networks[] {name, driver?, subnets?}, ips[], ports[], containerCount,
-   *  containers[] (per-service detail incl. mac/ip/startedAt when SSH-bound),
-   *  volumeMounts[], customApp?. */
+   *  containers[] (per-service detail incl. mac/ip/startedAt when SSH-bound,
+   *  volumes[] from compose config), app-level volumeMounts[], customApp?. */
   extra?: Record<string, unknown>;
 }
 
@@ -884,12 +885,12 @@ function buildContainerRows(
 
     // Per-service detail for the expandable row — enriched with SSH facts when
     // available (real MAC + live IP beat the compose static config).
-    const containers: { service?: string; image?: string | null; state?: string; mac?: string; ip?: string; startedAt?: string }[] = [];
+    const containers: { service?: string; image?: string | null; state?: string; mac?: string; ip?: string; startedAt?: string; volumes?: ContainerVolume[] }[] = [];
     for (const d of details) {
       const cid = pickString(d, ['id']);
       const svcName = pickString(d, ['service_name']) ?? '';
       const info = (cid ? infoById.get(cid) : undefined) ?? (svcName ? infoByName.get(svcName) : undefined);
-      // Compose detail for this service (hostname + static IPs).
+      // Compose detail for this service (hostname + static IPs + declared volumes).
       const svc = svcDetails.find((s) => s.hostname === svcName || s.hostname === name);
       let mac: string | undefined;
       let ip: string | undefined;
@@ -908,6 +909,7 @@ function buildContainerRows(
         ...(mac ? { mac } : {}),
         ...(ip ? { ip } : {}),
         ...(info?.startedAt && info.state === 'running' ? { startedAt: info.startedAt } : {}),
+        ...(svc && svc.volumes.length > 0 ? { volumes: svc.volumes } : {}),
       });
     }
 

@@ -33,6 +33,16 @@ import type { TruenasClient, TruenasCredentials } from './client/truenasClient';
 // ---------------------------------------------------------------------------
 
 /** One service's network placement from its compose config (app.config). */
+/** One volume mount as declared in a compose service's `volumes`. */
+export interface ContainerVolume {
+  /** Host path or named volume (the source). */
+  source: string;
+  /** Path inside the container (the target); omitted when not resolvable. */
+  target?: string;
+  /** 'ro' | 'rw'. */
+  mode?: string;
+}
+
 export interface ServiceNetDetail {
   /** Compose `hostname` — the container's L3 name. */
   hostname: string;
@@ -40,12 +50,15 @@ export interface ServiceNetDetail {
   ips: string[];
   /** Network names this service is attached to. */
   networks: string[];
+  /** Volume mounts declared for this service (compose `volumes`), host→container. */
+  volumes: ContainerVolume[];
 }
 
 /**
- * Extracts per-service network detail from ONE app's compose config (app.config).
- * The TrueNAS public API exposes NO per-container MAC — but the compose config
- * carries each service's `hostname` + static `ipv4_address`/`ipv6_address`.
+ * Extracts per-service network + volume detail from ONE app's compose config
+ * (app.config). The TrueNAS public API exposes NO per-container MAC — but the
+ * compose config carries each service's `hostname` + static
+ * `ipv4_address`/`ipv6_address`, and its declared `volumes` mounts.
  */
 export function serviceNetDetails(cfg: Record<string, unknown> | undefined): ServiceNetDetail[] {
   const out: ServiceNetDetail[] = [];
@@ -71,7 +84,30 @@ export function serviceNetDetails(cfg: Record<string, unknown> | undefined): Ser
         if (ip6) ips.add(ip6);
       }
     }
-    out.push({ hostname, ips: Array.from(ips).sort(), networks: networks.sort() });
+    // Declared volume mounts: "source[:target[:mode]]" strings or {type,...} objects.
+    const volumes: ContainerVolume[] = [];
+    const rawVols = s['volumes'];
+    if (Array.isArray(rawVols)) {
+      for (const rv of rawVols) {
+        let source = '';
+        let target = '';
+        let mode = '';
+        if (typeof rv === 'string') {
+          const parts = rv.split(':');
+          source = (parts[0] ?? '').trim();
+          target = (parts[1] ?? '').trim();
+          mode = (parts[2] ?? '').trim();
+        } else if (rv && typeof rv === 'object') {
+          const o = rv as Record<string, unknown>;
+          source = pickString(o, ['source']) ?? '';
+          target = pickString(o, ['target']) ?? '';
+          mode = o['read_only'] === true ? 'ro' : '';
+        }
+        if (!source) continue;
+        volumes.push({ source, ...(target ? { target } : {}), ...(mode ? { mode } : {}) });
+      }
+    }
+    out.push({ hostname, ips: Array.from(ips).sort(), networks: networks.sort(), volumes });
   }
   return out;
 }
@@ -213,6 +249,56 @@ const enrichmentCache = new Map<string, EnrichmentState>();
 const inFlightParts = new Set<string>();
 /** Hosts with an active /monitoring poll — the API wave must not overlap it. */
 export const monitoringInFlight = new Set<string>();
+/** Hosts whose app.config wave is DEFERRED (a poll was in flight when it became
+ * stale) — one pending timer per host so overlapping polls don't stack timers. */
+const deferredParts = new Set<string>();
+
+/** Runs the bounded-concurrency app.config wave for ONE host and caches the
+ * result. Extracted from ensureEnrichment so a wave blocked by an in-flight
+ * poll can be DEFERRED (re-checked shortly after) instead of silently dropped —
+ * previously it could never start, because ensureEnrichment is only called from
+ * inside /monitoring while monitoringInFlight already contains the host. */
+function runConfigWave(
+  host: string,
+  client: TruenasClient,
+  creds: TruenasCredentials,
+  apps: Record<string, unknown>[],
+  log?: (level: 'info' | 'warn', message: string) => void
+): void {
+  const key = `${host}|api`;
+  if (inFlightParts.has(key)) return; // already running — dedupe
+  inFlightParts.add(key);
+  void (async () => {
+    try {
+      const details = new Map<string, ServiceNetDetail[]>();
+      let cursor = 0;
+      async function worker(): Promise<void> {
+        while (cursor < apps.length) {
+          const i = cursor++;
+          const appName = pickString(apps[i], ['name', 'id']) ?? '';
+          if (!appName) continue;
+          try {
+            const cfg = await client.call<Record<string, unknown>>('app.config', [appName], creds);
+            if (cfg && typeof cfg === 'object') details.set(appName, serviceNetDetails(cfg));
+          } catch { /* best-effort — this app stays empty for this cycle */ }
+        }
+      }
+      const workers: Promise<void>[] = [];
+      for (let w = 0; w < Math.min(CONFIG_CONCURRENCY, apps.length); w++) workers.push(worker());
+      await Promise.all(workers);
+      // Merge with the previous map — a failed app.config must not wipe an app
+      // that succeeded last cycle.
+      const prev = enrichmentCache.get(host)?.serviceDetails;
+      if (prev) for (const [k, v] of prev) if (!details.has(k)) details.set(k, v);
+      const s = enrichmentCache.get(host) ?? {};
+      s.serviceDetails = details;
+      s.atServiceDetails = Date.now();
+      enrichmentCache.set(host, s);
+    } finally {
+      inFlightParts.delete(key);
+    }
+  })().catch((e) => log?.('warn', `app.config wave for ${host} crashed: ${(e as Error).message}`));
+}
 
 /** Current (possibly stale/empty) enrichment state for a host. */
 export function getEnrichment(host: string): EnrichmentState | undefined {
@@ -245,38 +331,21 @@ export function ensureEnrichment(args: {
   // --- Part 1: app.config wave (API transport — never overlap a live poll) --
   if (isStale(state.atServiceDetails)) {
     const key = `${host}|api`;
-    if (!inFlightParts.has(key) && !monitoringInFlight.has(host)) {
-      inFlightParts.add(key);
-      void (async () => {
-        try {
-          const details = new Map<string, ServiceNetDetail[]>();
-          let cursor = 0;
-          async function worker(): Promise<void> {
-            while (cursor < apps.length) {
-              const i = cursor++;
-              const appName = pickString(apps[i], ['name', 'id']) ?? '';
-              if (!appName) continue;
-              try {
-                const cfg = await client.call<Record<string, unknown>>('app.config', [appName], creds);
-                if (cfg && typeof cfg === 'object') details.set(appName, serviceNetDetails(cfg));
-              } catch { /* best-effort — this app stays empty for this cycle */ }
-            }
-          }
-          const workers: Promise<void>[] = [];
-          for (let w = 0; w < Math.min(CONFIG_CONCURRENCY, apps.length); w++) workers.push(worker());
-          await Promise.all(workers);
-          // Merge with the previous map — a failed app.config must not wipe an
-          // app that succeeded last cycle.
-          const prev = enrichmentCache.get(host)?.serviceDetails;
-          if (prev) for (const [k, v] of prev) if (!details.has(k)) details.set(k, v);
-          const s = enrichmentCache.get(host) ?? {};
-          s.serviceDetails = details;
-          s.atServiceDetails = Date.now();
-          enrichmentCache.set(host, s);
-        } finally {
-          inFlightParts.delete(key);
-        }
-      })().catch((e) => log?.('warn', `app.config wave for ${host} crashed: ${(e as Error).message}`));
+    if (!inFlightParts.has(key)) {
+      if (!monitoringInFlight.has(host)) {
+        // No poll in flight right now → run the wave immediately.
+        runConfigWave(host, client, creds, apps, log);
+      } else if (!deferredParts.has(key)) {
+        // A poll IS in flight (ensureEnrichment is only called from inside one) —
+        // DEFER: re-check shortly after it finishes so the wave actually runs.
+        deferredParts.add(key);
+        setTimeout(() => {
+          deferredParts.delete(key);
+          if (!isStale(enrichmentCache.get(host)?.atServiceDetails)) return; // refreshed meanwhile
+          if (monitoringInFlight.has(host) || inFlightParts.has(key)) return; // still busy — next poll re-defers
+          runConfigWave(host, client, creds, apps, log);
+        }, 1500).unref?.();
+      }
     }
   }
 

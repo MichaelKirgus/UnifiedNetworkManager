@@ -132,6 +132,20 @@ function compareValues(a: unknown, b: unknown): number {
   return String(a).localeCompare(String(b), undefined, { numeric: true });
 }
 
+/** Flattens a row's full subtree (self + all descendants, depth-first) so that
+ * search and per-column filters can match against nested expandable children —
+ * e.g. finding an app by one of its containers' images or volume mounts. */
+function collectSubtree<T>(root: T, childrenOf: (r: T) => T[]): T[] {
+  const out: T[] = [root];
+  const stack: T[] = [...childrenOf(root)];
+  while (stack.length > 0) {
+    const n = stack.pop() as T;
+    out.push(n);
+    for (const c of childrenOf(n)) stack.push(c);
+  }
+  return out;
+}
+
 function sortRows<T>(rows: T[], columns: DataTableColumn<T>[], sortKey: string, dir: 'asc' | 'desc'): T[] {
   const col = columns.find((c) => c.key === sortKey);
   if (!col || col.sortable === false) return rows;
@@ -292,21 +306,26 @@ export function DataTable<T>({
     [columns, prefs.hiddenKeys, prefs.visibilityTouched]
   );
 
-  // Row pipeline: search (visible cols) → per-column filters (AND) → sort.
+  // Row pipeline: search (visible cols) → per-column filters (AND) → sort. With
+  // expandable rows, matching also considers each row's nested children so an
+  // app is found by any of its containers' images/volumes/networks.
   const viewRows = useMemo(() => {
     let out = rows;
+    const kidsOf = expandable ? (r: T) => expandable.childrenOf(r) : () => [] as T[];
     const q = searchText_.trim().toLowerCase();
     if (q) {
-      out = out.filter((row) => visibleColumns.some((col) => searchText(col, row).toLowerCase().includes(q)));
+      out = out.filter((row) =>
+        visibleColumns.some((col) => collectSubtree(row, kidsOf).some((n) => searchText(col, n).toLowerCase().includes(q)))
+      );
     }
     for (const col of visibleColumns) {
       const f = (colFilters[col.key] ?? '').trim().toLowerCase();
       if (!f) continue;
-      out = out.filter((row) => searchText(col, row).toLowerCase().includes(f));
+      out = out.filter((row) => collectSubtree(row, kidsOf).some((n) => searchText(col, n).toLowerCase().includes(f)));
     }
     filteredRef.current = out;
     return prefs.sort ? sortRows(out, columns, prefs.sort.key, prefs.sort.dir) : out;
-  }, [rows, visibleColumns, colFilters, searchText_, prefs.sort, columns]);
+  }, [rows, visibleColumns, colFilters, searchText_, prefs.sort, columns, expandable]);
 
   // Drop selected keys whose rows disappeared from the dataset (e.g. deleted).
   useEffect(() => {
