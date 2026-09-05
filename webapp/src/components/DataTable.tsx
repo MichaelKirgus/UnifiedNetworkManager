@@ -36,6 +36,11 @@ export interface DataTableColumn<T> {
   exportValue?: (row: T) => string | number | null | undefined;
   /** Exclude this column from CSV/JSON exports (e.g. Actions columns). */
   excludeFromExport?: boolean;
+  /** Hidden on first render — useful for secondary/diagnostic data that is
+   * available but not worth the default screen space. Users can still enable it
+   * via the Columns picker; once they change ANY column visibility (or reset
+   * the layout) their explicit choice wins over this default. */
+  hiddenByDefault?: boolean;
 }
 
 /** A bulk action offered in the selection bar when `selectable` is set. */
@@ -274,9 +279,17 @@ export function DataTable<T>({
     if (next && autoRefresh) for (const q of autoRefresh.queries) void q.refetch?.();
   }
 
+  // Columns a page marks `hiddenByDefault` stay hidden until the user has
+  // explicitly customized visibility (or reset to defaults) — so new
+  // default-hidden columns also apply for users with pre-existing saved prefs.
   const visibleColumns = useMemo(
-    () => columns.filter((c) => !prefs.hiddenKeys.includes(c.key)),
-    [columns, prefs.hiddenKeys]
+    () =>
+      columns.filter((c) => {
+        if (prefs.hiddenKeys.includes(c.key)) return false;
+        if (!prefs.visibilityTouched && c.hiddenByDefault) return false;
+        return true;
+      }),
+    [columns, prefs.hiddenKeys, prefs.visibilityTouched]
   );
 
   // Row pipeline: search (visible cols) → per-column filters (AND) → sort.
@@ -323,16 +336,35 @@ export function DataTable<T>({
     });
   }
 
+  /** Effective hidden state of a column — saved prefs PLUS any `hiddenByDefault`
+   * flag while the user has not yet customized visibility. */
+  function isColHidden(p: { hiddenKeys: string[]; visibilityTouched?: boolean }, key: string): boolean {
+    if (p.hiddenKeys.includes(key)) return true;
+    const col = columns.find((c) => c.key === key);
+    return !p.visibilityTouched && !!col?.hiddenByDefault;
+  }
+
   function toggleColumn(key: string) {
     setPrefs((p) => {
-      const hidden = p.hiddenKeys.includes(key);
+      // On the FIRST explicit change, adopt the current effective state (which
+      // includes any `hiddenByDefault` columns) as the saved baseline — so
+      // toggling one column doesn't suddenly reveal other default-hidden ones.
+      let baseHidden: string[];
+      if (!p.visibilityTouched) {
+        const eff = new Set(p.hiddenKeys);
+        for (const c of columns) if (c.hiddenByDefault) eff.add(c.key);
+        baseHidden = [...eff];
+      } else {
+        baseHidden = p.hiddenKeys;
+      }
+      const hidden = baseHidden.includes(key);
       if (hidden) {
-        return { ...p, hiddenKeys: p.hiddenKeys.filter((k) => k !== key) };
+        return { ...p, visibilityTouched: true, hiddenKeys: baseHidden.filter((k) => k !== key) };
       }
       // Never allow hiding the last visible column.
-      const remainingVisible = columns.length - p.hiddenKeys.length;
+      const remainingVisible = columns.length - baseHidden.length;
       if (remainingVisible <= 1) return p;
-      return { ...p, hiddenKeys: [...p.hiddenKeys, key] };
+      return { ...p, visibilityTouched: true, hiddenKeys: [...baseHidden, key] };
     });
   }
 
@@ -555,7 +587,9 @@ export function DataTable<T>({
           <div className="absolute right-3 top-full z-20 mt-1 w-52 rounded-md border border-slate-200 bg-white p-2 shadow-lg">
             <p className="mb-1 px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Visible columns</p>
             {columns.map((col) => {
-              const hidden = prefs.hiddenKeys.includes(col.key);
+              // Effective state — a `hiddenByDefault` column reads as unchecked
+              // even before the user has customized anything.
+              const hidden = isColHidden(prefs, col.key);
               const isLastVisible = !hidden && visibleColumns.length === 1;
               return (
                 <label

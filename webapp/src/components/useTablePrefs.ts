@@ -11,6 +11,11 @@ export interface TablePrefs {
   widths: Record<string, number>;
   /** Whether auto-refresh is enabled (tables with an `autoRefresh` prop). Defaults to true. */
   autoRefreshOn: boolean;
+  /** True once the user has explicitly changed column visibility (or reset the
+   * layout). Until then, columns a page marks `hiddenByDefault` are hidden on
+   * top of any saved prefs — so new default-hidden columns apply for existing
+   * users too. */
+  visibilityTouched?: boolean;
 }
 
 const DEFAULT_PREFS: TablePrefs = { sort: null, hiddenKeys: [], widths: {}, autoRefreshOn: true };
@@ -50,6 +55,7 @@ function loadPrefs(key: string | null): TablePrefs {
       hiddenKeys: normalizeHiddenKeys(parsed.hiddenKeys),
       widths: normalizeWidths(parsed.widths),
       autoRefreshOn: parsed.autoRefreshOn !== false,
+      visibilityTouched: parsed.visibilityTouched === true,
     };
   } catch {
     return DEFAULT_PREFS;
