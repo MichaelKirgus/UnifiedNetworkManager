@@ -212,6 +212,11 @@ export function listContainers(o: DockerClientOptions): Promise<DockerApiResult<
   return dockerGet<unknown[]>(o, '/containers/json?all=true&limit=500');
 }
 
+/** GET /images/json — the local image inventory (tags, sizes, dangling flag). */
+export function listImages(o: DockerClientOptions): Promise<DockerApiResult<unknown[]>> {
+  return dockerGet<unknown[]>(o, '/images/json?all=true');
+}
+
 /** GET /version — daemon version info (used for the device overview + health detail). */
 export function engineVersion(o: DockerClientOptions): Promise<DockerApiResult<{ Version?: string; ApiVersion?: string; Os?: string; Arch?: string }>> {
   return dockerGet<{ Version?: string; ApiVersion?: string; Os?: string; Arch?: string }>(o, '/version');

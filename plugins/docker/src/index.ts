@@ -28,8 +28,8 @@ import {
   textMetric,
 } from '@unm/plugin-sdk';
 
-import { DockerClientOptions, DockerTlsMaterial, engineVersion, listContainers } from './client';
-import { buildContainerRows, ContainerRow as UnmContainerRow, DockerContainerRaw } from './rows';
+import { DockerClientOptions, DockerTlsMaterial, engineVersion, listContainers, listImages } from './client';
+import { buildContainerRows, buildImageRows, ContainerRow as UnmContainerRow, DockerContainerRaw, DockerImageRaw, ImageRow } from './rows';
 
 // --- Identity -----------------------------------------------------------------
 export const PLUGIN_UUID = '00000000-0000-4000-8000-00000000000b';
@@ -136,23 +136,27 @@ function tlsMaterialFromCredentials(credentials: unknown): DockerTlsMaterial | u
   return { ca, cert, key };
 }
 
-/** One full collection: version + container list → UNM rows. */
+/** One full collection: version + container list + image inventory → UNM rows. */
 async function collect(opts: DockerClientOptions): Promise<{
   health: Health;
   error?: string;
   rows: UnmContainerRow[];
+  /** null = the /images/json call failed (key omitted from metrics — no wipe). */
+  images: ImageRow[] | null;
   running: number;
   stopped: number;
   engineVersionText: string | null;
 }> {
   const version = await engineVersion(opts);
   if (!version.ok) {
-    return { health: 'critical', error: `Docker Engine unreachable via ${version.transportUsed ?? opts.transport}: ${version.error || `HTTP ${version.status}`}`, rows: [], running: 0, stopped: 0, engineVersionText: null };
+    return { health: 'critical', error: `Docker Engine unreachable via ${version.transportUsed ?? opts.transport}: ${version.error || `HTTP ${version.status}`}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText: null };
   }
 
-  const list = await listContainers(opts);
+  // Containers are the core of this plugin; the image inventory is a best-
+  // effort extra (a failure must not fail the poll or wipe previously seen rows).
+  const [list, imagesRes] = await Promise.all([listContainers(opts), listImages(opts)]);
   if (!list.ok) {
-    return { health: 'critical', error: `/containers/json failed (HTTP ${list.status}): ${JSON.stringify(list.data ?? '').slice(0, 200)}`, rows: [], running: 0, stopped: 0, engineVersionText: version.data?.Version ?? null };
+    return { health: 'critical', error: `/containers/json failed (HTTP ${list.status}): ${JSON.stringify(list.data ?? '').slice(0, 200)}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText: version.data?.Version ?? null };
   }
 
   const raw = Array.isArray(list.data) ? (list.data as DockerContainerRaw[]) : [];
@@ -164,9 +168,15 @@ async function collect(opts: DockerClientOptions): Promise<{
     else stopped++;
   }
 
+  let images: ImageRow[] | null = null;
+  if (imagesRes.ok && Array.isArray(imagesRes.data)) {
+    images = buildImageRows(imagesRes.data as DockerImageRaw[]);
+  }
+
   return {
     health: 'ok',
     rows,
+    images,
     running,
     stopped,
     engineVersionText: version.data?.Version ? `Docker ${version.data.Version}` : null,
@@ -230,6 +240,11 @@ app.post('/monitoring', async (req, res) => {
       'docker.containers.stopped': result.stopped,
     };
     if (result.engineVersionText) metrics['docker.version'] = result.engineVersionText;
+    // The generic images[] key — ingested into the cross-device `docker_images`
+    // table (Containers page → collapsible images panel). Emitted even when
+    // empty so a host that removes all images clears its rows; omitted entirely
+    // when the /images/json call itself failed (no wipe on transport errors).
+    if (result.images !== null) metrics['images'] = result.images;
 
     res.status(200).json({
       deviceId,

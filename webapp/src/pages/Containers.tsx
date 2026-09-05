@@ -1,12 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ChevronDown, ChevronRight } from 'lucide-react';
-import { useMemo, type ReactNode } from 'react';
+import { ChevronDown, ChevronRight, ChevronUp, Container } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
-import { formatDuration } from '../components/formatMetric';
-import { api, ContainerNetwork, ContainerRow, ContainerServiceDetail } from '../api/client';
+import { formatBytes, formatDuration } from '../components/formatMetric';
+import { api, ContainerNetwork, ContainerRow, ContainerServiceDetail, DockerImageRow } from '../api/client';
 
 /** Uptime cell — "running since". RUNNING + startedAt → duration; non-RUNNING
  * or no stamp → "—". The value is the real container start when the plugin
@@ -222,6 +222,26 @@ function PortsCell({ row }: { row: ContainerRow }) {
   );
 }
 
+/** Status badge for the images panel — dangling (slate) / update available
+ * (amber); plain hosts report neither, so most rows show a dash. */
+function ImageStatusBadge({ row }: { row: DockerImageRow }) {
+  if (row.dangling) {
+    return (
+      <span className="inline-flex items-center rounded-full border border-slate-300 bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600" title="Dangling image — no tag references it">
+        dangling
+      </span>
+    );
+  }
+  if (row.updateAvailable === true) {
+    return (
+      <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800" title="A newer version of this image is available">
+        update available
+      </span>
+    );
+  }
+  return <span className="text-slate-400">—</span>;
+}
+
 /** Version cell with an amber "update available" dot. */
 function VersionCell({ row }: { row: ContainerRow }) {
   const v = row.version && row.version.trim() !== '' ? row.version : null;
@@ -355,6 +375,39 @@ export default function Containers() {
     refetchInterval: 30_000,
   });
 
+  // Horizontal splitter: container table (top) vs image panel (bottom). The
+  // table gets a fixed share of the page height; collapsing the images below
+  // gives its space back to the table — same pattern as the Storage page.
+  const [imagesOpen, setImagesOpen] = useState(true);
+  const [tablePct, setTablePct] = useState(58);
+  const vSplitRef = useRef<HTMLDivElement>(null);
+  const vDragCleanup = useRef<(() => void) | null>(null);
+
+  useEffect(() => () => { vDragCleanup.current?.(); }, []);
+
+  const startVDrag = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    const el = vSplitRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const move = (ev: globalThis.MouseEvent) => {
+      const pct = ((ev.clientY - rect.top) / rect.height) * 100;
+      setTablePct(Math.min(85, Math.max(20, pct)));
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      vDragCleanup.current = null;
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    vDragCleanup.current = up;
+  };
+
   // Display tree for expandable rows: app → container(s) → volume mounts.
   // `roots` are the top-level (app) nodes; `childMap` maps a node key to its
   // DIRECT children so DataTable can render + recursively expand each level.
@@ -462,27 +515,180 @@ export default function Containers() {
     },
   ];
 
+  // Images panel data + summary numbers (total size across non-dangling rows).
+  const images: DockerImageRow[] = containersQuery.data?.images ?? [];
+  const imageTotalBytes = images.reduce((sum, i) => sum + (i.sizeBytes && i.sizeBytes > 0 ? i.sizeBytes : 0), 0);
+  const danglingCount = images.filter((i) => i.dangling).length;
+
+  // Container count across all app rows (extra.containerCount when known).
+  const containerTotal = tree.roots.reduce((sum, n) => {
+    if (!n.row) return sum;
+    const c = extraOf(n.row)['containerCount'];
+    return sum + (typeof c === 'number' && c > 0 ? c : 1);
+  }, 0);
+
+  const imageColumns: DataTableColumn<DockerImageRow>[] = [
+    {
+      header: 'Image',
+      key: 'name',
+      width: 280,
+      exportValue: (row) => row.name,
+      render: (row) => {
+        const { repo, tag } = splitImage(row.name);
+        return (
+          <span className="flex items-center gap-1.5" title={row.name}>
+            <span className="block truncate font-mono text-xs text-slate-700">{repo || row.name}</span>
+            {tag && tag !== 'latest' ? (
+              <span className="inline-flex shrink-0 items-center rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-slate-600">{tag}</span>
+            ) : (
+              tag === 'latest' && <span className="inline-flex shrink-0 items-center rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-sky-700">latest</span>
+            )}
+          </span>
+        );
+      },
+    },
+    {
+      header: 'Size',
+      key: 'sizeBytes',
+      width: 110,
+      sortAccessor: (row) => row.sizeBytes ?? -1,
+      exportValue: (row) => formatBytes(row.sizeBytes ?? 0),
+      render: (row) => (
+        <span className="font-mono text-xs">
+          {row.sizeBytes !== null && row.sizeBytes !== undefined ? formatBytes(row.sizeBytes) : '—'}
+        </span>
+      ),
+    },
+    {
+      header: 'Created',
+      key: 'createdAt',
+      width: 170,
+      sortAccessor: (row) => new Date(row.createdAt ?? '').getTime(),
+      render: (row) => (row.createdAt ? <span className="text-xs text-slate-600">{new Date(row.createdAt).toLocaleString()}</span> : <span className="text-slate-400">—</span>),
+    },
+    {
+      header: 'Status',
+      key: 'status',
+      width: 130,
+      render: (row) => <ImageStatusBadge row={row} />,
+    },
+    {
+      header: 'Device',
+      key: 'deviceName',
+      width: 260,
+      exportValue: (row) => `${row.deviceName ?? '?'} (${row.managementAddress ?? '?'})`,
+      render: (row) => (
+        <DeviceChip deviceName={row.deviceName} managementAddress={row.managementAddress} pluginName={row.pluginName} siteName={row.siteName} interfaces={[]} />
+      ),
+    },
+  ];
+
   return (
     <Layout title="Containers">
-      {containersQuery.isLoading && <p className="text-sm text-slate-500">Loading containers...</p>}
-      {containersQuery.isError && (
-        <p className="text-sm text-red-600">Failed to load containers: {(containersQuery.error as Error).message}</p>
-      )}
-      {containersQuery.data && (
-        <DataTable<TreeNode>
-          columns={columns}
-          rows={tree.roots}
-          rowKey={(node) => node.key}
-          storageKey="containers"
-          autoRefresh={{ intervalMs: 30_000, queries: [containersQuery] }}
-          searchPlaceholder="Search containers…"
-          expandable={{
-            childrenOf: (node) => tree.childMap.get(node.key) ?? [],
-            renderChild: (child, _parent, ctx) => <ChildRow node={child} ctx={ctx} />,
-          }}
-          emptyMessage="No containers collected yet — assign a TrueNAS plugin to a device and wait for the next poll."
-        />
-      )}
+      {/* Full-height column: container / image tables split by a horizontal
+          splitter — collapsing the images gives its space back to the table
+          instead of leaving it empty below. */}
+      <div className="flex h-full min-h-0 flex-col">
+        {containersQuery.isLoading && <p className="shrink-0 text-sm text-slate-500">Loading containers...</p>}
+        {containersQuery.isError && (
+          <p className="shrink-0 text-sm text-red-600">Failed to load containers: {(containersQuery.error as Error).message}</p>
+        )}
+
+        {/* Summary strip — app/container counts + image inventory. */}
+        {!containersQuery.isLoading && !containersQuery.isError && (
+          <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs">
+            <span className="flex items-center gap-2 text-slate-600">
+              <Container size={13} className="text-indigo-500" />
+              {tree.roots.length} app{tree.roots.length === 1 ? '' : 's'} · {containerTotal} container{containerTotal === 1 ? '' : 's'}
+            </span>
+            <span className="flex items-center gap-2 text-slate-600">
+              <Container size={13} className="text-slate-500" />
+              {images.length} image{images.length === 1 ? '' : 's'}
+              {imageTotalBytes > 0 && (
+                <span className="font-mono text-slate-700">· {formatBytes(imageTotalBytes)} total</span>
+              )}
+              {danglingCount > 0 && <span className="text-slate-400">({danglingCount} dangling)</span>}
+            </span>
+          </div>
+        )}
+
+        <div ref={vSplitRef} className="flex min-h-0 flex-1 flex-col">
+          {/* Container table (top) — fixed share of the page height while the
+              image panel is open; when collapsed it takes everything left. */}
+          <div
+            className={clsx('min-h-0 pr-1', !imagesOpen && 'flex-1')}
+            style={{ height: imagesOpen ? `${tablePct}%` : undefined }}
+          >
+            {containersQuery.data && (
+              <DataTable<TreeNode>
+                columns={columns}
+                rows={tree.roots}
+                rowKey={(node) => node.key}
+                storageKey="containers"
+                autoRefresh={{ intervalMs: 30_000, queries: [containersQuery] }}
+                fillHeight
+                searchPlaceholder="Search containers…"
+                expandable={{
+                  childrenOf: (node) => tree.childMap.get(node.key) ?? [],
+                  renderChild: (child, _parent, ctx) => <ChildRow node={child} ctx={ctx} />,
+                }}
+                emptyMessage="No containers collected yet — assign a TrueNAS or Docker plugin to a device and wait for the next poll."
+              />
+            )}
+          </div>
+
+          {/* Horizontal splitter between the two tables. */}
+          {imagesOpen && (
+            <div
+              role="separator"
+              aria-orientation="horizontal"
+              onMouseDown={startVDrag}
+              className="group relative -my-1 h-3 shrink-0 cursor-row-resize"
+              title="Drag to resize — or collapse the image panel for full container height"
+            >
+              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-slate-200 transition-colors group-hover:bg-indigo-400" />
+              <div className="absolute left-1/2 top-1/2 flex h-3 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center">
+                <span className="h-1 w-6 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400" />
+              </div>
+            </div>
+          )}
+
+          {/* Image panel (bottom) — takes the remaining height. The header stays
+              mounted when collapsed so it can be re-opened. */}
+          <div className={clsx('shrink-0 min-h-0 pl-1', imagesOpen && 'flex-1')}>
+            <div className="flex h-full min-h-0 flex-col rounded-lg border border-slate-200 bg-white">
+              <button
+                type="button"
+                onClick={() => setImagesOpen((o) => !o)}
+                className="flex w-full shrink-0 items-center justify-between px-4 py-3 text-left"
+                aria-expanded={imagesOpen}
+              >
+                <span className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+                  <Container size={16} className="text-slate-500" />
+                  Docker images{containersQuery.data ? ` (${images.length})` : ''}
+                </span>
+                {/* Expanded panel → chevron points DOWN (click collapses it);
+                    collapsed → UP (click expands). */}
+                {imagesOpen ? <ChevronDown size={18} className="text-slate-400" /> : <ChevronUp size={18} className="text-slate-400" />}
+              </button>
+              {imagesOpen && containersQuery.data && (
+                <div className="min-h-0 flex-1 border-t border-slate-100 p-3">
+                  <DataTable<DockerImageRow>
+                    columns={imageColumns}
+                    rows={images}
+                    rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.name}`}
+                    storageKey="containers-images"
+                    autoRefresh={{ intervalMs: 30_000, queries: [containersQuery] }}
+                    fillHeight
+                    searchPlaceholder="Search images…"
+                    emptyMessage="No image data reported yet — Docker hosts (generic Docker plugin) and TrueNAS SCALE appliances report their images within a poll cycle."
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
     </Layout>
   );
 }

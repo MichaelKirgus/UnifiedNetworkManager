@@ -1113,6 +1113,71 @@ async function ingestInventory(
           ));
       }
     }
+
+    // --- Docker images ------------------------------------------------------
+    // Generic key — any plugin may emit it:
+    //   images[] { name, sizeBytes?, createdAt?, updateAvailable?, dangling?, extra? }
+    // Same CONFIG-object lifecycle as containers (upsert-per-poll + delete-on-
+    // absent, present-but-empty = authoritative wipe): an image removed from the
+    // host must vanish from the Containers page's images panel on the next poll.
+    const rawImages = Array.isArray(metrics['images']) ? (metrics['images'] as unknown[]) : null;
+    if (rawImages !== null) {
+      const values: {
+        deviceId: string; pluginId: string; name: string; sizeBytes: number | null;
+        createdAt: string | null; updateAvailable: boolean | null; dangling: boolean;
+        extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawImages) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        if (!name) continue; // name is part of the conflict key
+        values.push({
+          deviceId,
+          pluginId,
+          name,
+          sizeBytes: numOrNull(r['sizeBytes']),
+          createdAt: typeof r['createdAt'] === 'string' && (r['createdAt'] as string).trim() !== '' ? (r['createdAt'] as string) : null,
+          updateAvailable: typeof r['updateAvailable'] === 'boolean' ? (r['updateAvailable'] as boolean) : null,
+          dangling: r['dangling'] === true,
+          extra: extraOf(r),
+          collectedAt,
+        });
+      }
+      const imgByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        imgByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}`, v);
+      }
+      if (imgByKey.size > 0) {
+        await db.insert(schema.dockerImages).values(Array.from(imgByKey.values())).onConflictDoUpdate({
+          target: [schema.dockerImages.deviceId, schema.dockerImages.pluginId, schema.dockerImages.name],
+          set: {
+            sizeBytes: sql`excluded."sizeBytes"`,
+            createdAt: sql`excluded."createdAt"`,
+            updateAvailable: sql`excluded."updateAvailable"`,
+            dangling: sql`excluded.dangling`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      const seenImgNames = new Set(values.map((v) => v.name));
+      if (seenImgNames.size > 0) {
+        await db.delete(schema.dockerImages)
+          .where(and(
+            eq(schema.dockerImages.deviceId, deviceId),
+            eq(schema.dockerImages.pluginId, pluginId),
+            notInArray(schema.dockerImages.name, Array.from(seenImgNames))
+          ));
+      } else if (rawImages.length === 0) {
+        // Present-but-EMPTY is the authoritative wipe — same contract as containers.
+        await db.delete(schema.dockerImages)
+          .where(and(
+            eq(schema.dockerImages.deviceId, deviceId),
+            eq(schema.dockerImages.pluginId, pluginId)
+          ));
+      }
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(
@@ -1157,6 +1222,7 @@ async function sweepStaleInventory(): Promise<void> {
   await db.delete(schema.storageFilesystems).where(lt(schema.storageFilesystems.collectedAt, cutoff));
   await db.delete(schema.storageDisks).where(lt(schema.storageDisks.collectedAt, cutoff));
   await db.delete(schema.containers).where(lt(schema.containers.collectedAt, cutoff));
+  await db.delete(schema.dockerImages).where(lt(schema.dockerImages.collectedAt, cutoff));
 }
 
 /**

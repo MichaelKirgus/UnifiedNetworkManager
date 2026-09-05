@@ -2391,11 +2391,13 @@ paths:
       description: >-
         Returns the normalized `containers` rows (TrueNAS SCALE Apps today; any
         plugin may emit the generic `containers[]` metric), populated by the
-        telemetry worker from each plugin's /monitoring metrics. One row per app
-        on one device — no merging; devices without container data contribute no
-        rows. The `extra` object carries networks[], ips[], ports[] and
-        per-service detail for expandable rows. Rows not refreshed within 24h are
-        swept away.
+        telemetry worker from each plugin's /monitoring metrics, plus the
+        normalized `docker_images` rows (any plugin may emit the generic
+        `images[]` metric) for the page's collapsible images panel. One row per
+        app/image on one device — no merging; devices without container or image
+        data contribute no rows. The containers `extra` object carries networks[],
+        ips[], ports[] and per-service detail for expandable rows. Rows not
+        refreshed within 24h are swept away.
       parameters:
         - in: query
           name: deviceId
@@ -4397,14 +4399,40 @@ components:
             host ports), containerCount, containers[] per-service detail, volumeMounts[].
         collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this app" }
 
+    DockerImageRow:
+      type: object
+      required: [deviceId, pluginId, name, dangling, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this image lives on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this image" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        name: { type: string, description: "Full image reference (e.g. nginx:1.27-alpine, ghcr.io/x/y@sha256:...)" }
+        sizeBytes: { type: [number, 'null'], description: "Image size in bytes as reported by the plugin's API" }
+        createdAt: { type: [string, 'null'], format: date-time, description: "ISO-8601 creation timestamp of the image" }
+        updateAvailable: { type: [boolean, 'null'], description: "True when a newer version is available (TrueNAS app.image.update_available; null for plain Docker hosts)" }
+        dangling: { type: boolean, description: "True for dangling images (<none>:<none> / unreferenced layers)" }
+        extra:
+          type: object
+          additionalProperties: true
+          description: "Plugin-specific details (JSON) — same contract as ContainerRow.extra"
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this image" }
+
     ContainersOverview:
       type: object
-      required: [containers]
+      required: [containers, images]
       properties:
         containers:
           type: array
           items:
             $ref: '#/components/schemas/ContainerRow'
+        images:
+          type: array
+          description: "Docker image inventory for the page's collapsible images panel (generic `images[]` metric)"
+          items:
+            $ref: '#/components/schemas/DockerImageRow'
 
     WifiOverview:
       type: object

@@ -832,9 +832,31 @@ export interface ContainerRow {
   pluginName?: string | null;
 }
 
-/** Response of GET /containers. */
+/** One docker image row from GET /containers (the `images` panel). */
+export interface DockerImageRow {
+  deviceId: string;
+  pluginId: string;
+  /** Full image reference (e.g. "nginx:1.27-alpine", "ghcr.io/x/y@sha256:..."). */
+  name: string;
+  sizeBytes?: number | null;
+  /** ISO-8601 creation timestamp of the image. */
+  createdAt?: string | null;
+  /** True when a newer version is available (TrueNAS only; null elsewhere). */
+  updateAvailable?: boolean | null;
+  /** Dangling image (<none>:<none> / unreferenced layers). */
+  dangling: boolean;
+  extra?: Record<string, unknown>;
+  collectedAt: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+/** Response of GET /containers — apps/containers (top table) + images (bottom panel). */
 export interface ContainersOverview {
   containers: ContainerRow[];
+  images: DockerImageRow[];
 }
 
 /** A user account (never includes password hashes or TOTP secrets). */

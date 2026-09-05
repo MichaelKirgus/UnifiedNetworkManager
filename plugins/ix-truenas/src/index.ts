@@ -979,6 +979,61 @@ function buildContainerRows(
   return rows;
 }
 
+// ---------------------------------------------------------------------------
+// Docker image inventory (Containers page → collapsible images panel): the
+// generic `images[]` metric. Source is app.image.query — TrueNAS SCALE's view
+// of the local docker image store (one entry per image, with all its tags).
+// Same upsert + delete-on-absent lifecycle as containers at ingest.
+// ---------------------------------------------------------------------------
+
+/** One row of the images inventory (shape consumed by the API's ingestInventory). */
+interface ImageRow {
+  name: string;
+  sizeBytes?: number | null;
+  createdAt?: string | null;
+  updateAvailable?: boolean | null;
+  dangling?: boolean;
+  extra?: Record<string, unknown>;
+}
+
+const NONE_TAG = '<none>:<none>';
+
+/** Maps raw app.image.query entries to UNM image rows: one row per IMAGE (not
+ * per tag) — the first real tag is the name, all tags/digests ride in `extra`.
+ * An image whose only tag is <none>:<none> is dangling and named by its short id. */
+function buildImageRows(appImages: Record<string, unknown>[]): ImageRow[] {
+  const rows: ImageRow[] = [];
+  for (const img of appImages) {
+    if (!img || typeof img !== 'object') continue;
+    const tagsRaw = Array.isArray(img['repo_tags']) ? (img['repo_tags'] as unknown[]) : [];
+    const tags = tagsRaw.filter((t): t is string => typeof t === 'string' && t.length > 0);
+    const realTags = tags.filter((t) => t !== NONE_TAG);
+    const dangling = img['dangling'] === true || realTags.length === 0;
+
+    let name: string;
+    if (!dangling) {
+      name = realTags[0];
+    } else {
+      // Untagged image — identify by short id so the row is stable + readable.
+      const id = pickString(img, ['id']) ?? '';
+      name = id ? `sha256:${id.slice(0, 12)}` : 'unknown';
+    }
+
+    rows.push({
+      name,
+      sizeBytes: pickNumber(img, ['size']),
+      createdAt: pickString(img, ['created']),
+      updateAvailable: typeof img['update_available'] === 'boolean' ? (img['update_available'] as boolean) : null,
+      dangling,
+      extra: {
+        ...(realTags.length > 1 ? { tags: realTags } : {}),
+        ...(Array.isArray(img['repo_digests']) && (img['repo_digests'] as unknown[]).length > 0 ? { digests: img['repo_digests'] } : {}),
+      },
+    });
+  }
+  return rows.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** True for DMI placeholder values ("To Be Filled By O.E.M.") — not real data. */
 function isPlaceholder(s: string | undefined): boolean {
   return !s || /to be filled/i.test(s);
@@ -1053,7 +1108,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // section, not reject the whole poll before error handling. The last three
   // are best-effort extras (networks inventory + static routes + board
   // serial/model) — their failure does NOT count toward health.
-  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes] = await Promise.allSettled([
+  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('alert.list', [], creds),
@@ -1071,12 +1126,15 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     client.call<string[]>('boot.get_disks', [], creds),
     // Containers-page extras (best-effort — never count toward health).
     // app.query = one row per installed App (k8s workload); docker.network.query
-    // = the docker networks (macvlan/bridge) with their subnets. Per-app static
-    // IPs come from app.config(name) below (sequential, after this batch).
+    // = the docker networks (macvlan/bridge) with their subnets; app.image.query
+    // = the local docker image inventory (tags, sizes, dangling flag) for the
+    // Containers page's images panel. Per-app static IPs come from app.config(name)
+    // below (sequential, after this batch).
     // Skipped entirely when the `collectApps` option is off — no container RPC
     // traffic to the appliance at all.
     collectApps ? client.call<Record<string, unknown>[]>('app.query', [], creds) : Promise.resolve(undefined),
     collectApps ? client.call<Record<string, unknown>[]>('docker.network.query', [], creds) : Promise.resolve(undefined),
+    collectApps ? client.call<Record<string, unknown>[]>('app.image.query', [], creds) : Promise.resolve(undefined),
   ]);
 
   // TEMP DEBUG (log-once per host): the storage extras are best-effort — their
@@ -1089,9 +1147,10 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     ['boot.get_disks', bootDisksRes],
     ['app.query', appsRes],
     ['docker.network.query', dockerNetsRes],
+    ['app.image.query', appImagesRes],
   ] as const) {
     // Not called when collection is disabled — don't log their "outcome".
-    if (!collectApps && (label === 'app.query' || label === 'docker.network.query')) continue;
+    if (!collectApps && (label === 'app.query' || label === 'docker.network.query' || label === 'app.image.query')) continue;
     if (storageDebugLogged.has(`${host}|${label}`)) continue;
     storageDebugLogged.add(`${host}|${label}`);
     if (r.status === 'rejected') {
@@ -1451,6 +1510,18 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     metrics['dockerHosts'] = dockerHosts;
   }
 
+  // --- app.image.query: image inventory (Containers page → images panel) -----
+  // Best-effort extra — never counts toward health. Independent of the app.query
+  // outcome above (the two RPCs are separate). Emitted even when EMPTY so a
+  // removed image vanishes from the page on the next poll (present-but-empty is
+  // authoritative; an absent key would not wipe). Skipped while collectApps is
+  // off — no image RPC traffic to the appliance at all.
+  if (!collectApps) {
+    metrics['images'] = [];
+  } else if (appImagesRes.status === 'fulfilled' && Array.isArray(appImagesRes.value)) {
+    metrics['images'] = buildImageRows(appImagesRes.value as Record<string, unknown>[]);
+  }
+
   // --- system.dmidecode_info: board serial + real hardware model fallback ---
   // system.info's `model` is the CPU; the baseboard product name is the actual
   // appliance model. Serial: DMI values are often placeholders — skip those.
@@ -1575,6 +1646,16 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
       type: 'string',
       visualization: 'table',
       columns: ['name', 'state', 'image', 'version'],
+      group: 'Storage',
+    });
+  }
+  if (Array.isArray(metrics['images']) && (metrics['images'] as unknown[]).length > 0) {
+    out.push({
+      key: 'images',
+      label: 'Docker Images',
+      type: 'string',
+      visualization: 'table',
+      columns: ['name', 'sizeBytes', 'createdAt', 'updateAvailable'],
       group: 'Storage',
     });
   }

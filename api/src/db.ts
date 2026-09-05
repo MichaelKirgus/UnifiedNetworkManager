@@ -588,6 +588,25 @@ export async function initDb(): Promise<void> {
   // release (the TrueNAS API exposes no container start-time; see schema.ts).
   await pool.query(`ALTER TABLE containers ADD COLUMN IF NOT EXISTS "startedAt" TEXT`);
 
+  // Docker images inventory table (Containers page → collapsible images panel) —
+  // one row per image, upserted per poll from the plugin's `images` metric.
+  // Same lifecycle as containers (upsert + delete-on-absent + 24h sweep).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS docker_images (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      "sizeBytes" DOUBLE PRECISION,
+      "createdAt" TEXT,
+      "updateAvailable" BOOLEAN,
+      "dangling" BOOLEAN NOT NULL DEFAULT FALSE,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_docker_images_device ON docker_images ("deviceId")`);
+
   // Plugin log entries (see schema.pluginLogs). Pushed by plugins in batches
   // via POST /plugin/logs; swept by the retention worker after LOG_RETENTION_DAYS.
   await pool.query(`

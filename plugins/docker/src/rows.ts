@@ -232,3 +232,71 @@ function dedupeVolumes(vols: ContainerVolume[]): ContainerVolume[] {
   }
   return out.sort((a, b) => a.source.localeCompare(b.source));
 }
+
+// --- Image inventory (/images/json → UNM `images[]` metric) -------------------
+
+export interface DockerImageRaw {
+  Id?: string; // sha256:<hex>
+  RepoTags?: string[]; // ["nginx:1.27-alpine", "<none>:<none>", ...] or [] for untagged
+  RepoDigests?: string[];
+  Created?: number; // unix seconds
+  Size?: number;
+  VirtualSize?: number;
+  Containers?: number;
+}
+
+/** One row of the images inventory (shape consumed by the API's ingestInventory). */
+export interface ImageRow {
+  name: string;
+  sizeBytes?: number | null;
+  createdAt?: string | null;
+  /** Plain Docker hosts do no registry checks — always null. */
+  updateAvailable?: boolean | null;
+  dangling?: boolean;
+  extra?: Record<string, unknown>;
+}
+
+const NONE_TAG = '<none>:<none>';
+
+/** Maps raw /images/json entries to UNM image rows: one row per IMAGE (not per
+ * tag) — the first real tag is the name, all tags/digests ride in `extra`. An
+ * image whose only tag is <none>:<none> is dangling and named by its short id. */
+export function buildImageRows(raw: DockerImageRaw[]): ImageRow[] {
+  const rows: ImageRow[] = [];
+  for (const img of raw) {
+    if (!img || typeof img !== 'object') continue;
+    const tags = Array.isArray(img.RepoTags) ? img.RepoTags.filter((t): t is string => typeof t === 'string' && t.length > 0) : [];
+    const realTags = tags.filter((t) => t !== NONE_TAG);
+    const dangling = realTags.length === 0;
+
+    let name: string;
+    if (!dangling) {
+      name = realTags[0];
+    } else {
+      // Untagged image — identify by short id so the row is stable + readable.
+      const id = typeof img.Id === 'string' ? img.Id.replace(/^sha256:/, '') : '';
+      name = id ? `sha256:${id.slice(0, 12)}` : 'unknown';
+    }
+
+    const sizeBytes = typeof img.Size === 'number' && img.Size > 0
+      ? img.Size
+      : (typeof img.VirtualSize === 'number' && img.VirtualSize > 0 ? img.VirtualSize : null);
+    const createdAt = typeof img.Created === 'number' && Number.isFinite(img.Created)
+      ? new Date(img.Created * 1000).toISOString()
+      : null;
+
+    rows.push({
+      name,
+      sizeBytes,
+      createdAt,
+      updateAvailable: null, // no registry check on plain Docker hosts
+      dangling,
+      extra: {
+        ...(realTags.length > 1 ? { tags: realTags } : {}),
+        ...(Array.isArray(img.RepoDigests) && img.RepoDigests.length > 0 ? { digests: img.RepoDigests } : {}),
+        ...(typeof img.Containers === 'number' ? { containersUsing: img.Containers } : {}),
+      },
+    });
+  }
+  return rows.sort((a, b) => a.name.localeCompare(b.name));
+}

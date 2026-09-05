@@ -709,6 +709,13 @@ router.delete('/devices/:deviceId', requireAuth, requirePermission('devices:writ
     await db.delete(schema.networks).where(eq(schema.networks.deviceId, deviceId));
     await db.delete(schema.hosts).where(eq(schema.hosts.deviceId, deviceId));
     await db.delete(schema.devicePorts).where(eq(schema.devicePorts.deviceId, deviceId));
+    // Cross-device inventory rows (Containers/Storage pages) — without these a
+    // deleted device leaves orphaned rows behind (they only carry deviceId +
+    // pluginId, no FK to devices).
+    await db.delete(schema.containers).where(eq(schema.containers.deviceId, deviceId));
+    await db.delete(schema.dockerImages).where(eq(schema.dockerImages.deviceId, deviceId));
+    await db.delete(schema.storageFilesystems).where(eq(schema.storageFilesystems.deviceId, deviceId));
+    await db.delete(schema.storageDisks).where(eq(schema.storageDisks.deviceId, deviceId));
     await db.delete(schema.deviceIps).where(eq(schema.deviceIps.deviceId, deviceId));
     await db.delete(schema.devicePlugins).where(eq(schema.devicePlugins.deviceId, deviceId));
     await db.delete(schema.devices).where(eq(schema.devices.id, deviceId));

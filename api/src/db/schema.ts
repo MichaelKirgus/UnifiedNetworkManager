@@ -891,6 +891,44 @@ export const containers = pgTable(
   }
 );
 
+// One row per docker image as reported by a plugin's `images` metric. Powers
+// the collapsible "Docker images" panel on the Containers page (same layout
+// pattern as storage_disks under the Storage page). Same upsert-per-poll +
+// delete-on-absent lifecycle as containers: an image removed from the host must
+// vanish, not linger until the 24h sweep. `name` is part of the PK — one row
+// per (device, plugin, image-name); a device without image data contributes no rows.
+export const dockerImages = pgTable(
+  'docker_images',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Full image reference (e.g. "nginx:1.27-alpine", "ghcr.io/x/y@sha256:...").
+    name: text('name').notNull(),
+    // Image size in bytes (compressed on the registry / unpacked on disk,
+    // depending on source — plugins report what their API exposes).
+    sizeBytes: doublePrecision('sizeBytes'),
+    // ISO-8601 creation timestamp of the image.
+    createdAt: text('createdAt'),
+    // True when a newer version is available (TrueNAS app.image.update_available;
+    // always null for plain Docker hosts — no registry check).
+    updateAvailable: boolean('updateAvailable'),
+    // True for dangling images (<none>:<none> / unreferenced layers).
+    dangling: boolean('dangling').notNull().default(false),
+    // Plugin-specific details (JSON object) stored verbatim.
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDockerImages: primaryKey({
+        name: 'docker_images_pkey',
+        columns: [table.deviceId, table.pluginId, table.name],
+      }),
+      idxDockerImagesDevice: index('idx_docker_images_device').on(table.deviceId),
+    };
+  }
+);
+
 // Execution plans produced by a plugin's /plan endpoint (e.g. an OPNsense
 // WireGuard tunnel spanning two firewalls). The API persists the plan and its
 // steps, fulfils the plan's provisionRequests via the secrets provider at

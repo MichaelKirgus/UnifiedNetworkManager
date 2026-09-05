@@ -1115,9 +1115,11 @@ router.get('/storage', requireAuth, requirePermission('storage:read'), async (_r
 
 // GET /containers - Cross-device container/App overview (Containers page).
 // Returns the normalized `containers` rows (TrueNAS SCALE Apps today; any plugin
-// may emit the generic `containers[]` metric) with device + plugin views joined.
-// One row per app on one device — no cross-device merge. The `extra` JSON column
-// carries networks[], ips[], ports[] and per-service detail for expandable rows.
+// may emit the generic `containers[]` metric) with device + plugin views joined,
+// plus the normalized `docker_images` rows (any plugin may emit the generic
+// `images[]` metric) for the page's collapsible images panel. One row per app /
+// image on one device — no cross-device merge. The `extra` JSON column carries
+// networks[], ips[], ports[] and per-service detail for expandable rows.
 // Query params: deviceId (exact), siteId (filter by device's site).
 router.get('/containers', requireAuth, requirePermission('containers:read'), async (_req, res: Response) => {
   try {
@@ -1128,7 +1130,7 @@ router.get('/containers', requireAuth, requirePermission('containers:read'), asy
       // Both filters: verify the device belongs to the site first.
       const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
       if (!device || device.siteId !== siteId) {
-        res.status(200).json({ containers: [] });
+        res.status(200).json({ containers: [], images: [] });
         return;
       }
       contWhere = eq(schema.containers.deviceId, deviceId);
@@ -1137,34 +1139,44 @@ router.get('/containers', requireAuth, requirePermission('containers:read'), asy
     } else if (siteId) {
       const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
       if (deviceIds.length === 0) {
-        res.status(200).json({ containers: [] });
+        res.status(200).json({ containers: [], images: [] });
         return;
       }
       contWhere = inArray(schema.containers.deviceId, deviceIds);
     }
 
-    const rows = await db.query.containers.findMany({
-      ...(contWhere ? { where: contWhere } : {}),
-      orderBy: [asc(schema.containers.deviceId), asc(schema.containers.name)],
-    });
-
-    const [deviceViews, pluginNames] = await Promise.all([
-      loadDeviceViews(rows.map((r) => r.deviceId)),
-      loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId)))),
+    const [rows, imageRows] = await Promise.all([
+      db.query.containers.findMany({
+        ...(contWhere ? { where: contWhere } : {}),
+        orderBy: [asc(schema.containers.deviceId), asc(schema.containers.name)],
+      }),
+      // Images share the device filter (same site/device scoping as containers).
+      db.query.dockerImages.findMany({
+        ...(contWhere ? { where: contWhere } : {}),
+        orderBy: [asc(schema.dockerImages.deviceId), asc(schema.dockerImages.name)],
+      }),
     ]);
 
+    const [deviceViews, pluginNames] = await Promise.all([
+      loadDeviceViews(Array.from(new Set([...rows.map((r) => r.deviceId), ...imageRows.map((r) => r.deviceId)]))),
+      loadPluginNames(Array.from(new Set([...rows.map((r) => r.pluginId), ...imageRows.map((r) => r.pluginId)]))),
+    ]);
+
+    const decorate = <T extends { deviceId: string; pluginId: string }>(row: T, extra?: string) => {
+      const device = deviceViews.get(row.deviceId);
+      return {
+        ...row,
+        ...(extra !== undefined ? { extra: safeParseJson<Record<string, unknown>>(extra) } : {}),
+        deviceName: device?.name ?? null,
+        managementAddress: device?.managementAddress ?? null,
+        siteName: device?.siteName ?? null,
+        pluginName: pluginNames.get(row.pluginId) ?? null,
+      };
+    };
+
     res.status(200).json({
-      containers: rows.map((row) => {
-        const device = deviceViews.get(row.deviceId);
-        return {
-          ...row,
-          extra: safeParseJson<Record<string, unknown>>(row.extra),
-          deviceName: device?.name ?? null,
-          managementAddress: device?.managementAddress ?? null,
-          siteName: device?.siteName ?? null,
-          pluginName: pluginNames.get(row.pluginId) ?? null,
-        };
-      }),
+      containers: rows.map((row) => decorate(row, row.extra)),
+      images: imageRows.map((row) => decorate(row, row.extra)),
     });
   } catch (err) {
     const e = err as { status?: number; message?: string };
