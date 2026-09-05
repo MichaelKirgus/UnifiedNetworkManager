@@ -1695,9 +1695,13 @@ export const api = {
       '/notifications/ack',
       { method: 'POST', body: JSON.stringify(all ? { all: true } : { ids }) }
     ),
-  closeNotifications: (ids: string[]) =>
-    apiFetch<{ closed: number }>('/notifications/close', { method: 'POST', body: JSON.stringify({ ids }) }),
+  /** Close rows locally; with `propagate`, mirrored appliance alerts (e.g. TrueNAS) are also dismissed on the box. */
+  closeNotifications: (ids: string[], propagate = false) =>
+    apiFetch<{ closed: number }>('/notifications/close', { method: 'POST', body: JSON.stringify({ ids, propagate }) }),
   resolveNotification: (id: string) => apiFetch<{ ok: boolean }>(`/notifications/${id}`, { method: 'DELETE' }),
+  /** Bulk "condition fixed" — same transition as resolveNotification, for many rows at once. */
+  resolveNotifications: (ids: string[]) =>
+    apiFetch<{ resolved: number }>('/notifications/resolve', { method: 'POST', body: JSON.stringify({ ids }) }),
   notificationPrefs: () => apiFetch<NotificationPrefs>('/notifications/prefs'),
   setNotificationPrefs: (visibility: Record<string, NotificationSeverity[]>) =>
     apiFetch<NotificationPrefs>('/notifications/prefs', { method: 'PUT', body: JSON.stringify({ visibility }) }),

@@ -36,7 +36,7 @@ import {
   type DockerContainerInfo,
   type ServiceNetDetail,
 } from './enrich';
-import { registry as actionRegistry, TruenasActionContext } from './actions';
+import { alertDedupeKey, registry as actionRegistry, TruenasActionContext } from './actions';
 import { buildTruenasState } from './state';
 import { buildPlan, PlanningError } from './plan';
 
@@ -1484,18 +1484,12 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
       const seen = new Set<string>();
       for (const a of active) {
         const klass = pickString(a, ['klass']) ?? 'Unknown';
-        const argsRaw = a['args'];
-        // Args are usually [diskName] or {name: ...} — take the first string-ish
-        // piece as the subject so "SMART uncorrected errors on da0" dedupes per disk.
-        let subject = '';
-        if (Array.isArray(argsRaw) && argsRaw.length > 0) {
-          const first = argsRaw[0];
-          subject = typeof first === 'string' ? first : pickString((first ?? {}) as Record<string, unknown>, ['name', 'disk']) ?? '';
-        } else if (argsRaw && typeof argsRaw === 'object') {
-          subject = pickString(argsRaw as Record<string, unknown>, ['name', 'disk']) ?? '';
-        }
-        const key = `alert:${klass}:${subject}`.toLowerCase();
+        // Shared with the alerts.dismiss action — keeps UNM rows and appliance
+        // alerts matched by the same stable key across polls.
+        const key = alertDedupeKey(klass, a['args']);
         seen.add(key);
+        // The subject is the tail of the shared key (alert:<klass>:<subject>).
+        const subject = key.slice(`alert:${klass}:`.length);
 
         const sev = parseAlertSeverity(a);
         const text = pickString(a, ['text']) ?? klass;

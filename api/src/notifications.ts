@@ -184,6 +184,19 @@ export async function resolveNotification(id: string): Promise<void> {
     .where(and(eq(schema.notifications.id, id), inArray(schema.notifications.status, ['open', 'acknowledged'])));
 }
 
+/** Resolve many notifications at once (bulk "condition fixed"). Returns the number of rows actually transitioned. */
+export async function resolveNotifications(ids: string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  const now = new Date().toISOString();
+  const placeholders = ids.map((_, i) => `$${i + 2}`).join(', ');
+  const result = await pool.query(
+    `UPDATE notifications SET status = 'resolved', "resolvedAt" = $1
+     WHERE id IN (${placeholders}) AND status IN ('open', 'acknowledged')`,
+    [now, ...ids]
+  );
+  return result.rowCount ?? 0;
+}
+
 /**
  * Resolve every live row whose dedupeKey is in the list. Used by plugins that
  * track ongoing conditions themselves (e.g. TrueNAS alerts): when an alert

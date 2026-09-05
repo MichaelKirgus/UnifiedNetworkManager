@@ -1,8 +1,9 @@
 import { Router, Response } from 'express';
 import { db } from '../db';
 import * as schema from '../db/schema';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { requireAuth, requirePermission } from '../auth/middleware';
+import { dispatchPluginAction } from '../utils/pluginDispatch';
 import {
   acknowledgeAllOpen,
   acknowledgeNotifications,
@@ -11,6 +12,7 @@ import {
   getVisibilityPrefs,
   listNotifications,
   resolveNotification,
+  resolveNotifications,
   setVisibilityPrefs,
 } from '../notifications';
 
@@ -20,13 +22,64 @@ import {
  *   GET    /notifications            list (filters: status/severity/source/deviceId/pluginId/search/limit)
  *   GET    /notifications/count      open count visible to the caller (bell badge)
  *   POST   /notifications/ack        acknowledge {ids} | all:true
- *   POST   /notifications/close      close/dismiss {ids}
+ *   POST   /notifications/close      close/dismiss {ids, propagate?}
+ *   POST   /notifications/resolve    resolve {ids} — bulk "condition fixed"
  *   DELETE /notifications/:id        resolve one (condition fixed/cleared)
  *   GET    /notifications/prefs      the caller's visibility prefs
  *   PUT    /notifications/prefs      update them (notifications:write)
  *
  * Gated by `notifications:read`; only the prefs PUT needs `notifications:write`.
  */
+
+/**
+ * Propagate a close to the appliance for TrueNAS alert notifications.
+ *
+ * UNM notification rows are normally LOCAL state — closing one never touches
+ * the device. But plugin-source rows that mirror appliance alerts (TrueNAS
+ * `alert.list`) carry a dedupe key of the form `plugin:<pluginId>:<key>`; when
+ * the user closes such a row we also dismiss the underlying alert on the box
+ * (`alerts.dismiss` action) so the acknowledgment is end-to-end. Dismissed
+ * alerts stop driving health and are skipped by the plugin's mirroring, so the
+ * closed state stays consistent across re-polls.
+ *
+ * Best-effort: runs AFTER the local close has already succeeded (the response
+ * is sent first), groups rows per device+plugin, and never throws — a failed
+ * dispatch only logs. Returns nothing; callers fire-and-forget it.
+ */
+async function propagateCloseToAppliances(ids: string[]): Promise<void> {
+  try {
+    const rows = await db.query.notifications.findMany({ where: inArray(schema.notifications.id, ids) });
+    // Group by device+plugin — one dispatch per appliance, keys batched.
+    const groups = new Map<string, { deviceId: string; pluginId: string; keys: Set<string> }>();
+    for (const row of rows) {
+      if (row.source !== 'plugin' || !row.deviceId || !row.pluginId || !row.dedupeKey) continue;
+      const m = /^plugin:([^:]+):(.+)$/.exec(row.dedupeKey);
+      if (!m || m[1] !== row.pluginId) continue; // only rows this plugin produced
+      const key = m[2];
+      let g = groups.get(`${row.deviceId}|${row.pluginId}`);
+      if (!g) {
+        g = { deviceId: row.deviceId, pluginId: row.pluginId, keys: new Set() };
+        groups.set(`${row.deviceId}|${row.pluginId}`, g);
+      }
+      g.keys.add(key);
+    }
+
+    for (const g of groups.values()) {
+      const res = await dispatchPluginAction(g.deviceId, g.pluginId, 'alerts.dismiss', { keys: [...g.keys] });
+      if (!res.ok) {
+        console.warn(`[notifications] appliance dismiss failed for ${g.deviceId}/${g.pluginId}: ${res.error}`);
+      } else {
+        const d = res.result?.details as Record<string, unknown> | undefined;
+        console.info(
+          `[notifications] dismissed ${String(d?.dismissed ?? 0)} alert(s) on appliance for device ${g.deviceId} (${[...g.keys].length} key(s))`
+        );
+      }
+    }
+  } catch (err) {
+    // Propagation is strictly best-effort — the local close already succeeded.
+    console.warn('[notifications] appliance propagation error:', err);
+  }
+}
 
 const router = Router();
 
@@ -106,19 +159,25 @@ router.post(
   }
 );
 
-// POST /notifications/close — dismiss from view.
+// POST /notifications/close — dismiss from view. With `propagate: true`,
+// plugin-source rows that mirror appliance alerts (TrueNAS alert.list) also
+// dismiss the underlying alert on the box (best-effort, after responding).
 router.post(
   '/notifications/close',
   requireAuth,
   requirePermission('notifications:read'),
   async (req, res: Response) => {
     try {
-      const body = req.body as { ids?: string[] };
+      const body = req.body as { ids?: string[]; propagate?: boolean };
       const ids = Array.isArray(body?.ids) ? body.ids.filter((x): x is string => typeof x === 'string') : [];
       if (ids.length === 0) {
         return res.status(400).json({ error: '"ids" array is required' });
       }
-      const n = await closeNotifications(ids.slice(0, 500));
+      const capped = ids.slice(0, 500);
+      const n = await closeNotifications(capped);
+      // Fire-and-forget AFTER the response — appliance round-trips must not
+      // delay or fail the local close.
+      if (body?.propagate === true) void propagateCloseToAppliances(capped);
       res.json({ closed: n });
     } catch (err) {
       const e = err as { status?: number; message?: string };
@@ -136,6 +195,27 @@ router.delete(
     try {
       await resolveNotification(req.params.id);
       res.json({ ok: true });
+    } catch (err) {
+      const e = err as { status?: number; message?: string };
+      res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+    }
+  }
+);
+
+// POST /notifications/resolve — bulk "condition fixed" (same transition as DELETE :id).
+router.post(
+  '/notifications/resolve',
+  requireAuth,
+  requirePermission('notifications:read'),
+  async (req, res: Response) => {
+    try {
+      const body = req.body as { ids?: string[] };
+      const ids = Array.isArray(body?.ids) ? body.ids.filter((x): x is string => typeof x === 'string') : [];
+      if (ids.length === 0) {
+        return res.status(400).json({ error: '"ids" array is required' });
+      }
+      const n = await resolveNotifications(ids.slice(0, 500));
+      res.json({ resolved: n });
     } catch (err) {
       const e = err as { status?: number; message?: string };
       res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

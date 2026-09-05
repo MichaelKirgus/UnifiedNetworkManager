@@ -2692,6 +2692,12 @@ paths:
     post:
       tags: [Notifications]
       summary: Close (dismiss) notifications from view
+      description: >-
+        Dismisses the given rows locally. With `propagate: true`, plugin-source
+        rows that mirror appliance alerts (e.g. TrueNAS alert.list entries,
+        dedupe key `plugin:<pluginId>:<key>`) additionally dismiss the
+        underlying alert on the appliance via its `alerts.dismiss` action —
+        best-effort and non-blocking; a failed dispatch never fails the close.
       requestBody:
         required: true
         content:
@@ -2704,6 +2710,10 @@ paths:
                   type: array
                   items: { type: string }
                   description: Notification ids to close (max 500)
+                propagate:
+                  type: boolean
+                  default: false
+                  description: Also dismiss mirrored appliance alerts on the device(s)
       responses:
         '200':
           description: Number of rows closed
@@ -2714,6 +2724,39 @@ paths:
                 required: [closed]
                 properties:
                   closed: { type: integer }
+        '400':
+          description: ids array missing or empty
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:read permission
+
+  /notifications/resolve:
+    post:
+      tags: [Notifications]
+      summary: Resolve notifications in bulk (condition fixed/cleared)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { type: string }
+                  description: Notification ids to resolve (max 500)
+      responses:
+        '200':
+          description: Number of rows resolved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [resolved]
+                properties:
+                  resolved: { type: integer }
         '400':
           description: ids array missing or empty
         '401':

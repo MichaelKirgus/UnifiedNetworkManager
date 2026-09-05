@@ -97,8 +97,17 @@ export default function Notifications() {
   };
 
   const ackMut = useMutation({ mutationFn: (ids: string[]) => api.acknowledgeNotifications(ids), onSuccess: invalidate });
-  const closeMut = useMutation({ mutationFn: (ids: string[]) => api.closeNotifications(ids), onSuccess: invalidate });
+  // propagate=true → mirrored appliance alerts (e.g. TrueNAS alert.list) are
+  // also dismissed on the box, so closing is end-to-end, not just local state.
+  const closeMut = useMutation({ mutationFn: (ids: string[]) => api.closeNotifications(ids, true), onSuccess: invalidate });
   const resolveMut = useMutation({ mutationFn: (id: string) => api.resolveNotification(id), onSuccess: invalidate });
+
+  // Bulk variants of the per-row actions — same transitions, many rows at once.
+  // Bulk variants of the per-row actions — same transitions, many rows at once.
+  const bulkAckMut = useMutation({ mutationFn: (ids: string[]) => api.acknowledgeNotifications(ids), onSuccess: invalidate });
+  const bulkResolveMut = useMutation({ mutationFn: (ids: string[]) => api.resolveNotifications(ids), onSuccess: invalidate });
+  // propagate=true → mirrored appliance alerts are dismissed on the box too.
+  const bulkCloseMut = useMutation({ mutationFn: (ids: string[]) => api.closeNotifications(ids, true), onSuccess: invalidate });
 
   const columns: DataTableColumn<Notification>[] = [
     {
@@ -292,6 +301,36 @@ export default function Notifications() {
           storageKey="unm:notifications-table"
           searchPlaceholder="Search notifications…"
           emptyMessage="No notifications match the current filters."
+          selectable
+          bulkActions={[
+            {
+              label: 'Mark as seen',
+              confirm: (count) => `Acknowledge ${count} notification(s)?\nThey stay in the list but drop out of the bell badge.`,
+              onClick: async (rows) => {
+                const ids = rows.filter((r) => r.status === 'open').map((r) => r.id);
+                if (ids.length === 0) return;
+                await bulkAckMut.mutateAsync(ids);
+              },
+            },
+            {
+              label: 'Resolve selected',
+              confirm: (count) => `Mark ${count} notification(s) as resolved?\nUse this when the underlying condition is fixed.`,
+              onClick: async (rows) => {
+                const ids = rows.filter((r) => r.status === 'open' || r.status === 'acknowledged').map((r) => r.id);
+                if (ids.length === 0) return;
+                await bulkResolveMut.mutateAsync(ids);
+              },
+            },
+            {
+              label: 'Close selected',
+              confirm: (count) => `Close ${count} notification(s)?\nThey are dismissed from view, and mirrored appliance alerts (e.g. TrueNAS alert.list entries) are also dismissed on the device itself — best-effort, so a reachable-device failure won't block the local close.`,
+              onClick: async (rows) => {
+                const ids = rows.filter((r) => r.status === 'open' || r.status === 'acknowledged').map((r) => r.id);
+                if (ids.length === 0) return;
+                await bulkCloseMut.mutateAsync(ids);
+              },
+            },
+          ]}
         />
     </Layout>
   );
