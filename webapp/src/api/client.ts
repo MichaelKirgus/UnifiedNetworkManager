@@ -842,6 +842,18 @@ export interface ContainerServiceDetail {
   startedAt?: string | null;
   /** Volume mounts declared for this container (compose config). */
   volumes?: ContainerVolume[];
+  // Live stats from `docker stats` over SSH (TrueNAS plugin) — absent until the
+  // first enrichment cycle completes. CPU/RAM are instantaneous; the four rate
+  // fields are AVERAGE throughput since the previous collection, bytes/s.
+  /** Instantaneous CPU utilization in percent. */
+  cpuPct?: number | null;
+  memUsedBytes?: number | null;
+  /** Memory limit in bytes — absent when the container has no limit. */
+  memLimitBytes?: number | null;
+  netRxRate?: number | null;
+  netTxRate?: number | null;
+  blkReadRate?: number | null;
+  blkWriteRate?: number | null;
 }
 
 /** One App/container row from GET /containers. */

@@ -25,7 +25,7 @@
  * the gaps above (and only what the user opted into).
  */
 
-import { createSshPool, pickString, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { CounterTracker, createSshPool, pickString, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import type { TruenasClient, TruenasCredentials } from './client/truenasClient';
 
 // ---------------------------------------------------------------------------
@@ -147,9 +147,12 @@ const MAX_CONTAINERS = 400;
 
 /**
  * Builds ONE combined read-only shell command that inspects every known
- * container in a single pass. Output contract (parsed by parseDockerInspect):
+ * container in a single pass. Output contract (parsed by parseDockerInspect /
+ * parseDockerStats):
  *   <64-hex-id>|<name>|<state>|<startedAt>     one line per container
  *   NET|<network>|<mac>|<ip>                   one line per attached network
+ *   STAT|<name>|<cpu%>|<memUsed/memLimit>|<netRx/netTx>|<blkRead/blkWrite>
+ *                                              one line per container (docker stats)
  */
 function buildDockerInspectCommand(ids: string[]): string {
   const fmt =
@@ -161,7 +164,14 @@ function buildDockerInspectCommand(ids: string[]): string {
     ids.length > 0
       ? ids.join(' ')
       : `$(docker ps -aq 2>/dev/null | head -n ${MAX_CONTAINERS})`;
-  return `for id in ${list}; do docker inspect "$id" --format '${fmt}' 2>/dev/null; done`;
+  return [
+    `for id in ${list}; do docker inspect "$id" --format '${fmt}' 2>/dev/null; done`,
+    // Live per-container stats — the SAME source the TrueNAS UI shows (CPU
+    // utilization, RAM usage/limit, network + block I/O). CPU% and memory are
+    // instantaneous; Net IO / Block IO are CUMULATIVE since container start,
+    // so rates come from deltas across enrichment cycles (computeContainerStats).
+    `docker stats --no-stream ${list} --format 'STAT|{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.NetIO}}|{{.BlockIO}}' 2>/dev/null`,
+  ].join('\n');
 }
 
 const MAC_RE = /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/i;
@@ -199,13 +209,133 @@ export function parseDockerInspect(stdout: string): DockerContainerInfo[] {
   return out;
 }
 
-/** Collects docker container facts over SSH (null when no slot / on failure). */
+/** One container's RAW docker-stats observation (keyed by container name).
+ * CPU% + memory are instantaneous; the four I/O fields are CUMULATIVE byte
+ * counters since container start (rates are derived across cycles). */
+export interface DockerStatsRaw {
+  cpuPct?: number;
+  memUsedBytes?: number;
+  /** Memory limit in bytes — absent when the container has no limit. */
+  memLimitBytes?: number;
+  netRxBytes?: number;
+  netTxBytes?: number;
+  blkReadBytes?: number;
+  blkWriteBytes?: number;
+}
+
+/** One container's derived stats as emitted into container rows: instantaneous
+ * CPU/RAM + AVERAGE throughput since the previous enrichment cycle (bytes/s).
+ * Rates are absent on the first sample after a restart or counter reset. */
+export interface ContainerStat {
+  /** Instantaneous CPU utilization in percent (docker stats sampling window). */
+  cpuPct?: number;
+  memUsedBytes?: number;
+  /** Memory limit in bytes — undefined when the container has no limit. */
+  memLimitBytes?: number;
+  /** Average network throughput since the previous cycle, bytes/s. */
+  netRxRate?: number;
+  netTxRate?: number;
+  /** Average block (disk) I/O since the previous cycle, bytes/s. */
+  blkReadRate?: number;
+  blkWriteRate?: number;
+}
+
+/** docker stats human sizes: "512.2kB", "7.8GiB", "0B" — base-1024 suffixes. */
+const HUMAN_SIZE_RE = /^([0-9]+(?:\.[0-9]+)?)\s*([KMGTP]?i?B?)$/i;
+const SIZE_MULT: Record<string, number> = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4, PB: 1024 ** 5 };
+
+/** Parses one docker humanized size ("5.2MiB") into bytes; undefined for "—"/garbage. */
+export function parseHumanBytes(s: string | null | undefined): number | undefined {
+  const t = (s ?? '').trim();
+  if (!t || t === '—') return undefined;
+  const m = HUMAN_SIZE_RE.exec(t);
+  if (!m) return undefined;
+  const mult = SIZE_MULT[m[2].toUpperCase().replace('I', '')] ?? 1;
+  const v = parseFloat(m[1]) * mult;
+  return Number.isFinite(v) ? Math.round(v) : undefined;
+}
+
+/** Splits a docker "a / b" pair (memory usage/limit, net rx/tx, …). */
+function splitPair(s: string | null | undefined): [string, string] {
+  const t = (s ?? '').trim();
+  if (!t || t === '—') return ['', ''];
+  const i = t.indexOf(' / ');
+  if (i < 0) return [t, ''];
+  return [t.slice(0, i), t.slice(i + 3)];
+}
+
+/** Parses the STAT| lines of the combined SSH output into per-name raw stats. */
+export function parseDockerStats(stdout: string): Map<string, DockerStatsRaw> {
+  const out = new Map<string, DockerStatsRaw>();
+  for (const line of stdout.split('\n')) {
+    if (!line.startsWith('STAT|')) continue;
+    const parts = line.split('|'); // STAT | name | cpu% | memUsed/memLimit | netRx/netTx | blkRead/blkWrite
+    if (parts.length < 6) continue;
+    const name = (parts[1] ?? '').replace(/^\//, '');
+    if (!name) continue;
+    const raw: DockerStatsRaw = {};
+    const cpu = parseFloat((parts[2] ?? '').replace('%', ''));
+    if (Number.isFinite(cpu)) raw.cpuPct = cpu;
+    const [mu, ml] = splitPair(parts[3]);
+    const used = parseHumanBytes(mu);
+    if (used !== undefined) raw.memUsedBytes = used;
+    const limit = parseHumanBytes(ml);
+    if (limit !== undefined && limit > 0) raw.memLimitBytes = limit;
+    const [nr, nt] = splitPair(parts[4]);
+    const rx = parseHumanBytes(nr);
+    if (rx !== undefined) raw.netRxBytes = rx;
+    const tx = parseHumanBytes(nt);
+    if (tx !== undefined) raw.netTxBytes = tx;
+    const [br, bw] = splitPair(parts[5]);
+    const rd = parseHumanBytes(br);
+    if (rd !== undefined) raw.blkReadBytes = rd;
+    const wr = parseHumanBytes(bw);
+    if (wr !== undefined) raw.blkWriteBytes = wr;
+    out.set(name, raw);
+  }
+  return out;
+}
+
+/** One CounterTracker per cumulative counter — baselines survive across the
+ * 15-min enrichment cycles so each cycle yields an average rate over the gap. */
+const statTrackers: Record<'netRx' | 'netTx' | 'blkRead' | 'blkWrite', CounterTracker> = {
+  netRx: new CounterTracker({ toBitsPerSec: false }),
+  netTx: new CounterTracker({ toBitsPerSec: false }),
+  blkRead: new CounterTracker({ toBitsPerSec: false }),
+  blkWrite: new CounterTracker({ toBitsPerSec: false }),
+};
+
+/** Derives per-container stats (instantaneous CPU/RAM + average I/O rates) from
+ * one cycle's raw docker-stats observations. First sample / counter reset →
+ * the rate is simply absent for that container this cycle. */
+export function computeContainerStats(host: string, raw: Map<string, DockerStatsRaw>): Map<string, ContainerStat> {
+  const out = new Map<string, ContainerStat>();
+  for (const [name, r] of raw) {
+    const key = `${host}|${name}`;
+    const stat: ContainerStat = {};
+    if (r.cpuPct !== undefined) stat.cpuPct = r.cpuPct;
+    if (r.memUsedBytes !== undefined) stat.memUsedBytes = r.memUsedBytes;
+    if (r.memLimitBytes !== undefined) stat.memLimitBytes = r.memLimitBytes;
+    const nr = r.netRxBytes !== undefined ? statTrackers.netRx.sample(`${key}|netRx`, r.netRxBytes) : null;
+    if (nr !== null && nr > 0) stat.netRxRate = Math.round(nr);
+    const nt = r.netTxBytes !== undefined ? statTrackers.netTx.sample(`${key}|netTx`, r.netTxBytes) : null;
+    if (nt !== null && nt > 0) stat.netTxRate = Math.round(nt);
+    const br = r.blkReadBytes !== undefined ? statTrackers.blkRead.sample(`${key}|blkRead`, r.blkReadBytes) : null;
+    if (br !== null && br > 0) stat.blkReadRate = Math.round(br);
+    const bw = r.blkWriteBytes !== undefined ? statTrackers.blkWrite.sample(`${key}|blkWrite`, r.blkWriteBytes) : null;
+    if (bw !== null && bw > 0) stat.blkWriteRate = Math.round(bw);
+    out.set(name, stat);
+  }
+  return out;
+}
+
+/** Collects docker container facts + live stats over SSH (null when no slot / on failure). */
 async function collectDockerViaSsh(
   host: string,
   sshCreds: ReturnType<typeof resolveSshCredentials>,
   containerIds: string[],
   log?: (level: 'info' | 'warn', message: string) => void
-): Promise<DockerContainerInfo[] | null> {
+): Promise<{ infos: DockerContainerInfo[]; stats: Map<string, DockerStatsRaw> } | null> {
   if (!sshCreds) return null; // no ssh slot bound — API-only mode
   try {
     const client = await sshPool.get(host, 22, sshCreds);
@@ -218,7 +348,7 @@ async function collectDockerViaSsh(
     if (infos.length === 0 && containerIds.length > 0) {
       log?.('warn', `SSH docker inspect on ${host}: no containers parsed (${r.stderr.slice(0, 120)})`);
     }
-    return infos;
+    return { infos, stats: parseDockerStats(r.stdout) };
   } catch (e) {
     if (e instanceof SshError) log?.('warn', `SSH docker inspect on ${host} failed: ${e.message}`);
     else log?.('warn', `SSH docker inspect on ${host} unexpected error: ${(e as Error).message}`);
@@ -236,6 +366,8 @@ export interface EnrichmentState {
   serviceDetails?: Map<string, ServiceNetDetail[]>;
   /** docker inspect result over SSH (null = attempted but failed/absent). */
   dockerInfo?: DockerContainerInfo[] | null;
+  /** docker stats result over SSH: container NAME → derived CPU/RAM/I-O rates. */
+  dockerStats?: Map<string, ContainerStat>;
   atServiceDetails?: number;
   atDockerInfo?: number;
 }
@@ -550,12 +682,13 @@ export function ensureEnrichment(args: {
         }
       }
       void collectDockerViaSsh(host, sshCreds, ids, log)
-        .then((infos) => {
+        .then((snap) => {
           const s = enrichmentCache.get(host) ?? {};
           // Only overwrite on SUCCESS — a failed cycle keeps the last good data.
-          if (infos !== null) {
-            s.dockerInfo = infos;
+          if (snap !== null) {
+            s.dockerInfo = snap.infos;
             s.atDockerInfo = Date.now();
+            s.dockerStats = computeContainerStats(host, snap.stats);
             enrichmentCache.set(host, s);
           }
         })

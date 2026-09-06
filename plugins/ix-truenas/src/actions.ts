@@ -291,9 +291,25 @@ interface AppRow {
   custom_app?: boolean | null;
 }
 
+/**
+ * One JSON-RPC call with a single retry on timeout. Bulk reads (app.query /
+ * app.image.query) can exceed the client's default per-call budget when the
+ * appliance is busy — e.g. right after a bulk stop/start of several apps, or on
+ * fleets with hundreds of apps/images. The retry uses a 15s round-trip budget;
+ * non-timeout errors (auth, method errors) are surfaced immediately.
+ */
+async function callWithRetry<T>(ctx: TruenasActionContext, method: string, params: unknown[]): Promise<T> {
+  try {
+    return await ctx.client.call<T>(method, params, ctx.creds);
+  } catch (e) {
+    if (!(e instanceof TruenasRpcError) || !/timed out/i.test(e.message)) throw e;
+    return await ctx.client.call<T>(method, params, ctx.creds, 15_000);
+  }
+}
+
 /** Fetches all installed apps with their current state. */
 async function listApps(ctx: TruenasActionContext): Promise<AppRow[]> {
-  const rows = await ctx.client.call<Record<string, unknown>[]>('app.query', [], ctx.creds);
+  const rows = await callWithRetry<Record<string, unknown>[]>(ctx, 'app.query', []);
   return (rows ?? []).map((r) => ({
     name: pickString(r, ['name']) ?? '',
     state: pickString(r, ['state']),
@@ -551,30 +567,41 @@ const imagesDeleteAction: ActionDescriptor<TruenasActionContext> = {
     if (ids.length === 0) return { success: false, details: { error: 'No image ids provided' } };
 
     // Build the set of known images (id + every tag/digest) so we can tell
-    // "already gone" from a real failure.
-    const rows = await ctx.client.call<Record<string, unknown>[]>('app.image.query', [], ctx.creds);
+    // "already gone" from a real failure, plus a map from any reference to its
+    // sha256 id — app.image.delete only accepts ids, not tags.
+    const rows = await callWithRetry<Record<string, unknown>[]>(ctx, 'app.image.query', []);
     const known = new Set<string>();
+    const idByRef = new Map<string, string>();
     for (const r of rows ?? []) {
       const id = pickString(r, ['id']);
-      if (id) known.add(id);
+      if (!id) continue;
+      known.add(id);
+      idByRef.set(id, id);
       for (const t of Array.isArray(r['repo_tags']) ? (r['repo_tags'] as unknown[]) : []) {
-        if (typeof t === 'string') known.add(t);
+        if (typeof t === 'string') {
+          known.add(t);
+          idByRef.set(t, id);
+        }
       }
     }
 
     let deleted = 0;
     const missing: string[] = [];
     const errors: Record<string, string> = {};
-    for (const id of ids) {
-      if (!known.has(id)) {
-        missing.push(id); // already gone — nothing to do
+    const doneIds = new Set<string>(); // several tags can share one image id — delete it once
+    for (const ref of ids) {
+      if (!known.has(ref)) {
+        missing.push(ref); // already gone — nothing to do
         continue;
       }
+      const target = idByRef.get(ref)!;
+      if (doneIds.has(target)) continue;
+      doneIds.add(target);
       try {
-        await ctx.client.call('app.image.delete', [id, { force: false }], ctx.creds);
+        await ctx.client.call('app.image.delete', [target, { force: false }], ctx.creds);
         deleted++;
       } catch (e) {
-        errors[id] = e instanceof Error ? e.message : String(e);
+        errors[ref] = e instanceof Error ? e.message : String(e);
       }
     }
     return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };

@@ -1,6 +1,6 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ChevronDown, ChevronRight, ChevronUp, Container, ExternalLink, FileCode2, Loader2, X } from 'lucide-react';
+import { ArrowUpCircle, ChevronDown, ChevronRight, ChevronUp, Container, ExternalLink, FileCode2, Loader2, Play, RotateCw, Square, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Layout } from '../components/Layout';
@@ -8,7 +8,7 @@ import { DataTable, DataTableColumn, ExpandChildContext } from '../components/Da
 import { DeviceChip } from '../components/DeviceChip';
 import { formatBytes, formatDuration } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
-import { api, ApiError, ContainerNetwork, ContainerRow, ContainerServiceDetail, DockerImageRow } from '../api/client';
+import { api, ApiError, CatalogEntry, ContainerNetwork, ContainerRow, ContainerServiceDetail, DockerImageRow } from '../api/client';
 
 /**
  * Creates a plan for ONE plugin and executes it in the background (no navigation).
@@ -202,6 +202,48 @@ function extraOf(row: { extra?: Record<string, unknown> }): Record<string, unkno
   return e && typeof e === 'object' ? (e as Record<string, unknown>) : {};
 }
 
+/** App-level live stats from `extra.stats` (docker stats over SSH enrichment).
+ * Absent until the first successful cycle — cells then show a dash. */
+function appStatsOf(row?: ContainerRow): Record<string, number> | undefined {
+  const s = row ? extraOf(row)['stats'] : undefined;
+  return s && typeof s === 'object' ? (s as Record<string, number>) : undefined;
+}
+
+/** CPU cell — percent with amber/red tint at high utilization. */
+function cpuCell(v?: number | null): ReactNode {
+  if (v === undefined || v === null) return <span className="text-faint">—</span>;
+  return (
+    <span className={clsx('font-mono text-xs', v >= 90 ? 'text-danger-fg' : v >= 60 ? 'text-warning-fg' : 'text-secondary')}>
+      {v.toFixed(1)}%
+    </span>
+  );
+}
+
+/** RAM cell — used (and limit when known), tinted near the ceiling. */
+function memCell(used?: number | null, limit?: number | null): ReactNode {
+  if (used === undefined || used === null) return <span className="text-faint">—</span>;
+  const pct = limit && limit > 0 ? Math.min(100, (used / limit) * 100) : null;
+  return (
+    <span
+      className={clsx('font-mono text-xs', pct !== null && pct >= 90 ? 'text-danger-fg' : pct !== null && pct >= 75 ? 'text-warning-fg' : 'text-secondary')}
+      title={limit ? `${formatBytes(used)} of ${formatBytes(limit)}` : formatBytes(used)}
+    >
+      {formatBytes(used)}{limit ? ` / ${formatBytes(limit)}` : ''}
+    </span>
+  );
+}
+
+/** Throughput cell — "↓ rx · ↑ tx" in bytes/s (average since last collection). */
+function rateCell(rx?: number | null, tx?: number | null): ReactNode {
+  if ((rx === undefined || rx === null) && (tx === undefined || tx === null)) return <span className="text-faint">—</span>;
+  const f = (v: number | null | undefined) => (v ? `${formatBytes(v)}/s` : '0');
+  return (
+    <span className="font-mono text-xs text-secondary" title={`rx ${f(rx)} · tx ${f(tx)} — average since the last collection`}>
+      ↓ {f(rx)} · ↑ {f(tx)}
+    </span>
+  );
+}
+
 /** Networks[] from extra (defensive). */
 function networksOf(row: ContainerRow): ContainerNetwork[] {
   const n = extraOf(row)['networks'];
@@ -258,6 +300,14 @@ interface TreeNode {
   mac?: string | null;
   ip?: string | null;
   startedAt?: string | null;
+  /** Live stats (docker stats over SSH) — container nodes only. */
+  cpuPct?: number | null;
+  memUsedBytes?: number | null;
+  memLimitBytes?: number | null;
+  netRxRate?: number | null;
+  netTxRate?: number | null;
+  blkReadRate?: number | null;
+  blkWriteRate?: number | null;
   /** Volume mount text (kind=volume): "source → target" (+ mode). */
   volumeText?: string;
 }
@@ -306,6 +356,13 @@ function buildApp(row: ContainerRow): BuiltApp {
         mac: s.mac ?? null,
         ip: s.ip ?? null,
         startedAt: s.startedAt ?? null,
+        cpuPct: s.cpuPct ?? null,
+        memUsedBytes: s.memUsedBytes ?? null,
+        memLimitBytes: s.memLimitBytes ?? null,
+        netRxRate: s.netRxRate ?? null,
+        netTxRate: s.netTxRate ?? null,
+        blkReadRate: s.blkReadRate ?? null,
+        blkWriteRate: s.blkWriteRate ?? null,
       },
       volumes: vols,
     });
@@ -398,26 +455,14 @@ function VersionCell({ row }: { row: ContainerRow }) {
   );
 }
 
-/** Top-level App cell — name + "custom" marker (+ an edit-compose button for custom apps). */
-function AppCell({ row, onEditCompose }: { row?: ContainerRow; onEditCompose?: (row: ContainerRow) => void }) {
+/** Top-level App cell — name + "custom" marker. The compose editor lives in the
+ * Actions column (generic across plugins that advertise the compose actions). */
+function AppCell({ row }: { row?: ContainerRow }) {
   if (!row) return null;
   const isCustom = typeof extraOf(row)['customApp'] === 'boolean' && (extraOf(row)['customApp'] as boolean);
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="flex items-center gap-1.5">
-        <span className="font-medium text-foreground">{row.name}</span>
-        {isCustom && onEditCompose && (
-          <button
-            type="button"
-            onClick={() => onEditCompose(row)}
-            title="Edit this custom app's Docker Compose YAML"
-            aria-label={`Edit compose for ${row.name}`}
-            className="rounded p-0.5 text-faint hover:bg-muted hover:text-secondary"
-          >
-            <FileCode2 size={13} />
-          </button>
-        )}
-      </span>
+      <span className="font-medium text-foreground">{row.name}</span>
       {isCustom && (
         <span className="text-[10px] uppercase tracking-wide text-faint">custom</span>
       )}
@@ -489,6 +534,18 @@ function nodeCell(key: string, node: TreeNode, depth: number): ReactNode {
       const secs = Math.max(0, (Date.now() - since) / 1000);
       return <span className="font-mono text-xs text-secondary" title={`Running since ${new Date(node.startedAt).toLocaleString()}`}>{formatDuration(secs)}</span>;
     }
+    case 'cpu':
+      if (node.kind !== 'container') return null;
+      return cpuCell(node.cpuPct);
+    case 'ram':
+      if (node.kind !== 'container') return null;
+      return memCell(node.memUsedBytes, node.memLimitBytes);
+    case 'netio':
+      if (node.kind !== 'container') return null;
+      return rateCell(node.netRxRate, node.netTxRate);
+    case 'blockio':
+      if (node.kind !== 'container') return null;
+      return rateCell(node.blkReadRate, node.blkWriteRate);
     default:
       return null;
   }
@@ -532,6 +589,32 @@ export default function Containers() {
     queryFn: () => api.containers(),
     refetchInterval: 30_000,
   });
+  const queryClient = useQueryClient();
+
+  // Action catalogs of every plugin that currently has container rows — drives
+  // the per-row Actions column GENERICALLY: a button only renders when the row's
+  // plugin advertises that action id, so any future plugin (docker, proxmox, …)
+  // gets the same column for free.
+  const catalogPluginIds = useMemo(
+    () => Array.from(new Set((containersQuery.data?.containers ?? []).map((r) => r.pluginId))),
+    [containersQuery.data],
+  );
+  const catalogsQuery = useQuery({
+    queryKey: ['plugin-actions-catalogs', catalogPluginIds.join('|')],
+    queryFn: async () => {
+      const entries = await Promise.all(
+        catalogPluginIds.map(async (pid) => [pid, (await api.pluginActions(pid)).actions] as const),
+      );
+      return Object.fromEntries(entries);
+    },
+    enabled: catalogPluginIds.length > 0,
+  });
+
+  /** True when the plugin's advertised action catalog contains `actionId`. */
+  function hasAction(pluginId: string, actionId: string): boolean {
+    const actions = catalogsQuery.data?.[pluginId];
+    return Array.isArray(actions) && actions.some((a) => a.id === actionId);
+  }
 
   // --- Bulk actions + YAML editor (plan-workflow backed) ---------------------
   const navigate = useNavigate();
@@ -542,9 +625,118 @@ export default function Containers() {
   /** Dismissible status banner (plan started / info / error). */
   const [notice, setNotice] = useState<{ kind: 'ok' | 'info' | 'error'; text: string; planId?: string } | null>(null);
 
+  // --- Plan tracking → auto-refresh (row + bulk actions) ---------------------
+  /** App key (deviceId|pluginId|name) → plan ids created by this page's row
+   * actions that have not settled yet. While any tracked plan is executing the
+   * row shows a spinner; when ALL of them finish, the affected device is
+   * force-refreshed so the state column reflects the outcome immediately
+   * (e.g. stopped instead of running) without waiting for the 30s poll. */
+  const [pendingPlans, setPendingPlans] = useState<Record<string, string[]>>({});
+  /** Bulk action in flight: its plan ids + every device a step touches. When
+   * ALL plans settle, those devices are force-refreshed so states/rows update
+   * immediately (same mechanism as the per-row actions). */
+  const [bulkPlan, setBulkPlan] = useState<{ label: string; ids: string[]; deviceIds: string[]; appNames?: string[] } | null>(null);
+  const pendingRef = useRef(pendingPlans);
+  useEffect(() => { pendingRef.current = pendingPlans; }, [pendingPlans]);
+  const bulkRef = useRef(bulkPlan);
+  useEffect(() => { bulkRef.current = bulkPlan; }, [bulkPlan]);
+
+  // --- Settle watch (transitional states after a plan) -----------------------
+  /** Apps still in an in-flight state (DEPLOYING / STOPPING / RESTARTING) after
+   * their plan finished. Container state is INVENTORY data — it only re-collects
+   * every ~15 min per device, so the one-shot refresh at plan completion can
+   * catch a mid-transition snapshot and leave it stale. While this watch is
+   * active we force-refresh the affected devices every 15s until all watched
+   * apps settle (or the window expires), so states flip as soon as TrueNAS does.
+   */
+  const [settleWatch, setSettleWatch] = useState<{ deviceIds: string[]; names: string[]; until: number } | null>(null);
+  const containersRef = useRef(containersQuery.data);
+  useEffect(() => { containersRef.current = containersQuery.data; }, [containersQuery.data]);
+
+  /** (Re)starts or extends the settle watch for the given apps + devices. */
+  function watchSettle(deviceIds: string[], names: string[]) {
+    if (names.length === 0) return;
+    setSettleWatch((prev) => ({
+      deviceIds: Array.from(new Set([...(prev?.deviceIds ?? []), ...deviceIds])),
+      names: Array.from(new Set([...(prev?.names ?? []), ...names])),
+      until: Math.max(prev?.until ?? 0, Date.now() + 5 * 60_000),
+    }));
+  }
+
+  useEffect(() => {
+    if (!settleWatch) return;
+    const timer = setInterval(async () => {
+      if (Date.now() > settleWatch.until) { setSettleWatch(null); return; }
+      const data = containersRef.current;
+      const transitional = new Set(
+        (data?.containers ?? []).filter((c) => TRANSITIONAL_STATES.has(c.state)).map((c) => c.name),
+      );
+      if (!settleWatch.names.some((n) => transitional.has(n))) { setSettleWatch(null); return; }
+      try { await api.refreshDevices(settleWatch.deviceIds); } catch { /* fall back to the 30s poll */ }
+      void queryClient.invalidateQueries({ queryKey: ['containers'] });
+    }, 15_000);
+    return () => clearInterval(timer);
+  }, [settleWatch, queryClient]);
+
+  useEffect(() => {
+    if (Object.keys(pendingPlans).length === 0 && !bulkPlan) return;
+    const timer = setInterval(async () => {
+      // Row-level plans — settle per app key.
+      const cur = pendingRef.current;
+      for (const key of Object.keys(cur)) {
+        const ids = cur[key];
+        let allDone = true;
+        let anyFailed = false;
+        for (const id of ids) {
+          try {
+            const p = await api.getPlan(id);
+            if (!['succeeded', 'failed', 'cancelled'].includes(p.status)) { allDone = false; break; }
+            if (p.status !== 'succeeded') anyFailed = true;
+          } catch { allDone = false; break; } // transient API error — keep waiting
+        }
+        if (!allDone) continue;
+        const row = (containersQuery.data?.containers ?? []).find((r) => `${r.deviceId}|${r.pluginId}|${r.name}` === key);
+        setPendingPlans((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+        if (row) {
+          try { await api.refreshDevices([row.deviceId]); } catch { /* fall back to the 30s poll */ }
+          void queryClient.invalidateQueries({ queryKey: ['containers'] });
+          watchSettle([row.deviceId], [row.name]); // keep re-polling while it transitions
+        }
+        if (anyFailed) setNotice((prev) => ({ kind: 'error', text: `A plan for ${key.split('|').pop()} finished with errors — check the Plans page.` }));
+      }
+      // Bulk plan — settle when every tracked plan finished.
+      const b = bulkRef.current;
+      if (!b) return;
+      let allDone = true;
+      let anyFailed = false;
+      for (const id of b.ids) {
+        try {
+          const p = await api.getPlan(id);
+          if (!['succeeded', 'failed', 'cancelled'].includes(p.status)) { allDone = false; break; }
+          if (p.status !== 'succeeded') anyFailed = true;
+        } catch { allDone = false; break; }
+      }
+      if (!allDone) return;
+      setBulkPlan(null);
+      try { if (b.deviceIds.length > 0) await api.refreshDevices(b.deviceIds); } catch { /* fall back to the 30s poll */ }
+      void queryClient.invalidateQueries({ queryKey: ['containers'] });
+      watchSettle(b.deviceIds, b.appNames ?? []); // keep re-polling while apps transition
+      setNotice(anyFailed
+        ? { kind: 'error', text: `${b.label} finished with errors — check the Plans page.` }
+        : { kind: 'ok', text: `${b.label} completed.`, planId: b.ids[b.ids.length - 1] });
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [pendingPlans, bulkPlan, containersQuery.data, queryClient]);
+
   // State sets used to filter which selected rows are eligible for an action.
   const STOPPED_STATES = useMemo(() => new Set(['STOPPED', 'STOPPING']), []);
   const RUNNING_STATES = useMemo(() => new Set(['RUNNING', 'DEPLOYING']), []);
+  /** In-flight transition states — a row in one of these may still change. */
+  const TRANSITIONAL_STATES = useMemo(() => new Set(['DEPLOYING', 'STOPPING', 'RESTARTING']), []);
 
   /**
    * Runs a bulk container/image action through the plan workflow, grouped by
@@ -557,12 +749,24 @@ export default function Containers() {
     buildGroups: () => Array<{ pluginId: string; actionId: string; steps: Array<{ deviceId: string; input: Record<string, unknown> }> }>,
   ) {
     const attempt = async () => {
-      let lastPlanId: string | null = null;
-      for (const g of buildGroups()) {
+      const groups = buildGroups();
+      const created: string[] = [];
+      for (const g of groups) {
         if (g.steps.length === 0) continue;
-        lastPlanId = await createAndExecutePlan(g.pluginId, g.actionId, g.steps);
+        created.push(await createAndExecutePlan(g.pluginId, g.actionId, g.steps));
       }
-      if (lastPlanId) setNotice({ kind: 'ok', text: `${label} — plan started in the background.`, planId: lastPlanId });
+      if (created.length > 0) {
+        // Track the plans so the affected devices are force-refreshed as soon
+        // as execution settles — states update without waiting for the poll.
+        const deviceIds = Array.from(new Set(groups.flatMap((g) => g.steps.map((s) => s.deviceId))));
+        // App names from step inputs (container actions carry {names}); image
+        // deletes have none → no settle watch, one refresh is enough.
+        const appNames = Array.from(new Set(
+          groups.flatMap((g) => g.steps.flatMap((s) => (Array.isArray(s.input['names']) ? (s.input['names'] as string[]) : []))),
+        ));
+        setBulkPlan({ label, ids: created, deviceIds, appNames });
+        setNotice({ kind: 'ok', text: `${label} — plan executing…`, planId: created[created.length - 1] });
+      }
     };
     try {
       await attempt();
@@ -571,6 +775,25 @@ export default function Containers() {
       else setNotice({ kind: 'error', text: `${label} failed: ${err instanceof Error ? err.message : String(err)}` });
     }
   }
+
+  /** One-click row action — runs a single-app plan and tracks it so the row
+   * auto-refreshes when execution settles. Same 401 → reauth flow as bulk. */
+  async function singleApp(row: ContainerRow, actionId: string, label: string) {
+    const key = `${row.deviceId}|${row.pluginId}|${row.name}`;
+    const attempt = async () => {
+      const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input: { names: [row.name] } }]);
+      setPendingPlans((prev) => ({ ...prev, [key]: [...(prev[key] ?? []), planId] }));
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth({ label: `${label} — ${row.name}`, retry: attempt });
+      else setNotice({ kind: 'error', text: `${label} failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  }
+
+  /** True while any plan created by this page for the app is still in flight. */
+  const hasPending = (row: ContainerRow): boolean => (pendingPlans[`${row.deviceId}|${row.pluginId}|${row.name}`] ?? []).length > 0;
 
   /** Container bulk action — filters eligible rows by state, groups per device. */
   function containerBulk(actionId: string, label: string, eligible: (r: ContainerRow) => boolean, noEligibleMsg: string) {
@@ -653,7 +876,7 @@ export default function Containers() {
       key: 'name',
       width: 210,
       exportValue: (node) => node.row?.name ?? '',
-      render: (node) => <AppCell row={node.row} onEditCompose={(r) => setYamlApp(r)} />,
+      render: (node) => <AppCell row={node.row} />,
     },
     {
       header: 'Device',
@@ -731,11 +954,92 @@ export default function Containers() {
       render: (node) => (node.row ? <VersionCell row={node.row} /> : null),
     },
     {
+      // Live per-app stats — aggregated from the app's containers by the plugin
+      // (docker stats over SSH; RAM + I/O summed, CPU = busiest container).
+      header: 'CPU',
+      key: 'cpu',
+      width: 90,
+      sortAccessor: (node) => appStatsOf(node.row)?.['cpuMax'] ?? null,
+      exportValue: (node) => { const v = appStatsOf(node.row)?.['cpuMax']; return typeof v === 'number' ? `${v.toFixed(1)}%` : ''; },
+      render: (node) => cpuCell(appStatsOf(node.row)?.['cpuMax']),
+    },
+    {
+      header: 'RAM',
+      key: 'ram',
+      width: 130,
+      sortAccessor: (node) => appStatsOf(node.row)?.['memUsedBytes'] ?? null,
+      exportValue: (node) => { const v = appStatsOf(node.row)?.['memUsedBytes']; return typeof v === 'number' ? formatBytes(v) : ''; },
+      render: (node) => memCell(appStatsOf(node.row)?.['memUsedBytes']),
+    },
+    {
+      header: 'Net I/O',
+      key: 'netio',
+      width: 170,
+      exportValue: (node) => { const s = appStatsOf(node.row); return s && (s['netRxRate'] || s['netTxRate']) ? `↓ ${formatBytes(s['netRxRate'] ?? 0)}/s ↑ ${formatBytes(s['netTxRate'] ?? 0)}/s` : ''; },
+      render: (node) => { const s = appStatsOf(node.row); return rateCell(s?.['netRxRate'], s?.['netTxRate']); },
+    },
+    {
+      header: 'Block I/O',
+      key: 'blockio',
+      width: 170,
+      exportValue: (node) => { const s = appStatsOf(node.row); return s && (s['blkReadRate'] || s['blkWriteRate']) ? `↓ ${formatBytes(s['blkReadRate'] ?? 0)}/s ↑ ${formatBytes(s['blkWriteRate'] ?? 0)}/s` : ''; },
+      render: (node) => { const s = appStatsOf(node.row); return rateCell(s?.['blkReadRate'], s?.['blkWriteRate']); },
+    },
+    {
       header: 'Collected',
       key: 'collectedAt',
       width: 170,
       sortAccessor: (node) => new Date(node.row?.collectedAt ?? '').getTime(),
       render: (node) => (node.row ? new Date(node.row.collectedAt).toLocaleString() : null),
+    },
+    {
+      // One-click per-row actions. Availability is GENERIC — a button only
+      // renders when the row's plugin advertises that action id in its catalog,
+      // so any future plugin (docker, proxmox, …) gets the same column for free.
+      header: 'Actions',
+      key: 'actions',
+      width: 150,
+      sortable: false,
+      excludeFromExport: true,
+      render: (node) => {
+        const r = node.row;
+        if (!r) return null;
+        const busy = hasPending(r);
+        const actions: { id: string; label: string; icon: ReactNode; available: boolean; eligible: boolean; danger?: boolean }[] = [
+          { id: 'containers.start', label: 'Start', icon: <Play size={14} />, available: hasAction(r.pluginId, 'containers.start'), eligible: STOPPED_STATES.has(r.state) },
+          { id: 'containers.stop', label: 'Stop', icon: <Square size={13} />, available: hasAction(r.pluginId, 'containers.stop'), eligible: RUNNING_STATES.has(r.state), danger: true },
+          { id: 'containers.restart', label: 'Restart', icon: <RotateCw size={14} />, available: hasAction(r.pluginId, 'containers.restart'), eligible: true },
+          { id: 'containers.upgrade', label: 'Update', icon: <ArrowUpCircle size={14} />, available: hasAction(r.pluginId, 'containers.upgrade'), eligible: r.upgradeAvailable === true },
+          // Compose editing is offered whenever the plugin advertises BOTH the
+          // read and write side of the contract (TrueNAS custom apps today).
+          { id: 'compose.config.read+containers.update', label: 'Edit compose YAML', icon: <FileCode2 size={14} />, available: hasAction(r.pluginId, 'compose.config.read') && hasAction(r.pluginId, 'containers.update'), eligible: true },
+        ];
+        return (
+          <div className="flex items-center gap-0.5">
+            {actions.map((a) => {
+              if (!a.available) return null;
+              const enabled = !busy && a.eligible;
+              return (
+                <button
+                  key={a.id}
+                  type="button"
+                  aria-label={`${a.label} ${r.name}`}
+                  title={enabled ? `${a.label} ${r.name}` : busy ? 'Waiting for the running plan to finish…' : a.eligible ? '' : `Not applicable in state ${r.state.toLowerCase()}`}
+                  disabled={!enabled}
+                  onClick={() => (a.id === 'compose.config.read+containers.update' ? setYamlApp(r) : void singleApp(r, a.id, a.label))}
+                  className={clsx(
+                    'rounded-md p-1.5 hover:bg-muted',
+                    a.danger ? 'text-danger-fg hover:text-danger-fg' : 'text-secondary hover:text-foreground',
+                    !enabled && 'cursor-not-allowed opacity-30',
+                  )}
+                >
+                  {busy ? <Loader2 size={14} className="animate-spin" /> : a.icon}
+                </button>
+              );
+            })}
+          </div>
+        );
+      },
     },
   ];
 
@@ -849,6 +1153,7 @@ export default function Containers() {
               notice.kind === 'error' && 'border-danger-border bg-danger text-danger-fg',
             )}
           >
+            {bulkPlan && <Loader2 size={14} className="shrink-0 animate-spin" />}
             <span className="flex-1">{notice.text}</span>
             {notice.planId && (
               <button
@@ -901,7 +1206,7 @@ export default function Containers() {
                 searchPlaceholder="Search containers…"
                 selectable
                 bulkActions={[
-                  { label: 'Stop', onClick: containerBulk('containers.stop', 'Stop selected', (r) => !RUNNING_STATES.has(r.state), 'No selected apps are running — nothing to stop.') },
+                  { label: 'Stop', onClick: containerBulk('containers.stop', 'Stop selected', (r) => RUNNING_STATES.has(r.state), 'No selected apps are running — nothing to stop.') },
                   { label: 'Start', onClick: containerBulk('containers.start', 'Start selected', (r) => STOPPED_STATES.has(r.state), 'No selected apps are stopped — nothing to start.') },
                   { label: 'Restart', onClick: containerBulk('containers.restart', 'Restart selected', () => true, '') },
                   { label: 'Update', onClick: containerBulk('containers.upgrade', 'Update selected', (r) => r.upgradeAvailable === true, 'No selected apps have an update available.') },

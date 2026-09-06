@@ -327,7 +327,7 @@ export class TruenasClient {
   // -------------------------------------------------------------------- rpc
 
   /** One JSON-RPC round-trip on the socket (authenticated or not). */
-  private rpc<T>(method: string, params: unknown[]): Promise<JsonRpcResponse<T>> {
+  private rpc<T>(method: string, params: unknown[], timeoutMs?: number): Promise<JsonRpcResponse<T>> {
     return new Promise((resolve, reject) => {
       void this.connect()
         .then(() => {
@@ -337,15 +337,21 @@ export class TruenasClient {
             return;
           }
           const id = this.nextId++;
+          // Per-call override (bulk queries on large fleets need more than the
+          // default); falls back to the client-wide value.
+          const effTimeout = timeoutMs && timeoutMs > 0 ? timeoutMs : this.timeoutMs;
           // Only invalidate the socket THIS call used — a concurrent reconnect
-          // may have already swapped in a newer one.
+          // may have already swapped in a newer one. A SHORT custom timeout must
+          // NOT kill a healthy session (the appliance was just slow), so only
+          // timeouts at/above the client default count as "socket likely dead".
+          const invalidateOnTimeout = effTimeout >= this.timeoutMs;
           const usedWs = ws;
           const timer = setTimeout(() => {
             this.pending.delete(id);
-            // A round-trip timeout means the socket is likely dead (server-side
-            // session drop / half-open TCP). Invalidate it so the NEXT call
-            // reconnects + re-authenticates instead of reusing a stuck socket.
-            if (this.ws === usedWs && this.state === 'open') {
+            if (invalidateOnTimeout && this.ws === usedWs && this.state === 'open') {
+              // A round-trip timeout means the socket is likely dead (server-side
+              // session drop / half-open TCP). Invalidate it so the NEXT call
+              // reconnects + re-authenticates instead of reusing a stuck socket.
               this.ws = null;
               this.state = 'idle';
               this.authedFp = null;
@@ -356,8 +362,8 @@ export class TruenasClient {
               }
               this.pending.clear();
             }
-            reject(new TruenasRpcError(`TrueNAS call ${method} timed out after ${this.timeoutMs} ms`));
-          }, Math.max(1000, this.timeoutMs));
+            reject(new TruenasRpcError(`TrueNAS call ${method} timed out after ${effTimeout} ms`));
+          }, Math.max(1000, effTimeout));
           this.pending.set(id, {
             resolve: (v) => resolve(v as JsonRpcResponse<T>),
             reject,
@@ -378,14 +384,16 @@ export class TruenasClient {
    * Executes one JSON-RPC method call. Ensures an authenticated session (logging
    * in when needed), and on a lost-session ENOTAUTHENTICATED re-authenticates
    * ONCE and retries — the second failure is surfaced to the caller.
+   * `timeoutMs` overrides the client-wide per-call timeout for this one round-trip
+   * (bulk queries like app.query/app.image.query on large fleets need more).
    */
-  async call<T = unknown>(method: string, params: unknown[] = [], creds?: TruenasCredentials): Promise<T> {
+  async call<T = unknown>(method: string, params: unknown[] = [], creds?: TruenasCredentials, timeoutMs?: number): Promise<T> {
     if (creds) await this.login(creds);
     if (!this.authedFp) throw new TruenasAuthError('Not authenticated — no credentials supplied');
 
     const doCall = async (): Promise<JsonRpcResponse<T>> => {
       try {
-        return await this.rpc<T>(method, params);
+        return await this.rpc<T>(method, params, timeoutMs);
       } catch (e) {
         if (e instanceof TruenasRpcError && e.code === -32001 && /ENOTAUTHENTICATED/i.test(e.message)) {
           // Session lost server-side → force re-login on the next attempt.

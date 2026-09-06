@@ -32,6 +32,7 @@ import {
   normalizeVmDevice,
   serviceNetDetails,
   sshHostOf,
+  type ContainerStat,
   type ContainerVolume,
   type DockerContainerInfo,
   type ServiceNetDetail,
@@ -869,7 +870,8 @@ function buildContainerRows(
   apps: Record<string, unknown>[],
   serviceDetailsByApp: Map<string, ServiceNetDetail[]>,
   dockerNets: Map<string, { driver: string; subnets: string[] }>,
-  dockerInfo?: DockerContainerInfo[] | null
+  dockerInfo?: DockerContainerInfo[] | null,
+  dockerStats?: Map<string, ContainerStat>
 ): ContainerRow[] {
   // Index the SSH observations by container id (and by name as a fallback).
   const infoById = new Map<string, DockerContainerInfo>();
@@ -905,11 +907,23 @@ function buildContainerRows(
 
     // Per-service detail for the expandable row — enriched with SSH facts when
     // available (real MAC + live IP beat the compose static config).
-    const containers: { service?: string; image?: string | null; state?: string; mac?: string; ip?: string; startedAt?: string; volumes?: ContainerVolume[] }[] = [];
+    const containers: {
+      service?: string; image?: string | null; state?: string; mac?: string; ip?: string;
+      startedAt?: string; volumes?: ContainerVolume[];
+      cpuPct?: number; memUsedBytes?: number; memLimitBytes?: number;
+      netRxRate?: number; netTxRate?: number; blkReadRate?: number; blkWriteRate?: number;
+    }[] = [];
     for (const d of details) {
       const cid = pickString(d, ['id']);
       const svcName = pickString(d, ['service_name']) ?? '';
       const info = (cid ? infoById.get(cid) : undefined) ?? (svcName ? infoByName.get(svcName) : undefined);
+      // Live stats (SSH docker stats) are keyed by container NAME — the service
+      // name first, then the observed docker name as fallback.
+      let stat: ContainerStat | undefined;
+      if (dockerStats && (svcName || info?.name)) {
+        stat = svcName ? dockerStats.get(svcName) : undefined;
+        if (!stat && info?.name) stat = dockerStats.get(info.name);
+      }
       // Compose detail for this service (hostname + static IPs + declared volumes).
       const svc = svcDetails.find((s) => s.hostname === svcName || s.hostname === name);
       let mac: string | undefined;
@@ -930,7 +944,32 @@ function buildContainerRows(
         ...(ip ? { ip } : {}),
         ...(info?.startedAt && info.state === 'running' ? { startedAt: info.startedAt } : {}),
         ...(svc && svc.volumes.length > 0 ? { volumes: svc.volumes } : {}),
+        // Live CPU/RAM + average I/O rates (absent until the first SSH cycle).
+        ...(stat?.cpuPct !== undefined ? { cpuPct: stat.cpuPct } : {}),
+        ...(stat?.memUsedBytes !== undefined ? { memUsedBytes: stat.memUsedBytes } : {}),
+        ...(stat?.memLimitBytes !== undefined ? { memLimitBytes: stat.memLimitBytes } : {}),
+        ...(stat?.netRxRate !== undefined ? { netRxRate: stat.netRxRate } : {}),
+        ...(stat?.netTxRate !== undefined ? { netTxRate: stat.netTxRate } : {}),
+        ...(stat?.blkReadRate !== undefined ? { blkReadRate: stat.blkReadRate } : {}),
+        ...(stat?.blkWriteRate !== undefined ? { blkWriteRate: stat.blkWriteRate } : {}),
       });
+    }
+
+    // App-level live stats — aggregate across this app's containers: RAM and
+    // I/O rates summed, CPU = the busiest container (multi-core sums would be
+    // misleading). Absent until the first successful SSH enrichment cycle.
+    let appStats: Record<string, number> | null = null;
+    const statRows = containers.filter((c) => c.cpuPct !== undefined || c.memUsedBytes !== undefined);
+    if (statRows.length > 0) {
+      const s: Record<string, number> = {};
+      for (const c of statRows) {
+        if (c.cpuPct !== undefined) s['cpuMax'] = Math.max(s['cpuMax'] ?? 0, c.cpuPct);
+        if (c.memUsedBytes !== undefined) s['memUsedBytes'] = (s['memUsedBytes'] ?? 0) + c.memUsedBytes;
+        for (const k of ['netRxRate', 'netTxRate', 'blkReadRate', 'blkWriteRate'] as const) {
+          if (c[k] !== undefined) s[k] = (s[k] ?? 0) + (c[k] as number);
+        }
+      }
+      appStats = s;
     }
 
     // SSH live IPs join the app-level IP set (real addresses beat compose-only).
@@ -983,6 +1022,7 @@ function buildContainerRows(
         ports: ports.sort((x, y) => x - y),
         containerCount: details.length,
         ...(containers.length > 0 ? { containers } : {}),
+        ...(appStats ? { stats: appStats } : {}),
         ...(volumeMounts.length > 0 ? { volumeMounts } : {}),
         customApp: a['custom_app'] === true ? true : undefined,
       },
@@ -1624,7 +1664,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
       dockerNetsRes.status === 'fulfilled' && Array.isArray(dockerNetsRes.value)
         ? parseDockerNetworks(dockerNetsRes.value as Record<string, unknown>[])
         : new Map<string, { driver: string; subnets: string[] }>();
-    metrics['containers'] = buildContainerRows(apps, serviceDetailsByApp, dockerNets, dockerInfo);
+    metrics['containers'] = buildContainerRows(apps, serviceDetailsByApp, dockerNets, dockerInfo, enrichment?.dockerStats);
 
     // Host inventory (source 'docker'): one row per container with a REAL MAC —
     // only possible via `docker inspect` over SSH (the public API exposes no

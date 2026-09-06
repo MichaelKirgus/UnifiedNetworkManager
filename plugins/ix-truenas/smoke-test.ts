@@ -199,8 +199,8 @@ async function main(): Promise<void> {
   const caps = (disc.capabilities ?? []) as string[];
   check('capabilities include configuration+planning+deviceState', ['configuration', 'planning', 'deviceState'].every((c) => caps.includes(c)), caps);
   const actions = (disc.actions ?? []) as { id: string; riskLevel: string }[];
-  check('action catalog has 5 actions', actions.length === 5, `count=${actions.length}`);
-  check('dangerous power actions marked', actions.filter((a) => a.riskLevel === 'dangerous').map((a) => a.id).sort().join(',') === 'system.reboot,system.shutdown');
+  check('action catalog has all expected actions', ['containers.stop','containers.start','containers.restart','containers.upgrade','containers.delete','images.delete','compose.config.read','containers.update','alerts.dismiss','alerts.undismiss'].every((id) => actions.some((a) => a.id === id)), `count=${actions.length}`);
+  check('dangerous destructive/power actions marked', actions.filter((a) => a.riskLevel === 'dangerous').map((a) => a.id).sort().join(',') === ['containers.delete','images.delete','system.reboot','system.shutdown'].sort().join(','));
 
   // --- /monitoring ---------------------------------------------------------------------
   const mon = (await post('/monitoring', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds })) as Response;
