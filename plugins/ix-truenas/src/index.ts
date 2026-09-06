@@ -1022,12 +1022,13 @@ function buildImageRows(appImages: Record<string, unknown>[]): ImageRow[] {
     const realTags = tags.filter((t) => t !== NONE_TAG);
     const dangling = img['dangling'] === true || realTags.length === 0;
 
+    const id = pickString(img, ['id']) ?? '';
+
     let name: string;
     if (!dangling) {
       name = realTags[0];
     } else {
       // Untagged image — identify by short id so the row is stable + readable.
-      const id = pickString(img, ['id']) ?? '';
       name = id ? `sha256:${id.slice(0, 12)}` : 'unknown';
     }
 
@@ -1038,6 +1039,8 @@ function buildImageRows(appImages: Record<string, unknown>[]): ImageRow[] {
       updateAvailable: typeof img['update_available'] === 'boolean' ? (img['update_available'] as boolean) : null,
       dangling,
       extra: {
+        // The appliance image id — the `images.delete` action matches on this.
+        ...(id ? { id } : {}),
         ...(realTags.length > 1 ? { tags: realTags } : {}),
         ...(Array.isArray(img['repo_digests']) && (img['repo_digests'] as unknown[]).length > 0 ? { digests: img['repo_digests'] } : {}),
       },

@@ -1,12 +1,156 @@
 import { useQuery } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ChevronDown, ChevronRight, ChevronUp, Container } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
+import { ChevronDown, ChevronRight, ChevronUp, Container, ExternalLink, FileCode2, Loader2, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { formatBytes, formatDuration } from '../components/formatMetric';
-import { api, ContainerNetwork, ContainerRow, ContainerServiceDetail, DockerImageRow } from '../api/client';
+import { ReauthDialog } from '../components/ReauthDialog';
+import { api, ApiError, ContainerNetwork, ContainerRow, ContainerServiceDetail, DockerImageRow } from '../api/client';
+
+/**
+ * Creates a plan for ONE plugin and executes it in the background (no navigation).
+ * The first step is the plan's intent; any further steps are appended in one bulk
+ * round-trip. Every step targets a single device with its own input, so this fans
+ * out across devices that share the same plugin. Throws on failure — callers catch
+ * ApiError 401 to offer two-factor revalidation and then retry from scratch.
+ */
+async function createAndExecutePlan(
+  pluginId: string,
+  actionId: string,
+  steps: Array<{ deviceId: string; input: Record<string, unknown> }>,
+): Promise<string> {
+  const first = steps[0];
+  const plan = await api.createPlan({
+    pluginId,
+    intentActionId: actionId,
+    inputs: first.input,
+    devices: [{ deviceId: first.deviceId }],
+  });
+  if (steps.length > 1) {
+    await api.addPlanStepsBulk(plan.id, steps.slice(1).map((s) => ({ deviceId: s.deviceId, actionId, input: s.input })));
+  }
+  await api.executePlan(plan.id);
+  return plan.id;
+}
+
+/** Groups selected rows by (pluginId, deviceId), collecting a per-row value. */
+function groupByDevice<T>(rows: T[], keyOf: (r: T) => { pluginId: string; deviceId: string }, valOf: (r: T) => string): Map<string, { pluginId: string; deviceId: string; values: string[] }> {
+  const m = new Map<string, { pluginId: string; deviceId: string; values: string[] }>();
+  for (const r of rows) {
+    const k = keyOf(r);
+    const entry = m.get(`${k.pluginId}|${k.deviceId}`) ?? { pluginId: k.pluginId, deviceId: k.deviceId, values: [] };
+    entry.values.push(valOf(r));
+    m.set(`${k.pluginId}|${k.deviceId}`, entry);
+  }
+  return m;
+}
+
+/**
+ * YamlEditorDialog — edit the Docker Compose YAML of a single CUSTOM app. On open
+ * it reads the current compose via the plugin's read-only `compose.config.read`
+ * action (no plan row), shows it in an editable monospace textarea, and on save
+ * submits `containers.update` through the plan workflow (2FA-gated) — executed in
+ * the background without navigating. Catalog apps generate their compose from a
+ * schema and have no editable string, so this is only offered for custom apps.
+ */
+function YamlEditorDialog({ app, onClose }: { app: ContainerRow; onClose: () => void }) {
+  const [yaml, setYaml] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [reauth, setReauth] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.executePluginAction(app.pluginId, { deviceId: app.deviceId, actionId: 'compose.config.read', input: { name: app.name } });
+        if (!cancelled) setYaml(typeof res.details.yaml === 'string' ? (res.details.yaml as string) : '');
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [app.pluginId, app.deviceId, app.name]);
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      await createAndExecutePlan(app.pluginId, 'containers.update', [{ deviceId: app.deviceId, input: { name: app.name, composeString: yaml } }]);
+      onClose();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth(true);
+      else setError(err instanceof Error ? err.message : String(err));
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
+      <div className="mt-8 w-full max-w-2xl rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <header className="flex items-center justify-between border-b border-border px-4 py-3">
+          <div>
+            <h2 className="text-base font-semibold text-foreground">Edit compose — {app.name}</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Applies via the plan workflow on {app.deviceName ?? app.deviceId}. The app is redeployed after saving.
+            </p>
+          </div>
+          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
+            <X className="h-4 w-4" />
+          </button>
+        </header>
+
+        <div className="p-4">
+          {loading && (
+            <div className="flex items-center gap-2 py-6 text-sm text-secondary">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading current compose…
+            </div>
+          )}
+
+          {!loading && error && yaml === '' && (
+            <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
+          )}
+
+          {!loading && yaml !== '' && (
+            <>
+              {error && (
+                <div className="mb-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
+              )}
+              <textarea
+                value={yaml}
+                onChange={(e) => setYaml(e.target.value)}
+                spellCheck={false}
+                className="h-[46vh] w-full resize-y rounded-md border border-border bg-background p-3 font-mono text-xs leading-relaxed focus:border-slate-500 focus:outline-none"
+              />
+              <div className="mt-3 flex items-center justify-end gap-2">
+                <button type="button" onClick={onClose} disabled={saving} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background disabled:opacity-40">
+                  Cancel
+                </button>
+                <button type="button" onClick={save} disabled={saving || yaml.trim() === ''} className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-40">
+                  {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />} Apply &amp; redeploy
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {reauth && (
+        <ReauthDialog
+          contextLabel={`Edit compose for ${app.name}`}
+          onClose={() => setReauth(false)}
+          onSuccess={async () => { setReauth(false); await save(); }}
+        />
+      )}
+    </div>
+  );
+}
 
 /** Uptime cell — "running since". RUNNING + startedAt → duration; non-RUNNING
  * or no stamp → "—". The value is the real container start when the plugin
@@ -53,7 +197,7 @@ function StateBadge({ state }: { state: string }) {
 }
 
 /** Reads the `extra` JSON object defensively — corrupt rows must not break the table. */
-function extraOf(row: ContainerRow): Record<string, unknown> {
+function extraOf(row: { extra?: Record<string, unknown> }): Record<string, unknown> {
   const e = row.extra;
   return e && typeof e === 'object' ? (e as Record<string, unknown>) : {};
 }
@@ -254,13 +398,27 @@ function VersionCell({ row }: { row: ContainerRow }) {
   );
 }
 
-/** Top-level App cell — name + "custom" marker. */
-function AppCell({ row }: { row?: ContainerRow }) {
+/** Top-level App cell — name + "custom" marker (+ an edit-compose button for custom apps). */
+function AppCell({ row, onEditCompose }: { row?: ContainerRow; onEditCompose?: (row: ContainerRow) => void }) {
   if (!row) return null;
+  const isCustom = typeof extraOf(row)['customApp'] === 'boolean' && (extraOf(row)['customApp'] as boolean);
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="font-medium text-foreground">{row.name}</span>
-      {typeof extraOf(row)['customApp'] === 'boolean' && (extraOf(row)['customApp'] as boolean) && (
+      <span className="flex items-center gap-1.5">
+        <span className="font-medium text-foreground">{row.name}</span>
+        {isCustom && onEditCompose && (
+          <button
+            type="button"
+            onClick={() => onEditCompose(row)}
+            title="Edit this custom app's Docker Compose YAML"
+            aria-label={`Edit compose for ${row.name}`}
+            className="rounded p-0.5 text-faint hover:bg-muted hover:text-secondary"
+          >
+            <FileCode2 size={13} />
+          </button>
+        )}
+      </span>
+      {isCustom && (
         <span className="text-[10px] uppercase tracking-wide text-faint">custom</span>
       )}
     </div>
@@ -375,6 +533,72 @@ export default function Containers() {
     refetchInterval: 30_000,
   });
 
+  // --- Bulk actions + YAML editor (plan-workflow backed) ---------------------
+  const navigate = useNavigate();
+  /** In-session 2FA revalidation prompt (shown when a plan call returns 401). */
+  const [reauth, setReauth] = useState<{ label: string; retry: () => void | Promise<void> } | null>(null);
+  /** Custom app whose compose YAML is being edited. */
+  const [yamlApp, setYamlApp] = useState<ContainerRow | null>(null);
+  /** Dismissible status banner (plan started / info / error). */
+  const [notice, setNotice] = useState<{ kind: 'ok' | 'info' | 'error'; text: string; planId?: string } | null>(null);
+
+  // State sets used to filter which selected rows are eligible for an action.
+  const STOPPED_STATES = useMemo(() => new Set(['STOPPED', 'STOPPING']), []);
+  const RUNNING_STATES = useMemo(() => new Set(['RUNNING', 'DEPLOYING']), []);
+
+  /**
+   * Runs a bulk container/image action through the plan workflow, grouped by
+   * plugin (each group becomes its own background-executed plan). On a 401 it
+   * offers two-factor revalidation and retries from scratch — safe because the
+   * first createPlan would have thrown before any plan row existed.
+   */
+  async function runBulk(
+    label: string,
+    buildGroups: () => Array<{ pluginId: string; actionId: string; steps: Array<{ deviceId: string; input: Record<string, unknown> }> }>,
+  ) {
+    const attempt = async () => {
+      let lastPlanId: string | null = null;
+      for (const g of buildGroups()) {
+        if (g.steps.length === 0) continue;
+        lastPlanId = await createAndExecutePlan(g.pluginId, g.actionId, g.steps);
+      }
+      if (lastPlanId) setNotice({ kind: 'ok', text: `${label} — plan started in the background.`, planId: lastPlanId });
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth({ label, retry: attempt });
+      else setNotice({ kind: 'error', text: `${label} failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  }
+
+  /** Container bulk action — filters eligible rows by state, groups per device. */
+  function containerBulk(actionId: string, label: string, eligible: (r: ContainerRow) => boolean, noEligibleMsg: string) {
+    return (rows: TreeNode[]) => {
+      const apps = rows.filter((n) => n.row && eligible(n.row));
+      if (apps.length === 0) {
+        setNotice({ kind: 'info', text: noEligibleMsg });
+        return;
+      }
+      runBulk(label, () =>
+        Array.from(groupByDevice(apps.map((n) => n.row!), (r) => ({ pluginId: r.pluginId, deviceId: r.deviceId }), (r) => r.name).values()).map(
+          (g) => ({ pluginId: g.pluginId, actionId, steps: [{ deviceId: g.deviceId, input: { names: g.values } }] }),
+        ),
+      );
+    };
+  }
+
+  /** Image bulk delete — groups selected images per device by their appliance id. */
+  function imageBulkDelete(rows: DockerImageRow[]) {
+    const ids = rows.map((r) => (typeof extraOf(r)['id'] === 'string' ? (extraOf(r)['id'] as string) : r.name));
+    if (ids.length === 0) return;
+    runBulk('Delete image(s)', () =>
+      Array.from(groupByDevice(rows, (r) => ({ pluginId: r.pluginId, deviceId: r.deviceId }), (r) => (typeof extraOf(r)['id'] === 'string' ? (extraOf(r)['id'] as string) : r.name)).values()).map(
+        (g) => ({ pluginId: g.pluginId, actionId: 'images.delete', steps: [{ deviceId: g.deviceId, input: { ids: g.values } }] }),
+      ),
+    );
+  }
+
   // Horizontal splitter: container table (top) vs image panel (bottom). The
   // table gets a fixed share of the page height; collapsing the images below
   // gives its space back to the table — same pattern as the Storage page.
@@ -429,7 +653,7 @@ export default function Containers() {
       key: 'name',
       width: 210,
       exportValue: (node) => node.row?.name ?? '',
-      render: (node) => <AppCell row={node.row} />,
+      render: (node) => <AppCell row={node.row} onEditCompose={(r) => setYamlApp(r)} />,
     },
     {
       header: 'Device',
@@ -560,6 +784,27 @@ export default function Containers() {
       ),
     },
     {
+      // All tags of the image (the first is shown in the Image column; the rest
+      // live here). Dangling images have no real tags.
+      header: 'Tags',
+      key: 'tags',
+      width: 200,
+      exportValue: (row) => { const t = extraOf(row)['tags']; return Array.isArray(t) ? t.join(', ') : ''; },
+      render: (row) => {
+        const t = extraOf(row)['tags'];
+        const tags = Array.isArray(t) ? t.filter((x): x is string => typeof x === 'string') : [];
+        if (tags.length === 0) return <span className="text-faint">—</span>;
+        return (
+          <span className="flex flex-wrap gap-x-1 gap-y-0.5" title={tags.join(', ')}>
+            {tags.slice(0, 4).map((tag) => (
+              <span key={tag} className="inline-flex items-center rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[11px] leading-4 text-secondary">{tag}</span>
+            ))}
+            {tags.length > 4 && <span className="text-[11px] text-faint">+{tags.length - 4}</span>}
+          </span>
+        );
+      },
+    },
+    {
       header: 'Created',
       key: 'createdAt',
       width: 170,
@@ -592,6 +837,32 @@ export default function Containers() {
         {containersQuery.isLoading && <p className="shrink-0 text-sm text-muted-foreground">Loading containers...</p>}
         {containersQuery.isError && (
           <p className="shrink-0 text-sm text-danger-fg">Failed to load containers: {(containersQuery.error as Error).message}</p>
+        )}
+
+        {/* Background-execution / info / error banner (bulk actions + YAML edits). */}
+        {notice && (
+          <div
+            className={clsx(
+              'mb-3 flex shrink-0 items-center gap-2 rounded-lg border px-4 py-2 text-xs',
+              notice.kind === 'ok' && 'border-success-border bg-success text-success-fg',
+              notice.kind === 'info' && 'border-info-border bg-info text-info-fg',
+              notice.kind === 'error' && 'border-danger-border bg-danger text-danger-fg',
+            )}
+          >
+            <span className="flex-1">{notice.text}</span>
+            {notice.planId && (
+              <button
+                type="button"
+                onClick={() => navigate(`/plans/${notice.planId}`)}
+                className="inline-flex items-center gap-1 font-medium underline-offset-2 hover:underline"
+              >
+                View plan <ExternalLink size={12} />
+              </button>
+            )}
+            <button type="button" aria-label="Dismiss notice" onClick={() => setNotice(null)} className="rounded p-0.5 opacity-70 hover:opacity-100">
+              <X size={14} />
+            </button>
+          </div>
         )}
 
         {/* Summary strip — app/container counts + image inventory. */}
@@ -628,6 +899,18 @@ export default function Containers() {
                 autoRefresh={{ intervalMs: 30_000, queries: [containersQuery] }}
                 fillHeight
                 searchPlaceholder="Search containers…"
+                selectable
+                bulkActions={[
+                  { label: 'Stop', onClick: containerBulk('containers.stop', 'Stop selected', (r) => !RUNNING_STATES.has(r.state), 'No selected apps are running — nothing to stop.') },
+                  { label: 'Start', onClick: containerBulk('containers.start', 'Start selected', (r) => STOPPED_STATES.has(r.state), 'No selected apps are stopped — nothing to start.') },
+                  { label: 'Restart', onClick: containerBulk('containers.restart', 'Restart selected', () => true, '') },
+                  { label: 'Update', onClick: containerBulk('containers.upgrade', 'Update selected', (r) => r.upgradeAvailable === true, 'No selected apps have an update available.') },
+                  {
+                    label: 'Delete',
+                    confirm: (count) => `Permanently delete ${count} app(s) and their docker resources? This is destructive.`,
+                    onClick: containerBulk('containers.delete', 'Delete selected', () => true, ''),
+                  },
+                ]}
                 expandable={{
                   childrenOf: (node) => tree.childMap.get(node.key) ?? [],
                   renderChild: (child, _parent, ctx) => <ChildRow node={child} ctx={ctx} />,
@@ -681,6 +964,14 @@ export default function Containers() {
                     autoRefresh={{ intervalMs: 30_000, queries: [containersQuery] }}
                     fillHeight
                     searchPlaceholder="Search images…"
+                    selectable
+                    bulkActions={[
+                      {
+                        label: 'Delete',
+                        confirm: (count) => `Permanently delete ${count} image(s) from the appliance? Images in use by a running app may fail to remove.`,
+                        onClick: imageBulkDelete,
+                      },
+                    ]}
                     emptyMessage="No image data reported yet — Docker hosts (generic Docker plugin) and TrueNAS SCALE appliances report their images within a poll cycle."
                   />
                 </div>
@@ -689,6 +980,22 @@ export default function Containers() {
           </div>
         </div>
       </div>
+
+      {/* In-session 2FA revalidation (plan create/execute returned 401). */}
+      {reauth && (
+        <ReauthDialog
+          contextLabel={reauth.label}
+          onClose={() => setReauth(null)}
+          onSuccess={async () => {
+            const retry = reauth.retry;
+            setReauth(null);
+            await retry();
+          }}
+        />
+      )}
+
+      {/* Custom-app compose YAML editor. */}
+      {yamlApp && <YamlEditorDialog app={yamlApp} onClose={() => setYamlApp(null)} />}
     </Layout>
   );
 }

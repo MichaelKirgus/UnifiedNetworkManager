@@ -621,6 +621,105 @@ router.post(
   }
 );
 
+// POST /plans/:id/steps/bulk — append MANY single-device steps in one round-trip.
+// Used by the Containers page's bulk actions (stop/start/update/delete N apps or
+// images): instead of N sequential add-step calls, the webapp sends every step
+// at once. Each step is validated against the plan plugin's catalog inputSchema
+// exactly like the single-step route; all-or-nothing (any invalid step → 400).
+router.post(
+  '/plans/:id/steps/bulk',
+  requireAuth,
+  requirePermission('configs:apply'),
+  async (req, res) => {
+    const plan = await loadPlan(req.params.id);
+    if (!plan) {
+      res.status(404).json({ error: 'Plan not found' });
+      return;
+    }
+    if (!EDITABLE_STATUSES.includes(plan.status)) {
+      res.status(409).json({ error: `Plan is ${plan.status} — only draft/ready plans can be edited` });
+      return;
+    }
+
+    const body = req.body ?? {};
+    const stepsRaw = Array.isArray(body.steps) ? body.steps : [];
+    if (stepsRaw.length === 0) {
+      res.status(400).json({ error: 'At least one step is required' });
+      return;
+    }
+
+    const catalog = await loadCatalog(plan.pluginId);
+    // Validate every step BEFORE writing anything (all-or-nothing).
+    for (let i = 0; i < stepsRaw.length; i++) {
+      const s = stepsRaw[i];
+      if (!s || typeof s !== 'object') {
+        res.status(400).json({ error: `Step ${i} must be an object` });
+        return;
+      }
+      const deviceId = typeof (s as Record<string, unknown>).deviceId === 'string' ? ((s as Record<string, unknown>).deviceId as string) : '';
+      const actionId = typeof (s as Record<string, unknown>).actionId === 'string' ? ((s as Record<string, unknown>).actionId as string) : '';
+      if (!deviceId || !actionId) {
+        res.status(400).json({ error: `Step ${i}: deviceId and actionId are required` });
+        return;
+      }
+      const device = await db.query.devices.findFirst({ where: (d, { eq }) => eq(d.id, deviceId) });
+      if (!device) {
+        res.status(404).json({ error: `Step ${i}: device not found: ${deviceId}` });
+        return;
+      }
+      const assignment = await resolveAssignment(deviceId, plan.pluginId);
+      if (!assignment) {
+        res.status(400).json({ error: `Step ${i}: plugin is not assigned to device "${device.name}"` });
+        return;
+      }
+      const entry = catalog.find((c) => c.id === actionId);
+      if (!entry || entry.deviceCount !== 1) {
+        res.status(400).json({ error: `Step ${i}: unknown single-device action: ${actionId}` });
+        return;
+      }
+      const input = isPlainObject((s as Record<string, unknown>).input) ? ((s as Record<string, unknown>).input as Record<string, unknown>) : {};
+      if (entry.inputSchema) {
+        const issues = validateInput(entry.inputSchema, input);
+        if (issues.length > 0) {
+          res.status(400).json({ error: `Step ${i}: invalid input`, fieldErrors: Object.fromEntries(issues.map((x) => [x.path, x.message])) });
+          return;
+        }
+      }
+    }
+
+    const steps = await loadSteps(plan.id);
+    const newIds: string[] = [];
+    for (const s of stepsRaw as Array<Record<string, unknown>>) {
+      const id = uuidv4();
+      newIds.push(id);
+      await db.insert(schema.planSteps).values({
+        id,
+        planId: plan.id,
+        stepIndex: 0, // temporary — reindex below
+        deviceId: s.deviceId as string,
+        actionId: s.actionId as string,
+        input: JSON.stringify(isPlainObject(s.input) ? (s.input as Record<string, unknown>) : {}),
+        dependsOn: '[]',
+        secretRefs: '[]',
+        bestEffort: typeof s.bestEffort === 'boolean' ? (s.bestEffort as boolean) : false,
+        status: 'pending',
+        result: null,
+        startedAt: null,
+        finishedAt: null,
+      });
+    }
+
+    try {
+      await reindexSteps(plan.id, [...steps.map((x) => x.id), ...newIds]);
+    } catch (err) {
+      const e = err as { status?: number; message?: string };
+      res.status(e.status ?? 500).json({ error: e.message ?? 'Failed to add steps' });
+      return;
+    }
+    res.status(201).json((await serializePlan(plan.id, true))!);
+  }
+);
+
 // DELETE /plans/:id/steps/:stepId — remove a step (draft/ready only).
 router.delete(
   '/plans/:id/steps/:stepId',

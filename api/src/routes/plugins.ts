@@ -5,6 +5,7 @@ import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { getRequiredSecretType } from '../secretsProvider';
+import { dispatchPluginAction } from '../utils/pluginDispatch';
 import { resolvePluginEndpoint } from '../utils/pluginEndpoint';
 import type { DeviceModelEntry } from '../types/deviceModels';
 import { CredentialSlotDescriptor, normalizeCredentialSlots } from '../types/credentialSlots';
@@ -227,6 +228,65 @@ router.get('/plugins/:id/actions', requireAuth, requirePermission('plugins:read'
     }
   }
   res.status(200).json({ pluginId: id, actions });
+});
+
+// POST /plugins/:id/actions/execute - run ONE single-device READ action against a
+// device's assignment and return its result. This is the "peek" path for pages
+// that need live appliance data without creating a plan (e.g. the Containers
+// page reading a custom app's current compose YAML before editing it). ONLY
+// catalog entries with riskLevel 'read' may be executed here — write/dangerous
+// actions MUST flow through the plan workflow (2FA + audit trail), so this route
+// can never mutate a device. Gated by containers:read (the page that uses it);
+// the read-only restriction is enforced against the persisted catalog, not the
+// caller's claim.
+router.post('/plugins/:id/actions/execute', requireAuth, requirePermission('containers:read'), async (req, res) => {
+  const { id } = req.params;
+  const body = req.body ?? {};
+  const deviceId = typeof body.deviceId === 'string' ? body.deviceId : '';
+  const actionId = typeof body.actionId === 'string' ? body.actionId : '';
+  const input = (body.input && typeof body.input === 'object' && !Array.isArray(body.input)) ? (body.input as Record<string, unknown>) : {};
+
+  if (!deviceId || !actionId) {
+    res.status(400).json({ error: 'deviceId and actionId are required' });
+    return;
+  }
+
+  const row = await db.query.plugins.findFirst({ where: (plugins, { eq }) => eq(plugins.id, id) });
+  if (!row) {
+    res.status(404).json({ error: 'Plugin not found' });
+    return;
+  }
+  let actions: Array<{ id?: string; riskLevel?: string; deviceCount?: number | 'N' }> = [];
+  try {
+    const parsed = row.actionDescriptors ? JSON.parse(row.actionDescriptors) : [];
+    actions = Array.isArray(parsed) ? (parsed as typeof actions) : [];
+  } catch {
+    actions = [];
+  }
+  const entry = actions.find((a) => a.id === actionId);
+  if (!entry || entry.deviceCount !== 1) {
+    res.status(400).json({ error: `Unknown single-device action: ${actionId}` });
+    return;
+  }
+  // Hard read-only gate — the persisted catalog is authoritative.
+  if (entry.riskLevel !== 'read') {
+    res.status(403).json({ error: `Action "${actionId}" is not a read action and must run through the plan workflow` });
+    return;
+  }
+
+  const out = await dispatchPluginAction(deviceId, id, actionId, input);
+  if (!out.ok) {
+    res.status(502).json({ error: out.error ?? 'Action failed' });
+    return;
+  }
+  // The plugin's ActionResult — `details` carries the payload (e.g. the YAML).
+  const result = out.result ?? {};
+  const details = (result.details ?? {}) as Record<string, unknown>;
+  if (result.success === false) {
+    res.status(409).json({ error: typeof details.error === 'string' ? details.error : 'Action reported failure', details });
+    return;
+  }
+  res.status(200).json({ details });
 });
 
 // --- Plugin options & settings ---------------------------------------------

@@ -101,6 +101,21 @@ export interface VerifyResponse {
   permissions: string[];
 }
 
+/** POST /auth/revalidate/challenge response — a pending in-session 2FA challenge. */
+export interface RevalidateChallenge {
+  challengeToken: string;
+  twoFactorRequired: boolean;
+  /** True when the caller has an enrolled passkey (the UI may offer it). */
+  supportsPasskey?: boolean;
+  /** The caller's user id — needed to fetch their own passkey assertion options. */
+  userId: string;
+}
+
+/** Stores a freshly minted access token (login or in-session revalidation). */
+export function setAccessToken(token: string): void {
+  localStorage.setItem('accessToken', token);
+}
+
 /** A long-lived API token for agents/scripts (MCP server, CI). */
 export interface ApiToken {
   id: string;
@@ -1812,8 +1827,23 @@ export const api = {
     apiFetch<PlanDetail>(`/plans/${planId}/steps/${stepId}`, { method: 'DELETE' }),
   reorderPlanSteps: (planId: string, from: number, to: number) =>
     apiFetch<PlanDetail>(`/plans/${planId}/steps/reorder`, { method: 'PATCH', body: JSON.stringify({ from, to }) }),
+  /** Append MANY single-device steps in one round-trip (bulk actions). */
+  addPlanStepsBulk: (planId: string, steps: Array<{ deviceId: string; actionId: string; input?: Record<string, unknown>; bestEffort?: boolean }>) =>
+    apiFetch<PlanDetail>(`/plans/${planId}/steps/bulk`, { method: 'POST', body: JSON.stringify({ steps }) }),
   regeneratePlanSecret: (planId: string, ref: string) =>
     apiFetch<{ id: string; type?: string }>(`/plans/${planId}/secrets/${encodeURIComponent(ref)}/regenerate`, { method: 'POST' }),
+  // Run ONE single-device READ action against a device's assignment and return its
+  // result details (no plan row). Only riskLevel 'read' actions are allowed server-side.
+  executePluginAction: (pluginId: string, body: { deviceId: string; actionId: string; input?: Record<string, unknown> }) =>
+    apiFetch<{ details: Record<string, unknown> }>(`/plugins/${pluginId}/actions/execute`, { method: 'POST', body: JSON.stringify(body) }),
+  // In-session 2FA re-validation (mint a fresh token without a full re-login).
+  revalidateChallenge: () => apiFetch<RevalidateChallenge>('/auth/revalidate/challenge', { method: 'POST' }),
+  verifyRevalidateTotp: (body: { challengeToken: string; totpCode: string }) =>
+    apiFetch<VerifyResponse>('/auth/revalidate/totp', { method: 'POST', body: JSON.stringify(body) }),
+  revalidateWebauthnOptions: (challengeToken: string, userId: string) =>
+    apiFetch<WebauthnAssertionOptions>(`/auth/revalidate/webauthn/options?challengeToken=${encodeURIComponent(challengeToken)}&userId=${encodeURIComponent(userId)}`),
+  verifyRevalidateWebauthn: (body: { challengeToken: string; response: unknown; nonce: string }) =>
+    apiFetch<VerifyResponse>('/auth/revalidate/webauthn/verify', { method: 'POST', body: JSON.stringify(body) }),
   // System/HA observability + runtime tuning (Workers page).
   systemStatus: () => apiFetch<SystemStatus>('/system/status'),
   systemSettings: () => apiFetch<SystemSettingsResponse>('/system/settings'),

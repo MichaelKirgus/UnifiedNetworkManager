@@ -263,6 +263,414 @@ const alertsUndismissAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Container / image lifecycle actions (Containers page bulk actions).
+//
+// These are GENERIC single-device actions: the UNM webapp's Containers page
+// offers them as bulk operations and fans one step out per selected app/image.
+// Any future vendor plugin that manages docker workloads can expose the same
+// action ids so the UI stays identical across vendors. All of them target the
+// TrueNAS SCALE `app.*` / `app.image.*` JSON-RPC methods (documented in the
+// middleware source). The mutating ones are @job methods — the RPC resolves to
+// a JOB ID immediately and the work runs server-side, so each step returns fast
+// ("accepted") rather than blocking until the workload settles.
+// ---------------------------------------------------------------------------
+
+/** Reads a non-empty string array from an action input (defensive). */
+function strArray(input: Record<string, unknown>, key: string): string[] {
+  const v = input[key];
+  if (!Array.isArray(v)) return [];
+  return v.filter((x): x is string => typeof x === 'string' && x.length > 0);
+}
+
+/** One app row as returned by `app.query` (only the fields we need). */
+interface AppRow {
+  name: string;
+  state?: string | null;
+  upgrade_available?: boolean | null;
+  custom_app?: boolean | null;
+}
+
+/** Fetches all installed apps with their current state. */
+async function listApps(ctx: TruenasActionContext): Promise<AppRow[]> {
+  const rows = await ctx.client.call<Record<string, unknown>[]>('app.query', [], ctx.creds);
+  return (rows ?? []).map((r) => ({
+    name: pickString(r, ['name']) ?? '',
+    state: pickString(r, ['state']),
+    upgrade_available: typeof r['upgrade_available'] === 'boolean' ? (r['upgrade_available'] as boolean) : null,
+    custom_app: typeof r['custom_app'] === 'boolean' ? (r['custom_app'] as boolean) : null,
+  }));
+}
+
+/** Normalizes an app state to uppercase (SCALE emits e.g. RUNNING/STOPPED). */
+function normState(s: string | null | undefined): string {
+  return (s ?? '').toUpperCase();
+}
+
+/**
+ * Builds the per-name outcome for a lifecycle action. `target` is the set of
+ * states that mean "already done" (idempotent skip); apps in those states are
+ * reported as skipped, not failed — so re-running a bulk stop/start is safe.
+ */
+function planAppOutcomes(
+  names: string[],
+  apps: AppRow[],
+  target: Set<string>,
+): { toRun: string[]; skipped: Record<string, string>; missing: string[] } {
+  const byName = new Map(apps.map((a) => [a.name, a]));
+  const toRun: string[] = [];
+  const skipped: Record<string, string> = {};
+  const missing: string[] = [];
+  for (const n of names) {
+    const app = byName.get(n);
+    if (!app) {
+      missing.push(n); // already gone — nothing to do
+      continue;
+    }
+    if (target.has(normState(app.state))) skipped[n] = normState(app.state).toLowerCase();
+    else toRun.push(n);
+  }
+  return { toRun, skipped, missing };
+}
+
+/** True when a JSON-RPC error means "the app is already in the target state". */
+function isAlreadyInState(e: unknown): boolean {
+  if (!(e instanceof TruenasRpcError)) return false;
+  return /already|not (running|stopped)|in an invalid state/i.test(e.message);
+}
+
+/** Describes a job-method result (job id = accepted, work runs server-side). */
+function describeAccepted(result: unknown): Record<string, unknown> {
+  if (typeof result === 'number') return { jobId: result, note: 'Accepted as an asynchronous appliance job.' };
+  if (result && typeof result === 'object' && typeof (result as Record<string, unknown>)['id'] === 'number') {
+    return { jobId: (result as Record<string, unknown>)['id'], note: 'Accepted as an asynchronous appliance job.' };
+  }
+  return {};
+}
+
+const containersStopAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'containers.stop',
+  label: 'Stop container(s)',
+  description: 'Stops the selected apps (app.stop). Apps already stopped are skipped, not failed.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'App names to stop' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No app names provided' } };
+    const apps = await listApps(ctx);
+    const { toRun, skipped, missing } = planAppOutcomes(names, apps, new Set(['STOPPED', 'STOPPING']));
+
+    let stopped = 0;
+    const errors: Record<string, string> = {};
+    for (const n of toRun) {
+      try {
+        await ctx.client.call('app.stop', [n], ctx.creds);
+        stopped++;
+      } catch (e) {
+        if (isAlreadyInState(e)) skipped[n] = 'already stopped';
+        else errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { stopped, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const containersStartAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'containers.start',
+  label: 'Start container(s)',
+  description: 'Starts the selected apps (app.start). Apps already running are skipped, not failed.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'App names to start' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No app names provided' } };
+    const apps = await listApps(ctx);
+    const { toRun, skipped, missing } = planAppOutcomes(names, apps, new Set(['RUNNING', 'DEPLOYING']));
+
+    let started = 0;
+    const errors: Record<string, string> = {};
+    for (const n of toRun) {
+      try {
+        await ctx.client.call('app.start', [n], ctx.creds);
+        started++;
+      } catch (e) {
+        if (isAlreadyInState(e)) skipped[n] = 'already running';
+        else errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { started, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const containersRestartAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'containers.restart',
+  label: 'Restart container(s)',
+  description: 'Restarts the selected apps (app.stop then app.start). Apps already stopped are started directly.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'App names to restart' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No app names provided' } };
+    const apps = await listApps(ctx);
+    const byName = new Map(apps.map((a) => [a.name, a]));
+
+    let restarted = 0;
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      const app = byName.get(n);
+      if (!app) {
+        missing.push(n); // already gone — nothing to do
+        continue;
+      }
+      try {
+        // Stop first unless it is not running, then start.
+        if (normState(app.state) !== 'STOPPED') {
+          await ctx.client.call('app.stop', [n], ctx.creds);
+        }
+        await ctx.client.call('app.start', [n], ctx.creds);
+        restarted++;
+      } catch (e) {
+        errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { restarted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const containersUpgradeAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'containers.upgrade',
+  label: 'Update container(s)',
+  description:
+    'Upgrades the selected apps to their latest version (app.upgrade). Apps with no update available are skipped, not failed.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'App names to update' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No app names provided' } };
+    const apps = await listApps(ctx);
+    const byName = new Map(apps.map((a) => [a.name, a]));
+
+    let upgraded = 0;
+    const skipped: Record<string, string> = {};
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      const app = byName.get(n);
+      if (!app) {
+        missing.push(n);
+        continue;
+      }
+      // Only upgrade when the appliance reports an update — otherwise skip.
+      if (app.upgrade_available !== true) {
+        skipped[n] = 'no update available';
+        continue;
+      }
+      try {
+        await ctx.client.call('app.upgrade', [n, { app_version: 'latest' }], ctx.creds);
+        upgraded++;
+      } catch (e) {
+        errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { upgraded, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const containersDeleteAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'containers.delete',
+  label: 'Delete container(s)',
+  description:
+    'DELETES the selected apps and their docker resources (app.delete, remove_images). This is destructive — data in app-managed volumes is removed.',
+  module: 'Containers',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'App names to delete' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No app names provided' } };
+    const apps = await listApps(ctx);
+    const byName = new Map(apps.map((a) => [a.name, a]));
+
+    let deleted = 0;
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      if (!byName.has(n)) {
+        missing.push(n); // already gone — nothing to do
+        continue;
+      }
+      try {
+        await ctx.client.call('app.delete', [n, { remove_images: true, force_remove_custom_app: true }], ctx.creds);
+        deleted++;
+      } catch (e) {
+        errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const imagesDeleteAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'images.delete',
+  label: 'Delete image(s)',
+  description:
+    'DELETES the selected docker images from the appliance (app.image.delete). Images still in use by a running app may fail; dangling/unused ones are removed.',
+  module: 'Containers',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    ids: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'Image ids or tag references to delete' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const ids = strArray(input, 'ids');
+    if (ids.length === 0) return { success: false, details: { error: 'No image ids provided' } };
+
+    // Build the set of known images (id + every tag/digest) so we can tell
+    // "already gone" from a real failure.
+    const rows = await ctx.client.call<Record<string, unknown>[]>('app.image.query', [], ctx.creds);
+    const known = new Set<string>();
+    for (const r of rows ?? []) {
+      const id = pickString(r, ['id']);
+      if (id) known.add(id);
+      for (const t of Array.isArray(r['repo_tags']) ? (r['repo_tags'] as unknown[]) : []) {
+        if (typeof t === 'string') known.add(t);
+      }
+    }
+
+    let deleted = 0;
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const id of ids) {
+      if (!known.has(id)) {
+        missing.push(id); // already gone — nothing to do
+        continue;
+      }
+      try {
+        await ctx.client.call('app.image.delete', [id, { force: false }], ctx.creds);
+        deleted++;
+      } catch (e) {
+        errors[id] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+/**
+ * Reads the current compose YAML of a custom app (app.config with
+ * retrieve_config). The webapp's Containers page uses this to pre-fill its YAML
+ * editor before submitting `containers.update`. For catalog apps the compose is
+ * generated from the schema, so only custom apps expose an editable string.
+ */
+const composeConfigReadAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'compose.config.read',
+  label: 'Read app compose YAML',
+  description: 'Returns the current Docker Compose configuration (YAML) of a single custom app.',
+  module: 'Containers',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'App name to read the compose config of' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'App name is required' } };
+
+    // app.query with retrieve_config returns the full config incl. compose.
+    let cfg: Record<string, unknown> | null = null;
+    try {
+      const rows = await ctx.client.call<Record<string, unknown>[]>('app.query', [[], { extra: { retrieve_config: true } }], ctx.creds);
+      for (const r of rows ?? []) {
+        if ((pickString(r, ['name']) ?? '') === name) {
+          const c = r['config'];
+          cfg = c && typeof c === 'object' ? (c as Record<string, unknown>) : null;
+          break;
+        }
+      }
+    } catch (e) {
+      // Older appliances may not support retrieve_config — fall back to app.config.
+      if (!(e instanceof TruenasRpcError)) throw e;
+    }
+    if (!cfg) {
+      try {
+        cfg = await ctx.client.call<Record<string, unknown>>('app.config', [name], ctx.creds);
+      } catch (e) {
+        return { success: false, details: { error: `Could not read config for "${name}": ${e instanceof Error ? e.message : String(e)}` } };
+      }
+    }
+
+    // The compose lives in custom_compose_config_string when present; otherwise
+    // fall back to the structured services map (serialized as YAML-ish JSON).
+    const yamlStr = pickString(cfg, ['custom_compose_config_string']);
+    let yaml: string;
+    if (yamlStr && yamlStr.trim() !== '') {
+      yaml = yamlStr;
+    } else {
+      const svcs = cfg['services'];
+      yaml = svcs && typeof svcs === 'object' ? JSON.stringify({ services: svcs }, null, 2) : '';
+    }
+    if (yaml.trim() === '') return { success: false, details: { error: `No editable compose config found for "${name}" (catalog apps generate their compose from the schema)` } };
+
+    const customApp = typeof cfg['custom_app'] === 'boolean' ? (cfg['custom_app'] as boolean) : null;
+    return { success: true, details: { name, yaml, ...(customApp !== null ? { customApp } : {}) } };
+  },
+};
+
+const containersUpdateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'containers.update',
+  label: 'Edit app compose YAML',
+  description:
+    'Applies an edited Docker Compose configuration to a single custom app (app.update with custom_compose_config_string). The app is redeployed.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'App name to update' },
+    composeString: { type: 'string', required: true, minLength: 2, description: 'New Docker Compose YAML for the app' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    const composeString = str(input, 'composeString');
+    if (!name || !composeString) return { success: false, details: { error: 'App name and compose YAML are required' } };
+
+    try {
+      const result = await ctx.client.call('app.update', [name, { custom_compose_config_string: composeString }], ctx.creds);
+      return { success: true, applied: true, details: describeAccepted(result) };
+    } catch (e) {
+      if (e instanceof TruenasRpcError && /timed out|closed|unresponsive/i.test(e.message)) {
+        return { success: true, applied: true, details: { note: 'Update accepted — connection dropped while the app redeployed.' } };
+      }
+      throw e;
+    }
+  },
+};
+
 export const registry = createRegistry<TruenasActionContext>([
   systemInfoAction,
   poolsReadAction,
@@ -271,4 +679,12 @@ export const registry = createRegistry<TruenasActionContext>([
   systemShutdownAction,
   alertsDismissAction,
   alertsUndismissAction,
+  containersStopAction,
+  containersStartAction,
+  containersRestartAction,
+  containersUpgradeAction,
+  containersDeleteAction,
+  imagesDeleteAction,
+  composeConfigReadAction,
+  containersUpdateAction,
 ]);

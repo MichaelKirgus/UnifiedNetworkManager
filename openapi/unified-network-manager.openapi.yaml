@@ -175,6 +175,122 @@ paths:
         '401':
           description: Invalid/expired challenge, nonce mismatch, or assertion rejected
 
+  # --- In-session two-factor re-validation ---------------------------------
+  # A session whose 2FA `amr` has expired is rejected by require2FA-gated
+  # endpoints (plan create/execute). Instead of a full re-login, the webapp can
+  # re-prove TOTP/passkey here to mint a fresh JWT. The password is NOT
+  # re-checked — the caller's identity is already established by their current
+  # JWT; only the second factor is asserted (per credential policy).
+
+  /auth/revalidate/challenge:
+    post:
+      tags: [Authentication]
+      summary: Start an in-session two-factor revalidation for the caller
+      description: >-
+        Issues a 2FA challenge for the ALREADY-authenticated caller WITHOUT
+        re-checking the password (the provider trusts the caller's user id, which
+        the API verified via their JWT). Returns a challenge token plus whether
+        passkey step-2 is available. Completion mints a fresh session JWT.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Revalidation challenge started
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [challengeToken, twoFactorRequired, userId]
+                properties:
+                  challengeToken: { type: string }
+                  twoFactorRequired: { type: boolean }
+                  supportsPasskey: { type: boolean, description: "True when the caller has an enrolled passkey" }
+                  userId: { type: string }
+        '401':
+          description: Authentication required or user no longer exists
+        '503':
+          description: No identity provider available
+
+  /auth/revalidate/totp:
+    post:
+      tags: [Authentication]
+      summary: Complete an in-session revalidation with a TOTP code
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challengeToken, totpCode]
+              properties:
+                challengeToken: { type: string }
+                totpCode: { type: string, minLength: 6, maxLength: 6, pattern: "^\\d{6}$" }
+      responses:
+        '200':
+          description: Fresh session minted (amr carries the verified second factor)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginSessionResponse'
+        '401':
+          description: Authentication required, or invalid/expired challenge/code
+
+  /auth/revalidate/webauthn/options:
+    get:
+      tags: [Authentication]
+      summary: Fetch passkey assertion options for a pending revalidation challenge
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: challengeToken
+          required: true
+          schema: { type: string }
+        - in: query
+          name: userId
+          required: true
+          schema: { type: string, description: "Must equal the caller's own user id" }
+      responses:
+        '200':
+          description: Assertion options + nonce
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebauthnAssertionOptionsResponse'
+        '401':
+          description: Authentication required or invalid/expired challenge
+        '403':
+          description: userId does not match the caller
+
+  /auth/revalidate/webauthn/verify:
+    post:
+      tags: [Authentication]
+      summary: Complete an in-session revalidation with a passkey assertion
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challengeToken, response, nonce]
+              properties:
+                challengeToken: { type: string }
+                response: { type: object }
+                nonce: { type: string }
+      responses:
+        '200':
+          description: Fresh session minted (amr carries ['webauthn'])
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginSessionResponse'
+        '401':
+          description: Authentication required, or invalid/expired challenge/assertion
+
   /auth/2fa/verify:
     post:
       tags: [Authentication]
@@ -1224,6 +1340,51 @@ paths:
         '409':
           description: Plan is not editable (not draft/ready)
 
+  /plans/{id}/steps/bulk:
+    post:
+      tags: [Plans]
+      summary: Append many single-device steps to a draft/ready plan in one call
+      description: >-
+        Bulk variant of the single-step append, used by cross-device bulk actions
+        (e.g. stop/start/update/delete N apps or images on the Containers page).
+        Every step is validated against the plan plugin's catalog inputSchema;
+        all-or-nothing — any invalid step returns 400 and nothing is written.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [steps]
+              properties:
+                steps:
+                  type: array
+                  minItems: 1
+                  items:
+                    $ref: '#/components/schemas/PlanStepCreateRequest'
+      responses:
+        '201':
+          description: Steps added (indices + dependsOn re-indexed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '400':
+          description: Empty list, or a step's input fails the action's schema
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Plan or device not found
+        '409':
+          description: Plan is not editable (not draft/ready)
+
   /plans/{id}/steps/reorder:
     patch:
       tags: [Plans]
@@ -1692,6 +1853,56 @@ paths:
           description: Authentication required
         '404':
           description: Plugin not found
+
+  /plugins/{id}/actions/execute:
+    post:
+      tags: [Plugins]
+      summary: Run one single-device READ action against a device's assignment
+      description: >-
+        The "peek" path for pages that need live appliance data without creating
+        a plan (e.g. the Containers page reading a custom app's current compose
+        YAML before editing it). ONLY catalog entries with riskLevel `read` may be
+        executed here — write/dangerous actions MUST flow through the plan workflow
+        (2FA + audit trail), so this route can never mutate a device. The read-only
+        restriction is enforced against the persisted catalog, not the caller's claim.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId, actionId]
+              properties:
+                deviceId: { type: string }
+                actionId: { type: string }
+                input: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: The action's result details (e.g. the compose YAML)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [details]
+                properties:
+                  details: { type: object, additionalProperties: true }
+        '400':
+          description: Missing fields or unknown single-device action
+        '401':
+          description: Authentication required
+        '403':
+          description: Action is not a read action (must use the plan workflow)
+        '404':
+          description: Plugin not found
+        '409':
+          description: The plugin reported the action failed (e.g. no editable compose)
+        '502':
+          description: Device/assignment/plugin missing or dispatch failed
 
   /plugins/{id}/options:
     get:

@@ -154,6 +154,41 @@ app.post('/auth/login', requirePluginKey, async (req, res) => {
 });
 
 /**
+ * Re-validation challenge: issue a 2FA challenge for an ALREADY-authenticated
+ * user WITHOUT re-checking the password. The API calls this from its
+ * /auth/revalidate/challenge route — it has already verified the caller's JWT,
+ * so it passes the caller's own userId (the plugin trusts the shared
+ * x-plugin-api-key + that id). Lets a session whose 2FA `amr` expired re-prove
+ * TOTP/passkey to mint a fresh token without a full re-login.
+ */
+app.post('/auth/revalidate/challenge', requirePluginKey, async (req, res) => {
+  const { userId } = req.body ?? {};
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
+
+  if (typeof userId !== 'string' || !userId) {
+    res.status(400).json({ error: 'userId is required' });
+    return;
+  }
+  let user;
+  try {
+    user = await getUserById(userId);
+  } catch (err) {
+    logger.error(`User lookup failed during revalidation challenge for "${userId}": ${(err as Error).message}`);
+    res.status(502).json({ error: 'Identity backend unavailable' });
+    return;
+  }
+  if (!user) {
+    res.status(401).json({ error: 'Unknown user' });
+    return;
+  }
+
+  purgeExpiredChallenges();
+  const challengeToken = uuidv4();
+  challenges.set(challengeToken, { userId: user.id, expiresAt: Date.now() + CHALLENGE_TTL_MS });
+  res.status(200).json({ challengeToken, twoFactorRequired: true });
+});
+
+/**
  * Step 2: verify the TOTP code for the challenge and return the verified
  * identity assertion. The API broker mints the platform JWT from this.
  */

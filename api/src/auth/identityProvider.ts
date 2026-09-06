@@ -207,6 +207,30 @@ export async function login(username: string, password: string): Promise<LoginRe
 }
 
 /**
+ * Re-validation challenge for an ALREADY-authenticated user — issues a 2FA
+ * challenge WITHOUT re-checking the password. The caller (the API's
+ * /auth/revalidate/challenge route) has already verified the JWT, so it passes
+ * the caller's own userId; the provider trusts that id (shared plugin key).
+ * Lets a session whose 2FA `amr` expired re-prove TOTP/passkey to mint a fresh
+ * token without a full re-login. The completion steps reuse verify2fa /
+ * webauthnAssertionOptions / verifyWebauthn unchanged.
+ */
+export async function revalidateChallenge(userId: string): Promise<LoginResult> {
+  const provider = await resolveActiveProvider();
+
+  const data = await callProvider<{
+    twoFactorRequired?: boolean;
+    challengeToken?: string;
+  }>(provider, '/auth/revalidate/challenge', { userId });
+
+  if (!data.challengeToken) {
+    throw Object.assign(new Error('Identity provider did not return a revalidation challenge token'), { status: 502 });
+  }
+
+  return { challengeToken: data.challengeToken, twoFactorRequired: data.twoFactorRequired ?? true };
+}
+
+/**
  * Step 2: complete authentication (e.g. TOTP) and return the verified identity.
  */
 export async function verify2fa(challengeToken: string, code: string): Promise<IdentityAssertion> {

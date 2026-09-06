@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import { eq } from 'drizzle-orm';
-import { db } from '../db';
+import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { signToken } from '../auth/jwt';
 import { requireAuth } from '../auth/middleware';
 import {
   login,
   verify2fa,
+  revalidateChallenge,
   getFlow,
   getRedirectUrl,
   webauthnAssertionOptions,
@@ -197,6 +198,99 @@ router.post('/auth/webauthn/verify', async (req, res) => {
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Passkey verification failed' });
+  }
+});
+
+// --- In-session 2FA re-validation ------------------------------------------
+// A session whose 2FA `amr` has expired (or a user with no 2FA amr) is rejected
+// by require2FA-gated endpoints (plan create/execute). Rather than forcing a
+// full re-login, the webapp can re-prove TOTP/passkey HERE to mint a fresh JWT.
+// The password is NOT re-checked — the caller's identity is already established
+// by their current JWT; only the second factor is re-asserted (per policy).
+
+/** Counts enrolled passkeys for a user (0 when the table predates migration). */
+async function countPasskeys(userId: string): Promise<number> {
+  try {
+    const r = await pool.query(`SELECT COUNT(*)::int AS n FROM webauthn_credentials WHERE "userId" = $1`, [userId]);
+    return Number(r.rows[0]?.n ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+// POST /auth/revalidate/challenge — start a revalidation for the CALLER. Returns
+// a challenge token + whether passkey step-2 is available (so the UI can offer it).
+router.post('/auth/revalidate/challenge', requireAuth, async (req, res) => {
+  const userId = req.user?.sub ?? '';
+  try {
+    const row = await db.query.users.findFirst({ where: eq(schema.users.id, userId) });
+    if (!row) {
+      res.status(401).json({ error: 'User no longer exists' });
+      return;
+    }
+    const result = await revalidateChallenge(userId);
+    // Passkey is offered only when the active provider supports it AND the user
+    // has at least one enrolled passkey (TOTP-only users get the code field).
+    let supportsPasskey = false;
+    try {
+      const provider = await resolveActiveProvider();
+      if (provider.id === BASIC_AUTH_PLUGIN_UUID) supportsPasskey = (await countPasskeys(userId)) > 0;
+    } catch {
+      // Provider resolution failed — just report no passkey support.
+    }
+    res.status(200).json({ challengeToken: result.challengeToken, twoFactorRequired: true, supportsPasskey, userId });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Unable to start revalidation' });
+  }
+});
+
+// POST /auth/revalidate/totp — complete a revalidation with a TOTP code. Mints a
+// fresh JWT (amr carries the verified second factor) exactly like login step-2.
+router.post('/auth/revalidate/totp', requireAuth, async (req, res) => {
+  const { challengeToken, totpCode } = req.body ?? {};
+  try {
+    const identity = await verify2fa(typeof challengeToken === 'string' ? challengeToken : '', typeof totpCode === 'string' ? totpCode : '');
+    res.status(200).json(await mintSession(identity));
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Revalidation failed' });
+  }
+});
+
+// GET /auth/revalidate/webauthn/options — passkey assertion options for a pending
+// revalidation challenge. Restricted to the CALLER (userId must match) so one
+// user cannot drive another's passkey prompt.
+router.get('/auth/revalidate/webauthn/options', requireAuth, async (req, res) => {
+  const challengeToken = typeof req.query.challengeToken === 'string' ? req.query.challengeToken : '';
+  const userId = typeof req.query.userId === 'string' ? req.query.userId : '';
+  if (!userId || userId !== req.user?.sub) {
+    res.status(403).json({ error: 'Can only fetch passkey options for your own account' });
+    return;
+  }
+  try {
+    const result = await webauthnAssertionOptions(challengeToken);
+    res.status(200).json(result);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Unable to fetch passkey options' });
+  }
+});
+
+// POST /auth/revalidate/webauthn/verify — complete a revalidation with a passkey
+// assertion. Mints a fresh JWT (amr carries ['webauthn']) like login step-2b.
+router.post('/auth/revalidate/webauthn/verify', requireAuth, async (req, res) => {
+  const { challengeToken, response, nonce } = req.body ?? {};
+  try {
+    const identity = await verifyWebauthn(
+      typeof challengeToken === 'string' ? challengeToken : '',
+      response,
+      typeof nonce === 'string' ? nonce : ''
+    );
+    res.status(200).json(await mintSession(identity));
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Passkey revalidation failed' });
   }
 });
 
