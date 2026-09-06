@@ -1,6 +1,6 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ArrowUpCircle, ChevronDown, ChevronRight, ChevronUp, Container, ExternalLink, FileCode2, Loader2, Play, RotateCw, Square, X } from 'lucide-react';
+import { ArrowUpCircle, ChevronDown, ChevronRight, ChevronUp, Container, ExternalLink, FileCode2, Loader2, Play, RotateCw, Square, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Layout } from '../components/Layout';
@@ -9,6 +9,61 @@ import { DeviceChip } from '../components/DeviceChip';
 import { formatBytes, formatDuration } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
 import { api, ApiError, CatalogEntry, ContainerNetwork, ContainerRow, ContainerServiceDetail, DockerImageRow } from '../api/client';
+
+/** One container's live stat snapshot from a probe (key 'containerStats'). */
+interface LiveContainerStat {
+  name: string;
+  cpuPct?: number;
+  memUsedBytes?: number;
+  memLimitBytes?: number;
+  netRxRate?: number;
+  netTxRate?: number;
+  blkReadRate?: number;
+  blkWriteRate?: number;
+}
+
+/** Aggregates live per-container stats into app-level totals (same rule as the
+ * plugin: RAM + I/O summed, CPU = busiest container). Keys match extra.stats. */
+function aggregateLiveStats(stats: LiveContainerStat[]): Record<string, number> | null {
+  if (stats.length === 0) return null;
+  const s: Record<string, number> = {};
+  for (const c of stats) {
+    if (c.cpuPct !== undefined) s['cpuMax'] = Math.max(s['cpuMax'] ?? 0, c.cpuPct);
+    if (c.memUsedBytes !== undefined) s['memUsedBytes'] = (s['memUsedBytes'] ?? 0) + c.memUsedBytes;
+    for (const k of ['netRxRate', 'netTxRate', 'blkReadRate', 'blkWriteRate'] as const) {
+      if (c[k] !== undefined) s[k] = (s[k] ?? 0) + (c[k] as number);
+    }
+  }
+  return s;
+}
+
+/** Looks up a live stat for one service/container by name (exact, then row-name fallback). */
+function liveStatFor(byName: Record<string, LiveContainerStat>, serviceName?: string | null, rowName?: string): LiveContainerStat | undefined {
+  if (!byName) return undefined;
+  const keys = Object.keys(byName);
+  if (serviceName && byName[serviceName]) return byName[serviceName];
+  if (rowName && byName[rowName]) return byName[rowName];
+  // TrueNAS names multi-container app containers `<app>-<service>` — try a suffix match.
+  if (serviceName) {
+    const hit = keys.find((k) => k === serviceName || k.endsWith(`-${serviceName}`));
+    if (hit) return byName[hit];
+  }
+  return undefined;
+}
+
+/** Live running-ness of an app from probe `docker ps` data (null = no fresh
+ * data for its device). TrueNAS multi-container apps name docker containers
+ * `<app>-<service>`, so candidates are matched exactly or by suffix. */
+function isAppRunningLive(row: ContainerRow, running?: Set<string>): boolean | null {
+  if (!running) return null;
+  const services = servicesOf(row);
+  const candidates = Array.from(new Set([row.name, ...(services.length > 0 ? services.map((s) => s.service ?? row.name) : [])]));
+  for (const n of candidates) {
+    if (running.has(n)) return true;
+    for (const k of running) if (k.endsWith(`-${n}`)) return true;
+  }
+  return false;
+}
 
 /**
  * Creates a plan for ONE plugin and executes it in the background (no navigation).
@@ -175,15 +230,15 @@ function UptimeCell({ row }: { row: ContainerRow }) {
  * generic Docker plugin emits its own native states for child containers). */
 const STATE_STYLES: Record<string, string> = {
   RUNNING: 'bg-success text-success-fg border-success-border',
-  STOPPED: 'bg-muted text-secondary border-border',
+  STOPPED: 'bg-muted text-secondary border-border dark:text-foreground/85',
   ERROR: 'bg-danger text-danger-fg border-danger-border',
   FAILED: 'bg-danger text-danger-fg border-danger-border',
   // Docker-native states (generic docker plugin):
-  EXITED: 'bg-muted text-secondary border-border',
-  CREATED: 'bg-muted text-secondary border-border',
+  EXITED: 'bg-muted text-secondary border-border dark:text-foreground/85',
+  CREATED: 'bg-muted text-secondary border-border dark:text-foreground/85',
   RESTARTING: 'bg-warning text-warning-fg border-warning-border',
   REMOVING: 'bg-warning text-warning-fg border-warning-border',
-  PAUSED: 'bg-sky-100 text-sky-800 border-sky-300',
+  PAUSED: 'bg-sky-100 text-sky-800 border-sky-300 dark:bg-sky-950/40 dark:text-sky-300 dark:border-sky-900/70',
   DEAD: 'bg-danger text-danger-fg border-danger-border',
 };
 
@@ -213,7 +268,7 @@ function appStatsOf(row?: ContainerRow): Record<string, number> | undefined {
 function cpuCell(v?: number | null): ReactNode {
   if (v === undefined || v === null) return <span className="text-faint">—</span>;
   return (
-    <span className={clsx('font-mono text-xs', v >= 90 ? 'text-danger-fg' : v >= 60 ? 'text-warning-fg' : 'text-secondary')}>
+    <span className={clsx('font-mono text-xs', v >= 90 ? 'text-danger-fg' : v >= 60 ? 'text-warning-fg' : 'text-foreground')}>
       {v.toFixed(1)}%
     </span>
   );
@@ -225,7 +280,7 @@ function memCell(used?: number | null, limit?: number | null): ReactNode {
   const pct = limit && limit > 0 ? Math.min(100, (used / limit) * 100) : null;
   return (
     <span
-      className={clsx('font-mono text-xs', pct !== null && pct >= 90 ? 'text-danger-fg' : pct !== null && pct >= 75 ? 'text-warning-fg' : 'text-secondary')}
+      className={clsx('font-mono text-xs', pct !== null && pct >= 90 ? 'text-danger-fg' : pct !== null && pct >= 75 ? 'text-warning-fg' : 'text-foreground')}
       title={limit ? `${formatBytes(used)} of ${formatBytes(limit)}` : formatBytes(used)}
     >
       {formatBytes(used)}{limit ? ` / ${formatBytes(limit)}` : ''}
@@ -238,7 +293,7 @@ function rateCell(rx?: number | null, tx?: number | null): ReactNode {
   if ((rx === undefined || rx === null) && (tx === undefined || tx === null)) return <span className="text-faint">—</span>;
   const f = (v: number | null | undefined) => (v ? `${formatBytes(v)}/s` : '0');
   return (
-    <span className="font-mono text-xs text-secondary" title={`rx ${f(rx)} · tx ${f(tx)} — average since the last collection`}>
+    <span className="font-mono text-xs text-foreground" title={`rx ${f(rx)} · tx ${f(tx)} — average since the last collection`}>
       ↓ {f(rx)} · ↑ {f(tx)}
     </span>
   );
@@ -294,6 +349,10 @@ interface TreeNode {
   kind: 'app' | 'container' | 'volume';
   /** Source app row — set on `kind === 'app'` nodes only. */
   row?: ContainerRow;
+  /** Set on container child nodes — the device + plugin that own this member,
+   * needed to create a per-container plan (the `-one` actions). */
+  deviceId?: string;
+  pluginId?: string;
   service?: string;
   image?: string | null;
   state?: string | null;
@@ -323,8 +382,9 @@ interface BuiltApp {
  * children, and each container's declared volume mounts as grandchildren. A
  * single-container app still nests its container (uniform structure); an app
  * with no per-service detail yet falls back to a synthetic container from the
- * app-level image so nothing is lost. */
-function buildApp(row: ContainerRow): BuiltApp {
+ * app-level image so nothing is lost. `liveStats` (probe data for this device)
+ * overrides the enrichment stats when present — live wins, cached fills gaps. */
+function buildApp(row: ContainerRow, liveStats?: Record<string, LiveContainerStat>): BuiltApp {
   const base = `${row.deviceId}|${row.pluginId}|${row.name}`;
   const services = servicesOf(row);
   let list: ContainerServiceDetail[];
@@ -346,23 +406,29 @@ function buildApp(row: ContainerRow): BuiltApp {
       kind: 'volume',
       volumeText: [v.source, v.target ? `→ ${v.target}` : '', v.mode].filter(Boolean).join(' '),
     }));
+    // Live probe stats win over the enrichment snapshot; per-field fallback so
+    // a partial live sample (e.g. first cycle has no I/O rates yet) still shows
+    // whatever the slower path already collected.
+    const live = liveStats ? liveStatFor(liveStats, s.service ?? row.name, row.name) : undefined;
     containers.push({
       node: {
         key: ckey,
         kind: 'container',
+        deviceId: row.deviceId,
+        pluginId: row.pluginId,
         service: s.service ?? (list.length > 1 ? undefined : row.name),
         image: s.image ?? null,
         state: s.state ?? null,
         mac: s.mac ?? null,
         ip: s.ip ?? null,
         startedAt: s.startedAt ?? null,
-        cpuPct: s.cpuPct ?? null,
-        memUsedBytes: s.memUsedBytes ?? null,
-        memLimitBytes: s.memLimitBytes ?? null,
-        netRxRate: s.netRxRate ?? null,
-        netTxRate: s.netTxRate ?? null,
-        blkReadRate: s.blkReadRate ?? null,
-        blkWriteRate: s.blkWriteRate ?? null,
+        cpuPct: live?.cpuPct ?? s.cpuPct ?? null,
+        memUsedBytes: live?.memUsedBytes ?? s.memUsedBytes ?? null,
+        memLimitBytes: live?.memLimitBytes ?? s.memLimitBytes ?? null,
+        netRxRate: live?.netRxRate ?? s.netRxRate ?? null,
+        netTxRate: live?.netTxRate ?? s.netTxRate ?? null,
+        blkReadRate: live?.blkReadRate ?? s.blkReadRate ?? null,
+        blkWriteRate: live?.blkWriteRate ?? s.blkWriteRate ?? null,
       },
       volumes: vols,
     });
@@ -374,7 +440,7 @@ function buildApp(row: ContainerRow): BuiltApp {
 function NetworkChip({ net }: { net: ContainerNetwork }) {
   const tip = [net.name, net.driver ? `driver: ${net.driver}` : '', ...(net.subnets ?? [])].filter(Boolean).join(' · ');
   return (
-    <span title={tip} className="inline-flex items-center rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-sky-800">
+    <span title={tip} className="inline-flex items-center rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-sky-800 dark:border-sky-900/70 dark:bg-sky-950/40 dark:text-sky-300">
       {net.name}
     </span>
   );
@@ -384,7 +450,7 @@ function NetworkChip({ net }: { net: ContainerNetwork }) {
 function IpChip({ ip }: { ip: string }) {
   const isV6 = ip.includes(':');
   return (
-    <span className={clsx('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[11px] leading-4', isV6 ? 'border-violet-200 bg-violet-50 text-violet-800' : 'border-info-border bg-info text-info-fg')}>
+    <span className={clsx('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[11px] leading-4', isV6 ? 'border-violet-200 bg-violet-50 text-violet-800 dark:border-violet-900/70 dark:bg-violet-950/40 dark:text-violet-300' : 'border-info-border bg-info text-info-fg')}>
       {ip}
     </span>
   );
@@ -470,17 +536,71 @@ function AppCell({ row }: { row?: ContainerRow }) {
   );
 }
 
+/** Callbacks an expanded child row needs for per-container actions — bound in
+ * the page component (catalog gating + plan tracking live there). */
+interface ChildActionContext {
+  hasAction: (pluginId: string, actionId: string) => boolean;
+  busy: (node: TreeNode) => boolean;
+  run: (node: TreeNode, actionId: string, label: string) => void;
+}
+
+/** Per-container lifecycle actions for child rows — rendered in the Actions cell
+ * of an expanded container row. Availability is GENERIC: a button only renders
+ * when the owning plugin advertises the matching `-one` action id (the Docker
+ * plugin does; TrueNAS manages apps as units and advertises none, so its child
+ * rows stay action-free). States are lowercase docker states from both plugins. */
+function ContainerNodeActions({ node, ctx }: { node: TreeNode; ctx: ChildActionContext }) {
+  const pid = node.pluginId ?? '';
+  const state = (node.state ?? '').toLowerCase();
+  const running = state === 'running' || state === 'restarting';
+  const actions: { id: string; label: string; icon: ReactNode; available: boolean; eligible: boolean; danger?: boolean }[] = [
+    { id: 'containers.start-one', label: 'Start', icon: <Play size={13} />, available: ctx.hasAction(pid, 'containers.start-one'), eligible: !running },
+    { id: 'containers.stop-one', label: 'Stop', icon: <Square size={12} />, available: ctx.hasAction(pid, 'containers.stop-one'), eligible: running, danger: true },
+    { id: 'containers.restart-one', label: 'Restart', icon: <RotateCw size={13} />, available: ctx.hasAction(pid, 'containers.restart-one'), eligible: true },
+    { id: 'containers.delete-one', label: 'Delete', icon: <Trash2 size={13} />, available: ctx.hasAction(pid, 'containers.delete-one'), eligible: true, danger: true },
+  ];
+  const isBusy = ctx.busy(node);
+  return (
+    <div className="flex items-center gap-0.5">
+      {actions.map((a) => {
+        if (!a.available) return null;
+        const enabled = !isBusy && a.eligible;
+        return (
+          <button
+            key={a.id}
+            type="button"
+            aria-label={`${a.label} ${node.service ?? ''}`}
+            title={enabled ? `${a.label} ${node.service ?? ''}` : isBusy ? 'Waiting for the running plan to finish…' : a.eligible ? '' : `Not applicable in state ${state || 'unknown'}`}
+            disabled={!enabled}
+            onClick={() => ctx.run(node, a.id, a.label)}
+            className={clsx(
+              'rounded-md p-1 hover:bg-muted',
+              a.danger ? 'text-danger-fg hover:text-danger-fg' : 'text-secondary hover:text-foreground',
+              !enabled && 'cursor-not-allowed opacity-30',
+            )}
+          >
+            {isBusy ? <Loader2 size={13} className="animate-spin" /> : a.icon}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Cell content for one column of an expanded child row — mirrors the top-level
  * column renders so children line up with the header. ONLY the name column is
  * indented (the hierarchy cue); every other cell aligns normally under its
  * header, exactly like a regular data row. Container rows fill most columns;
  * volume leaves only use the name column (indented one step deeper). */
-function nodeCell(key: string, node: TreeNode, depth: number): ReactNode {
+function nodeCell(key: string, node: TreeNode, depth: number, actions?: ChildActionContext): ReactNode {
   switch (key) {
     case 'name': {
       if (node.kind === 'container') {
+        // text-foreground (not secondary): child rows sit on a tinted fill that
+        // is lighter than the card in dark mode, where secondary text would drop
+        // below readable contrast.
         return (
-          <span className="block truncate font-medium text-secondary" style={{ paddingLeft: 18 + depth * 14 }} title={node.service ?? undefined}>
+          <span className="block truncate font-medium text-foreground" style={{ paddingLeft: 18 + depth * 14 }} title={node.service ?? undefined}>
             {node.service ?? '—'}
           </span>
         );
@@ -499,7 +619,7 @@ function nodeCell(key: string, node: TreeNode, depth: number): ReactNode {
       if (node.kind !== 'container') return null;
       const repo = splitImage(node.image).repo;
       return repo ? (
-        <span className="block truncate font-mono text-xs text-secondary" title={node.image ?? undefined}>{repo}</span>
+        <span className="block truncate font-mono text-xs text-foreground" title={node.image ?? undefined}>{repo}</span>
       ) : (
         <span className="text-faint">—</span>
       );
@@ -508,7 +628,7 @@ function nodeCell(key: string, node: TreeNode, depth: number): ReactNode {
       if (node.kind !== 'container') return null;
       const tag = splitImage(node.image).tag;
       return tag ? (
-        <span className="inline-flex items-center rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[11px] leading-4 text-secondary" title={tag}>{tag}</span>
+        <span className="inline-flex items-center rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[11px] leading-4 text-foreground" title={tag}>{tag}</span>
       ) : (
         <span className="text-faint">—</span>
       );
@@ -518,7 +638,7 @@ function nodeCell(key: string, node: TreeNode, depth: number): ReactNode {
       const parts: ReactNode[] = [];
       if (node.ip) {
         parts.push(
-          <span key="ip" className={clsx('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[11px] leading-4', node.ip.includes(':') ? 'border-violet-200 bg-violet-50 text-violet-800' : 'border-info-border bg-info text-info-fg')} title="IP">
+          <span key="ip" className={clsx('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[11px] leading-4', node.ip.includes(':') ? 'border-violet-200 bg-violet-50 text-violet-800 dark:border-violet-900/70 dark:bg-violet-950/40 dark:text-violet-300' : 'border-info-border bg-info text-info-fg')} title="IP">
             {node.ip}
           </span>
         );
@@ -532,7 +652,7 @@ function nodeCell(key: string, node: TreeNode, depth: number): ReactNode {
       const since = new Date(node.startedAt).getTime();
       if (Number.isNaN(since)) return null;
       const secs = Math.max(0, (Date.now() - since) / 1000);
-      return <span className="font-mono text-xs text-secondary" title={`Running since ${new Date(node.startedAt).toLocaleString()}`}>{formatDuration(secs)}</span>;
+      return <span className="font-mono text-xs text-foreground" title={`Running since ${new Date(node.startedAt).toLocaleString()}`}>{formatDuration(secs)}</span>;
     }
     case 'cpu':
       if (node.kind !== 'container') return null;
@@ -546,6 +666,12 @@ function nodeCell(key: string, node: TreeNode, depth: number): ReactNode {
     case 'blockio':
       if (node.kind !== 'container') return null;
       return rateCell(node.blkReadRate, node.blkWriteRate);
+    case 'actions': {
+      // Per-container lifecycle buttons — only container children carry them,
+      // and only when the page bound an action context for this table.
+      if (node.kind !== 'container' || !actions) return null;
+      return <ContainerNodeActions node={node} ctx={actions} />;
+    }
     default:
       return null;
   }
@@ -554,9 +680,12 @@ function nodeCell(key: string, node: TreeNode, depth: number): ReactNode {
 /** One expanded child rendered as a FULL `<tr>` — a chevron cell plus one cell
  * per visible column (ctx.columns), so it stays aligned with the header. A
  * container that has volume mounts gets its own chevron for recursive expand. */
-function ChildRow({ node, ctx }: { node: TreeNode; ctx: ExpandChildContext }) {
+function ChildRow({ node, ctx, actions }: { node: TreeNode; ctx: ExpandChildContext; actions?: ChildActionContext }) {
+  // Theme-aware fills — in dark mode a near-white bg-sky-50/40 over the dark
+  // card blends into a mid-gray band that kills text contrast, so children use
+  // muted-panel shades instead (container rows lighter than volume leaves).
   return (
-    <tr className={node.kind === 'volume' ? 'bg-background/60' : 'bg-sky-50/40'}>
+    <tr className={node.kind === 'volume' ? 'bg-background/60 dark:bg-muted/40' : 'bg-sky-50/40 dark:bg-muted/70'}>
       <td className="px-1 py-2 align-middle">
         {ctx.hasChildren ? (
           <button
@@ -572,9 +701,13 @@ function ChildRow({ node, ctx }: { node: TreeNode; ctx: ExpandChildContext }) {
           <span className="inline-block h-6 w-6" />
         )}
       </td>
+      {/* Empty selection cell — the table is selectable, so parent rows carry a
+       * checkbox column between chevron and data. Children are NOT selectable,
+       * but without this cell every child's content shifts one column left. */}
+      {ctx.selectable && <td className="px-3 py-2" />}
       {ctx.columns.map((col) => (
         <td key={col.key} className="overflow-hidden px-4 py-2 text-secondary">
-          {nodeCell(col.key, node, ctx.depth)}
+          {nodeCell(col.key, node, ctx.depth, actions)}
         </td>
       ))}
     </tr>
@@ -616,6 +749,99 @@ export default function Containers() {
     return Array.isArray(actions) && actions.some((a) => a.id === actionId);
   }
 
+  // --- Live stats via PROBE (short-cycle, capability 'probe') -----------------
+  // The CPU/RAM/Net I/O/Block I/O columns prefer LIVE data from the plugin's
+  // POST /probe endpoint — polled every few seconds per device through the API
+  // broker — and fall back to the slower 15-min SSH enrichment baked into
+  // extra.stats when a probe is unavailable (no ssh slot, flaky sshd, ...).
+  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
+  const probePluginIds = useMemo(
+    () => new Set((pluginsQuery.data ?? []).filter((p) => (p.capabilities ?? []).includes('probe')).map((p) => p.id)),
+    [pluginsQuery.data],
+  );
+
+  // One live probe per (device, plugin) pair that has container rows AND a
+  // probe-capable plugin. Two keys per poll: 'containerStats' (CPU/RAM/I-O for
+  // the stat columns) + 'containerStates' (running set from one cheap `docker
+  // ps` — feeds the settle watch so plan outcomes are detected in ~3 s without
+  // a full /monitoring inventory poll).
+  const probeTargets = useMemo(() => {
+    const seen = new Set<string>();
+    const out: { deviceId: string; pluginId: string }[] = [];
+    for (const r of containersQuery.data?.containers ?? []) {
+      if (!probePluginIds.has(r.pluginId)) continue;
+      const k = `${r.deviceId}|${r.pluginId}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push({ deviceId: r.deviceId, pluginId: r.pluginId });
+    }
+    return out;
+  }, [containersQuery.data, probePluginIds]);
+
+  const probeResults = useQueries({
+    queries: probeTargets.map((t) => ({
+      queryKey: ['device-probe', t.deviceId, 'containerStats+containerStates'],
+      queryFn: () => api.deviceProbe(t.deviceId, ['containerStats', 'containerStates'], t.pluginId),
+      refetchInterval: 3_000,
+      staleTime: 0,
+      gcTime: 30_000,
+    })),
+  });
+
+  // deviceId|pluginId → live per-container stats (name → stat). Empty until the
+  // first successful probe; a failed poll keeps serving the last good snapshot.
+  const liveStatsByDevice = useMemo(() => {
+    const m = new Map<string, Record<string, LiveContainerStat>>();
+    probeTargets.forEach((t, i) => {
+      const res = probeResults[i];
+      if (!res?.data) return;
+      const cs = res.data.probe.metrics['containerStats'];
+      if (cs && typeof cs === 'object') m.set(`${t.deviceId}|${t.pluginId}`, cs as Record<string, LiveContainerStat>);
+    });
+    return m;
+  }, [probeTargets, probeResults]);
+
+  // deviceId|pluginId → fresh set of RUNNING container names (probe key
+  // 'containerStates' = one cheap `docker ps`). Absence from the set is the
+  // "stopped" signal. Feeds the settle watch's cheap live check.
+  const liveRunningByDevice = useMemo(() => {
+    const m = new Map<string, { at: number; names: Set<string> }>();
+    probeTargets.forEach((t, i) => {
+      const res = probeResults[i];
+      if (!res?.data) return;
+      const cs = res.data.probe.metrics['containerStates'];
+      if (cs && typeof cs === 'object') {
+        m.set(`${t.deviceId}|${t.pluginId}`, {
+          at: Date.parse(res.data.probe.collectedAt) || Date.now(),
+          names: new Set(Object.keys(cs as Record<string, unknown>)),
+        });
+      }
+    });
+    return m;
+  }, [probeTargets, probeResults]);
+
+  const liveRunningRef = useRef(liveRunningByDevice);
+  useEffect(() => { liveRunningRef.current = liveRunningByDevice; }, [liveRunningByDevice]);
+
+  /** Effective app-level stats: LIVE probe data when available, else the
+   * enrichment snapshot in extra.stats (15-min cadence). */
+  function effectiveAppStats(row?: ContainerRow): Record<string, number> | undefined {
+    if (!row) return undefined;
+    const live = liveStatsByDevice.get(`${row.deviceId}|${row.pluginId}`);
+    if (live && Object.keys(live).length > 0) {
+      const services = servicesOf(row);
+      const names = Array.from(new Set(services.length > 0 ? services.map((s) => s.service ?? row.name) : [row.name]));
+      const stats: LiveContainerStat[] = [];
+      for (const n of names) {
+        const st = liveStatFor(live, n, row.name);
+        if (st) stats.push(st);
+      }
+      const agg = aggregateLiveStats(stats);
+      if (agg) return agg;
+    }
+    return appStatsOf(row); // fallback: enrichment data in extra.stats
+  }
+
   // --- Bulk actions + YAML editor (plan-workflow backed) ---------------------
   const navigate = useNavigate();
   /** In-session 2FA revalidation prompt (shown when a plan call returns 401). */
@@ -646,8 +872,11 @@ export default function Containers() {
    * their plan finished. Container state is INVENTORY data — it only re-collects
    * every ~15 min per device, so the one-shot refresh at plan completion can
    * catch a mid-transition snapshot and leave it stale. While this watch is
-   * active we force-refresh the affected devices every 15s until all watched
-   * apps settle (or the window expires), so states flip as soon as TrueNAS does.
+   * active we check the LIVE probe cache (docker ps via POST /probe, 3 s
+   * cadence — zero appliance API load) every tick; only when the live state is
+   * stable across ticks do we trigger ONE heavy refreshDevices (throttled to
+   * one per 15 s), and only a SETTLED DB clears the watch. Without probe data
+   * (no ssh slot / capability) it degrades to the legacy 15 s heavy loop.
    */
   const [settleWatch, setSettleWatch] = useState<{ deviceIds: string[]; names: string[]; until: number } | null>(null);
   const containersRef = useRef(containersQuery.data);
@@ -665,16 +894,56 @@ export default function Containers() {
 
   useEffect(() => {
     if (!settleWatch) return;
+    // The caller (singleApp / runBulk) already did one heavy refresh at plan
+    // completion — start the throttle clock there so this watch only adds
+    // follow-ups, never a redundant immediate one.
+    let lastHeavyAt = Date.now();
+    /** app name → running on previous tick. Stability gate: TrueNAS app.state
+     * lags docker state during transitions, so one sample can still be
+     * mid-flight — require the same answer twice before syncing the DB. */
+    const prevLive = new Map<string, boolean>();
     const timer = setInterval(async () => {
       if (Date.now() > settleWatch.until) { setSettleWatch(null); return; }
       const data = containersRef.current;
-      const transitional = new Set(
+
+      // Authoritative exit: the DB no longer shows any watched app as transitional.
+      const dbTransitional = new Set(
         (data?.containers ?? []).filter((c) => TRANSITIONAL_STATES.has(c.state)).map((c) => c.name),
       );
-      if (!settleWatch.names.some((n) => transitional.has(n))) { setSettleWatch(null); return; }
+      if (!settleWatch.names.some((n) => dbTransitional.has(n))) { setSettleWatch(null); return; }
+
+      // Cheap live check: docker ps via the probe cache (3 s cadence, zero
+      // appliance API load — unlike refreshDevices which triggers a full
+      // /monitoring inventory poll on the device).
+      const rows = data?.containers ?? [];
+      let allLive = true;
+      let allStable = true;
+      const nextPrev = new Map<string, boolean>();
+      for (const name of settleWatch.names) {
+        const row = rows.find((r) => r.name === name);
+        if (!row) continue; // vanished from inventory — settled by definition
+        const live = liveRunningRef.current.get(`${row.deviceId}|${row.pluginId}`);
+        const fresh = live && Date.now() - live.at < 30_000 ? live.names : undefined;
+        const running = isAppRunningLive(row, fresh);
+        if (running === null) { allLive = false; continue; } // no probe data for this device
+        nextPrev.set(name, running);
+        if (prevLive.has(name) && prevLive.get(name) !== running) allStable = false;
+      }
+      prevLive.clear();
+      for (const [k, v] of nextPrev) prevLive.set(k, v);
+
+      // Nudge the DB only when a heavy poll is worth it: no live data at all
+      // (legacy path), or live data stable across ticks. Either way throttled
+      // to one heavy refresh per 15 s — the cheap probe keeps watching between.
+      const shouldRefresh = !allLive || (nextPrev.size > 0 && allStable);
+      if (!shouldRefresh) return;
+      if (Date.now() - lastHeavyAt < 15_000) return;
+      lastHeavyAt = Date.now();
       try { await api.refreshDevices(settleWatch.deviceIds); } catch { /* fall back to the 30s poll */ }
       void queryClient.invalidateQueries({ queryKey: ['containers'] });
-    }, 15_000);
+      // DB verification happens on the NEXT tick (top of loop) — only a settled
+      // DB clears the watch, so a lagging app.state can never get stuck stale.
+    }, 3_000);
     return () => clearInterval(timer);
   }, [settleWatch, queryClient]);
 
@@ -705,6 +974,16 @@ export default function Containers() {
           try { await api.refreshDevices([row.deviceId]); } catch { /* fall back to the 30s poll */ }
           void queryClient.invalidateQueries({ queryKey: ['containers'] });
           watchSettle([row.deviceId], [row.name]); // keep re-polling while it transitions
+        } else {
+          // Per-container plan key (deviceId|pluginId|containerName) — no app row
+          // carries that name, so refresh the device directly to update child-row
+          // states. No settle watch: a single member changing state does not move
+          // the app-level state the watch tracks.
+          const deviceId = key.split('|')[0];
+          if (deviceId) {
+            try { await api.refreshDevices([deviceId]); } catch { /* fall back to the 30s poll */ }
+            void queryClient.invalidateQueries({ queryKey: ['containers'] });
+          }
         }
         if (anyFailed) setNotice((prev) => ({ kind: 'error', text: `A plan for ${key.split('|').pop()} finished with errors — check the Plans page.` }));
       }
@@ -792,8 +1071,36 @@ export default function Containers() {
     }
   }
 
+  /** One-click PER-CONTAINER action — runs a single-member plan (`*-one`
+   * actions, exact docker-name resolution) for one child row and tracks it so
+   * the device auto-refreshes when execution settles. Same 401 → reauth flow
+   * as app-level actions; tracked under its own key space (…|app#svc) so it
+   * never collides with an app-level plan on the same row. */
+  async function singleContainer(node: TreeNode, actionId: string, label: string) {
+    const name = node.service ?? '';
+    if (!node.deviceId || !node.pluginId || !name) return;
+    const key = `${node.deviceId}|${node.pluginId}|${name}`;
+    const attempt = async () => {
+      const planId = await createAndExecutePlan(node.pluginId!, actionId, [{ deviceId: node.deviceId!, input: { names: [name] } }]);
+      setPendingPlans((prev) => ({ ...prev, [key]: [...(prev[key] ?? []), planId] }));
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth({ label: `${label} — ${name}`, retry: attempt });
+      else setNotice({ kind: 'error', text: `${label} failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  }
+
   /** True while any plan created by this page for the app is still in flight. */
   const hasPending = (row: ContainerRow): boolean => (pendingPlans[`${row.deviceId}|${row.pluginId}|${row.name}`] ?? []).length > 0;
+
+  /** True while a per-container plan for one child node is still in flight. */
+  const containerBusy = (node: TreeNode): boolean => {
+    if (!node.deviceId || !node.pluginId) return false;
+    const name = node.service ?? '';
+    return (pendingPlans[`${node.deviceId}|${node.pluginId}|${name}`] ?? []).length > 0;
+  };
 
   /** Container bulk action — filters eligible rows by state, groups per device. */
   function containerBulk(actionId: string, label: string, eligible: (r: ContainerRow) => boolean, noEligibleMsg: string) {
@@ -862,13 +1169,14 @@ export default function Containers() {
     const childMap = new Map<string, TreeNode[]>();
     const roots: TreeNode[] = [];
     for (const row of containersQuery.data?.containers ?? []) {
-      const built = buildApp(row);
+      // Live probe stats for this device+plugin override the enrichment data.
+      const built = buildApp(row, liveStatsByDevice.get(`${row.deviceId}|${row.pluginId}`));
       roots.push(built.app);
       childMap.set(built.app.key, built.containers.map((c) => c.node));
       for (const c of built.containers) if (c.volumes.length > 0) childMap.set(c.node.key, c.volumes);
     }
     return { roots, childMap };
-  }, [containersQuery.data]);
+  }, [containersQuery.data, liveStatsByDevice]);
 
   const columns: DataTableColumn<TreeNode>[] = [
     {
@@ -954,36 +1262,37 @@ export default function Containers() {
       render: (node) => (node.row ? <VersionCell row={node.row} /> : null),
     },
     {
-      // Live per-app stats — aggregated from the app's containers by the plugin
-      // (docker stats over SSH; RAM + I/O summed, CPU = busiest container).
+      // Live per-app stats — LIVE probe data (3s cadence, capability 'probe')
+      // aggregated from the app's containers; falls back to the 15-min SSH
+      // enrichment snapshot in extra.stats when no probe is available.
       header: 'CPU',
       key: 'cpu',
       width: 90,
-      sortAccessor: (node) => appStatsOf(node.row)?.['cpuMax'] ?? null,
-      exportValue: (node) => { const v = appStatsOf(node.row)?.['cpuMax']; return typeof v === 'number' ? `${v.toFixed(1)}%` : ''; },
-      render: (node) => cpuCell(appStatsOf(node.row)?.['cpuMax']),
+      sortAccessor: (node) => effectiveAppStats(node.row)?.['cpuMax'] ?? null,
+      exportValue: (node) => { const v = effectiveAppStats(node.row)?.['cpuMax']; return typeof v === 'number' ? `${v.toFixed(1)}%` : ''; },
+      render: (node) => cpuCell(effectiveAppStats(node.row)?.['cpuMax']),
     },
     {
       header: 'RAM',
       key: 'ram',
       width: 130,
-      sortAccessor: (node) => appStatsOf(node.row)?.['memUsedBytes'] ?? null,
-      exportValue: (node) => { const v = appStatsOf(node.row)?.['memUsedBytes']; return typeof v === 'number' ? formatBytes(v) : ''; },
-      render: (node) => memCell(appStatsOf(node.row)?.['memUsedBytes']),
+      sortAccessor: (node) => effectiveAppStats(node.row)?.['memUsedBytes'] ?? null,
+      exportValue: (node) => { const v = effectiveAppStats(node.row)?.['memUsedBytes']; return typeof v === 'number' ? formatBytes(v) : ''; },
+      render: (node) => memCell(effectiveAppStats(node.row)?.['memUsedBytes']),
     },
     {
       header: 'Net I/O',
       key: 'netio',
       width: 170,
-      exportValue: (node) => { const s = appStatsOf(node.row); return s && (s['netRxRate'] || s['netTxRate']) ? `↓ ${formatBytes(s['netRxRate'] ?? 0)}/s ↑ ${formatBytes(s['netTxRate'] ?? 0)}/s` : ''; },
-      render: (node) => { const s = appStatsOf(node.row); return rateCell(s?.['netRxRate'], s?.['netTxRate']); },
+      exportValue: (node) => { const s = effectiveAppStats(node.row); return s && (s['netRxRate'] || s['netTxRate']) ? `↓ ${formatBytes(s['netRxRate'] ?? 0)}/s ↑ ${formatBytes(s['netTxRate'] ?? 0)}/s` : ''; },
+      render: (node) => { const s = effectiveAppStats(node.row); return rateCell(s?.['netRxRate'], s?.['netTxRate']); },
     },
     {
       header: 'Block I/O',
       key: 'blockio',
       width: 170,
-      exportValue: (node) => { const s = appStatsOf(node.row); return s && (s['blkReadRate'] || s['blkWriteRate']) ? `↓ ${formatBytes(s['blkReadRate'] ?? 0)}/s ↑ ${formatBytes(s['blkWriteRate'] ?? 0)}/s` : ''; },
-      render: (node) => { const s = appStatsOf(node.row); return rateCell(s?.['blkReadRate'], s?.['blkWriteRate']); },
+      exportValue: (node) => { const s = effectiveAppStats(node.row); return s && (s['blkReadRate'] || s['blkWriteRate']) ? `↓ ${formatBytes(s['blkReadRate'] ?? 0)}/s ↑ ${formatBytes(s['blkWriteRate'] ?? 0)}/s` : ''; },
+      render: (node) => { const s = effectiveAppStats(node.row); return rateCell(s?.['blkReadRate'], s?.['blkWriteRate']); },
     },
     {
       header: 'Collected',
@@ -1069,7 +1378,7 @@ export default function Containers() {
             {tag && tag !== 'latest' ? (
               <span className="inline-flex shrink-0 items-center rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[11px] leading-4 text-secondary">{tag}</span>
             ) : (
-              tag === 'latest' && <span className="inline-flex shrink-0 items-center rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-sky-700">latest</span>
+              tag === 'latest' && <span className="inline-flex shrink-0 items-center rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-sky-700 dark:border-sky-900/70 dark:bg-sky-950/40 dark:text-sky-300">latest</span>
             )}
           </span>
         );
@@ -1218,7 +1527,11 @@ export default function Containers() {
                 ]}
                 expandable={{
                   childrenOf: (node) => tree.childMap.get(node.key) ?? [],
-                  renderChild: (child, _parent, ctx) => <ChildRow node={child} ctx={ctx} />,
+                  // Bind the per-container action callbacks so expanded child rows
+                  // can offer start/stop/restart/delete for a single member.
+                  renderChild: (child, _parent, ctx) => (
+                    <ChildRow node={child} ctx={ctx} actions={{ hasAction, busy: containerBusy, run: singleContainer }} />
+                  ),
                 }}
                 emptyMessage="No containers collected yet — assign a TrueNAS or Docker plugin to a device and wait for the next poll."
               />

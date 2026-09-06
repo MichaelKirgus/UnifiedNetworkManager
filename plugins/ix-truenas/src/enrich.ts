@@ -357,6 +357,134 @@ async function collectDockerViaSsh(
 }
 
 // ---------------------------------------------------------------------------
+// Live probe (POST /probe) — short-cycle stats for on-demand webapp polling
+// ---------------------------------------------------------------------------
+
+/** One container's live stat snapshot as served by POST /probe (key 'containerStats'). */
+export interface ProbeContainerStat {
+  /** Container name (docker, no leading slash). */
+  name: string;
+  cpuPct?: number;
+  memUsedBytes?: number;
+  memLimitBytes?: number;
+  netRxRate?: number;
+  netTxRate?: number;
+  blkReadRate?: number;
+  blkWriteRate?: number;
+}
+
+/** SEPARATE rate trackers for the probe path — the webapp polls every few
+ * seconds, so each interval yields a fresh average WITHOUT disturbing the
+ * 15-min enrichment baselines (which would otherwise see a "reset" whenever
+ * the fast cycle refreshes them first). */
+const probeStatTrackers: Record<'netRx' | 'netTx' | 'blkRead' | 'blkWrite', CounterTracker> = {
+  netRx: new CounterTracker({ toBitsPerSec: false }),
+  netTx: new CounterTracker({ toBitsPerSec: false }),
+  blkRead: new CounterTracker({ toBitsPerSec: false }),
+  blkWrite: new CounterTracker({ toBitsPerSec: false }),
+};
+
+/** Throttled failure logging — a flaky sshd must not spam the log every poll. */
+const lastProbeFailLog = new Map<string, number>();
+function probeFailLog(host: string, message: string, log?: (level: 'info' | 'warn', message: string) => void): void {
+  const now = Date.now();
+  if (now - (lastProbeFailLog.get(host) ?? 0) < 60_000) return; // at most one warn/min/host
+  lastProbeFailLog.set(host, now);
+  log?.('warn', message);
+}
+
+/**
+ * Collects live per-container stats for the PROBE path: ONE `docker stats
+ * --no-stream` over the shared SSH pool (connection RE-USED — cheap), parsed
+ * with the same parser as the enrichment cycle. Covers ALL running containers
+ * (`docker ps -q`) so custom apps without app.query rows are included too.
+ * Returns null when no ssh slot is bound or SSH fails — the caller then throws
+ * and the webapp keeps its last good snapshot / falls back to enrichment data.
+ */
+export async function collectProbeStats(
+  host: string,
+  sshCreds: ReturnType<typeof resolveSshCredentials>,
+  log?: (level: 'info' | 'warn', message: string) => void
+): Promise<Map<string, ProbeContainerStat> | null> {
+  if (!sshCreds) return null; // no ssh slot bound — API-only mode
+  try {
+    const client = await sshPool.get(host, 22, sshCreds);
+    const list = `$(docker ps -q 2>/dev/null | head -n ${MAX_CONTAINERS})`;
+    const cmd = `docker stats --no-stream ${list} --format 'STAT|{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.NetIO}}|{{.BlockIO}}' 2>/dev/null`;
+    const r = await client.exec(cmd, sshCreds);
+    if (r.code !== 0 && !r.stdout) {
+      probeFailLog(host, `SSH docker stats probe on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`, log);
+      return null;
+    }
+    const raw = parseDockerStats(r.stdout);
+    const out = new Map<string, ProbeContainerStat>();
+    for (const [name, s] of raw) {
+      const key = `probe|${host}|${name}`;
+      const stat: ProbeContainerStat = { name };
+      if (s.cpuPct !== undefined) stat.cpuPct = s.cpuPct;
+      if (s.memUsedBytes !== undefined) stat.memUsedBytes = s.memUsedBytes;
+      if (s.memLimitBytes !== undefined) stat.memLimitBytes = s.memLimitBytes;
+      const nr = s.netRxBytes !== undefined ? probeStatTrackers.netRx.sample(`${key}|netRx`, s.netRxBytes) : null;
+      if (nr !== null && nr > 0) stat.netRxRate = Math.round(nr);
+      const nt = s.netTxBytes !== undefined ? probeStatTrackers.netTx.sample(`${key}|netTx`, s.netTxBytes) : null;
+      if (nt !== null && nt > 0) stat.netTxRate = Math.round(nt);
+      const br = s.blkReadBytes !== undefined ? probeStatTrackers.blkRead.sample(`${key}|blkRead`, s.blkReadBytes) : null;
+      if (br !== null && br > 0) stat.blkReadRate = Math.round(br);
+      const bw = s.blkWriteBytes !== undefined ? probeStatTrackers.blkWrite.sample(`${key}|blkWrite`, s.blkWriteBytes) : null;
+      if (bw !== null && bw > 0) stat.blkWriteRate = Math.round(bw);
+      out.set(name, stat);
+    }
+    return out;
+  } catch (e) {
+    probeFailLog(host, e instanceof SshError ? `SSH docker stats probe on ${host} failed: ${e.message}` : `SSH docker stats probe on ${host} unexpected error: ${(e as Error).message}`, log);
+    return null; // best-effort — the webapp keeps its last good snapshot
+  }
+}
+
+/** One container's live state as served by POST /probe (key 'containerStates'). */
+export interface ProbeContainerState {
+  /** Container name (docker, no leading slash). */
+  name: string;
+  /** Always 'running' — `docker ps` lists running containers only. */
+  status: string;
+}
+
+/**
+ * Collects the set of RUNNING container names for the PROBE path: ONE cheap
+ * `docker ps` over the shared SSH pool (sub-second, zero TrueNAS API load).
+ * Absence from the result IS the "stopped" signal — callers treat a missing
+ * name as not-running. Returns null when no ssh slot is bound or SSH fails;
+ * an EMPTY map is a valid answer (all containers stopped) and must NOT be
+ * conflated with failure.
+ */
+export async function collectProbeStates(
+  host: string,
+  sshCreds: ReturnType<typeof resolveSshCredentials>,
+  log?: (level: 'info' | 'warn', message: string) => void
+): Promise<Map<string, ProbeContainerState> | null> {
+  if (!sshCreds) return null; // no ssh slot bound — API-only mode
+  try {
+    const client = await sshPool.get(host, 22, sshCreds);
+    const r = await client.exec(`docker ps --format 'STATE|{{.Names}}' 2>/dev/null`, sshCreds);
+    if (r.code !== 0 && !r.stdout) {
+      probeFailLog(host, `SSH docker ps probe on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`, log);
+      return null;
+    }
+    const out = new Map<string, ProbeContainerState>();
+    for (const line of r.stdout.split('\n')) {
+      if (!line.startsWith('STATE|')) continue;
+      const name = line.slice('STATE|'.length).replace(/^\//, '').trim();
+      if (!name) continue;
+      out.set(name, { name, status: 'running' });
+    }
+    return out;
+  } catch (e) {
+    probeFailLog(host, e instanceof SshError ? `SSH docker ps probe on ${host} failed: ${e.message}` : `SSH docker ps probe on ${host} unexpected error: ${(e as Error).message}`, log);
+    return null; // best-effort — the webapp keeps its last good snapshot
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Background refresh orchestration (15-min cache per host)
 // ---------------------------------------------------------------------------
 

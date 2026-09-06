@@ -323,10 +323,10 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-    # Only needed for transport=socket devices (daemon on the UNM host itself).
+    # Needed for transport=socket devices (daemon on the UNM host itself).
     # Grants the plugin full control of that daemon — enable deliberately.
-    # volumes:
-    #   - /var/run/docker.sock:/var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
   # MCP server for AI agents: exposes the API's OpenAPI operations as MCP tools
   # over Streamable HTTP. Two endpoints:

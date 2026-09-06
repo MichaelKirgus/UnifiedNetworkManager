@@ -36,6 +36,15 @@ export const CAPABILITIES = [
   // plugin must declare an 'ssh' credential slot (secretType usernamePassword
   // or sshKeyPair) in /discover so users can bind credentials to it.
   'ssh',
+  // Serves POST /probe — SHORT-CYCLE live telemetry (1–5 s cadence) for the
+  // webapp's on-demand polling, as opposed to /monitoring which is the API's
+  // background worker at a much slower beat. The caller selects WHICH probe
+  // keys it wants via `keys` so a page only pays for what it renders (the
+  // plugin decides how each key maps onto its data path and skips everything
+  // else — no overload). Response is a free-form metrics map; the API brokers
+  // it verbatim without interpreting content. Advertise when the plugin can
+  // answer cheaply (cached connections, single read-only command, ...).
+  'probe',
   'secretsProvider',
   'identityProvider',
   // Reserved for future log-forwarder plugins (syslog daemon, OpenSearch, ...).
@@ -353,6 +362,42 @@ export interface MonitoringResponseBody {
   health?: Health;
   metrics?: Record<string, unknown>;
   metricDescriptors?: MetricDescriptor[];
+}
+
+// ---------------------------------------------------------------------------
+// Wire shapes — POST /probe (API -> plugin), advertised via capability 'probe'
+// Short-cycle live telemetry: the webapp polls on demand (1–5 s) through the
+// API's generic broker (GET /v1/devices/:id/probe). Unlike /monitoring this is
+// a LIVE read path — no DB writes, no worker. The plugin owns what each key
+// means and how it collects it; `keys` lets the caller request only what it
+// needs so an idle page never overloads the device or the plugin.
+// ---------------------------------------------------------------------------
+
+/** Body of POST /probe as sent by the API broker (same credential model as /monitoring). */
+export interface ProbeRequestBody {
+  deviceId: string;
+  managementAddress: string;
+  /** All known addresses, primary first. */
+  ipAddresses?: DeviceAddress[];
+  /** User-selected hardware model from the device row (null = not set). */
+  model?: string | null;
+  /** User-selected firmware version from the device row (null = not set). */
+  firmwareVersion?: string | null;
+  credentials: StepCredentials;
+  /**
+   * Which probe keys to collect. Absent/empty = the plugin's default set
+   * (usually its cheapest key(s)). Unknown keys are ignored — plugins evolve
+   * independently of callers, and a stale caller must not break a fresh one.
+   */
+  keys?: string[];
+}
+
+/** Response of POST /probe — the API broker returns it verbatim to the webapp. */
+export interface ProbeResponseBody {
+  /** ISO-8601 timestamp when the plugin collected this snapshot. */
+  collectedAt: string;
+  /** Free-form metrics map keyed by probe key (e.g. `containerStats`). Shape is plugin-owned. */
+  metrics: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------

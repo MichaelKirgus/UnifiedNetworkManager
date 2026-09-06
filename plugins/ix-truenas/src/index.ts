@@ -15,15 +15,19 @@ import {
   readSettings,
   resolvePluginIdentity,
   stateHandler,
+  probeHandler,
   textMetric,
   validateInput,
   PortRow,
   PlanRequest,
   StateRequestBody,
+  ProbeRequestBody,
   resolveSshCredentials,
 } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } from './client/truenasClient';
 import {
+  collectProbeStates,
+  collectProbeStats,
   ensureEnrichment,
   ensureVmEnrichment,
   getEnrichment,
@@ -35,6 +39,8 @@ import {
   type ContainerStat,
   type ContainerVolume,
   type DockerContainerInfo,
+  type ProbeContainerState,
+  type ProbeContainerStat,
   type ServiceNetDetail,
 } from './enrich';
 import { alertDedupeKey, registry as actionRegistry, TruenasActionContext } from './actions';
@@ -54,13 +60,13 @@ export const PLUGIN_NAME = 'TrueNAS Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
-  // 0.4.0 — VM collection (vm.query → vms[] + vmHosts for the Hosts page,
-  // live guest IPs via `virsh domifaddr` over SSH) on top of the 0.3.0 SSH
-  // data path (per-container MACs/IPs/start times via docker inspect) and
-  // background app.config enrichment (static container IPs).
-  version: '0.4.0',
+  // 0.5.0 — live PROBE endpoint (POST /probe, capability 'probe'): short-cycle
+  // per-container CPU/RAM/I-O for the Containers page's on-demand polling
+  // (1–5 s), served from ONE `docker stats --no-stream` over the shared SSH
+  // pool. On top of 0.4.0 VM collection + the 0.3.0 SSH data path.
+  version: '0.5.0',
   vendors: ['truenas'],
-  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh'],
+  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe'],
 });
 
 /**
@@ -2013,6 +2019,70 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
     pools: poolsRes.status === 'fulfilled' && Array.isArray(poolsRes.value) ? poolsRes.value : [],
     ifaces: ifacesRes.status === 'fulfilled' && Array.isArray(ifacesRes.value) ? ifacesRes.value : [],
   });
+}, 'ix-truenas-plugin'));
+
+// ---------------------------------------------------------------------------
+// POST /probe — SHORT-CYCLE live telemetry (capability 'probe'). The webapp's
+// Containers page polls this every few seconds through the API broker.
+// Requires a bound ssh slot — without one this throws and the webapp falls back
+// to the slower enrichment data in the inventory rows.
+// Probe keys:
+//   - 'containerStats' (default): per-container CPU/RAM/I-O from ONE
+//     `docker stats --no-stream` over the shared SSH pool (connection reused);
+//     rates come from dedicated probe trackers so fast cycles don't disturb the
+//     15-min enrichment baselines.
+//   - 'containerStates': the set of RUNNING container names from one cheap
+//     `docker ps` (sub-second, zero TrueNAS API load). Absence = stopped — the
+//     webapp's settle watch uses it to detect plan outcomes in ~3 s instead of
+//     waiting for a full /monitoring inventory poll. An EMPTY map is valid
+//     (all containers stopped) and distinct from failure (null → 502).
+// Unknown keys are ignored; an empty/absent list means "the default set".
+// ---------------------------------------------------------------------------
+const PROBE_KEYS = new Set(['containerStats', 'containerStates']);
+
+app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+
+  const host = applianceHost(body.managementAddress);
+  if (!host) throw new Error('Missing managementAddress');
+
+  // Only the ssh slot counts — the primary username/password must NOT be reused.
+  const sshCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
+  if (!sshCreds) throw new Error('No SSH credential bound — live container stats unavailable');
+
+  // Which keys did the caller ask for? Absent/empty = default set. Unknown keys ignored.
+  const requested = Array.isArray(body.keys) && body.keys.length > 0 ? body.keys : ['containerStats'];
+  const wanted = new Set(requested.filter((k) => PROBE_KEYS.has(k)));
+  if (wanted.size === 0) throw new Error(`No supported probe keys in [${requested.join(', ')}]`);
+
+  // Both collectors share the pooled SSH session; run them in parallel when both
+  // are requested (two exec channels on one connection).
+  const logFn = (level: 'info' | 'warn', message: string) =>
+    level === 'warn' ? logger.warn(message, { deviceId: body.deviceId }) : logger.info(message, { deviceId: body.deviceId });
+  const [stats, states] = await Promise.all([
+    wanted.has('containerStats') ? collectProbeStats(host, sshCreds, logFn) : Promise.resolve(null),
+    wanted.has('containerStates') ? collectProbeStates(host, sshCreds, logFn) : Promise.resolve(null),
+  ]);
+
+  const metrics: Record<string, unknown> = {};
+  if (wanted.has('containerStats')) {
+    if (!stats || stats.size === 0) throw new Error('SSH docker stats probe returned no data');
+    // Flat map keyed by container NAME — the webapp joins it onto its rows.
+    const flat: Record<string, ProbeContainerStat> = {};
+    for (const [name, s] of stats) flat[name] = s;
+    metrics['containerStats'] = flat;
+  }
+  if (wanted.has('containerStates')) {
+    // null = SSH failure → 502 (webapp keeps last good data); an EMPTY map is a
+    // valid answer (all containers stopped) and must reach the caller.
+    if (!states) throw new Error('SSH docker ps probe returned no data');
+    const flat: Record<string, ProbeContainerState> = {};
+    for (const [name, s] of states) flat[name] = s;
+    metrics['containerStates'] = flat;
+  }
+
+  return { collectedAt: new Date().toISOString(), metrics };
 }, 'ix-truenas-plugin'));
 
 // ---------------------------------------------------------------------------

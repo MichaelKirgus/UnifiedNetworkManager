@@ -1079,6 +1079,51 @@ paths:
         '502':
           description: Plugin failed to report device state
 
+  /devices/{deviceId}/probe:
+    get:
+      tags: [Devices]
+      summary: Get live short-cycle telemetry from a plugin (probe)
+      description: >-
+        Fetches LIVE probe data from one assigned plugin's `POST /probe`
+        endpoint (capability `probe`). Designed for on-demand webapp polling at
+        1–5 s cadence — data too slow/heavy for the background monitoring
+        worker. The response is returned verbatim: a free-form metrics map
+        keyed by probe key, owned by the plugin. Without a `pluginId` query
+        param the device's primary assignment is used. This is a live read
+        path — nothing is written to the database.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: pluginId
+          required: false
+          description: "Assigned plugin to probe (default = primary assignment)"
+          schema: { type: string }
+        - in: query
+          name: keys
+          required: false
+          description: "Comma-separated probe keys to collect (absent = the plugin's default set)"
+          schema: { type: string }
+      responses:
+        '200':
+          description: Live probe snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceProbe'
+        '400':
+          description: Plugin not assigned to this device / no assignment at all
+        '401':
+          description: Authentication required
+        '404':
+          description: Device or plugin endpoint not found
+        '501':
+          description: This plugin does not support probing
+        '502':
+          description: Plugin failed to report probe data
+
   /devices/{deviceId}/ports:
     get:
       tags: [Devices]
@@ -5077,6 +5122,26 @@ components:
         pluginId: { type: string }
         state:
           $ref: '#/components/schemas/DeviceStateResponse'
+
+    # Live probe snapshot (capability 'probe') — the metrics map is free-form
+    # and plugin-owned; the broker never interprets its content.
+    DeviceProbeResult:
+      type: object
+      required: [collectedAt, metrics]
+      properties:
+        collectedAt: { type: string, format: date-time }
+        metrics:
+          type: object
+          additionalProperties: true
+
+    DeviceProbe:
+      type: object
+      required: [deviceId, pluginId, probe]
+      properties:
+        deviceId: { type: string }
+        pluginId: { type: string }
+        probe:
+          $ref: '#/components/schemas/DeviceProbeResult'
 
     DevicePortRow:
       type: object

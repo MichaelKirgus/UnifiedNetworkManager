@@ -17,6 +17,8 @@ import {
   DeviceStateResponse,
   MetricDescriptor,
   PluginOptionDescriptor,
+  ProbeRequestBody,
+  ProbeResponseBody,
   StateRequestBody,
 } from './types';
 
@@ -202,6 +204,38 @@ export function stateHandler(
       res.status(200).json(state);
     } catch (err) {
       console.error(`[${logTag ?? 'plugin'}] /state failed:`, err instanceof Error ? err.message : err);
+      res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  };
+}
+
+/**
+ * Express-4-safe handler factory for the POST /probe endpoint (capability
+ * 'probe'). Same contract as stateHandler but for SHORT-CYCLE live telemetry:
+ * the webapp polls on demand (1–5 s) through the API's generic broker. The
+ * callback receives the parsed body (deviceId/managementAddress/credentials +
+ * `keys` — which probe keys the caller wants) AND the raw request (for
+ * readSettings()). Keep it CHEAP: reuse cached connections, one read-only
+ * command, no long walks — a page may poll every few seconds.
+ *
+ * Success: 200 + ProbeResponseBody ({ collectedAt, metrics }).
+ * Failure: 502 + { error } (device unreachable / auth failure / key unsupported).
+ */
+export function probeHandler(
+  fn: (body: ProbeRequestBody, req: express.Request) => Promise<ProbeResponseBody>,
+  logTag?: string
+): express.RequestHandler {
+  return async (req, res) => {
+    try {
+      const body = req.body as ProbeRequestBody;
+      if (!body || typeof body.managementAddress !== 'string' || !body.credentials) {
+        res.status(400).json({ error: 'Invalid probe request: managementAddress + credentials required' });
+        return;
+      }
+      const result = await fn(body, req);
+      res.status(200).json(result);
+    } catch (err) {
+      console.error(`[${logTag ?? 'plugin'}] /probe failed:`, err instanceof Error ? err.message : err);
       res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
     }
   };

@@ -14,7 +14,10 @@ export default {
         background: 'rgb(var(--background) / <alpha-value>)',
         foreground: 'rgb(var(--foreground) / <alpha-value>)',
         card: 'rgb(var(--card) / <alpha-value>)',
-        muted: 'rgb(var(--muted) / <alpha-value>)',
+        muted: {
+          DEFAULT: 'rgb(var(--muted) / <alpha-value>)',
+          foreground: 'rgb(var(--muted-foreground) / <alpha-value>)',
+        },
         border: 'rgb(var(--border) / <alpha-value>)',
         secondary: 'rgb(var(--secondary) / <alpha-value>)',
         faint: 'rgb(var(--faint) / <alpha-value>)',

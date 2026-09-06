@@ -6,6 +6,7 @@ import { configJobQueue } from '../queue';
 import { asc, eq, and, desc, inArray } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { DeviceStateError, fetchDeviceState } from '../deviceState';
+import { DeviceProbeError, fetchDeviceProbe } from '../deviceProbe';
 import {
   AssignmentError,
   addAssignment,
@@ -1019,6 +1020,44 @@ router.get('/devices/:deviceId/state', requireAuth, requirePermission('devices:r
     res.status(200).json({ deviceId, ...result });
   } catch (err) {
     if (err instanceof DeviceStateError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// GET /devices/:deviceId/probe - LIVE short-cycle telemetry from one assigned
+// plugin's POST /probe endpoint (capability 'probe'). The webapp polls this on
+// demand (1–5 s) for data too slow/heavy for the background /monitoring worker
+// — e.g. per-container CPU/RAM/I-O. Query params: keys (comma-separated probe
+// keys to collect; absent = plugin default), pluginId (default = primary).
+// The broker is generic (see deviceProbe.ts) — it resolves credentials and
+// forwards verbatim, never interpreting metric content or writing to the DB.
+router.get('/devices/:deviceId/probe', requireAuth, requirePermission('devices:read'), async (req, res) => {
+  const { deviceId } = req.params;
+  const pluginId = typeof req.query.pluginId === 'string' ? req.query.pluginId : '';
+  const keysRaw = typeof req.query.keys === 'string' ? req.query.keys : Array.isArray(req.query.keys) ? (req.query.keys as string[]).join(',') : '';
+  const keys = keysRaw.split(',').map((k) => k.trim()).filter(Boolean);
+
+  try {
+    // No explicit plugin → the device's primary assignment.
+    let effectivePluginId = pluginId;
+    if (!effectivePluginId) {
+      const assignments = await db.query.devicePlugins.findMany({ where: eq(schema.devicePlugins.deviceId, deviceId) });
+      const primary = assignments.find((a) => a.isPrimary) ?? assignments[0];
+      if (!primary) {
+        res.status(400).json({ error: 'Device has no plugin assignment' });
+        return;
+      }
+      effectivePluginId = primary.pluginId;
+    }
+
+    const result = await fetchDeviceProbe(deviceId, effectivePluginId, keys);
+    res.status(200).json({ deviceId, ...result });
+  } catch (err) {
+    if (err instanceof DeviceProbeError) {
       res.status(err.status).json({ error: err.message });
       return;
     }

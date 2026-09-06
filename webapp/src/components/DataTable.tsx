@@ -15,6 +15,10 @@ export interface ExpandChildContext {
   expanded: boolean;
   /** Toggles the child's own expanded state — only meaningful when hasChildren. */
   onToggle?: () => void;
+  /** True when the table has a leading checkbox column (selectable). Child rows
+   * must render an EMPTY selection cell after their chevron to stay aligned with
+   * the header and parent rows — children themselves are not selectable. */
+  selectable?: boolean;
   /** The currently visible columns (same order/widths as the header) so the
    * page can render one aligned `<td>` per column for each child row. */
   columns: DataTableColumn<never>[];
@@ -478,6 +482,7 @@ export function DataTable<T>({
           if (next.has(ckey)) next.delete(ckey); else next.add(ckey);
           return next;
         }) : undefined,
+        selectable: selectable ?? false,
         columns: visibleColumns as DataTableColumn<never>[],
       };
       return (
@@ -720,10 +725,12 @@ export function DataTable<T>({
           <thead className="bg-background">
             <tr>
                 {expandable && (
-                  <th scope="col" aria-label="Expand" className="border-r border-border px-1 py-2" />
+                  // sticky like the data-column headers — without it these two
+                  // cells scroll away vertically while the rest of the header row stays pinned.
+                  <th scope="col" aria-label="Expand" className="sticky top-0 z-10 border-b border-r border-border bg-background px-1 py-2" />
                 )}
                 {selectable && (
-                  <th scope="col" className="border-r border-border px-3 py-2">
+                  <th scope="col" className="sticky top-0 z-10 border-b border-r border-border bg-background px-3 py-2">
                     <input
                       ref={selectAllRef}
                       type="checkbox"

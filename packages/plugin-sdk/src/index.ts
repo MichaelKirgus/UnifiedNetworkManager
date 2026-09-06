@@ -8,7 +8,7 @@
 export * from './types';
 export { resolvePluginIdentity, DEFAULT_PLUGIN_PORT } from './identity';
 export type { PluginIdentity, PluginIdentityInput } from './identity';
-export { createPluginServer, buildDiscoverPayload, requirePluginKey, stateHandler } from './server';
+export { createPluginServer, buildDiscoverPayload, requirePluginKey, stateHandler, probeHandler } from './server';
 export type { PluginServerOptions, PluginServer, DiscoveryExtras } from './server';
 export { readSettings, clampInt, hostFromAddress, pickString, pickNumber } from './settings';
 export { suggestPortLayout, portNumberFromKey } from './portLayout';

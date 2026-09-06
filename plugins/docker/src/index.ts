@@ -18,18 +18,29 @@ import {
   Health,
   MetricDescriptor,
   PluginOptionDescriptor,
+  PlanRequest,
+  ProbeRequestBody,
+  StateItem,
+  StateRequestBody,
+  StateSection,
   clampInt,
   createPluginLogger,
   createPluginServer,
   errorDescriptor,
   gaugeMetric,
+  probeHandler,
   readSettings,
   resolvePluginIdentity,
+  stateHandler,
   textMetric,
+  validateInput,
 } from '@unm/plugin-sdk';
 
 import { DockerClientOptions, DockerTlsMaterial, engineVersion, listContainers, listImages } from './client';
 import { buildContainerRows, buildImageRows, ContainerRow as UnmContainerRow, DockerContainerRaw, DockerImageRaw, ImageRow } from './rows';
+import { registry as actionRegistry, DockerActionContext } from './actions';
+import { buildPlan, PlanningError } from './plan';
+import { collectProbeStats, collectProbeStates, ProbeContainerStat, ProbeContainerState } from './probe';
 
 // --- Identity -----------------------------------------------------------------
 export const PLUGIN_UUID = '00000000-0000-4000-8000-00000000000b';
@@ -43,9 +54,15 @@ export const PLUGIN_NAME = 'Docker Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
-  version: '0.1.0',
+  // 0.3.0 — per-container control: containers.start-one / stop-one / restart-one
+  // / delete-one drive a SINGLE container by its exact docker name (no
+  // compose-project fan-out), powering the Containers page's child-row actions.
+  // On top of 0.2.0 (app-level start/stop/restart/delete + image delete via the
+  // Engine API, short-cycle POST /probe with 'containerStats' +
+  // 'containerStates') and 0.1.0 monitoring over tcp/tls/socket.
+  version: '0.3.0',
   vendors: ['generic'],
-  capabilities: ['monitoring'],
+  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'probe'],
 });
 
 // --- Options --------------------------------------------------------------------
@@ -110,6 +127,7 @@ const server = createPluginServer({
     ],
     metrics: METRIC_DESCRIPTORS,
     options: PLUGIN_OPTIONS,
+    actions: actionRegistry.listCatalog(), // config-capable — /config + /plan below
     deviceModels: [{ vendor: 'generic', model: 'Docker Host' }],
   },
 });
@@ -134,6 +152,29 @@ function tlsMaterialFromCredentials(credentials: unknown): DockerTlsMaterial | u
   const key = pick('key');
   if (!ca && !cert && !key) return undefined;
   return { ca, cert, key };
+}
+
+/**
+ * Builds a DockerClientOptions from effective settings + the request's
+ * management address + decrypted credentials. Shared by /monitoring, /config,
+ * /state and /probe so all four resolve transport/port/socket/TLS identically.
+ */
+function clientOptsFrom(
+  req: { body?: unknown },
+  settings: Record<string, unknown>,
+): DockerClientOptions {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const managementAddress = typeof body.managementAddress === 'string' ? body.managementAddress : '';
+  const transport = String(settings.transport ?? 'auto');
+  const port = clampInt(Number(settings.port ?? 2375), 1, 65535, 2375);
+  return {
+    host: managementAddress,
+    transport: transport as DockerClientOptions['transport'],
+    tcpPort: port,
+    tlsPort: 2376,
+    localSocketPath: String(settings.localSocketPath || '/var/run/docker.sock'),
+    tls: tlsMaterialFromCredentials(body.credentials),
+  };
 }
 
 /** One full collection: version + container list + image inventory → UNM rows. */
@@ -274,6 +315,204 @@ app.post('/monitoring', async (req, res) => {
     return fail('critical', `Monitoring failed: ${(err as Error).message}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// POST /config — executes ONE action step against one Docker host. The API's
+// config-job worker dispatches here with {actionId, input}; the plugin owns ALL
+// logic (schema validation + Engine API call). Same contract as the other
+// plugins: 200 + { success, result } on every path.
+// ---------------------------------------------------------------------------
+app.post('/config', async (req, res) => {
+  const body = req.body ?? {};
+  const deviceId = typeof body.deviceId === 'string' ? body.deviceId : null;
+
+  // Registry shape preferred; legacy `{action, payload}` maps onto it.
+  const actionId: string | undefined = typeof body.actionId === 'string' ? body.actionId : (typeof body.action === 'string' ? body.action : undefined);
+  const input: Record<string, unknown> =
+    body.input && typeof body.input === 'object'
+      ? (body.input as Record<string, unknown>)
+      : body.payload && typeof body.payload === 'object'
+        ? (body.payload as Record<string, unknown>)
+        : {};
+
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+
+  if (!actionId) {
+    res.status(400).json({ success: false, result: { error: 'Missing actionId (or legacy "action")' } });
+    return;
+  }
+
+  const action = actionRegistry.getAction(actionId);
+  if (!action) {
+    res.status(400).json({ success: false, result: { error: `Unknown action "${actionId}"` } });
+    return;
+  }
+
+  // Validate input against the action's declared schema — the plugin is the
+  // authority on what it accepts; the API only checks that the id exists.
+  const issues = validateInput(action.inputSchema, input);
+  if (issues.length > 0) {
+    res.status(200).json({ success: false, result: { error: `Invalid input for ${actionId}: ${issues.map((i) => `${i.path}: ${i.message}`).join('; ')}` } });
+    return;
+  }
+
+  try {
+    const opts = clientOptsFrom(req, settings);
+    if (!opts.host.trim() && opts.transport !== 'socket') {
+      res.status(200).json({ success: false, result: { error: 'No target address — set the device management address (or use transport=socket for a local daemon).' } });
+      return;
+    }
+    const ctx: DockerActionContext = { opts };
+    const result = await action.execute(ctx, input);
+    res.status(200).json({ success: result.success, result });
+  } catch (err) {
+    logger.error(`Config action ${actionId} failed: ${(err as Error).message}`, { deviceId, context: { actionId } });
+    res.status(200).json({ success: false, result: { error: (err as Error).message } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /plan — builds an execution plan for an intent across a device batch.
+// v1 has no multi-device intents: single-device actions fan out to one step per
+// device. The API persists the returned steps and the plan executor dispatches
+// each step to /config.
+// ---------------------------------------------------------------------------
+app.post('/plan', async (req, res) => {
+  const body = req.body ?? {};
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
+
+  const planReq: PlanRequest = {
+    intent: {
+      actionId: typeof body.intent?.actionId === 'string' ? body.intent.actionId : '',
+      inputs: (body.intent?.inputs && typeof body.intent.inputs === 'object' ? body.intent.inputs : {}) as Record<string, unknown>,
+    },
+    devices: Array.isArray(body.devices)
+      ? (body.devices as PlanRequest['devices']).map((d) => ({
+          deviceId: String(d.deviceId),
+          managementAddress: String(d.managementAddress ?? ''),
+          credentials: d.credentials,
+        }))
+      : [],
+  };
+
+  try {
+    const plan = await buildPlan(planReq);
+    res.status(200).json({ plan });
+  } catch (err) {
+    if (err instanceof PlanningError) {
+      logger.error(`Planning ${planReq.intent.actionId} failed: ${err.message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    const message = (err as Error).message;
+    logger.error(`Planning ${planReq.intent.actionId} failed unexpectedly: ${message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
+    res.status(500).json({ error: message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /state — dynamic device-state document for the UNM Config page. The API
+// broker calls this with fresh credentials + injected settings and returns the
+// response verbatim to the webapp. Best-effort reads: a failing endpoint yields
+// an empty section, not an error.
+// ---------------------------------------------------------------------------
+app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+
+  const opts = clientOptsFrom({ body }, settings);
+  if (!opts.host.trim() && opts.transport !== 'socket') throw new Error('Missing managementAddress');
+
+  // Engine version + a container summary. Both best-effort — a failure yields an
+  // empty section rather than failing the whole state document.
+  const [versionRes, listRes] = await Promise.allSettled([engineVersion(opts), listContainers(opts)]);
+
+  const sections: StateSection[] = [];
+
+  if (versionRes.status === 'fulfilled' && versionRes.value.ok) {
+    const v = versionRes.value.data ?? {};
+    sections.push({
+      id: 'engine',
+      label: 'Docker Engine',
+      items: [
+        { key: 'version', title: `Docker ${v.Version ?? '?'}`, fields: { Version: v.Version ?? null, ApiVersion: v.ApiVersion ?? null, Os: v.Os ?? null, Arch: v.Arch ?? null } },
+      ],
+    });
+  }
+
+  if (listRes.status === 'fulfilled' && listRes.value.ok && Array.isArray(listRes.value.data)) {
+    const rows = listRes.value.data as Array<{ Names?: string[]; State?: string; Image?: string }>;
+    let running = 0;
+    for (const r of rows) if (String(r.State ?? '').toLowerCase() === 'running') running++;
+    sections.push({
+      id: 'containers',
+      label: `Containers (${rows.length} total, ${running} running)`,
+      items: rows.slice(0, 200).map((r, i) => {
+        const name = Array.isArray(r.Names) && r.Names.length > 0 ? String(r.Names[0]).replace(/^\/+/, '') : `container-${i}`;
+        return { key: name, title: name, status: String(r.State ?? 'unknown').toLowerCase(), fields: { Image: r.Image ?? null } };
+      }),
+    });
+  }
+
+  return { collectedAt: new Date().toISOString(), sections };
+}, 'docker-plugin'));
+
+// ---------------------------------------------------------------------------
+// POST /probe — SHORT-CYCLE live telemetry (capability 'probe'). The webapp's
+// Containers page polls this every few seconds through the API broker. Served
+// straight from the Engine REST API (no SSH needed):
+//   - 'containerStats' (default): per-container CPU/RAM/I-O from a bounded
+//     fan-out of /containers/{id}/stats?stream=false; rates come from dedicated
+//     probe trackers so fast cycles yield fresh averages.
+//   - 'containerStates': the set of RUNNING container names from ONE cheap
+//     /containers/json (sub-second). Absence = stopped — the webapp's settle
+//     watch uses it to detect plan outcomes in ~3 s instead of waiting for a
+//     full /monitoring inventory poll. An EMPTY map is valid (all stopped) and
+//     distinct from failure (null → 502).
+// Unknown keys are ignored; an empty/absent list means "the default set".
+// ---------------------------------------------------------------------------
+const PROBE_KEYS = new Set(['containerStats', 'containerStates']);
+
+app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+
+  const opts = clientOptsFrom(req, settings);
+  if (!opts.host.trim() && opts.transport !== 'socket') throw new Error('Missing managementAddress');
+
+  // Which keys did the caller ask for? Absent/empty = default set. Unknown ignored.
+  const requested = Array.isArray(body.keys) && body.keys.length > 0 ? body.keys : ['containerStats'];
+  const wanted = new Set(requested.filter((k) => PROBE_KEYS.has(k)));
+  if (wanted.size === 0) throw new Error(`No supported probe keys in [${requested.join(', ')}]`);
+
+  // Both collectors share the same transport; run them in parallel when both are
+  // requested.
+  const logFn = (level: 'info' | 'warn', message: string) =>
+    level === 'warn' ? logger.warn(message, { deviceId: body.deviceId }) : logger.info(message, { deviceId: body.deviceId });
+  const [stats, states] = await Promise.all([
+    wanted.has('containerStats') ? collectProbeStats(opts, logFn) : Promise.resolve(null),
+    wanted.has('containerStates') ? collectProbeStates(opts, logFn) : Promise.resolve(null),
+  ]);
+
+  const metrics: Record<string, unknown> = {};
+  if (wanted.has('containerStats')) {
+    // null = transport failure → 502 (webapp keeps last good data); an EMPTY map
+    // is a valid answer (nothing running) and must reach the caller.
+    if (!stats) throw new Error('Docker stats probe returned no data');
+    const flat: Record<string, ProbeContainerStat> = {};
+    for (const [name, s] of stats) flat[name] = s;
+    metrics['containerStats'] = flat;
+  }
+  if (wanted.has('containerStates')) {
+    if (!states) throw new Error('Docker /containers/json probe returned no data');
+    const flat: Record<string, ProbeContainerState> = {};
+    for (const [name, s] of states) flat[name] = s;
+    metrics['containerStates'] = flat;
+  }
+
+  return { collectedAt: new Date().toISOString(), metrics };
+}, 'docker-plugin'));
 
 // listen() binds the conventional plugin port (4080 by default; override with
 // the PORT env var) and starts mDNS advertising — both handled by the SDK.

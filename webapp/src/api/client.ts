@@ -1358,6 +1358,20 @@ export interface DeviceState {
   state: DeviceStateResponse;
 }
 
+/** The live probe snapshot a plugin serves from POST /probe (capability 'probe').
+ * `metrics` is a free-form map keyed by probe key — the shape is plugin-owned. */
+export interface ProbeResult {
+  collectedAt: string;
+  metrics: Record<string, unknown>;
+}
+
+/** GET /devices/:id/probe response — the broker wraps the snapshot with ids. */
+export interface DeviceProbe {
+  deviceId: string;
+  pluginId: string;
+  probe: ProbeResult;
+}
+
 /** One normalized port row (device_ports table). */
 export interface DevicePortRow {
   pluginId: string;
@@ -1541,6 +1555,19 @@ export const api = {
   // Live device state from one assigned plugin's GET /state endpoint.
   deviceState: (deviceId: string, pluginId?: string) =>
     apiFetch<DeviceState>(`/devices/${deviceId}/state${pluginId ? `?pluginId=${encodeURIComponent(pluginId)}` : ''}`),
+  // LIVE short-cycle telemetry from one assigned plugin's POST /probe endpoint
+  // (capability 'probe'). The webapp polls this on demand (1–5 s) for data too
+  // slow/heavy for the background worker. `keys` selects which probe keys to
+  // collect; absent = the plugin's default set.
+  deviceProbe: (deviceId: string, keys?: string[], pluginId?: string) => {
+    const params = new URLSearchParams();
+    // Comma-joined list — URLSearchParams percent-encodes the comma, which the
+    // API's OpenAPI validator requires (raw reserved chars in query values 400).
+    if (keys && keys.length > 0) params.set('keys', keys.join(','));
+    if (pluginId) params.set('pluginId', pluginId);
+    const qs = params.toString();
+    return apiFetch<DeviceProbe>(`/devices/${deviceId}/probe${qs ? `?${qs}` : ''}`);
+  },
   // Normalized port inventory for a device across all plugins.
   devicePorts: (deviceId: string) =>
     apiFetch<{ deviceId: string; ports: DevicePortRow[] }>(`/devices/${deviceId}/ports`),

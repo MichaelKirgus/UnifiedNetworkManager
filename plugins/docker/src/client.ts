@@ -54,6 +54,12 @@ export interface DockerApiResult<T = unknown> {
 
 const DEFAULT_TIMEOUT_MS = 8_000; // the API gives the whole poll a hard 10 s budget
 
+/** Timeout for mutating action calls (start/stop/restart/delete). Docker's
+ * default stop grace period is 10 s — `docker stop` blocks until it elapses or
+ * the container exits, so these need a longer budget than reads. The config-job
+ * worker has no hard per-call deadline like /monitoring does. */
+const ACTION_TIMEOUT_MS = 35_000;
+
 /** Splits `host` into { host, port? } — tolerates bare hosts and explicit ports. */
 function splitHostPort(host: string): { host: string; port?: number } {
   const h = (host ?? '').trim().replace(/\/+$/, '');
@@ -126,23 +132,32 @@ function buildBound(o: DockerClientOptions): BoundClient {
   }
 }
 
-/** Executes one GET against the Docker Engine API. Never throws for HTTP-level failures. */
-async function get<T>(bound: BoundClient, path: string): Promise<DockerApiResult<T>> {
+/** HTTP verbs the Engine API needs. GET = reads; POST/DELETE = actions + image removal. */
+export type DockerMethod = 'GET' | 'POST' | 'DELETE';
+
+/** Executes one request against the Docker Engine API. Never throws for HTTP-level failures. */
+async function request<T>(bound: BoundClient, method: DockerMethod, path: string, body?: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<DockerApiResult<T>> {
   try {
     if (bound.kind === 'socket') {
       // Unix-socket request via raw node http — keeps the plugin dependency-light
       // (no axios adapter package needed).
+      const payload = body !== undefined ? JSON.stringify(body) : null;
       const data = await new Promise<string>((resolve, reject) => {
         const req = http.request(
-          { socketPath: bound.socketPath!, path, method: 'GET', timeout: DEFAULT_TIMEOUT_MS },
+          { socketPath: bound.socketPath!, path, method, timeout: timeoutMs },
           (res) => {
-            let body = '';
-            res.on('data', (c) => (body += c));
-            res.on('end', () => resolve(JSON.stringify({ status: res.statusCode ?? 0, body })));
+            let bodyText = '';
+            res.on('data', (c) => (bodyText += c));
+            res.on('end', () => resolve(JSON.stringify({ status: res.statusCode ?? 0, body: bodyText })));
           }
         );
-        req.on('timeout', () => req.destroy(new Error(`socket request timed out after ${DEFAULT_TIMEOUT_MS} ms`)));
+        req.on('timeout', () => req.destroy(new Error(`socket request timed out after ${timeoutMs} ms`)));
         req.on('error', reject);
+        if (payload !== null) {
+          req.setHeader('Content-Type', 'application/json');
+          req.setHeader('Content-Length', Buffer.byteLength(payload));
+          req.write(payload);
+        }
         req.end();
       });
       const parsed = JSON.parse(data) as { status: number; body: string };
@@ -155,7 +170,7 @@ async function get<T>(bound: BoundClient, path: string): Promise<DockerApiResult
       return { ok: parsed.status >= 200 && parsed.status < 300, status: parsed.status, data: json, transportUsed: 'socket' };
     }
 
-    const res = await bound.axios!.get<T>(path);
+    const res = await bound.axios!.request<T>({ method, url: path, timeout: timeoutMs, ...(body !== undefined ? { data: body } : {}) });
     return {
       ok: res.status >= 200 && res.status < 300,
       status: res.status,
@@ -174,12 +189,12 @@ async function get<T>(bound: BoundClient, path: string): Promise<DockerApiResult
 }
 
 /**
- * Runs one GET across the transports implied by `transport` (auto = tcp, then
- * tls when material is available) and returns the first success. Connection-
- * level failures on one transport fall through to the next; an HTTP error from
- * a reachable daemon is authoritative (no fallback — the daemon answered).
+ * Runs one request across the transports implied by `transport` (auto = tcp,
+ * then tls when material is available) and returns the first success.
+ * Connection-level failures on one transport fall through to the next; an HTTP
+ * error from a reachable daemon is authoritative (no fallback — it answered).
  */
-export async function dockerGet<T>(o: DockerClientOptions, path: string): Promise<DockerApiResult<T>> {
+export async function dockerRequest<T>(o: DockerClientOptions, method: DockerMethod, path: string, body?: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<DockerApiResult<T>> {
   const attempts: BoundClient[] = [];
   if (o.transport === 'auto') {
     try {
@@ -198,13 +213,32 @@ export async function dockerGet<T>(o: DockerClientOptions, path: string): Promis
 
   let last: DockerApiResult<T> | null = null;
   for (const bound of attempts) {
-    const r = await get<T>(bound, path);
+    const r = await request<T>(bound, method, path, body, timeoutMs);
     if (r.ok) return r;
     // A reachable daemon that answered with an HTTP error is authoritative.
     if (r.status >= 400 && r.status < 600) return r;
     last = r; // connection-level failure — try the next transport
   }
   return last ?? { ok: false, status: 0, data: undefined as unknown as T, error: 'no transports attempted' };
+}
+
+/** GET convenience wrapper over dockerRequest. */
+export function dockerGet<T>(o: DockerClientOptions, path: string): Promise<DockerApiResult<T>> {
+  return dockerRequest<T>(o, 'GET', path);
+}
+
+/**
+ * POST convenience wrapper (container start/stop/restart). Uses the LONGER
+ * action timeout — `docker stop`/`restart` block for up to Docker's default
+ * 10 s graceful-stop period before force-killing, so the read budget is too short.
+ */
+export function dockerPost<T = unknown>(o: DockerClientOptions, path: string): Promise<DockerApiResult<T>> {
+  return dockerRequest<T>(o, 'POST', path, undefined, ACTION_TIMEOUT_MS);
+}
+
+/** DELETE convenience wrapper (container removal, image removal). Same longer action budget. */
+export function dockerDelete<T = unknown>(o: DockerClientOptions, path: string): Promise<DockerApiResult<T>> {
+  return dockerRequest<T>(o, 'DELETE', path, undefined, ACTION_TIMEOUT_MS);
 }
 
 /** GET /containers/json?all=true — the full container list with network + mount detail. */
@@ -220,4 +254,14 @@ export function listImages(o: DockerClientOptions): Promise<DockerApiResult<unkn
 /** GET /version — daemon version info (used for the device overview + health detail). */
 export function engineVersion(o: DockerClientOptions): Promise<DockerApiResult<{ Version?: string; ApiVersion?: string; Os?: string; Arch?: string }>> {
   return dockerGet<{ Version?: string; ApiVersion?: string; Os?: string; Arch?: string }>(o, '/version');
+}
+
+/** GET /containers/{id}/stats?stream=false — one non-streaming stats sample. */
+export function containerStats(o: DockerClientOptions, idOrName: string): Promise<DockerApiResult<Record<string, unknown>>> {
+  return dockerGet<Record<string, unknown>>(o, `/containers/${encodeURIComponent(idOrName)}/stats?stream=false`);
+}
+
+/** GET /containers/json filtered by a compose project label — member resolution. */
+export function listComposeMembers(o: DockerClientOptions, project: string): Promise<DockerApiResult<unknown[]>> {
+  return dockerGet<unknown[]>(o, `/containers/json?all=true&filters=${encodeURIComponent(JSON.stringify({ label: [`com.docker.compose.project=${project}`] }))}`);
 }

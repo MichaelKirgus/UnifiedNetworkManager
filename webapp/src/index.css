@@ -23,6 +23,7 @@
   --muted: 241 245 249;      /* slate-100  subtle fills, hovers, rows */
   --border: 226 232 240;     /* slate-200  borders & dividers         */
   --secondary: 71 85 105;    /* slate-600  body / secondary text      */
+  --muted-foreground: 100 116 139; /* slate-500 muted text (one step below body) */
   --faint: 148 163 184;      /* slate-400  hints, placeholders        */
 
   --primary: 15 23 42;       /* slate-900  primary button bg          */
@@ -62,6 +63,7 @@
   --muted: 60 60 60;           /* #3c3c3c subtle fills, hovers    */
   --border: 69 69 69;          /* #454545 borders & dividers      */
   --secondary: 157 157 157;    /* #9d9d9d body / secondary text   */
+  --muted-foreground: 139 139 139; /* #8b8b8b muted text (between body & hints) */
   --faint: 122 122 122;        /* #7a7a7a hints, placeholders     */
 
   --primary: 14 99 156;        /* #0e639c VS Code button blue     */
@@ -92,6 +94,7 @@
   --muted: 30 41 59;         /* slate-800                */
   --border: 51 65 85;        /* slate-700                */
   --secondary: 203 213 225;  /* slate-300                */
+  --muted-foreground: 148 163 184; /* slate-400            */
   --faint: 100 116 139;      /* slate-500                */
 
   --primary: 51 65 85;       /* slate-700 (white text stays readable) */
