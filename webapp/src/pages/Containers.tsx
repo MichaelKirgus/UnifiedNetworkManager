@@ -1,8 +1,9 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ArrowUpCircle, ChevronDown, ChevronRight, ChevronUp, Container, ExternalLink, FileCode2, Loader2, Play, RotateCw, Square, Trash2, X } from 'lucide-react';
+import { ArrowUpCircle, ChevronDown, ChevronRight, ChevronUp, Container, ExternalLink, FileCode2, Loader2, Play, Plus, RotateCw, Square, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { CreateAppDialog, CreateAppCandidate, type AppMode } from '../components/CreateAppDialog';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
@@ -749,6 +750,72 @@ export default function Containers() {
     return Array.isArray(actions) && actions.some((a) => a.id === actionId);
   }
 
+  // --- Create-app candidates ----------------------------------------------------
+  // Any device whose assigned plugin advertises an install action (containers.install
+  // or containers.deploy-compose) can host the "Create app" dialog — GENERIC: no
+  // per-backend UI code, just catalog detection. Catalogs are fetched for every
+  // distinct plugin across all devices (usually a handful; react-query caches).
+  const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
+  const allPluginIds = useMemo(
+    () => Array.from(new Set((devicesQuery.data ?? []).flatMap((d) => (d.plugins ?? []).map((p) => p.pluginId)))),
+    [devicesQuery.data],
+  );
+  const allCatalogsQuery = useQuery({
+    queryKey: ['plugin-actions-catalogs-all', allPluginIds.join('|')],
+    queryFn: async () => {
+      const entries = await Promise.all(
+        allPluginIds.map(async (pid) => [pid, (await api.pluginActions(pid)).actions] as const),
+      );
+      return Object.fromEntries(entries);
+    },
+    enabled: allPluginIds.length > 0,
+  });
+
+  /** Devices that can create apps — their plugin advertises at least one
+   *  install action. Modes are derived from the catalog (generic): 'catalog'
+   *  needs containers.install + catalog.templates.list; 'compose' needs either
+   *  containers.install or containers.deploy-compose; 'image' needs
+   *  containers.run-image. */
+  const createCandidates = useMemo<CreateAppCandidate[]>(() => {
+    const out: CreateAppCandidate[] = [];
+    for (const d of devicesQuery.data ?? []) {
+      for (const a of d.plugins ?? []) {
+        const actions = allCatalogsQuery.data?.[a.pluginId];
+        if (!Array.isArray(actions)) continue;
+        const has = (id: string) => actions.some((x) => x.id === id);
+        const modes: AppMode[] = [];
+        const actionMap: Partial<Record<AppMode, string>> = {};
+        if (has('containers.install') && has('catalog.templates.list')) {
+          modes.push('catalog');
+          actionMap.catalog = 'containers.install';
+        }
+        if (has('containers.deploy-compose')) {
+          modes.push('compose');
+          actionMap.compose = 'containers.deploy-compose';
+        } else if (has('containers.install')) {
+          // TrueNAS — custom compose via containers.install (mode=custom)
+          modes.push('compose');
+          actionMap.compose = 'containers.install';
+        }
+        if (has('containers.run-image')) {
+          modes.push('image');
+          actionMap.image = 'containers.run-image';
+        }
+        if (modes.length === 0) continue;
+        out.push({
+          deviceId: d.id,
+          deviceName: d.name,
+          managementAddress: d.managementAddress,
+          pluginId: a.pluginId,
+          pluginName: a.pluginName,
+          modes,
+          actions: actionMap,
+        });
+      }
+    }
+    return out;
+  }, [devicesQuery.data, allCatalogsQuery.data]);
+
   // --- Live stats via PROBE (short-cycle, capability 'probe') -----------------
   // The CPU/RAM/Net I/O/Block I/O columns prefer LIVE data from the plugin's
   // POST /probe endpoint — polled every few seconds per device through the API
@@ -848,6 +915,7 @@ export default function Containers() {
   const [reauth, setReauth] = useState<{ label: string; retry: () => void | Promise<void> } | null>(null);
   /** Custom app whose compose YAML is being edited. */
   const [yamlApp, setYamlApp] = useState<ContainerRow | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
   /** Dismissible status banner (plan started / info / error). */
   const [notice, setNotice] = useState<{ kind: 'ok' | 'info' | 'error'; text: string; planId?: string } | null>(null);
 
@@ -1052,6 +1120,31 @@ export default function Containers() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) setReauth({ label, retry: attempt });
       else setNotice({ kind: 'error', text: `${label} failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  }
+
+  /** Create-app submit — a single-step plan through the standard workflow
+   * (2FA-gated), tracked so the device is force-refreshed when execution settles.
+   * Throws on failure so the dialog can surface it; a 401 opens the reauth flow
+   * AND throws, keeping the dialog open for retry after revalidation. */
+  async function runInstall(candidate: CreateAppCandidate, mode: AppMode, input: Record<string, unknown>) {
+    const actionId = candidate.actions[mode];
+    if (!actionId) throw new Error(`No install action for mode '${mode}' on ${candidate.deviceName}`);
+    const label = `Create app ${String(input['name'])}`;
+    const attempt = async () => {
+      const planId = await createAndExecutePlan(candidate.pluginId, actionId, [{ deviceId: candidate.deviceId, input }]);
+      setBulkPlan({ label, ids: [planId], deviceIds: [candidate.deviceId] });
+      setNotice({ kind: 'ok', text: `${label} — plan executing…`, planId });
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        // ReauthDialog takes over — the dialog closes and the plan runs after revalidation.
+        setReauth({ label, retry: attempt });
+        return;
+      }
+      throw err; // dialog renders this as its submit error
     }
   }
 
@@ -1494,6 +1587,16 @@ export default function Containers() {
               )}
               {danglingCount > 0 && <span className="text-faint">({danglingCount} dangling)</span>}
             </span>
+            {/* Create app — shown when any device's plugin advertises an install action. */}
+            {createCandidates.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setCreateOpen(true)}
+                className="ml-auto inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90"
+              >
+                <Plus size={14} /> Create app
+              </button>
+            )}
           </div>
         )}
 
@@ -1614,6 +1717,13 @@ export default function Containers() {
 
       {/* Custom-app compose YAML editor. */}
       {yamlApp && <YamlEditorDialog app={yamlApp} onClose={() => setYamlApp(null)} />}
+
+      {/* Create app (catalog template or custom compose) — generic over any
+          backend whose plugin advertises an install action. `apps` feeds the
+          "Duplicate existing" source picker + clone prefill. */}
+      {createOpen && createCandidates.length > 0 && (
+        <CreateAppDialog candidates={createCandidates} apps={containersQuery.data?.containers ?? []} onSubmit={(c, mode, input) => runInstall(c, mode, input)} onClose={() => setCreateOpen(false)} />
+      )}
     </Layout>
   );
 }

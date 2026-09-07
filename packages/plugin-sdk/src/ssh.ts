@@ -454,7 +454,17 @@ export class SshClient {
     const conn = this.conn;
     this.conn = null;
     if (conn) {
-      try { conn.removeAllListeners(); conn.end(); } catch { /* noop */ }
+      try {
+        // Remove the functional handlers, but KEEP a no-op 'error' guard: ssh2
+        // can still emit late async errors after we drop the connection — its
+        // internal readyTimeout timer ("Timed out while waiting for handshake")
+        // or in-flight socket reads (ECONNRESET) fire on the Client object.
+        // With zero error listeners that is an unhandled 'error' event and Node
+        // kills the whole plugin process (observed crash loop, 2026-09-07).
+        conn.removeAllListeners();
+        conn.on('error', () => { /* permanent guard */ });
+        conn.end();
+      } catch { /* noop */ }
     }
   }
 
@@ -510,7 +520,14 @@ export class SshClient {
     const conn = this.conn;
     this.conn = null;
     if (conn) {
-      try { conn.removeAllListeners(); conn.end(); } catch { /* noop */ }
+      try {
+        // Same late-error guard as teardown(): a no-op 'error' listener must
+        // survive removeAllListeners(), or ssh2's async error events crash the
+        // process with an unhandled 'error' event.
+        conn.removeAllListeners();
+        conn.on('error', () => { /* permanent guard */ });
+        conn.end();
+      } catch { /* noop */ }
     }
   }
 }

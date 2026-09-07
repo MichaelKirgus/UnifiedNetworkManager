@@ -54,6 +54,13 @@ export interface ContainerVolume {
   mode?: 'ro' | 'rw';
 }
 
+/** Published port with the full host→container mapping (clone prefill). */
+export interface PortMapping {
+  hostPort: number;
+  containerPort: number;
+  protocol: 'tcp' | 'udp';
+}
+
 export interface ContainerServiceDetail {
   service?: string | null;
   image?: string | null;
@@ -186,6 +193,7 @@ export function buildContainerRows(raw: DockerContainerRaw[]): ContainerRow[] {
     const networks = new Map<string, { name: string }>();
     const ips = new Set<string>();
     const ports = new Set<number>();
+    const portMappingsAll: PortMapping[] = [];
     const volumeMountsAll: ContainerVolume[] = [];
     for (const c of sorted) {
       for (const netName of Object.keys(c.NetworkSettings?.Networks ?? {})) networks.set(netName, { name: netName });
@@ -193,6 +201,10 @@ export function buildContainerRows(raw: DockerContainerRaw[]): ContainerRow[] {
       if (ip) ips.add(ip);
       for (const p of c.Ports ?? []) {
         if (typeof p.PublicPort === 'number' && p.PublicPort > 0) ports.add(p.PublicPort);
+        // Full host→container mapping — used by the webapp's clone/duplicate flow.
+        if (typeof p.PublicPort === 'number' && p.PublicPort > 0 && typeof p.PrivatePort === 'number') {
+          portMappingsAll.push({ hostPort: p.PublicPort, containerPort: p.PrivatePort, protocol: p.Type === 'udp' ? 'udp' : 'tcp' });
+        }
       }
       volumeMountsAll.push(...volumeMounts(c));
     }
@@ -210,6 +222,7 @@ export function buildContainerRows(raw: DockerContainerRaw[]): ContainerRow[] {
         networks: [...networks.values()].sort((a, b) => a.name.localeCompare(b.name)),
         ips: [...ips].sort(),
         ports: [...ports].sort((a, b) => a - b),
+        portMappings: dedupePortMappings(portMappingsAll),
         containerCount: sorted.length,
         containers,
         volumeMounts: dedupeVolumes(volumeMountsAll),
@@ -218,6 +231,19 @@ export function buildContainerRows(raw: DockerContainerRaw[]): ContainerRow[] {
   }
 
   return rows.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Deduped port-mapping list (same triple keeps the first). */
+function dedupePortMappings(ms: PortMapping[]): PortMapping[] {
+  const seen = new Set<string>();
+  const out: PortMapping[] = [];
+  for (const m of ms) {
+    const k = `${m.hostPort}→${m.containerPort}/${m.protocol}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(m);
+  }
+  return out.sort((a, b) => a.hostPort - b.hostPort || a.containerPort - b.containerPort);
 }
 
 /** App-level deduped mount list (same source+target keeps the first). */

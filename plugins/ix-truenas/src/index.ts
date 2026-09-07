@@ -64,7 +64,16 @@ const identity = resolvePluginIdentity({
   // per-container CPU/RAM/I-O for the Containers page's on-demand polling
   // (1–5 s), served from ONE `docker stats --no-stream` over the shared SSH
   // pool. On top of 0.4.0 VM collection + the 0.3.0 SSH data path.
-  version: '0.5.0',
+  // 0.6.0 — app-store actions: catalog.templates.list + template.details.read
+  // (read-only, drive the Containers page's Create-app dialog) and
+  // containers.install (app.create job — catalog template or custom compose).
+  // 0.6.1 — template.details.read also returns a `groups` section layout
+  // (TrueNAS question groups + dict sub-forms as their own sections) so the
+  // dialog can render long config forms as collapsible sections.
+  // 0.6.2 — compose.config.read now answers for CATALOG apps too: instead of an
+  // error it returns catalog_app/train/values (the saved template config), which
+  // drives the Create-app dialog's duplicate/clone flow.
+  version: '0.6.2',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe'],
 });

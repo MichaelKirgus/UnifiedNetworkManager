@@ -54,13 +54,15 @@ export const PLUGIN_NAME = 'Docker Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
-  // 0.3.0 — per-container control: containers.start-one / stop-one / restart-one
-  // / delete-one drive a SINGLE container by its exact docker name (no
-  // compose-project fan-out), powering the Containers page's child-row actions.
-  // On top of 0.2.0 (app-level start/stop/restart/delete + image delete via the
-  // Engine API, short-cycle POST /probe with 'containerStats' +
-  // 'containerStates') and 0.1.0 monitoring over tcp/tls/socket.
-  version: '0.3.0',
+  // 0.4.0 — containers.deploy-compose deploys a NEW compose stack on the host
+  // (docker compose up -d via an optional ssh slot; the Engine API has no
+  // classic compose endpoint), powering the Containers page's Create-app dialog.
+  // On top of 0.3.0 (per-container start/stop/restart/delete-one) and 0.2.0
+  // (app-level actions + image delete via the Engine API, short-cycle POST /probe).
+  // 0.4.1 — clone support: rows carry extra.portMappings (full host→container
+  // mappings) and containers.run-image accepts optional volumes[] + network,
+  // so the webapp can duplicate a single-container app with new mounts/network.
+  version: '0.4.1',
   vendors: ['generic'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'probe'],
 });
@@ -123,6 +125,13 @@ const server = createPluginServer({
         required: false,
         description:
           "Docker TLS client certificates (CA + cert + key) for the tls transport / auto fallback. Unbound = plain TCP only.",
+      },
+      {
+        name: 'ssh',
+        secretTypes: ['usernamePassword', 'sshKeyPair'],
+        required: false,
+        description:
+          'Optional SSH access to the host — needed by containers.deploy-compose (runs `docker compose up -d` on the box; the Engine API has no classic compose endpoint). Unbound = deploy action unavailable.',
       },
     ],
     metrics: METRIC_DESCRIPTORS,
@@ -363,7 +372,9 @@ app.post('/config', async (req, res) => {
       res.status(200).json({ success: false, result: { error: 'No target address — set the device management address (or use transport=socket for a local daemon).' } });
       return;
     }
-    const ctx: DockerActionContext = { opts };
+    // credentials ride along for SSH-based actions (deploy-compose) — the
+    // Engine-API-only actions ignore it.
+    const ctx: DockerActionContext = { opts, credentials: body.credentials as Record<string, unknown> | null };
     const result = await action.execute(ctx, input);
     res.status(200).json({ success: result.success, result });
   } catch (err) {

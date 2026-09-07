@@ -608,11 +608,82 @@ const imagesDeleteAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+/** Quote a YAML scalar when it could be misread (leading indicator chars,
+ * trailing space, colon-space, or looking like a number/bool/null). */
+function yamlScalar(v: string): string {
+  if (v === '') return "''";
+  const risky = /^[\s#&*!|>%@`"'{}\[\],-]/.test(v) || /[:\s]$/.test(v) || /:\s/.test(v);
+  if (!risky && !/^[0-9]+(\.[0-9]+)?$/.test(v) && !/^(true|false|null|yes|no|on|off)$/i.test(v)) return v;
+  const escaped = v.replace(/\\/g, '\\\\').replace(/'/g, "''");
+  return `'${escaped}'`;
+}
+
+/** Serializes a TrueNAS app config object (the structured `services`/`networks`
+ * map of a custom app) into Docker Compose YAML. TrueNAS 26 does NOT store the
+ * original compose string for custom apps — only this structured form — so the
+ * clone/duplicate flow reconstructs an editable YAML from it. Keys are sorted
+ * alphabetically (compose is order-insensitive); values keep their native types.
+ */
+function serializeComposeYaml(cfg: Record<string, unknown>): string {
+  const TOP_KEYS = ['networks', 'services', 'volumes', 'configs', 'secrets'];
+  const lines: string[] = [];
+  for (const key of TOP_KEYS) {
+    if (!(key in cfg)) continue;
+    const v = cfg[key];
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      lines.push(`${key}:`);
+      for (const [name, def] of Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))) {
+        const d = def;
+        if (d && typeof d === 'object' && !Array.isArray(d)) {
+          lines.push(`  ${name}:`);
+          for (const [fk, fv] of Object.entries(d as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))) {
+            const ind = '    ';
+            if (fv && typeof fv === 'object' && !Array.isArray(fv)) {
+              lines.push(`${ind}${fk}:`);
+              for (const [gk, gv] of Object.entries(fv as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))) {
+                if (gv && typeof gv === 'object' && !Array.isArray(gv)) {
+                  lines.push(`${ind}  ${gk}:`);
+                  for (const [hk, hv] of Object.entries(gv as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))) {
+                    if (hv && typeof hv === 'object') lines.push(`${ind}    ${hk}: ${JSON.stringify(hv)}`);
+                    else if (typeof hv === 'string') lines.push(`${ind}    ${hk}: ${yamlScalar(hv)}`);
+                    else lines.push(`${ind}    ${hk}: ${String(hv ?? '')}`);
+                  }
+                } else if (Array.isArray(gv)) {
+                  if (gv.length === 0) { lines.push(`${ind}  ${gk}: []`); continue; }
+                  lines.push(`${ind}  ${gk}:`);
+                  for (const item of gv) lines.push(`${ind}    - ${typeof item === 'string' ? yamlScalar(item) : JSON.stringify(item)}`);
+                } else if (typeof gv === 'string') lines.push(`${ind}  ${gk}: ${yamlScalar(gv)}`);
+                else lines.push(`${ind}  ${gk}: ${String(gv ?? '')}`);
+              }
+            } else if (Array.isArray(fv)) {
+              if (fv.length === 0) { lines.push(`${ind}${fk}: []`); continue; }
+              lines.push(`${ind}${fk}:`);
+              for (const item of fv) lines.push(`${ind}  - ${typeof item === 'string' ? yamlScalar(item) : JSON.stringify(item)}`);
+            } else if (typeof fv === 'string') lines.push(`${ind}${fk}: ${yamlScalar(fv)}`);
+            else lines.push(`${ind}${fk}: ${String(fv ?? '')}`);
+          }
+        } else {
+          lines.push(`  ${name}: ${JSON.stringify(d)}`);
+        }
+      }
+    } else if (Array.isArray(v)) {
+      if (v.length === 0) { lines.push(`${key}: []`); continue; }
+      lines.push(`${key}:`);
+      for (const item of v) lines.push(`  - ${typeof item === 'string' ? yamlScalar(item) : JSON.stringify(item)}`);
+    } else if (typeof v === 'string') {
+      lines.push(`${key}: ${yamlScalar(v)}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 /**
- * Reads the current compose YAML of a custom app (app.config with
- * retrieve_config). The webapp's Containers page uses this to pre-fill its YAML
- * editor before submitting `containers.update`. For catalog apps the compose is
- * generated from the schema, so only custom apps expose an editable string.
+ * Reads the current compose YAML of a custom app. The webapp's Containers page
+ * uses this to pre-fill its YAML editor (and the Create-app dialog's duplicate
+ * flow). TrueNAS 26 stores custom apps as a STRUCTURED config ({networks,
+ * services}) — there is no original compose string — so it is reconstructed as
+ * editable YAML. Catalog apps return their template identity + saved values
+ * instead, which drives the catalog-clone prefill.
  */
 const composeConfigReadAction: ActionDescriptor<TruenasActionContext> = {
   id: 'compose.config.read',
@@ -628,22 +699,29 @@ const composeConfigReadAction: ActionDescriptor<TruenasActionContext> = {
     const name = str(input, 'name');
     if (!name) return { success: false, details: { error: 'App name is required' } };
 
-    // app.query with retrieve_config returns the full config incl. compose.
+    // app.query with retrieve_config returns the full config. Long budget +
+    // retry — on a busy appliance (250+ apps) this query can take 30 s+, and
+    // silently falling back to app.config would return a DIFFERENT shape and
+    // break the clone prefill.
     let cfg: Record<string, unknown> | null = null;
+    // Row-level custom_app flag — ALWAYS present on TrueNAS 26 and the most
+    // reliable catalog-vs-custom signal (the config object itself omits it).
+    let rowCustomApp: boolean | null = null;
     try {
-      const rows = await ctx.client.call<Record<string, unknown>[]>('app.query', [[], { extra: { retrieve_config: true } }], ctx.creds);
+      const rows = await ctx.client.call<Record<string, unknown>[]>('app.query', [[], { extra: { retrieve_config: true } }], ctx.creds, 45_000);
       for (const r of rows ?? []) {
         if ((pickString(r, ['name']) ?? '') === name) {
           const c = r['config'];
           cfg = c && typeof c === 'object' ? (c as Record<string, unknown>) : null;
+          rowCustomApp = typeof r['custom_app'] === 'boolean' ? (r['custom_app'] as boolean) : null;
           break;
         }
       }
     } catch (e) {
-      // Older appliances may not support retrieve_config — fall back to app.config.
-      if (!(e instanceof TruenasRpcError)) throw e;
+      return { success: false, details: { error: `Could not read config for "${name}": ${e instanceof Error ? e.message : String(e)}` } };
     }
     if (!cfg) {
+      // Not found in the query — try app.config directly (older appliances).
       try {
         cfg = await ctx.client.call<Record<string, unknown>>('app.config', [name], ctx.creds);
       } catch (e) {
@@ -651,20 +729,44 @@ const composeConfigReadAction: ActionDescriptor<TruenasActionContext> = {
       }
     }
 
-    // The compose lives in custom_compose_config_string when present; otherwise
-    // fall back to the structured services map (serialized as YAML-ish JSON).
+    const cfgCustomApp = typeof cfg['custom_app'] === 'boolean' ? (cfg['custom_app'] as boolean) : null;
+    // Prefer the row flag; fall back to the config's own field on older boxes.
+    const isCatalog = rowCustomApp !== null ? rowCustomApp === false : (cfgCustomApp === false || typeof pickString(cfg, ['catalog_app']) === 'string');
+
+    // Catalog apps have no editable compose string — their configuration is the
+    // saved `values` map plus the template identity. Return those so the webapp's
+    // clone/duplicate flow can re-open the catalog form pre-filled (change one
+    // setting, redeploy). Custom apps keep the existing YAML payload.
+    if (isCatalog) {
+      const catalogApp = pickString(cfg, ['catalog_app']);
+      const valuesRaw = cfg['values'];
+      return {
+        success: true,
+        details: {
+          name,
+          yaml: '',
+          customApp: false,
+          catalogApp,
+          train: pickString(cfg, ['train']) ?? 'stable',
+          values: valuesRaw && typeof valuesRaw === 'object' && !Array.isArray(valuesRaw) ? (valuesRaw as Record<string, unknown>) : {},
+        },
+      };
+    }
+
+    // Custom apps — the original compose string when present (older appliances);
+    // otherwise reconstruct editable YAML from the structured config. The
+    // top-level `networks:` map MUST be included — it's where users change the
+    // network of a cloned app.
     const yamlStr = pickString(cfg, ['custom_compose_config_string']);
     let yaml: string;
     if (yamlStr && yamlStr.trim() !== '') {
       yaml = yamlStr;
     } else {
-      const svcs = cfg['services'];
-      yaml = svcs && typeof svcs === 'object' ? JSON.stringify({ services: svcs }, null, 2) : '';
+      yaml = serializeComposeYaml(cfg);
     }
-    if (yaml.trim() === '') return { success: false, details: { error: `No editable compose config found for "${name}" (catalog apps generate their compose from the schema)` } };
+    if (yaml.trim() === '') return { success: false, details: { error: `No editable compose config found for "${name}"` } };
 
-    const customApp = typeof cfg['custom_app'] === 'boolean' ? (cfg['custom_app'] as boolean) : null;
-    return { success: true, details: { name, yaml, ...(customApp !== null ? { customApp } : {}) } };
+    return { success: true, details: { name, yaml, customApp: true } };
   },
 };
 
@@ -698,6 +800,396 @@ const containersUpdateAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+// --- Catalog (app store) + install -------------------------------------------------
+// TrueNAS 25.04+/26 renamed the community-apps API: `communityapps.*` is gone,
+// replaced by `catalog.trains`, `catalog.apps({trains:[...]})` and
+// `catalog.get_app_details(name, {train})`. Installation is `app.create` — a
+// JOB method (returns a job id; the work runs server-side). Verified live on
+// 26.0.0-BETA: AppCreateArgs = { custom_app, app_name, catalog_app?, train?
+// ('stable'), version? ('latest'), values{}, custom_compose_config_string }.
+
+/** One template summary as surfaced to the webapp's Create-app dialog. */
+interface CatalogTemplateSummary {
+  name: string; // catalog slug (catalog_app)
+  title: string;
+  description?: string;
+  iconUrl?: string;
+  latestVersion?: string;
+  latestHumanVersion?: string;
+  categories?: string[];
+  tags?: string[];
+  recommended?: boolean;
+  healthy?: boolean;
+}
+
+/** TrueNAS question-schema node (the appliance's own form definition). */
+interface TnQuestion {
+  variable: string;
+  label?: string;
+  group?: string;
+  schema?: Record<string, unknown>;
+}
+
+function strOr(input: Record<string, unknown>, key: string, fallback: string): string {
+  const v = input[key];
+  return typeof v === 'string' && v.trim() !== '' ? v : fallback;
+}
+
+/** Maps a TrueNAS scalar type onto the UNM InputSchemaProperty types. */
+function scalarType(t: string): 'string' | 'number' | 'boolean' {
+  if (t === 'number') return 'number';
+  if (t === 'boolean') return 'boolean';
+  return 'string';
+}
+
+/** Converts a leaf attr (no group nesting expected below attrs). */
+function convertAttr(a: TnQuestion): Record<string, unknown> | null {
+  const s = a.schema ?? {};
+  const type = String(s['type'] ?? 'string');
+  if (type === 'dict' || type === 'list') return convertQuestion({ ...a, schema: s });
+  const out: Record<string, unknown> = { type: scalarType(type), label: a.label || undefined, description: pickString(s, ['description']) };
+  if (s['required'] === true) out['required'] = true;
+  if (s['default'] !== undefined) out['default'] = s['default'];
+  const enumRaw = s['enum'];
+  if (Array.isArray(enumRaw)) {
+    // TrueNAS enums are [{value, description?}] — flatten to values.
+    out['enum'] = enumRaw.map((e: unknown) => (e && typeof e === 'object' ? (e as Record<string, unknown>)['value'] : e));
+  }
+  const validChars = pickString(s, ['valid_chars']);
+  if (validChars) out['pattern'] = validChars;
+  return out;
+}
+
+/**
+ * Converts one TrueNAS question-schema node into the UNM InputSchemaProperty
+ * shape (the subset SchemaForm renders). Handles the nesting styles observed
+ * in real templates: dict groups with `attrs[]`, list-of-dict rows, enums as
+ * {value, description}[], valid_chars → pattern. show_if is dropped — fields
+ * are always rendered; the appliance re-validates everything on install.
+ */
+function convertQuestion(q: TnQuestion): Record<string, unknown> | null {
+  const s = q.schema ?? {};
+  const type = String(s['type'] ?? 'string');
+
+  if (type === 'dict') {
+    // Group container — its fields live in attrs[].
+    const attrs = Array.isArray(s['attrs']) ? (s['attrs'] as TnQuestion[]) : [];
+    const properties: Record<string, unknown> = {};
+    for (const a of attrs) {
+      if (!a.variable) continue;
+      const sub = convertAttr(a);
+      if (sub) properties[a.variable] = sub;
+    }
+    return { type: 'object', label: q.label || undefined, description: pickString(s, ['description']), properties };
+  }
+
+  if (type === 'list') {
+    const itemsRaw = Array.isArray(s['items']) ? s['items'] : [];
+    const first = itemsRaw.length > 0 ? (itemsRaw[0] as TnQuestion) : null;
+    let itemProp: Record<string, unknown> = { type: 'string' };
+    if (first) {
+      const isDict = String((first.schema ?? {})['type']) === 'dict';
+      if (isDict) {
+        const attrs = Array.isArray((first.schema ?? {})['attrs']) ? ((first.schema as Record<string, unknown>)['attrs'] as TnQuestion[]) : [];
+        const properties: Record<string, unknown> = {};
+        for (const a of attrs) {
+          if (!a.variable) continue;
+          const sub = convertAttr(a);
+          if (sub) properties[a.variable] = sub;
+        }
+        itemProp = { type: 'object', properties };
+      } else {
+        itemProp = convertAttr(first) ?? { type: 'string' };
+      }
+    }
+    return {
+      type: 'array',
+      label: q.label || undefined,
+      description: pickString(s, ['description']),
+      default: s['default'] !== undefined ? s['default'] : [],
+      items: itemProp,
+    };
+  }
+
+  // Scalar (string/number/boolean) — may carry an enum of {value, description}.
+  const out: Record<string, unknown> = { type: scalarType(type), label: q.label || undefined, description: pickString(s, ['description']) };
+  if (s['required'] === true) out['required'] = true;
+  if (s['default'] !== undefined) out['default'] = s['default'];
+  const enumRaw = s['enum'];
+  if (Array.isArray(enumRaw)) {
+    out['enum'] = enumRaw.map((e: unknown) => (e && typeof e === 'object' ? (e as Record<string, unknown>)['value'] : e));
+  }
+  const validChars = pickString(s, ['valid_chars']);
+  if (validChars) out['pattern'] = validChars;
+  return out;
+}
+
+/** Picks the version entry to use: explicit `version` input, else latest. */
+function pickVersionEntry(versions: Record<string, unknown>, wanted?: string): { key: string; entry: Record<string, unknown> } | null {
+  if (!versions || typeof versions !== 'object') return null;
+  const keys = Object.keys(versions);
+  if (keys.length === 0) return null;
+  if (wanted && versions[wanted]) return { key: wanted, entry: versions[wanted] as Record<string, unknown> };
+  // "latest" or no preference → the highest version-ish key.
+  const sorted = [...keys].sort((a, b) => compareVersions(b, a));
+  return { key: sorted[0], entry: versions[sorted[0]] as Record<string, unknown> };
+}
+
+/** Loose version comparator (handles "1.2.3" and "26.04.3.2.1_1.5.28" style). */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split(/[._-]/).map((x) => parseInt(x, 10)).filter((n) => !Number.isNaN(n));
+  const pb = b.split(/[._-]/).map((x) => parseInt(x, 10)).filter((n) => !Number.isNaN(n));
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? 0;
+    const y = pb[i] ?? 0;
+    if (x !== y) return x - y;
+  }
+  return 0;
+}
+
+/** catalog.templates.list — read-only template gallery for the Create-app dialog. */
+const catalogTemplatesListAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'catalog.templates.list',
+  label: 'List app store templates',
+  description:
+    "Returns the appliance's community-app catalog (per train) with name, title, description, icon and latest version — drives the Create-app dialog. Read-only.",
+  module: 'Containers',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000, // catalog.apps can be slow right after a catalog sync
+  inputSchema: {
+    train: { type: 'string', required: false, description: 'Catalog train to list (default: stable)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const train = strOr(input, 'train', 'stable');
+
+    let trains: string[];
+    try {
+      const t = await callWithRetry<unknown>(ctx, 'catalog.trains', []);
+      trains = Array.isArray(t) ? (t as string[]) : ['stable'];
+    } catch {
+      trains = [train]; // catalog.trains missing on older boxes — fall back to the requested train
+    }
+
+    let byTrain: Record<string, unknown>;
+    try {
+      const r = await callWithRetry<Record<string, unknown>>(ctx, 'catalog.apps', [{ trains: [train] }]);
+      byTrain = r && typeof r === 'object' ? r : {};
+    } catch (e) {
+      // Pre-25.04 boxes lack the catalog.* namespace — surface a clear error so
+      // the dialog can hide itself for this device.
+      return { success: false, details: { error: `Catalog API unavailable on this appliance (${e instanceof Error ? e.message : String(e)})` } };
+    }
+
+    const appMap = (byTrain[train] ?? {}) as Record<string, Record<string, unknown>>;
+    const templates: CatalogTemplateSummary[] = Object.values(appMap).map((a) => ({
+      name: pickString(a, ['name']) ?? '',
+      title: pickString(a, ['title']) ?? pickString(a, ['name']) ?? '',
+      description: pickString(a, ['description']),
+      iconUrl: pickString(a, ['icon_url']),
+      latestVersion: pickString(a, ['latest_version']),
+      latestHumanVersion: pickString(a, ['latest_human_version']),
+      categories: Array.isArray(a['categories']) ? (a['categories'] as string[]) : undefined,
+      tags: Array.isArray(a['tags']) ? (a['tags'] as string[]) : undefined,
+      recommended: typeof a['recommended'] === 'boolean' ? (a['recommended'] as boolean) : undefined,
+      healthy: typeof a['healthy'] === 'boolean' ? (a['healthy'] as boolean) : undefined,
+    })).filter((t) => t.name !== '');
+
+    return { success: true, details: { train, trains, templates } };
+  },
+};
+
+/** template.details.read — one template's config schema for the form. */
+const templateDetailsReadAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'template.details.read',
+  label: 'Read template config schema',
+  description:
+    "Returns one catalog template's configuration questions (converted to UNM form fields) plus its default values — pre-fills the Create-app dialog. Read-only.",
+  module: 'Containers',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'Catalog template slug (e.g. "collabora")' },
+    train: { type: 'string', required: false, description: 'Catalog train (default: stable)' },
+    version: { type: 'string', required: false, description: 'Specific version to read the schema of (default: latest)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'Template name is required' } };
+    const train = strOr(input, 'train', 'stable');
+
+    let d: Record<string, unknown>;
+    try {
+      d = await callWithRetry<Record<string, unknown>>(ctx, 'catalog.get_app_details', [name, { train }]);
+    } catch (e) {
+      return { success: false, details: { error: `Could not read template "${name}" from train "${train}": ${e instanceof Error ? e.message : String(e)}` } };
+    }
+
+    const versions = (d['versions'] ?? {}) as Record<string, unknown>;
+    const picked = pickVersionEntry(versions, str(input, 'version'));
+    if (!picked) return { success: false, details: { error: `Template "${name}" has no version entries` } };
+    const ve = picked.entry;
+
+    // Convert the question schema into UNM InputSchema shape.
+    const questions = (((ve['schema'] as Record<string, unknown> | undefined)?.['questions']) ?? []) as TnQuestion[];
+    const fields: Record<string, unknown> = {};
+    for (const q of questions) {
+      if (!q.variable) continue;
+      const converted = convertQuestion(q);
+      if (converted) fields[q.variable] = converted;
+    }
+
+    // Group layout for the dialog's collapsible sections. TrueNAS questions
+    // carry a `group` name; dict containers are self-contained sub-forms and
+    // become their own section; ungrouped scalars land in "General". Order of
+    // first appearance is preserved (matches the appliance's form order).
+    const groupOrder: string[] = [];
+    const groupsByTitle: Record<string, string[]> = {};
+    for (const q of questions) {
+      if (!q.variable || !fields[q.variable]) continue;
+      const converted = fields[q.variable] as Record<string, unknown>;
+      let title: string;
+      if (converted['type'] === 'object' && converted['properties']) {
+        title = String(converted['label'] ?? q.label ?? q.variable); // dict sub-form → own section
+      } else if (typeof q.group === 'string' && q.group.trim() !== '') {
+        title = q.group;
+      } else {
+        title = 'General';
+      }
+      if (!groupsByTitle[title]) {
+        groupsByTitle[title] = [];
+        groupOrder.push(title);
+      }
+      groupsByTitle[title].push(q.variable);
+    }
+    const groups = groupOrder.map((title) => ({ title, fields: groupsByTitle[title] }));
+
+    // Default values shipped with the template (the appliance's own defaults).
+    const values = (ve['values'] ?? {}) as Record<string, unknown>;
+
+    return {
+      success: true,
+      details: {
+        name,
+        train,
+        version: picked.key,
+        humanVersion: pickString(ve, ['human_version']),
+        title: pickString(d, ['title']) ?? name,
+        description: pickString(d, ['description']),
+        fields, // InputSchema-compatible map for SchemaForm
+        values, // defaults to pre-fill the form (appliance-side source of truth)
+        groups, // [{title, fields[]}] — section layout for the dialog
+      },
+    };
+  },
+};
+
+/** Waits for a TrueNAS job (by id from app.create etc.) until it settles or budget runs out. */
+async function waitForJob(
+  ctx: TruenasActionContext,
+  jobId: number,
+  budgetMs: number,
+): Promise<{ state: string; error?: string }> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    let jobs: Record<string, unknown>[];
+    try {
+      jobs = await ctx.client.call<Record<string, unknown>[]>('core.get_jobs', [], ctx.creds);
+    } catch (e) {
+      return { state: 'UNKNOWN', error: `Lost track of job ${jobId}: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    const j = (jobs ?? []).find((x) => x['id'] === jobId);
+    if (!j) return { state: 'UNKNOWN', error: `Job ${jobId} no longer listed` };
+    const state = pickString(j, ['state']) ?? '';
+    if (state !== 'RUNNING') {
+      const errRaw = j['error'];
+      return { state, ...(errRaw ? { error: String(errRaw) } : {}) };
+    }
+    if (Date.now() >= deadline) return { state: 'RUNNING', error: `Still running after ${Math.round(budgetMs / 1000)}s — the install continues on the appliance; check its Apps page.` };
+    await new Promise((r) => setTimeout(r, 3_000));
+  }
+}
+
+/** containers.install — creates a NEW app (catalog template or custom compose). */
+const containersInstallAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'containers.install',
+  label: 'Create app (install)',
+  description:
+    'Creates a new app on the appliance via app.create — either from a catalog template (with its config values) or as a custom Docker Compose stack. Runs to completion (image pulls included), so it may take several minutes.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 900_000, // image pulls dominate — give the plan executor a 15-min budget
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, maxLength: 40, pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$', description: 'App instance name (lowercase slug — TrueNAS enforces this)' },
+    mode: { type: 'string', required: true, enum: ['catalog', 'custom'], description: 'catalog = install a store template; custom = deploy your own compose YAML' },
+    catalogApp: { type: 'string', required: false, description: 'Catalog template slug (required when mode=catalog)' },
+    train: { type: 'string', required: false, description: 'Catalog train (default stable)' },
+    version: { type: 'string', required: false, description: 'Template version to install (default latest)' },
+    config: { type: 'object', required: false, properties: {}, description: 'Template configuration values (mode=catalog)' },
+    composeString: { type: 'string', required: false, minLength: 2, description: 'Docker Compose YAML (required when mode=custom)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'App name is required' } };
+    const mode = strOr(input, 'mode', 'catalog');
+
+    // Idempotency guard — an app with this name already exists.
+    try {
+      const apps = await listApps(ctx);
+      if (apps.some((a) => a.name === name)) {
+        return { success: false, details: { error: `An app named "${name}" already exists on this appliance` } };
+      }
+    } catch { /* best-effort guard — app.create will reject duplicates anyway */ }
+
+    let params: Record<string, unknown>;
+    if (mode === 'catalog') {
+      const catalogApp = str(input, 'catalogApp');
+      if (!catalogApp) return { success: false, details: { error: 'catalogApp is required when mode=catalog' } };
+      params = {
+        custom_app: false,
+        app_name: name,
+        catalog_app: catalogApp,
+        train: strOr(input, 'train', 'stable'),
+        version: strOr(input, 'version', 'latest'),
+        values: input['config'] && typeof input['config'] === 'object' ? (input['config'] as Record<string, unknown>) : {},
+      };
+    } else if (mode === 'custom') {
+      const composeString = str(input, 'composeString');
+      if (!composeString) return { success: false, details: { error: 'composeString is required when mode=custom' } };
+      params = { custom_app: true, app_name: name, custom_compose_config_string: composeString };
+    } else {
+      return { success: false, details: { error: `Unknown mode "${mode}" (expected catalog|custom)` } };
+    }
+
+    // app.create is a JOB method — it returns the job id immediately.
+    let jobId: number;
+    try {
+      const r = await ctx.client.call<unknown>('app.create', [params], ctx.creds);
+      if (typeof r !== 'number') return { success: false, details: { error: `Unexpected app.create result: ${JSON.stringify(r)}` } };
+      jobId = r;
+    } catch (e) {
+      // The socket can drop while a long install runs — treat as "initiated" only
+      // when the transport died AFTER dispatch (same convention as reboot).
+      if (e instanceof TruenasRpcError && /timed out|closed|unresponsive/i.test(e.message)) {
+        return { success: true, applied: true, details: { note: 'Install accepted — connection dropped while the appliance worked; check its Apps page.' } };
+      }
+      throw e;
+    }
+
+    // Wait for the job to settle (budget = our timeout minus a safety margin).
+    const wait = await waitForJob(ctx, jobId, 840_000);
+    if (wait.state === 'RUNNING') {
+      return { success: true, applied: true, details: { jobId, state: wait.state, note: wait.error } };
+    }
+    if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') {
+      return { success: false, details: { jobId, state: wait.state, error: wait.error ?? `Job ended in state ${wait.state}` } };
+    }
+    return { success: true, applied: true, details: { jobId, state: wait.state, name, mode } };
+  },
+};
+
 export const registry = createRegistry<TruenasActionContext>([
   systemInfoAction,
   poolsReadAction,
@@ -714,4 +1206,7 @@ export const registry = createRegistry<TruenasActionContext>([
   imagesDeleteAction,
   composeConfigReadAction,
   containersUpdateAction,
+  catalogTemplatesListAction,
+  templateDetailsReadAction,
+  containersInstallAction,
 ]);

@@ -15,15 +15,29 @@
  * state is skipped, not failed — mirroring ix-truenas's app.* actions.
  */
 
-import { ActionDescriptor, ActionResult, createRegistry } from '@unm/plugin-sdk';
-import { DockerClientOptions, dockerDelete, dockerPost, listComposeMembers, listContainers } from './client';
+import { ActionDescriptor, ActionResult, createRegistry, createSshPool, resolveSshCredentials } from '@unm/plugin-sdk';
+import { DockerClientOptions, dockerDelete, dockerPost, dockerRequest, listComposeMembers, listContainers } from './client';
 
-/** Executor context for one /config step — just the resolved client options. */
+/** Executor context for one /config step — resolved client options + the raw
+ *  decrypted credentials body (needed by SSH-based actions like deploy-compose). */
 export interface DockerActionContext {
   opts: DockerClientOptions;
+  /** The request's `credentials` field (decrypted primary secret + slots). */
+  credentials?: Record<string, unknown> | null;
 }
 
+// One shared SSH pool for the whole plugin process — deploy-compose reuses a
+// live session per host instead of re-authenticating on every step.
+const sshPool = createSshPool();
+process.on('SIGTERM', () => sshPool.closeAll());
+process.on('SIGINT', () => sshPool.closeAll());
+
 const COMPOSE_PROJECT_LABEL = 'com.docker.compose.project';
+
+function str(input: Record<string, unknown>, key: string): string | undefined {
+  const v = input[key];
+  return typeof v === 'string' && v.trim() !== '' ? v : undefined;
+}
 
 function strArray(input: Record<string, unknown>, key: string): string[] {
   const v = input[key];
@@ -355,6 +369,238 @@ const containersDeleteAction: ActionDescriptor<DockerActionContext> = {
   },
 };
 
+// --- containers.deploy-compose -------------------------------------------------
+// Deploys a NEW compose stack on the host via SSH (`docker compose up -d`). The
+// Engine API has no classic compose endpoint (its /services/create is swarm-only),
+// so the host's compose CLI is the transport — same pattern as TrueNAS enrichment.
+const COMPOSE_YAML_DELIM = '__UNM_COMPOSE_YAML_8f3a__';
+
+/** Strips scheme + port from a management address for SSH (port 22). */
+function sshHostOf(managementAddress: string): string {
+  const bare = (managementAddress ?? '').trim().replace(/^https?:\/\//i, '');
+  return bare.split(':')[0] || bare;
+}
+
+const containersDeployComposeAction: ActionDescriptor<DockerActionContext> = {
+  id: 'containers.deploy-compose',
+  label: 'Deploy compose stack',
+  description:
+    'Deploys a new Docker Compose stack on the host (docker compose up -d via SSH). The project name becomes an "app" in the Containers page. Image pulls included — may take several minutes.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 600_000, // image pulls dominate
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, maxLength: 40, pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$', description: 'Compose project / app name (lowercase slug)' },
+    composeString: { type: 'string', required: true, minLength: 2, description: 'Docker Compose YAML' },
+  },
+  async execute(ctx, input): Promise<ActionResult> {
+    const name = str(input, 'name');
+    const composeString = str(input, 'composeString');
+    if (!name || !composeString) return { success: false, details: { error: 'Project name and compose YAML are required' } };
+    if (composeString.includes(COMPOSE_YAML_DELIM)) {
+      return { success: false, details: { error: `Compose YAML must not contain the delimiter "${COMPOSE_YAML_DELIM}"` } };
+    }
+
+    // Idempotency guard — a compose project with this name already exists.
+    try {
+      const all = await listContainers(ctx.opts);
+      if (all.ok && Array.isArray(all.data)) {
+        const existing = (all.data as RawContainer[]).some((c) => c.Labels?.[COMPOSE_PROJECT_LABEL] === name);
+        if (existing) return { success: false, details: { error: `A compose project named "${name}" already exists on this host` } };
+      }
+    } catch { /* best-effort guard — up -d would just update it */ }
+
+    const creds = resolveSshCredentials(ctx.credentials);
+    if (!creds) {
+      return {
+        success: false,
+        details: {
+          error:
+            'No SSH credential bound to this device — bind an ssh secret (username/password or key pair) to the Docker host assignment to deploy compose stacks.',
+        },
+      };
+    }
+
+    // Single remote script: write the YAML to a temp dir, run `docker compose up -d`
+    // under the project name, tail the output, clean up. The quoted heredoc keeps
+    // the YAML byte-exact (no shell expansion); the slug pattern makes `name` safe.
+    const script = [
+      'set -u',
+      'd=$(mktemp -d) || exit 97',
+      `cat > "$d/docker-compose.yml" <<'${COMPOSE_YAML_DELIM}'`,
+      composeString.replace(/\n$/, ''),
+      COMPOSE_YAML_DELIM,
+      'cd "$d"',
+      'if ! docker compose version >/dev/null 2>&1; then echo "ERROR: docker compose CLI not available on host (need Compose v2)"; rm -rf "$d"; exit 96; fi',
+      `out=$(docker compose -f docker-compose.yml up -d --project-name ${name} 2>&1); rc=$?`,
+      'echo "$out" | tail -n 40',
+      'rm -rf "$d"',
+      'exit $rc',
+    ].join('\n');
+
+    const host = sshHostOf(ctx.opts.host);
+    try {
+      // Long budget — image pulls dominate; the pool keeps the session warm after.
+      const client = await sshPool.get(host, 22, creds, { timeoutMs: 570_000 });
+      const r = await client.exec(script, creds);
+      if (r.code !== 0) {
+        return { success: false, details: { error: `docker compose up failed (exit ${r.code}): ${(r.stderr || r.stdout).slice(-800)}` } };
+      }
+      return { success: true, applied: true, details: { name, note: 'Compose stack deployed — containers appear in the next inventory poll.' } };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/timed out/i.test(msg)) {
+        return { success: true, applied: true, details: { name, note: 'Deploy dispatched — the SSH session timed out while images pulled; check the host.' } };
+      }
+      throw e;
+    }
+  },
+};
+
+// --- containers.run-image ------------------------------------------------------
+// Runs a SINGLE image as a standalone container via the Engine API (pull +
+// create + start) — NO SSH needed, works over tcp/tls/socket like every other
+// action here. The new container becomes a single-container "app" row on the
+// Containers page (rows.ts groups by compose project; standalones are their own app).
+const PULL_TIMEOUT_MS = 570_000; // image pulls dominate
+
+/** Splits an image reference into { repo, tag } — handles registries with ports
+ *  and digest refs ("registry:5000/x/y@sha256:…" keeps the whole ref as repo). */
+function splitImageRef(ref: string): { fromImage: string; tag?: string } {
+  if (ref.includes('@')) return { fromImage: ref }; // digest — pass through verbatim
+  const lastColon = ref.lastIndexOf(':');
+  const lastSlash = ref.lastIndexOf('/');
+  if (lastColon > lastSlash) {
+    return { fromImage: ref.slice(0, lastColon), tag: ref.slice(lastColon + 1) };
+  }
+  return { fromImage: ref, tag: 'latest' };
+}
+
+const containersRunImageAction: ActionDescriptor<DockerActionContext> = {
+  id: 'containers.run-image',
+  label: 'Run image (single container)',
+  description:
+    'Pulls a docker image and runs it as a standalone container (docker run equivalent via the Engine API — no SSH needed). Optional port mappings and environment variables.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 600_000, // image pulls dominate
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, maxLength: 40, pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$', description: 'Container / app name (lowercase slug)' },
+    image: { type: 'string', required: true, minLength: 2, description: 'Image reference (e.g. "nginx:latest", "ghcr.io/org/app:v1")' },
+    ports: {
+      type: 'array',
+      required: false,
+      items: {
+        type: 'object',
+        properties: {
+          hostPort: { type: 'number', required: true, min: 1, max: 65535 },
+          containerPort: { type: 'number', required: true, min: 1, max: 65535 },
+          protocol: { type: 'string', enum: ['tcp', 'udp'] },
+        },
+      },
+      description: 'Optional host→container port mappings',
+    },
+    env: { type: 'object', required: false, properties: {}, description: 'Optional environment variables (key → value)' },
+    volumes: {
+      type: 'array',
+      required: false,
+      items: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', required: true, minLength: 1, description: 'Host path (bind) or named volume' },
+          target: { type: 'string', required: false, description: 'Container path (default: the source path)' },
+          mode: { type: 'string', enum: ['ro', 'rw'], description: 'Mount mode (default rw)' },
+        },
+      },
+      description: 'Optional volume mounts (host path or named volume → container path)',
+    },
+    network: { type: 'string', required: false, minLength: 1, description: 'Optional docker network to attach the container to (default: bridge)' },
+  },
+  async execute(ctx, input): Promise<ActionResult> {
+    const name = str(input, 'name');
+    const image = str(input, 'image');
+    if (!name || !image) return { success: false, details: { error: 'Container name and image reference are required' } };
+
+    // Idempotency guard — a container with this exact name already exists.
+    try {
+      const all = await listContainers(ctx.opts);
+      if (all.ok && Array.isArray(all.data)) {
+        const existing = (all.data as RawContainer[]).some((c) => nameOf(c) === name || c.Labels?.[COMPOSE_PROJECT_LABEL] === name);
+        if (existing) return { success: false, details: { error: `A container or compose project named "${name}" already exists on this host` } };
+      }
+    } catch { /* best-effort guard — create would 409 anyway */ }
+
+    // 1) Pull the image (streamed progress; wait for completion).
+    const { fromImage, tag } = splitImageRef(image);
+    const pullPath = `/images/create?fromImage=${encodeURIComponent(fromImage)}${tag ? `&tag=${encodeURIComponent(tag)}` : ''}`;
+    const pull = await dockerRequest<unknown>(ctx.opts, 'POST', pullPath, undefined, PULL_TIMEOUT_MS);
+    if (!pull.ok && pull.status !== 204) {
+      return { success: false, details: { error: `Image pull failed (${image}): ${pull.error || `HTTP ${pull.status}`}` } };
+    }
+
+    // 2) Create the container.
+    const portsRaw = Array.isArray(input['ports']) ? (input['ports'] as Record<string, unknown>[]) : [];
+    const portBindings: Record<string, { HostPort: string }[]> = {};
+    const exposedPorts: Record<string, Record<string, never>> = {};
+    for (const p of portsRaw) {
+      const hostPort = Number(p['hostPort']);
+      const containerPort = Number(p['containerPort']);
+      if (!Number.isInteger(hostPort) || !Number.isInteger(containerPort)) continue;
+      const proto = p['protocol'] === 'udp' ? 'udp' : 'tcp';
+      const key = `${containerPort}/${proto}`;
+      exposedPorts[key] = {};
+      portBindings[key] = [{ HostPort: String(hostPort) }];
+    }
+    const envRaw = input['env'] && typeof input['env'] === 'object' ? (input['env'] as Record<string, unknown>) : {};
+    const env = Object.entries(envRaw)
+      .filter(([, v]) => typeof v === 'string')
+      .map(([k, v]) => `${k}=${v}`);
+
+    // Volume mounts → Engine Binds ("source:target[:ro|rw]"). Named volumes are
+    // passed through as-is; the engine resolves them. Host paths must exist on
+    // the host — a missing bind path is created by docker, matching `docker run`.
+    const volsRaw = Array.isArray(input['volumes']) ? (input['volumes'] as Record<string, unknown>[]) : [];
+    const binds: string[] = [];
+    for (const v of volsRaw) {
+      const source = typeof v['source'] === 'string' && v['source'].trim() !== '' ? v['source'].trim() : null;
+      if (!source) continue;
+      const target = typeof v['target'] === 'string' && v['target'].trim() !== '' ? v['target'].trim() : source;
+      const mode = v['mode'] === 'ro' ? ':ro' : ''; // rw is the default — omit it
+      binds.push(`${source}:${target}${mode}`);
+    }
+    const network = typeof input['network'] === 'string' && input['network'].trim() !== '' ? input['network'].trim() : undefined;
+
+    const createBody: Record<string, unknown> = {
+      Image: image,
+      ...(env.length > 0 ? { Env: env } : {}),
+      HostConfig: {
+        RestartPolicy: { Name: 'unless-stopped' },
+        ...(Object.keys(portBindings).length > 0 ? { PortBindings: portBindings } : {}),
+        ...(binds.length > 0 ? { Binds: binds } : {}),
+        ...(network ? { NetworkMode: network } : {}),
+      },
+    };
+    const created = await dockerRequest<{ Id?: string; Warnings?: string[] }>(ctx.opts, 'POST', `/containers/create?name=${encodeURIComponent(name)}`, createBody);
+    if (!created.ok || !created.data?.Id) {
+      return { success: false, details: { error: `Container create failed (${name}): ${created.error || JSON.stringify(created.data ?? {})}` } };
+    }
+
+    // 3) Start it.
+    const started = await dockerPost<unknown>(ctx.opts, `/containers/${encodeURIComponent(created.data.Id)}/start`);
+    if (!started.ok && started.status !== 304) {
+      return { success: false, details: { error: `Container start failed (${name}): ${started.error || `HTTP ${started.status}`}`, containerId: created.data.Id } };
+    }
+
+    return {
+      success: true,
+      applied: true,
+      details: { name, image, containerId: created.data.Id, note: 'Container running — it appears in the next inventory poll.' },
+    };
+  },
+};
+
 // --- images.delete ------------------------------------------------------------
 const imagesDeleteAction: ActionDescriptor<DockerActionContext> = {
   id: 'images.delete',
@@ -397,5 +643,7 @@ export const registry = createRegistry<DockerActionContext>([
   containersStopOneAction,
   containersRestartOneAction,
   containersDeleteOneAction,
+  containersRunImageAction,
+  containersDeployComposeAction,
   imagesDeleteAction,
 ]);
