@@ -137,8 +137,10 @@ export interface DockerContainerInfo {
   nets: DockerContainerNet[];
 }
 
-/** Process-wide SSH pool — one session per appliance, RE-USED across polls. */
-const sshPool = createSshPool();
+/** Process-wide SSH pool — one session per appliance, RE-USED across polls.
+ *  Exported so the action registry (containers.logs.read) can reuse the SAME
+ *  pooled sessions instead of opening a fresh connection per log read. */
+export const sshPool = createSshPool();
 process.on('SIGTERM', () => sshPool.closeAll());
 process.on('SIGINT', () => sshPool.closeAll());
 

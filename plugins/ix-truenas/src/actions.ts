@@ -12,13 +12,18 @@
  * "initiated").
  */
 
-import { ActionDescriptor, ActionResult, createRegistry, pickString } from '@unm/plugin-sdk';
+import { ActionDescriptor, ActionResult, createRegistry, pickString, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
+import { sshPool } from './enrich';
 
 /** Executor context for one /config step. */
 export interface TruenasActionContext {
   client: TruenasClient;
   creds: TruenasCredentials;
+  /** The device management address (host[:port]) — needed by actions that reach the appliance over a different channel than the RPC socket (e.g. SSH for container logs). */
+  host?: string;
+  /** The request's raw `credentials` body (primary secret + bound slots) — needed by actions that use a slot distinct from the primary (e.g. SSH for container logs). */
+  rawCredentials?: Record<string, unknown> | null;
 }
 
 function str(input: Record<string, unknown>, key: string): string | undefined {
@@ -770,6 +775,95 @@ const composeConfigReadAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+/**
+ * Reads the recent log output of one app's container(s). TrueNAS 26 exposes NO
+ * RPC for app/container logs (verified against the full core.get_methods
+ * catalog — no app.logs / docker.logs / journal method exists), so this runs
+ * `docker logs --tail N` over the shared SSH pool — the same channel used for
+ * per-container enrichment. Requires a bound `ssh` credential slot; without one
+ * it reports a clear "bind an SSH secret" error instead of failing opaquely.
+ */
+const containersLogsReadAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'containers.logs.read',
+  label: 'Read container logs',
+  description: 'Returns the recent log output (docker logs --tail) of a single app\'s container(s). Requires an SSH credential bound to this device.',
+  module: 'Containers',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'App name to read the logs of' },
+    tail: { type: 'number', required: false, min: 20, max: 5000, default: 300, description: 'Number of trailing log lines (default 300)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'App name is required' } };
+    const tailRaw = typeof input['tail'] === 'number' ? Math.floor(input['tail']) : 300;
+    const tail = Math.min(5000, Math.max(20, Number.isFinite(tailRaw) ? tailRaw : 300));
+
+    // SSH slot — the ONLY log path on TrueNAS (no API method exists).
+    const sshCreds = resolveSshCredentials(ctx.rawCredentials ?? undefined, { slotOnly: true });
+    if (!sshCreds) {
+      return { success: false, details: { error: 'No SSH credential is bound to this device — container logs need the optional "SSH" secret slot (username/password or key pair).' } };
+    }
+
+    // Resolve the app's docker container ids via RPC (no SSH needed for this).
+    let idMap: Record<string, { id?: string; service_name?: string; state?: string }> | null = null;
+    try {
+      const r = await ctx.client.call<Record<string, { id?: string; service_name?: string; state?: string }>>('app.container_ids', [name, { alive_only: false }], ctx.creds, 20_000);
+      if (r && typeof r === 'object' && Object.keys(r).length > 0) idMap = r;
+    } catch (e) {
+      return { success: false, details: { error: `Could not resolve containers for "${name}": ${e instanceof Error ? e.message : String(e)}` } };
+    }
+    if (!idMap || Object.keys(idMap).length === 0) {
+      return { success: false, details: { error: `App "${name}" has no containers (it may not exist or is not deployed yet)` } };
+    }
+
+    // ONE combined SSH command — every container in a single exec (reuses the pooled session).
+    const parts = Object.values(idMap)
+      .map((c) => c.id ?? '')
+      .filter((id) => /^[a-f0-9]{12,64}$/i.test(id))
+      .slice(0, 32); // defensive cap — a single app should never have more than a handful
+    if (parts.length === 0) return { success: false, details: { error: `App "${name}" has no resolvable container ids` } };
+
+    const host = (ctx.host ?? '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+    if (!host) return { success: false, details: { error: 'No management address available for the SSH log read' } };
+
+    // ONE combined SSH command — every container in a single exec (reuses the pooled session).
+    const cmd = parts.map((id) => `echo "=== ${id}"; docker logs --tail ${tail} --timestamps ${id} 2>&1 | tail -c 512000`).join(' ; ');
+    try {
+      const client = await sshPool.get(host, 22, sshCreds);
+      const r = await client.exec(cmd, sshCreds);
+      if (r.code !== 0 && !r.stdout) {
+        return { success: false, details: { error: `docker logs over SSH failed (exit ${r.code}): ${r.stderr.slice(0, 300) || 'no output'}` } };
+      }
+      // Split the combined output back into per-container sections. Markers are
+      // full 64-char ids in command order — locate each marker, section ends at
+      // the NEXT marker (or end of output).
+      const byId = new Map(Object.values(idMap).map((c) => [c.id ?? '', c]));
+      const markers: Array<{ id: string; idx: number }> = [];
+      for (const id of parts) {
+        const idx = r.stdout.indexOf(`=== ${id}`);
+        if (idx !== -1) markers.push({ id, idx });
+      }
+      const containers: Array<{ id: string; service?: string; state?: string; logs: string }> = [];
+      for (let i = 0; i < markers.length; i++) {
+        const m = markers[i];
+        const end = i + 1 < markers.length ? markers[i + 1].idx : r.stdout.length;
+        const c = byId.get(m.id);
+        containers.push({ id: m.id, service: c?.service_name, state: c?.state, logs: r.stdout.slice(m.idx + (`=== ${m.id}`).length, end).trim() });
+      }
+      if (containers.length === 0) {
+        return { success: false, details: { error: `docker logs over SSH returned no parseable output${r.stderr ? ` (${r.stderr.slice(0, 200)})` : ''}` } };
+      }
+      return { success: true, details: { name, tail, containers } };
+    } catch (e) {
+      if (e instanceof SshError) return { success: false, details: { error: `SSH to the appliance failed: ${e.message}` } };
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+  },
+};
+
 const containersUpdateAction: ActionDescriptor<TruenasActionContext> = {
   id: 'containers.update',
   label: 'Edit app compose YAML',
@@ -1205,6 +1299,7 @@ export const registry = createRegistry<TruenasActionContext>([
   containersDeleteAction,
   imagesDeleteAction,
   composeConfigReadAction,
+  containersLogsReadAction,
   containersUpdateAction,
   catalogTemplatesListAction,
   templateDetailsReadAction,

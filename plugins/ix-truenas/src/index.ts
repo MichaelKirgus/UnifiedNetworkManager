@@ -73,7 +73,10 @@ const identity = resolvePluginIdentity({
   // 0.6.2 — compose.config.read now answers for CATALOG apps too: instead of an
   // error it returns catalog_app/train/values (the saved template config), which
   // drives the Create-app dialog's duplicate/clone flow.
-  version: '0.6.2',
+  // 0.6.3 — containers.logs.read: per-container log output via `docker logs` over
+  // the shared SSH pool (TrueNAS 26 has NO app/container-log RPC — verified
+  // against the full core.get_methods catalog). Requires a bound ssh slot.
+  version: '0.6.3',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe'],
 });
@@ -1988,7 +1991,9 @@ app.post('/config', async (req, res) => {
   }
 
   try {
-    const ctx: TruenasActionContext = { client: getClient(host, transport, timeoutMs), creds };
+    // host + rawCredentials let slot-based actions (e.g. containers.logs.read over SSH)
+    // reach the appliance on a different channel than the RPC socket.
+    const ctx: TruenasActionContext = { client: getClient(host, transport, timeoutMs), creds, host, rawCredentials: body.credentials as Record<string, unknown> | null };
     const result = await action.execute(ctx, input);
     res.status(200).json({ success: result.success, result });
   } catch (err) {

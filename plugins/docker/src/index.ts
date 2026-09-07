@@ -62,7 +62,9 @@ const identity = resolvePluginIdentity({
   // 0.4.1 — clone support: rows carry extra.portMappings (full host→container
   // mappings) and containers.run-image accepts optional volumes[] + network,
   // so the webapp can duplicate a single-container app with new mounts/network.
-  version: '0.4.1',
+  // 0.5.0 — containers.logs.read: per-container log output via the Engine API
+  // (GET /containers/{id}/logs, multiplexed stream demuxed in-process) — no SSH needed.
+  version: '0.5.0',
   vendors: ['generic'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'probe'],
 });

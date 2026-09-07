@@ -16,7 +16,7 @@
  */
 
 import { ActionDescriptor, ActionResult, createRegistry, createSshPool, resolveSshCredentials } from '@unm/plugin-sdk';
-import { DockerClientOptions, dockerDelete, dockerPost, dockerRequest, listComposeMembers, listContainers } from './client';
+import { DockerClientOptions, containerLogsRaw, dockerDelete, dockerPost, dockerRequest, listComposeMembers, listContainers } from './client';
 
 /** Executor context for one /config step — resolved client options + the raw
  *  decrypted credentials body (needed by SSH-based actions like deploy-compose). */
@@ -633,6 +633,88 @@ const imagesDeleteAction: ActionDescriptor<DockerActionContext> = {
   },
 };
 
+/**
+ * Demuxes the Docker Engine log stream. With BOTH stdout+stderr requested the
+ * daemon multiplexes: each frame = 8-byte header (stream-type byte + 3-byte
+ * zero pad + uint32 BE payload length) + payload, and frames may be split or
+ * coalesced across TCP chunks — so we walk a cursor over the buffer. A body
+ * that does NOT start with a valid header is treated as plain text (single
+ * stream / older daemons). Returns interleaved lines tagged [out]/[err].
+ */
+function demuxDockerLogs(buf: Buffer): string {
+  if (buf.length === 0) return '';
+  // Plain-text heuristic: first byte must be a known stream type (1=stdout, 2=stderr).
+  const looksMultiplexed = buf.length >= 8 && (buf[0] === 1 || buf[0] === 2);
+  if (!looksMultiplexed) return buf.toString('utf8').replace(/\n$/, '');
+
+  let cursor = 0;
+  const out: string[] = [];
+  while (cursor + 8 <= buf.length) {
+    const streamType = buf[cursor]; // 1=stdout, 2=stderr
+    if (streamType !== 1 && streamType !== 2) break; // not a frame — stop demuxing
+    const len = buf.readUInt32BE(cursor + 4);
+    if (cursor + 8 + len > buf.length) {
+      // Truncated final frame (daemon cut the stream mid-frame) — take what's left.
+      out.push(buf.slice(cursor + 8).toString('utf8'));
+      break;
+    }
+    const payload = buf.slice(cursor + 8, cursor + 8 + len);
+    if (payload.length > 0) {
+      // Tag stderr lines so the webapp can tint them; stdout stays untagged.
+      out.push(streamType === 2 ? `[err] ${payload.toString('utf8')}` : payload.toString('utf8'));
+    }
+    cursor += 8 + len;
+  }
+  return out.join('').replace(/\n$/, '');
+}
+
+// --- containers.logs.read -----------------------------------------------------
+const containersLogsReadAction: ActionDescriptor<DockerActionContext> = {
+  id: 'containers.logs.read',
+  label: 'Read container logs',
+  description: 'Returns the recent log output of a single app\'s container(s) via the Engine API (GET /containers/{id}/logs). No SSH needed.',
+  module: 'Containers',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'App / container name to read the logs of' },
+    tail: { type: 'number', required: false, min: 20, max: 5000, default: 300, description: 'Number of trailing log lines (default 300)' },
+  },
+  async execute(ctx, input): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'Container/app name is required' } };
+    const tailRaw = typeof input['tail'] === 'number' ? Math.floor(input['tail']) : 300;
+    const tail = Math.min(5000, Math.max(20, Number.isFinite(tailRaw) ? tailRaw : 300));
+
+    // Resolve the app to its member containers (compose project OR standalone).
+    const members = await resolveMembers(ctx.opts, name);
+    if (!members || members.length === 0) {
+      return { success: false, details: { error: `No container found for "${name}"` } };
+    }
+
+    // Fetch each member's log stream (bounded by tail). Parallel — independent.
+    const results = await Promise.all(members.map(async (m) => {
+      const r = await containerLogsRaw(ctx.opts, nameOf(m), { tail });
+      if (!r.ok) return { id: m.Id ?? '', name: nameOf(m), state: m.State ?? 'unknown', error: r.error || `HTTP ${r.status}`, logs: '' };
+      return { id: m.Id ?? '', name: nameOf(m), state: m.State ?? 'unknown', error: undefined as string | undefined, logs: demuxDockerLogs(r.data) };
+    }));
+
+    const failed = results.filter((x) => x.error);
+    if (results.length > 0 && failed.length === results.length) {
+      return { success: false, details: { error: `Could not read logs for "${name}": ${failed[0].error}` } };
+    }
+    return {
+      success: true,
+      details: {
+        name,
+        tail,
+        containers: results.map((x) => ({ id: x.id.slice(0, 12), service: x.name, state: x.state, logs: x.logs, ...(x.error ? { error: x.error } : {}) })),
+      },
+    };
+  },
+};
+
 export const registry = createRegistry<DockerActionContext>([
   containersStartAction,
   containersStopAction,
@@ -646,4 +728,5 @@ export const registry = createRegistry<DockerActionContext>([
   containersRunImageAction,
   containersDeployComposeAction,
   imagesDeleteAction,
+  containersLogsReadAction,
 ]);

@@ -265,3 +265,67 @@ export function containerStats(o: DockerClientOptions, idOrName: string): Promis
 export function listComposeMembers(o: DockerClientOptions, project: string): Promise<DockerApiResult<unknown[]>> {
   return dockerGet<unknown[]>(o, `/containers/json?all=true&filters=${encodeURIComponent(JSON.stringify({ label: [`com.docker.compose.project=${project}`] }))}`);
 }
+
+/**
+ * GET /containers/{id}/logs — RAW byte stream (NOT JSON). With both stdout and
+ * stderr requested the Engine returns multiplexed frames (8-byte header +
+ * payload per line); with a single stream it's plain text. Returns the raw body
+ * so the caller can demux (see demuxDockerLogs in actions.ts). Longer budget —
+ * tailing large logs from a remote daemon can take a while.
+ */
+export async function containerLogsRaw(o: DockerClientOptions, idOrName: string, opts: { tail?: number; sinceSeconds?: number } = {}): Promise<DockerApiResult<Buffer>> {
+  const q = new URLSearchParams();
+  q.set('stdout', '1');
+  q.set('stderr', '1');
+  if (typeof opts.tail === 'number' && Number.isFinite(opts.tail)) q.set('tail', String(Math.max(1, Math.floor(opts.tail))));
+  else q.set('all', '0'); // bounded by default — the caller passes tail explicitly
+  if (typeof opts.sinceSeconds === 'number') q.set('since', String(Math.max(0, Math.floor(opts.sinceSeconds))));
+  const path = `/containers/${encodeURIComponent(idOrName)}/logs?${q.toString()}`;
+
+  // Build the transport list exactly like dockerRequest does.
+  const attempts: BoundClient[] = [];
+  if (o.transport === 'auto') {
+    try { attempts.push(buildBound({ ...o, transport: 'tcp' })); } catch { /* no host */ }
+    if (o.tls?.ca || o.tls?.cert) {
+      try { attempts.push(buildBound({ ...o, transport: 'tls' })); } catch { /* missing material */ }
+    }
+  } else {
+    attempts.push(buildBound(o));
+  }
+  if (attempts.length === 0) return { ok: false, status: 0, data: Buffer.alloc(0), error: 'No target address — set the device management address.' };
+
+  const timeoutMs = 30_000;
+  let last: DockerApiResult<Buffer> | null = null;
+  for (const bound of attempts) {
+    try {
+      if (bound.kind === 'socket') {
+        const { status, body } = await new Promise<{ status: number; body: Buffer }>((resolve, reject) => {
+          const req = http.request({ socketPath: bound.socketPath!, path, method: 'GET', timeout: timeoutMs }, (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (c: Buffer) => chunks.push(c));
+            res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks) }));
+          });
+          req.on('timeout', () => req.destroy(new Error(`socket request timed out after ${timeoutMs} ms`)));
+          req.on('error', reject);
+          req.end();
+        });
+        if (status >= 200 && status < 300) return { ok: true, status, data: body, transportUsed: 'socket' };
+        // Daemon error bodies are JSON ({message}) — surface the message.
+        let msg = `HTTP ${status}`;
+        try { const j = JSON.parse(body.toString('utf8')); if (j && typeof j.message === 'string') msg = j.message; } catch { /* not JSON */ }
+        return { ok: false, status, data: Buffer.alloc(0), transportUsed: 'socket', error: msg };
+      }
+      const res = await bound.axios!.request<Buffer>({ method: 'GET', url: path, timeout: timeoutMs, responseType: 'arraybuffer' });
+      if (res.status >= 200 && res.status < 300) {
+        return { ok: true, status: res.status, data: Buffer.isBuffer(res.data) ? res.data : Buffer.from(res.data as ArrayBuffer), transportUsed: bound.kind === 'tls' ? 'tls' : 'tcp' };
+      }
+      // A reachable daemon that answered with an HTTP error is authoritative.
+      if (res.status >= 400 && res.status < 600) {
+        return { ok: false, status: res.status, data: Buffer.alloc(0), transportUsed: bound.kind === 'tls' ? 'tls' : 'tcp', error: `HTTP ${res.status}` };
+      }
+    } catch (err) {
+      last = { ok: false, status: 0, data: Buffer.alloc(0), transportUsed: bound.kind === 'tls' ? 'tls' : 'socket', error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  return last ?? { ok: false, status: 0, data: Buffer.alloc(0), error: 'no transports attempted' };
+}

@@ -1,6 +1,6 @@
 {
   "name": "unm-plugin-ix-truenas",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "private": true,
   "description": "UnifiedNetworkManager plugin for TrueNAS SCALE appliances (JSON-RPC API monitoring).",
   "main": "dist/src/index.js",
