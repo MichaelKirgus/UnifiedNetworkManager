@@ -51,18 +51,59 @@ function liveStatFor(byName: Record<string, LiveContainerStat>, serviceName?: st
   return undefined;
 }
 
-/** Live running-ness of an app from probe `docker ps` data (null = no fresh
- * data for its device). TrueNAS multi-container apps name docker containers
+/** Severity rank for aggregating non-running member states — a restarting or
+ * created (mid-start) container outranks a plain exited one. */
+function stateRank(s: string): number {
+  if (s === 'restarting') return 3;
+  if (s === 'created' || s === 'paused') return 2;
+  return 1; // exited / dead / unknown
+}
+
+/** Normalizes one probe `containerStates` payload into name → lowercase docker
+ * state. Fresh plugins report the real state ('exited', …); older ones reported
+ * a bare running set ({ status: 'running' }) — normalize both to strings. */
+function normalizeContainerStates(v: unknown): Record<string, string> | null {
+  if (!v || typeof v !== 'object') return null;
+  const out: Record<string, string> = {};
+  for (const [name, s] of Object.entries(v as Record<string, unknown>)) {
+    const st = typeof s === 'string' ? s : (s && typeof s === 'object' && typeof (s as Record<string, unknown>).status === 'string') ? String((s as Record<string, unknown>).status) : 'running';
+    out[name] = st.toLowerCase();
+  }
+  return out;
+}
+
+/** Aggregated LIVE docker state for a set of candidate container names from
+ * probe `containerStates` data (null = no data at all). The app is 'running'
+ * when ANY member runs; otherwise the WORST non-running state wins so a
+ * mid-transition app shows 'restarting', not just 'exited'. */
+function liveStateForNames(names: string[], states?: Record<string, string>): string | null {
+  if (!states || Object.keys(states).length === 0) return null;
+  let anyRunning = false;
+  let worst: string | null = null;
+  for (const n of names) {
+    // Exact docker-name match first, then the `<app>-<service>` convention.
+    const direct = states[n];
+    if (direct !== undefined) {
+      if (direct === 'running') anyRunning = true;
+      else if (!worst || stateRank(direct) > stateRank(worst)) worst = direct;
+      continue;
+    }
+    for (const [k, v] of Object.entries(states)) {
+      if (!k.endsWith(`-${n}`)) continue;
+      if (v === 'running') anyRunning = true;
+      else if (!worst || stateRank(v) > stateRank(worst)) worst = v;
+    }
+  }
+  return anyRunning ? 'running' : worst;
+}
+
+/** Live docker state of an APP from probe data (null = no fresh data for its
+ * device). TrueNAS multi-container apps name docker containers
  * `<app>-<service>`, so candidates are matched exactly or by suffix. */
-function isAppRunningLive(row: ContainerRow, running?: Set<string>): boolean | null {
-  if (!running) return null;
+function liveStateOf(row: ContainerRow, states?: Record<string, string>): string | null {
   const services = servicesOf(row);
   const candidates = Array.from(new Set([row.name, ...(services.length > 0 ? services.map((s) => s.service ?? row.name) : [])]));
-  for (const n of candidates) {
-    if (running.has(n)) return true;
-    for (const k of running) if (k.endsWith(`-${n}`)) return true;
-  }
-  return false;
+  return liveStateForNames(candidates, states);
 }
 
 /**
@@ -371,7 +412,10 @@ const STATE_STYLES: Record<string, string> = {
 };
 
 function StateBadge({ state }: { state: string }) {
-  const style = STATE_STYLES[state] ?? 'bg-warning text-warning-fg border-warning-border';
+  // Case-tolerant lookup — inventory states are UPPERCASE, live probe states
+  // are lowercase docker states; both must map to the same style (an unknown
+  // case variant must NOT fall through to the orange warning default).
+  const style = STATE_STYLES[state] ?? STATE_STYLES[state.toUpperCase()] ?? 'bg-warning text-warning-fg border-warning-border';
   return (
     <span className={clsx('inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium', style)}>
       {state.toLowerCase()}
@@ -484,6 +528,9 @@ interface TreeNode {
   service?: string;
   image?: string | null;
   state?: string | null;
+  /** FRESH live docker state from the probe cache (lowercase, e.g. 'exited',
+   * 'restarting') — overrides `state` in the badge when present and fresh. */
+  liveState?: string | null;
   mac?: string | null;
   ip?: string | null;
   startedAt?: string | null;
@@ -511,8 +558,9 @@ interface BuiltApp {
  * single-container app still nests its container (uniform structure); an app
  * with no per-service detail yet falls back to a synthetic container from the
  * app-level image so nothing is lost. `liveStats` (probe data for this device)
- * overrides the enrichment stats when present — live wins, cached fills gaps. */
-function buildApp(row: ContainerRow, liveStats?: Record<string, LiveContainerStat>): BuiltApp {
+ * overrides the enrichment stats when present — live wins, cached fills gaps.
+ * `liveStates` carries the fresh probe docker states for each member's badge. */
+function buildApp(row: ContainerRow, liveStats?: Record<string, LiveContainerStat>, liveStates?: Record<string, string>): BuiltApp {
   const base = `${row.deviceId}|${row.pluginId}|${row.name}`;
   const services = servicesOf(row);
   let list: ContainerServiceDetail[];
@@ -537,16 +585,19 @@ function buildApp(row: ContainerRow, liveStats?: Record<string, LiveContainerSta
     // Live probe stats win over the enrichment snapshot; per-field fallback so
     // a partial live sample (e.g. first cycle has no I/O rates yet) still shows
     // whatever the slower path already collected.
-    const live = liveStats ? liveStatFor(liveStats, s.service ?? row.name, row.name) : undefined;
+    const svcName = s.service ?? (list.length > 1 ? undefined : row.name);
+    const live = liveStats ? liveStatFor(liveStats, svcName ?? row.name, row.name) : undefined;
     containers.push({
       node: {
         key: ckey,
         kind: 'container',
         deviceId: row.deviceId,
         pluginId: row.pluginId,
-        service: s.service ?? (list.length > 1 ? undefined : row.name),
+        service: svcName,
         image: s.image ?? null,
         state: s.state ?? null,
+        // Fresh probe docker state for this member (exact or `<app>-<svc>` match).
+        liveState: liveStates && svcName ? liveStateForNames([svcName], liveStates) : null,
         mac: s.mac ?? null,
         ip: s.ip ?? null,
         startedAt: s.startedAt ?? null,
@@ -738,9 +789,13 @@ function nodeCell(key: string, node: TreeNode, depth: number, actions?: ChildAct
         </span>
       );
     }
-    case 'state':
+    case 'state': {
+      // Fresh probe docker state wins over the cached inventory state — a
+      // per-container start/stop flips its badge in ~3 s.
+      if (node.kind === 'container' && node.liveState) return <StateBadge state={node.liveState.toUpperCase()} />;
       if (node.kind === 'container' && node.state) return <StateBadge state={node.state.toUpperCase()} />;
       return null;
+    }
     case 'image': {
       if (node.kind !== 'container') return null;
       const repo = splitImage(node.image).repo;
@@ -954,9 +1009,10 @@ export default function Containers() {
 
   // One live probe per (device, plugin) pair that has container rows AND a
   // probe-capable plugin. Two keys per poll: 'containerStats' (CPU/RAM/I-O for
-  // the stat columns) + 'containerStates' (running set from one cheap `docker
-  // ps` — feeds the settle watch so plan outcomes are detected in ~3 s without
-  // a full /monitoring inventory poll).
+  // the stat columns) + 'containerStates' (live docker state of every
+  // container from one cheap `docker ps -a` — feeds the settle watch so plan
+  // outcomes are detected in ~3 s without a full /monitoring inventory poll,
+  // and drives the live State badges below).
   const probeTargets = useMemo(() => {
     const seen = new Set<string>();
     const out: { deviceId: string; pluginId: string }[] = [];
@@ -993,27 +1049,8 @@ export default function Containers() {
     return m;
   }, [probeTargets, probeResults]);
 
-  // deviceId|pluginId → fresh set of RUNNING container names (probe key
-  // 'containerStates' = one cheap `docker ps`). Absence from the set is the
-  // "stopped" signal. Feeds the settle watch's cheap live check.
-  const liveRunningByDevice = useMemo(() => {
-    const m = new Map<string, { at: number; names: Set<string> }>();
-    probeTargets.forEach((t, i) => {
-      const res = probeResults[i];
-      if (!res?.data) return;
-      const cs = res.data.probe.metrics['containerStates'];
-      if (cs && typeof cs === 'object') {
-        m.set(`${t.deviceId}|${t.pluginId}`, {
-          at: Date.parse(res.data.probe.collectedAt) || Date.now(),
-          names: new Set(Object.keys(cs as Record<string, unknown>)),
-        });
-      }
-    });
-    return m;
-  }, [probeTargets, probeResults]);
-
-  const liveRunningRef = useRef(liveRunningByDevice);
-  useEffect(() => { liveRunningRef.current = liveRunningByDevice; }, [liveRunningByDevice]);
+  // (liveStatesByDevice is built further down — it merges this page-wide probe
+  // with the fast transition probe that only exists while a plan settles.)
 
   /** Effective app-level stats: LIVE probe data when available, else the
    * enrichment snapshot in extra.stats (15-min cadence). */
@@ -1086,16 +1123,94 @@ export default function Containers() {
     }));
   }
 
+  // --- Fast transition probe (tight cadence while a plan settles) --------------
+  // While the settle watch is active we poll the plugin's POST /probe AGAIN —
+  // but with `names` restricted to ONLY the transitioning containers, at a
+  // tighter 1.5 s cadence than the page-wide 3 s probe. The response is merged
+  // into liveStatesByDevice (per-name overlay), so the State badges flip in
+  // ~1.5 s after a start/stop instead of waiting for the next inventory poll.
+  const fastProbeTargets = useMemo(() => {
+    if (!settleWatch) return [] as { deviceId: string; pluginId: string; names: string[] }[];
+    const byKey = new Map<string, Set<string>>();
+    for (const r of containersQuery.data?.containers ?? []) {
+      if (!probePluginIds.has(r.pluginId)) continue;
+      if (!settleWatch.deviceIds.includes(r.deviceId)) continue;
+      // Only the watched apps' members — keep the selection small. The plugin
+      // filters by EXACT docker name, so request every naming convention: the
+      // app name, each service name, and `<app>-<service>` (TrueNAS multi-
+      // container apps).
+      const services = servicesOf(r);
+      const svcNames = services.length > 0 ? services.map((s) => s.service ?? r.name) : [];
+      const names = Array.from(new Set([r.name, ...svcNames, ...svcNames.map((n) => `${r.name}-${n}`)]));
+      if (!names.some((n) => settleWatch.names.includes(n))) continue;
+      const k = `${r.deviceId}|${r.pluginId}`;
+      byKey.set(k, new Set([...(byKey.get(k) ?? []), ...names]));
+    }
+    return Array.from(byKey.entries()).map(([k, names]) => {
+      const [deviceId, pluginId] = k.split('|');
+      return { deviceId: deviceId!, pluginId: pluginId!, names: Array.from(names).sort() };
+    });
+  }, [settleWatch, containersQuery.data, probePluginIds]);
+
+  const fastProbeResults = useQueries({
+    queries: fastProbeTargets.map((t) => ({
+      // Distinct key from the page-wide probe — this one carries a `names`
+      // selection, so its (partial) response must not clobber the full cache.
+      queryKey: ['device-probe-fast', t.deviceId, 'containerStates', t.names.join(',')],
+      queryFn: () => api.deviceProbe(t.deviceId, ['containerStates'], t.pluginId, t.names),
+      refetchInterval: 1_500,
+      staleTime: 0,
+      gcTime: 30_000,
+    })),
+  });
+
+  // deviceId|pluginId → fresh LIVE docker state per container name (probe key
+  // 'containerStates' = one cheap `docker ps -a` — real states, not just the
+  // running set). Merges the page-wide probe with the fast transition probe's
+  // per-name updates. Feeds both the settle watch's cheap live check and the
+  // live State badges; a failed poll keeps serving the last good snapshot.
+  const liveStatesByDevice = useMemo(() => {
+    const m = new Map<string, { at: number; states: Record<string, string> }>();
+    probeTargets.forEach((t, i) => {
+      const res = probeResults[i];
+      if (!res?.data) return;
+      const norm = normalizeContainerStates(res.data.probe.metrics['containerStates']);
+      if (norm) m.set(`${t.deviceId}|${t.pluginId}`, { at: Date.parse(res.data.probe.collectedAt) || Date.now(), states: norm });
+    });
+    // Overlay the fast probe's fresh per-name states on top of the full set.
+    fastProbeTargets.forEach((t, i) => {
+      const res = fastProbeResults[i];
+      if (!res?.data) return;
+      const norm = normalizeContainerStates(res.data.probe.metrics['containerStates']);
+      if (!norm) return;
+      const key = `${t.deviceId}|${t.pluginId}`;
+      const at = Date.parse(res.data.probe.collectedAt) || Date.now();
+      const prev = m.get(key);
+      m.set(key, { at: Math.max(prev?.at ?? 0, at), states: { ...(prev?.states ?? {}), ...norm } });
+    });
+    return m;
+  }, [probeTargets, probeResults, fastProbeTargets, fastProbeResults]);
+
+  const liveStatesRef = useRef(liveStatesByDevice);
+  useEffect(() => { liveStatesRef.current = liveStatesByDevice; }, [liveStatesByDevice]);
+
+  /** Fresh (≤30 s) live states for one device+plugin — null when the probe has
+   * no recent data, so callers fall back to the inventory state. */
+  function freshLiveStates(deviceId: string, pluginId: string): Record<string, string> | null {
+    const e = liveStatesByDevice.get(`${deviceId}|${pluginId}`);
+    return e && Date.now() - e.at < 30_000 ? e.states : null;
+  }
+
   useEffect(() => {
     if (!settleWatch) return;
     // The caller (singleApp / runBulk) already did one heavy refresh at plan
     // completion — start the throttle clock there so this watch only adds
     // follow-ups, never a redundant immediate one.
     let lastHeavyAt = Date.now();
-    /** app name → running on previous tick. Stability gate: TrueNAS app.state
-     * lags docker state during transitions, so one sample can still be
-     * mid-flight — require the same answer twice before syncing the DB. */
-    const prevLive = new Map<string, boolean>();
+    /** app name → live state on previous tick. Stability gate: TrueNAS
+     * app.state lags docker state during transitions, so one sample can still
+     * be mid-flight — require the same answer twice before syncing the DB. */
+    const prevLive = new Map<string, string>();
     const timer = setInterval(async () => {
       if (Date.now() > settleWatch.until) { setSettleWatch(null); return; }
       const data = containersRef.current;
@@ -1106,22 +1221,22 @@ export default function Containers() {
       );
       if (!settleWatch.names.some((n) => dbTransitional.has(n))) { setSettleWatch(null); return; }
 
-      // Cheap live check: docker ps via the probe cache (3 s cadence, zero
+      // Cheap live check: docker ps -a via the probe cache (3 s cadence, zero
       // appliance API load — unlike refreshDevices which triggers a full
       // /monitoring inventory poll on the device).
       const rows = data?.containers ?? [];
       let allLive = true;
       let allStable = true;
-      const nextPrev = new Map<string, boolean>();
+      const nextPrev = new Map<string, string>();
       for (const name of settleWatch.names) {
         const row = rows.find((r) => r.name === name);
         if (!row) continue; // vanished from inventory — settled by definition
-        const live = liveRunningRef.current.get(`${row.deviceId}|${row.pluginId}`);
-        const fresh = live && Date.now() - live.at < 30_000 ? live.names : undefined;
-        const running = isAppRunningLive(row, fresh);
-        if (running === null) { allLive = false; continue; } // no probe data for this device
-        nextPrev.set(name, running);
-        if (prevLive.has(name) && prevLive.get(name) !== running) allStable = false;
+        const live = liveStatesRef.current.get(`${row.deviceId}|${row.pluginId}`);
+        const fresh = live && Date.now() - live.at < 30_000 ? live.states : undefined;
+        const state = liveStateOf(row, fresh);
+        if (state === null) { allLive = false; continue; } // no probe data for this device
+        nextPrev.set(name, state);
+        if (prevLive.has(name) && prevLive.get(name) !== state) allStable = false;
       }
       prevLive.clear();
       for (const [k, v] of nextPrev) prevLive.set(k, v);
@@ -1327,14 +1442,18 @@ export default function Containers() {
     const childMap = new Map<string, TreeNode[]>();
     const roots: TreeNode[] = [];
     for (const row of containersQuery.data?.containers ?? []) {
-      // Live probe stats for this device+plugin override the enrichment data.
-      const built = buildApp(row, liveStatsByDevice.get(`${row.deviceId}|${row.pluginId}`));
+      // Live probe stats + states for this device+plugin override the
+      // enrichment data — live wins, cached fills gaps.
+      const key = `${row.deviceId}|${row.pluginId}`;
+      const liveEntry = liveStatesByDevice.get(key);
+      const freshStates = liveEntry && Date.now() - liveEntry.at < 30_000 ? liveEntry.states : undefined;
+      const built = buildApp(row, liveStatsByDevice.get(key), freshStates);
       roots.push(built.app);
       childMap.set(built.app.key, built.containers.map((c) => c.node));
       for (const c of built.containers) if (c.volumes.length > 0) childMap.set(c.node.key, c.volumes);
     }
     return { roots, childMap };
-  }, [containersQuery.data, liveStatsByDevice]);
+  }, [containersQuery.data, liveStatsByDevice, liveStatesByDevice]);
 
   const columns: DataTableColumn<TreeNode>[] = [
     {
@@ -1356,11 +1475,21 @@ export default function Containers() {
       },
     },
     {
+      // LIVE docker state from the probe cache when fresh — a start/stop shows
+      // up in ~3 s instead of waiting for the next inventory poll. Falls back
+      // to the (slower) inventory state otherwise.
       header: 'State',
       key: 'state',
       width: 110,
       exportValue: (node) => node.row?.state ?? '',
-      render: (node) => (node.row ? <StateBadge state={node.row.state} /> : null),
+      render: (node) => {
+        const r = node.row;
+        if (!r) return null;
+        const live = freshLiveStates(r.deviceId, r.pluginId);
+        const ls = live ? liveStateOf(r, live) : null;
+        // Uppercase — inventory states are uppercase; StateBadge is case-tolerant.
+        return <StateBadge state={(ls ?? r.state).toUpperCase()} />;
+      },
     },
     {
       header: 'Uptime',

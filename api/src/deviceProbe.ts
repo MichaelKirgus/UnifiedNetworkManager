@@ -47,12 +47,14 @@ export class DeviceProbeError extends Error {
  * plugin's POST /probe endpoint. Credentials are fetched FRESH (uncached) —
  * the same rule as plan steps and device state: a live call must use current
  * secrets. `keys` is forwarded verbatim; an empty/absent list means "the
- * plugin's default set".
+ * plugin's default set". `names` optionally restricts collection to a subset
+ * of containers (state-style keys); absent = full collection.
  */
 export async function fetchDeviceProbe(
   deviceId: string,
   pluginId: string,
-  keys?: string[]
+  keys?: string[],
+  names?: string[]
 ): Promise<{ pluginId: string; probe: ProbeResult }> {
   const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
   if (!device) throw new DeviceProbeError(404, 'Device not found');
@@ -104,6 +106,7 @@ export async function fetchDeviceProbe(
         firmwareVersion: device.firmwareVersion ?? null,
         credentials,
         ...(keys && keys.length > 0 ? { keys } : {}),
+        ...(names && names.length > 0 ? { names } : {}),
         ...(decrypted?.type === 'apiKey' ? { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret } : {})
       },
       // Short-cycle path — the webapp polls every few seconds, so keep the

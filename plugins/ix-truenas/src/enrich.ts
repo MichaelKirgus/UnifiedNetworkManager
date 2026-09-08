@@ -447,37 +447,47 @@ export async function collectProbeStats(
 export interface ProbeContainerState {
   /** Container name (docker, no leading slash). */
   name: string;
-  /** Always 'running' — `docker ps` lists running containers only. */
+  /** Docker-native lowercase state ('running', 'exited', 'created', …). */
   status: string;
 }
 
 /**
- * Collects the set of RUNNING container names for the PROBE path: ONE cheap
- * `docker ps` over the shared SSH pool (sub-second, zero TrueNAS API load).
- * Absence from the result IS the "stopped" signal — callers treat a missing
- * name as not-running. Returns null when no ssh slot is bound or SSH fails;
- * an EMPTY map is a valid answer (all containers stopped) and must NOT be
- * conflated with failure.
+ * Collects the live state of containers for the PROBE path: ONE `docker ps -a`
+ * over the shared SSH pool (sub-second, zero TrueNAS API load). Unlike a plain
+ * `docker ps`, this lists ALL containers with their real docker state — so a
+ * caller can watch specific containers through a start/stop transition and see
+ * 'exited'/'created' as soon as docker reports it. `names` optionally restricts
+ * the result to a subset of container names (absent = all). Returns null when
+ * no ssh slot is bound or SSH fails; an EMPTY map is a valid answer (no
+ * containers at all) and must NOT be conflated with failure.
  */
 export async function collectProbeStates(
   host: string,
   sshCreds: ReturnType<typeof resolveSshCredentials>,
-  log?: (level: 'info' | 'warn', message: string) => void
+  log?: (level: 'info' | 'warn', message: string) => void,
+  names?: string[]
 ): Promise<Map<string, ProbeContainerState> | null> {
   if (!sshCreds) return null; // no ssh slot bound — API-only mode
   try {
     const client = await sshPool.get(host, 22, sshCreds);
-    const r = await client.exec(`docker ps --format 'STATE|{{.Names}}' 2>/dev/null`, sshCreds);
+    const r = await client.exec(`docker ps -a --format 'PS|{{.State}}|{{.Names}}' 2>/dev/null`, sshCreds);
     if (r.code !== 0 && !r.stdout) {
       probeFailLog(host, `SSH docker ps probe on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`, log);
       return null;
     }
+    const wanted = names && names.length > 0 ? new Set(names) : null;
     const out = new Map<string, ProbeContainerState>();
     for (const line of r.stdout.split('\n')) {
-      if (!line.startsWith('STATE|')) continue;
-      const name = line.slice('STATE|'.length).replace(/^\//, '').trim();
-      if (!name) continue;
-      out.set(name, { name, status: 'running' });
+      if (!line.startsWith('PS|')) continue;
+      const rest = line.slice('PS|'.length);
+      const sep = rest.indexOf('|');
+      if (sep < 0) continue;
+      // {{.State}} is a lowercase docker state ('running', 'exited (13)', …).
+      const status = rest.slice(0, sep).trim().toLowerCase();
+      const name = rest.slice(sep + 1).replace(/^\//, '').trim();
+      if (!name || !status) continue;
+      if (wanted && !wanted.has(name)) continue;
+      out.set(name, { name, status });
     }
     return out;
   } catch (e) {

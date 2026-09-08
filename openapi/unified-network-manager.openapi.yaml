@@ -1106,6 +1106,15 @@ paths:
           required: false
           description: "Comma-separated probe keys to collect (absent = the plugin's default set)"
           schema: { type: string }
+        - in: query
+          name: names
+          required: false
+          description: >-
+            Comma-separated container-name selection — state-style probe keys
+            (e.g. `containerStates`) collect only these containers instead of
+            the full set, so a page can watch a small subset at a tighter
+            cadence. Absent = no restriction (full collection).
+          schema: { type: string }
       responses:
         '200':
           description: Live probe snapshot

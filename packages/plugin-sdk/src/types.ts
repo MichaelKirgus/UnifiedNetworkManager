@@ -390,6 +390,13 @@ export interface ProbeRequestBody {
    * independently of callers, and a stale caller must not break a fresh one.
    */
   keys?: string[];
+  /**
+   * Optional container-name selection: when present, state-style probe keys
+   * (e.g. `containerStates`) collect ONLY these containers instead of the full
+   * set — lets a page watch a small subset at a tighter cadence without paying
+   * for everything else. Absent/empty = no restriction (full collection).
+   */
+  names?: string[];
 }
 
 /** Response of POST /probe — the API broker returns it verbatim to the webapp. */

@@ -30,7 +30,8 @@ export interface ProbeContainerStat {
 /** One container's live state as served by POST /probe (key 'containerStates'). */
 export interface ProbeContainerState {
   name: string;
-  status: string; // always 'running' — only running containers are listed
+  /** Docker-native lowercase state ('running', 'exited', 'created', …). */
+  status: string;
 }
 
 // SEPARATE rate trackers for the probe path — the webapp polls every few seconds,
@@ -66,15 +67,19 @@ function nameOf(c: RawContainer): string {
 }
 
 /**
- * Collects the set of RUNNING container names for the PROBE path: ONE cheap
- * /containers/json?all=true. Absence from the result IS the "stopped" signal —
- * callers treat a missing name as not-running. Returns null on transport failure;
- * an EMPTY map is a valid answer (all containers stopped) and must NOT be
+ * Collects the live state of containers for the PROBE path: ONE cheap
+ * /containers/json?all=true. Unlike a running-only list, this reports every
+ * container with its real docker state — so a caller can watch specific
+ * containers through a start/stop transition and see 'exited'/'created' as
+ * soon as the engine reports it. `names` optionally restricts the result to a
+ * subset of container names (absent = all). Returns null on transport failure;
+ * an EMPTY map is a valid answer (no containers at all) and must NOT be
  * conflated with failure.
  */
 export async function collectProbeStates(
   opts: DockerClientOptions,
-  log?: (level: 'info' | 'warn', message: string) => void
+  log?: (level: 'info' | 'warn', message: string) => void,
+  names?: string[]
 ): Promise<Map<string, ProbeContainerState> | null> {
   const host = opts.host || 'local';
   try {
@@ -83,12 +88,15 @@ export async function collectProbeStates(
       probeFailLog(host, `Docker /containers/json probe failed (HTTP ${r.status}): ${(r.error ?? '').slice(0, 200)}`, log);
       return null;
     }
+    const wanted = names && names.length > 0 ? new Set(names) : null;
     const out = new Map<string, ProbeContainerState>();
     for (const c of r.data as RawContainer[]) {
       if (!c || typeof c !== 'object') continue;
-      if (String(c.State ?? '').toLowerCase() !== 'running') continue;
+      const status = String(c.State ?? '').trim().toLowerCase();
       const name = nameOf(c);
-      if (name) out.set(name, { name, status: 'running' });
+      if (!name || !status) continue;
+      if (wanted && !wanted.has(name)) continue;
+      out.set(name, { name, status });
     }
     return out;
   } catch (e) {

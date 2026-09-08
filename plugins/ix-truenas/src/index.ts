@@ -76,7 +76,11 @@ const identity = resolvePluginIdentity({
   // 0.6.3 — containers.logs.read: per-container log output via `docker logs` over
   // the shared SSH pool (TrueNAS 26 has NO app/container-log RPC — verified
   // against the full core.get_methods catalog). Requires a bound ssh slot.
-  version: '0.6.3',
+  // 0.6.4 — probe key `containerStates` now reports REAL per-container docker
+  // states (`docker ps -a`) instead of just the running set, and honors an
+  // optional `names` selection so a page can watch specific containers at a
+  // tighter cadence (e.g. right after start/stop).
+  version: '0.6.4',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe'],
 });
@@ -2045,11 +2049,12 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
 //     `docker stats --no-stream` over the shared SSH pool (connection reused);
 //     rates come from dedicated probe trackers so fast cycles don't disturb the
 //     15-min enrichment baselines.
-//   - 'containerStates': the set of RUNNING container names from one cheap
-//     `docker ps` (sub-second, zero TrueNAS API load). Absence = stopped — the
-//     webapp's settle watch uses it to detect plan outcomes in ~3 s instead of
-//     waiting for a full /monitoring inventory poll. An EMPTY map is valid
-//     (all containers stopped) and distinct from failure (null → 502).
+//   - 'containerStates': the live state of ALL containers from one cheap
+//     `docker ps -a` (sub-second, zero TrueNAS API load) — real docker states
+//     ('running', 'exited', …), so a caller can watch specific containers
+//     through a start/stop transition. The optional `names` request field
+//     restricts the result to a subset of container names. An EMPTY map is
+//     valid (no containers at all) and distinct from failure (null → 502).
 // Unknown keys are ignored; an empty/absent list means "the default set".
 // ---------------------------------------------------------------------------
 const PROBE_KEYS = new Set(['containerStats', 'containerStates']);
@@ -2074,9 +2079,13 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   // are requested (two exec channels on one connection).
   const logFn = (level: 'info' | 'warn', message: string) =>
     level === 'warn' ? logger.warn(message, { deviceId: body.deviceId }) : logger.info(message, { deviceId: body.deviceId });
+  // Optional container-name selection (state-style keys only — stats always
+  // cover everything running). Absent/empty = full collection.
+  const nameSel = Array.isArray(body.names) && body.names.length > 0 ? body.names : undefined;
+
   const [stats, states] = await Promise.all([
     wanted.has('containerStats') ? collectProbeStats(host, sshCreds, logFn) : Promise.resolve(null),
-    wanted.has('containerStates') ? collectProbeStates(host, sshCreds, logFn) : Promise.resolve(null),
+    wanted.has('containerStates') ? collectProbeStates(host, sshCreds, logFn, nameSel) : Promise.resolve(null),
   ]);
 
   const metrics: Record<string, unknown> = {};

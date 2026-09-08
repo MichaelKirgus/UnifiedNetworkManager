@@ -1560,13 +1560,15 @@ export const api = {
   // LIVE short-cycle telemetry from one assigned plugin's POST /probe endpoint
   // (capability 'probe'). The webapp polls this on demand (1–5 s) for data too
   // slow/heavy for the background worker. `keys` selects which probe keys to
-  // collect; absent = the plugin's default set.
-  deviceProbe: (deviceId: string, keys?: string[], pluginId?: string) => {
+  // collect; absent = the plugin's default set. `names` optionally restricts
+  // state-style keys to a subset of containers (absent = full collection).
+  deviceProbe: (deviceId: string, keys?: string[], pluginId?: string, names?: string[]) => {
     const params = new URLSearchParams();
     // Comma-joined list — URLSearchParams percent-encodes the comma, which the
     // API's OpenAPI validator requires (raw reserved chars in query values 400).
     if (keys && keys.length > 0) params.set('keys', keys.join(','));
     if (pluginId) params.set('pluginId', pluginId);
+    if (names && names.length > 0) params.set('names', names.join(','));
     const qs = params.toString();
     return apiFetch<DeviceProbe>(`/devices/${deviceId}/probe${qs ? `?${qs}` : ''}`);
   },

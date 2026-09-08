@@ -1032,14 +1032,18 @@ router.get('/devices/:deviceId/state', requireAuth, requirePermission('devices:r
 // plugin's POST /probe endpoint (capability 'probe'). The webapp polls this on
 // demand (1–5 s) for data too slow/heavy for the background /monitoring worker
 // — e.g. per-container CPU/RAM/I-O. Query params: keys (comma-separated probe
-// keys to collect; absent = plugin default), pluginId (default = primary).
-// The broker is generic (see deviceProbe.ts) — it resolves credentials and
-// forwards verbatim, never interpreting metric content or writing to the DB.
+// keys to collect; absent = plugin default), names (comma-separated container
+// selection for state-style keys; absent = full collection), pluginId
+// (default = primary). The broker is generic (see deviceProbe.ts) — it resolves
+// credentials and forwards verbatim, never interpreting metric content or
+// writing to the DB.
 router.get('/devices/:deviceId/probe', requireAuth, requirePermission('devices:read'), async (req, res) => {
   const { deviceId } = req.params;
   const pluginId = typeof req.query.pluginId === 'string' ? req.query.pluginId : '';
   const keysRaw = typeof req.query.keys === 'string' ? req.query.keys : Array.isArray(req.query.keys) ? (req.query.keys as string[]).join(',') : '';
   const keys = keysRaw.split(',').map((k) => k.trim()).filter(Boolean);
+  const namesRaw = typeof req.query.names === 'string' ? req.query.names : Array.isArray(req.query.names) ? (req.query.names as string[]).join(',') : '';
+  const names = namesRaw.split(',').map((n) => n.trim()).filter(Boolean);
 
   try {
     // No explicit plugin → the device's primary assignment.
@@ -1054,7 +1058,7 @@ router.get('/devices/:deviceId/probe', requireAuth, requirePermission('devices:r
       effectivePluginId = primary.pluginId;
     }
 
-    const result = await fetchDeviceProbe(deviceId, effectivePluginId, keys);
+    const result = await fetchDeviceProbe(deviceId, effectivePluginId, keys, names.length > 0 ? names : undefined);
     res.status(200).json({ deviceId, ...result });
   } catch (err) {
     if (err instanceof DeviceProbeError) {
