@@ -7,6 +7,7 @@ import { asc, eq, and, desc, inArray } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { DeviceStateError, fetchDeviceState } from '../deviceState';
 import { DeviceProbeError, fetchDeviceProbe } from '../deviceProbe';
+import { DeviceFilesystemError, performFilesystemOp, type FilesystemOp } from '../deviceFilesystem';
 import {
   AssignmentError,
   addAssignment,
@@ -1062,6 +1063,56 @@ router.get('/devices/:deviceId/probe', requireAuth, requirePermission('devices:r
     res.status(200).json({ deviceId, ...result });
   } catch (err) {
     if (err instanceof DeviceProbeError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// POST /devices/:deviceId/filesystem - one file operation on a device's filesystem,
+// brokered to the assigned plugin's POST /filesystem endpoint (capability
+// 'filesystem'). The webapp's Storage page browses dataset contents and the
+// Containers page browses container volume mounts through this ONE route. Body:
+//   { op, path?, targetPath?, contentBase64?, parents?, context? }
+// `context` names WHAT to browse (a dataset or a container volume); the plugin maps
+// it onto an SFTP root and confines every path to it. Gated on devices:write — file
+// ops mutate device state (and reads are only useful alongside them). The broker is
+// generic (see deviceFilesystem.ts) — it resolves credentials + forwards verbatim.
+router.post('/devices/:deviceId/filesystem', requireAuth, requirePermission('devices:write'), async (req, res) => {
+  const { deviceId } = req.params;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+
+  // No explicit plugin → the device's primary assignment.
+  let pluginId = typeof body.pluginId === 'string' ? body.pluginId : '';
+  if (!pluginId) {
+    const assignments = await db.query.devicePlugins.findMany({ where: eq(schema.devicePlugins.deviceId, deviceId) });
+    const primary = assignments.find((a) => a.isPrimary) ?? assignments[0];
+    if (!primary) {
+      res.status(400).json({ error: 'Device has no plugin assignment' });
+      return;
+    }
+    pluginId = primary.pluginId;
+  }
+
+  const op = typeof body.op === 'string' ? (body.op as FilesystemOp) : '';
+  if (!op) {
+    res.status(400).json({ error: 'Missing "op" in request body' });
+    return;
+  }
+
+  try {
+    const result = await performFilesystemOp(deviceId, pluginId, op, {
+      path: typeof body.path === 'string' ? body.path : undefined,
+      targetPath: typeof body.targetPath === 'string' ? body.targetPath : undefined,
+      contentBase64: typeof body.contentBase64 === 'string' ? body.contentBase64 : undefined,
+      parents: typeof body.parents === 'boolean' ? body.parents : undefined,
+      context: body.context && typeof body.context === 'object' ? (body.context as Record<string, unknown>) : undefined,
+    });
+    res.status(200).json({ deviceId, ...result });
+  } catch (err) {
+    if (err instanceof DeviceFilesystemError) {
       res.status(err.status).json({ error: err.message });
       return;
     }

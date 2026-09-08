@@ -16,6 +16,10 @@ import {
   resolvePluginIdentity,
   stateHandler,
   probeHandler,
+  filesystemHandler,
+  type FilesystemRequestBody,
+  type FilesystemResponseBody,
+  createSftpPool,
   textMetric,
   validateInput,
   PortRow,
@@ -99,9 +103,16 @@ const identity = resolvePluginIdentity({
   // dedicated 20 s per-call timeout: on slow/degraded appliances it can exceed
   // the default 5 s and previously timed out, silently dropping ALL datasets of
   // that device from the Storage page (pools showed no children).
-  version: '0.8.1',
+  // 0.9.0 — filesystem browser (POST /filesystem, capability 'filesystem'): a
+  // generic, root-scoped SFTP file manager for the webapp's Storage page (browse
+  // dataset contents) and Containers page (browse container volume mounts). Ops:
+  // list/read/stat/write/mkdir/rmdir/unlink/rename. Paths are confined to the
+  // scoped root (a dataset mountpoint or a volume's host source) — requires a
+  // bound ssh slot. GENERIC contract: any future plugin serving /filesystem gets
+  // the webapp's file browser for free.
+  version: '0.9.0',
   vendors: ['truenas'],
-  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe'],
+  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem'],
 });
 
 /**
@@ -301,6 +312,9 @@ const knownAlertsByHost = new Map<string, Set<string>>();
 const server = createPluginServer({
   identity,
   logTag: 'ix-truenas-plugin',
+  // Filesystem writes (POST /filesystem op=write) carry base64 file contents —
+  // allow up to ~10 MiB of inbound JSON so a user can upload files that size.
+  jsonLimit: '12mb',
   // Static icon assets, advertised in /discover and fetched by the API's icon proxy.
   iconsDir: path.join(__dirname, '../../icons'),
   discovery: {
@@ -322,7 +336,7 @@ const server = createPluginServer({
         secretTypes: ['usernamePassword', 'sshKeyPair'],
         required: false,
         description:
-          'Optional SSH access for per-container details (real MAC addresses, live IPs and start times via docker inspect) — the public API exposes none of these. Read-only commands; runs at 15-min cadence in the background. Unbound = containers keep showing compose-config data only.',
+          'Optional SSH access for per-container details (real MAC addresses, live IPs and start times via docker inspect) AND the filesystem browser (browse/edit dataset contents + container volume mounts over SFTP). Unbound = containers keep showing compose-config data only and the Browse buttons stay hidden.',
       },
     ],
     metrics: buildMetricDescriptors(),
@@ -2144,6 +2158,154 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
 
   return { collectedAt: new Date().toISOString(), metrics };
 }, 'ix-truenas-plugin'));
+
+// ---------------------------------------------------------------------------
+// POST /filesystem — generic, root-scoped SFTP file manager (capability
+// 'filesystem'). The webapp's Storage page browses a dataset's contents and the
+// Containers page browses a container volume mount; both drive this ONE endpoint
+// through the API broker. The caller passes `context` describing WHAT to browse:
+//   { kind: 'dataset', name }            → root = that dataset's live mountpoint
+//                                         (resolved via pool.dataset.query)
+//   { kind: 'container-volume', source, target? }
+//                                        → root = the volume's HOST path (a bind
+//                                          mount's source, or a named docker
+//                                          volume under /var/lib/docker/volumes)
+// Every subsequent `path` is resolved RELATIVE to that root and confined to it —
+// a webapp-supplied relative path can never walk out of the scoped tree (the SDK
+// rejects `..` traversal + root escape). Requires a bound ssh slot.
+// Ops: list | read | stat | write | mkdir | rmdir | unlink | rename.
+// ---------------------------------------------------------------------------
+
+/** Process-wide SFTP session pool — one connection per host+root, reused across requests. */
+const fsSftpPool = createSftpPool();
+process.on('SIGTERM', () => fsSftpPool.closeAll());
+process.on('SIGINT', () => fsSftpPool.closeAll());
+
+/** Resolves a dataset's live mountpoint via pool.dataset.query (handles both the
+ * flattened and legacy property shapes). Returns null when the dataset is not found. */
+async function resolveDatasetMountpoint(
+  client: TruenasClient,
+  creds: TruenasCredentials,
+  name: string
+): Promise<string | null> {
+  // No server-side filter — reuse the exact call shape the monitoring poll already
+  // uses successfully (filter formats are version-sensitive), then match by name.
+  const rows = await client.call<Record<string, unknown>[]>('pool.dataset.query', [], creds, 20_000);
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const d = rows.find((r) => pickString(r, ['name']) === name) ?? null;
+  if (!d) return null;
+  // A zvol is a block device — not browsable as a directory tree.
+  const dsType = typeof d['type'] === 'string' ? (d['type'] as string).toLowerCase() : '';
+  if (dsType === 'volume') return null;
+  const mp = propOf(d, 'mountpoint');
+  const mpVal = mp?.value ?? (typeof d['mountpoint'] === 'string' ? d['mountpoint'] : undefined);
+  if (typeof mpVal === 'string' && mpVal !== 'legacy' && mpVal !== 'unmounted') return mpVal;
+  return null; // unmounted / no mountpoint — nothing to browse
+}
+
+/** Maps a container-volume context onto the HOST path that holds its data. */
+function volumeHostPath(source: string): string {
+  if (!source) throw new Error('container-volume context requires a non-empty source');
+  // Named docker volumes live under /var/lib/docker/volumes/<name>/_data; bind
+  // mounts are already absolute host paths (or relative to the compose dir — we
+  // only accept absolute sources, which is what `docker inspect` reports).
+  if (source.startsWith('/')) return source;
+  return `/var/lib/docker/volumes/${source}/_data`;
+}
+
+app.post(
+  '/filesystem',
+  filesystemHandler(async (body: FilesystemRequestBody, req): Promise<FilesystemResponseBody> => {
+    const settings = readSettings(req, PLUGIN_OPTIONS);
+    logger.setEnabled(settings.logToApi === true);
+
+    const host = sshHostOf(body.managementAddress);
+    if (!host) throw new Error('Missing managementAddress');
+
+    // Only the bound ssh slot counts — the primary username/password must NOT be reused.
+    const sshCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
+    if (!sshCreds) throw new Error('No SSH credential bound — filesystem browsing unavailable');
+
+    // Resolve the SFTP root from the caller's context (what to browse).
+    const ctx = body.context ?? {};
+    let root: string;
+    const kind = typeof ctx['kind'] === 'string' ? (ctx['kind'] as string) : '';
+    if (kind === 'dataset') {
+      const name = pickString(ctx, ['name']);
+      if (!name) throw new Error('dataset context requires a "name"');
+      // The mountpoint is resolved over the appliance's RPC socket — that uses the
+      // PRIMARY credential (username/password or API key), NOT the ssh slot.
+      const apiKeyUsername = typeof settings.apiKeyUsername === 'string' ? settings.apiKeyUsername.trim() : '';
+      const { creds, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined, apiKeyUsername);
+      if (!creds) throw new Error(credError ?? 'Missing appliance credentials');
+      const client = getClient(host, transportOf(settings), 5000);
+      const mp = await resolveDatasetMountpoint(client, creds, name);
+      if (!mp) throw new Error(`Dataset "${name}" is not mounted (or is a zvol) — nothing to browse`);
+      root = mp;
+    } else if (kind === 'container-volume') {
+      const source = pickString(ctx, ['source']);
+      root = volumeHostPath(source ?? '');
+    } else {
+      throw new Error(`Unsupported filesystem context kind "${kind || '(none)'}" — expected "dataset" or "container-volume"`);
+    }
+
+    // One pooled SFTP session per host+root; every path is confined to `root`.
+    const session = await fsSftpPool.get(host, 22, sshCreds, { root, timeoutMs: 30_000 });
+    const op = body.op;
+    const relPath = typeof body.path === 'string' ? body.path : '';
+
+    switch (op) {
+      case 'list': {
+        const abs = session.resolve(relPath);
+        const r = await session.list(abs, sshCreds);
+        return { collectedAt: new Date().toISOString(), path: r.path, entries: r.entries.map((e) => ({ name: e.name, isDirectory: e.isDirectory, sizeBytes: e.sizeBytes, mtimeMs: e.mtimeMs })) };
+      }
+      case 'stat': {
+        const abs = session.resolve(relPath);
+        const s = await session.stat(abs, sshCreds);
+        return { collectedAt: new Date().toISOString(), path: abs, isDirectory: s.isDirectory, sizeBytes: s.sizeBytes, mtimeMs: s.mtimeMs };
+      }
+      case 'read': {
+        const abs = session.resolve(relPath);
+        const buf = await session.readFile(abs, sshCreds);
+        return { collectedAt: new Date().toISOString(), path: abs, contentBase64: buf.toString('base64'), sizeBytes: buf.length };
+      }
+      case 'write': {
+        if (typeof body.contentBase64 !== 'string') throw new Error('write requires contentBase64');
+        const abs = session.resolve(relPath);
+        await session.writeFile(abs, Buffer.from(body.contentBase64, 'base64'), sshCreds);
+        return { collectedAt: new Date().toISOString(), path: abs };
+      }
+      case 'mkdir': {
+        if (!relPath) throw new Error('mkdir requires a path');
+        const abs = session.resolve(relPath);
+        await session.mkdir(abs, sshCreds, body.parents === true);
+        return { collectedAt: new Date().toISOString(), path: abs };
+      }
+      case 'rmdir': {
+        if (!relPath) throw new Error('rmdir requires a path');
+        const abs = session.resolve(relPath);
+        await session.rmdir(abs, sshCreds);
+        return { collectedAt: new Date().toISOString(), path: abs };
+      }
+      case 'unlink': {
+        if (!relPath) throw new Error('unlink requires a path');
+        const abs = session.resolve(relPath);
+        await session.unlink(abs, sshCreds);
+        return { collectedAt: new Date().toISOString(), path: abs };
+      }
+      case 'rename': {
+        if (!relPath || typeof body.targetPath !== 'string' || !body.targetPath) throw new Error('rename requires path + targetPath');
+        const from = session.resolve(relPath);
+        const to = session.resolve(body.targetPath);
+        await session.rename(from, to, sshCreds);
+        return { collectedAt: new Date().toISOString(), path: to };
+      }
+      default:
+        throw new Error(`Unsupported filesystem op "${op}"`);
+    }
+  }, 'ix-truenas-plugin')
+);
 
 // ---------------------------------------------------------------------------
 // POST /plan — builds an execution plan for an intent across a device batch.

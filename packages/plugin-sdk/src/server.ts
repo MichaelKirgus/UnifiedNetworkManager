@@ -15,6 +15,8 @@ import {
   CredentialSlotDescriptor,
   DeviceModelEntry,
   DeviceStateResponse,
+  FilesystemRequestBody,
+  FilesystemResponseBody,
   MetricDescriptor,
   PluginOptionDescriptor,
   ProbeRequestBody,
@@ -236,6 +238,38 @@ export function probeHandler(
       res.status(200).json(result);
     } catch (err) {
       console.error(`[${logTag ?? 'plugin'}] /probe failed:`, err instanceof Error ? err.message : err);
+      res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  };
+}
+
+/**
+ * Express-4-safe handler factory for the POST /filesystem endpoint (capability
+ * 'filesystem'). Same contract as probeHandler but for a generic, root-scoped file
+ * manager over SFTP: the webapp's Storage page (dataset contents) and Containers
+ * page (volume mounts) drive it through the API broker. The callback receives the
+ * parsed body (deviceId/managementAddress/credentials + op/path/context) AND the raw
+ * request (for readSettings()). The plugin maps `context` onto an SFTP root and confines
+ * every path to it — see sftp.ts resolvePath().
+ *
+ * Success: 200 + FilesystemResponseBody ({ collectedAt, … }).
+ * Failure: 502 + { error } (device unreachable / auth failure / bad context).
+ */
+export function filesystemHandler(
+  fn: (body: FilesystemRequestBody, req: express.Request) => Promise<FilesystemResponseBody>,
+  logTag?: string
+): express.RequestHandler {
+  return async (req, res) => {
+    try {
+      const body = req.body as FilesystemRequestBody;
+      if (!body || typeof body.managementAddress !== 'string' || !body.credentials || typeof body.op !== 'string') {
+        res.status(400).json({ error: 'Invalid filesystem request: managementAddress + credentials + op required' });
+        return;
+      }
+      const result = await fn(body, req);
+      res.status(200).json(result);
+    } catch (err) {
+      console.error(`[${logTag ?? 'plugin'}] /filesystem failed:`, err instanceof Error ? err.message : err);
       res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
     }
   };

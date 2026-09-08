@@ -1,0 +1,389 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import clsx from 'clsx';
+import {
+  ArrowUp,
+  Eye,
+  FileText,
+  Folder,
+  FolderPlus,
+  Loader2,
+  Pencil,
+  RefreshCw,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react';
+import { api, ApiError, type FilesystemEntry } from '../api/client';
+import { formatBytes } from './formatMetric';
+
+/**
+ * A generic, root-scoped file manager dialog driven by the API's filesystem broker
+ * (POST /devices/:id/filesystem → plugin POST /filesystem, capability 'filesystem').
+ * The caller passes a `context` naming WHAT to browse — e.g. `{ kind: 'dataset', name }`
+ * for a Storage-page dataset or `{ kind: 'container-volume', source, target? }` for a
+ * Containers-page volume mount. The plugin maps that context onto an SFTP root and
+ * confines every path to it, so this dialog can only ever see the scoped tree — no raw
+ * device-internal paths are passed here.
+ *
+ * Full file operations: browse (list), open/edit (read/write), create folder (mkdir),
+ * upload (write), rename, delete (unlink/rmdir). Destructive ops use window.confirm;
+ * rename uses window.prompt. All mutations go through the same broker route and are
+ * gated on devices:write server-side.
+ */
+
+/** Decodes a base64 string into a UTF-8 JS string (handles multi-byte safely). */
+function b64ToText(b64: string): string {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+/** Encodes a UTF-8 JS string into base64 (chunked to avoid call-stack limits). */
+function textToB64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+/** Reads a File as base64 (binary-safe — no text decoding). */
+function fileToB64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const url = String(fr.result ?? '');
+      resolve(url.slice(url.indexOf(',') + 1));
+    };
+    fr.onerror = () => reject(new Error('Failed to read the selected file'));
+    fr.readAsDataURL(file);
+  });
+}
+
+function formatTime(ms: number | null): string {
+  if (ms === null || Number.isNaN(ms)) return '—';
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString();
+}
+
+export interface FileBrowserDialogProps {
+  deviceId: string;
+  pluginId?: string;
+  /** Plugin-owned context naming what to browse (dataset / container-volume). */
+  context: Record<string, unknown>;
+  /** Dialog title (e.g. "Browse DATA01" or "Browse volume /mnt/tank/app"). */
+  title: string;
+  /** Subtitle shown under the title (device name, mountpoint hint, …). */
+  subtitle?: string;
+  /** Initial directory to open (relative to the root); default = the root. */
+  initialPath?: string;
+  onClose: () => void;
+}
+
+export function FileBrowserDialog({ deviceId, pluginId, context, title, subtitle, initialPath, onClose }: FileBrowserDialogProps) {
+  const [dir, setDir] = useState<string>(initialPath ?? '');
+  const [entries, setEntries] = useState<FilesystemEntry[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Editor state (read/write a file).
+  const [editing, setEditing] = useState<{ name: string; content: string } | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  // Upload input ref.
+  const uploadRef = useRef<HTMLInputElement>(null);
+
+  /** Performs one filesystem op through the broker, mapping errors to a banner. */
+  const runOp = useCallback(
+    async (op: Parameters<typeof api.filesystem>[1], params: Record<string, unknown> = {}) => {
+      try {
+        return await api.filesystem(deviceId, op, { ...params, context, ...(pluginId ? { pluginId } : {}) });
+      } catch (err) {
+        const msg = err instanceof ApiError ? err.message : err instanceof Error ? err.message : String(err);
+        setError(msg);
+        throw err;
+      }
+    },
+    [deviceId, pluginId, context],
+  );
+
+  /** Lists the current directory. */
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await runOp('list', dir ? { path: dir } : {});
+      setEntries(res.result.entries ?? []);
+    } catch {
+      // error already surfaced in the banner
+    } finally {
+      setLoading(false);
+    }
+  }, [dir, runOp]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  /** Navigates into a subdirectory (or back up one level). */
+  function navigate(target: string) {
+    setDir(target);
+  }
+
+  const canGoUp = dir !== '' && dir !== '/';
+
+  async function openFile(entry: FilesystemEntry) {
+    setError(null);
+    try {
+      const res = await runOp('read', { path: joinPath(dir, entry.name) });
+      setEditing({ name: entry.name, content: b64ToText(res.result.contentBase64 ?? '') });
+    } catch {
+      // surfaced in banner
+    }
+  }
+
+  async function saveEdit() {
+    if (!editing) return;
+    setSavingEdit(true);
+    setError(null);
+    try {
+      await runOp('write', { path: joinPath(dir, editing.name), contentBase64: textToB64(editing.content) });
+      setEditing(null);
+      void refresh();
+    } catch {
+      // surfaced in banner
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
+  async function createFolder() {
+    const name = window.prompt('New folder name:');
+    if (!name || !name.trim()) return;
+    setError(null);
+    try {
+      await runOp('mkdir', { path: joinPath(dir, name.trim()), parents: true });
+      void refresh();
+    } catch {
+      // surfaced in banner
+    }
+  }
+
+  async function uploadFile() {
+    uploadRef.current?.click();
+  }
+
+  async function onUploadChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-selecting the same file later
+    if (!file) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const b64 = await fileToB64(file);
+      await runOp('write', { path: joinPath(dir, file.name), contentBase64: b64 });
+      void refresh();
+    } catch {
+      // surfaced in banner
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function renameEntry(entry: FilesystemEntry) {
+    const newName = window.prompt(`Rename "${entry.name}" to:`, entry.name);
+    if (!newName || !newName.trim() || newName === entry.name) return;
+    setError(null);
+    try {
+      await runOp('rename', { path: joinPath(dir, entry.name), targetPath: joinPath(dir, newName.trim()) });
+      void refresh();
+    } catch {
+      // surfaced in banner
+    }
+  }
+
+  async function deleteEntry(entry: FilesystemEntry) {
+    const verb = entry.isDirectory ? 'folder' : 'file';
+    if (!window.confirm(`Permanently delete ${verb} "${entry.name}"? This cannot be undone.`)) return;
+    setError(null);
+    try {
+      await runOp(entry.isDirectory ? 'rmdir' : 'unlink', { path: joinPath(dir, entry.name) });
+      void refresh();
+    } catch {
+      // surfaced in banner
+    }
+  }
+
+  // Directories first (so they're easy to find), then files — both alphabetical.
+  const sorted = [...(entries ?? [])].sort((a, b) => {
+    if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
+      <div
+        className="mt-8 w-full max-w-3xl rounded-md border border-border bg-card shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <header className="flex items-center justify-between border-b border-border px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-base font-semibold text-foreground">{title}</h2>
+            {subtitle && <p className="mt-0.5 truncate text-xs text-muted-foreground">{subtitle}</p>}
+          </div>
+          <button type="button" aria-label="Close file browser" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
+            <X size={16} />
+          </button>
+        </header>
+
+        {/* Toolbar */}
+        <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
+          <button
+            type="button"
+            onClick={() => navigate(parentOf(dir))}
+            disabled={!canGoUp || busy}
+            title={canGoUp ? 'Go up one level' : 'Already at the root'}
+            className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-secondary hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <ArrowUp size={13} /> Up
+          </button>
+          <span className="min-w-0 flex-1 truncate font-mono text-xs text-secondary" title={dir || '(root)'}>
+            {dir ? `/${dir}` : '/ (root)'}
+          </span>
+          <div className="flex items-center gap-1">
+            <button type="button" onClick={() => void refresh()} disabled={loading} title="Refresh listing" className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground disabled:opacity-40">
+              {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+            </button>
+            <button type="button" onClick={() => void createFolder()} disabled={busy} title="Create a new folder here" className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-secondary hover:bg-muted disabled:opacity-40">
+              <FolderPlus size={13} /> New folder
+            </button>
+            <button type="button" onClick={() => void uploadFile()} disabled={busy} title="Upload a file here" className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-secondary hover:bg-muted disabled:opacity-40">
+              {busy ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />} Upload
+            </button>
+          </div>
+        </div>
+
+        {/* Hidden upload input */}
+        <input ref={uploadRef} type="file" className="hidden" onChange={(e) => void onUploadChange(e)} />
+
+        {/* Error banner */}
+        {error && (
+          <div className="mx-4 mt-3 rounded border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
+        )}
+
+        {/* File listing */}
+        <div className="max-h-[50vh] overflow-y-auto">
+          {loading && entries === null ? (
+            <div className="flex items-center justify-center gap-2 px-4 py-10 text-sm text-muted-foreground">
+              <Loader2 size={16} className="animate-spin" /> Loading…
+            </div>
+          ) : sorted.length === 0 ? (
+            <div className="px-4 py-10 text-center text-sm text-faint">This directory is empty.</div>
+          ) : (
+            <table className="w-full border-collapse text-sm">
+              <thead className="sticky top-0 bg-card">
+                <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
+                  <th className="px-4 py-2 font-medium">Name</th>
+                  <th className="w-28 px-3 py-2 text-right font-medium">Size</th>
+                  <th className="w-44 px-3 py-2 font-medium">Modified</th>
+                  <th className="w-28 px-3 py-2 text-right font-medium">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map((entry) => (
+                  <tr key={entry.name} className="border-b border-border/60 hover:bg-muted/40">
+                    <td className="px-4 py-2">
+                      <button
+                        type="button"
+                        onClick={() => (entry.isDirectory ? navigate(joinPath(dir, entry.name)) : void openFile(entry))}
+                        onDoubleClick={() => entry.isDirectory && navigate(joinPath(dir, entry.name))}
+                        title={entry.isDirectory ? `Open ${entry.name}` : `View / edit ${entry.name}`}
+                        className="flex items-center gap-2 text-left font-medium text-foreground hover:underline"
+                      >
+                        {entry.isDirectory ? <Folder size={15} className="shrink-0 text-sky-600 dark:text-sky-400" /> : <FileText size={15} className="shrink-0 text-muted-foreground" />}
+                        <span className="truncate">{entry.name}</span>
+                      </button>
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-xs text-secondary">
+                      {entry.isDirectory ? '—' : formatBytes(entry.sizeBytes ?? 0)}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-xs text-secondary">{formatTime(entry.mtimeMs)}</td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center justify-end gap-0.5">
+                        {!entry.isDirectory && (
+                          <button type="button" onClick={() => void openFile(entry)} title={`View / edit ${entry.name}`} className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground">
+                            <Eye size={14} />
+                          </button>
+                        )}
+                        <button type="button" onClick={() => void renameEntry(entry)} title={`Rename ${entry.name}`} className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground">
+                          <Pencil size={13} />
+                        </button>
+                        <button type="button" onClick={() => void deleteEntry(entry)} title={`Delete ${entry.name}`} className="rounded-md p-1.5 text-danger-fg hover:bg-muted">
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Footer hint */}
+        <footer className="border-t border-border px-4 py-2 text-[11px] text-faint">
+          Double-click a folder to open it. Click a file (or the eye icon) to view/edit it. All operations are scoped to this location — you cannot navigate outside of it.
+        </footer>
+
+        {/* Editor overlay */}
+        {editing && (
+          <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-primary/50 p-6" onClick={() => setEditing(null)}>
+            <div className="mt-8 w-full max-w-2xl rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
+              <header className="flex items-center justify-between border-b border-border px-4 py-3">
+                <h3 className="truncate font-mono text-sm font-semibold text-foreground">{editing.name}</h3>
+                <button type="button" aria-label="Close editor" onClick={() => setEditing(null)} className="rounded p-1 text-faint hover:bg-muted">
+                  <X size={16} />
+                </button>
+              </header>
+              <div className="p-4">
+                <textarea
+                  value={editing.content}
+                  onChange={(e) => setEditing({ ...editing, content: e.target.value })}
+                  spellCheck={false}
+                  className="h-[50vh] w-full resize-none rounded-md border border-border bg-background p-3 font-mono text-xs text-foreground"
+                />
+              </div>
+              <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+                <button type="button" onClick={() => setEditing(null)} disabled={savingEdit} className="rounded-md border border-border px-3 py-1.5 text-sm text-secondary hover:bg-muted disabled:opacity-40">
+                  Cancel
+                </button>
+                <button type="button" onClick={() => void saveEdit()} disabled={savingEdit} className="flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-fg hover:opacity-90 disabled:opacity-40">
+                  {savingEdit && <Loader2 size={14} className="animate-spin" />} Save file
+                </button>
+              </footer>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Joins a directory path and an entry name into one relative path. */
+function joinPath(dir: string, name: string): string {
+  if (!dir) return name;
+  return dir.endsWith('/') ? `${dir}${name}` : `${dir}/${name}`;
+}
+
+/** Returns the parent of a relative directory path ('' for root). */
+function parentOf(dir: string): string {
+  if (!dir || dir === '/') return '';
+  const trimmed = dir.replace(/\/+$/, '');
+  const idx = trimmed.lastIndexOf('/');
+  return idx <= 0 ? '' : trimmed.slice(0, idx);
+}

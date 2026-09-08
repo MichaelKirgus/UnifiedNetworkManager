@@ -1133,6 +1133,48 @@ paths:
         '502':
           description: Plugin failed to report probe data
 
+  /devices/{deviceId}/filesystem:
+    post:
+      tags: [Devices]
+      summary: Perform one file operation on a device's filesystem (SFTP)
+      description: >-
+        Performs ONE file operation on a device's filesystem, brokered to the
+        assigned plugin's `POST /filesystem` endpoint (capability `filesystem`).
+        The webapp's Storage page browses dataset contents and the Containers
+        page browses container volume mounts through this single route. The body
+        carries an `op` (`list` | `read` | `stat` | `write` | `mkdir` | `rmdir` |
+        `unlink` | `rename`) plus a `path` (relative to the scoped root) and a
+        `context` naming WHAT to browse — e.g. `{ kind: 'dataset', name }` or
+        `{ kind: 'container-volume', source, target? }`. The plugin maps that
+        context onto an SFTP root and confines every path to it, so a webapp-
+        supplied relative path can never walk out of the scoped tree. Without a
+        `pluginId` in the body the device's primary assignment is used. Gated on
+        `devices:write` — file operations mutate device state. The response is
+        returned verbatim from the plugin (see FilesystemResult).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FilesystemRequest'
+      responses:
+        '200':
+          description: Result of the file operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FilesystemResponse'
+        '400':
+          description: Plugin not assigned to this device / no assignment at all / bad op
+        '401':
+          description: Authentication required (requires devices:write)
+        '404':
+          description: Device or plugin endpoint not found
+        '501':
+          description: This plugin does not support filesystem browsing
+        '502':
+          description: Plugin failed to perform the file operation
+
   /devices/{deviceId}/ports:
     get:
       tags: [Devices]
@@ -5168,6 +5210,60 @@ components:
         metrics:
           type: object
           additionalProperties: true
+
+    FilesystemRequest:
+      type: object
+      required: [op]
+      properties:
+        op:
+          type: string
+          enum: [list, read, stat, write, mkdir, rmdir, unlink, rename]
+          description: "The file operation to perform"
+        path: { type: string, description: "Path within the scoped root (relative). For rename this is the SOURCE. Empty/absent = the root itself." }
+        targetPath: { type: string, description: "Destination path for rename" }
+        contentBase64: { type: string, description: "File contents for write, base64-encoded (binary-safe)" }
+        parents: { type: boolean, description: "For mkdir: create intermediate directories as needed" }
+        pluginId: { type: string, description: "Assigned plugin to use (default = primary assignment)" }
+        context:
+          type: object
+          additionalProperties: true
+          description: >-
+            Plugin-owned context naming what to browse — e.g. `{ kind: 'dataset', name }`
+            or `{ kind: 'container-volume', source, target? }`. The plugin maps it onto an
+            SFTP root and confines every path to it.
+
+    FilesystemEntry:
+      type: object
+      required: [name, isDirectory]
+      properties:
+        name: { type: string }
+        isDirectory: { type: boolean }
+        sizeBytes: { type: integer, nullable: true }
+        mtimeMs: { type: integer, nullable: true }
+
+    FilesystemResult:
+      type: object
+      required: [collectedAt]
+      properties:
+        collectedAt: { type: string, format: date-time }
+        path: { type: string, description: "Absolute path operated on (after root resolution)" }
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/FilesystemEntry'
+        contentBase64: { type: string, description: "File contents for read, base64-encoded" }
+        sizeBytes: { type: integer, nullable: true }
+        mtimeMs: { type: integer, nullable: true }
+        isDirectory: { type: boolean }
+
+    FilesystemResponse:
+      type: object
+      required: [deviceId, pluginId, result]
+      properties:
+        deviceId: { type: string }
+        pluginId: { type: string }
+        result:
+          $ref: '#/components/schemas/FilesystemResult'
 
     DeviceProbe:
       type: object

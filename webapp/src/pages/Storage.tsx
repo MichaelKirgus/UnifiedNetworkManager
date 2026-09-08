@@ -1,8 +1,9 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ArrowDownToLine, ArrowUpFromLine, Camera, ChevronDown, ChevronRight, ChevronUp, Database, Gauge, HardDrive, Loader2, Search, Trash2, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpFromLine, Camera, ChevronDown, ChevronRight, ChevronUp, Database, FolderOpen, Gauge, HardDrive, Loader2, Search, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Layout } from '../components/Layout';
+import { FileBrowserDialog } from '../components/FileBrowserDialog';
 import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { StatusBadge } from '../components/StatusBadge';
@@ -356,6 +357,27 @@ export default function Storage() {
     return Array.isArray(actions) && actions.some((a) => a.id === actionId);
   }
 
+  // --- Filesystem browser (capability 'filesystem') ---------------------------
+  // The Browse button only renders when the row's plugin advertises the
+  // 'filesystem' capability — GENERIC: any future storage plugin serving POST
+  // /filesystem gets the file browser for free. Capabilities come from the
+  // plugins catalog (react-query caches it).
+  const [pluginsForCaps, setPluginsForCaps] = useState<Record<string, string[]>>({});
+  useEffect(() => {
+    let cancelled = false;
+    api.plugins().then((ps) => {
+      if (cancelled) return;
+      const m: Record<string, string[]> = {};
+      for (const p of ps) m[p.id] = p.capabilities ?? [];
+      setPluginsForCaps(m);
+    }).catch(() => { /* capabilities unavailable — Browse stays hidden */ });
+    return () => { cancelled = true; };
+  }, []);
+  const hasFilesystemCap = (pluginId: string): boolean => (pluginsForCaps[pluginId] ?? []).includes('filesystem');
+
+  /** The dataset row whose contents the file browser is showing (null = closed). */
+  const [browseTarget, setBrowseTarget] = useState<StorageFilesystemRow | null>(null);
+
   // --- Plan tracking → auto-refresh -------------------------------------------
   // Plans created by this page are tracked ONLY for data freshness: when one
   // settles the touched devices are force-refreshed once so capacity/status
@@ -520,6 +542,13 @@ export default function Storage() {
       { id: 'storage.delete', label: `Delete ${row.name}`, icon: <Trash2 size={13} />, available: hasAction(row.pluginId, 'storage.delete'), eligible: true, danger: true },
     ];
 
+    // Browse the contents over SFTP — only when the plugin advertises the
+    // 'filesystem' capability AND this row is a ZFS filesystem with a directory tree
+    // (a pool or dataset; zvols are block devices). The mountpoint is resolved by the
+    // PLUGIN at browse time (pool.dataset.query covers pools too), so we don't gate on
+    // the row's own mountpoint field — pool rows carry null there.
+    const browsable = hasFilesystemCap(row.pluginId) && (pool || dsLike);
+
     return (
       <div className="flex items-center gap-0.5">
         {actions.map((a) => {
@@ -554,6 +583,17 @@ export default function Storage() {
             </button>
           );
         })}
+        {browsable && (
+          <button
+            type="button"
+            aria-label={`Browse contents of ${row.name}`}
+            title={`Browse the files in ${row.name}${row.mountpoint ? ` (${row.mountpoint})` : ''}`}
+            onClick={() => setBrowseTarget(row)}
+            className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
+          >
+            <FolderOpen size={14} />
+          </button>
+        )}
       </div>
     );
   }
@@ -622,7 +662,7 @@ export default function Storage() {
     {
       header: 'Actions',
       key: 'actions',
-      width: 190,
+      width: 230,
       sortable: false,
       excludeFromExport: true,
       render: (row) => renderActions(row),
@@ -965,6 +1005,18 @@ export default function Storage() {
         {/* Snapshot / quota dialogs */}
         {snapshotTarget && <SnapshotDialog row={snapshotTarget} onClose={() => setSnapshotTarget(null)} />}
         {quotaTarget && <QuotaDialog row={quotaTarget} onClose={() => setQuotaTarget(null)} />}
+
+        {/* Filesystem browser — browse a dataset's contents over SFTP (capability 'filesystem'). */}
+        {browseTarget && (
+          <FileBrowserDialog
+            deviceId={browseTarget.deviceId}
+            pluginId={browseTarget.pluginId}
+            context={{ kind: 'dataset', name: browseTarget.name }}
+            title={`Browse ${browseTarget.name}`}
+            subtitle={`${browseTarget.deviceName ?? browseTarget.managementAddress ?? ''}${browseTarget.mountpoint ? ` · ${browseTarget.mountpoint}` : ''}`}
+            onClose={() => setBrowseTarget(null)}
+          />
+        )}
 
         {/* 2FA revalidation (plan create/execute returned 401) */}
         {reauth && (

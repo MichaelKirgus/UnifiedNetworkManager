@@ -36,6 +36,14 @@ export const CAPABILITIES = [
   // plugin must declare an 'ssh' credential slot (secretType usernamePassword
   // or sshKeyPair) in /discover so users can bind credentials to it.
   'ssh',
+  // Can browse + manage the device's filesystem over SFTP (see createSftpPool /
+  // SftpSession). Advertise when the plugin serves POST /filesystem — a generic,
+  // root-scoped file manager (list/read/write/mkdir/rename/delete) that the webapp
+  // renders on the Storage page (dataset contents) and Containers page (volume
+  // mounts). Like 'ssh', it rides the same bound 'ssh' credential slot. The plugin
+  // owns what each path means (e.g. a dataset mountpoint or a container volume's
+  // host source); the webapp only ever passes paths relative to that root.
+  'filesystem',
   // Serves POST /probe — SHORT-CYCLE live telemetry (1–5 s cadence) for the
   // webapp's on-demand polling, as opposed to /monitoring which is the API's
   // background worker at a much slower beat. The caller selects WHICH probe
@@ -405,6 +413,71 @@ export interface ProbeResponseBody {
   collectedAt: string;
   /** Free-form metrics map keyed by probe key (e.g. `containerStats`). Shape is plugin-owned. */
   metrics: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem — POST /filesystem (API -> plugin), advertised via capability 'filesystem'
+// A generic, root-scoped file manager over SFTP. The webapp's Storage page (dataset
+// contents) and Containers page (volume mounts) drive it through the API broker.
+// The caller passes a `context` describing WHAT to browse (a dataset, a container
+// volume, …); the plugin maps that context onto an SFTP root and confines every path
+// to it — so a webapp-supplied relative path can never walk out of the scoped tree.
+// ---------------------------------------------------------------------------
+
+/** One file/directory entry as reported by POST /filesystem `list`. */
+export interface FilesystemEntry {
+  /** Entry name (basename, no leading/trailing slash). */
+  name: string;
+  isDirectory: boolean;
+  sizeBytes: number | null;
+  mtimeMs: number | null;
+}
+
+/** The file operation to perform. Read ops are non-mutating; the rest change device state. */
+export type FilesystemOp = 'list' | 'read' | 'stat' | 'write' | 'mkdir' | 'rmdir' | 'unlink' | 'rename';
+
+/** Body of POST /filesystem as sent by the API broker (same credential model as /probe). */
+export interface FilesystemRequestBody {
+  deviceId: string;
+  managementAddress: string;
+  ipAddresses?: DeviceAddress[];
+  /** User-selected hardware model from the device row (null = not set). */
+  model?: string | null;
+  /** User-selected firmware version from the device row (null = not set). */
+  firmwareVersion?: string | null;
+  credentials: StepCredentials;
+  /** The operation to perform. */
+  op: FilesystemOp;
+  /** Path WITHIN the scoped root (relative, or absolute when the plugin allows it).
+   *  For `rename` this is the SOURCE path. Empty/absent = the root itself (for list/stat). */
+  path?: string;
+  /** Destination path for `rename`. */
+  targetPath?: string;
+  /** File contents for `write`, base64-encoded (binary-safe). */
+  contentBase64?: string;
+  /** For `mkdir`: create intermediate directories as needed. */
+  parents?: boolean;
+  /** Plugin-owned context describing what to browse — the plugin maps this onto an
+   *  SFTP root and validates it. E.g. `{ kind: 'dataset', name }` or
+   *  `{ kind: 'container-volume', source, target? }`. The webapp never passes raw
+   *  device-internal paths for datasets; it names the dataset and lets the plugin resolve it. */
+  context?: Record<string, unknown>;
+}
+
+/** Response of POST /filesystem — the API broker returns it verbatim to the webapp. */
+export interface FilesystemResponseBody {
+  /** ISO-8601 timestamp when the plugin performed this operation. */
+  collectedAt: string;
+  /** The absolute path that was operated on (after root resolution) — for list/stat/read. */
+  path?: string;
+  /** For `list`: the directory's entries. */
+  entries?: FilesystemEntry[];
+  /** For `read`: file contents, base64-encoded. */
+  contentBase64?: string;
+  /** For `read`/`stat`: metadata. */
+  sizeBytes?: number | null;
+  mtimeMs?: number | null;
+  isDirectory?: boolean;
 }
 
 // ---------------------------------------------------------------------------

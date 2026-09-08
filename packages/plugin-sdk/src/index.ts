@@ -8,7 +8,7 @@
 export * from './types';
 export { resolvePluginIdentity, DEFAULT_PLUGIN_PORT } from './identity';
 export type { PluginIdentity, PluginIdentityInput } from './identity';
-export { createPluginServer, buildDiscoverPayload, requirePluginKey, stateHandler, probeHandler } from './server';
+export { createPluginServer, buildDiscoverPayload, requirePluginKey, stateHandler, probeHandler, filesystemHandler } from './server';
 export type { PluginServerOptions, PluginServer, DiscoveryExtras } from './server';
 export { readSettings, clampInt, hostFromAddress, pickString, pickNumber } from './settings';
 export { suggestPortLayout, portNumberFromKey } from './portLayout';
@@ -32,3 +32,6 @@ export type { PluginSelfMetrics, SelfMetricsOptions, SelfMetricsLoggerLike } fro
 export { SshClient, createSshPool, resolveSshCredentials, normalizeFingerprint, fingerprintMatches, computeFingerprint, normalizePrivateKey } from './ssh';
 export type { SshCredentials, SshClientOptions, ExecResult, SshPool, SshPoolOptions, SshFingerprint } from './ssh';
 export { SshError, SshAuthError, SshHostKeyError, SshTimeoutError } from './ssh';
+// SFTP file-system access for plugins (shared transport + path safety). See sftp.ts.
+export { SftpSession, createSftpPool, resolvePath, SftpPathError } from './sftp';
+export type { SftpCredentials, SftpSessionOptions, SftpPool, SftpPoolOptions, FsEntry, FsListResult, FsStat } from './sftp';

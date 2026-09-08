@@ -1372,6 +1372,40 @@ export interface DeviceProbe {
   probe: ProbeResult;
 }
 
+// --- Filesystem (SFTP file manager, capability 'filesystem') -----------------
+
+/** One file/directory entry from a filesystem `list` operation. */
+export interface FilesystemEntry {
+  name: string;
+  isDirectory: boolean;
+  sizeBytes: number | null;
+  mtimeMs: number | null;
+}
+
+/** The file operation to perform (mirrors the SDK's FilesystemOp). */
+export type FilesystemOp = 'list' | 'read' | 'stat' | 'write' | 'mkdir' | 'rmdir' | 'unlink' | 'rename';
+
+/** Result of one filesystem operation — returned verbatim from the plugin. */
+export interface FilesystemResult {
+  collectedAt: string;
+  /** Absolute path operated on (after root resolution). */
+  path?: string;
+  /** For `list`: the directory's entries. */
+  entries?: FilesystemEntry[];
+  /** For `read`: file contents, base64-encoded. */
+  contentBase64?: string;
+  sizeBytes?: number | null;
+  mtimeMs?: number | null;
+  isDirectory?: boolean;
+}
+
+/** POST /devices/:id/filesystem response — the broker wraps the result with ids. */
+export interface FilesystemResponse {
+  deviceId: string;
+  pluginId: string;
+  result: FilesystemResult;
+}
+
 /** One normalized port row (device_ports table). */
 export interface DevicePortRow {
   pluginId: string;
@@ -1572,6 +1606,20 @@ export const api = {
     const qs = params.toString();
     return apiFetch<DeviceProbe>(`/devices/${deviceId}/probe${qs ? `?${qs}` : ''}`);
   },
+  // One file operation on a device's filesystem, brokered to the assigned plugin's
+  // POST /filesystem endpoint (capability 'filesystem'). The Storage page browses
+  // dataset contents and the Containers page browses container volume mounts.
+  // `context` names WHAT to browse; the plugin maps it onto an SFTP root and confines
+  // every path to it. Gated on devices:write — file ops mutate device state.
+  filesystem: (
+    deviceId: string,
+    op: FilesystemOp,
+    params: { path?: string; targetPath?: string; contentBase64?: string; parents?: boolean; context?: Record<string, unknown>; pluginId?: string } = {},
+  ) =>
+    apiFetch<FilesystemResponse>(`/devices/${deviceId}/filesystem`, {
+      method: 'POST',
+      body: JSON.stringify({ op, ...params }),
+    }),
   // Normalized port inventory for a device across all plugins.
   devicePorts: (deviceId: string) =>
     apiFetch<{ deviceId: string; ports: DevicePortRow[] }>(`/devices/${deviceId}/ports`),

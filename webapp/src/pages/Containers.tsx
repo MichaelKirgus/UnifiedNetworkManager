@@ -1,8 +1,9 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ArrowUpCircle, ChevronDown, ChevronRight, ChevronUp, Container, FileCode2, Loader2, Play, Plus, RotateCw, ScrollText, Square, Trash2, X } from 'lucide-react';
+import { ArrowUpCircle, ChevronDown, ChevronRight, ChevronUp, Container, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { CreateAppDialog, CreateAppCandidate, type AppMode } from '../components/CreateAppDialog';
+import { FileBrowserDialog } from '../components/FileBrowserDialog';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
@@ -544,6 +545,11 @@ interface TreeNode {
   blkWriteRate?: number | null;
   /** Volume mount text (kind=volume): "source → target" (+ mode). */
   volumeText?: string;
+  /** The volume's HOST path (the bind-mount source, or a named docker volume) —
+   * what the filesystem browser opens for this leaf. Absent when unresolvable. */
+  volumeSource?: string | null;
+  /** Path inside the container (the mount target) — shown as a hint in the dialog. */
+  volumeTarget?: string | null;
 }
 
 /** Result of building one app's subtree: the app node + its containers, each
@@ -581,6 +587,11 @@ function buildApp(row: ContainerRow, liveStats?: Record<string, LiveContainerSta
       key: `${ckey}#v${vi}`,
       kind: 'volume',
       volumeText: [v.source, v.target ? `→ ${v.target}` : '', v.mode].filter(Boolean).join(' '),
+      // The host path the filesystem browser opens for this mount (the source — a
+      // bind-mount's absolute host path or a named docker volume). Named volumes
+      // are resolved to their /var/lib/docker/volumes/<name>/_data location by the plugin.
+      volumeSource: v.source || null,
+      volumeTarget: v.target ?? null,
     }));
     // Live probe stats win over the enrichment snapshot; per-field fallback so
     // a partial live sample (e.g. first cycle has no I/O rates yet) still shows
@@ -720,6 +731,10 @@ function AppCell({ row }: { row?: ContainerRow }) {
 interface ChildActionContext {
   hasAction: (pluginId: string, actionId: string) => boolean;
   run: (node: TreeNode, actionId: string, label: string) => void;
+  /** True when the plugin advertises the 'filesystem' capability (Browse button). */
+  canBrowse?: (pluginId: string) => boolean;
+  /** Opens the filesystem browser for a volume leaf's host path. */
+  browseVolume?: (node: TreeNode) => void;
 }
 
 /** Per-container lifecycle actions for child rows — rendered in the Actions cell
@@ -783,9 +798,25 @@ function nodeCell(key: string, node: TreeNode, depth: number, actions?: ChildAct
         );
       }
       // Volume leaf — the mount lives in the name column, indented under its container.
+      // A Browse icon (when the plugin supports 'filesystem' and a host path is known)
+      // opens the filesystem browser on this volume's HOST location.
+      const browsable = !!actions?.canBrowse && node.volumeSource != null;
       return (
-        <span className="block truncate font-mono text-[11px] text-muted-foreground" style={{ paddingLeft: 32 + depth * 14 }} title={node.volumeText}>
-          {node.volumeText}
+        <span className="flex items-center gap-1" style={{ paddingLeft: 32 + depth * 14 }}>
+          <span className="block truncate font-mono text-[11px] text-muted-foreground" title={node.volumeText}>
+            {node.volumeText}
+          </span>
+          {browsable && (
+            <button
+              type="button"
+              aria-label={`Browse volume ${node.volumeSource}`}
+              title={`Browse the files in this volume (${node.volumeSource})`}
+              onClick={() => actions?.browseVolume?.(node)}
+              className="shrink-0 rounded-md p-1 text-secondary hover:bg-muted hover:text-foreground"
+            >
+              <FolderOpen size={13} />
+            </button>
+          )}
         </span>
       );
     }
@@ -1074,6 +1105,28 @@ export default function Containers() {
   // --- Bulk actions + YAML editor (plan-workflow backed) ---------------------
   /** In-session 2FA revalidation prompt (shown when a plan call returns 401). */
   const [reauth, setReauth] = useState<{ label: string; retry: () => void | Promise<void> } | null>(null);
+
+  // --- Filesystem browser (capability 'filesystem') ---------------------------
+  // The Browse icon on volume leaves only renders when the owning plugin advertises
+  // the 'filesystem' capability — GENERIC: any future container plugin serving POST
+  // /filesystem gets the file browser for free. Capabilities come from the plugins
+  // catalog (react-query caches it).
+  const [pluginsForCaps, setPluginsForCaps] = useState<Record<string, string[]>>({});
+  useEffect(() => {
+    let cancelled = false;
+    api.plugins().then((ps) => {
+      if (cancelled) return;
+      const m: Record<string, string[]> = {};
+      for (const p of ps) m[p.id] = p.capabilities ?? [];
+      setPluginsForCaps(m);
+    }).catch(() => { /* capabilities unavailable — Browse stays hidden */ });
+    return () => { cancelled = true; };
+  }, []);
+  const canBrowseFs = (pluginId: string): boolean => (pluginsForCaps[pluginId] ?? []).includes('filesystem');
+
+  /** The volume leaf whose host path the file browser is showing (null = closed). */
+  const [browseVolume, setBrowseVolume] = useState<TreeNode | null>(null);
+
   /** Custom app whose compose YAML is being edited. */
   const [yamlApp, setYamlApp] = useState<ContainerRow | null>(null);
   const [logsApp, setLogsApp] = useState<ContainerRow | null>(null);
@@ -1823,7 +1876,16 @@ export default function Containers() {
                   // Bind the per-container action callbacks so expanded child rows
                   // can offer start/stop/restart/delete for a single member.
                   renderChild: (child, _parent, ctx) => (
-                    <ChildRow node={child} ctx={ctx} actions={{ hasAction, run: singleContainer }} />
+                    <ChildRow
+                      node={child}
+                      ctx={ctx}
+                      actions={{
+                        hasAction,
+                        run: singleContainer,
+                        canBrowse: canBrowseFs,
+                        browseVolume: (node) => setBrowseVolume(node),
+                      }}
+                    />
                   ),
                 }}
                 emptyMessage="No containers collected yet — assign a TrueNAS or Docker plugin to a device and wait for the next poll."
@@ -1908,6 +1970,18 @@ export default function Containers() {
       {/* Custom-app compose YAML editor. */}
       {yamlApp && <YamlEditorDialog app={yamlApp} onClose={() => setYamlApp(null)} />}
       {logsApp && <LogsDialog app={logsApp} onClose={() => setLogsApp(null)} />}
+
+      {/* Filesystem browser — browse a container volume's HOST location over SFTP (capability 'filesystem'). */}
+      {browseVolume && browseVolume.volumeSource != null && (
+        <FileBrowserDialog
+          deviceId={browseVolume.deviceId ?? ''}
+          pluginId={browseVolume.pluginId}
+          context={{ kind: 'container-volume', source: browseVolume.volumeSource, ...(browseVolume.volumeTarget ? { target: browseVolume.volumeTarget } : {}) }}
+          title={`Browse volume ${browseVolume.volumeSource}`}
+          subtitle={`${browseVolume.service ?? ''}${browseVolume.volumeTarget ? ` · mounted at ${browseVolume.volumeTarget} in the container` : ''}`}
+          onClose={() => setBrowseVolume(null)}
+        />
+      )}
 
       {/* Create app (catalog template or custom compose) — generic over any
           backend whose plugin advertises an install action. `apps` feeds the
