@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { desc, eq, asc } from 'drizzle-orm';
+import { and, asc, desc, eq, gte } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
 import { db } from '../db';
@@ -40,6 +40,7 @@ interface PlanRow {
   createdAt: string;
   updatedAt: string;
   finishedAt: string | null;
+  recentlyFinishedAt: string | null;
 }
 
 interface StepRow {
@@ -145,6 +146,7 @@ async function serializePlan(planId: string, withSteps = false) {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     finishedAt: row.finishedAt,
+    recentlyFinishedAt: row.recentlyFinishedAt,
   };
   if (withSteps) {
     const steps = await loadSteps(planId);
@@ -404,6 +406,33 @@ router.post(
     res.status(201).json(await serializePlan(planRowId, true));
   }
 );
+
+// GET /plans/activity — compact feed for the top-bar plans icon. Returns
+// every executing + queued (ready/draft) plan plus recently-finished ones
+// (terminal status within `windowMs`, default 5 min), newest activity first,
+// with step progress.
+router.get('/plans/activity', requireAuth, requirePermission('plans:read'), async (req, res) => {
+  const windowMs = Math.min(Math.max(Number(req.query.windowMs ?? 300_000), 10_000), 3_600_000);
+  const cutoff = new Date(Date.now() - windowMs).toISOString();
+  const rows = await db.query.plans.findMany({
+    where: (plans, { or }) =>
+      or(
+        eq(plans.status, 'executing'),
+        eq(plans.status, 'ready'),
+        eq(plans.status, 'draft'),
+        gte(plans.recentlyFinishedAt, cutoff),
+      ),
+    orderBy: [desc(schema.plans.updatedAt)],
+    limit: 50,
+  });
+  const out: unknown[] = [];
+  for (const row of rows as PlanRow[]) {
+    const steps = await loadSteps(row.id);
+    const done = steps.filter((s) => s.status === 'succeeded').length;
+    out.push({ ...(await serializePlan(row.id)), stepCount: steps.length, stepsDone: done });
+  }
+  res.status(200).json(out);
+});
 
 // GET /plans — most recent plans (no steps; use the detail route for those).
 router.get('/plans', requireAuth, requirePermission('plans:read'), async (_req, res) => {
@@ -810,7 +839,8 @@ router.post(
     }
     const now = new Date().toISOString();
     await db.update(schema.plans)
-      .set({ status: 'executing', updatedAt: now })
+      // Re-execution clears the "recently done" tick so it re-appears on finish.
+      .set({ status: 'executing', updatedAt: now, recentlyFinishedAt: null })
       .where(eq(schema.plans.id, plan.id));
     planQueue.add(plan.id, { planId: plan.id });
     res.status(202).json((await serializePlan(plan.id, true))!);

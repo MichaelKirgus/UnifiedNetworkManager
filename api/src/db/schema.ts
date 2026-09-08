@@ -998,6 +998,10 @@ export const plans = pgTable(
     createdAt: text('createdAt').notNull(),
     updatedAt: text('updatedAt').notNull(),
     finishedAt: text('finishedAt'),
+    // Last time this plan reached a terminal status (succeeded/failed/cancelled).
+    // Distinct from finishedAt, which is cleared when the plan is re-executed —
+    // the top-bar plans icon uses it to show a brief "recently done" tick.
+    recentlyFinishedAt: text('recentlyFinishedAt'),
   },
   (table) => {
     return {

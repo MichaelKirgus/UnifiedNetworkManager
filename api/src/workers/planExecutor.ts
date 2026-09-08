@@ -106,7 +106,9 @@ async function markStep(stepId: string, status: string, result?: StoredStepResul
 async function finishPlan(planId: string, status: string, error?: string | null): Promise<void> {
   const now = new Date().toISOString();
   await db.update(schema.plans)
-    .set({ status, error: error ?? null, updatedAt: now, finishedAt: now })
+    // recentlyFinishedAt drives the top-bar plans icon's "recently done" tick;
+    // it is distinct from finishedAt (cleared on re-execution).
+    .set({ status, error: error ?? null, updatedAt: now, finishedAt: now, recentlyFinishedAt: now })
     .where(eq(schema.plans.id, planId));
 
   // Mirror failures into the notification center (one-shot per plan).

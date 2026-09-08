@@ -114,6 +114,11 @@ export async function initDb(): Promise<void> {
     `ALTER TABLE devices ADD COLUMN IF NOT EXISTS "siteId" TEXT`
   );
 
+  // Plans: last terminal-status timestamp (top-bar plans icon "recently done").
+  await pool.query(
+    `ALTER TABLE plans ADD COLUMN IF NOT EXISTS "recentlyFinishedAt" TEXT`
+  );
+
   // Roles: named bundles of permissions (see backfillAdminRole for the seed).
   await pool.query(`
     CREATE TABLE IF NOT EXISTS roles (

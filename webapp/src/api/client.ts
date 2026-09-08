@@ -1423,6 +1423,8 @@ export interface Plan {
   createdAt: string;
   updatedAt: string;
   finishedAt?: string | null;
+  /** Last terminal-status timestamp (cleared on re-execution) — drives the top-bar plans icon tick. */
+  recentlyFinishedAt?: string | null;
   /** Present on list responses. */
   stepCount?: number;
   stepsDone?: number;
@@ -1838,6 +1840,8 @@ export const api = {
     apiFetch<{ pluginId: string; actions: CatalogEntry[] }>(`/plugins/${pluginId}/actions`),
   // Execution plans.
   plans: () => apiFetch<Plan[]>('/plans'),
+  /** Top-bar plans icon feed — executing + recently-finished (default 5 min window). */
+  planActivity: (windowMs = 300_000) => apiFetch<Plan[]>(`/plans/activity?windowMs=${windowMs}`),
   createPlan: (body: {
     pluginId: string;
     intentActionId: string;

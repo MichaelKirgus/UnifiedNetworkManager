@@ -1,8 +1,7 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ArrowUpCircle, ChevronDown, ChevronRight, ChevronUp, Container, ExternalLink, FileCode2, Loader2, Play, Plus, RotateCw, ScrollText, Square, Trash2, X } from 'lucide-react';
+import { ArrowUpCircle, ChevronDown, ChevronRight, ChevronUp, Container, FileCode2, Loader2, Play, Plus, RotateCw, ScrollText, Square, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { CreateAppDialog, CreateAppCandidate, type AppMode } from '../components/CreateAppDialog';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
@@ -669,7 +668,6 @@ function AppCell({ row }: { row?: ContainerRow }) {
  * the page component (catalog gating + plan tracking live there). */
 interface ChildActionContext {
   hasAction: (pluginId: string, actionId: string) => boolean;
-  busy: (node: TreeNode) => boolean;
   run: (node: TreeNode, actionId: string, label: string) => void;
 }
 
@@ -688,18 +686,17 @@ function ContainerNodeActions({ node, ctx }: { node: TreeNode; ctx: ChildActionC
     { id: 'containers.restart-one', label: 'Restart', icon: <RotateCw size={13} />, available: ctx.hasAction(pid, 'containers.restart-one'), eligible: true },
     { id: 'containers.delete-one', label: 'Delete', icon: <Trash2 size={13} />, available: ctx.hasAction(pid, 'containers.delete-one'), eligible: true, danger: true },
   ];
-  const isBusy = ctx.busy(node);
   return (
     <div className="flex items-center gap-0.5">
       {actions.map((a) => {
         if (!a.available) return null;
-        const enabled = !isBusy && a.eligible;
+        const enabled = a.eligible;
         return (
           <button
             key={a.id}
             type="button"
             aria-label={`${a.label} ${node.service ?? ''}`}
-            title={enabled ? `${a.label} ${node.service ?? ''}` : isBusy ? 'Waiting for the running plan to finish…' : a.eligible ? '' : `Not applicable in state ${state || 'unknown'}`}
+            title={enabled ? `${a.label} ${node.service ?? ''}` : `Not applicable in state ${state || 'unknown'}`}
             disabled={!enabled}
             onClick={() => ctx.run(node, a.id, a.label)}
             className={clsx(
@@ -708,7 +705,7 @@ function ContainerNodeActions({ node, ctx }: { node: TreeNode; ctx: ChildActionC
               !enabled && 'cursor-not-allowed opacity-30',
             )}
           >
-            {isBusy ? <Loader2 size={13} className="animate-spin" /> : a.icon}
+            {a.icon}
           </button>
         );
       })}
@@ -1038,31 +1035,31 @@ export default function Containers() {
   }
 
   // --- Bulk actions + YAML editor (plan-workflow backed) ---------------------
-  const navigate = useNavigate();
   /** In-session 2FA revalidation prompt (shown when a plan call returns 401). */
   const [reauth, setReauth] = useState<{ label: string; retry: () => void | Promise<void> } | null>(null);
   /** Custom app whose compose YAML is being edited. */
   const [yamlApp, setYamlApp] = useState<ContainerRow | null>(null);
   const [logsApp, setLogsApp] = useState<ContainerRow | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  /** Dismissible status banner (plan started / info / error). */
-  const [notice, setNotice] = useState<{ kind: 'ok' | 'info' | 'error'; text: string; planId?: string } | null>(null);
+  /** Dismissible status banner (info / error only — plan execution itself is
+   * surfaced globally by the top-bar plans icon, not per page). */
+  const [notice, setNotice] = useState<{ kind: 'ok' | 'info' | 'error'; text: string } | null>(null);
 
-  // --- Plan tracking → auto-refresh (row + bulk actions) ---------------------
-  /** App key (deviceId|pluginId|name) → plan ids created by this page's row
-   * actions that have not settled yet. While any tracked plan is executing the
-   * row shows a spinner; when ALL of them finish, the affected device is
-   * force-refreshed so the state column reflects the outcome immediately
-   * (e.g. stopped instead of running) without waiting for the 30s poll. */
-  const [pendingPlans, setPendingPlans] = useState<Record<string, string[]>>({});
-  /** Bulk action in flight: its plan ids + every device a step touches. When
-   * ALL plans settle, those devices are force-refreshed so states/rows update
-   * immediately (same mechanism as the per-row actions). */
-  const [bulkPlan, setBulkPlan] = useState<{ label: string; ids: string[]; deviceIds: string[]; appNames?: string[] } | null>(null);
+  // --- Plan tracking → auto-refresh ------------------------------------------
+  // Plans created by this page are tracked ONLY for data freshness: while one
+  // is executing the affected apps may be mid-transition, and when it settles
+  // the touched devices are force-refreshed once so states update immediately
+  // (container state is inventory data that otherwise re-collects every ~15
+  // min). Execution status/progress lives in the top-bar plans icon.
+  /** Plan id → the apps + devices its steps touch. */
+  const [pendingPlans, setPendingPlans] = useState<Record<string, { deviceIds: string[]; names: string[] }>>({});
   const pendingRef = useRef(pendingPlans);
   useEffect(() => { pendingRef.current = pendingPlans; }, [pendingPlans]);
-  const bulkRef = useRef(bulkPlan);
-  useEffect(() => { bulkRef.current = bulkPlan; }, [bulkPlan]);
+
+  /** Track a plan created by this page so its devices refresh on settle. */
+  function trackPlan(planId: string, deviceIds: string[], names: string[]) {
+    setPendingPlans((prev) => ({ ...prev, [planId]: { deviceIds, names } }));
+  }
 
   // --- Settle watch (transitional states after a plan) -----------------------
   /** Apps still in an in-flight state (DEPLOYING / STOPPING / RESTARTING) after
@@ -1145,68 +1142,30 @@ export default function Containers() {
   }, [settleWatch, queryClient]);
 
   useEffect(() => {
-    if (Object.keys(pendingPlans).length === 0 && !bulkPlan) return;
+    if (Object.keys(pendingPlans).length === 0) return;
     const timer = setInterval(async () => {
-      // Row-level plans — settle per app key.
-      const cur = pendingRef.current;
-      for (const key of Object.keys(cur)) {
-        const ids = cur[key];
-        let allDone = true;
-        let anyFailed = false;
-        for (const id of ids) {
-          try {
-            const p = await api.getPlan(id);
-            if (!['succeeded', 'failed', 'cancelled'].includes(p.status)) { allDone = false; break; }
-            if (p.status !== 'succeeded') anyFailed = true;
-          } catch { allDone = false; break; } // transient API error — keep waiting
-        }
-        if (!allDone) continue;
-        const row = (containersQuery.data?.containers ?? []).find((r) => `${r.deviceId}|${r.pluginId}|${r.name}` === key);
+      for (const [planId, entry] of Object.entries(pendingRef.current)) {
+        let p;
+        try {
+          p = await api.getPlan(planId);
+        } catch { continue; } // transient API error — keep waiting
+        if (!['succeeded', 'failed', 'cancelled'].includes(p.status)) continue;
         setPendingPlans((prev) => {
           const next = { ...prev };
-          delete next[key];
+          delete next[planId];
           return next;
         });
-        if (row) {
-          try { await api.refreshDevices([row.deviceId]); } catch { /* fall back to the 30s poll */ }
-          void queryClient.invalidateQueries({ queryKey: ['containers'] });
-          watchSettle([row.deviceId], [row.name]); // keep re-polling while it transitions
-        } else {
-          // Per-container plan key (deviceId|pluginId|containerName) — no app row
-          // carries that name, so refresh the device directly to update child-row
-          // states. No settle watch: a single member changing state does not move
-          // the app-level state the watch tracks.
-          const deviceId = key.split('|')[0];
-          if (deviceId) {
-            try { await api.refreshDevices([deviceId]); } catch { /* fall back to the 30s poll */ }
-            void queryClient.invalidateQueries({ queryKey: ['containers'] });
-          }
+        try { await api.refreshDevices(entry.deviceIds); } catch { /* fall back to the 30s poll */ }
+        void queryClient.invalidateQueries({ queryKey: ['containers'] });
+        watchSettle(entry.deviceIds, entry.names); // keep re-polling while apps transition
+        if (p.status !== 'succeeded') {
+          const what = entry.names[0] ?? entry.deviceIds.join(', ');
+          setNotice({ kind: 'error', text: `A plan for ${what} finished with errors — check the Plans page.` });
         }
-        if (anyFailed) setNotice((prev) => ({ kind: 'error', text: `A plan for ${key.split('|').pop()} finished with errors — check the Plans page.` }));
       }
-      // Bulk plan — settle when every tracked plan finished.
-      const b = bulkRef.current;
-      if (!b) return;
-      let allDone = true;
-      let anyFailed = false;
-      for (const id of b.ids) {
-        try {
-          const p = await api.getPlan(id);
-          if (!['succeeded', 'failed', 'cancelled'].includes(p.status)) { allDone = false; break; }
-          if (p.status !== 'succeeded') anyFailed = true;
-        } catch { allDone = false; break; }
-      }
-      if (!allDone) return;
-      setBulkPlan(null);
-      try { if (b.deviceIds.length > 0) await api.refreshDevices(b.deviceIds); } catch { /* fall back to the 30s poll */ }
-      void queryClient.invalidateQueries({ queryKey: ['containers'] });
-      watchSettle(b.deviceIds, b.appNames ?? []); // keep re-polling while apps transition
-      setNotice(anyFailed
-        ? { kind: 'error', text: `${b.label} finished with errors — check the Plans page.` }
-        : { kind: 'ok', text: `${b.label} completed.`, planId: b.ids[b.ids.length - 1] });
     }, 3000);
     return () => clearInterval(timer);
-  }, [pendingPlans, bulkPlan, containersQuery.data, queryClient]);
+  }, [pendingPlans, queryClient]);
 
   // State sets used to filter which selected rows are eligible for an action.
   const STOPPED_STATES = useMemo(() => new Set(['STOPPED', 'STOPPING']), []);
@@ -1225,23 +1184,13 @@ export default function Containers() {
     buildGroups: () => Array<{ pluginId: string; actionId: string; steps: Array<{ deviceId: string; input: Record<string, unknown> }> }>,
   ) {
     const attempt = async () => {
-      const groups = buildGroups();
-      const created: string[] = [];
-      for (const g of groups) {
+      for (const g of buildGroups()) {
         if (g.steps.length === 0) continue;
-        created.push(await createAndExecutePlan(g.pluginId, g.actionId, g.steps));
-      }
-      if (created.length > 0) {
-        // Track the plans so the affected devices are force-refreshed as soon
-        // as execution settles — states update without waiting for the poll.
-        const deviceIds = Array.from(new Set(groups.flatMap((g) => g.steps.map((s) => s.deviceId))));
-        // App names from step inputs (container actions carry {names}); image
-        // deletes have none → no settle watch, one refresh is enough.
-        const appNames = Array.from(new Set(
-          groups.flatMap((g) => g.steps.flatMap((s) => (Array.isArray(s.input['names']) ? (s.input['names'] as string[]) : []))),
-        ));
-        setBulkPlan({ label, ids: created, deviceIds, appNames });
-        setNotice({ kind: 'ok', text: `${label} — plan executing…`, planId: created[created.length - 1] });
+        const planId = await createAndExecutePlan(g.pluginId, g.actionId, g.steps);
+        // Track per group so the touched devices refresh when execution settles.
+        const deviceIds = Array.from(new Set(g.steps.map((s) => s.deviceId)));
+        const names = Array.isArray(g.steps[0].input['names']) ? (g.steps[0].input['names'] as string[]) : [];
+        trackPlan(planId, deviceIds, names);
       }
     };
     try {
@@ -1262,8 +1211,7 @@ export default function Containers() {
     const label = `Create app ${String(input['name'])}`;
     const attempt = async () => {
       const planId = await createAndExecutePlan(candidate.pluginId, actionId, [{ deviceId: candidate.deviceId, input }]);
-      setBulkPlan({ label, ids: [planId], deviceIds: [candidate.deviceId] });
-      setNotice({ kind: 'ok', text: `${label} — plan executing…`, planId });
+      trackPlan(planId, [candidate.deviceId], typeof input['name'] === 'string' ? [input['name']] : []);
     };
     try {
       await attempt();
@@ -1280,10 +1228,9 @@ export default function Containers() {
   /** One-click row action — runs a single-app plan and tracks it so the row
    * auto-refreshes when execution settles. Same 401 → reauth flow as bulk. */
   async function singleApp(row: ContainerRow, actionId: string, label: string) {
-    const key = `${row.deviceId}|${row.pluginId}|${row.name}`;
     const attempt = async () => {
       const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input: { names: [row.name] } }]);
-      setPendingPlans((prev) => ({ ...prev, [key]: [...(prev[key] ?? []), planId] }));
+      trackPlan(planId, [row.deviceId], [row.name]);
     };
     try {
       await attempt();
@@ -1301,10 +1248,9 @@ export default function Containers() {
   async function singleContainer(node: TreeNode, actionId: string, label: string) {
     const name = node.service ?? '';
     if (!node.deviceId || !node.pluginId || !name) return;
-    const key = `${node.deviceId}|${node.pluginId}|${name}`;
     const attempt = async () => {
       const planId = await createAndExecutePlan(node.pluginId!, actionId, [{ deviceId: node.deviceId!, input: { names: [name] } }]);
-      setPendingPlans((prev) => ({ ...prev, [key]: [...(prev[key] ?? []), planId] }));
+      trackPlan(planId, [node.deviceId!], []);
     };
     try {
       await attempt();
@@ -1313,16 +1259,6 @@ export default function Containers() {
       else setNotice({ kind: 'error', text: `${label} failed: ${err instanceof Error ? err.message : String(err)}` });
     }
   }
-
-  /** True while any plan created by this page for the app is still in flight. */
-  const hasPending = (row: ContainerRow): boolean => (pendingPlans[`${row.deviceId}|${row.pluginId}|${row.name}`] ?? []).length > 0;
-
-  /** True while a per-container plan for one child node is still in flight. */
-  const containerBusy = (node: TreeNode): boolean => {
-    if (!node.deviceId || !node.pluginId) return false;
-    const name = node.service ?? '';
-    return (pendingPlans[`${node.deviceId}|${node.pluginId}|${name}`] ?? []).length > 0;
-  };
 
   /** Container bulk action — filters eligible rows by state, groups per device. */
   function containerBulk(actionId: string, label: string, eligible: (r: ContainerRow) => boolean, noEligibleMsg: string) {
@@ -1535,7 +1471,6 @@ export default function Containers() {
       render: (node) => {
         const r = node.row;
         if (!r) return null;
-        const busy = hasPending(r);
         const actions: { id: string; label: string; icon: ReactNode; available: boolean; eligible: boolean; danger?: boolean }[] = [
           { id: 'containers.start', label: 'Start', icon: <Play size={14} />, available: hasAction(r.pluginId, 'containers.start'), eligible: STOPPED_STATES.has(r.state) },
           { id: 'containers.stop', label: 'Stop', icon: <Square size={13} />, available: hasAction(r.pluginId, 'containers.stop'), eligible: RUNNING_STATES.has(r.state), danger: true },
@@ -1552,13 +1487,13 @@ export default function Containers() {
           <div className="flex items-center gap-0.5">
             {actions.map((a) => {
               if (!a.available) return null;
-              const enabled = !busy && a.eligible;
+              const enabled = a.eligible;
               return (
                 <button
                   key={a.id}
                   type="button"
                   aria-label={`${a.label} ${r.name}`}
-                  title={enabled ? `${a.label} ${r.name}` : busy ? 'Waiting for the running plan to finish…' : a.eligible ? '' : `Not applicable in state ${r.state.toLowerCase()}`}
+                  title={enabled ? `${a.label} ${r.name}` : `Not applicable in state ${r.state.toLowerCase()}`}
                   disabled={!enabled}
                   onClick={() => {
                     if (a.id === 'compose.config.read+containers.update') setYamlApp(r);
@@ -1571,7 +1506,7 @@ export default function Containers() {
                     !enabled && 'cursor-not-allowed opacity-30',
                   )}
                 >
-                  {busy ? <Loader2 size={14} className="animate-spin" /> : a.icon}
+                  {a.icon}
                 </button>
               );
             })}
@@ -1681,7 +1616,7 @@ export default function Containers() {
           <p className="shrink-0 text-sm text-danger-fg">Failed to load containers: {(containersQuery.error as Error).message}</p>
         )}
 
-        {/* Background-execution / info / error banner (bulk actions + YAML edits). */}
+        {/* Info / error banner (plan execution itself is shown by the top-bar plans icon). */}
         {notice && (
           <div
             className={clsx(
@@ -1691,17 +1626,7 @@ export default function Containers() {
               notice.kind === 'error' && 'border-danger-border bg-danger text-danger-fg',
             )}
           >
-            {bulkPlan && <Loader2 size={14} className="shrink-0 animate-spin" />}
             <span className="flex-1">{notice.text}</span>
-            {notice.planId && (
-              <button
-                type="button"
-                onClick={() => navigate(`/plans/${notice.planId}`)}
-                className="inline-flex items-center gap-1 font-medium underline-offset-2 hover:underline"
-              >
-                View plan <ExternalLink size={12} />
-              </button>
-            )}
             <button type="button" aria-label="Dismiss notice" onClick={() => setNotice(null)} className="rounded p-0.5 opacity-70 hover:opacity-100">
               <X size={14} />
             </button>
@@ -1769,7 +1694,7 @@ export default function Containers() {
                   // Bind the per-container action callbacks so expanded child rows
                   // can offer start/stop/restart/delete for a single member.
                   renderChild: (child, _parent, ctx) => (
-                    <ChildRow node={child} ctx={ctx} actions={{ hasAction, busy: containerBusy, run: singleContainer }} />
+                    <ChildRow node={child} ctx={ctx} actions={{ hasAction, run: singleContainer }} />
                   ),
                 }}
                 emptyMessage="No containers collected yet — assign a TrueNAS or Docker plugin to a device and wait for the next poll."

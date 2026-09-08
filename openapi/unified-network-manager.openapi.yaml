@@ -1258,6 +1258,32 @@ paths:
         '502':
           description: Plugin unreachable or secret provisioning failed
 
+  /plans/activity:
+    get:
+      tags: [Plans]
+      summary: Plans activity feed for the top-bar plans icon
+      description: >-
+        Returns every executing plan plus recently-finished ones (terminal
+        status within `windowMs`, default 300000), newest activity first, with
+        step progress. No steps — use the detail route for those.
+      parameters:
+        - in: query
+          name: windowMs
+          required: false
+          schema: { type: integer, minimum: 10000, maximum: 3600000 }
+          description: "Recency window for finished plans (ms). Default 300000."
+      responses:
+        '200':
+          description: Active + recently-finished plans (with step progress)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Plan'
+        '401':
+          description: Authentication required
+
   /plans/{id}:
     get:
       tags: [Plans]
@@ -5315,6 +5341,11 @@ components:
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
         finishedAt: { type: string, format: date-time, nullable: true }
+        recentlyFinishedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Last time the plan reached a terminal status (cleared on re-execution); drives the top-bar plans icon tick"
         stepCount: { type: integer, description: "Present on list responses" }
         stepsDone: { type: integer, description: "Present on list responses" }
 

@@ -1,6 +1,7 @@
 import { ReactNode } from 'react';
 import { Sidebar } from './Sidebar';
 import { NotificationCenter } from './NotificationCenter';
+import { PlansCenter } from './PlansCenter';
 import { ThemeToggle } from './ThemeToggle';
 
 export interface LayoutProps {
@@ -16,14 +17,14 @@ export interface LayoutProps {
  * The top bar is h-14 — the same height as the sidebar brand row — and carries
  * each page's title (left) and action buttons (right), so pages don't need
  * their own header block and no vertical space is wasted on duplicated chrome.
- * The notification bell sits far right in every view.
+ * The plans icon and notification bell sit far right in every view.
  */
 export function Layout({ children, title, actions }: LayoutProps) {
   return (
     <div className="flex h-screen overflow-hidden bg-background">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Top bar — page title + actions on the left/right, bell far right. */}
+        {/* Top bar — page title + actions on the left/right, plans icon + bell far right. */}
         <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card pl-6 pr-4">
           {title != null && (
             <h1 className="min-w-0 overflow-hidden whitespace-nowrap text-base font-semibold text-foreground">{title}</h1>
@@ -31,6 +32,7 @@ export function Layout({ children, title, actions }: LayoutProps) {
           <div className="ml-auto flex shrink-0 items-center gap-2">
             {actions}
             <ThemeToggle />
+            <PlansCenter />
             <NotificationCenter />
           </div>
         </header>
