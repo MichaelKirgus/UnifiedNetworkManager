@@ -28,6 +28,7 @@ import { TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } 
 import {
   collectProbeStates,
   collectProbeStats,
+  collectProbeVmStates,
   ensureEnrichment,
   ensureVmEnrichment,
   getEnrichment,
@@ -41,6 +42,7 @@ import {
   type DockerContainerInfo,
   type ProbeContainerState,
   type ProbeContainerStat,
+  type ProbeVmState,
   type ServiceNetDetail,
 } from './enrich';
 import { alertDedupeKey, registry as actionRegistry, TruenasActionContext } from './actions';
@@ -80,7 +82,13 @@ const identity = resolvePluginIdentity({
   // states (`docker ps -a`) instead of just the running set, and honors an
   // optional `names` selection so a page can watch specific containers at a
   // tighter cadence (e.g. right after start/stop).
-  version: '0.6.4',
+  // 0.7.0 — VM lifecycle + NIC actions for the VMs page: vms.start / stop /
+  // kill / restart / suspend / resume / delete (vm.* RPC, names resolved via
+  // vm.query, idempotent per-name outcomes) plus vms.nic-choices (read-only
+  // bridge/MACVLAN list), vms.nic-attach and vms.nic-detach. GENERIC contract:
+  // any future hypervisor plugin implementing the same action ids gets the
+  // webapp's VM row/bulk actions for free.
+  version: '0.7.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe'],
 });
@@ -2055,9 +2063,13 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
 //     through a start/stop transition. The optional `names` request field
 //     restricts the result to a subset of container names. An EMPTY map is
 //     valid (no containers at all) and distinct from failure (null → 502).
+//   - 'vmStates': the live state of ALL VM guests from one cheap `virsh list`
+//     over SSH — real libvirt states ('running', 'shut off', …), so the VMs
+//     page can watch specific guests through a start/stop transition. Same
+//     `names` selection + empty-map semantics as containerStates.
 // Unknown keys are ignored; an empty/absent list means "the default set".
 // ---------------------------------------------------------------------------
-const PROBE_KEYS = new Set(['containerStats', 'containerStates']);
+const PROBE_KEYS = new Set(['containerStats', 'containerStates', 'vmStates']);
 
 app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   const settings = readSettings(req, PLUGIN_OPTIONS);
@@ -2068,7 +2080,7 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
 
   // Only the ssh slot counts — the primary username/password must NOT be reused.
   const sshCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
-  if (!sshCreds) throw new Error('No SSH credential bound — live container stats unavailable');
+  if (!sshCreds) throw new Error('No SSH credential bound — live probe data unavailable');
 
   // Which keys did the caller ask for? Absent/empty = default set. Unknown keys ignored.
   const requested = Array.isArray(body.keys) && body.keys.length > 0 ? body.keys : ['containerStats'];
@@ -2083,9 +2095,10 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   // cover everything running). Absent/empty = full collection.
   const nameSel = Array.isArray(body.names) && body.names.length > 0 ? body.names : undefined;
 
-  const [stats, states] = await Promise.all([
+  const [stats, states, vmStates] = await Promise.all([
     wanted.has('containerStats') ? collectProbeStats(host, sshCreds, logFn) : Promise.resolve(null),
     wanted.has('containerStates') ? collectProbeStates(host, sshCreds, logFn, nameSel) : Promise.resolve(null),
+    wanted.has('vmStates') ? collectProbeVmStates(host, sshCreds, logFn, nameSel) : Promise.resolve(null),
   ]);
 
   const metrics: Record<string, unknown> = {};
@@ -2103,6 +2116,13 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
     const flat: Record<string, ProbeContainerState> = {};
     for (const [name, s] of states) flat[name] = s;
     metrics['containerStates'] = flat;
+  }
+  if (wanted.has('vmStates')) {
+    // Same semantics as containerStates — null → 502, empty map is valid.
+    if (!vmStates) throw new Error('SSH virsh list probe returned no data');
+    const flat: Record<string, ProbeVmState> = {};
+    for (const [name, s] of vmStates) flat[name] = s;
+    metrics['vmStates'] = flat;
   }
 
   return { collectedAt: new Date().toISOString(), metrics };

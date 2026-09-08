@@ -496,6 +496,59 @@ export async function collectProbeStates(
   }
 }
 
+/** One VM's live libvirt state as served by POST /probe (key 'vmStates'). */
+export interface ProbeVmState {
+  /** Domain name (= the VM name in vm.query). */
+  name: string;
+  /** Lowercase libvirt state ('running', 'shut off', 'paused', …). */
+  status: string;
+}
+
+/**
+ * Collects the live state of ALL VMs for the PROBE path: ONE `virsh list` over
+ * the shared SSH pool (sub-second, zero TrueNAS API load) — so a page can watch
+ * specific guests through a start/stop transition and flip their State badge in
+ * ~1.5 s instead of waiting for the next inventory poll. Reuses the same socket
+ * detection as the VM IP enrichment (TrueNAS SCALE runs libvirtd on a custom
+ * socket). `names` optionally restricts the result to a subset of guest names
+ * (absent = all). Returns null when no ssh slot is bound or SSH fails; an EMPTY
+ * map is a valid answer (no guests at all) and must NOT be conflated with failure.
+ */
+export async function collectProbeVmStates(
+  host: string,
+  sshCreds: ReturnType<typeof resolveSshCredentials>,
+  log?: (level: 'info' | 'warn', message: string) => void,
+  names?: string[]
+): Promise<Map<string, ProbeVmState> | null> {
+  if (!sshCreds) return null; // no ssh slot bound — API-only mode
+  try {
+    const client = await sshPool.get(host, 22, sshCreds);
+    const r = await client.exec(buildVirshCommand(), sshCreds);
+    if (r.code !== 0 && !r.stdout) {
+      probeFailLog(host, `SSH virsh list probe on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`, log);
+      return null;
+    }
+    const wanted = names && names.length > 0 ? new Set(names) : null;
+    const out = new Map<string, ProbeVmState>();
+    for (const line of r.stdout.split('\n')) {
+      if (!line.startsWith('VS|')) continue;
+      const rest = line.slice('VS|'.length);
+      const sep = rest.indexOf('|');
+      if (sep < 0) continue;
+      // virsh list --all: "running" / "shut off" / "paused" / … (lowercase).
+      const status = rest.slice(0, sep).trim().toLowerCase();
+      const name = rest.slice(sep + 1).trim();
+      if (!name || !status) continue;
+      if (wanted && !wanted.has(name)) continue;
+      out.set(name, { name, status });
+    }
+    return out;
+  } catch (e) {
+    probeFailLog(host, e instanceof SshError ? `SSH virsh list probe on ${host} failed: ${e.message}` : `SSH virsh list probe on ${host} unexpected error: ${(e as Error).message}`, log);
+    return null; // best-effort — the webapp keeps its last good snapshot
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Background refresh orchestration (15-min cache per host)
 // ---------------------------------------------------------------------------
@@ -578,6 +631,9 @@ function buildVirshCommand(): string {
     `    if [ -S "$s" ] && virsh -c "qemu+unix:///system?socket=$s" list --name >/dev/null 2>&1; then VIRSH_URI="qemu+unix:///system?socket=$s"; break; fi`,
     '  done',
     'fi',
+    // Live guest states for the probe path (key 'vmStates'): one `virsh list --all`
+    // covers every domain. State is columns 3..NF ("running", "shut off", …).
+    "run_virsh list --all 2>/dev/null | awk 'NR>2 && NF>=3 {st=$3; for(i=4;i<=NF;i++) st=st\" \"$i; print \"VS|\" st \"|\" $2}'",
     'for d in $(run_virsh list --name 2>/dev/null); do',
     "  run_virsh domifaddr \"$d\" 2>/dev/null | awk -v OFS='|' 'NR>1 && NF>=4 {print \"domifaddr|\" $2, $3, $4}'",
     'done',

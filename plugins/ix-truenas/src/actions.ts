@@ -14,7 +14,7 @@
 
 import { ActionDescriptor, ActionResult, createRegistry, pickString, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
-import { sshPool } from './enrich';
+import { normalizeVmDevice, sshPool } from './enrich';
 
 /** Executor context for one /config step. */
 export interface TruenasActionContext {
@@ -552,6 +552,491 @@ const containersDeleteAction: ActionDescriptor<TruenasActionContext> = {
       }
     }
     return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// VM lifecycle + NIC actions (VMs page) — a GENERIC contract any hypervisor
+// plugin can implement: input is always guest NAMES (`names[]` for bulk, `name`
+// for single-VM ops), each action resolves them to appliance ids via vm.query
+// and reports per-name outcomes, so re-running a bulk start/stop is idempotent
+// (already in the target state = skipped, not failed). TrueNAS mapping:
+//   vms.start    → vm.start(id)            immediate
+//   vms.stop     → vm.stop(id)             JOB — ACPI powerdown, bounded by the
+//                                           appliance's shutdown timeout
+//   vms.kill     → vm.poweroff(id)         hard kill for unresponsive guests
+//   vms.restart  → vm.restart(id)          JOB — stop + start server-side
+//   vms.suspend  → vm.suspend(id)          freeze RAM state (guest must run)
+//   vms.resume   → vm.resume(id)           unfreeze SUSPENDED/PAUSED guests
+//   vms.delete   → vm.delete(id,{zvols})   destructive; zvols removes storage
+// NICs are VM devices: attach = vm.device.create({id, attributes:{dtype:'NIC',…}}),
+// detach = vm.device.delete(deviceId) — the integer device id is resolved from
+// the NIC's MAC via vm.query. `vms.nic-choices` (read-only) feeds the webapp's
+// attach dialog with the appliance's bridges + MACVLANs.
+// ---------------------------------------------------------------------------
+
+/** One VM as returned by `vm.query` (only the fields these actions need). */
+interface VmInfo {
+  id: number;
+  name: string;
+  /** Normalized uppercase libvirt state (RUNNING / STOPPED / SUSPENDED / …). */
+  state: string;
+  /** Raw devices[] entries — NIC detach resolves its integer device id from here. */
+  devices: Record<string, unknown>[];
+}
+
+/** Fetches all VMs with their current state (vm.query). */
+async function listVms(ctx: TruenasActionContext): Promise<VmInfo[]> {
+  const rows = await callWithRetry<Record<string, unknown>[]>(ctx, 'vm.query', []);
+  const out: VmInfo[] = [];
+  for (const r of rows ?? []) {
+    if (!r || typeof r !== 'object') continue;
+    const name = pickString(r, ['name']);
+    if (!name) continue;
+    const status = (r['status'] ?? {}) as Record<string, unknown>;
+    out.push({
+      id: typeof r['id'] === 'number' ? (r['id'] as number) : -1,
+      name,
+      state: normState(pickString(status, ['state'])),
+      devices: Array.isArray(r['devices']) ? (r['devices'] as Record<string, unknown>[]) : [],
+    });
+  }
+  return out;
+}
+
+/** Resolves guest names to VMs — the per-name outcome for a lifecycle action. */
+function planVmOutcomes(
+  names: string[],
+  vms: VmInfo[],
+  target: Set<string>,
+): { toRun: VmInfo[]; skipped: Record<string, string>; missing: string[] } {
+  const byName = new Map(vms.map((v) => [v.name, v]));
+  const toRun: VmInfo[] = [];
+  const skipped: Record<string, string> = {};
+  const missing: string[] = [];
+  for (const n of names) {
+    const vm = byName.get(n);
+    if (!vm) {
+      missing.push(n); // already gone — nothing to do
+      continue;
+    }
+    if (target.has(vm.state)) skipped[n] = vm.state.toLowerCase();
+    else toRun.push(vm);
+  }
+  return { toRun, skipped, missing };
+}
+
+const vmsStartAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.start',
+  label: 'Start VM(s)',
+  description: 'Starts the selected VMs (vm.start). VMs already running are skipped, not failed.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'VM names to start' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No VM names provided' } };
+    const vms = await listVms(ctx);
+    const { toRun, skipped, missing } = planVmOutcomes(names, vms, new Set(['RUNNING']));
+
+    let started = 0;
+    const errors: Record<string, string> = {};
+    for (const vm of toRun) {
+      try {
+        await ctx.client.call('vm.start', [vm.id], ctx.creds);
+        started++;
+      } catch (e) {
+        if (isAlreadyInState(e)) skipped[vm.name] = 'already running';
+        else errors[vm.name] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { started, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const vmsStopAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.stop',
+  label: 'Stop VM(s)',
+  description:
+    'Gracefully stops the selected VMs (vm.stop — ACPI powerdown, an appliance job). The step waits for each stop job to settle; a guest that ignores the shutdown is reported per-VM so it can be killed. VMs already stopped are skipped.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'VM names to stop' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No VM names provided' } };
+    const vms = await listVms(ctx);
+    const { toRun, skipped, missing } = planVmOutcomes(names, vms, new Set(['STOPPED']));
+
+    let stopped = 0;
+    const notes: Record<string, string> = {};
+    const errors: Record<string, string> = {};
+    for (const vm of toRun) {
+      try {
+        // vm.stop is a JOB method — the ACPI powerdown runs server-side and the
+        // job settles when the guest acks or its shutdown timeout elapses. Wait
+        // with a bounded budget so an unresponsive guest surfaces as a per-VM
+        // error (the user can then Kill it) instead of a silent "accepted".
+        const r = await ctx.client.call<unknown>('vm.stop', [vm.id], ctx.creds);
+        const job = describeAccepted(r);
+        if (typeof job['jobId'] === 'number') {
+          const wait = await waitForJob(ctx, job['jobId'], 150_000);
+          if (wait.state === 'RUNNING') {
+            notes[vm.name] = 'Stop initiated — still in progress on the appliance';
+            stopped++;
+            continue;
+          }
+          if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') {
+            errors[vm.name] = wait.error ?? `Stop job ended in state ${wait.state}`;
+            continue;
+          }
+        }
+        stopped++;
+      } catch (e) {
+        if (isAlreadyInState(e)) skipped[vm.name] = 'already stopped';
+        else errors[vm.name] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { stopped, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const vmsKillAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.kill',
+  label: 'Kill VM(s)',
+  description:
+    'HARD-KILLS the selected VMs (vm.poweroff) — no ACPI handshake, use for guests that are unresponsive to a graceful stop. VMs already stopped are skipped.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'VM names to kill' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No VM names provided' } };
+    const vms = await listVms(ctx);
+    const { toRun, skipped, missing } = planVmOutcomes(names, vms, new Set(['STOPPED']));
+
+    let killed = 0;
+    const errors: Record<string, string> = {};
+    for (const vm of toRun) {
+      try {
+        await ctx.client.call('vm.poweroff', [vm.id], ctx.creds);
+        killed++;
+      } catch (e) {
+        if (isAlreadyInState(e)) skipped[vm.name] = 'already stopped';
+        else errors[vm.name] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { killed, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const vmsRestartAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.restart',
+  label: 'Restart VM(s)',
+  description:
+    'Restarts the selected VMs (vm.restart — an appliance job). Stopped VMs are started directly. The step waits for each restart job to settle.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'VM names to restart' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No VM names provided' } };
+    const vms = await listVms(ctx);
+    const byName = new Map(vms.map((v) => [v.name, v]));
+
+    let restarted = 0;
+    const notes: Record<string, string> = {};
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      const vm = byName.get(n);
+      if (!vm) {
+        missing.push(n); // already gone — nothing to do
+        continue;
+      }
+      try {
+        if (vm.state === 'STOPPED') {
+          await ctx.client.call('vm.start', [vm.id], ctx.creds);
+        } else {
+          const r = await ctx.client.call<unknown>('vm.restart', [vm.id], ctx.creds);
+          const job = describeAccepted(r);
+          if (typeof job['jobId'] === 'number') {
+            const wait = await waitForJob(ctx, job['jobId'], 150_000);
+            if (wait.state === 'RUNNING') {
+              notes[n] = 'Restart initiated — still in progress on the appliance';
+              restarted++;
+              continue;
+            }
+            if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') {
+              errors[n] = wait.error ?? `Restart job ended in state ${wait.state}`;
+              continue;
+            }
+          }
+        }
+        restarted++;
+      } catch (e) {
+        errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { restarted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const vmsSuspendAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.suspend',
+  label: 'Suspend VM(s)',
+  description: 'Suspends the selected RUNNING VMs (vm.suspend) — RAM state is frozen, resume continues exactly where it left off.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'VM names to suspend' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No VM names provided' } };
+    const vms = await listVms(ctx);
+    const { toRun, skipped, missing } = planVmOutcomes(names, vms, new Set(['SUSPENDED']));
+
+    let suspended = 0;
+    const errors: Record<string, string> = {};
+    for (const vm of toRun) {
+      if (vm.state !== 'RUNNING') {
+        skipped[vm.name] = `not running (${vm.state.toLowerCase()})`;
+        continue;
+      }
+      try {
+        await ctx.client.call('vm.suspend', [vm.id], ctx.creds);
+        suspended++;
+      } catch (e) {
+        if (isAlreadyInState(e)) skipped[vm.name] = 'already suspended';
+        else errors[vm.name] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { suspended, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const vmsResumeAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.resume',
+  label: 'Resume VM(s)',
+  description: 'Resumes the selected SUSPENDED/PAUSED VMs (vm.resume).',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'VM names to resume' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No VM names provided' } };
+    const vms = await listVms(ctx);
+    const byName = new Map(vms.map((v) => [v.name, v]));
+
+    let resumed = 0;
+    const skipped: Record<string, string> = {};
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      const vm = byName.get(n);
+      if (!vm) {
+        missing.push(n);
+        continue;
+      }
+      if (vm.state === 'RUNNING') {
+        skipped[n] = 'already running';
+        continue;
+      }
+      if (vm.state !== 'SUSPENDED' && vm.state !== 'PAUSED') {
+        skipped[n] = `not suspended (${vm.state.toLowerCase()})`;
+        continue;
+      }
+      try {
+        await ctx.client.call('vm.resume', [vm.id], ctx.creds);
+        resumed++;
+      } catch (e) {
+        if (isAlreadyInState(e)) skipped[n] = 'already running';
+        else errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { resumed, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const vmsDeleteAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.delete',
+  label: 'Delete VM(s)',
+  description:
+    'DELETES the selected VMs (vm.delete). Running VMs are stopped first. With removeStorage=true the backing zvols/disks are removed too — this is destructive.',
+  module: 'VMs',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'VM names to delete' },
+    removeStorage: { type: 'boolean', required: false, default: false, description: 'Also delete the VMs\' backing storage (zvols)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No VM names provided' } };
+    const removeStorage = input['removeStorage'] === true;
+    const vms = await listVms(ctx);
+    const byName = new Map(vms.map((v) => [v.name, v]));
+
+    let deleted = 0;
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      const vm = byName.get(n);
+      if (!vm) {
+        missing.push(n); // already gone — nothing to do
+        continue;
+      }
+      try {
+        // vm.delete refuses running guests — stop first (bounded job wait).
+        if (vm.state === 'RUNNING') {
+          const r = await ctx.client.call<unknown>('vm.stop', [vm.id], ctx.creds);
+          const job = describeAccepted(r);
+          if (typeof job['jobId'] === 'number') {
+            const wait = await waitForJob(ctx, job['jobId'], 150_000);
+            if (wait.state !== 'RUNNING' && wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') {
+              errors[n] = `Could not stop before delete: ${wait.error ?? `stop job ended in state ${wait.state}`}`;
+              continue;
+            }
+          }
+        }
+        await ctx.client.call('vm.delete', [vm.id, removeStorage ? { zvols: true } : {}], ctx.creds);
+        deleted++;
+      } catch (e) {
+        errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, removeStorage, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const vmsNicChoicesAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.nic-choices',
+  label: 'List attachable NIC interfaces',
+  description: 'Read-only list of the bridges and MACVLANs this appliance can attach to VMs (vm.device.nic_attach_choices). Feeds the VMs page attach dialog.',
+  module: 'VMs',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  async execute(ctx: TruenasActionContext): Promise<ActionResult> {
+    const r = await ctx.client.call<{ BRIDGE?: string[]; MACVLAN?: string[] }>('vm.device.nic_attach_choices', [], ctx.creds);
+    return {
+      success: true,
+      details: {
+        bridges: Array.isArray(r?.BRIDGE) ? (r.BRIDGE as string[]) : [],
+        macvlans: Array.isArray(r?.MACVLAN) ? (r.MACVLAN as string[]) : [],
+      },
+    };
+  },
+};
+
+const vmsNicAttachAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.nic-attach',
+  label: 'Attach NIC to VM',
+  description:
+    'Attaches a network interface to ONE VM (vm.device.create with dtype NIC). nicAttach is a bridge or MACVLAN from vms.nic-choices; omit mac to let the appliance assign one.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'VM name' },
+    nicAttach: { type: 'string', required: true, minLength: 1, description: 'Bridge or MACVLAN interface to attach (from vms.nic-choices)' },
+    type: { type: 'string', required: false, enum: ['BRIDGE', 'MACVLAN'], default: 'BRIDGE', description: 'NIC attachment kind' },
+    mac: { type: 'string', required: false, pattern: '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', description: 'Optional fixed MAC (appliance assigns one when omitted)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'VM name is required' } };
+    const nicAttach = str(input, 'nicAttach');
+    if (!nicAttach) return { success: false, details: { error: 'nicAttach (bridge/MACVLAN) is required' } };
+    const type = (str(input, 'type') ?? 'BRIDGE').toUpperCase();
+    if (type !== 'BRIDGE' && type !== 'MACVLAN') return { success: false, details: { error: `Unsupported NIC type "${type}" (expected BRIDGE or MACVLAN)` } };
+    const mac = str(input, 'mac');
+
+    const vms = await listVms(ctx);
+    const vm = vms.find((v) => v.name === name);
+    if (!vm) return { success: false, details: { error: `VM "${name}" not found on this appliance` } };
+
+    try {
+      const attributes: Record<string, unknown> = { dtype: 'NIC', type, nic_attach: nicAttach };
+      if (mac) attributes['mac'] = mac;
+      await ctx.client.call('vm.device.create', [{ id: vm.id, attributes }], ctx.creds);
+      return { success: true, applied: true, details: { name, nicAttach, type, ...(mac ? { mac } : {}), note: 'NIC attached — visible after the next inventory poll.' } };
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+  },
+};
+
+const vmsNicDetachAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.nic-detach',
+  label: 'Detach NIC from VM',
+  description:
+    'Removes ONE network interface from a VM (vm.device.delete). The target NIC is identified by its MAC; the integer device id is resolved via vm.query.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'VM name' },
+    mac: { type: 'string', required: true, pattern: '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', description: 'MAC of the NIC to remove' },
+    force: { type: 'boolean', required: false, default: false, description: 'Force removal even if the appliance would otherwise refuse' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    const mac = (str(input, 'mac') ?? '').toLowerCase();
+    if (!name) return { success: false, details: { error: 'VM name is required' } };
+    if (!mac) return { success: false, details: { error: 'NIC MAC is required' } };
+
+    const vms = await listVms(ctx);
+    const vm = vms.find((v) => v.name === name);
+    if (!vm) return { success: false, details: { error: `VM "${name}" not found on this appliance` } };
+
+    // Resolve the integer device id of the NIC with this MAC. The id sits at the
+    // entry top level (TrueNAS 26+ nested shape) or flat inside attrs (legacy).
+    let deviceId: number | null = null;
+    for (const d of vm.devices) {
+      const dev = normalizeVmDevice(d);
+      if (!dev || dev.dtype !== 'NIC') continue;
+      const dmac = pickString(dev.attrs, ['mac']);
+      if (!dmac || dmac.toLowerCase() !== mac) continue;
+      const raw = d as Record<string, unknown>;
+      deviceId = typeof raw['id'] === 'number' ? (raw['id'] as number) : typeof dev.attrs['id'] === 'number' ? (dev.attrs['id'] as number) : null;
+      break;
+    }
+    if (deviceId === null) return { success: false, details: { error: `No NIC with MAC ${mac.toUpperCase()} on VM "${name}"` } };
+
+    try {
+      const force = input['force'] === true;
+      await ctx.client.call('vm.device.delete', [deviceId, force ? { force: true } : {}], ctx.creds);
+      return { success: true, applied: true, details: { name, mac: mac.toUpperCase(), deviceId, note: 'NIC detached — visible after the next inventory poll.' } };
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
   },
 };
 
@@ -1297,6 +1782,16 @@ export const registry = createRegistry<TruenasActionContext>([
   containersRestartAction,
   containersUpgradeAction,
   containersDeleteAction,
+  vmsStartAction,
+  vmsStopAction,
+  vmsKillAction,
+  vmsRestartAction,
+  vmsSuspendAction,
+  vmsResumeAction,
+  vmsDeleteAction,
+  vmsNicChoicesAction,
+  vmsNicAttachAction,
+  vmsNicDetachAction,
   imagesDeleteAction,
   composeConfigReadAction,
   containersLogsReadAction,
