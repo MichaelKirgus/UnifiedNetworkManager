@@ -1040,6 +1040,303 @@ const vmsNicDetachAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Storage actions (Storage page) — a GENERIC contract any storage plugin can
+// implement. Input is always dataset/pool NAMES (`names[]` for bulk, `name` for
+// single ops); each action resolves them against the appliance and reports
+// per-name outcomes, so re-running a bulk op is idempotent (already in the
+// target state = skipped, not failed). TrueNAS mapping:
+//   storage.scrub        → pool.scrub(name)            JOB — full-pool scrub
+//   storage.snapshot     → pool.snapshot.create(...)   JOB — timestamped snapshot
+//                                            (+ optional retention cleanup of
+//                                             prior `unm-*` snapshots)
+//   storage.quota-set    → pool.dataset.update(name,{quota})  set/clear quota
+//   storage.mount        → pool.dataset.mount(name)
+//   storage.unmount      → pool.dataset.unmount(name, {force?})
+//   storage.delete       → pool.dataset.delete(name, {recursive?, force?})
+// Destructive ops (delete) are `dangerous`; the rest are `write`. A future
+// libvirt/Proxmox/storage plugin implementing these ids gets the webapp's row +
+// bulk actions for free.
+// ---------------------------------------------------------------------------
+
+/** Parses a human size ("10 GB", "512 MB", "1 TB") to bytes; null when unparseable. */
+function parseHumanSize(s: string): number | null {
+  const m = s.trim().match(/^(\d+(?:\.\d+)?)\s*([KMGTPE]?)(B|I)?$/i);
+  if (!m) return null;
+  const n = parseFloat(m[1]);
+  if (!Number.isFinite(n)) return null;
+  const unit = (m[2] ?? '').toUpperCase();
+  const mult: Record<string, number> = { '': 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3, T: 1024 ** 4, P: 1024 ** 5, E: 1024 ** 6 };
+  return Math.round(n * (mult[unit] ?? 1));
+}
+
+/** One ZFS pool as returned by `pool.query` (only the fields these actions need). */
+interface PoolInfo {
+  name: string;
+  /** ONLINE | DEGRADED | OFFLINE | FAULTED | ... — normalized uppercase. */
+  status: string;
+}
+
+/** Fetches all pools with their current state (pool.query). */
+async function listPools(ctx: TruenasActionContext): Promise<PoolInfo[]> {
+  const rows = await callWithRetry<Record<string, unknown>[]>(ctx, 'pool.query', []);
+  const out: PoolInfo[] = [];
+  for (const r of rows ?? []) {
+    if (!r || typeof r !== 'object') continue;
+    const name = pickString(r, ['name']);
+    if (!name) continue;
+    out.push({ name, status: normState(pickString(r, ['state'])) });
+  }
+  return out;
+}
+
+const storageScrubAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'storage.scrub',
+  label: 'Scrub pool(s)',
+  description:
+    'Starts a full scrub on the selected ZFS pools (pool.scrub — an appliance job). A scrub reads every block and repairs any silently-corrupted data from redundancy. Pools already being scrubbed are skipped, not failed.',
+  module: 'Storage',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'Pool names to scrub' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No pool names provided' } };
+    const pools = await listPools(ctx);
+    const byName = new Map(pools.map((p) => [p.name, p]));
+
+    let started = 0;
+    const skipped: Record<string, string> = {};
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      const pool = byName.get(n);
+      if (!pool) {
+        missing.push(n); // not a pool on this appliance — nothing to do
+        continue;
+      }
+      try {
+        await ctx.client.call('pool.scrub', [n], ctx.creds);
+        started++;
+      } catch (e) {
+        if (/already|in progress/i.test(e instanceof Error ? e.message : String(e))) skipped[n] = 'scrub already in progress';
+        else errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { started, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const storageSnapshotAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'storage.snapshot',
+  label: 'Create snapshot(s)',
+  description:
+    'Creates a timestamped ZFS snapshot on the selected dataset (pool.snapshot.create — an appliance job). With retentionDays set, older `unm-*` snapshots of that dataset are pruned to keep only the newest N days. Snapshots are non-destructive point-in-time copies.',
+  module: 'Storage',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'Dataset (or pool) to snapshot' },
+    retentionDays: { type: 'number', required: false, min: 1, max: 3650, default: 7, description: 'Prune prior `unm-*` snapshots older than this many days (omit to keep all)' },
+    recursive: { type: 'boolean', required: false, default: false, description: 'Also snapshot all child datasets' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'Dataset name is required' } };
+    const recursive = input['recursive'] === true;
+    const retentionRaw = typeof input['retentionDays'] === 'number' ? (input['retentionDays'] as number) : undefined;
+
+    // Timestamped snapshot name — sortable, and the `unm-` prefix marks it as
+    // ours so the retention cleanup only ever touches snapshots we created.
+    const ts = new Date().toISOString().replace(/[-:TZ]/g, '').slice(0, 14); // YYYYMMDDHHmmss
+    const snapName = `${name}@unm-${ts}`;
+
+    let jobId: number | null = null;
+    try {
+      const r = await ctx.client.call<unknown>('pool.snapshot.create', [{ dataset: name, snapshot_name: `unm-${ts}`, recursive }], ctx.creds);
+      if (typeof r === 'number') jobId = r;
+      else if (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number') jobId = (r as Record<string, unknown>)['id'] as number;
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e), snapshot: snapName } };
+    }
+
+    // pool.snapshot.create is a JOB method — wait for it to settle so the
+    // retention cleanup below sees the new snapshot.
+    let note = '';
+    if (typeof jobId === 'number') {
+      const wait = await waitForJob(ctx, jobId, 240_000);
+      if (wait.state === 'RUNNING') note = 'Snapshot job still in progress on the appliance';
+      else if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') return { success: false, details: { snapshot: snapName, error: wait.error ?? `Job ended in state ${wait.state}` } };
+    }
+
+    // Optional retention cleanup — prune prior `unm-*` snapshots older than the
+    // requested window. Best-effort: a failure here does NOT fail the create.
+    let pruned = 0;
+    const pruneErrors: Record<string, string> = {};
+    if (typeof retentionRaw === 'number' && Number.isFinite(retentionRaw) && retentionRaw > 0) {
+      const cutoffMs = Date.now() - retentionRaw * 86_400_000;
+      let snaps: Record<string, unknown>[];
+      try {
+        snaps = await ctx.client.call<Record<string, unknown>[]>('pool.snapshot.query', [{ dataset: name }], ctx.creds);
+      } catch (e) {
+        return { success: true, applied: true, details: { snapshot: snapName, note: [note, `Retention cleanup skipped: ${e instanceof Error ? e.message : String(e)}`].filter(Boolean).join('; ') || undefined } };
+      }
+      for (const s of snaps ?? []) {
+        const sn = pickString(s, ['name']); // "dataset@unm-YYYYMMDDHHmmss"
+        if (!sn) continue;
+        const at = sn.split('@')[1] ?? '';
+        if (!at.startsWith('unm-')) continue; // only snapshots WE created
+        const digits = at.slice(4);
+        if (digits.length < 12) continue;
+        const t = Date.parse(`${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}T${digits.slice(8, 10)}:${digits.slice(10, 12)}:00Z`);
+        if (Number.isNaN(t) || t >= cutoffMs) continue; // keep recent ones
+        try {
+          await ctx.client.call('pool.snapshot.delete', [sn], ctx.creds);
+          pruned++;
+        } catch (e) {
+          pruneErrors[sn] = e instanceof Error ? e.message : String(e);
+        }
+      }
+    }
+
+    return { success: Object.keys(pruneErrors).length === 0, applied: true, details: { snapshot: snapName, pruned, ...(note ? { note } : {}), ...(Object.keys(pruneErrors).length ? { pruneErrors } : {}) } };
+  },
+};
+
+const storageQuotaSetAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'storage.quota-set',
+  label: 'Set dataset quota',
+  description:
+    'Sets (or clears, with an empty value) the ZFS `quota` property on a dataset (pool.dataset.update). The quota caps how much space the dataset may consume; children are not limited unless they have their own quota.',
+  module: 'Storage',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'Dataset to update' },
+    quota: { type: 'string', required: false, description: 'New quota as bytes (number) or a human size like "10 GB"; empty/omitted clears the quota' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'Dataset name is required' } };
+    const raw = typeof input['quota'] === 'string' ? (input['quota'] as string).trim() : '';
+    let quota: number | null;
+    if (raw === '') quota = null; // clear
+    else if (/^\d+$/.test(raw)) quota = parseInt(raw, 10);
+    else {
+      const parsed = parseHumanSize(raw);
+      if (parsed === null) return { success: false, details: { error: `Could not parse quota "${raw}" — use bytes or a size like "10 GB"` } };
+      quota = parsed;
+    }
+    try {
+      await ctx.client.call('pool.dataset.update', [name, { quota }], ctx.creds);
+      return { success: true, applied: true, details: { name, quota, note: quota === null ? 'Quota cleared' : `Quota set to ${quota} bytes` } };
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e), name } };
+    }
+  },
+};
+
+const storageMountAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'storage.mount',
+  label: 'Mount dataset(s)',
+  description: 'Mounts the selected ZFS datasets (pool.dataset.mount). Datasets already mounted are skipped, not failed.',
+  module: 'Storage',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'Dataset names to mount' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No dataset names provided' } };
+    let mounted = 0;
+    const skipped: Record<string, string> = {};
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      try {
+        await ctx.client.call('pool.dataset.mount', [n], ctx.creds);
+        mounted++;
+      } catch (e) {
+        if (/already|mounted/i.test(e instanceof Error ? e.message : String(e))) skipped[n] = 'already mounted';
+        else errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { mounted, skipped, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const storageUnmountAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'storage.unmount',
+  label: 'Unmount dataset(s)',
+  description: 'Unmounts the selected ZFS datasets (pool.dataset.unmount). Datasets already unmounted are skipped, not failed. Data remains safe on disk — remount to access it again.',
+  module: 'Storage',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'Dataset names to unmount' },
+    force: { type: 'boolean', required: false, default: false, description: 'Force unmount even if the dataset is busy (may lose in-flight writes)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No dataset names provided' } };
+    const force = input['force'] === true;
+    let unmounted = 0;
+    const skipped: Record<string, string> = {};
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      try {
+        await ctx.client.call('pool.dataset.unmount', [n, force ? { force: true } : {}], ctx.creds);
+        unmounted++;
+      } catch (e) {
+        if (/not mounted|unmounted/i.test(e instanceof Error ? e.message : String(e))) skipped[n] = 'already unmounted';
+        else errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { unmounted, force, skipped, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const storageDeleteAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'storage.delete',
+  label: 'Delete dataset(s)',
+  description:
+    'DELETES the selected ZFS datasets (pool.dataset.delete) — this is destructive and removes all data in them. With recursive=true child datasets are removed too; without it a dataset that has children fails so nothing is lost by accident.',
+  module: 'Storage',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'Dataset names to delete' },
+    recursive: { type: 'boolean', required: false, default: false, description: 'Also delete all child datasets' },
+    force: { type: 'boolean', required: false, default: false, description: 'Force deletion even if the dataset is busy/mounted' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No dataset names provided' } };
+    const recursive = input['recursive'] === true;
+    const force = input['force'] === true;
+
+    let deleted = 0;
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      try {
+        await ctx.client.call('pool.dataset.delete', [n, recursive || force ? { recursive, force } : {}], ctx.creds);
+        deleted++;
+      } catch (e) {
+        errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, recursive, force, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
 const imagesDeleteAction: ActionDescriptor<TruenasActionContext> = {
   id: 'images.delete',
   label: 'Delete image(s)',
@@ -1792,6 +2089,12 @@ export const registry = createRegistry<TruenasActionContext>([
   vmsNicChoicesAction,
   vmsNicAttachAction,
   vmsNicDetachAction,
+  storageScrubAction,
+  storageSnapshotAction,
+  storageQuotaSetAction,
+  storageMountAction,
+  storageUnmountAction,
+  storageDeleteAction,
   imagesDeleteAction,
   composeConfigReadAction,
   containersLogsReadAction,

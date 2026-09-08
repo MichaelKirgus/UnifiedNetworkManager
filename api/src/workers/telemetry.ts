@@ -173,7 +173,11 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
           ? { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }
           : {})
       },
-      { timeout: 10_000, headers }
+      // 30 s — slow inventory RPCs (e.g. TrueNAS pool.dataset.query on a
+      // degraded appliance) can take well over the old 10 s; a timeout here
+      // would drop the ENTIRE snapshot (pools, disks, apps, VMs), not just the
+      // one slow section (plugins settle their calls internally).
+      { timeout: 30_000, headers }
     );
 
     const health = response.data?.health ?? 'unknown';

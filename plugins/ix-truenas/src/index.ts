@@ -88,7 +88,18 @@ const identity = resolvePluginIdentity({
   // bridge/MACVLAN list), vms.nic-attach and vms.nic-detach. GENERIC contract:
   // any future hypervisor plugin implementing the same action ids gets the
   // webapp's VM row/bulk actions for free.
-  version: '0.7.0',
+  // 0.8.0 — Storage lifecycle actions for the Storage page: storage.scrub
+  // (pool.scrub), storage.snapshot (pool.snapshot.create + optional retention
+  // cleanup of prior `unm-*` snapshots), storage.quota-set (pool.dataset.update
+  // quota), storage.mount / storage.unmount (pool.dataset.mount/unmount) and
+  // storage.delete (pool.dataset.delete, destructive). GENERIC contract: any
+  // future storage plugin implementing these ids gets the webapp's row + bulk
+  // actions for free.
+  // 0.8.1 — pool.dataset.query (Storage-page dataset inventory) now runs with a
+  // dedicated 20 s per-call timeout: on slow/degraded appliances it can exceed
+  // the default 5 s and previously timed out, silently dropping ALL datasets of
+  // that device from the Storage page (pools showed no children).
+  version: '0.8.1',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe'],
 });
@@ -116,7 +127,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: 5000,
     min: 500,
     max: 60000,
-    description: 'Per-request timeout for TrueNAS API calls. The whole poll must fit the API\'s ~10 s budget.',
+    description: 'Per-request timeout for TrueNAS API calls. The whole poll must fit the API\'s ~30 s monitoring budget (slow inventory RPCs like pool.dataset.query get a dedicated 20 s per-call timeout).',
   },
   {
     key: 'apiKeyUsername',
@@ -1318,11 +1329,12 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   let failures = 0;
   let firstError = '';
 
-  // Core calls in parallel (well under the 10 s budget). allSettled (NOT all):
-  // a failed login (unreachable host / bad credentials) must be handled per
-  // section, not reject the whole poll before error handling. The last three
-  // are best-effort extras (networks inventory + static routes + board
-  // serial/model) — their failure does NOT count toward health.
+  // Core calls in parallel (the API's monitoring budget is ~30 s; the slowest
+  // call dominates). allSettled (NOT all): a failed login (unreachable host /
+  // bad credentials) must be handled per section, not reject the whole poll
+  // before error handling. The last three are best-effort extras (networks
+  // inventory + static routes + board serial/model) — their failure does NOT
+  // count toward health.
   const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes, vmsRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
@@ -1336,7 +1348,12 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     // all releases), disk.query (physical disks incl. USB/NVMe), boot.get_disks
     // (boot-pool members; 25.10+/26) with system.datastore as the legacy
     // fallback for older releases.
-    collectInventory ? client.call<Record<string, unknown>[]>('pool.dataset.query', [], creds) : Promise.resolve(undefined),
+    // pool.dataset.query reads EVERY dataset's full property set — on slow or
+    // degraded appliances it can exceed the default per-call timeout and time
+    // out, silently dropping ALL of that device's datasets from the Storage
+    // page (pools with no children). Give it a dedicated 20 s budget; the API
+    // worker's /monitoring timeout (30 s) covers it.
+    collectInventory ? client.call<Record<string, unknown>[]>('pool.dataset.query', [], creds, 20_000) : Promise.resolve(undefined),
     collectInventory ? client.call<Record<string, unknown>[]>('disk.query', [], creds) : Promise.resolve(undefined),
     collectInventory ? client.call<Record<string, unknown>>('system.datastore', [], creds) : Promise.resolve(undefined),
     collectInventory ? client.call<string[]>('boot.get_disks', [], creds) : Promise.resolve(undefined),
