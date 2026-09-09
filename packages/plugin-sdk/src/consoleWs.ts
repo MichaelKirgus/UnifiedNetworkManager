@@ -95,6 +95,8 @@ export function makeConsoleUpgrade(opts: ConsoleEndpointOptions): ConsoleUpgrade
 function wire(ws: WebSocket, opts: ConsoleEndpointOptions): void {
   let session: SshTerminalSession | null = null;
   let state: 'awaiting-hello' | 'open' | 'done' = 'awaiting-hello';
+  /** Last resize seen BEFORE the session existed — applied once onOpen() resolves. */
+  let pendingResize: { cols: number; rows: number } | null = null;
 
   const sendControl = (msg: ConsoleControlMessage): void => {
     if (ws.readyState !== WebSocket.OPEN) return;
@@ -115,6 +117,26 @@ function wire(ws: WebSocket, opts: ConsoleEndpointOptions): void {
       : Array.isArray(data)
         ? Buffer.concat(data.map((d) => Buffer.from(d)))
         : Buffer.from(data);
+
+    // Resize control frames may arrive BEFORE the session exists: the browser
+    // sends its initial geometry as soon as ITS websocket opens — long before
+    // the SSH handshake + shell allocation below has finished. Buffer the last
+    // one and apply it right after onOpen() resolves (like PuTTY re-sending
+    // window-change once the PTY is allocated). Dropping them here was exactly
+    // why a freshly opened console stayed at 80x24 until any later resize.
+    if (!isBinary) {
+      let msg: ConsoleControlMessage;
+      try {
+        msg = JSON.parse(buf.toString('utf8')) as ConsoleControlMessage;
+      } catch {
+        return; // ignore malformed control frames
+      }
+      if (msg.type === 'resize' && typeof msg.cols === 'number' && typeof msg.rows === 'number') {
+        if (state === 'open' && session) session.resize(msg.cols, msg.rows);
+        else pendingResize = { cols: msg.cols, rows: msg.rows };
+        return;
+      }
+    }
 
     if (state === 'awaiting-hello') {
       // The API's first frame is ALWAYS the hello JSON. A binary frame here means
@@ -137,6 +159,7 @@ function wire(ws: WebSocket, opts: ConsoleEndpointOptions): void {
         return;
       }
       wireSession(session, ws, sendControl, finish);
+      if (pendingResize) { session.resize(pendingResize.cols, pendingResize.rows); pendingResize = null; }
       sendControl({ type: 'ready' });
       return;
     }
@@ -146,16 +169,6 @@ function wire(ws: WebSocket, opts: ConsoleEndpointOptions): void {
     if (isBinary) {
       // Pass the Buffer VERBATIM — a latin-1 string round-trip would corrupt non-ASCII.
       session.write(buf);
-      return;
-    }
-    let msg: ConsoleControlMessage;
-    try {
-      msg = JSON.parse(buf.toString('utf8')) as ConsoleControlMessage;
-    } catch {
-      return; // ignore malformed control frames
-    }
-    if (msg.type === 'resize' && typeof msg.cols === 'number' && typeof msg.rows === 'number') {
-      session.resize(msg.cols, msg.rows);
     }
   });
 

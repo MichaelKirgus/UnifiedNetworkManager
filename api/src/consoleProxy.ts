@@ -167,12 +167,29 @@ export function attachConsoleProxy(server: Server): void {
         upstream.on('message', bufferHandler);
 
         const client = await upgradeBrowser(req, socket);
+
+        // RACE GUARD (reverse direction): the browser's onopen fires as soon as
+        // the 101 lands and it may send keyboard/resize frames BEFORE the pump
+        // below attaches its listeners — those would be dropped. Buffer them
+        // until we can flush into the live pipe. (Synchronous section: no I/O
+        // turn runs between listener attach/detach, so nothing slips through.)
+        const pendingClient: Array<{ data: WebSocket.RawData; isBinary: boolean }> = [];
+        const clientBufferHandler = (data: WebSocket.RawData, isBinary: boolean): void => {
+          pendingClient.push({ data, isBinary });
+        };
+        client.on('message', clientBufferHandler);
+
         // Flush the pre-wire buffer, then hand over to the verbatim pump.
         upstream.removeListener('message', bufferHandler);
         for (const f of pendingUpstream.splice(0)) {
           if (client.readyState === WebSocket.OPEN) client.send(f.data, { binary: f.isBinary });
         }
+
+        client.removeListener('message', clientBufferHandler); // sync — no frame can slip through
         pipePair(client, upstream);
+        for (const f of pendingClient.splice(0)) {
+          if (upstream.readyState === WebSocket.OPEN) upstream.send(f.data, { binary: f.isBinary });
+        }
       } catch (err) {
         // Close any half-open upstream so a failed handshake leaks nothing.
         if (upstream) {

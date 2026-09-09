@@ -82,16 +82,32 @@ export function useConsoleSession(deviceId: string, pluginId?: string, contextKe
     const host = hostRef.current;
     if (!host) return;
     term.open(host);
-    // Fit after the layout settles (dialog animation / flex sizing).
-    requestAnimationFrame(() => {
-      try { fit.fit(); } catch { /* not laid out yet */ }
-    });
 
     const sendResize = (): void => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
       }
     };
+
+    // Fit until the layout has settled. The first measurement can run before
+    // fonts/flex sizing are ready (dialog mount, new-window tab paint) and then
+    // yields a grid SMALLER than the usable area — one that looks plausible but
+    // is wrong, so "retry while at default 80x24" would stop too early. Keep
+    // re-fitting on a short timer for ~2 s after open instead; any change
+    // propagates to the PTY via the onResize subscription below (xterm dedupes
+    // no-op resizes, so steady-state ticks are free).
+    let fitTicks = 0;
+    const tryFit = (): void => {
+      if (disposed) return;
+      try { fit.fit(); } catch { /* not laid out yet */ }
+      if (++fitTicks < 20) window.setTimeout(tryFit, 100);
+    };
+    requestAnimationFrame(tryFit);
+    // Font metrics change when web fonts finish loading (cell width/height shift) —
+    // re-fit exactly at that moment too, in case it lands after the settle loop.
+    if (typeof document !== 'undefined' && document.fonts?.ready) {
+      void document.fonts.ready.then(() => tryFit()).catch(() => { /* noop */ });
+    }
 
     // Keyboard → binary frames (xterm emits the exact escape sequences).
     const dataSub = term.onData((data) => {
@@ -100,13 +116,22 @@ export function useConsoleSession(deviceId: string, pluginId?: string, contextKe
       }
     });
 
-    // ResizeObserver keeps the PTY in sync with the dialog size.
+    // THE resize path: whenever xterm's grid changes — initial fit, container
+    // resize, font load — tell the remote PTY immediately. This is authoritative;
+    // the ResizeObserver below only triggers re-fits.
+    const resizeSub = term.onResize(({ cols, rows }) => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+      }
+    });
+
+    // ResizeObserver re-fits the grid when the container changes size; the
+    // onResize subscription above then propagates the new geometry to the PTY.
     let resizeTimer: number | undefined;
     const ro = new ResizeObserver(() => {
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
         try { fit.fit(); } catch { /* not laid out yet */ }
-        sendResize();
       }, 120);
     });
     if (host) ro.observe(host);
@@ -143,7 +168,14 @@ export function useConsoleSession(deviceId: string, pluginId?: string, contextKe
           // Control message.
           let msg: { type?: string; code?: number; message?: string };
           try { msg = JSON.parse(ev.data); } catch { return; }
-          if (msg.type === 'ready') term.focus();
+          if (msg.type === 'ready') {
+            term.focus();
+            // Re-advertise the current geometry: our initial resize may have
+            // reached the plugin before its SSH session existed. The SDK now
+            // buffers + applies it, but sending again is harmless and removes
+            // any residual race (xterm dedupes identical PTY sizes).
+            sendResize();
+          }
           else if (msg.type === 'exit') {
             setExitCode(typeof msg.code === 'number' ? msg.code : null);
             setStatus('closed');
@@ -170,6 +202,7 @@ export function useConsoleSession(deviceId: string, pluginId?: string, contextKe
       ro.disconnect();
       window.clearTimeout(resizeTimer);
       dataSub.dispose();
+      resizeSub.dispose();
       if (ws) {
         ws.onclose = null; // suppress post-unmount state updates
         try { ws.close(1000, 'session closed'); } catch { /* noop */ }
