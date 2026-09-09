@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { db, Device, Plugin, Telemetry, ConfigJob } from '../db';
 import { requireAuth, requirePermission, require2FA } from '../auth/middleware';
+import { mintConsoleTicket } from '../consoleTickets';
+import { DeviceConsoleError, resolveConsoleTarget } from '../deviceConsole';
 import { configJobQueue } from '../queue';
 import { asc, eq, and, desc, inArray } from 'drizzle-orm';
 import * as schema from '../db/schema';
@@ -1120,6 +1122,43 @@ router.post('/devices/:deviceId/filesystem', requireAuth, requirePermission('dev
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
   }
 });
+
+// POST /devices/:deviceId/console - mint a short-lived, single-use CONSOLE TICKET
+// for an interactive SSH terminal (capability 'sshConsole'). This is the ONLY
+// authenticated step of the console flow — browsers cannot set headers on a
+// WebSocket upgrade, so the ticket itself becomes the bearer credential for the
+// WS path below. Authorization happens HERE: JWT + devices:write + the plugin's
+// 'sshConsole' capability (resolveConsoleTarget throws 501 when absent). The webapp
+// then opens GET /devices/:id/console/ws?ticket=… and gets a full xterm.js session.
+router.post('/devices/:deviceId/console', requireAuth, requirePermission('devices:write'), async (req, res) => {
+  const { deviceId } = req.params;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+
+  try {
+    // Resolves the assignment + checks the capability BEFORE minting — a ticket is
+    // only ever issued for a target that can actually serve a console.
+    const pluginId = typeof body.pluginId === 'string' ? body.pluginId : undefined;
+    await resolveConsoleTarget(deviceId, pluginId);
+
+    const context = body.context && typeof body.context === 'object' ? (body.context as Record<string, unknown>) : undefined;
+    const ticket = mintConsoleTicket(deviceId, pluginId, context);
+    res.status(201).json({ deviceId, ticket });
+  } catch (err) {
+    if (err instanceof DeviceConsoleError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// NOTE: the console WebSocket PROXY (GET /devices/:id/console/ws?ticket=…) is NOT an
+// express route — WS upgrades bypass express entirely. It lives in consoleProxy.ts
+// and is attached to the HTTP server's 'upgrade' event in index.ts. The single-use
+// ticket minted above IS its credential: browsers cannot set headers on a WS upgrade,
+// so the ticket proves "this user already passed JWT + devices:write + capability
+// checks for exactly this device/assignment".
 
 // GET /devices/:deviceId/ports - Normalized port inventory (device_ports table)
 // for this device across all plugins. Fed by the telemetry worker from each

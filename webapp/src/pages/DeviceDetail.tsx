@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import clsx from 'clsx';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { Copy, Power, Plus, RefreshCw, Settings, Settings2, Star, Trash2, X } from 'lucide-react';
+import { Copy, Power, Plus, RefreshCw, Settings, Settings2, Star, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
+import { ConsoleDialog } from '../components/ConsoleDialog';
 import { StatusBadge } from '../components/StatusBadge';
 import { MetricView } from '../components/MetricView';
 import { OptionForm } from '../components/OptionForm';
@@ -156,6 +157,24 @@ export default function DeviceDetail() {
     return (pluginsQuery.data ?? []).find((p) => p.id === assignments[0].pluginId) ?? null;
   }, [assignments, pluginsQuery.data]);
 
+  // --- SSH console (capability 'sshConsole') ---------------------------------
+  // The Shell button only renders when an assigned plugin advertises the
+  // 'sshConsole' capability — GENERIC: any future plugin serving /console gets
+  // the web terminal for free. Opens a host login shell on the device.
+  /** The assignment whose plugin serves the console (first match) — null = no Shell button. */
+  const consoleAssignment = useMemo(
+    () =>
+      assignments.find((a) => {
+        if (a.pluginCapabilities?.includes('sshConsole')) return true;
+        const p = (pluginsQuery.data ?? []).find((x) => x.id === a.pluginId);
+        return p?.capabilities?.includes('sshConsole') ?? false;
+      }) ?? null,
+    [assignments, pluginsQuery.data],
+  );
+  const hasSshConsole = consoleAssignment !== null;
+  /** True while the host-shell console dialog is open. */
+  const [consoleOpen, setConsoleOpen] = useState(false);
+
   // Static descriptors (from /discover) as a fallback for plugins that have
   // not reported live descriptors yet. Needs plugins:read (API-gated).
   const [fallbackDescriptors, setFallbackDescriptors] = useState<Record<string, MetricDescriptor[]>>({});
@@ -306,6 +325,16 @@ export default function DeviceDetail() {
           )}
           {device && canWriteDevices && (
           <div className="flex items-center gap-2">
+            {hasSshConsole && (
+              <button
+                onClick={() => setConsoleOpen(true)}
+                title="Open an interactive SSH shell on this device (like PuTTY) — uses the bound SSH credential"
+                className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background"
+              >
+                <TerminalIcon className="h-4 w-4" />
+                Shell
+              </button>
+            )}
             <button
               onClick={() => refreshDevice.mutate()}
               disabled={refreshDevice.isPending}
@@ -841,6 +870,18 @@ export default function DeviceDetail() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* --- SSH console (host login shell, capability 'sshConsole') -------- */}
+      {consoleOpen && device && consoleAssignment && (
+        <ConsoleDialog
+          deviceId={device.id}
+          pluginId={consoleAssignment.pluginId}
+          context={{ kind: 'host' }}
+          title={`Shell — ${device.name}`}
+          subtitle={`${device.managementAddress ?? ''}${consoleAssignment.pluginName ? ` · via ${consoleAssignment.pluginName}` : ''}`}
+          onClose={() => setConsoleOpen(false)}
+        />
       )}
     </Layout>
   );

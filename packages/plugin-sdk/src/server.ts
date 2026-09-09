@@ -5,6 +5,8 @@
  */
 
 import path from 'path';
+import type { IncomingMessage } from 'http';
+import type { Duplex } from 'stream';
 import cors from 'cors';
 import express, { Express, Request, Response } from 'express';
 import { Bonjour } from 'bonjour-service';
@@ -53,6 +55,10 @@ export interface PluginServerOptions {
   discovery?: DiscoveryExtras | (() => DiscoveryExtras);
   /** Extra custom self-metrics gauges, merged into GET /metrics (see createSelfMetrics). */
   selfMetricsExtra?: Record<string, number> | (() => Record<string, number>);
+  /** Optional WebSocket upgrade handler (e.g. makeConsoleUpgrade for the SSH console,
+   *  capability 'sshConsole'). Attached to the HTTP server on listen(); non-matching
+   *  paths are dropped by the handler itself. */
+  wsUpgrade?: (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
 }
 
 export interface PluginServer {
@@ -156,6 +162,11 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
           startMdnsAdvertising(identity, logTag);
           resolve(identity.port);
         });
+        // WebSocket support (SSH console): the handler decides per-path whether to
+        // take the upgrade; everything else is dropped so plain HTTP is unaffected.
+        if (opts.wsUpgrade) {
+          server.on('upgrade', opts.wsUpgrade);
+        }
         // Keep a reference so the process stays alive and tests can close it.
         (app as unknown as { __server?: typeof server }).__server = server;
       });

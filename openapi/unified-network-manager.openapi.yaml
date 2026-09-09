@@ -1175,6 +1175,82 @@ paths:
         '502':
           description: Plugin failed to perform the file operation
 
+  /devices/{deviceId}/console:
+    post:
+      tags: [Devices]
+      summary: Mint a short-lived ticket for an interactive SSH console
+      description: >-
+        Authorizes ONE interactive SSH terminal session (capability `sshConsole`)
+        and returns a single-use, 60-second CONSOLE TICKET. This is the only
+        authenticated step of the console flow — browsers cannot set headers on a
+        WebSocket upgrade, so the ticket itself becomes the bearer credential for
+        the companion endpoint `GET /devices/{deviceId}/console/ws?ticket=…`.
+        Authorization happens here: JWT + `devices:write` + the assigned plugin's
+        `sshConsole` capability. The body may carry a `pluginId` (default = primary
+        assignment) and a plugin-owned `context` naming what to attach to — e.g.
+        `{ kind: 'host' }` for a login shell or `{ kind: 'container', name?, service? }`
+        for an exec into a container. The webapp's DeviceDetail page ("Shell" button)
+        and the Containers page (per-container console) both drive this route; the
+        WebSocket proxy then pipes bytes verbatim to the plugin's `/console` endpoint,
+        which opens a PTY session over the bound `ssh` credential slot.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConsoleTicketRequest'
+      responses:
+        '201':
+          description: Ticket minted (use it on the console WebSocket endpoint)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsoleTicketResponse'
+        '400':
+          description: Plugin not assigned to this device / no assignment at all
+        '401':
+          description: Authentication required (requires devices:write)
+        '404':
+          description: Device or plugin endpoint not found
+        '501':
+          description: This plugin does not support an SSH console
+
+  /devices/{deviceId}/console/ws:
+    get:
+      tags: [Devices]
+      summary: Open the interactive SSH console WebSocket (ticket-authenticated)
+      description: >-
+        The WebSocket PROXY for an SSH console. Browsers cannot attach an
+        Authorization header to a WS upgrade, so this endpoint authenticates via
+        the single-use ticket minted by `POST /devices/{deviceId}/console` — which
+        already enforced JWT + `devices:write` + capability checks for exactly this
+        device/assignment. The proxy redeems the ticket once, resolves FRESH
+        credentials and pipes frames VERBATIM between the browser's xterm.js and
+        the plugin's `/console` endpoint (capability `sshConsole`): binary frames
+        are raw terminal I/O in both directions; text frames carry JSON control
+        messages (`ready`, `resize {cols,rows}`, `exit {code}`, `error {message}`).
+        The first frame FROM the proxy is a hello object with fresh credentials —
+        plugins never see the user's JWT. This path is served by a server-level
+        upgrade listener (not an express route) and therefore appears in this spec
+        for documentation only; clients open it as `ws(s)://…/v1/devices/{id}/console/ws?ticket=…`.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: ticket
+          required: true
+          description: "Single-use console ticket from POST /devices/{deviceId}/console"
+          schema: { type: string }
+      responses:
+        '101':
+          description: WebSocket upgrade — the terminal stream is live
+        '401':
+          description: Missing, invalid or expired console ticket
+        '502':
+          description: Plugin console unreachable / failed to open the PTY
+
   /devices/{deviceId}/ports:
     get:
       tags: [Devices]
@@ -5264,6 +5340,27 @@ components:
         pluginId: { type: string }
         result:
           $ref: '#/components/schemas/FilesystemResult'
+
+    ConsoleTicketRequest:
+      type: object
+      properties:
+        pluginId: { type: string, description: "Assigned plugin to console (default = primary assignment)" }
+        context:
+          type: object
+          additionalProperties: true
+          description: >-
+            Plugin-owned context naming what to attach to — e.g. `{ kind: 'host' }`
+            for a login shell or `{ kind: 'container', name?, service? }` for an exec
+            into a container (the plugin resolves the docker name + entrypoint).
+
+    ConsoleTicketResponse:
+      type: object
+      required: [deviceId, ticket]
+      properties:
+        deviceId: { type: string }
+        ticket:
+          type: string
+          description: "Single-use, 60 s console ticket — pass it as ?ticket= on the console WebSocket endpoint"
 
     DeviceProbe:
       type: object

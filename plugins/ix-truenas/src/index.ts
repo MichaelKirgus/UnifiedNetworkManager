@@ -27,6 +27,10 @@ import {
   StateRequestBody,
   ProbeRequestBody,
   resolveSshCredentials,
+  makeConsoleUpgrade,
+  createTerminalPool,
+  type SshCredentials,
+  type SshTerminalSession,
 } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } from './client/truenasClient';
 import {
@@ -41,6 +45,7 @@ import {
   normalizeVmDevice,
   serviceNetDetails,
   sshHostOf,
+  sshPool,
   type ContainerStat,
   type ContainerVolume,
   type DockerContainerInfo,
@@ -110,9 +115,17 @@ const identity = resolvePluginIdentity({
   // scoped root (a dataset mountpoint or a volume's host source) — requires a
   // bound ssh slot. GENERIC contract: any future plugin serving /filesystem gets
   // the webapp's file browser for free.
-  version: '0.9.0',
+  // 0.10.0 — interactive SSH console (/console WebSocket, capability 'sshConsole'):
+  // a full xterm.js terminal in the web UI that talks to the appliance like PuTTY
+  // would (TrueNAS' own web console does exactly this). Two attach modes via the
+  // plugin-owned `context`: { kind: 'host' } = login shell on the host, and
+  // { kind: 'container', name?, service? } = `docker exec -it` into a container
+  // (the docker name is resolved live from `docker ps`). Requires a bound ssh slot.
+  // GENERIC contract: any future plugin serving /console with the SDK's
+  // makeConsoleUpgrade gets the webapp's Shell button + container consoles for free.
+  version: '0.10.0',
   vendors: ['truenas'],
-  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem'],
+  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole'],
 });
 
 /**
@@ -307,11 +320,90 @@ const notifier = createNotifier(identity);
  */
 const knownAlertsByHost = new Map<string, Set<string>>();
 
+// ---------------------------------------------------------------------------
+// Interactive SSH console (/console WebSocket, capability 'sshConsole').
+// The webapp's DeviceDetail "Shell" button and the Containers page per-container
+// consoles drive this: a full xterm.js terminal that talks to the appliance like
+// PuTTY would. Two attach modes via the plugin-owned `context`:
+//   { kind: 'host' }                        → login shell on the host (openShell)
+//   { kind: 'container', name?, service? }  → docker exec -it into a container;
+//                                             the docker NAME is resolved live from
+//                                             `docker ps` against candidate names
+//                                             (the webapp knows compose service
+//                                             names, not necessarily docker names).
+// Requires a bound ssh slot. The SDK's makeConsoleUpgrade handles the WS protocol
+// (binary = raw I/O, text = control JSON); this plugin only maps context → session.
+// ---------------------------------------------------------------------------
+
+/** Process-wide terminal connection pool — one authenticated SSH conn per host+user,
+ *  shared by ALL concurrent consoles to that appliance (each console opens its own channel). */
+const termPool = createTerminalPool();
+process.on('SIGTERM', () => termPool.closeAll());
+process.on('SIGINT', () => termPool.closeAll());
+
+/** Opens an interactive session for one console hello frame. */
+async function openConsoleSession(
+  host: string,
+  sshCreds: SshCredentials,
+  context: Record<string, unknown> | undefined,
+): Promise<SshTerminalSession> {
+  const conn = await termPool.get(host, 22, sshCreds);
+  const ctx: Record<string, unknown> = context ?? {};
+  const kind = typeof ctx['kind'] === 'string' ? (ctx['kind'] as string) : '';
+
+  if (kind === 'container') {
+    // Candidate docker names: explicit `name` first, then the compose service name
+    // and the `<app>-<service>` convention TrueNAS uses for multi-container apps.
+    const candidates = [pickString(ctx, ['name']), pickString(ctx, ['service'])].filter((c): c is string => !!c);
+    const svc = pickString(ctx, ['service']);
+    if (svc) {
+      // The webapp sends the app name too when it differs — try `<app>-<svc>` as well.
+      const app = pickString(ctx, ['app']);
+      if (app && app !== svc) candidates.push(`${app}-${svc}`);
+    }
+
+    // Resolve the real docker name with ONE `docker ps -a` over the plugin's shared
+    // (non-PTY) exec pool — clean output, no terminal artifacts.
+    const probeClient = await sshPool.get(host, 22, sshCreds);
+    const listingRes = await probeClient.exec(`docker ps -a --format '{{.Names}}' 2>/dev/null`, sshCreds);
+    const names = new Set(listingRes.stdout.split('\n').map((l) => l.trim()).filter(Boolean));
+    const dockerName = candidates.find((c) => names.has(c)) ?? null;
+    if (!dockerName) {
+      throw new Error(`Container not found on the appliance (tried: ${candidates.join(', ') || 'no name given'})`);
+    }
+
+    // `docker exec -it <name> /bin/sh` — the outer SSH PTY is what makes docker's
+    // `-t` work; resize propagates through both layers. /bin/sh exists in (nearly)
+    // every image that ships a shell at all; images without one surface docker's
+    // own error on the terminal, which is the honest answer.
+    return conn.openExec(`docker exec -it ${dockerName} /bin/sh`, sshCreds);
+  }
+
+  // Default (and kind: 'host') — a plain login shell on the appliance.
+  return conn.openShell(sshCreds);
+}
+
+/** The WebSocket upgrade handler createPluginServer attaches to its HTTP server. */
+const consoleUpgrade = makeConsoleUpgrade({
+  expectedApiKey: () => process.env.PLUGIN_API_KEY ?? null,
+  path: '/console',
+  onOpen: async (hello) => {
+    const host = sshHostOf(hello.managementAddress);
+    if (!host) throw new Error('Missing management address');
+    // Only the bound ssh slot counts — the primary username/password must NOT be reused.
+    const sshCreds = resolveSshCredentials(hello.credentials as Record<string, unknown> | undefined, { slotOnly: true });
+    if (!sshCreds) throw new Error('No SSH credential bound — console unavailable');
+    return openConsoleSession(host, sshCreds, hello.context);
+  },
+});
+
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
   identity,
   logTag: 'ix-truenas-plugin',
+  // Interactive SSH console (capability 'sshConsole') — WS upgrades for /console.
+  wsUpgrade: consoleUpgrade,
   // Filesystem writes (POST /filesystem op=write) carry base64 file contents —
   // allow up to ~10 MiB of inbound JSON so a user can upload files that size.
   jsonLimit: '12mb',
@@ -336,7 +428,7 @@ const server = createPluginServer({
         secretTypes: ['usernamePassword', 'sshKeyPair'],
         required: false,
         description:
-          'Optional SSH access for per-container details (real MAC addresses, live IPs and start times via docker inspect) AND the filesystem browser (browse/edit dataset contents + container volume mounts over SFTP). Unbound = containers keep showing compose-config data only and the Browse buttons stay hidden.',
+          'Optional SSH access for per-container details (real MAC addresses, live IPs and start times via docker inspect), the filesystem browser (browse/edit dataset contents + container volume mounts over SFTP) AND the interactive web console (a full shell on the host or inside a container — like TrueNAS\' own web terminal). Unbound = containers keep showing compose-config data only and the Browse/Shell buttons stay hidden.',
       },
     ],
     metrics: buildMetricDescriptors(),

@@ -1,7 +1,8 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ArrowUpCircle, ChevronDown, ChevronRight, ChevronUp, Container, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Trash2, X } from 'lucide-react';
+import { ArrowUpCircle, ChevronDown, ChevronRight, ChevronUp, Container, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
+import { ConsoleDialog } from '../components/ConsoleDialog';
 import { CreateAppDialog, CreateAppCandidate, type AppMode } from '../components/CreateAppDialog';
 import { FileBrowserDialog } from '../components/FileBrowserDialog';
 import { Layout } from '../components/Layout';
@@ -526,6 +527,8 @@ interface TreeNode {
    * needed to create a per-container plan (the `-one` actions). */
   deviceId?: string;
   pluginId?: string;
+  /** The owning app's name (TrueNAS multi-container naming: docker names are often `<app>-<service>`). */
+  appName?: string;
   service?: string;
   image?: string | null;
   state?: string | null;
@@ -604,6 +607,7 @@ function buildApp(row: ContainerRow, liveStats?: Record<string, LiveContainerSta
         kind: 'container',
         deviceId: row.deviceId,
         pluginId: row.pluginId,
+        appName: row.name,
         service: svcName,
         image: s.image ?? null,
         state: s.state ?? null,
@@ -735,6 +739,10 @@ interface ChildActionContext {
   canBrowse?: (pluginId: string) => boolean;
   /** Opens the filesystem browser for a volume leaf's host path. */
   browseVolume?: (node: TreeNode) => void;
+  /** True when the plugin advertises the 'sshConsole' capability (console button). */
+  canConsole?: (pluginId: string) => boolean;
+  /** Opens an interactive shell INSIDE this container (docker exec over SSH). */
+  openContainerConsole?: (node: TreeNode) => void;
 }
 
 /** Per-container lifecycle actions for child rows — rendered in the Actions cell
@@ -752,6 +760,10 @@ function ContainerNodeActions({ node, ctx }: { node: TreeNode; ctx: ChildActionC
     { id: 'containers.restart-one', label: 'Restart', icon: <RotateCw size={13} />, available: ctx.hasAction(pid, 'containers.restart-one'), eligible: true },
     { id: 'containers.delete-one', label: 'Delete', icon: <Trash2 size={13} />, available: ctx.hasAction(pid, 'containers.delete-one'), eligible: true, danger: true },
   ];
+  // Interactive console (capability 'sshConsole') — a full shell INSIDE this
+  // container via `docker exec -it` over the bound SSH credential. Rendered
+  // alongside the lifecycle actions; only when the plugin advertises it.
+  const canConsole = !!ctx.canConsole && ctx.canConsole(pid);
   return (
     <div className="flex items-center gap-0.5">
       {actions.map((a) => {
@@ -775,6 +787,17 @@ function ContainerNodeActions({ node, ctx }: { node: TreeNode; ctx: ChildActionC
           </button>
         );
       })}
+      {canConsole && (
+        <button
+          type="button"
+          aria-label={`Open console in ${node.service ?? ''}`}
+          title={`Open an interactive shell inside ${node.service ?? 'this container'} (docker exec over SSH)`}
+          onClick={() => ctx.openContainerConsole?.(node)}
+          className="rounded-md p-1 text-secondary hover:bg-muted hover:text-foreground"
+        >
+          <TerminalIcon size={13} />
+        </button>
+      )}
     </div>
   );
 }
@@ -1126,6 +1149,16 @@ export default function Containers() {
 
   /** The volume leaf whose host path the file browser is showing (null = closed). */
   const [browseVolume, setBrowseVolume] = useState<TreeNode | null>(null);
+
+  // --- SSH console (capability 'sshConsole') ---------------------------------
+  // A per-container console button only renders when the owning plugin advertises
+  // the 'sshConsole' capability — GENERIC: any future container plugin serving
+  // /console gets in-container shells for free. Opens `docker exec -it` into the
+  // member via the bound SSH credential (the plugin resolves the docker name).
+  const canConsole = (pluginId: string): boolean => (pluginsForCaps[pluginId] ?? []).includes('sshConsole');
+
+  /** The container node whose shell is open in the console dialog (null = closed). */
+  const [consoleNode, setConsoleNode] = useState<TreeNode | null>(null);
 
   /** Custom app whose compose YAML is being edited. */
   const [yamlApp, setYamlApp] = useState<ContainerRow | null>(null);
@@ -1884,6 +1917,8 @@ export default function Containers() {
                         run: singleContainer,
                         canBrowse: canBrowseFs,
                         browseVolume: (node) => setBrowseVolume(node),
+                        canConsole,
+                        openContainerConsole: (node) => setConsoleNode(node),
                       }}
                     />
                   ),
@@ -1980,6 +2015,18 @@ export default function Containers() {
           title={`Browse volume ${browseVolume.volumeSource}`}
           subtitle={`${browseVolume.service ?? ''}${browseVolume.volumeTarget ? ` · mounted at ${browseVolume.volumeTarget} in the container` : ''}`}
           onClose={() => setBrowseVolume(null)}
+        />
+      )}
+
+      {/* SSH console — an interactive shell INSIDE one container member (capability 'sshConsole'). */}
+      {consoleNode && consoleNode.kind === 'container' && (
+        <ConsoleDialog
+          deviceId={consoleNode.deviceId ?? ''}
+          pluginId={consoleNode.pluginId}
+          context={{ kind: 'container', service: consoleNode.service, ...(consoleNode.appName ? { app: consoleNode.appName } : {}) }}
+          title={`Console — ${consoleNode.service ?? 'container'}`}
+          subtitle={`${consoleNode.image ?? ''}${consoleNode.state ? ` · ${consoleNode.state}` : ''}`}
+          onClose={() => setConsoleNode(null)}
         />
       )}
 

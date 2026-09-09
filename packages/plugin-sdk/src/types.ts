@@ -53,6 +53,15 @@ export const CAPABILITIES = [
   // it verbatim without interpreting content. Advertise when the plugin can
   // answer cheaply (cached connections, single read-only command, ...).
   'probe',
+  // Serves an interactive SSH console over WebSocket (see makeConsoleUpgrade /
+  // createTerminalPool in terminal.ts + consoleWs.ts). The webapp's DeviceDetail
+  // page offers a "Shell" button and the Containers page a per-container console —
+  // both open a full xterm.js terminal that talks to the device like PuTTY would.
+  // Like 'ssh'/'filesystem', it rides the same bound 'ssh' credential slot; the
+  // plugin owns what each `context` means (a host login shell, or an exec into a
+  // container). The API brokers the WebSocket verbatim — credentials travel only
+  // over the authenticated API→plugin hop, never to the browser.
+  'sshConsole',
   'secretsProvider',
   'identityProvider',
   // Reserved for future log-forwarder plugins (syslog daemon, OpenSearch, ...).
@@ -479,6 +488,38 @@ export interface FilesystemResponseBody {
   mtimeMs?: number | null;
   isDirectory?: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// SSH console — WebSocket (API -> plugin), advertised via capability 'sshConsole'
+// An interactive terminal over SSH: the webapp's xterm.js talks to the API, which
+// proxies VERBATIM to the plugin's /console endpoint. BINARY frames are raw
+// terminal I/O both directions; TEXT frames carry ConsoleControlMessage JSON.
+// The FIRST text frame from the API is a ConsoleHelloFrame with fresh credentials —
+// the plugin maps `context` onto an SshTerminalSession (host shell or container exec).
+// ---------------------------------------------------------------------------
+
+/** First text frame the API sends to the plugin's /console endpoint after upgrade. */
+export interface ConsoleHelloFrame {
+  deviceId: string;
+  /** The device address as registered (may carry a scheme — strip it for SSH). */
+  managementAddress: string;
+  /** All known addresses, primary first. */
+  ipAddresses?: DeviceAddress[];
+  /** Fresh decrypted credentials (primary + bound slots) — same shape as /monitoring. */
+  credentials: StepCredentials;
+  /** Plugin-owned context naming WHAT to attach to. E.g. `{ kind: 'host' }` for a
+   *  login shell, or `{ kind: 'container', name?, service? }` for an exec into a
+   *  container (the plugin resolves the docker name + entrypoint). */
+  context?: Record<string, unknown>;
+}
+
+/** Control messages carried in TEXT frames on the console WebSocket. */
+export type ConsoleControlMessage =
+  | { type: 'ready' }
+  | { type: 'resize'; cols: number; rows: number }
+  | { type: 'exit'; code: number }
+  | { type: 'error'; message: string }
+  | { type: 'closed' };
 
 // ---------------------------------------------------------------------------
 // Wire shapes — POST /config (API -> plugin). TWO request shapes coexist:

@@ -10,6 +10,12 @@ export { resolvePluginIdentity, DEFAULT_PLUGIN_PORT } from './identity';
 export type { PluginIdentity, PluginIdentityInput } from './identity';
 export { createPluginServer, buildDiscoverPayload, requirePluginKey, stateHandler, probeHandler, filesystemHandler } from './server';
 export type { PluginServerOptions, PluginServer, DiscoveryExtras } from './server';
+// Interactive SSH console (capability 'sshConsole'): PTY sessions + pool (terminal.ts)
+// and the WebSocket bridge helper plugins pass to createPluginServer (consoleWs.ts).
+export { SshTerminalSession, SshTerminalConnection, createTerminalPool } from './terminal';
+export type { TerminalCredentials, TerminalPtyOptions, TerminalConnectionOptions, TerminalPool, TerminalPoolOptions } from './terminal';
+export { makeConsoleUpgrade } from './consoleWs';
+export type { ConsoleEndpointOptions, ConsoleUpgradeHandler } from './consoleWs';
 export { readSettings, clampInt, hostFromAddress, pickString, pickNumber } from './settings';
 export { suggestPortLayout, portNumberFromKey } from './portLayout';
 export { INVENTORY_INTERVAL_MS, errorDescriptor, modelFirmwareDescriptors, gaugeMetric, textMetric, tableMetric } from './metrics';

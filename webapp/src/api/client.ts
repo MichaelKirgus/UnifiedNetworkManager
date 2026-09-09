@@ -1406,6 +1406,25 @@ export interface FilesystemResponse {
   result: FilesystemResult;
 }
 
+// --- SSH console (capability 'sshConsole') -----------------------------------
+
+/** Response of POST /devices/:id/console — a single-use, 60 s console ticket. */
+export interface ConsoleTicketResponse {
+  deviceId: string;
+  /** Pass as ?ticket= on the console WebSocket endpoint (see openConsoleSocket). */
+  ticket: string;
+}
+
+/** Builds the browser-facing console WebSocket URL for one minted ticket.
+ *  The API proxies it verbatim to the plugin's /console endpoint — binary frames
+ *  are raw terminal I/O, text frames carry JSON control messages ({ type: 'ready' |
+ *  'resize' | 'exit' | 'error', … }). */
+export function consoleSocketUrl(deviceId: string, ticket: string): string {
+  const base = BASE.replace(/\/$/, '');
+  const wsBase = base.replace(/^http/i, 'ws');
+  return `${wsBase}/devices/${encodeURIComponent(deviceId)}/console/ws?ticket=${encodeURIComponent(ticket)}`;
+}
+
 /** One normalized port row (device_ports table). */
 export interface DevicePortRow {
   pluginId: string;
@@ -1619,6 +1638,13 @@ export const api = {
     apiFetch<FilesystemResponse>(`/devices/${deviceId}/filesystem`, {
       method: 'POST',
       body: JSON.stringify({ op, ...params }),
+    }),
+  // Mint a single-use, 60 s ticket for an interactive SSH console (capability
+  // 'sshConsole'). Gated on devices:write; the plugin's capability is checked here.
+  mintConsoleTicket: (deviceId: string, params: { pluginId?: string; context?: Record<string, unknown> } = {}) =>
+    apiFetch<ConsoleTicketResponse>(`/devices/${deviceId}/console`, {
+      method: 'POST',
+      body: JSON.stringify(params),
     }),
   // Normalized port inventory for a device across all plugins.
   devicePorts: (deviceId: string) =>

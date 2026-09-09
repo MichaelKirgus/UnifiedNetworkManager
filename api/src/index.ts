@@ -33,6 +33,7 @@ import { startLogRetentionWorker } from './workers/logRetention';
 import { startPluginMetricsWorker } from './workers/pluginMetrics';
 import { LEADER_KEYS, runAsLeader } from './workers/leader';
 import { initWorker } from './workers/stats';
+import { attachConsoleProxy } from './consoleProxy';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const API_PREFIX = '/v1';
@@ -154,11 +155,16 @@ async function main(): Promise<void> {
   // gated — it drains this instance's own in-process queue, so every replica
   // must run one to process jobs its routes enqueued.
   const workerStops: Array<() => Promise<void>> = [];
-  app.listen(PORT, () => {
+  const httpServer = app.listen(PORT, () => {
     // eslint-disable-next-line no-console
     console.log(`[api] UnifiedNetworkManager API listening on port ${PORT}`);
     // eslint-disable-next-line no-console
     console.log(`[api] OpenAPI spec loaded from ${specPath}`);
+
+    // SSH console (capability 'sshConsole'): WS upgrades bypass express entirely, so
+    // the proxy attaches to the raw HTTP server — it pipes browser ⇄ plugin /console
+    // verbatim using single-use tickets minted by POST /devices/:id/console.
+    attachConsoleProxy(httpServer);
 
     startConfigJobWorker();
 
