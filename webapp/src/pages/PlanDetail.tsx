@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
 import clsx from 'clsx';
@@ -9,6 +9,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  RotateCcw,
   Square,
   Trash2,
   X,
@@ -16,6 +17,7 @@ import {
 import { Layout } from '../components/Layout';
 import { StatusBadge } from '../components/StatusBadge';
 import { SchemaForm, validateSchema, defaultValues } from '../components/SchemaForm';
+import { ReauthDialog } from '../components/ReauthDialog';
 import { api, ApiError, CatalogEntry, Device, PlanDetail as PlanDetailType, PlanStep } from '../api/client';
 import { can } from '../auth/permissions';
 
@@ -54,6 +56,24 @@ export default function PlanDetail() {
   const actionLabel = (actionId: string) => catalog.find((c) => c.id === actionId)?.label ?? actionId;
 
   const editable = plan ? ['draft', 'ready'].includes(plan.status) : false;
+
+  // Retry duplicates the plan (same payload + provisioned secrets) and executes
+  // the copy — 2FA-gated server-side, so a 401 opens in-session revalidation.
+  const [reauth, setReauth] = useState<{ label: string; retry: () => Promise<void> } | null>(null);
+  const [retryError, setRetryError] = useState<string | null>(null);
+  async function handleRetry() {
+    setRetryError(null);
+    const attempt = async () => {
+      const fresh = await api.retryPlan(id);
+      window.location.href = `/plans/${fresh.id}`;
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth({ label: `Retry ${plan?.intentActionId ?? 'plan'}`, retry: attempt });
+      else setRetryError(describeError(err));
+    }
+  }
 
   const executeMutation = useMutation({
     mutationFn: () => api.executePlan(id),
@@ -99,6 +119,12 @@ export default function PlanDetail() {
               <Play className="h-4 w-4" /> Execute
             </button>
           )}
+          {canApply && plan.status !== 'executing' && (
+            <button onClick={handleRetry} title="Duplicates this plan (same payload + secrets) and executes the copy"
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
+              <RotateCcw className="h-4 w-4" /> Retry
+            </button>
+          )}
           {canApply && plan.status === 'executing' && (
             <button onClick={() => cancelMutation.mutate()} disabled={cancelMutation.isPending}
               className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted disabled:opacity-50">
@@ -122,6 +148,40 @@ export default function PlanDetail() {
           {describeError(executeMutation.error ?? cancelMutation.error)}
         </div>
       )}
+      {retryError && (
+        <div className="mb-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{retryError}</div>
+      )}
+
+      {/* Who + when — attribution and execution timing for the current run. */}
+      <section className="mb-5 grid grid-cols-2 gap-x-6 gap-y-3 rounded-md border border-border bg-card p-4 text-sm shadow-sm sm:grid-cols-3 lg:grid-cols-6">
+        <Meta label="Created by" value={plan.createdByName ?? plan.createdBy} />
+        <Meta label="Executed by" value={plan.executedByName ?? '—'} muted={!plan.executedByName} />
+        <Meta label="Created" value={fmtTime(plan.createdAt)} />
+        <Meta
+          label="Started"
+          value={plan.startedAt ? fmtTime(plan.startedAt) : ['draft', 'ready'].includes(plan.status) ? 'queued' : '—'}
+          muted={!plan.startedAt}
+        />
+        <Meta label="Finished" value={fmtTime(plan.finishedAt)} muted={!plan.finishedAt} />
+        {plan.retriedFrom && (
+          <Meta
+            label="Retried from"
+            value={
+              <Link to={`/plans/${plan.retriedFrom}`} className="text-primary hover:underline">
+                view original
+              </Link>
+            }
+          />
+        )}
+      </section>
+
+      {/* Payload — the raw intent inputs behind every execution of this plan. */}
+      <section className="mb-5 rounded-md border border-border bg-card p-4 shadow-sm">
+        <h2 className="mb-2 text-sm font-semibold text-foreground">Payload — intent inputs</h2>
+        <pre className="max-h-64 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-slate-100">
+          {Object.keys(plan.intentInputs ?? {}).length > 0 ? JSON.stringify(plan.intentInputs, null, 2) : '{}'}
+        </pre>
+      </section>
 
       {/* Provisioned secrets */}
       {plan.provisionedSecrets.length > 0 && (
@@ -155,8 +215,38 @@ export default function PlanDetail() {
       {plan.error && (
         <div className="mt-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{plan.error}</div>
       )}
+
+      {reauth && (
+        <ReauthDialog
+          contextLabel={reauth.label}
+          onClose={() => setReauth(null)}
+          onSuccess={async () => {
+            const retry = reauth.retry;
+            setReauth(null);
+            await retry();
+          }}
+        />
+      )}
     </Layout>
   );
+}
+
+// --- Small helpers -------------------------------------------------------------
+
+/** One label/value cell of the plan metadata grid. */
+function Meta({ label, value, muted }: { label: string; value: React.ReactNode; muted?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-faint">{label}</p>
+      <p className={muted ? 'truncate text-secondary' : 'truncate text-foreground'} title={typeof value === 'string' ? value : undefined}>
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function fmtTime(iso?: string | null): string {
+  return iso ? new Date(iso).toLocaleString() : '—';
 }
 
 // --- Provisioned secret card --------------------------------------------------

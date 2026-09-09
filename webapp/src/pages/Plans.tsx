@@ -1,11 +1,12 @@
 import { FormEvent, useMemo, useState } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { Plus, X } from 'lucide-react';
+import { Plus, RotateCcw, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
-import { DataTable, DataTableColumn } from '../components/DataTable';
+import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
 import { SchemaForm, validateSchema, defaultValues } from '../components/SchemaForm';
+import { ReauthDialog } from '../components/ReauthDialog';
 import { api, ApiError, CatalogEntry, Device, Plan } from '../api/client';
 import { can } from '../auth/permissions';
 
@@ -24,15 +25,50 @@ export default function Plans() {
   return <PlansList onCreate={can('configs:apply') ? () => setMode('create') : undefined} />;
 }
 
+/** Formats an ISO timestamp for the timing columns; '—' when absent. */
+function fmtTime(iso?: string | null): string {
+  return iso ? new Date(iso).toLocaleString() : '—';
+}
+
+/** Id prefix marking a plan's synthetic payload child row (see PlansList expandable). */
+const PAYLOAD_CHILD_PREFIX = '__payload__:';
+
 function PlansList({ onCreate }: { onCreate?: () => void }) {
   const plansQuery = useQuery({ queryKey: ['plans'], queryFn: api.plans, refetchInterval: 10_000 });
   // Plugin names for the table — only fetched when allowed (API gates on plugins:read).
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, enabled: can('plugins:read') });
 
   const pluginName = (id: string) => pluginsQuery.data?.find((p) => p.id === id)?.name ?? id;
+  const canApply = can('configs:apply');
+
+  // Retry duplicates the plan and executes the copy — 2FA-gated server-side,
+  // so a 401 opens the in-session revalidation dialog before retrying.
+  const [reauth, setReauth] = useState<{ label: string; retry: () => Promise<void> } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  async function handleRetry(plan: Plan) {
+    const attempt = async () => {
+      const fresh = await api.retryPlan(plan.id);
+      window.location.href = `/plans/${fresh.id}`;
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth({ label: `Retry ${plan.intentActionId}`, retry: attempt });
+      else setNotice(`Retry failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   const columns: DataTableColumn<Plan>[] = [
-    { header: 'Intent', key: 'intentActionId' },
+    {
+      header: 'Intent',
+      key: 'intentActionId',
+      render: (row) => (
+        <Link to={`/plans/${row.id}`} className="font-medium text-foreground hover:text-primary" title={`Open plan ${row.id.slice(0, 8)}…`}>
+          {row.intentActionId}
+        </Link>
+      ),
+    },
     { header: 'Plugin', key: 'pluginId', render: (row) => <span className="text-secondary">{pluginName(row.pluginId)}</span> },
     {
       header: 'Steps',
@@ -46,10 +82,71 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
     },
     { header: 'Status', key: 'status', render: (row) => <StatusBadge status={row.status} /> },
     {
+      header: 'Error',
+      key: 'error',
+      sortable: false,
+      filterable: false,
+      width: 260,
+      exportValue: (row) => row.error ?? '',
+      render: (row) =>
+        row.error ? (
+          <span className="block max-w-[300px] truncate text-danger-fg" title={row.error}>
+            {row.error}
+          </span>
+        ) : (
+          <span className="text-faint">—</span>
+        ),
+    },
+    {
+      header: 'Created by',
+      key: 'createdByName',
+      render: (row) => <span className="text-secondary">{row.createdByName ?? row.createdBy}</span>,
+    },
+    {
+      header: 'Executed by',
+      key: 'executedByName',
+      render: (row) => (
+        <span className={row.executedByName ? 'text-secondary' : 'text-faint'}>{row.executedByName ?? '—'}</span>
+      ),
+    },
+    {
       header: 'Created',
       key: 'createdAt',
       sortAccessor: (row) => new Date(row.createdAt).getTime(),
-      render: (row) => new Date(row.createdAt).toLocaleString(),
+      render: (row) => fmtTime(row.createdAt),
+    },
+    {
+      header: 'Started',
+      key: 'startedAt',
+      sortAccessor: (row) => (row.startedAt ? new Date(row.startedAt).getTime() : 0),
+      render: (row) => (
+        row.startedAt ? fmtTime(row.startedAt) : <span className="text-faint">{['draft', 'ready'].includes(row.status) ? 'queued' : '—'}</span>
+      ),
+    },
+    {
+      header: 'Finished',
+      key: 'finishedAt',
+      sortAccessor: (row) => (row.finishedAt ? new Date(row.finishedAt).getTime() : 0),
+      render: (row) => fmtTime(row.finishedAt),
+    },
+    {
+      header: 'Actions',
+      key: 'actions',
+      sortable: false,
+      filterable: false,
+      excludeFromExport: true,
+      width: 90,
+      render: (row) =>
+        canApply && row.status !== 'executing' ? (
+          <button
+            onClick={() => handleRetry(row)}
+            title="Retry — duplicates this plan (same payload + secrets) and executes the copy"
+            aria-label={`Retry ${row.intentActionId}`}
+            className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs font-medium text-secondary hover:bg-muted disabled:opacity-50"
+          >
+            <RotateCcw className="h-3.5 w-3.5" /> Retry
+          </button>
+        ) : null,
     },
   ];
 
@@ -72,6 +169,12 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
       {plansQuery.isError && (
         <p className="text-sm text-danger-fg">Failed to load plans: {(plansQuery.error as Error).message}</p>
       )}
+      {notice && (
+        <div className="mb-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
+          {notice}{' '}
+          <button onClick={() => setNotice(null)} className="font-medium underline">Dismiss</button>
+        </div>
+      )}
       {plansQuery.data && (
         <DataTable
           columns={columns}
@@ -80,9 +183,91 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
           storageKey="plans"
           autoRefresh={{ intervalMs: 10_000, queries: [plansQuery] }}
           emptyMessage="No plans yet. Create one to roll out a multi-device change (e.g. a WireGuard tunnel)."
+          expandable={{
+            // Every plan is expandable — the payload (intent inputs + per-step
+            // payloads) must always be visible, for past and future executions.
+            // The child is a sentinel COPY of the row (synthetic id): search/
+            // filter match it exactly like its parent (no new surface), and the
+            // prefix marks it as leaf so DataTable's subtree walk terminates.
+            childrenOf: (row) =>
+              String(row.id).startsWith(PAYLOAD_CHILD_PREFIX) ? [] : [{ ...row, id: PAYLOAD_CHILD_PREFIX + row.id }],
+            renderChild: (_child, parent, ctx) => <PlanPayloadRow plan={parent} ctx={ctx} />,
+          }}
+        />
+      )}
+
+      {reauth && (
+        <ReauthDialog
+          contextLabel={reauth.label}
+          onClose={() => setReauth(null)}
+          onSuccess={async () => {
+            const retry = reauth.retry;
+            setReauth(null);
+            await retry();
+          }}
         />
       )}
     </Layout>
+  );
+}
+
+/**
+ * Expanded row under a plan: the full payload of what was / will be executed —
+ * the raw intent inputs plus every step's action, target device and input.
+ * Step payloads are loaded lazily (the list endpoint omits them).
+ */
+function PlanPayloadRow({ plan, ctx }: { plan: Plan; ctx: ExpandChildContext }) {
+  const detailQuery = useQuery({ queryKey: ['plan', plan.id], queryFn: () => api.getPlan(plan.id) });
+  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, enabled: can('plugins:read') });
+  const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices, enabled: can('devices:read') });
+
+  const pluginName = (id: string) => pluginsQuery.data?.find((p) => p.id === id)?.name ?? id;
+  const deviceName = (id: string) => devicesQuery.data?.find((d) => d.id === id)?.name ?? id;
+
+  // Anchor the payload in the Intent column when visible, else the first
+  // visible column — hiding a column must never hide the payload.
+  const anchorIdx = Math.max(0, ctx.columns.findIndex((c) => c.key === 'intentActionId'));
+
+  return (
+    <tr className="bg-background/70">
+      {ctx.columns.map((col, i) => (
+        <td key={col.key} className="overflow-hidden px-4 py-2 text-secondary">
+          {i === anchorIdx ? (
+            <div className="space-y-3 py-1">
+              <div>
+                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-faint">Intent inputs</p>
+                <pre className="max-h-48 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-slate-100">
+                  {Object.keys(plan.intentInputs ?? {}).length > 0
+                    ? JSON.stringify(plan.intentInputs, null, 2)
+                    : '{}'}
+                </pre>
+              </div>
+              <div>
+                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-faint">Step payloads</p>
+                {detailQuery.isLoading && <p className="text-xs text-faint">Loading steps…</p>}
+                {!detailQuery.isLoading && (detailQuery.data?.steps ?? []).length === 0 && (
+                  <p className="text-xs text-faint">No steps.</p>
+                )}
+                <div className="space-y-2">
+                  {(detailQuery.data?.steps ?? []).map((s) => (
+                    <details key={s.id} className="rounded border border-border bg-card px-2.5 py-1.5">
+                      <summary className="cursor-pointer text-xs font-medium text-secondary hover:text-foreground">
+                        #{s.stepIndex} · {s.actionId}
+                        <span className="ml-2 text-faint">{deviceName(s.deviceId)} ({pluginName(plan.pluginId)})</span>
+                        <StatusBadge status={s.status} />
+                      </summary>
+                      <pre className="mt-1.5 max-h-40 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-slate-100">
+                        {JSON.stringify(s.input ?? {}, null, 2)}
+                      </pre>
+                    </details>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </td>
+      ))}
+    </tr>
   );
 }
 

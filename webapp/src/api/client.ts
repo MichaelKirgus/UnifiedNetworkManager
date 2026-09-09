@@ -1469,15 +1469,26 @@ export interface Plan {
   id: string;
   pluginId: string;
   intentActionId: string;
+  /** The raw intent inputs as submitted — the payload of every execution (re-runs and retries carry the same values). */
+  intentInputs?: Record<string, unknown>;
   status: 'draft' | 'ready' | 'executing' | 'succeeded' | 'failed' | 'cancelled';
   provisionedSecrets: PlanProvisionedSecret[];
   error?: string | null;
   createdBy: string;
+  /** Display name of the creator (falls back to the raw user id). */
+  createdByName?: string;
+  /** User who started the CURRENT execution (null until executed; may differ from createdBy). */
+  executedBy?: string | null;
+  executedByName?: string | null;
   createdAt: string;
   updatedAt: string;
+  /** When the current execution actually started (set by the executor); null while queued. */
+  startedAt?: string | null;
   finishedAt?: string | null;
   /** Last terminal-status timestamp (cleared on re-execution) — drives the top-bar plans icon tick. */
   recentlyFinishedAt?: string | null;
+  /** Set when this plan was created via retry — id of the duplicated plan. */
+  retriedFrom?: string | null;
   /** Present on list responses. */
   stepCount?: number;
   stepsDone?: number;
@@ -1927,6 +1938,8 @@ export const api = {
   getPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}`),
   deletePlan: (id: string) => apiFetch<void>(`/plans/${id}`, { method: 'DELETE' }),
   executePlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/execute`, { method: 'POST' }),
+  /** Duplicate this plan (same payload + provisioned secrets) and execute the copy. */
+  retryPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/retry`, { method: 'POST' }),
   cancelPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/cancel`, { method: 'POST' }),
   addPlanStep: (planId: string, body: {
     deviceId: string;

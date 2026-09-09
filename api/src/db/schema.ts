@@ -986,6 +986,10 @@ export const plans = pgTable(
     pluginId: text('pluginId').notNull(),
     // Catalog entry the user started from (e.g. wireguard.tunnel.create).
     intentActionId: text('intentActionId').notNull(),
+    // JSON object — the raw intent inputs as submitted by the creator. Kept on
+    // the plan row so the payload of every execution is transparent, including
+    // re-runs and retries (which duplicate the plan with the same inputs).
+    intentInputs: text('intentInputs').notNull().default('{}'),
     // draft | ready | executing | succeeded | failed | cancelled
     status: text('status').notNull().default('ready'),
     // JSON object mapping provisionRequest ref -> created secret id.
@@ -993,10 +997,20 @@ export const plans = pgTable(
     error: text('error'),
     // JWT sub of the user who created the plan (also owns its secrets).
     createdBy: text('createdBy').notNull(),
+    // JWT sub of the user who started the CURRENT execution (set on execute;
+    // may differ from createdBy when someone else re-runs or retries it).
+    executedBy: text('executedBy'),
     // Set when a cancel is requested; the executor checks it between steps.
     cancelledAt: text('cancelledAt'),
     createdAt: text('createdAt').notNull(),
     updatedAt: text('updatedAt').notNull(),
+    // When the CURRENT execution actually started (set by the executor on its
+    // first step; null until then). Distinct from finishedAt, which is cleared
+    // when the plan is re-executed.
+    startedAt: text('startedAt'),
+    // Set on plans created via POST /plans/:id/retry — the id of the plan this
+    // one duplicates (same payload + provisioned secrets). Null otherwise.
+    retriedFrom: text('retriedFrom'),
     finishedAt: text('finishedAt'),
     // Last time this plan reached a terminal status (succeeded/failed/cancelled).
     // Distinct from finishedAt, which is cleared when the plan is re-executed —

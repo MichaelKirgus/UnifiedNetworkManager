@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { and, asc, desc, eq, gte } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, like, ne } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
 import { db } from '../db';
@@ -32,15 +32,67 @@ interface PlanRow {
   id: string;
   pluginId: string;
   intentActionId: string;
+  intentInputs: string | null;
   status: string;
   provisionedSecrets: string | null;
   error: string | null;
   createdBy: string;
+  executedBy: string | null;
   cancelledAt: string | null;
   createdAt: string;
   updatedAt: string;
+  startedAt: string | null;
   finishedAt: string | null;
   recentlyFinishedAt: string | null;
+  retriedFrom: string | null;
+}
+
+/**
+ * Resolves user ids to display names for a batch of plan rows (createdBy +
+ * executedBy). One query per list call; unknown ids (deleted users) fall back
+ * to the raw id so the column never renders empty.
+ */
+async function resolveUsernames(rows: PlanRow[]): Promise<Map<string, string>> {
+  const ids = new Set<string>();
+  for (const r of rows) {
+    if (r.createdBy) ids.add(r.createdBy);
+    if (r.executedBy) ids.add(r.executedBy);
+  }
+  const map = new Map<string, string>();
+  if (ids.size > 0) {
+    const users = await db.query.users.findMany({ where: (u, { inArray }) => inArray(u.id, [...ids]) });
+    for (const u of users) map.set(u.id, u.username);
+  }
+  return map;
+}
+
+/** Secret metadata shape as exposed on plan responses (never material). */
+type PlanSecretMeta = { ref: string; secretId: string; label?: string | null; type?: string };
+
+/**
+ * Batch-resolves provisioned-secret metadata for many plan rows in ONE query
+ * (label/type only — never material). Returns a map of planId → ordered meta.
+ */
+async function resolveSecretsMetadata(rows: PlanRow[]): Promise<Map<string, PlanSecretMeta[]>> {
+  const byPlan = new Map<string, PlanSecretMeta[]>();
+  const ids = new Set<string>();
+  for (const r of rows) {
+    const map = parseJson<Record<string, string>>(r.provisionedSecrets ?? '{}', {});
+    for (const secretId of Object.values(map)) ids.add(secretId);
+  }
+  const meta = new Map<string, { label: string | null; type?: string }>();
+  if (ids.size > 0) {
+    const srows = await db.query.secrets.findMany({ where: (s, { inArray }) => inArray(s.id, [...ids]) });
+    for (const s of srows) meta.set(s.id, { label: s.label ?? null, type: s.type });
+  }
+  for (const r of rows) {
+    const map = parseJson<Record<string, string>>(r.provisionedSecrets ?? '{}', {});
+    byPlan.set(
+      r.id,
+      Object.entries(map).map(([ref, secretId]) => ({ ref, secretId, label: meta.get(secretId)?.label ?? null, type: meta.get(secretId)?.type }))
+    );
+  }
+  return byPlan;
 }
 
 interface StepRow {
@@ -123,31 +175,42 @@ async function loadSteps(planId: string): Promise<StepRow[]> {
   return rows as StepRow[];
 }
 
-async function serializePlan(planId: string, withSteps = false) {
-  const row = await loadPlan(planId);
-  if (!row) return null;
-  const provisionedSecrets = parseJson<Record<string, string>>(row.provisionedSecrets, {});
-  // Secret metadata (label/type/createdAt only — never material).
-  let secrets: Array<{ ref: string; secretId: string; label?: string | null; type?: string }> = [];
-  for (const [ref, secretId] of Object.entries(provisionedSecrets)) {
-    const srow = await db.query.secrets.findFirst({
-      where: (secretsTable, { eq }) => eq(secretsTable.id, secretId),
-    });
-    secrets.push({ ref, secretId, label: srow?.label ?? null, type: srow?.type ?? undefined });
-  }
-  const out: Record<string, unknown> & { id: string; pluginId: string } = {
+/**
+ * Serializes one plan row; `usernames` (from resolveUsernames) maps ids →
+ * display names. NOTE: does NOT include `provisionedSecrets` — callers must
+ * add the resolved metadata array (resolveSecretsMetadata), never the raw map.
+ */
+function serializePlanRow(row: PlanRow, usernames: Map<string, string>): Record<string, unknown> & { id: string; pluginId: string } {
+  return {
     id: row.id,
     pluginId: row.pluginId,
     intentActionId: row.intentActionId,
+    // The raw intent inputs — the payload of every execution (re-runs and
+    // retries carry the same values, so this is always what will be applied).
+    intentInputs: parseJson<Record<string, unknown>>(row.intentInputs ?? '{}', {}),
     status: row.status,
-    provisionedSecrets: secrets,
     error: row.error,
     createdBy: row.createdBy,
+    createdByName: usernames.get(row.createdBy) ?? row.createdBy,
+    executedBy: row.executedBy,
+    executedByName: row.executedBy ? (usernames.get(row.executedBy) ?? row.executedBy) : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    startedAt: row.startedAt,
     finishedAt: row.finishedAt,
     recentlyFinishedAt: row.recentlyFinishedAt,
+    retriedFrom: row.retriedFrom,
   };
+}
+
+async function serializePlan(planId: string, withSteps = false) {
+  const row = await loadPlan(planId);
+  if (!row) return null;
+  const usernames = await resolveUsernames([row]);
+  const secretsMeta = await resolveSecretsMetadata([row]);
+  const out = serializePlanRow(row, usernames);
+  // Secret metadata (label/type only — never material).
+  out.provisionedSecrets = secretsMeta.get(row.id) ?? [];
   if (withSteps) {
     const steps = await loadSteps(planId);
     out.steps = steps.map(serializeStep);
@@ -376,13 +439,18 @@ router.post(
       id: planRowId,
       pluginId,
       intentActionId,
+      // Persist the raw intent inputs so every execution of this plan (and any
+      // retry that duplicates it) is fully transparent about what was applied.
+      intentInputs: JSON.stringify(inputs),
       status: 'ready',
       provisionedSecrets: JSON.stringify(provisionedSecrets),
       error: null,
       createdBy: userId,
+      executedBy: null,
       cancelledAt: null,
       createdAt: now,
       updatedAt: now,
+      startedAt: null,
       finishedAt: null,
     });
     for (const step of plan.steps) {
@@ -425,11 +493,14 @@ router.get('/plans/activity', requireAuth, requirePermission('plans:read'), asyn
     orderBy: [desc(schema.plans.updatedAt)],
     limit: 50,
   });
+  const planRows = rows as PlanRow[];
+  const usernames = await resolveUsernames(planRows);
+  const secretsMeta = await resolveSecretsMetadata(planRows);
   const out: unknown[] = [];
-  for (const row of rows as PlanRow[]) {
+  for (const row of planRows) {
     const steps = await loadSteps(row.id);
     const done = steps.filter((s) => s.status === 'succeeded').length;
-    out.push({ ...(await serializePlan(row.id)), stepCount: steps.length, stepsDone: done });
+    out.push({ ...serializePlanRow(row, usernames), provisionedSecrets: secretsMeta.get(row.id) ?? [], stepCount: steps.length, stepsDone: done });
   }
   res.status(200).json(out);
 });
@@ -440,11 +511,14 @@ router.get('/plans', requireAuth, requirePermission('plans:read'), async (_req, 
     orderBy: [desc(schema.plans.createdAt)],
     limit: 100,
   });
+  const planRows = rows as PlanRow[];
+  const usernames = await resolveUsernames(planRows);
+  const secretsMeta = await resolveSecretsMetadata(planRows);
   const out: unknown[] = [];
-  for (const row of rows as PlanRow[]) {
+  for (const row of planRows) {
     const steps = await loadSteps(row.id);
     const done = steps.filter((s) => s.status === 'succeeded').length;
-    out.push({ ...(await serializePlan(row.id)), stepCount: steps.length, stepsDone: done });
+    out.push({ ...serializePlanRow(row, usernames), provisionedSecrets: secretsMeta.get(row.id) ?? [], stepCount: steps.length, stepsDone: done });
   }
   res.status(200).json(out);
 });
@@ -839,11 +913,99 @@ router.post(
     }
     const now = new Date().toISOString();
     await db.update(schema.plans)
-      // Re-execution clears the "recently done" tick so it re-appears on finish.
-      .set({ status: 'executing', updatedAt: now, recentlyFinishedAt: null })
+      // Re-execution clears the "recently done" tick so it re-appears on finish,
+      // and resets every step to pending (a re-run re-applies ALL steps — the
+      // executor resolves ${steps[N].result...} tokens from THIS run's results).
+      .set({
+        status: 'executing',
+        executedBy: req.user?.sub ?? null,
+        error: null,
+        startedAt: null,
+        finishedAt: null,
+        recentlyFinishedAt: null,
+        updatedAt: now,
+      })
       .where(eq(schema.plans.id, plan.id));
+    await db.update(schema.planSteps)
+      .set({ status: 'pending', result: null, startedAt: null, finishedAt: null })
+      .where(eq(schema.planSteps.planId, plan.id));
     planQueue.add(plan.id, { planId: plan.id });
     res.status(202).json((await serializePlan(plan.id, true))!);
+  }
+);
+
+// POST /plans/:id/retry — duplicate this plan and execute the copy. The new
+// plan carries the SAME intent inputs, steps and provisioned secrets (no
+// re-provisioning), so a retry is exactly "run it again" with full payload
+// transparency on both rows (`retriedFrom` links them). 2FA-gated like execute.
+router.post(
+  '/plans/:id/retry',
+  requireAuth,
+  require2FA,
+  requirePermission('configs:apply'),
+  async (req, res) => {
+    const plan = await loadPlan(req.params.id);
+    if (!plan) {
+      res.status(404).json({ error: 'Plan not found' });
+      return;
+    }
+    if (plan.status === 'executing') {
+      res.status(409).json({ error: 'This plan is still executing — cancel it or wait for completion before retrying' });
+      return;
+    }
+
+    const steps = await loadSteps(plan.id);
+    if (steps.length === 0) {
+      res.status(400).json({ error: 'Plan has no steps to retry' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const userId = req.user?.sub ?? '';
+    const newId = uuidv4();
+    await db.insert(schema.plans).values({
+      id: newId,
+      pluginId: plan.pluginId,
+      intentActionId: plan.intentActionId,
+      // Same payload as the original — a retry re-applies exactly what was planned.
+      intentInputs: plan.intentInputs ?? '{}',
+      status: 'ready',
+      provisionedSecrets: plan.provisionedSecrets ?? '{}',
+      error: null,
+      createdBy: userId,
+      executedBy: null,
+      cancelledAt: null,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      finishedAt: null,
+      retriedFrom: plan.id,
+    });
+    for (const step of steps) {
+      await db.insert(schema.planSteps).values({
+        id: uuidv4(),
+        planId: newId,
+        stepIndex: step.stepIndex,
+        deviceId: step.deviceId,
+        actionId: step.actionId,
+        input: step.input ?? '{}',
+        dependsOn: step.dependsOn ?? '[]',
+        secretRefs: step.secretRefs ?? '[]',
+        bestEffort: !!step.bestEffort,
+        status: 'pending',
+        result: null,
+        startedAt: null,
+        finishedAt: null,
+      });
+    }
+
+    // Execute the duplicate immediately (same path as a manual execute).
+    await db.update(schema.plans)
+      .set({ status: 'executing', executedBy: userId, updatedAt: now })
+      .where(eq(schema.plans.id, newId));
+    planQueue.add(newId, { planId: newId });
+
+    res.status(201).json((await serializePlan(newId, true))!);
   }
 );
 
@@ -903,8 +1065,14 @@ router.delete('/plans/:id', requireAuth, requirePermission('configs:apply'), asy
     res.status(409).json({ error: 'Cancel the plan before deleting it' });
     return;
   }
-  const provisioned = parseJson<Record<string, string>>(plan.provisionedSecrets, {});
+  const provisioned = parseJson<Record<string, string>>(plan.provisionedSecrets ?? '{}', {});
   for (const secretId of Object.values(provisioned)) {
+    // Retried plans share the original's secrets — never delete one that
+    // another plan row still references.
+    const others = await db.query.plans.findMany({
+      where: and(ne(schema.plans.id, plan.id), like(schema.plans.provisionedSecrets, `%${secretId}%`)),
+    });
+    if (others.length > 0) continue;
     await deleteSecret(secretId).catch((err) => {
       // eslint-disable-next-line no-console
       console.warn(`[plans] failed to delete provisioned secret ${secretId}:`, (err as Error).message);

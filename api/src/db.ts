@@ -119,6 +119,18 @@ export async function initDb(): Promise<void> {
     `ALTER TABLE plans ADD COLUMN IF NOT EXISTS "recentlyFinishedAt" TEXT`
   );
 
+  // Plans: payload transparency + execution attribution. intentInputs keeps the
+  // raw intent inputs on the row so every execution (incl. re-runs/retries) is
+  // auditable; executedBy names who started the current run; startedAt marks
+  // when that run actually began (set by the executor).
+  await pool.query(
+    `ALTER TABLE plans ADD COLUMN IF NOT EXISTS "intentInputs" TEXT NOT NULL DEFAULT '{}'`
+  );
+  await pool.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS "executedBy" TEXT`);
+  await pool.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS "startedAt" TEXT`);
+  // Plans created via retry duplicate another plan — link them for traceability.
+  await pool.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS "retriedFrom" TEXT`);
+
   // Roles: named bundles of permissions (see backfillAdminRole for the seed).
   await pool.query(`
     CREATE TABLE IF NOT EXISTS roles (

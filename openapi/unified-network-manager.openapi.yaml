@@ -1485,6 +1485,38 @@ paths:
         '409':
           description: Plan is not in a startable state
 
+  /plans/{id}/retry:
+    post:
+      tags: [Plans]
+      summary: Retry a plan (duplicate + execute the copy)
+      description: >-
+        Requires 2FA-completed session and permission `configs:apply`. Duplicates
+        the plan — same intent inputs, steps and provisioned secrets (no
+        re-provisioning) — and executes the duplicate immediately. The new plan's
+        `retriedFrom` links it to this one. Only non-executing plans can be
+        retried.
+      x-2fa-required: true
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '201':
+          description: Duplicate created and queued for execution (status executing)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '401':
+          description: Authentication required (or 2FA-completed session missing)
+        '403':
+          description: Missing required permission
+        '404':
+          description: Plan not found
+        '409':
+          description: Plan is still executing
+
   /plans/{id}/cancel:
     post:
       tags: [Plans]
@@ -5531,6 +5563,10 @@ components:
         id: { type: string }
         pluginId: { type: string }
         intentActionId: { type: string }
+        intentInputs:
+          type: object
+          additionalProperties: true
+          description: "The raw intent inputs as submitted — the payload of every execution (re-runs and retries carry the same values)"
         status:
           type: string
           enum: [draft, ready, executing, succeeded, failed, cancelled]
@@ -5540,9 +5576,27 @@ components:
             $ref: '#/components/schemas/PlanProvisionedSecret'
         error: { type: string, nullable: true }
         createdBy: { type: string }
+        createdByName: { type: string, description: "Display name of the creator (falls back to the raw user id)" }
+        executedBy:
+          type: string
+          nullable: true
+          description: "User who started the current execution (null until executed; may differ from createdBy)"
+        executedByName:
+          type: string
+          nullable: true
+          description: "Display name of the executor (null until executed)"
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: "When the current execution actually started (set by the executor); null while queued"
         finishedAt: { type: string, format: date-time, nullable: true }
+        retriedFrom:
+          type: string
+          nullable: true
+          description: "Set on plans created via retry — id of the duplicated plan"
         recentlyFinishedAt:
           type: string
           format: date-time

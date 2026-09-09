@@ -37,6 +37,7 @@ interface PlanRecord {
   provisionedSecrets: string | null;
   error: string | null;
   cancelledAt: string | null;
+  startedAt: string | null;
 }
 
 /** The ActionResult a plugin /config call returns, as stored on plan_steps.result. */
@@ -167,7 +168,16 @@ async function processPlan(planId: string): Promise<void> {
     orderBy: [asc(schema.planSteps.stepIndex)],
   })) as StepRecord[];
 
-  const provisionedSecrets = parseJson<Record<string, string>>(plan.provisionedSecrets, {});
+  // Stamp when this execution actually started (the route only flips the
+  // status; the worker may pick it up seconds later). Guarded so a re-run of
+  // an already-stamped row never moves the timestamp backwards.
+  if (!plan.startedAt) {
+    await db.update(schema.plans)
+      .set({ startedAt: new Date().toISOString() })
+      .where(eq(schema.plans.id, planId));
+  }
+
+  const provisionedSecrets = parseJson<Record<string, string>>(plan.provisionedSecrets ?? '{}', {});
   const results = new Map<number, StoredStepResult>();
 
   for (const step of steps) {
