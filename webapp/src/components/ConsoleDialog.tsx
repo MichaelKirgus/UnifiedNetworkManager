@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { ExternalLink, Loader2, Terminal as TerminalIcon, X } from 'lucide-react';
+import { Loader2, Terminal as TerminalIcon } from 'lucide-react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { api, consoleSocketUrl } from '../api/client';
+import { ResizableDialog } from './ResizableDialog';
 
 /**
  * A full interactive SSH terminal (capability 'sshConsole') — the web-UI
@@ -180,99 +181,11 @@ export function useConsoleSession(deviceId: string, pluginId?: string, contextKe
   return { hostRef, status, error, exitCode };
 }
 
-/** Dialog geometry — fixed positioning so the panel can be dragged + resized. */
-interface Geom { x: number; y: number; w: number; h: number }
-
-const MIN_W = 420;
-const MIN_H = 300;
-
-const clampNum = (v: number, lo: number, hi: number): number => Math.min(Math.max(v, lo), hi);
-
-function defaultGeom(): Geom {
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  const w = Math.min(960, vw - 48);
-  const h = Math.min(720, vh - 96);
-  return { x: (vw - w) / 2, y: Math.max(16, (vh - h) / 2), w, h };
-}
-
-/** Edge/corner resize handles (Tailwind ships all eight resize cursors). */
-const RESIZE_HANDLES: Array<{ edge: string; cls: string }> = [
-  { edge: 'n', cls: 'inset-x-3 top-0 h-1.5 cursor-n-resize' },
-  { edge: 's', cls: 'inset-x-3 bottom-0 h-1.5 cursor-s-resize' },
-  { edge: 'e', cls: 'top-3 bottom-3 right-0 w-1.5 cursor-e-resize' },
-  { edge: 'w', cls: 'top-3 bottom-3 left-0 w-1.5 cursor-w-resize' },
-  { edge: 'ne', cls: 'right-0 top-0 h-3 w-3 cursor-ne-resize' },
-  { edge: 'nw', cls: 'left-0 top-0 h-3 w-3 cursor-nw-resize' },
-  { edge: 'se', cls: 'bottom-0 right-0 h-3 w-3 cursor-se-resize' },
-  { edge: 'sw', cls: 'bottom-0 left-0 h-3 w-3 cursor-sw-resize' },
-];
-
 export function ConsoleDialog({ deviceId, pluginId, context, title, subtitle, onClose }: ConsoleDialogProps) {
   // Stable key for the (caller-supplied) context object — it must reach the mint
   // endpoint but must not re-trigger the session effect on every render.
   const contextKey = JSON.stringify(context);
   const { hostRef, status, error, exitCode } = useConsoleSession(deviceId, pluginId, contextKey);
-
-  // Draggable + resizable geometry (centered by default).
-  const [geom, setGeom] = useState<Geom>(defaultGeom);
-  const dragRef = useRef<{ px: number; py: number; gx: number; gy: number } | null>(null);
-  const resizeRef = useRef<{ edge: string; px: number; py: number; g: Geom } | null>(null);
-
-  // Keep the panel inside the viewport when the browser window is resized.
-  useEffect(() => {
-    const onWindowResize = () => setGeom((g) => {
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-      const w = Math.min(g.w, vw - 16);
-      const h = Math.min(g.h, vh - 16);
-      return { ...g, w, h, x: clampNum(g.x, -(w - 96), vw - 96), y: clampNum(g.y, 0, vh - 48) };
-    });
-    window.addEventListener('resize', onWindowResize);
-    return () => window.removeEventListener('resize', onWindowResize);
-  }, []);
-
-  // Drag — pointer capture on the header keeps tracking even outside the panel.
-  const startDrag = (e: ReactPointerEvent<HTMLElement>) => {
-    if ((e.target as HTMLElement).closest('button')) return; // buttons keep their own clicks
-    dragRef.current = { px: e.clientX, py: e.clientY, gx: geom.x, gy: geom.y };
-    e.currentTarget.setPointerCapture(e.pointerId);
-  };
-  const onDragMove = (e: ReactPointerEvent<HTMLElement>) => {
-    const d = dragRef.current;
-    if (!d) return;
-    setGeom((g) => ({
-      ...g,
-      x: clampNum(d.gx + e.clientX - d.px, -(g.w - 96), window.innerWidth - 96),
-      y: clampNum(d.gy + e.clientY - d.py, 0, window.innerHeight - 48),
-    }));
-  };
-  const endDrag = () => { dragRef.current = null; };
-
-  // Resize — one handler for all eight handles; the edge string drives which
-  // sides move ('ne' adjusts both north and east).
-  const startResize = (edge: string) => (e: ReactPointerEvent<HTMLElement>) => {
-    resizeRef.current = { edge, px: e.clientX, py: e.clientY, g: geom };
-    e.currentTarget.setPointerCapture(e.pointerId);
-    e.stopPropagation();
-  };
-  const onResizeMove = (e: ReactPointerEvent<HTMLElement>) => {
-    const r = resizeRef.current;
-    if (!r) return;
-    const dx = e.clientX - r.px;
-    const dy = e.clientY - r.py;
-    setGeom(() => {
-      let { x, y } = r.g;
-      let w = r.g.w;
-      let h = r.g.h;
-      if (r.edge.includes('e')) w = clampNum(r.g.w + dx, MIN_W, window.innerWidth - r.g.x);
-      if (r.edge.includes('s')) h = clampNum(r.g.h + dy, MIN_H, window.innerHeight - r.g.y);
-      if (r.edge.includes('w')) { const nw = clampNum(r.g.w - dx, MIN_W, r.g.x + r.g.w); x += r.g.w - nw; w = nw; }
-      if (r.edge.includes('n')) { const nh = clampNum(r.g.h - dy, MIN_H, r.g.y + r.g.h); y += r.g.h - nh; h = nh; }
-      return { x, y, w, h };
-    });
-  };
-  const endResize = () => { resizeRef.current = null; };
 
   /** Pop the session out into its own full-window tab (same ticket flow). */
   const openInWindow = () => {
@@ -285,70 +198,34 @@ export function ConsoleDialog({ deviceId, pluginId, context, title, subtitle, on
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-primary/40" onClick={onClose}>
-      <div
-        className="absolute flex flex-col overflow-hidden rounded-md border border-border bg-card shadow-xl"
-        style={{ left: geom.x, top: geom.y, width: geom.w, height: geom.h }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header — also the drag handle (cursor-move). */}
-        <header
-          className="flex cursor-move touch-none select-none items-center justify-between gap-3 border-b border-border px-4 py-3"
-          onPointerDown={startDrag}
-          onPointerMove={onDragMove}
-          onPointerUp={endDrag}
-          onPointerCancel={endDrag}
-        >
-          <div className="flex min-w-0 items-center gap-2.5">
-            <TerminalIcon size={16} className="shrink-0 text-secondary" />
-            <div className="min-w-0">
-              <h2 className="truncate text-base font-semibold text-foreground">{title}</h2>
-              {subtitle && <p className="mt-0.5 truncate text-xs text-muted-foreground">{subtitle}</p>}
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {/* Status pill */}
-            <ConsoleStatusPill status={status} exitCode={exitCode} />
-            <button type="button" aria-label="Open console in a new window" title="Open in a new window" onClick={openInWindow} className="rounded p-1 text-faint hover:bg-muted">
-              <ExternalLink size={16} />
-            </button>
-            <button type="button" aria-label="Close console" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-              <X size={16} />
-            </button>
-          </div>
-        </header>
-
-        {/* Error banner */}
-        {error && (
-          <div className="flex items-center justify-between gap-3 border-b border-danger-border bg-danger px-4 py-2 text-sm text-white">
-            <span className="min-w-0 truncate" title={error}>{error}</span>
-            <button type="button" onClick={onClose} className="shrink-0 rounded px-2 py-0.5 text-xs font-semibold hover:bg-white/10">Dismiss</button>
-          </div>
-        )}
-
-        {/* Terminal host — xterm.js renders here; the dark theme is fixed (terminals are dark). */}
-        <div className="min-h-0 flex-1 bg-[#0d1117] p-2">
-          <div ref={hostRef} className="h-full w-full" />
-        </div>
-
-        {/* Footer hint */}
-        <footer className="border-t border-border px-4 py-1.5 text-[11px] text-faint">
+    <ResizableDialog
+      title={title}
+      subtitle={subtitle}
+      icon={<TerminalIcon size={16} />}
+      onClose={onClose}
+      onOpenInWindow={openInWindow}
+      headerExtra={<ConsoleStatusPill status={status} exitCode={exitCode} />}
+      defaultSize={{ w: 960, h: 720 }}
+      bodyClassName="min-h-0 flex-1 flex flex-col"
+      footer={
+        <span className="text-[11px] text-faint">
           Interactive session over the bound SSH credential — input goes straight to the device. Drag the header to move, pull an edge or corner to resize; close to end the session.
-        </footer>
+        </span>
+      }
+    >
+      {/* Error banner */}
+      {error && (
+        <div className="flex items-center justify-between gap-3 border-b border-danger-border bg-danger px-4 py-2 text-sm text-white">
+          <span className="min-w-0 truncate" title={error}>{error}</span>
+          <button type="button" onClick={onClose} className="shrink-0 rounded px-2 py-0.5 text-xs font-semibold hover:bg-white/10">Dismiss</button>
+        </div>
+      )}
 
-        {/* Resize handles (edges + corners). */}
-        {RESIZE_HANDLES.map((h) => (
-          <div
-            key={h.edge}
-            className={`absolute touch-none ${h.cls}`}
-            onPointerDown={startResize(h.edge)}
-            onPointerMove={onResizeMove}
-            onPointerUp={endResize}
-            onPointerCancel={endResize}
-          />
-        ))}
+      {/* Terminal host — xterm.js renders here; the dark theme is fixed (terminals are dark). */}
+      <div className="min-h-0 flex-1 bg-[#0d1117] p-2">
+        <div ref={hostRef} className="h-full w-full" />
       </div>
-    </div>
+    </ResizableDialog>
   );
 }
 

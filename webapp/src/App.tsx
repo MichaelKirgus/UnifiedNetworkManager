@@ -21,7 +21,9 @@ import Notifications from './pages/Notifications';
 import Wifi from './pages/Wifi';
 import Storage from './pages/Storage';
 import Containers from './pages/Containers';
+import ContainerLogsPage from './pages/ContainerLogsPage';
 import ConsolePage from './pages/ConsolePage';
+import FileBrowserPage from './pages/FileBrowserPage';
 import Vms from './pages/Vms';
 import Topology from './pages/Topology';
 import Users from './pages/Users';
@@ -113,6 +115,12 @@ export default function App() {
       {/* Standalone SSH console window — popped out of the ConsoleDialog; needs devices:write
           because minting a console ticket is gated on it server-side. */}
       <Route path="/console/:deviceId" element={<Page permission="devices:write"><ConsolePage /></Page>} />
+      {/* Standalone file browser — popped out of the FileBrowserDialog; mirrors the
+          filesystem broker's devices:write gate (all ops are write-capable). */}
+      <Route path="/file-browser/:deviceId" element={<Page permission="devices:write"><FileBrowserPage /></Page>} />
+      {/* Standalone container logs — popped out of the LogsDialog; mirrors the
+          containers.logs.read execute endpoint's containers:read gate. */}
+      <Route path="/container-logs/:deviceId" element={<Page permission="containers:read"><ContainerLogsPage /></Page>} />
       {/* Cross-device virtual machines (TrueNAS SCALE VMs today; generic key for future hypervisor plugins). */}
       <Route path="/vms" element={<Page permission="vms:read"><Vms /></Page>} />
       {/* Physical + logical network graph (inferred cables, per-VLAN segments). */}

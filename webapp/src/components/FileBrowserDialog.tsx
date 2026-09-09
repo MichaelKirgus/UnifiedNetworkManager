@@ -5,6 +5,7 @@ import {
   Eye,
   FileText,
   Folder,
+  FolderOpen,
   FolderPlus,
   Loader2,
   Pencil,
@@ -15,6 +16,7 @@ import {
 } from 'lucide-react';
 import { api, ApiError, type FilesystemEntry } from '../api/client';
 import { formatBytes } from './formatMetric';
+import { ResizableDialog } from './ResizableDialog';
 
 /**
  * A generic, root-scoped file manager dialog driven by the API's filesystem broker
@@ -69,21 +71,27 @@ function formatTime(ms: number | null): string {
   return d.toLocaleString();
 }
 
-export interface FileBrowserDialogProps {
+/** Props of the core file-manager body (shared by dialog + full-window page). */
+export interface FileBrowserProps {
   deviceId: string;
   pluginId?: string;
   /** Plugin-owned context naming what to browse (dataset / container-volume). */
   context: Record<string, unknown>;
+  /** Initial directory to open (relative to the root); default = the root. */
+  initialPath?: string;
+}
+
+export interface FileBrowserDialogProps extends FileBrowserProps {
   /** Dialog title (e.g. "Browse DATA01" or "Browse volume /mnt/tank/app"). */
   title: string;
   /** Subtitle shown under the title (device name, mountpoint hint, …). */
   subtitle?: string;
-  /** Initial directory to open (relative to the root); default = the root. */
-  initialPath?: string;
   onClose: () => void;
 }
 
-export function FileBrowserDialog({ deviceId, pluginId, context, title, subtitle, initialPath, onClose }: FileBrowserDialogProps) {
+/** Core file-manager body — toolbar + listing + editor overlay. Shared by the
+ * in-app dialog and the full-window /file-browser page so both stay in lockstep. */
+export function FileBrowser({ deviceId, pluginId, context, initialPath }: FileBrowserProps) {
   const [dir, setDir] = useState<string>(initialPath ?? '');
   const [entries, setEntries] = useState<FilesystemEntry[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -225,23 +233,8 @@ export function FileBrowserDialog({ deviceId, pluginId, context, title, subtitle
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div
-        className="mt-8 w-full max-w-3xl rounded-md border border-border bg-card shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div className="min-w-0">
-            <h2 className="truncate text-base font-semibold text-foreground">{title}</h2>
-            {subtitle && <p className="mt-0.5 truncate text-xs text-muted-foreground">{subtitle}</p>}
-          </div>
-          <button type="button" aria-label="Close file browser" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-            <X size={16} />
-          </button>
-        </header>
-
-        {/* Toolbar */}
+    <>
+      {/* Toolbar */}
         <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
           <button
             type="button"
@@ -335,12 +328,7 @@ export function FileBrowserDialog({ deviceId, pluginId, context, title, subtitle
           )}
         </div>
 
-        {/* Footer hint */}
-        <footer className="border-t border-border px-4 py-2 text-[11px] text-faint">
-          Double-click a folder to open it. Click a file (or the eye icon) to view/edit it. All operations are scoped to this location — you cannot navigate outside of it.
-        </footer>
-
-        {/* Editor overlay */}
+      {/* Editor overlay */}
         {editing && (
           <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-primary/50 p-6" onClick={() => setEditing(null)}>
             <div className="mt-8 w-full max-w-2xl rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
@@ -369,8 +357,39 @@ export function FileBrowserDialog({ deviceId, pluginId, context, title, subtitle
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </>
+  );
+}
+
+/**
+ * Draggable + resizable file-manager dialog — wraps <FileBrowser> in the shared
+ * ResizableDialog shell and offers "open in a new window" for full-screen browsing.
+ */
+export function FileBrowserDialog({ deviceId, pluginId, context, title, subtitle, initialPath, onClose }: FileBrowserDialogProps) {
+  const openInWindow = () => {
+    const params = new URLSearchParams();
+    params.set('context', JSON.stringify(context));
+    if (pluginId) params.set('plugin', pluginId);
+    if (initialPath) params.set('path', initialPath);
+    window.open(`${window.location.origin}/file-browser/${deviceId}?${params.toString()}`, '_blank');
+  };
+
+  return (
+    <ResizableDialog
+      title={title}
+      subtitle={subtitle}
+      icon={<FolderOpen size={16} />}
+      onClose={onClose}
+      onOpenInWindow={openInWindow}
+      defaultSize={{ w: 896, h: 560 }}
+      footer={
+        <span className="text-[11px] text-faint">
+          Double-click a folder to open it. Click a file (or the eye icon) to view/edit it. All operations are scoped to this location — you cannot navigate outside of it.
+        </span>
+      }
+    >
+      <FileBrowser deviceId={deviceId} pluginId={pluginId} context={context} initialPath={initialPath} />
+    </ResizableDialog>
   );
 }
 
