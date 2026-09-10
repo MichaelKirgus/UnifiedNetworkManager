@@ -3,6 +3,7 @@ import { db } from '../db';
 import { eq, desc } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
+import { allowedDeviceIds } from '../deviceAccess';
 
 const router = Router();
 
@@ -28,6 +29,12 @@ router.get('/config-jobs/:jobId', requireAuth, requirePermission('config-jobs:re
     res.status(404).json({ error: 'Job not found' });
     return;
   }
+  // Device-level access control — a job on an out-of-scope device is invisible.
+  const allowed = await allowedDeviceIds(req);
+  if (allowed !== null && !allowed.has(job.deviceId)) {
+    res.status(404).json({ error: 'Job not found' });
+    return;
+  }
   res.status(200).json(serializeConfigJob(job));
 });
 
@@ -44,7 +51,10 @@ configJobsListRouter.get('/config-jobs', requireAuth, requirePermission('config-
     orderBy: [desc(schema.configJobs.createdAt)],
     limit: 100,
   });
-  res.status(200).json(jobs.map(serializeConfigJob));
+  // Device-level access control — only jobs on the caller's devices are listed.
+  const allowed = await allowedDeviceIds(_req);
+  const visible = allowed !== null ? jobs.filter((j) => allowed.has(j.deviceId)) : jobs;
+  res.status(200).json(visible.map(serializeConfigJob));
 });
 
 export default router;

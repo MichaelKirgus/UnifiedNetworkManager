@@ -331,6 +331,8 @@ paths:
         the self-service "My Account" page. `effectivePermissions` is the
         session's JWT claim (explicit grants + role-derived); `permissions` are
         the explicit grants stored on the account.
+        `deviceAccessUnrestricted` indicates whether the caller can see every
+        device (true) or is limited by their effective device-scope rules (false).
       responses:
         '200':
           description: Own profile
@@ -344,6 +346,9 @@ paths:
                       effectivePermissions:
                         type: array
                         items: { type: string }
+                      deviceAccessUnrestricted:
+                        type: boolean
+                        description: "True when the caller can access every device (devices:all or no scope rules)"
         '401':
           description: Authentication required
 
@@ -552,6 +557,11 @@ paths:
     get:
       tags: [Devices]
       summary: List managed devices
+      description: >-
+        Returns the device list. Callers whose effective permissions include
+        `devices:all` (or who have no device-scope rules) see every device.
+        Scoped callers only receive devices matching at least one of their
+        siteIds, tags, or deviceIds rules.
       parameters:
         - in: query
           name: vendor
@@ -4413,6 +4423,27 @@ components:
         latitude: { type: [number, 'null'], minimum: -90, maximum: 90, description: "Provide together with longitude; both null clears the location" }
         longitude: { type: [number, 'null'], minimum: -180, maximum: 180, description: "Provide together with latitude" }
 
+    DeviceScope:
+      type: object
+      description: >-
+        Device-level access rules. A caller may see a device when it matches ANY
+        of the listed rules (union). An empty object `{}` or an absent field means
+        unrestricted (full visibility). Callers whose effective permissions include
+        `devices:all` bypass scoping entirely.
+      properties:
+        siteIds:
+          type: array
+          items: { type: string }
+          description: "Visible devices assigned to any of these site ids"
+        tags:
+          type: array
+          items: { type: string }
+          description: "Devices carrying ANY of these tags"
+        deviceIds:
+          type: array
+          items: { type: string }
+          description: "Explicitly visible device ids"
+
     User:
       type: object
       required: [id, username, roles, permissions, twoFactorEnabled, totpEnabled, passkeyCount, createdAt]
@@ -4426,6 +4457,8 @@ components:
         permissions:
           type: array
           items: { type: string }
+        deviceScope:
+          $ref: '#/components/schemas/DeviceScope'
         twoFactorEnabled: { type: boolean, description: "Whether ANY second factor is enrolled (TOTP or ≥1 passkey)" }
         totpEnabled: { type: boolean, description: "Whether a TOTP secret is enrolled" }
         passkeyCount: { type: integer, minimum: 0, description: "Number of enrolled passkeys (one per device)" }
@@ -4479,6 +4512,8 @@ components:
         permissions:
           type: array
           items: { type: string }
+        deviceScope:
+          $ref: '#/components/schemas/DeviceScope'
 
     UserCreatedResponse:
       type: object
@@ -4625,6 +4660,8 @@ components:
         permissions:
           type: array
           items: { type: string }
+        deviceScope:
+          $ref: '#/components/schemas/DeviceScope'
 
     Role:
       type: object
@@ -4635,6 +4672,8 @@ components:
         permissions:
           type: array
           items: { type: string }
+        deviceScope:
+          $ref: '#/components/schemas/DeviceScope'
         createdAt: { type: string, format: date-time }
 
     RoleCreateRequest:
@@ -4646,6 +4685,8 @@ components:
         permissions:
           type: array
           items: { type: string }
+        deviceScope:
+          $ref: '#/components/schemas/DeviceScope'
 
     RoleUpdateRequest:
       type: object
@@ -4655,6 +4696,8 @@ components:
         permissions:
           type: array
           items: { type: string }
+        deviceScope:
+          $ref: '#/components/schemas/DeviceScope'
 
     PermissionCatalog:
       type: object

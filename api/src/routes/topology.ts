@@ -3,6 +3,7 @@ import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
+import { allowedDeviceIds } from '../deviceAccess';
 import { buildTopologyGraph, TopologyResult } from '../utils/topology';
 
 const router = Router();
@@ -20,7 +21,9 @@ const router = Router();
  */
 
 const CACHE_TTL_MS = 30_000; // matches the telemetry poll cadence
-let cache: { key: string; at: number; payload: TopologyResult } | null = null;
+// Keyed per (user scope, site, hosts) — a scoped user's graph must never be
+// served from another caller's cache entry.
+const cache = new Map<string, { at: number; payload: TopologyResult }>();
 
 router.get('/topology', requireAuth, requirePermission('topology:read'), async (req, res: Response) => {
   try {
@@ -28,15 +31,24 @@ router.get('/topology', requireAuth, requirePermission('topology:read'), async (
     // declares type: boolean), so accept both the coerced value and raw strings.
     const { siteId, includeHosts } = req.query as Record<string, string | boolean | undefined>;
     const wantHosts = includeHosts === true || includeHosts === 'true' || includeHosts === '1';
-    const key = `${siteId ?? ''}|${wantHosts ? 1 : 0}`;
 
-    if (cache && cache.key === key && Date.now() - cache.at < CACHE_TTL_MS) {
-      res.status(200).json(cache.payload);
+    // Device-level access control — the graph only contains the caller's devices.
+    const allowed = await allowedDeviceIds(req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json({ nodes: [], edges: [] });
+      return;
+    }
+    const key = `${allowed !== null ? req.user!.sub : 'all'}|${siteId ?? ''}|${wantHosts ? 1 : 0}`;
+
+    const hit = cache.get(key);
+    if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+      res.status(200).json(hit.payload);
       return;
     }
 
     // Devices (optionally scoped to one site), name-sorted for stable layout.
     let deviceRows = await db.query.devices.findMany({ orderBy: [asc(schema.devices.name)] });
+    if (allowed !== null) deviceRows = deviceRows.filter((d) => allowed.has(d.id));
     if (siteId) deviceRows = deviceRows.filter((d) => d.siteId === siteId);
     const deviceIds = deviceRows.map((d) => d.id);
     if (deviceIds.length === 0) {
@@ -145,7 +157,11 @@ router.get('/topology', requireAuth, requirePermission('topology:read'), async (
       includeHosts: wantHosts,
     });
 
-    cache = { key, at: Date.now(), payload };
+    cache.set(key, { at: Date.now(), payload });
+    if (cache.size > 64) { // unbounded-growth guard — drop the oldest entries
+      const oldest = [...cache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+      if (oldest && oldest[0] !== key) cache.delete(oldest[0]);
+    }
     res.status(200).json(payload);
   } catch (err) {
     const e = err as { status?: number; message?: string };

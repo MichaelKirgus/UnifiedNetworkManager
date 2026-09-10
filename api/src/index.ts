@@ -4,7 +4,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import * as OpenApiValidator from 'express-openapi-validator';
 import { loadOpenApiSpec, resolveOpenApiPath } from './openapi';
-import { initDb, backfillSecrets, backfillAdminPermissions, backfillDeviceSites, backfillAdminRole, backfillInteractiveLoginPermission } from './db';
+import { initDb, backfillSecrets, backfillAdminPermissions, backfillDeviceSites, backfillAdminRole, backfillInteractiveLoginPermission, backfillDeviceAllPermission } from './db';
 import authRouter from './routes/auth';
 import devicesRouter from './routes/devices';
 import pluginsRouter from './routes/plugins';
@@ -67,6 +67,9 @@ async function main(): Promise<void> {
   // New permission: keep every pre-existing user able to sign in until an
   // admin explicitly locks them down (service-only accounts).
   await backfillInteractiveLoginPermission();
+  // Device-level access control: keep everyone unrestricted until an admin
+  // configures scope rules + removes the bypass for a specific account/role.
+  await backfillDeviceAllPermission();
   await backfillDeviceSites();
   await backfillSecrets();
 

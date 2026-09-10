@@ -5,6 +5,7 @@ import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { signToken } from '../auth/jwt';
 import { requireAuth } from '../auth/middleware';
+import { allowedDeviceIds } from '../deviceAccess';
 import {
   login,
   verify2fa,
@@ -95,7 +96,21 @@ router.get('/auth/me', requireAuth, async (req, res) => {
     res.status(401).json({ error: 'User no longer exists' });
     return;
   }
-  res.status(200).json({ ...(await serializeUser(row)), effectivePermissions: req.user?.permissions ?? [] });
+
+  // Device-level access state for the webapp (restricted-view badge + pickers):
+  // unrestricted = devices:all permission OR no scope rules configured.
+  let deviceAccessUnrestricted = true;
+  try {
+    deviceAccessUnrestricted = (await allowedDeviceIds(req)) === null;
+  } catch {
+    /* keep the optimistic default — enforcement is server-side anyway */
+  }
+
+  res.status(200).json({
+    ...(await serializeUser(row)),
+    effectivePermissions: req.user?.permissions ?? [],
+    deviceAccessUnrestricted,
+  });
 });
 
 /** Coerce an unknown value into a clean string[] (drops non-strings, dedupes). */

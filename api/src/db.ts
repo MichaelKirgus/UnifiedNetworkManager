@@ -794,6 +794,12 @@ export async function initDb(): Promise<void> {
   await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "passwordMaxAgeDays" INTEGER`);
   await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "inactiveDisableAfterDays" INTEGER`);
   await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "sessionTimeoutSeconds" INTEGER`);
+
+  // Device-level access control (see deviceAccess.ts): JSON scope rules on
+  // users + roles. '{}' = unrestricted, so existing deployments keep full
+  // visibility until an admin explicitly configures a scope.
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "deviceScope" TEXT NOT NULL DEFAULT '{}'`);
+  await pool.query(`ALTER TABLE roles ADD COLUMN IF NOT EXISTS "deviceScope" TEXT NOT NULL DEFAULT '{}'`);
   // The legacy singular columns are superseded by device_plugins. There is no
   // production data to migrate (confirmed), so drop them outright — any dev
   // devices must be recreated via the new multi-plugin create flow.
@@ -927,6 +933,54 @@ export async function backfillInteractiveLoginPermission(): Promise<void> {
       .where(eq(schema.users.id, user.id));
     // eslint-disable-next-line no-console
     console.log(`[db] backfilled "auth:interactive-login" for existing user "${user.username}"`);
+  }
+}
+
+/**
+ * One-time backfill for the new `devices:all` permission (device-level access
+ * control): granted additively to EVERY existing user and role, so nobody
+ * loses device visibility when the feature ships — an empty scope is only
+ * meaningful once a scope rule actually exists. Removing it afterwards is an
+ * explicit admin action that activates the account's/role's deviceScope rules.
+ * Idempotent — no-ops once everyone carries it.
+ */
+export async function backfillDeviceAllPermission(): Promise<void> {
+  const PERM = 'devices:all';
+
+  for (const user of await db.query.users.findMany()) {
+    let perms: string[] = [];
+    try {
+      perms = JSON.parse(user.permissions);
+    } catch {
+      /* treat as empty */
+    }
+    if (!Array.isArray(perms)) perms = [];
+    if (perms.includes(PERM)) continue;
+
+    await db
+      .update(schema.users)
+      .set({ permissions: JSON.stringify([...perms, PERM]) })
+      .where(eq(schema.users.id, user.id));
+    // eslint-disable-next-line no-console
+    console.log(`[db] backfilled "devices:all" for existing user "${user.username}"`);
+  }
+
+  for (const role of await db.query.roles.findMany()) {
+    let perms: string[] = [];
+    try {
+      perms = JSON.parse(role.permissions);
+    } catch {
+      /* treat as empty */
+    }
+    if (!Array.isArray(perms)) perms = [];
+    if (perms.includes(PERM)) continue;
+
+    await db
+      .update(schema.roles)
+      .set({ permissions: JSON.stringify([...perms, PERM]) })
+      .where(eq(schema.roles.name, role.name));
+    // eslint-disable-next-line no-console
+    console.log(`[db] backfilled "devices:all" into existing role "${role.name}"`);
   }
 }
 

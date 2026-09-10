@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { Pencil, Plus, Trash2, X } from 'lucide-react';
+import { Globe, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
-import { api, Role } from '../api/client';
+import { DeviceScopeEditor } from '../components/DeviceScopeEditor';
+import { api, Role, DeviceScope } from '../api/client';
 import { can } from '../auth/permissions';
 
 const emptyRole = { name: '', description: '' };
@@ -17,18 +18,20 @@ export default function Roles() {
   const [editingName, setEditingName] = useState<string | null>(null);
   const [role, setRole] = useState(emptyRole);
   const [draftPermissions, setDraftPermissions] = useState<string[]>([]);
+  const [draftScope, setDraftScope] = useState<DeviceScope>({});
+  const [createScope, setCreateScope] = useState<DeviceScope>({});
 
   const rolesQuery = useQuery({ queryKey: ['roles'], queryFn: api.roles });
   const catalogQuery = useQuery({ queryKey: ['permissions-catalog'], queryFn: api.permissionCatalog });
 
   const createRole = useMutation({
-    mutationFn: (body: { name: string; description?: string; permissions: string[] }) => api.createRole(body),
+    mutationFn: (body: { name: string; description?: string; permissions: string[]; deviceScope?: DeviceScope }) => api.createRole(body),
     onSuccess: () => resetForm(),
     onError: (err: unknown) => setFormError((err as Error).message),
   });
 
   const updateRole = useMutation({
-    mutationFn: (body: { description?: string | null; permissions?: string[] }) => api.updateRole(editingName!, body),
+    mutationFn: (body: { description?: string | null; permissions?: string[]; deviceScope?: DeviceScope }) => api.updateRole(editingName!, body),
     onSuccess: () => resetForm(),
     onError: (err: unknown) => setFormError((err as Error).message),
   });
@@ -45,12 +48,15 @@ export default function Roles() {
     setEditingName(null);
     setRole(emptyRole);
     setDraftPermissions([]);
+    setDraftScope({});
+    setCreateScope({});
     setFormError(null);
   }
 
   function openEdit(row: Role) {
     setRole({ name: row.name, description: row.description ?? '' });
     setDraftPermissions([...row.permissions]);
+    setDraftScope(row.deviceScope ?? {});
     setEditingName(row.name);
     setShowForm(true);
     setFormError(null);
@@ -58,9 +64,9 @@ export default function Roles() {
 
   function handleSubmit() {
     if (editingName) {
-      updateRole.mutate({ description: role.description.trim() || null, permissions: draftPermissions });
+      updateRole.mutate({ description: role.description.trim() || null, permissions: draftPermissions, deviceScope: draftScope });
     } else {
-      createRole.mutate({ name: role.name.trim(), description: role.description.trim() || undefined, permissions: draftPermissions });
+      createRole.mutate({ name: role.name.trim(), description: role.description.trim() || undefined, permissions: draftPermissions, deviceScope: createScope });
     }
   }
 
@@ -89,6 +95,24 @@ export default function Roles() {
         ) : (
           <span className="text-faint">—</span>
         ),
+    },
+    {
+      header: 'Scope',
+      key: 'deviceScope',
+      sortable: false as const,
+      render: (row) => {
+        const s = row.deviceScope ?? {};
+        if (!s.siteIds?.length && !s.tags?.length && !s.deviceIds?.length) return <span className="text-faint">—</span>;
+        return (
+          <span
+            title={`Limited to ${s.siteIds?.length ?? 0} site(s), ${s.tags?.length ?? 0} tag(s), ${s.deviceIds?.length ?? 0} device(s).`}
+            className="inline-flex items-center gap-1 rounded-full bg-info px-2 py-0.5 text-xs font-medium text-info-fg"
+          >
+            <Globe className="h-3 w-3" />
+            device-restricted
+          </span>
+        );
+      },
     },
     ...(canWrite
       ? [
@@ -209,6 +233,11 @@ export default function Roles() {
                   ))}
                 </div>
               </fieldset>
+
+              <div className="sm:col-span-2">
+                <h3 className="mb-2 text-sm font-medium text-secondary">Device access</h3>
+                <DeviceScopeEditor value={editingName ? draftScope : createScope} onChange={editingName ? setDraftScope : setCreateScope} />
+              </div>
 
               <div className="flex items-center gap-2 sm:col-span-2">
                 <button

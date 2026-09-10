@@ -8,6 +8,7 @@ import { requireAuth, requirePermission } from '../auth/middleware';
 import { generateSecret, buildOtpAuthUri } from '../auth/totp';
 import { buildRegistrationOptions, verifyRegistration } from '../auth/webauthn';
 import { ALL_PERMISSIONS, PERMISSION_DESCRIPTIONS, KNOWN_ROLES, INITIAL_ADMIN_USERNAME } from '../auth/permissions';
+import { parseDeviceScope, invalidateDeviceAccessCache } from '../deviceAccess';
 import { resolveCredentialPolicy, getGlobalPolicy, effectiveMinPasswordLength } from '../auth/credentialPolicy';
 
 const router = Router();
@@ -45,12 +46,12 @@ router.get('/permissions', requireAuth, async (_req: Request, res: Response) => 
     } catch {
       /* keep [] */
     }
-    return { name: row.name, description: row.description ?? null, permissions: Array.isArray(perms) ? perms : [] };
+    return { name: row.name, description: row.description ?? null, permissions: Array.isArray(perms) ? perms : [], deviceScope: parseDeviceScope(row.deviceScope) };
   });
   // Fallback so the UI still works if the roles table is somehow empty.
   if (roles.length === 0) {
     for (const name of KNOWN_ROLES) {
-      roles.push({ name, description: null, permissions: [...ALL_PERMISSIONS] });
+      roles.push({ name, description: null, permissions: [...ALL_PERMISSIONS], deviceScope: {} });
     }
   }
 
@@ -104,7 +105,29 @@ export async function serializeUser(row: typeof schema.users.$inferSelect) {
     // the inactivity auto-disable sweep.
     disabled: Boolean(row.disabled),
     lastLoginAt: row.lastLoginAt ?? null,
+    // Device-level access control — the user's OWN scope rules (role scopes are
+    // unioned on top server-side; see deviceAccess.ts).
+    deviceScope: parseDeviceScope(row.deviceScope),
   };
+}
+
+/** Validates a device-scope object ({siteIds?, tags?, deviceIds?} — arrays of non-empty strings). */
+function validateDeviceScopeField(raw: unknown): { value?: Record<string, string[]>; error?: string } {
+  if (raw === null) return { value: {} }; // explicit clear
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { error: '"deviceScope" must be an object with optional siteIds/tags/deviceIds arrays' };
+  }
+  const out: Record<string, string[]> = {};
+  for (const key of ['siteIds', 'tags', 'deviceIds'] as const) {
+    if (!(key in raw)) continue;
+    const arr = (raw as Record<string, unknown>)[key];
+    if (!Array.isArray(arr) || arr.some((v) => typeof v !== 'string' || String(v).trim() === '')) {
+      return { error: `"deviceScope.${key}" must be an array of non-empty strings` };
+    }
+    const cleaned = [...new Set((arr as string[]).map((s) => s.trim()))];
+    if (cleaned.length > 0) out[key] = cleaned;
+  }
+  return { value: out };
 }
 
 /** Validates role/permission id arrays against the roles table + catalog. */
@@ -131,7 +154,7 @@ function enrollmentPayload(username: string, secret: string) {
 
 /** Validates a `{ roles?, permissions? }` payload; returns values or an error. */
 function validateUserUpdate(body: Record<string, unknown>) {
-  const updates: { roles?: string[]; permissions?: string[] } = {};
+  const updates: { roles?: string[]; permissions?: string[]; deviceScope?: Record<string, string[]> } = {};
 
   if (body.roles !== undefined) {
     if (!Array.isArray(body.roles) || body.roles.some((r) => typeof r !== 'string')) {
@@ -147,8 +170,14 @@ function validateUserUpdate(body: Record<string, unknown>) {
     updates.permissions = (body.permissions as string[]).map((p) => p.trim()).filter(Boolean);
   }
 
-  if (!updates.roles && !updates.permissions) {
-    return { error: 'Provide at least one of: roles, permissions' };
+  if (body.deviceScope !== undefined) {
+    const ref = validateDeviceScopeField(body.deviceScope);
+    if (ref.error) return { error: ref.error };
+    updates.deviceScope = ref.value!;
+  }
+
+  if (!updates.roles && !updates.permissions && updates.deviceScope === undefined) {
+    return { error: 'Provide at least one of: roles, permissions, deviceScope' };
   }
   return { values: updates };
 }
@@ -201,6 +230,16 @@ router.post('/users', requireAuth, requirePermission('users:create'), async (req
     return;
   }
 
+  let deviceScope: Record<string, string[]> = {};
+  if (body.deviceScope !== undefined) {
+    const ref = validateDeviceScopeField(body.deviceScope);
+    if (ref.error) {
+      res.status(400).json({ error: ref.error });
+      return;
+    }
+    deviceScope = ref.value!;
+  }
+
   const totpSecret = generateSecret();
   await db.insert(schema.users).values({
     id: uuidv4(),
@@ -209,6 +248,7 @@ router.post('/users', requireAuth, requirePermission('users:create'), async (req
     totpSecret,
     roles: JSON.stringify(roles),
     permissions: JSON.stringify(permissions),
+    deviceScope: JSON.stringify(deviceScope),
     createdAt: new Date().toISOString(),
     // A freshly created account has a fresh password — no forced rotation.
     passwordChangedAt: new Date().toISOString(),
@@ -267,7 +307,14 @@ router.patch('/users/:id', requireAuth, requirePermission('users:write'), async 
     ...(check.values.permissions !== undefined
       ? { permissions: JSON.stringify(check.values.permissions) }
       : {}),
+    ...(check.values.deviceScope !== undefined
+      ? { deviceScope: JSON.stringify(check.values.deviceScope) }
+      : {}),
   }).where(eq(schema.users.id, req.params.id));
+
+  // Scope rules changed — drop the per-user allowed-id caches so the new scope
+  // applies immediately (not after the 5 s TTL).
+  invalidateDeviceAccessCache();
 
   const updated = await db.query.users.findFirst({ where: eq(schema.users.id, req.params.id) });
   if (!updated) {
@@ -316,6 +363,7 @@ router.delete('/users/:id', requireAuth, requirePermission('users:write'), async
   }
 
   await db.delete(schema.users).where(eq(schema.users.id, targetId));
+  invalidateDeviceAccessCache(); // drop the deleted user's cached scope entry
   res.status(204).send();
 });
 

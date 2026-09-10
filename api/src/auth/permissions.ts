@@ -19,6 +19,12 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // menu entries whose read permission is missing (see Sidebar.tsx).
   'devices:read': 'View devices, their plugins and telemetry',
   'devices:write': 'Create, update and delete devices and plugin assignments',
+  // Device-level access control. ADDITIVE: every existing user/role keeps
+  // full device visibility by default (no scope rules = unrestricted), so the
+  // permission is granted to everyone at backfill time — removing it from a
+  // role/user is what activates their deviceScope restrictions. Carriers of
+  // this permission bypass all device-scope checks entirely.
+  'devices:all': 'Access every device regardless of device-scope rules',
   'networks:read': 'View the Networks inventory page (logical networks across devices)',
   'hosts:read': 'View the Hosts inventory page (ARP/NDP/DHCP/WLAN clients)',
   'tunnels:read': 'View the Tunnels page (configured + live tunnel state)',

@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { KeyRound, Pencil, Plus, ShieldOff, Trash2, UserCheck, UserX, X } from 'lucide-react';
+import { Globe, KeyRound, Pencil, Plus, ShieldOff, Trash2, UserCheck, UserX, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { TotpEnrollmentDialog } from '../components/TotpEnrollmentDialog';
 import { PasskeyManager } from '../components/PasskeyManager';
 import { PolicyEditor } from '../components/PolicyEditor';
-import { api, User, TotpEnrollment, CredentialPolicy } from '../api/client';
+import { DeviceScopeEditor } from '../components/DeviceScopeEditor';
+import { api, User, TotpEnrollment, CredentialPolicy, DeviceScope } from '../api/client';
 import { can, getUsername } from '../auth/permissions';
 
 /** Username of the initial seeded admin — protected from deletion/demotion. */
@@ -28,6 +29,7 @@ export default function Users() {
   const [formError, setFormError] = useState<string | null>(null);
   const [draftRoles, setDraftRoles] = useState<string[]>([]);
   const [draftPermissions, setDraftPermissions] = useState<string[]>([]);
+  const [draftScope, setDraftScope] = useState<DeviceScope>({});
 
   // --- User creation state ----------------------------------------------------
   const [showCreate, setShowCreate] = useState(false);
@@ -35,6 +37,7 @@ export default function Users() {
   const [createPassword, setCreatePassword] = useState('');
   const [createRoles, setCreateRoles] = useState<string[]>([]);
   const [createPermissions, setCreatePermissions] = useState<string[]>([]);
+  const [createScope, setCreateScope] = useState<DeviceScope>({});
   const [enrollment, setEnrollment] = useState<EnrollmentState | null>(null);
 
   // --- Credential management state (password reset + 2FA) ---------------------
@@ -46,7 +49,7 @@ export default function Users() {
   const catalogQuery = useQuery({ queryKey: ['permissions-catalog'], queryFn: api.permissionCatalog });
 
   const updateUser = useMutation({
-    mutationFn: (body: { roles?: string[]; permissions?: string[] }) => api.updateUser(editingId!, body),
+    mutationFn: (body: { roles?: string[]; permissions?: string[]; deviceScope?: DeviceScope }) => api.updateUser(editingId!, body),
     onSuccess: () => resetEditForm(),
     onError: (err: unknown) => setFormError((err as Error).message),
   });
@@ -66,7 +69,7 @@ export default function Users() {
   });
 
   const createUser = useMutation({
-    mutationFn: (body: { username: string; password: string; roles?: string[]; permissions?: string[] }) =>
+    mutationFn: (body: { username: string; password: string; roles?: string[]; permissions?: string[]; deviceScope?: DeviceScope }) =>
       api.createUser(body),
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ['users'] });
@@ -133,12 +136,14 @@ export default function Users() {
     setEditingId(null);
     setDraftRoles([]);
     setDraftPermissions([]);
+    setDraftScope({});
     setFormError(null);
   }
 
   function openEdit(row: User) {
     setDraftRoles([...row.roles]);
     setDraftPermissions([...row.permissions]);
+    setDraftScope(row.deviceScope ?? {});
     setEditingId(row.id);
     setFormError(null);
   }
@@ -155,6 +160,7 @@ export default function Users() {
     setCreatePassword('');
     setCreateRoles([]);
     setCreatePermissions([]);
+    setCreateScope({});
     setFormError(null);
   }
 
@@ -168,6 +174,7 @@ export default function Users() {
       password: createPassword,
       roles: createRoles,
       permissions: createPermissions,
+      deviceScope: createScope,
     });
   }
 
@@ -201,6 +208,13 @@ export default function Users() {
   };
   const isServiceOnly = (row: User): boolean =>
     Boolean(catalog) && !effectivePermissions(row).has('auth:interactive-login');
+  // A user is device-restricted when their effective scope carries any rule AND
+  // they lack the devices:all bypass — same union the API enforces.
+  const isDeviceRestricted = (row: User): boolean => {
+    if (effectivePermissions(row).has('devices:all')) return false;
+    const s = row.deviceScope ?? {};
+    return Boolean(s.siteIds?.length || s.tags?.length || s.deviceIds?.length);
+  };
   const credsUser = usersQuery.data?.find((u) => u.id === credsId) ?? null;
   // Self-credential ops need users:self-credentials; other-user ops need users:manage-credentials.
   const canManageCredsOf = (row: User): boolean => {
@@ -249,6 +263,15 @@ export default function Users() {
             >
               <ShieldOff className="h-3 w-3" />
               service-only
+            </span>
+          )}
+          {isDeviceRestricted(row) && (
+            <span
+              title={`Limited to ${row.deviceScope!.siteIds?.length ?? 0} site(s), ${row.deviceScope!.tags?.length ?? 0} tag(s), ${row.deviceScope!.deviceIds?.length ?? 0} device(s).`}
+              className="inline-flex items-center gap-1 rounded-full bg-info px-2 py-0.5 text-xs font-medium text-info-fg"
+            >
+              <Globe className="h-3 w-3" />
+              device-restricted
             </span>
           )}
         </div>
@@ -411,6 +434,15 @@ export default function Users() {
                   </label>
                 ))}
               </div>
+            </fieldset>
+
+            {/* Device-level access control */}
+            <fieldset className="sm:col-span-2">
+              <legend className="mb-2 text-sm font-medium text-secondary">Device access</legend>
+              <p className="mb-3 text-xs text-faint">
+                Restrict which devices this account can see and manage (by site, tag or specific device). Role-level scopes are unioned on top.
+              </p>
+              <DeviceScopeEditor value={createScope} onChange={setCreateScope} />
             </fieldset>
 
             <div className="flex items-center gap-2 sm:col-span-2">
@@ -594,7 +626,7 @@ export default function Users() {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                updateUser.mutate({ roles: draftRoles, permissions: draftPermissions });
+                updateUser.mutate({ roles: draftRoles, permissions: draftPermissions, deviceScope: draftScope });
               }}
               className="grid grid-cols-1 gap-4 sm:grid-cols-2"
             >
@@ -640,6 +672,15 @@ export default function Users() {
                     </p>
                   ) : null;
                 })()}
+              </fieldset>
+
+              {/* Device-level access control */}
+              <fieldset className="sm:col-span-2">
+                <legend className="mb-2 text-sm font-medium text-secondary">Device access</legend>
+                <p className="mb-3 text-xs text-faint">
+                  Restrict which devices this account can see and manage (by site, tag or specific device). Role-level scopes are unioned on top.
+                </p>
+                <DeviceScopeEditor value={draftScope} onChange={setDraftScope} />
               </fieldset>
 
               <div className="flex items-center gap-2 sm:col-span-2">

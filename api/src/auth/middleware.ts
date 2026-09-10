@@ -4,6 +4,7 @@ import { verifyToken, AccessTokenPayload } from './jwt';
 import { resolveApiTokenPayload } from './apiTokens';
 import { resolveCredentialPolicy, effectiveSessionTtl } from './credentialPolicy';
 import { getEffectiveSettingValue } from '../systemSettings';
+import { allowedDeviceIds, isUnrestricted } from '../deviceAccess';
 import { db } from '../db';
 import * as schema from '../db/schema';
 
@@ -120,6 +121,36 @@ export function requirePermission(permission: string) {
     }
     next();
   };
+}
+
+/**
+ * Device-level access gate for routes parameterized by `:deviceId`. Callers
+ * carrying the `devices:all` permission pass through untouched; everyone else
+ * is checked against their effective device scope (own rules ∪ role rules,
+ * resolved live with a short in-memory cache — see deviceAccess.ts). Out-of-
+ * scope devices answer 404 "Device not found" rather than 403 so the existence
+ * of a device is never leaked to callers who cannot see it. Must run AFTER
+ * requireAuth (it reads req.user) and BEFORE any handler that touches the DB.
+ */
+export async function requireDeviceAccess(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const deviceId = req.params.deviceId;
+  if (!deviceId || isUnrestricted(req)) {
+    next();
+    return;
+  }
+
+  try {
+    const allowed = await allowedDeviceIds(req);
+    if (allowed !== null && !allowed.has(deviceId)) {
+      res.status(404).json({ error: 'Device not found' });
+      return;
+    }
+    next();
+  } catch (err) {
+    // Fail closed — a scope-resolution hiccup must never open the device.
+    console.error('[auth] requireDeviceAccess failed:', err);
+    res.status(503).json({ error: 'Unable to verify device access' });
+  }
 }
 
 /**

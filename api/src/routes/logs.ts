@@ -3,6 +3,7 @@ import { and, desc, eq, gte, inArray, ilike, lt, or } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
+import { allowedDeviceIds } from '../deviceAccess';
 
 /**
  * Public read side of the plugin log pipeline (ingest lives in routes/internal.ts).
@@ -55,6 +56,18 @@ router.get(
       }
       if (q.from) clauses.push(gte(schema.pluginLogs.timestamp, q.from));
       if (q.to) clauses.push(lt(schema.pluginLogs.timestamp, q.to));
+
+      // Device-level access control — scoped callers only see logs of their own
+      // devices. Device-less plugin logs are excluded for them too (they may
+      // reference any device); unrestricted callers keep the full view.
+      const allowed = await allowedDeviceIds(_req);
+      if (allowed !== null) {
+        if (q.deviceId && !allowed.has(q.deviceId)) {
+          res.status(200).json([]);
+          return;
+        }
+        clauses.push(inArray(schema.pluginLogs.deviceId, [...allowed]));
+      }
 
       const rows = await db.query.pluginLogs.findMany({
         ...(clauses.length > 0 ? { where: and(...clauses) } : {}),

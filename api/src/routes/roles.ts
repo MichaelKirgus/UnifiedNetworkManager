@@ -4,6 +4,7 @@ import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { ALL_PERMISSIONS } from '../auth/permissions';
+import { parseDeviceScope, invalidateDeviceAccessCache } from '../deviceAccess';
 
 const router = Router();
 
@@ -19,13 +20,33 @@ function serializeRole(row: typeof schema.roles.$inferSelect) {
     name: row.name,
     description: row.description ?? null,
     permissions: Array.isArray(permissions) ? permissions : [],
+    deviceScope: parseDeviceScope(row.deviceScope),
     createdAt: row.createdAt,
   };
 }
 
+/** Validates a device-scope object ({siteIds?, tags?, deviceIds?} — arrays of non-empty strings). */
+function validateDeviceScopeField(raw: unknown): { value?: Record<string, string[]>; error?: string } {
+  if (raw === null) return { value: {} }; // explicit clear
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { error: '"deviceScope" must be an object with optional siteIds/tags/deviceIds arrays' };
+  }
+  const out: Record<string, string[]> = {};
+  for (const key of ['siteIds', 'tags', 'deviceIds'] as const) {
+    if (!(key in raw)) continue;
+    const arr = (raw as Record<string, unknown>)[key];
+    if (!Array.isArray(arr) || arr.some((v) => typeof v !== 'string' || String(v).trim() === '')) {
+      return { error: `"deviceScope.${key}" must be an array of non-empty strings` };
+    }
+    const cleaned = [...new Set((arr as string[]).map((s) => s.trim()))];
+    if (cleaned.length > 0) out[key] = cleaned;
+  }
+  return { value: out };
+}
+
 /** Validates a role payload; returns values or an error message. */
 function validateRolePayload(body: Record<string, unknown>, partial: boolean) {
-  const values: { name?: string; description?: string | null; permissions?: string[] } = {};
+  const values: { name?: string; description?: string | null; permissions?: string[]; deviceScope?: Record<string, string[]> } = {};
 
   if (body.name !== undefined || !partial) {
     if (typeof body.name !== 'string' || body.name.trim().length === 0) {
@@ -53,8 +74,14 @@ function validateRolePayload(body: Record<string, unknown>, partial: boolean) {
     values.permissions = [...new Set(cleaned)];
   }
 
-  if (!values.name && values.description === undefined && !values.permissions) {
-    return { error: 'Provide at least one of: name, description, permissions' };
+  if (body.deviceScope !== undefined) {
+    const ref = validateDeviceScopeField(body.deviceScope);
+    if (ref.error) return { error: ref.error };
+    values.deviceScope = ref.value!;
+  }
+
+  if (!values.name && values.description === undefined && !values.permissions && values.deviceScope === undefined) {
+    return { error: 'Provide at least one of: name, description, permissions, deviceScope' };
   }
   return { values };
 }
@@ -85,6 +112,7 @@ router.post('/roles', requireAuth, requirePermission('users:write'), async (req:
     name: check.values.name!,
     description: check.values.description ?? null,
     permissions: JSON.stringify(check.values.permissions ?? []),
+    deviceScope: JSON.stringify(check.values.deviceScope ?? {}),
     createdAt: new Date().toISOString(),
   });
 
@@ -112,7 +140,14 @@ router.patch('/roles/:name', requireAuth, requirePermission('users:write'), asyn
     ...(check.values.permissions !== undefined
       ? { permissions: JSON.stringify(check.values.permissions) }
       : {}),
+    ...(check.values.deviceScope !== undefined
+      ? { deviceScope: JSON.stringify(check.values.deviceScope) }
+      : {}),
   }).where(eq(schema.roles.name, req.params.name));
+
+  // Scope rules changed — drop the per-user allowed-id caches so members of
+  // this role see the new scope immediately (not after the 5 s TTL).
+  invalidateDeviceAccessCache();
 
   const updated = await db.query.roles.findFirst({ where: eq(schema.roles.name, req.params.name) });
   res.status(200).json(serializeRole(updated!));

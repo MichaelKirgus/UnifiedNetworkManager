@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { db, Device, Plugin, Telemetry, ConfigJob } from '../db';
-import { requireAuth, requirePermission, require2FA } from '../auth/middleware';
+import { requireAuth, requirePermission, require2FA, requireDeviceAccess } from '../auth/middleware';
+import { allowedDeviceIds, invalidateDeviceAccessCache } from '../deviceAccess';
 import { mintConsoleTicket } from '../consoleTickets';
 import { DeviceConsoleError, resolveConsoleTarget } from '../deviceConsole';
 import { configJobQueue } from '../queue';
@@ -248,12 +249,25 @@ function firstMetricValue(rows: ({ metrics: unknown } | undefined)[], keys: stri
 router.get('/devices', requireAuth, requirePermission('devices:read'), async (req, res) => {
   const { vendor, siteId } = req.query;
 
+  // Device-level access control: scoped callers only ever see their devices.
+  // `null` = unrestricted (devices:all or no scope rules); an empty set means
+  // the caller sees nothing — answer early instead of querying with inArray([])
+  // (drizzle rejects empty arrays).
+  const allowed = await allowedDeviceIds(req);
+  if (allowed !== null && allowed.size === 0) {
+    res.status(200).json([]);
+    return;
+  }
+
   const filters = [];
   if (typeof vendor === 'string' && vendor.length > 0) {
     filters.push(eq(schema.devices.vendor, vendor));
   }
   if (typeof siteId === 'string' && siteId.length > 0) {
     filters.push(eq(schema.devices.siteId, siteId));
+  }
+  if (allowed !== null) {
+    filters.push(inArray(schema.devices.id, [...allowed]));
   }
 
   const result = await db.query.devices.findMany({
@@ -464,6 +478,8 @@ router.post('/devices', requireAuth, requirePermission('devices:write'), async (
     /* device exists — treat as no secondaries */
   }
   const createdSiteNames = await siteNamesFor([created]);
+  // A new device may match a scoped caller's tag/site rules — refresh caches.
+  invalidateDeviceAccessCache();
   res.status(201).json({
     ...serializeDevice(created, createdSiteNames.get(created.siteId ?? '') ?? null),
     plugins: pluginsView,
@@ -592,6 +608,9 @@ router.patch('/devices/:deviceId', requireAuth, requirePermission('devices:write
 
   await db.update(schema.devices).set(updates).where(eq(schema.devices.id, deviceId));
 
+  // tags/siteId changes shift which scoped callers may see this device.
+  invalidateDeviceAccessCache();
+
   const updated = await db.query.devices.findFirst({
     where: (devices, { eq }) => eq(devices.id, deviceId),
   });
@@ -712,6 +731,8 @@ router.post('/devices/:deviceId/clone', requireAuth, requirePermission('devices:
       /* device exists — treat as no secondaries */
     }
     const siteNames = await siteNamesFor([created]);
+    // The clone inherits the source's tags/site — refresh access caches.
+    invalidateDeviceAccessCache();
     res.status(201).json({
       ...serializeDevice(created, siteNames.get(created.siteId ?? '') ?? null),
       plugins: pluginsView,
@@ -762,6 +783,9 @@ router.delete('/devices/:deviceId', requireAuth, requirePermission('devices:writ
     await db.delete(schema.devicePlugins).where(eq(schema.devicePlugins.deviceId, deviceId));
     await db.delete(schema.devices).where(eq(schema.devices.id, deviceId));
 
+    // The device set changed — drop the in-memory snapshot + per-user allowed-id
+    // caches so tag/site-scoped callers see the change immediately.
+    invalidateDeviceAccessCache();
     res.status(204).send();
   } catch (err) {
     const e = err as { status?: number; message?: string };
@@ -772,7 +796,7 @@ router.delete('/devices/:deviceId', requireAuth, requirePermission('devices:writ
 // --- Device IP addresses (primary = managementAddress, secondaries here) --
 
 // GET /devices/:deviceId/ips - primary address first, then secondary IPs.
-router.get('/devices/:deviceId/ips', requireAuth, requirePermission('devices:read'), async (req, res) => {
+router.get('/devices/:deviceId/ips', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
   const { deviceId } = req.params;
   try {
     const ips = await listDeviceAddresses(deviceId);
@@ -784,7 +808,7 @@ router.get('/devices/:deviceId/ips', requireAuth, requirePermission('devices:rea
 });
 
 // POST /devices/:deviceId/ips - add a secondary IP ({ "address": "10.0.0.5" }).
-router.post('/devices/:deviceId/ips', requireAuth, requirePermission('devices:write'), async (req, res) => {
+router.post('/devices/:deviceId/ips', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
   const { deviceId } = req.params;
   const { address } = req.body ?? {};
   if (!isValidAddress(address)) {
@@ -801,7 +825,7 @@ router.post('/devices/:deviceId/ips', requireAuth, requirePermission('devices:wr
 });
 
 // DELETE /devices/:deviceId/ips/:ipId - remove a secondary IP.
-router.delete('/devices/:deviceId/ips/:ipId', requireAuth, requirePermission('devices:write'), async (req, res) => {
+router.delete('/devices/:deviceId/ips/:ipId', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
   const { deviceId, ipId } = req.params;
   try {
     await removeDeviceIp(deviceId, ipId);
@@ -815,7 +839,7 @@ router.delete('/devices/:deviceId/ips/:ipId', requireAuth, requirePermission('de
 // --- Device ↔ plugin assignments -------------------------------------------
 
 // GET /devices/:deviceId/plugins - all plugin assignments with identity + online state.
-router.get('/devices/:deviceId/plugins', requireAuth, requirePermission('devices:read'), async (req, res) => {
+router.get('/devices/:deviceId/plugins', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
   const { deviceId } = req.params;
   try {
     const plugins = await listAssignmentViews(deviceId);
@@ -827,7 +851,7 @@ router.get('/devices/:deviceId/plugins', requireAuth, requirePermission('devices
 });
 
 // POST /devices/:deviceId/plugins - assign another plugin to this device.
-router.post('/devices/:deviceId/plugins', requireAuth, requirePermission('devices:write'), async (req, res) => {
+router.post('/devices/:deviceId/plugins', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
   const { deviceId } = req.params;
   const { pluginId, secretId, isPrimary, extraCredentials } = req.body ?? {};
   if (!pluginId || typeof pluginId !== 'string') {
@@ -856,7 +880,7 @@ router.post('/devices/:deviceId/plugins', requireAuth, requirePermission('device
 //   { "secretId": "..." | null }→ change credential source (null clears it)
 //   { "extraCredentials": {...} }→ replace bound slot secrets (validated per slot type)
 //   any combination             → applied in one call
-router.patch('/devices/:deviceId/plugins/:pluginId', requireAuth, requirePermission('devices:write'), async (req, res) => {
+router.patch('/devices/:deviceId/plugins/:pluginId', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
   const { deviceId, pluginId } = req.params;
   const body = (req.body ?? {}) as Record<string, unknown>;
   try {
@@ -882,7 +906,7 @@ router.patch('/devices/:deviceId/plugins/:pluginId', requireAuth, requirePermiss
 });
 
 // DELETE /devices/:deviceId/plugins/:pluginId - remove an assignment.
-router.delete('/devices/:deviceId/plugins/:pluginId', requireAuth, requirePermission('devices:write'), async (req, res) => {
+router.delete('/devices/:deviceId/plugins/:pluginId', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
   const { deviceId, pluginId } = req.params;
   try {
     await removeAssignment(deviceId, pluginId);
@@ -896,7 +920,7 @@ router.delete('/devices/:deviceId/plugins/:pluginId', requireAuth, requirePermis
 // --- Per-device plugin settings (inherit global → override per device) ------
 
 // GET /devices/:deviceId/plugins/:pluginId/options - descriptors + this device's overrides.
-router.get('/devices/:deviceId/plugins/:pluginId/options', requireAuth, requirePermission('devices:read'), async (req, res) => {
+router.get('/devices/:deviceId/plugins/:pluginId/options', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
   const { deviceId, pluginId } = req.params;
   try {
     const view = await getDevicePluginOptions(deviceId, pluginId);
@@ -909,7 +933,7 @@ router.get('/devices/:deviceId/plugins/:pluginId/options', requireAuth, requireP
 });
 
 // PUT /devices/:deviceId/plugins/:pluginId/settings - persist this device's overrides.
-router.put('/devices/:deviceId/plugins/:pluginId/settings', requireAuth, requirePermission('plugins:manage'), async (req, res) => {
+router.put('/devices/:deviceId/plugins/:pluginId/settings', requireAuth, requirePermission('plugins:manage'), requireDeviceAccess, async (req, res) => {
   const { deviceId, pluginId } = req.params;
   const settings = (req.body ?? {}).settings as Record<string, unknown> | undefined;
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
@@ -932,7 +956,7 @@ router.put('/devices/:deviceId/plugins/:pluginId/settings', requireAuth, require
 });
 
 // DELETE /devices/:deviceId/plugins/:pluginId/settings - reset this device's overrides.
-router.delete('/devices/:deviceId/plugins/:pluginId/settings', requireAuth, requirePermission('plugins:manage'), async (req, res) => {
+router.delete('/devices/:deviceId/plugins/:pluginId/settings', requireAuth, requirePermission('plugins:manage'), requireDeviceAccess, async (req, res) => {
   const { deviceId, pluginId } = req.params;
   try {
     await resetDevicePluginSettings(deviceId, pluginId);
@@ -945,7 +969,7 @@ router.delete('/devices/:deviceId/plugins/:pluginId/settings', requireAuth, requ
   }
 });
 
-router.get('/devices/:deviceId/monitoring', requireAuth, requirePermission('devices:read'), async (req, res) => {
+router.get('/devices/:deviceId/monitoring', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
   const { deviceId } = req.params;
 
   const device = await db.query.devices.findFirst({
@@ -1002,7 +1026,7 @@ router.get('/devices/:deviceId/monitoring', requireAuth, requirePermission('devi
 // interfaces, ZFS pools) + context-aware action references. The broker is
 // generic — it only resolves credentials and validates advertised action ids
 // against the plugin's persisted catalog (see deviceState.ts).
-router.get('/devices/:deviceId/state', requireAuth, requirePermission('devices:read'), async (req, res) => {
+router.get('/devices/:deviceId/state', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
   const { deviceId } = req.params;
   const pluginId = typeof req.query.pluginId === 'string' ? req.query.pluginId : '';
 
@@ -1040,7 +1064,7 @@ router.get('/devices/:deviceId/state', requireAuth, requirePermission('devices:r
 // (default = primary). The broker is generic (see deviceProbe.ts) — it resolves
 // credentials and forwards verbatim, never interpreting metric content or
 // writing to the DB.
-router.get('/devices/:deviceId/probe', requireAuth, requirePermission('devices:read'), async (req, res) => {
+router.get('/devices/:deviceId/probe', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
   const { deviceId } = req.params;
   const pluginId = typeof req.query.pluginId === 'string' ? req.query.pluginId : '';
   const keysRaw = typeof req.query.keys === 'string' ? req.query.keys : Array.isArray(req.query.keys) ? (req.query.keys as string[]).join(',') : '';
@@ -1082,7 +1106,7 @@ router.get('/devices/:deviceId/probe', requireAuth, requirePermission('devices:r
 // it onto an SFTP root and confines every path to it. Gated on devices:write — file
 // ops mutate device state (and reads are only useful alongside them). The broker is
 // generic (see deviceFilesystem.ts) — it resolves credentials + forwards verbatim.
-router.post('/devices/:deviceId/filesystem', requireAuth, requirePermission('devices:write'), async (req, res) => {
+router.post('/devices/:deviceId/filesystem', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
   const { deviceId } = req.params;
   const body = (req.body ?? {}) as Record<string, unknown>;
 
@@ -1130,7 +1154,7 @@ router.post('/devices/:deviceId/filesystem', requireAuth, requirePermission('dev
 // WS path below. Authorization happens HERE: JWT + devices:write + the plugin's
 // 'sshConsole' capability (resolveConsoleTarget throws 501 when absent). The webapp
 // then opens GET /devices/:id/console/ws?ticket=… and gets a full xterm.js session.
-router.post('/devices/:deviceId/console', requireAuth, requirePermission('devices:write'), async (req, res) => {
+router.post('/devices/:deviceId/console', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
   const { deviceId } = req.params;
   const body = (req.body ?? {}) as Record<string, unknown>;
 
@@ -1163,7 +1187,7 @@ router.post('/devices/:deviceId/console', requireAuth, requirePermission('device
 // GET /devices/:deviceId/ports - Normalized port inventory (device_ports table)
 // for this device across all plugins. Fed by the telemetry worker from each
 // plugin's `metrics['ports']` array — upserted per poll, deleted-on-absent.
-router.get('/devices/:deviceId/ports', requireAuth, requirePermission('devices:read'), async (req, res) => {
+router.get('/devices/:deviceId/ports', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
   const { deviceId } = req.params;
 
   const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
@@ -1194,7 +1218,7 @@ router.get('/devices/:deviceId/ports', requireAuth, requirePermission('devices:r
 });
 
 // GET /devices/:deviceId/telemetry - Recent telemetry history (for plot metrics).
-router.get('/devices/:deviceId/telemetry', requireAuth, requirePermission('devices:read'), async (req, res) => {
+router.get('/devices/:deviceId/telemetry', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
   const { deviceId } = req.params;
   const limit = Math.min(Number(req.query.limit ?? 30) || 30, 200);
 
@@ -1232,6 +1256,7 @@ router.post(
   requireAuth,
   require2FA,
   requirePermission('configs:apply'),
+  requireDeviceAccess,
   async (req, res) => {
     const { deviceId } = req.params;
     const { action, payload, pluginId } = req.body ?? {};
@@ -1307,10 +1332,22 @@ router.post('/devices/refresh', requireAuth, requirePermission('devices:write'),
     res.status(400).json({ error: '"deviceIds" must be an array of device id strings' });
     return;
   }
-  const ids = rawIds.filter((v): v is string => typeof v === 'string' && v.trim() !== '').map((v) => v.trim());
+  let ids = rawIds.filter((v): v is string => typeof v === 'string' && v.trim() !== '').map((v) => v.trim());
   if (ids.length === 0) {
     res.status(400).json({ error: '"deviceIds" must contain at least one device id' });
     return;
+  }
+
+  // Device-level access control: scoped callers may only refresh their own
+  // devices — out-of-scope ids are dropped silently (they would be "unknown"
+  // to them anyway, and listing them would leak existence).
+  const allowed = await allowedDeviceIds(req);
+  if (allowed !== null) {
+    ids = ids.filter((id) => allowed.has(id));
+    if (ids.length === 0) {
+      res.status(200).json({ results: [] });
+      return;
+    }
   }
 
   try {

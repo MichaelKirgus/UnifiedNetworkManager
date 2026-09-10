@@ -22,6 +22,11 @@ export const users = pgTable('users', {
   disabled: boolean('disabled').notNull().default(false),
   lastLoginAt: text('lastLoginAt'),
   passwordChangedAt: text('passwordChangedAt'),
+  // Device-level access control (see deviceAccess.ts). JSON object
+  // {siteIds?: string[], tags?: string[], deviceIds?: string[]} — a user may
+  // see any device matching ANY of the listed rules. '{}' = unrestricted.
+  // Only enforced when the user's effective permissions lack 'devices:all'.
+  deviceScope: text('deviceScope').notNull().default('{}'),
 });
 
 // Long-lived bearer tokens for agents/scripts (e.g. the MCP server). The raw
@@ -57,6 +62,10 @@ export const roles = pgTable('roles', {
   // JSON string array of permission ids (validated against the catalog).
   permissions: text('permissions').notNull().default('[]'),
   createdAt: text('createdAt').notNull(),
+  // Device-level access control — group-level default scope for every member
+  // carrying this role. Same shape as users.deviceScope; a user's own rules
+  // are UNIONED on top of their roles' rules (union model, see deviceAccess.ts).
+  deviceScope: text('deviceScope').notNull().default('{}'),
 });
 
 // Sites are first-class objects (name + description + address/country/timezone)

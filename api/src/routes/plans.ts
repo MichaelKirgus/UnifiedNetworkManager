@@ -1,10 +1,11 @@
-import { Router } from 'express';
+import { Router, Request, Response } from 'express';
 import { and, asc, desc, eq, gte, inArray, like, ne } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission, require2FA } from '../auth/middleware';
+import { allowedDeviceIds } from '../deviceAccess';
 import { getSecret, generateSecret, regenerateSecret, deleteSecret } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
 import { planQueue } from '../queue';
@@ -291,6 +292,30 @@ async function reindexSteps(planId: string, orderedIds: string[]): Promise<void>
   }
 }
 
+// --- Device-level access control --------------------------------------------
+
+/**
+ * A plan is visible to a caller only when EVERY device referenced by its steps
+ * lies within their scope — list and detail stay consistent, and no mutation
+ * can ever touch an out-of-scope device. Unrestricted callers (devices:all or
+ * no scope rules) always pass; step-less plans have nothing to touch.
+ */
+async function planVisibleTo(req: Request, planId: string): Promise<boolean> {
+  const allowed = await allowedDeviceIds(req);
+  if (allowed === null) return true;
+  for (const step of await loadSteps(planId)) {
+    if (!allowed.has(step.deviceId)) return false;
+  }
+  return true;
+}
+
+/** Responds 404 "Plan not found" when the plan is outside the caller's device scope. */
+async function assertPlanAccess(req: Request, res: Response, planId: string): Promise<boolean> {
+  if (await planVisibleTo(req, planId)) return true;
+  res.status(404).json({ error: 'Plan not found' });
+  return false;
+}
+
 // --- Routes -----------------------------------------------------------------
 
 // POST /plans — plan an intent across devices via the plugin's /plan endpoint,
@@ -347,6 +372,13 @@ router.post(
         where: (devices, { eq }) => eq(devices.id, d.deviceId),
       });
       if (!device) {
+        res.status(404).json({ error: `Device not found: ${d.deviceId}` });
+        return;
+      }
+      // Device-level access control — a plan may only be created for the
+      // caller's own devices (out-of-scope ids are indistinguishable from unknown).
+      const allowed = await allowedDeviceIds(req);
+      if (allowed !== null && !allowed.has(device.id)) {
         res.status(404).json({ error: `Device not found: ${d.deviceId}` });
         return;
       }
@@ -493,7 +525,16 @@ router.get('/plans/activity', requireAuth, requirePermission('plans:read'), asyn
     orderBy: [desc(schema.plans.updatedAt)],
     limit: 50,
   });
-  const planRows = rows as PlanRow[];
+  // Device-level access control — a plan is only listed when every device its
+  // steps reference is within the caller's scope.
+  const visibleRows = (await Promise.all(
+    (rows as PlanRow[]).map(async (row) => ((await planVisibleTo(req, row.id)) ? row : null))
+  )).filter((r): r is PlanRow => r !== null);
+  if (visibleRows.length === 0) {
+    res.status(200).json([]);
+    return;
+  }
+  const planRows = visibleRows;
   const usernames = await resolveUsernames(planRows);
   const secretsMeta = await resolveSecretsMetadata(planRows);
   const out: unknown[] = [];
@@ -511,7 +552,15 @@ router.get('/plans', requireAuth, requirePermission('plans:read'), async (_req, 
     orderBy: [desc(schema.plans.createdAt)],
     limit: 100,
   });
-  const planRows = rows as PlanRow[];
+  // Device-level access control — same visibility rule as /plans/activity.
+  const visibleRows = (await Promise.all(
+    (rows as PlanRow[]).map(async (row) => ((await planVisibleTo(_req, row.id)) ? row : null))
+  )).filter((r): r is PlanRow => r !== null);
+  if (visibleRows.length === 0) {
+    res.status(200).json([]);
+    return;
+  }
+  const planRows = visibleRows;
   const usernames = await resolveUsernames(planRows);
   const secretsMeta = await resolveSecretsMetadata(planRows);
   const out: unknown[] = [];
@@ -525,6 +574,7 @@ router.get('/plans', requireAuth, requirePermission('plans:read'), async (_req, 
 
 // GET /plans/:id — full plan with ordered steps + provisioned secret metadata.
 router.get('/plans/:id', requireAuth, requirePermission('plans:read'), async (req, res) => {
+  if (!(await assertPlanAccess(req, res, req.params.id))) return;
   const out = await serializePlan(req.params.id, true);
   if (!out) {
     res.status(404).json({ error: 'Plan not found' });
@@ -539,6 +589,7 @@ router.patch(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
+    if (!(await assertPlanAccess(req, res, req.params.id))) return;
     const plan = await loadPlan(req.params.id);
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
@@ -651,6 +702,13 @@ router.post(
     }
 
     const body = req.body ?? {};
+    // Device-level access control — a new step may only target the caller's devices.
+    const allowed = await allowedDeviceIds(req);
+    if (allowed !== null && !allowed.has(typeof body.deviceId === 'string' ? body.deviceId : '')) {
+      res.status(404).json({ error: 'Plan not found' });
+      return;
+    }
+
     const deviceId = typeof body.deviceId === 'string' ? body.deviceId : '';
     const actionId = typeof body.actionId === 'string' ? body.actionId : '';
     if (!deviceId || !actionId) {
@@ -745,6 +803,18 @@ router.post(
     }
 
     const body = req.body ?? {};
+    // Device-level access control — every new step must target the caller's devices.
+    const allowed = await allowedDeviceIds(req);
+    if (allowed !== null) {
+      for (const s of Array.isArray(body.steps) ? body.steps : []) {
+        const deviceId = typeof (s as Record<string, unknown>)?.deviceId === 'string' ? ((s as Record<string, unknown>).deviceId as string) : '';
+        if (!allowed.has(deviceId)) {
+          res.status(404).json({ error: 'Plan not found' });
+          return;
+        }
+      }
+    }
+
     const stepsRaw = Array.isArray(body.steps) ? body.steps : [];
     if (stepsRaw.length === 0) {
       res.status(400).json({ error: 'At least one step is required' });
@@ -845,6 +915,13 @@ router.delete(
       return;
     }
 
+    // Device-level access control — the removed step's device must be in scope.
+    const allowed = await allowedDeviceIds(req);
+    if (allowed !== null && !allowed.has(step.deviceId)) {
+      res.status(404).json({ error: 'Plan not found' });
+      return;
+    }
+
     await db.delete(schema.planSteps).where(eq(schema.planSteps.id, step.id));
     try {
       await reindexSteps(plan.id, steps.filter((s) => s.id !== step.id).map((s) => s.id));
@@ -872,6 +949,9 @@ router.patch(
       res.status(409).json({ error: `Plan is ${plan.status} — only draft/ready plans can be edited` });
       return;
     }
+    // Device-level access control (reorder touches every step's device).
+    if (!(await assertPlanAccess(req, res, req.params.id))) return;
+
     const body = req.body ?? {};
     const from = typeof body.from === 'number' ? body.from : -1;
     const to = typeof body.to === 'number' ? body.to : -1;
@@ -911,6 +991,9 @@ router.post(
       res.status(409).json({ error: `Plan is ${plan.status} — only draft/ready plans can be executed` });
       return;
     }
+    // Device-level access control — executing applies changes to every step's device.
+    if (!(await assertPlanAccess(req, res, req.params.id))) return;
+
     const now = new Date().toISOString();
     await db.update(schema.plans)
       // Re-execution clears the "recently done" tick so it re-appears on finish,
@@ -953,6 +1036,8 @@ router.post(
       res.status(409).json({ error: 'This plan is still executing — cancel it or wait for completion before retrying' });
       return;
     }
+    // Device-level access control — a retry re-applies every step's device.
+    if (!(await assertPlanAccess(req, res, req.params.id))) return;
 
     const steps = await loadSteps(plan.id);
     if (steps.length === 0) {
@@ -1016,6 +1101,7 @@ router.post('/plans/:id/cancel', requireAuth, requirePermission('configs:apply')
     res.status(404).json({ error: 'Plan not found' });
     return;
   }
+  if (!(await assertPlanAccess(req, res, req.params.id))) return;
   if (plan.status !== 'executing') {
     res.status(409).json({ error: `Plan is ${plan.status} — only executing plans can be cancelled` });
     return;
@@ -1033,6 +1119,7 @@ router.post(
   requireAuth,
   requirePermission('secrets:write'),
   async (req, res) => {
+    if (!(await assertPlanAccess(req, res, req.params.id))) return;
     const plan = await loadPlan(req.params.id);
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
@@ -1061,6 +1148,7 @@ router.delete('/plans/:id', requireAuth, requirePermission('configs:apply'), asy
     res.status(404).json({ error: 'Plan not found' });
     return;
   }
+  if (!(await assertPlanAccess(req, res, req.params.id))) return;
   if (plan.status === 'executing') {
     res.status(409).json({ error: 'Cancel the plan before deleting it' });
     return;

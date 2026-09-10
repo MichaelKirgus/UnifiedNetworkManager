@@ -3,6 +3,7 @@ import { and, asc, eq, inArray } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
+import { allowedDeviceIds } from '../deviceAccess';
 import { subnetOf } from '../utils/address';
 import { buildFirewallInventoryIndex, enrichFirewallAddress, getCachedFirewallIndex } from '../utils/firewallEnrichment';
 import type { FirewallAddressResolution } from '../utils/firewallEnrichment';
@@ -432,6 +433,17 @@ router.get('/networks', requireAuth, requirePermission('networks:read'), async (
   try {
     const { deviceId, siteId } = _req.query as Record<string, string | undefined>;
 
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json([]);
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json([]);
+      return;
+    }
+
     let where;
     if (deviceId && siteId) {
       // Both filters: verify the device belongs to the site first.
@@ -445,12 +457,15 @@ router.get('/networks', requireAuth, requirePermission('networks:read'), async (
       where = eq(schema.networks.deviceId, deviceId);
     } else if (siteId) {
       // Subquery: devices belonging to the site.
-      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
       if (deviceIds.length === 0) {
         res.status(200).json([]);
         return;
       }
       where = inArray(schema.networks.deviceId, deviceIds);
+    } else if (allowed !== null) {
+      where = inArray(schema.networks.deviceId, [...allowed]);
     }
 
     const rows = await db.query.networks.findMany({
@@ -499,6 +514,17 @@ router.get('/hosts', requireAuth, requirePermission('hosts:read'), async (_req, 
       return;
     }
 
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json([]);
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json([]);
+      return;
+    }
+
     let where;
     const sourceClause = source ? eq(schema.hosts.source, source) : undefined;
     if (deviceId && siteId) {
@@ -512,7 +538,8 @@ router.get('/hosts', requireAuth, requirePermission('hosts:read'), async (_req, 
     } else if (deviceId) {
       where = sourceClause ? and(eq(schema.hosts.deviceId, deviceId), sourceClause) : eq(schema.hosts.deviceId, deviceId);
     } else if (siteId) {
-      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
       if (deviceIds.length === 0) {
         res.status(200).json([]);
         return;
@@ -520,7 +547,9 @@ router.get('/hosts', requireAuth, requirePermission('hosts:read'), async (_req, 
       const deviceClause = inArray(schema.hosts.deviceId, deviceIds);
       where = sourceClause ? and(deviceClause, sourceClause) : deviceClause;
     } else if (sourceClause) {
-      where = sourceClause;
+      where = allowed !== null ? and(sourceClause, inArray(schema.hosts.deviceId, [...allowed])) : sourceClause;
+    } else if (allowed !== null) {
+      where = inArray(schema.hosts.deviceId, [...allowed]);
     }
 
     const rows = await db.query.hosts.findMany({
@@ -571,6 +600,17 @@ router.get('/tunnels', requireAuth, requirePermission('tunnels:read'), async (_r
       return;
     }
 
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json([]);
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json([]);
+      return;
+    }
+
     let where;
     const typeClause = type ? eq(schema.tunnels.type, type) : undefined;
     if (deviceId && siteId) {
@@ -584,7 +624,8 @@ router.get('/tunnels', requireAuth, requirePermission('tunnels:read'), async (_r
     } else if (deviceId) {
       where = typeClause ? and(eq(schema.tunnels.deviceId, deviceId), typeClause) : eq(schema.tunnels.deviceId, deviceId);
     } else if (siteId) {
-      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
       if (deviceIds.length === 0) {
         res.status(200).json([]);
         return;
@@ -592,7 +633,9 @@ router.get('/tunnels', requireAuth, requirePermission('tunnels:read'), async (_r
       const deviceClause = inArray(schema.tunnels.deviceId, deviceIds);
       where = typeClause ? and(deviceClause, typeClause) : deviceClause;
     } else if (typeClause) {
-      where = typeClause;
+      where = allowed !== null ? and(typeClause, inArray(schema.tunnels.deviceId, [...allowed])) : typeClause;
+    } else if (allowed !== null) {
+      where = inArray(schema.tunnels.deviceId, [...allowed]);
     }
 
     const rows = await db.query.tunnels.findMany({
@@ -639,6 +682,17 @@ router.get('/routes', requireAuth, requirePermission('routes:read'), async (_req
       return;
     }
 
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json([]);
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json([]);
+      return;
+    }
+
     let where;
     const protocolClause = protocol ? eq(schema.routes.protocol, protocol) : undefined;
     if (deviceId && siteId) {
@@ -652,7 +706,8 @@ router.get('/routes', requireAuth, requirePermission('routes:read'), async (_req
     } else if (deviceId) {
       where = protocolClause ? and(eq(schema.routes.deviceId, deviceId), protocolClause) : eq(schema.routes.deviceId, deviceId);
     } else if (siteId) {
-      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
       if (deviceIds.length === 0) {
         res.status(200).json([]);
         return;
@@ -660,7 +715,9 @@ router.get('/routes', requireAuth, requirePermission('routes:read'), async (_req
       const deviceClause = inArray(schema.routes.deviceId, deviceIds);
       where = protocolClause ? and(deviceClause, protocolClause) : deviceClause;
     } else if (protocolClause) {
-      where = protocolClause;
+      where = allowed !== null ? and(protocolClause, inArray(schema.routes.deviceId, [...allowed])) : protocolClause;
+    } else if (allowed !== null) {
+      where = inArray(schema.routes.deviceId, [...allowed]);
     }
 
     const rows = await db.query.routes.findMany({
@@ -707,6 +764,17 @@ router.get('/firewall-rules', requireAuth, requirePermission('firewall:read'), a
       return;
     }
 
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json([]);
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json([]);
+      return;
+    }
+
     let where;
     const ruleTypeClause = ruleType ? eq(schema.firewallRules.ruleType, ruleType) : undefined;
     if (deviceId && siteId) {
@@ -720,7 +788,8 @@ router.get('/firewall-rules', requireAuth, requirePermission('firewall:read'), a
     } else if (deviceId) {
       where = ruleTypeClause ? and(eq(schema.firewallRules.deviceId, deviceId), ruleTypeClause) : eq(schema.firewallRules.deviceId, deviceId);
     } else if (siteId) {
-      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
       if (deviceIds.length === 0) {
         res.status(200).json([]);
         return;
@@ -728,7 +797,9 @@ router.get('/firewall-rules', requireAuth, requirePermission('firewall:read'), a
       const deviceClause = inArray(schema.firewallRules.deviceId, deviceIds);
       where = ruleTypeClause ? and(deviceClause, ruleTypeClause) : deviceClause;
     } else if (ruleTypeClause) {
-      where = ruleTypeClause;
+      where = allowed !== null ? and(ruleTypeClause, inArray(schema.firewallRules.deviceId, [...allowed])) : ruleTypeClause;
+    } else if (allowed !== null) {
+      where = inArray(schema.firewallRules.deviceId, [...allowed]);
     }
 
     const rows = await db.query.firewallRules.findMany({
@@ -750,13 +821,21 @@ router.get('/firewall-rules', requireAuth, requirePermission('firewall:read'), a
         (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id)
       );
       indexScope = Array.from(siteDeviceIds);
+    } else if (allowed !== null) {
+      // Scoped callers resolve addresses against their own devices only.
+      indexScope = [...allowed];
     }
 
     // Device names for interface labels — ALL devices (the inventory may carry
     // subnets/hosts from devices that have no firewall rules of their own).
-    const allDevices = await db.query.devices.findMany();
+    // Scoped callers only get the names of their own devices.
+    const allDevices = await db.query.devices.findMany(
+      allowed !== null ? { where: inArray(schema.devices.id, [...allowed]) } : undefined
+    );
     const deviceNameById = new Map(allDevices.map((d) => [d.id, d.name] as const));
-    const indexKey = `fw:${siteId ?? 'all'}`;
+    // The index cache is shared across users — fold the caller's scope into the
+    // key so a scoped user never resolves against another user's inventory.
+    const indexKey = `fw:${allowed !== null ? _req.user!.sub : 'all'}:${siteId ?? 'all'}`;
     const index = await getCachedFirewallIndex(indexKey, async () => {
       const scopeClause = indexScope ? inArray(schema.networks.deviceId, indexScope) : undefined;
       const [networkRows, hostRows] = await Promise.all([
@@ -842,13 +921,23 @@ router.get('/wifi', requireAuth, requirePermission('wifi:read'), async (_req, re
   try {
     const { siteId } = _req.query as Record<string, string | undefined>;
 
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json({ ssids: [], bands: [] });
+      return;
+    }
+
     let deviceIds: string[] | null = null;
     if (siteId) {
       deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
       if (deviceIds.length === 0) {
         res.status(200).json({ ssids: [], bands: [] });
         return;
       }
+    } else if (allowed !== null) {
+      deviceIds = [...allowed];
     }
 
     const [ssidRows, channelRows, clientRows, radioRows, neighborRows] = await Promise.all([
@@ -1051,6 +1140,17 @@ router.get('/storage', requireAuth, requirePermission('storage:read'), async (_r
   try {
     const { deviceId, siteId } = _req.query as Record<string, string | undefined>;
 
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json({ filesystems: [], disks: [] });
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json({ filesystems: [], disks: [] });
+      return;
+    }
+
     // Resolve the device filter once, then build per-table where clauses.
     let fsWhere;
     let diskWhere;
@@ -1067,13 +1167,17 @@ router.get('/storage', requireAuth, requirePermission('storage:read'), async (_r
       fsWhere = eq(schema.storageFilesystems.deviceId, deviceId);
       diskWhere = eq(schema.storageDisks.deviceId, deviceId);
     } else if (siteId) {
-      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
       if (deviceIds.length === 0) {
         res.status(200).json({ filesystems: [], disks: [] });
         return;
       }
       fsWhere = inArray(schema.storageFilesystems.deviceId, deviceIds);
       diskWhere = inArray(schema.storageDisks.deviceId, deviceIds);
+    } else if (allowed !== null) {
+      fsWhere = inArray(schema.storageFilesystems.deviceId, [...allowed]);
+      diskWhere = inArray(schema.storageDisks.deviceId, [...allowed]);
     }
 
     const [fsRows, diskRows] = await Promise.all([
@@ -1125,6 +1229,17 @@ router.get('/containers', requireAuth, requirePermission('containers:read'), asy
   try {
     const { deviceId, siteId } = _req.query as Record<string, string | undefined>;
 
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json({ containers: [], images: [] });
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json({ containers: [], images: [] });
+      return;
+    }
+
     let contWhere;
     if (deviceId && siteId) {
       // Both filters: verify the device belongs to the site first.
@@ -1137,12 +1252,15 @@ router.get('/containers', requireAuth, requirePermission('containers:read'), asy
     } else if (deviceId) {
       contWhere = eq(schema.containers.deviceId, deviceId);
     } else if (siteId) {
-      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
       if (deviceIds.length === 0) {
         res.status(200).json({ containers: [], images: [] });
         return;
       }
       contWhere = inArray(schema.containers.deviceId, deviceIds);
+    } else if (allowed !== null) {
+      contWhere = inArray(schema.containers.deviceId, [...allowed]);
     }
 
     const [rows, imageRows] = await Promise.all([
@@ -1196,6 +1314,17 @@ router.get('/vms', requireAuth, requirePermission('vms:read'), async (_req, res:
   try {
     const { deviceId, siteId } = _req.query as Record<string, string | undefined>;
 
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json({ vms: [] });
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json({ vms: [] });
+      return;
+    }
+
     let vmWhere;
     if (deviceId && siteId) {
       // Both filters: verify the device belongs to the site first.
@@ -1208,12 +1337,15 @@ router.get('/vms', requireAuth, requirePermission('vms:read'), async (_req, res:
     } else if (deviceId) {
       vmWhere = eq(schema.vms.deviceId, deviceId);
     } else if (siteId) {
-      const deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
       if (deviceIds.length === 0) {
         res.status(200).json({ vms: [] });
         return;
       }
       vmWhere = inArray(schema.vms.deviceId, deviceIds);
+    } else if (allowed !== null) {
+      vmWhere = inArray(schema.vms.deviceId, [...allowed]);
     }
 
     const rows = await db.query.vms.findMany({

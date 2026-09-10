@@ -996,6 +996,16 @@ export interface VmsOverview {
   vms: VmRow[];
 }
 
+/** Device-level access scope rules — a user may see any device matching ANY rule. Empty = unrestricted. */
+export interface DeviceScope {
+  /** Visible devices assigned to any of these site ids. */
+  siteIds?: string[];
+  /** Visible devices carrying any of these tags. */
+  tags?: string[];
+  /** Explicitly visible device ids. */
+  deviceIds?: string[];
+}
+
 /** A user account (never includes password hashes or TOTP secrets). */
 export interface User {
   id: string;
@@ -1003,6 +1013,8 @@ export interface User {
   roles: string[];
   /** Explicit permission grants only (role-derived ones are added at login). */
   permissions: string[];
+  /** The user's OWN device-scope rules (role scopes are unioned server-side). Empty = unrestricted. */
+  deviceScope?: DeviceScope;
   /** True when ANY second factor is enrolled (TOTP or ≥1 passkey). */
   twoFactorEnabled: boolean;
   totpEnabled?: boolean;
@@ -1052,12 +1064,14 @@ export interface Role {
   name: string;
   description?: string | null;
   permissions: string[];
+  /** Group-level device-scope default for every member carrying this role. Empty = unrestricted. */
+  deviceScope?: DeviceScope;
   createdAt?: string;
 }
 
 export interface PermissionCatalog {
   permissions: { id: string; description: string }[];
-  roles: { name: string; description?: string | null; permissions: string[] }[];
+  roles: { name: string; description?: string | null; permissions: string[]; deviceScope?: DeviceScope }[];
 }
 
 export interface DeviceCreateRequest {
@@ -1925,9 +1939,9 @@ export const api = {
     ),
   // Users + permission catalog.
   users: () => apiFetch<User[]>('/users'),
-  createUser: (body: { username: string; password: string; roles?: string[]; permissions?: string[] }) =>
+  createUser: (body: { username: string; password: string; roles?: string[]; permissions?: string[]; deviceScope?: DeviceScope }) =>
     apiFetch<{ user: User; enrollment: TotpEnrollment }>('/users', { method: 'POST', body: JSON.stringify(body) }),
-  updateUser: (id: string, body: { roles?: string[]; permissions?: string[] }) =>
+  updateUser: (id: string, body: { roles?: string[]; permissions?: string[]; deviceScope?: DeviceScope }) =>
     apiFetch<User>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteUser: (id: string) => apiFetch<void>(`/users/${id}`, { method: 'DELETE' }),
   /** Enable/disable a user account (requires users:write). */
@@ -1975,9 +1989,9 @@ export const api = {
   deleteToken: (id: string) => apiFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
   // Roles.
   roles: () => apiFetch<Role[]>('/roles'),
-  createRole: (body: { name: string; description?: string; permissions: string[] }) =>
+  createRole: (body: { name: string; description?: string; permissions: string[]; deviceScope?: DeviceScope }) =>
     apiFetch<Role>('/roles', { method: 'POST', body: JSON.stringify(body) }),
-  updateRole: (name: string, body: { description?: string | null; permissions?: string[] }) =>
+  updateRole: (name: string, body: { description?: string | null; permissions?: string[]; deviceScope?: DeviceScope }) =>
     apiFetch<Role>(`/roles/${encodeURIComponent(name)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteRole: (name: string) => apiFetch<void>(`/roles/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   /** Primary secret type + any additional named credential slots the plugin declares. */
