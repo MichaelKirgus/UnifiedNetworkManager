@@ -115,7 +115,9 @@ paths:
           description: >-
             No enrolled second factor satisfies the user's credential policy
             (error code `no_2fa_enrolled`) — enroll TOTP/passkey first. A
-            disabled account is also rejected here (error code `user_disabled`).
+            disabled account is also rejected here (error code `user_disabled`),
+            as is a service-only account without the `auth:interactive-login`
+            permission (error code `no_interactive_login`).
         '429':
           description: Too many login attempts
 
@@ -3871,14 +3873,16 @@ paths:
           description: Missing tokens:manage permission, or missing users:read with all=true
     post:
       tags: [Tokens]
-      summary: Create an API token for the caller
+      summary: Create an API token for the caller (or another user)
       description: >-
         Creates a long-lived bearer token (`unm_…`) bound to the CALLING user.
         Requires permission `tokens:manage`. The raw value is returned exactly
         once in `rawToken` — store it now, only its SHA-256 hash is kept.
-        `permissions` may narrow the grant to a subset of the caller's effective
-        permissions; omit it (or pass []) to inherit the full current effective
-        set.
+        `permissions` may narrow the grant to a subset of the target user's
+        effective permissions; omit it (or pass []) to inherit the full current
+        effective set. Pass `userId` to mint on behalf of ANOTHER user —
+        requires permission `users:write`. That is how admins provision API
+        tokens for service-only accounts that cannot sign into the web UI.
       requestBody:
         required: false
         content:
@@ -3893,11 +3897,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiTokenCreated'
         '400':
-          description: Invalid payload or permission not in caller's effective set
+          description: Invalid payload or permission not in the target user's effective set
         '401':
           description: Authentication required
         '403':
-          description: Missing tokens:manage permission
+          description: Missing tokens:manage permission, or missing users:write when minting for another user
+        '404':
+          description: Target userId not found
 
   /tokens/{id}:
     delete:
@@ -4162,10 +4168,11 @@ components:
       type: object
       properties:
         label: { type: string, maxLength: 120, description: "Human-readable purpose (e.g. 'MCP server')" }
+        userId: { type: string, description: "Optional — mint on behalf of another user (requires users:write); omitted = the caller" }
         permissions:
           type: array
           items: { type: string }
-          description: "Optional narrowing to a subset of the caller's effective permissions; omit for inherit-all"
+          description: "Optional narrowing to a subset of the target user's effective permissions; omit for inherit-all"
         expiresAt: { type: [string, 'null'], format: date-time, description: "ISO expiry timestamp; null/omitted = no expiry" }
 
     ApiTokenCreated:

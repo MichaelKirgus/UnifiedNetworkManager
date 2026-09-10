@@ -188,6 +188,19 @@ export default function Users() {
 
   const catalog = catalogQuery.data;
   const editingUser = usersQuery.data?.find((u) => u.id === editingId) ?? null;
+
+  // Effective permission set (explicit grants + role-derived, same union the
+  // API computes at login). Used to flag service-only accounts — users without
+  // `auth:interactive-login` cannot sign into the web UI.
+  const effectivePermissions = (row: User): Set<string> => {
+    const perms = new Set(row.permissions);
+    for (const role of row.roles) {
+      for (const p of catalog?.roles.find((r) => r.name === role)?.permissions ?? []) perms.add(p);
+    }
+    return perms;
+  };
+  const isServiceOnly = (row: User): boolean =>
+    Boolean(catalog) && !effectivePermissions(row).has('auth:interactive-login');
   const credsUser = usersQuery.data?.find((u) => u.id === credsId) ?? null;
   // Self-credential ops need users:self-credentials; other-user ops need users:manage-credentials.
   const canManageCredsOf = (row: User): boolean => {
@@ -222,12 +235,24 @@ export default function Users() {
       header: 'Status',
       key: 'disabled',
       sortable: false as const,
-      render: (row) =>
-        row.disabled ? (
-          <span className="inline-flex items-center rounded-full bg-danger px-2 py-0.5 text-xs font-medium text-danger-fg">disabled</span>
-        ) : (
-          <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">active</span>
-        ),
+      render: (row) => (
+        <div className="flex flex-wrap gap-1">
+          {row.disabled ? (
+            <span className="inline-flex items-center rounded-full bg-danger px-2 py-0.5 text-xs font-medium text-danger-fg">disabled</span>
+          ) : (
+            <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">active</span>
+          )}
+          {isServiceOnly(row) && (
+            <span
+              title="No auth:interactive-login — this account cannot sign in to the web UI (API tokens only)."
+              className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-secondary"
+            >
+              <ShieldOff className="h-3 w-3" />
+              service-only
+            </span>
+          )}
+        </div>
+      ),
     },
     {
       header: '2FA',
@@ -603,6 +628,18 @@ export default function Users() {
                     </label>
                   ))}
                 </div>
+                {/* Effective-set hint: explicit grants alone can hide role-derived
+                    permissions, so show the union that login actually uses. */}
+                {(() => {
+                  const eff = effectivePermissions(editingUser);
+                  return !eff.has('auth:interactive-login') ? (
+                    <p className="mt-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-xs text-amber-900">
+                      This account is <strong>service-only</strong>: it cannot sign in to the web UI. Grant{' '}
+                      <code className="rounded bg-card px-1">auth:interactive-login</code> (directly or via a role) to restore
+                      interactive login.
+                    </p>
+                  ) : null;
+                })()}
               </fieldset>
 
               <div className="flex items-center gap-2 sm:col-span-2">

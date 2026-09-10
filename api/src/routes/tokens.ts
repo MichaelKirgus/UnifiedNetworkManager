@@ -33,12 +33,27 @@ router.get('/tokens', requireAuth, requirePermission('tokens:manage'), async (re
 });
 
 // POST /tokens - create a token for the CALLER. Requires tokens:manage.
-// Body (all optional): label, permissions[] (subset of caller's effective set;
-// [] = inherit all), expiresAt (ISO timestamp). Response carries `rawToken`
-// exactly once.
+// Body (all optional): label, permissions[] (subset of the target user's
+// effective set; [] = inherit all), expiresAt (ISO timestamp or null), and
+// userId — mint on behalf of ANOTHER user (requires users:write). That is how
+// admins provision API tokens for service-only accounts that cannot sign into
+// the web UI. Response carries `rawToken` exactly once.
 router.post('/tokens', requireAuth, requirePermission('tokens:manage'), async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
   try {
+    let targetUserId = req.user!.sub;
+    if (body.userId !== undefined) {
+      if (typeof body.userId !== 'string' || body.userId.trim().length === 0) {
+        res.status(400).json({ error: '"userId" must be a non-empty string' });
+        return;
+      }
+      targetUserId = body.userId.trim();
+      // Minting for someone else is an admin-level action.
+      if (targetUserId !== req.user!.sub && !req.user?.permissions?.includes('users:write')) {
+        res.status(403).json({ error: 'Missing required permission: users:write' });
+        return;
+      }
+    }
     const label = typeof body.label === 'string' ? body.label : undefined;
     if (label !== undefined && label.trim().length > 120) {
       res.status(400).json({ error: '"label" must be at most 120 characters' });
@@ -67,7 +82,9 @@ router.post('/tokens', requireAuth, requirePermission('tokens:manage'), async (r
       }
     }
 
-    const created = await createApiToken({ userId: req.user!.sub, label, permissions, expiresAt });
+    // Note: createApiToken validates the grant against the TARGET user's
+    // effective set — a token can never exceed what its owner has.
+    const created = await createApiToken({ userId: targetUserId, label, permissions, expiresAt });
     res.status(201).json(created);
   } catch (err) {
     const e = err as { status?: number; message?: string };

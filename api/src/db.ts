@@ -903,6 +903,34 @@ export async function backfillAdminRole(): Promise<void> {
 }
 
 /**
+ * One-time backfill for the new `auth:interactive-login` permission: every
+ * existing user gets it granted additively, so nobody is locked out of the
+ * web UI when the feature ships. Removing it afterwards is an explicit admin
+ * action (service-only lockdown). Idempotent — no-ops once all users carry it.
+ */
+export async function backfillInteractiveLoginPermission(): Promise<void> {
+  const PERM = 'auth:interactive-login';
+  const users = await db.query.users.findMany();
+  for (const user of users) {
+    let perms: string[] = [];
+    try {
+      perms = JSON.parse(user.permissions);
+    } catch {
+      /* treat as empty */
+    }
+    if (!Array.isArray(perms)) perms = [];
+    if (perms.includes(PERM)) continue;
+
+    await db
+      .update(schema.users)
+      .set({ permissions: JSON.stringify([...perms, PERM]) })
+      .where(eq(schema.users.id, user.id));
+    // eslint-disable-next-line no-console
+    console.log(`[db] backfilled "auth:interactive-login" for existing user "${user.username}"`);
+  }
+}
+
+/**
  * One-time migration from the legacy free-text `devices.site` column to the
  * sites table: each distinct non-empty site text becomes a Site row (named by
  * that text), devices are re-pointed at it, and the legacy column is dropped.

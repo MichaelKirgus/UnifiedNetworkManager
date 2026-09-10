@@ -4,6 +4,7 @@ import { db } from '../db';
 import * as schema from '../db/schema';
 import { buildAuthenticationOptions, generateWebauthnNonce } from './webauthn';
 import { resolveCredentialPolicy, isPasswordExpired } from './credentialPolicy';
+import { expandRolePermissions } from '../routes/roles';
 
 /**
  * Identity provider broker.
@@ -196,13 +197,37 @@ export async function login(username: string, password: string): Promise<LoginRe
       if (row.disabled) {
         throw Object.assign(new Error('Account is disabled'), { status: 403, code: 'user_disabled' });
       }
+      // Service-only lockdown: a user WITHOUT `auth:interactive-login` in their
+      // effective set (explicit grants + roles) may not sign into the web UI.
+      // The check runs before credential verification so the distinct error code
+      // reaches the client; long-lived API tokens are never affected by this.
+      let explicitPerms: string[] = [];
+      try {
+        explicitPerms = JSON.parse(row.permissions);
+      } catch {
+        /* keep [] */
+      }
+      let roleNames: string[] = [];
+      try {
+        roleNames = JSON.parse(row.roles);
+      } catch {
+        /* keep [] */
+      }
+      const effectivePerms = await expandRolePermissions(roleNames, Array.isArray(explicitPerms) ? explicitPerms : []);
+      if (!effectivePerms.includes('auth:interactive-login')) {
+        throw Object.assign(new Error('Interactive web-UI login is not allowed for this account'), {
+          status: 403,
+          code: 'no_interactive_login',
+        });
+      }
       const policy = await resolveCredentialPolicy(row.id);
       requiredMethods = [...policy.requiredMethods];
       passwordExpired = isPasswordExpired(policy, row.passwordChangedAt ?? null);
     }
   } catch (err) {
-    // A deliberate user_disabled rejection must propagate — rethrow it.
-    if ((err as { code?: string })?.code === 'user_disabled') throw err;
+    // Deliberate policy rejections must propagate to the client verbatim.
+    const code = (err as { code?: string })?.code;
+    if (code === 'user_disabled' || code === 'no_interactive_login') throw err;
     // DB hiccup — let the provider decide with its own defaults.
   }
 

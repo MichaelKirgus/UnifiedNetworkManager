@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Check, Copy, Plus, Trash2, X } from 'lucide-react';
-import { api, ApiToken, PermissionCatalog } from '../api/client';
-import { can } from '../auth/permissions';
+import { api, ApiToken, PermissionCatalog, User } from '../api/client';
+import { can, getUsername } from '../auth/permissions';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { Layout } from '../components/Layout';
 
@@ -23,9 +23,19 @@ export default function Tokens() {
   const [selectedPerms, setSelectedPerms] = useState<Set<string>>(new Set());
   const [inheritAll, setInheritAll] = useState(true);
   const [expiresAt, setExpiresAt] = useState('');
+  // On-behalf-of creation (requires users:write): mint for another user — the
+  // way service-only accounts get their API tokens. '' = the caller.
+  const canMintForOthers = can('users:write');
+  const selfUsername = getUsername();
+  const [targetUserId, setTargetUserId] = useState('');
+  const [users, setUsers] = useState<User[]>([]);
+
+  useEffect(() => {
+    if (canMintForOthers) api.users().then(setUsers).catch(() => { /* non-fatal */ });
+  }, [canMintForOthers]);
 
   // The just-created token (raw value shown once).
-  const [createdToken, setCreatedToken] = useState<{ rawToken: string; label: string | null } | null>(null);
+  const [createdToken, setCreatedToken] = useState<{ rawToken: string; label: string | null; owner?: string | null } | null>(null);
   const [copied, setCopied] = useState(false);
 
   const canSeeAll = can('users:read');
@@ -87,13 +97,16 @@ export default function Tokens() {
         label: label.trim() || undefined,
         permissions: inheritAll ? [] : [...selectedPerms],
         expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+        userId: targetUserId || undefined,
       });
-      setCreatedToken({ rawToken: created.rawToken, label: created.label });
+      const owner = created.username && created.username !== selfUsername ? ` for ${created.username}` : '';
+      setCreatedToken({ rawToken: created.rawToken, label: created.label, owner: owner || null });
       setShowForm(false);
       setLabel('');
       setSelectedPerms(new Set());
       setInheritAll(true);
       setExpiresAt('');
+      setTargetUserId('');
       await load();
     } catch (err) {
       alert(`Failed to create token: ${(err as Error).message}`);
@@ -215,7 +228,7 @@ export default function Tokens() {
       {createdToken && (
         <div className="mb-6 rounded-md border border-warning-border bg-warning p-4">
           <h2 className="text-sm font-semibold text-amber-900">
-            Token created{createdToken.label ? `: ${createdToken.label}` : ''} — copy it now, it is shown only once.
+            Token created{createdToken.owner ? createdToken.owner : ''}{createdToken.label ? `: ${createdToken.label}` : ''} — copy it now, it is shown only once.
           </h2>
           <div className="mt-2 flex items-center gap-2">
             <code className="flex-1 select-all break-all rounded-md border border-warning-border bg-card px-3 py-2 text-sm">
@@ -238,6 +251,30 @@ export default function Tokens() {
       {showForm && (
         <form onSubmit={handleCreate} className="mb-6 rounded-md border border-border bg-card p-4 shadow-sm">
           <h2 className="mb-4 text-sm font-semibold text-foreground">New API Token</h2>
+          {canMintForOthers && (
+            <div className="mb-3">
+              <label className="mb-1 block text-xs font-medium text-secondary">Owner (you, or another user)</label>
+              <select
+                value={targetUserId}
+                onChange={(e) => setTargetUserId(e.target.value)}
+                className="w-full rounded-md border border-border px-2 py-1.5 text-sm"
+              >
+                <option value="">{selfUsername ?? 'me'} (the caller)</option>
+                {users
+                  .filter((u) => u.username !== selfUsername)
+                  .map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.username}
+                      {!u.permissions.includes('auth:interactive-login') ? ' (service-only)' : ''}
+                    </option>
+                  ))}
+              </select>
+              <p className="mt-1 text-xs text-faint">
+                Minting for another user requires <code>users:write</code>. The grant is validated against the
+                OWNER's effective permissions — use this to provision tokens for service-only accounts that cannot sign in.
+              </p>
+            </div>
+          )}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label className="mb-1 block text-xs font-medium text-secondary">Label (purpose)</label>
@@ -267,7 +304,7 @@ export default function Tokens() {
                 checked={inheritAll}
                 onChange={(e) => setInheritAll(e.target.checked)}
               />
-              Inherit all my effective permissions (recommended for personal agents)
+              {targetUserId ? 'Inherit all of the owner’s effective permissions' : 'Inherit all my effective permissions'} (recommended)
             </label>
             {!inheritAll && catalog && (
               <div className="mt-2 grid max-h-56 grid-cols-1 gap-1 overflow-y-auto rounded-md border border-border bg-background p-3 sm:grid-cols-2">

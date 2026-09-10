@@ -222,6 +222,13 @@ router.post('/auth/login', async (req, res) => {
       res.status(403).json({ error: 'Account is disabled — contact an administrator', code: 'user_disabled' });
       return;
     }
+    if (e.code === 'no_interactive_login') {
+      res.status(403).json({
+        error: 'This account is service-only and cannot sign in to the web UI. Use its API token instead.',
+        code: 'no_interactive_login',
+      });
+      return;
+    }
     res.status(e.status ?? 500).json({ error: e.message ?? 'Authentication failed' });
   }
 });

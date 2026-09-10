@@ -1968,7 +1968,9 @@ export const api = {
   // API tokens (self-service; ?all=true needs users:read).
   tokens: (all = false) =>
     apiFetch<ApiToken[]>(`/tokens${all ? '?all=true' : ''}`),
-  createToken: (body: { label?: string; permissions?: string[]; expiresAt?: string | null }) =>
+  // userId = mint on behalf of another user (requires users:write) — used to
+  // provision API tokens for service-only accounts that can't sign in.
+  createToken: (body: { label?: string; permissions?: string[]; expiresAt?: string | null; userId?: string }) =>
     apiFetch<ApiTokenCreated>('/tokens', { method: 'POST', body: JSON.stringify(body) }),
   deleteToken: (id: string) => apiFetch<void>(`/tokens/${id}`, { method: 'DELETE' }),
   // Roles.

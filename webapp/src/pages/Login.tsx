@@ -91,6 +91,10 @@ export default function Login() {
         );
       } else if (err instanceof ApiError && err.code === 'user_disabled') {
         setError('Your account has been disabled. Contact an administrator to be re-enabled.');
+      } else if (err instanceof ApiError && err.code === 'no_interactive_login') {
+        setError(
+          'This account is service-only and cannot sign in to the web UI. Use its API token instead, or ask an administrator to restore interactive login.'
+        );
       } else {
         setError((err as Error).message);
       }

@@ -61,6 +61,11 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // Credential policies (required 2nd factor at login + which AMRs satisfy the
   // privileged-action gate) — global default and per-user overrides.
   'auth:policies:write': 'Edit credential policies (2FA requirements and 2FA-gate satisfaction)',
+  // Interactive web-UI sign-in. ADDITIVE: every existing user keeps it by
+  // default, so removing it is an explicit lockdown for service-only accounts
+  // that are only used to mint API tokens / call the API directly. Checked at
+  // login (POST /auth/login) — long-lived API tokens are never affected.
+  'auth:interactive-login': 'Sign in interactively to the web UI',
   // System/HA observability + runtime tuning (Workers page): worker leadership,
   // poll-cycle stats, Postgres health, and the admin-tunable HA settings.
   'system:read': 'View system status — workers, leader election, database health',
