@@ -6,7 +6,7 @@ import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } 
 import { CSS } from '@dnd-kit/utilities';
 import { GripVertical, RotateCcw, X } from 'lucide-react';
 import { api, type NavPreferences } from '../api/client';
-import type { NavItem } from './navItems';
+import { orderedNavItems, type NavItem } from './navItems';
 
 interface Props {
   /** Permission-visible nav items (already in the user's current order). */
@@ -61,32 +61,40 @@ function SortableRow({ item, hidden, onToggle }: { item: NavItem; hidden: boolea
 export function NavCustomizer({ items, initialOrder, initialHidden, onClose }: Props) {
   const queryClient = useQueryClient();
 
-  // Local working state — initialized from the loaded prefs (or defaults).
-  const [order, setOrder] = useState<string[]>(() => initialOrder.length ? initialOrder : items.map((i) => i.to));
+  // Local working state — initialized from the loaded prefs (or defaults). The
+  // initial order doubles as the "already persisted" baseline so merely opening
+  // the panel never triggers a save.
+  const initialOrderRef = useRef<string[]>(initialOrder.length ? initialOrder : items.map((i) => i.to));
+  const [order, setOrder] = useState<string[]>(initialOrderRef.current);
   const [hidden, setHidden] = useState<Set<string>>(() => new Set(initialHidden));
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
-  // Keep the working list in sync with the (permission-visible) item set.
+  // Signature of the last persisted state — saves only fire on a real change.
+  const lastSavedRef = useRef<string>(JSON.stringify({ navOrder: initialOrderRef.current, hiddenPages: initialHidden }));
+
+  // Keep the working list in sync with the (permission-visible) item set; bail out
+  // when contents are unchanged so prop churn never causes re-renders or saves.
   useEffect(() => {
     setOrder((prev) => {
       const known = new Set(items.map((i) => i.to));
       const kept = prev.filter((p) => known.has(p));
       const missing = items.map((i) => i.to).filter((p) => !kept.includes(p));
-      return [...kept, ...missing];
+      const next = [...kept, ...missing];
+      return next.join('\u0000') === prev.join('\u0000') ? prev : next;
     });
   }, [items]);
 
-  // Auto-save (debounced ~300ms to coalesce rapid drags/toggles).
-  const firstRun = useRef(true);
+  // Auto-save (debounced ~300ms to coalesce rapid drags/toggles). Skips when the
+  // working state matches what's already persisted — this also breaks the loop
+  // where setQueryData → new items prop → sync effect would otherwise re-save.
   useEffect(() => {
-    if (firstRun.current) {
-      firstRun.current = false;
-      return;
-    }
+    const sig = JSON.stringify({ navOrder: order, hiddenPages: [...hidden] });
+    if (sig === lastSavedRef.current) return;
     setStatus('saving');
     const t = window.setTimeout(async () => {
       try {
         await api.setNavPrefs({ navOrder: order, hiddenPages: [...hidden] });
+        lastSavedRef.current = sig;
         queryClient.setQueryData(['navPrefs'], { navOrder: order, hiddenPages: [...hidden] } satisfies NavPreferences);
         setStatus('saved');
       } catch {
@@ -118,7 +126,9 @@ export function NavCustomizer({ items, initialOrder, initialHidden, onClose }: P
   }
 
   function reset() {
-    setOrder(items.map((i) => i.to)); // default order
+    // Restore the DEFAULT (NAV_ITEMS) order — not `items`, which already reflects
+    // the user's current custom order. No prefs passed = permission-filtered default.
+    setOrder(orderedNavItems(undefined).map((i) => i.to));
     setHidden(new Set()); // show everything
   }
 

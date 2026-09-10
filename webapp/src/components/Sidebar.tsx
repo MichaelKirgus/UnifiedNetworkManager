@@ -120,7 +120,7 @@ export function Sidebar() {
         </div>
       )}
 
-      {/* Footer: customize + collapse toggle + sign out */}
+      {/* Footer: customize + collapse toggle + sign out (icon-only, tooltips via title) */}
       <div className={clsx('flex gap-1 border-t border-border p-2', collapsed && 'flex-col items-center')}>
         <button
           type="button"
@@ -128,13 +128,12 @@ export function Sidebar() {
           title="Customize navigation"
           onClick={() => setCustomizing((v) => !v)}
           className={clsx(
-            'flex items-center gap-2 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
+            'flex flex-1 items-center justify-center rounded-md p-2 transition-colors',
             customizing ? 'bg-primary text-white' : 'text-secondary hover:bg-muted',
-            collapsed && 'justify-center px-0'
+            collapsed && 'flex-none'
           )}
         >
           <SlidersHorizontal className="h-5 w-5 shrink-0" />
-          {!collapsed && <span>Customize</span>}
         </button>
         <button
           type="button"
@@ -142,12 +141,11 @@ export function Sidebar() {
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           onClick={() => setCollapsed((v) => !v)}
           className={clsx(
-            'flex items-center gap-2 rounded-md px-2.5 py-2 text-sm font-medium text-secondary hover:bg-muted',
-            collapsed && 'justify-center px-0'
+            'flex flex-1 items-center justify-center rounded-md p-2 text-secondary hover:bg-muted',
+            collapsed && 'flex-none'
           )}
         >
           {collapsed ? <PanelLeftOpen className="h-5 w-5 shrink-0" /> : <PanelLeftClose className="h-5 w-5 shrink-0" />}
-          {!collapsed && <span>Collapse</span>}
         </button>
         <button
           type="button"
@@ -160,12 +158,11 @@ export function Sidebar() {
             window.location.href = '/login';
           }}
           className={clsx(
-            'flex items-center gap-2 rounded-md px-2.5 py-2 text-sm font-medium text-secondary hover:bg-danger hover:text-danger-fg',
-            collapsed && 'justify-center px-0'
+            'flex flex-1 items-center justify-center rounded-md p-2 text-secondary hover:bg-danger hover:text-danger-fg',
+            collapsed && 'flex-none'
           )}
         >
           <LogOut className="h-5 w-5 shrink-0" />
-          {!collapsed && <span>Sign out</span>}
         </button>
       </div>
     </aside>
