@@ -986,6 +986,11 @@ export default function Containers() {
       queryKey: ['device-probe', t.deviceId, 'containerStats+containerStates'],
       queryFn: () => api.deviceProbe(t.deviceId, ['containerStats', 'containerStates'], t.pluginId),
       refetchInterval: 3_000,
+      // Short-cycle live data — a failed poll is retried by the NEXT interval
+      // tick anyway; React Query's default retry storm (3× backoff per tick) only
+      // floods the console/network tab for devices whose probe can't work (e.g.
+      // no SSH slot bound). The page falls back to last-good data on failure.
+      retry: false,
       staleTime: 0,
       gcTime: 30_000,
     })),
@@ -1146,6 +1151,8 @@ export default function Containers() {
       queryKey: ['device-probe-fast', t.deviceId, 'containerStates', t.names.join(',')],
       queryFn: () => api.deviceProbe(t.deviceId, ['containerStates'], t.pluginId, t.names),
       refetchInterval: 1_500,
+      // Short-cycle transition probe — no retry storm; the next tick retries.
+      retry: false,
       staleTime: 0,
       gcTime: 30_000,
     })),

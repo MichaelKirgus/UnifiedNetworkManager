@@ -308,6 +308,15 @@ interface PoolEntry {
  * pooled clients; a plugin managing its own client should closeAll/close on
  * SIGTERM/SIGINT).
  */
+/** True for transport-level failures worth one transparent retry (a dead pooled
+ *  socket or a reset on rapid reconnect). Auth and host-key errors are real
+ *  failures and must NOT be retried. */
+function isTransportError(e: unknown): boolean {
+  if (e instanceof SshAuthError || e instanceof SshHostKeyError) return false;
+  const msg = e instanceof Error ? e.message : String(e);
+  return /ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up|No response from server|timed out/i.test(msg);
+}
+
 export class SshClient {
   private readonly opts: Required<Pick<SshClientOptions, 'host' | 'port' | 'timeoutMs'>> & SshClientOptions;
   /** The live ssh2 connection (null = not connected / closed). */
@@ -336,8 +345,8 @@ export class SshClient {
   }
 
   private connect(creds: SshCredentials): Promise<void> {
-    if (this.conn) return Promise.resolve(); // already connected — RE-USE, no re-auth
-    if (this.connectPromise) return this.connectPromise;
+    if (this.conn) return Promise.resolve(); // already ESTABLISHED — RE-USE, no re-auth
+    if (this.connectPromise) return this.connectPromise; // handshake in flight — share it
     const o = this.opts;
     const pinned = normalizeFingerprint(o.hostKeyFingerprint);
 
@@ -387,15 +396,10 @@ export class SshClient {
       hostVerifier,
     };
 
-    const conn = new Ssh2Client();
-    this.conn = conn;
-    this.hostKeyMismatch = null;
-
-    // Permanent no-op guard FIRST: a late socket error must never become an
-    // unhandled 'error' event that crashes the plugin process (same lesson as
-    // truenasClient). The real handler below still runs — multiple listeners OK.
-    conn.on('error', () => { /* guarded */ });
-
+    // Publish the in-flight handshake BEFORE creating the client: a concurrent
+    // caller that arrives mid-handshake must share this promise, not start its
+    // own connection (two rapid reconnects to one host is exactly what trips
+    // appliance sshd into resetting connections).
     const p = new Promise<void>((resolve, reject) => {
       let settled = false;
       const fail = (e: Error): void => {
@@ -409,10 +413,23 @@ export class SshClient {
         fail(new SshTimeoutError(`SSH connect to ${o.host}:${o.port} timed out after ${o.timeoutMs} ms`));
       }, Math.max(3000, o.timeoutMs));
 
+      // Only mark the client ESTABLISHED once 'ready' fires. Setting this.conn at
+      // creation time (the old behavior) let a concurrent caller see a non-null
+      // conn and skip waiting for ready — then call exec() on an unconnected
+      // client, opening a second connection to the same host.
+      const conn = new Ssh2Client();
+      this.hostKeyMismatch = null;
+
+      // Permanent no-op guard FIRST: a late socket error must never become an
+      // unhandled 'error' event that crashes the plugin process (same lesson as
+      // truenasClient). The real handler below still runs — multiple listeners OK.
+      conn.on('error', () => { /* guarded */ });
+
       conn.on('ready', () => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        this.conn = conn; // established from now on
         resolve();
       });
       conn.on('error', (err: Error) => {
@@ -476,6 +493,26 @@ export class SshClient {
    */
   async exec(command: string, creds: SshCredentials): Promise<ExecResult> {
     if (this.ownerClosed) throw new SshError(`SSH client for ${this.opts.host} is closed`);
+    try {
+      return await this.execOnce(command, creds);
+    } catch (e) {
+      // A pooled socket can be dead even though we believe it's connected — the
+      // appliance or a middlebox drops idle SSH sessions between poll cycles — and
+      // a fresh reconnect can itself get reset when the remote rate-limits rapid
+      // reconnections. Both surface as transport errors on connect/exec. Retry ONCE
+      // after a short pause: a transient reset is not a real failure, but we must NOT
+      // hammer (that would worsen any rate-limiting), so exactly one retry.
+      if (!isTransportError(e)) throw e;
+      this.teardown(); // drop whatever state we have so the retry connects fresh
+      await new Promise((r) => setTimeout(r, 1_000));
+      return await this.execOnce(command, creds);
+    }
+  }
+
+  /** One exec attempt on a (re)established session. Transport failures here are
+   *  caught by exec() for a single retry; auth/host-key errors propagate as-is. */
+  private async execOnce(command: string, creds: SshCredentials): Promise<ExecResult> {
+    if (this.ownerClosed) throw new SshError(`SSH client for ${this.opts.host} is closed`);
     await this.connect(creds);
     const conn = this.conn;
     if (!conn) throw new SshError(`SSH connect to ${this.opts.host}:${this.opts.port} failed`);
@@ -485,7 +522,7 @@ export class SshClient {
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        this.close(); // a hung exec poisons the session — drop it so the pool can replace it
+        this.teardown(); // a hung exec poisons the session — drop it so we reconnect next time
         reject(new SshTimeoutError(`SSH exec on ${this.opts.host} timed out after ${this.opts.timeoutMs} ms`));
       }, Math.max(3000, this.opts.timeoutMs));
 
@@ -494,7 +531,7 @@ export class SshClient {
           if (!settled) {
             settled = true;
             clearTimeout(timer);
-            this.close(); // session is broken — force a fresh one next time
+            this.teardown(); // session is broken — reconnect fresh next time
             reject(err instanceof SshError ? err : new SshError(`SSH exec failed: ${err?.message ?? 'unknown'}`));
           }
           return;

@@ -428,6 +428,9 @@ export default function Vms() {
       queryKey: ['device-probe', t.deviceId, 'vmStates'],
       queryFn: () => api.deviceProbe(t.deviceId, ['vmStates'], t.pluginId),
       refetchInterval: 3_000,
+      // Same rationale as the Containers page probe — no retry storm on a
+      // short-cycle poll; the next tick retries and stale data is kept.
+      retry: false,
       staleTime: 0,
       gcTime: 30_000,
     })),

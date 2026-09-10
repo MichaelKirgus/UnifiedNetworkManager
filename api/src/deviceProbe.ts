@@ -109,9 +109,11 @@ export async function fetchDeviceProbe(
         ...(names && names.length > 0 ? { names } : {}),
         ...(decrypted?.type === 'apiKey' ? { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret } : {})
       },
-      // Short-cycle path — the webapp polls every few seconds, so keep the
-      // budget tight; a slow probe should fail fast and let the UI fall back.
-      { timeout: 8_000, headers }
+      // Short-cycle path — the webapp polls every few seconds, but some probes
+      // are legitimately heavy (e.g. `docker stats` over ~250 containers takes
+      // several seconds on a busy box). 15 s covers that plus connect time; the
+      // plugin-side in-flight dedup prevents overlapping polls from piling up.
+      { timeout: 15_000, headers }
     );
   } catch (err) {
     const e = err as { response?: { status?: number; data?: { error?: string } }; message?: string };

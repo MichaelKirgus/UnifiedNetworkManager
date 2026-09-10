@@ -396,6 +396,24 @@ function probeFailLog(host: string, message: string, log?: (level: 'info' | 'war
 }
 
 /**
+ * Per-host in-flight dedup for the PROBE collectors. `docker stats` over ~250
+ * containers takes several seconds on a busy box, but the webapp probes every
+ * few seconds — without this, each new poll would start ANOTHER heavy SSH exec
+ * while the previous one is still running (concurrent reconnects/execs are what
+ * trip appliance sshd into resetting connections). A caller that arrives while a
+ * collection is in flight shares its promise instead of piling up.
+ */
+const probeInFlight = new Map<string, Promise<unknown>>();
+function dedupeProbe<T>(host: string, key: string, fn: () => Promise<T>): Promise<T> {
+  const k = `${key}|${host}`;
+  const existing = probeInFlight.get(k);
+  if (existing) return existing as Promise<T>;
+  const p = fn().finally(() => { if (probeInFlight.get(k) === p) probeInFlight.delete(k); });
+  probeInFlight.set(k, p);
+  return p;
+}
+
+/**
  * Collects live per-container stats for the PROBE path: ONE `docker stats
  * --no-stream` over the shared SSH pool (connection RE-USED — cheap), parsed
  * with the same parser as the enrichment cycle. Covers ALL running containers
@@ -409,6 +427,14 @@ export async function collectProbeStats(
   log?: (level: 'info' | 'warn', message: string) => void
 ): Promise<Map<string, ProbeContainerStat> | null> {
   if (!sshCreds) return null; // no ssh slot bound — API-only mode
+  return dedupeProbe(host, 'stats', () => collectProbeStatsInner(host, sshCreds, log));
+}
+
+async function collectProbeStatsInner(
+  host: string,
+  sshCreds: NonNullable<ReturnType<typeof resolveSshCredentials>>,
+  log?: (level: 'info' | 'warn', message: string) => void
+): Promise<Map<string, ProbeContainerStat> | null> {
   try {
     const client = await sshPool.get(host, 22, sshCreds);
     const list = `$(docker ps -q 2>/dev/null | head -n ${MAX_CONTAINERS})`;
@@ -468,6 +494,22 @@ export async function collectProbeStates(
   names?: string[]
 ): Promise<Map<string, ProbeContainerState> | null> {
   if (!sshCreds) return null; // no ssh slot bound — API-only mode
+  // `names` selection is per-caller, so dedupe only the full (unfiltered)
+  // collection and apply the filter afterwards.
+  const full = await dedupeProbe(host, 'states', () => collectProbeStatesInner(host, sshCreds, log));
+  if (!full) return null;
+  if (!names || names.length === 0) return full;
+  const wanted = new Set(names);
+  const out = new Map<string, ProbeContainerState>();
+  for (const [name, s] of full) if (wanted.has(name)) out.set(name, s);
+  return out;
+}
+
+async function collectProbeStatesInner(
+  host: string,
+  sshCreds: NonNullable<ReturnType<typeof resolveSshCredentials>>,
+  log?: (level: 'info' | 'warn', message: string) => void
+): Promise<Map<string, ProbeContainerState> | null> {
   try {
     const client = await sshPool.get(host, 22, sshCreds);
     const r = await client.exec(`docker ps -a --format 'PS|{{.State}}|{{.Names}}' 2>/dev/null`, sshCreds);
@@ -475,7 +517,7 @@ export async function collectProbeStates(
       probeFailLog(host, `SSH docker ps probe on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`, log);
       return null;
     }
-    const wanted = names && names.length > 0 ? new Set(names) : null;
+    // Full collection — per-caller `names` filtering happens in collectProbeStates.
     const out = new Map<string, ProbeContainerState>();
     for (const line of r.stdout.split('\n')) {
       if (!line.startsWith('PS|')) continue;
@@ -486,7 +528,6 @@ export async function collectProbeStates(
       const status = rest.slice(0, sep).trim().toLowerCase();
       const name = rest.slice(sep + 1).replace(/^\//, '').trim();
       if (!name || !status) continue;
-      if (wanted && !wanted.has(name)) continue;
       out.set(name, { name, status });
     }
     return out;
@@ -521,6 +562,20 @@ export async function collectProbeVmStates(
   names?: string[]
 ): Promise<Map<string, ProbeVmState> | null> {
   if (!sshCreds) return null; // no ssh slot bound — API-only mode
+  const full = await dedupeProbe(host, 'vmStates', () => collectProbeVmStatesInner(host, sshCreds, log));
+  if (!full) return null;
+  if (!names || names.length === 0) return full;
+  const wanted = new Set(names);
+  const out = new Map<string, ProbeVmState>();
+  for (const [name, s] of full) if (wanted.has(name)) out.set(name, s);
+  return out;
+}
+
+async function collectProbeVmStatesInner(
+  host: string,
+  sshCreds: NonNullable<ReturnType<typeof resolveSshCredentials>>,
+  log?: (level: 'info' | 'warn', message: string) => void
+): Promise<Map<string, ProbeVmState> | null> {
   try {
     const client = await sshPool.get(host, 22, sshCreds);
     const r = await client.exec(buildVirshCommand(), sshCreds);
@@ -528,7 +583,7 @@ export async function collectProbeVmStates(
       probeFailLog(host, `SSH virsh list probe on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`, log);
       return null;
     }
-    const wanted = names && names.length > 0 ? new Set(names) : null;
+    // Full collection — per-caller `names` filtering happens in collectProbeVmStates.
     const out = new Map<string, ProbeVmState>();
     for (const line of r.stdout.split('\n')) {
       if (!line.startsWith('VS|')) continue;
@@ -539,7 +594,6 @@ export async function collectProbeVmStates(
       const status = rest.slice(0, sep).trim().toLowerCase();
       const name = rest.slice(sep + 1).trim();
       if (!name || !status) continue;
-      if (wanted && !wanted.has(name)) continue;
       out.set(name, { name, status });
     }
     return out;

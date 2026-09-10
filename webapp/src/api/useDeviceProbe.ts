@@ -37,6 +37,11 @@ export function useDeviceProbe(
     queryFn: () => api.deviceProbe(deviceId as string, keys),
     enabled,
     refetchInterval: intervalMs,
+    // Short-cycle live data — a failed poll is retried by the NEXT interval tick.
+    // React Query's default retry storm (3× backoff per tick) only floods the
+    // console/network tab for devices whose probe can't work; callers fall back
+    // to last-good data on failure, so retries add nothing but noise.
+    retry: false,
     // Short-cycle data is inherently ephemeral — don't hold onto it long after
     // the page unmounts (the next visit re-probes fresh).
     staleTime: 0,
