@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { buildAuthenticationOptions, generateWebauthnNonce } from './webauthn';
-import { resolveCredentialPolicy } from './credentialPolicy';
+import { resolveCredentialPolicy, isPasswordExpired } from './credentialPolicy';
 
 /**
  * Identity provider broker.
@@ -39,6 +39,9 @@ export interface IdentityAssertion {
 export interface LoginResult {
   challengeToken: string;
   twoFactorRequired: boolean;
+  /** True when the user's password has exceeded its max age — the webapp must
+   *  force a password change right after sign-in completes. */
+  passwordExpired?: boolean;
 }
 
 interface ProviderRecord {
@@ -184,13 +187,22 @@ export async function login(username: string, password: string): Promise<LoginRe
   // Resolve the user's policy up-front (best-effort — an unknown username just
   // gets the global default; the provider will reject the credentials anyway).
   let requiredMethods: string[] | undefined;
+  let passwordExpired = false;
   try {
     const row = await db.query.users.findFirst({ where: eq(schema.users.username, username) });
     if (row) {
+      // A disabled account is rejected BEFORE the provider even sees the
+      // credentials — distinct code so the UI can say "contact an admin".
+      if (row.disabled) {
+        throw Object.assign(new Error('Account is disabled'), { status: 403, code: 'user_disabled' });
+      }
       const policy = await resolveCredentialPolicy(row.id);
       requiredMethods = [...policy.requiredMethods];
+      passwordExpired = isPasswordExpired(policy, row.passwordChangedAt ?? null);
     }
-  } catch {
+  } catch (err) {
+    // A deliberate user_disabled rejection must propagate — rethrow it.
+    if ((err as { code?: string })?.code === 'user_disabled') throw err;
     // DB hiccup — let the provider decide with its own defaults.
   }
 
@@ -203,7 +215,7 @@ export async function login(username: string, password: string): Promise<LoginRe
     throw Object.assign(new Error('Identity provider did not return a challenge token'), { status: 502 });
   }
 
-  return { challengeToken: data.challengeToken, twoFactorRequired: data.twoFactorRequired ?? true };
+  return { challengeToken: data.challengeToken, twoFactorRequired: data.twoFactorRequired ?? true, passwordExpired };
 }
 
 /**

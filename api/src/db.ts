@@ -782,6 +782,18 @@ export async function initDb(): Promise<void> {
       "hiddenPages" TEXT NOT NULL DEFAULT '[]',
       "updatedAt" TEXT NOT NULL
     )`);
+
+  // Credential-policy state on users: disabled flag + login/password timestamps.
+  // Idempotent ADD COLUMN so existing deployments pick these up on restart.
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "disabled" BOOLEAN NOT NULL DEFAULT FALSE`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "lastLoginAt" TEXT`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "passwordChangedAt" TEXT`);
+
+  // Extended credential-policy fields (per-user override of password/session rules).
+  await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "minPasswordLength" INTEGER`);
+  await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "passwordMaxAgeDays" INTEGER`);
+  await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "inactiveDisableAfterDays" INTEGER`);
+  await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "sessionTimeoutSeconds" INTEGER`);
   // The legacy singular columns are superseded by device_plugins. There is no
   // production data to migrate (confirmed), so drop them outright — any dev
   // devices must be recreated via the new multi-plugin create flow.

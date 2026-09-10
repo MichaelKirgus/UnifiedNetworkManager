@@ -37,6 +37,19 @@ export default function Login() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  // Forced password change: the login reported `passwordExpired`, so after the
+  // (2FA) sign-in completes we hold the user on a "set a new password" step.
+  const [forceChange, setForceChange] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+
+  // A disabled account bounced here by the client's auto-logout (401 user_disabled).
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('reason') === 'disabled') {
+      setError('Your account has been disabled. Contact an administrator to be re-enabled.');
+    }
+  }, []);
+
   // Determine how the active identity provider wants us to authenticate.
   useEffect(() => {
     let cancelled = false;
@@ -68,14 +81,55 @@ export default function Login() {
     try {
       const res = await api.login({ username, password });
       setChallengeToken(res.challengeToken);
+      // Remember whether the policy says this password must be rotated — we act
+      // on it once sign-in (incl. 2FA) has actually completed below.
+      setForceChange(Boolean(res.passwordExpired));
     } catch (err) {
       if (err instanceof ApiError && err.code === 'no_2fa_enrolled') {
         setError(
           'Your account requires a second factor that is not enrolled yet. Enroll TOTP or a passkey in My Account, or ask an administrator to adjust your credential policy.'
         );
+      } else if (err instanceof ApiError && err.code === 'user_disabled') {
+        setError('Your account has been disabled. Contact an administrator to be re-enabled.');
       } else {
         setError((err as Error).message);
       }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /** Store the freshly minted session, then either enter the app or (when the
+   *  policy flagged an expired password) hold on a forced-change step. */
+  function finishSignIn(res: { accessToken: string; permissions?: string[]; username?: string }) {
+    localStorage.setItem('accessToken', res.accessToken);
+    setPermissions(res.permissions ?? []);
+    if (res.username) setUsername(res.username);
+    if (forceChange) {
+      // Stay on the login screen — the user must rotate their password first.
+      return;
+    }
+    navigate('/devices');
+  }
+
+  async function handleForceChange(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      if (newPassword.length < 8) {
+        setError('New password must be at least 8 characters.');
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        setError('The two new passwords do not match.');
+        return;
+      }
+      await api.changeOwnPassword({ currentPassword: password, newPassword });
+      setForceChange(false);
+      navigate('/devices');
+    } catch (err) {
+      setError((err as Error).message);
     } finally {
       setLoading(false);
     }
@@ -114,10 +168,7 @@ export default function Login() {
       }
 
       const res = await api.verifyWebauthn({ challengeToken, response: assertion, nonce });
-      localStorage.setItem('accessToken', res.accessToken);
-      setPermissions(res.permissions ?? []);
-      if (res.username) setUsername(res.username);
-      navigate('/devices');
+      finishSignIn(res);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -132,10 +183,7 @@ export default function Login() {
     setLoading(true);
     try {
       const res = await api.verify2fa({ challengeToken, totpCode });
-      localStorage.setItem('accessToken', res.accessToken);
-      setPermissions(res.permissions ?? []);
-      if (res.username) setUsername(res.username);
-      navigate('/devices');
+      finishSignIn(res);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -188,7 +236,47 @@ export default function Login() {
         )}
 
         {flow === 'password' ? (
-          !challengeToken ? (
+          forceChange && challengeToken ? (
+            // Sign-in completed but the policy flagged an expired password —
+            // hold the user here until they set a new one.
+            <form className="space-y-4" onSubmit={handleForceChange}>
+              <div>
+                <h2 className="text-sm font-semibold text-secondary">Password change required</h2>
+                <p className="mt-1 text-xs text-faint">
+                  Your password has reached its maximum age. Set a new one to continue — your current session is
+                  already active, so this only updates the stored credential.
+                </p>
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-secondary">New password * (min 8 chars)</label>
+                <input
+                  type="password"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  autoComplete="new-password"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-secondary">Confirm new password *</label>
+                <input
+                  type="password"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  autoComplete="new-password"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={loading}
+                className="flex w-full items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
+              >
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
+                {loading ? 'Saving…' : 'Set new password & continue'}
+              </button>
+            </form>
+          ) : !challengeToken ? (
             <form className="space-y-4" onSubmit={handleCredentials}>
               <div>
                 <label className="mb-1 block text-sm font-medium text-secondary">Username</label>

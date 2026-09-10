@@ -9,6 +9,19 @@ export const users = pgTable('users', {
   roles: text('roles').notNull().default('[]'),
   permissions: text('permissions').notNull().default('[]'),
   createdAt: text('createdAt').notNull(),
+  // Credential-policy state (see credentialPolicies below):
+  //   disabled — set by the inactivity sweep when a user has not logged on for
+  //     `inactiveDisableAfterDays`; also settable manually. Disabled users are
+  //     rejected at login AND their live sessions are terminated (401).
+  //   lastLoginAt — ISO timestamp of the most recent successful authentication
+  //     (login or in-session revalidation); drives the inactivity sweep.
+  //   passwordChangedAt — ISO timestamp of the most recent password set/reset;
+  //     drives forced rotation when `passwordMaxAgeDays` is enabled. NULL =
+  //     unknown age (treated as "just changed" so existing accounts are not
+  //     locked out on first deploy).
+  disabled: boolean('disabled').notNull().default(false),
+  lastLoginAt: text('lastLoginAt'),
+  passwordChangedAt: text('passwordChangedAt'),
 });
 
 // Long-lived bearer tokens for agents/scripts (e.g. the MCP server). The raw
@@ -1094,9 +1107,10 @@ export const webauthnCredentials = pgTable(
   }
 );
 
-// Credential policies controlling 2FA requirements. One GLOBAL row
-// (`userId IS NULL`) acts as the default for everyone; a per-user row
-// (unique on userId) overrides it entirely — user policy wins over global.
+// Credential policies. One GLOBAL row (`userId IS NULL`) acts as the default
+// for everyone; a per-user row (unique on userId) OVERRIDES individual fields —
+// each field is resolved independently, so an override only needs to carry the
+// fields it wants to change (the rest inherit from global).
 //   requiredMethods: which enrolled 2nd factors satisfy login step 2,
 //     JSON array of 'totp' | 'webauthn'. Empty = no 2FA required at all.
 //     If none of the allowed methods is enrolled, login is blocked with a
@@ -1104,12 +1118,22 @@ export const webauthnCredentials = pgTable(
 //   gateAmrs: which JWT `amr` values satisfy require2FA (privileged endpoints
 //     like config-job submission). Evaluated LIVE per request against this
 //     table — admin changes apply immediately to existing sessions.
+//   minPasswordLength: minimum characters for any new/reset password.
+//   passwordMaxAgeDays / inactiveDisableAfterDays: optional day-counts; NULL =
+//     the rule is OFF (no forced rotation / no auto-disable).
+//   sessionTimeoutSeconds: optional per-user cap on the global session timeout
+//     — a user's sessions expire at min(global, this) so an admin can force a
+//     shorter lifetime for one account. NULL = inherit the global setting.
 export const credentialPolicies = pgTable('credential_policies', {
   id: text('id').primaryKey(),
   // NULL = the global default policy; otherwise the user id it applies to.
   userId: text('userId').unique(),
   requiredMethods: text('requiredMethods').notNull().default('["totp"]'),
   gateAmrs: text('gateAmrs').notNull().default('["totp"]'),
+  minPasswordLength: integer('minPasswordLength'),
+  passwordMaxAgeDays: integer('passwordMaxAgeDays'),
+  inactiveDisableAfterDays: integer('inactiveDisableAfterDays'),
+  sessionTimeoutSeconds: integer('sessionTimeoutSeconds'),
   updatedAt: text('updatedAt').notNull(),
 });
 

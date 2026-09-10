@@ -1,7 +1,11 @@
 import { NextFunction, Request, Response } from 'express';
+import { eq } from 'drizzle-orm';
 import { verifyToken, AccessTokenPayload } from './jwt';
 import { resolveApiTokenPayload } from './apiTokens';
-import { resolveCredentialPolicy } from './credentialPolicy';
+import { resolveCredentialPolicy, effectiveSessionTtl } from './credentialPolicy';
+import { getEffectiveSettingValue } from '../systemSettings';
+import { db } from '../db';
+import * as schema from '../db/schema';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -22,7 +26,40 @@ declare global {
  *      the api_tokens table; their permission set is re-intersected with the
  *      user's CURRENT effective permissions on every request, and they can
  *      never satisfy a 2FA requirement (no TOTP claim).
+ *
+ * Beyond signature/expiry checks this also enforces credential-policy state
+ * LIVE (short-cached): a DISABLED user is rejected outright (`user_disabled`),
+ * and a JWT session whose age exceeds the user's effective session timeout —
+ * the global setting capped by any per-user `sessionTimeoutSeconds` override —
+ * is treated as expired. API tokens are exempt from both: they carry their own
+ * expiry and must not be cut short by an interactive-session policy.
  */
+
+const AUTH_POLICY_CACHE_TTL_MS = 5_000;
+interface AuthPolicyEntry {
+  disabled: boolean;
+  /** Effective session TTL in seconds (global capped by the per-user override). */
+  ttlSeconds: number;
+  cachedAt: number;
+}
+const authPolicyCache = new Map<string, AuthPolicyEntry>();
+
+/** Resolves a user's live policy state (disabled flag + effective session TTL), short-cached. */
+async function resolveAuthState(userId: string): Promise<AuthPolicyEntry> {
+  const now = Date.now();
+  let entry = authPolicyCache.get(userId);
+  if (!entry || now - entry.cachedAt > AUTH_POLICY_CACHE_TTL_MS) {
+    const [policy, userRow] = await Promise.all([
+      resolveCredentialPolicy(userId),
+      db.query.users.findFirst({ where: (u, { eq }) => eq(u.id, userId) }),
+    ]);
+    const globalTtl = Number(await getEffectiveSettingValue('sessionTimeoutSeconds')) || 3600;
+    entry = { disabled: Boolean(userRow?.disabled), ttlSeconds: effectiveSessionTtl(globalTtl, policy), cachedAt: now };
+    authPolicyCache.set(userId, entry);
+  }
+  return entry;
+}
+
 export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) {
@@ -31,13 +68,34 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   }
 
   const token = header.slice('Bearer '.length).trim();
+  let payload: AccessTokenPayload | null = null;
   try {
-    const payload = verifyToken(token);
-    req.user = payload;
-    next();
-    return;
+    payload = verifyToken<AccessTokenPayload>(token);
   } catch {
     // Not a valid JWT — fall through to the API-token lookup.
+  }
+
+  if (payload) {
+    req.user = payload;
+    const state = await resolveAuthState(payload.sub).catch(() => null);
+    if (!state) {
+      res.status(503).json({ error: 'Unable to verify account status' });
+      return;
+    }
+    if (state.disabled) {
+      res.status(401).json({ error: 'Account is disabled', code: 'user_disabled' });
+      return;
+    }
+    // Enforce the per-user session cap against the JWT's issued-at time. The
+    // static `exp` claim cannot be shortened after minting, so we compare age
+    // to the effective TTL instead (a shorter global setting also applies).
+    const iat = typeof payload.iat === 'number' ? payload.iat : null;
+    if (iat !== null && Date.now() / 1000 - iat > state.ttlSeconds) {
+      res.status(401).json({ error: 'Session expired', code: 'session_expired' });
+      return;
+    }
+    next();
+    return;
   }
 
   const tokenPayload = await resolveApiTokenPayload(token).catch(() => null);

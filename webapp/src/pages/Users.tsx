@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { KeyRound, Pencil, Plus, ShieldOff, Trash2, X } from 'lucide-react';
+import { KeyRound, Pencil, Plus, ShieldOff, Trash2, UserCheck, UserX, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { TotpEnrollmentDialog } from '../components/TotpEnrollmentDialog';
@@ -53,6 +53,14 @@ export default function Users() {
 
   const deleteUser = useMutation({
     mutationFn: (id: string) => api.deleteUser(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
+    onError: (err: unknown) => setFormError((err as Error).message),
+  });
+
+  // Enable/disable an account (requires users:write). Disabling rejects the user
+  // at login and terminates their live sessions; re-enabling restores access.
+  const toggleStatus = useMutation({
+    mutationFn: ({ id, disabled }: { id: string; disabled: boolean }) => api.setUserStatus(id, disabled),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
     onError: (err: unknown) => setFormError((err as Error).message),
   });
@@ -211,6 +219,17 @@ export default function Users() {
     },
     { header: 'Permissions', key: 'permissions', render: (row) => `${row.permissions.length} granted` },
     {
+      header: 'Status',
+      key: 'disabled',
+      sortable: false as const,
+      render: (row) =>
+        row.disabled ? (
+          <span className="inline-flex items-center rounded-full bg-danger px-2 py-0.5 text-xs font-medium text-danger-fg">disabled</span>
+        ) : (
+          <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">active</span>
+        ),
+    },
+    {
       header: '2FA',
       key: 'twoFactorEnabled',
       sortable: false as const,
@@ -251,6 +270,21 @@ export default function Users() {
                     onClick={() => openCreds(row)}
                   >
                     <KeyRound className="h-4 w-4" />
+                  </button>
+                )}
+                {/* Enable/disable — the initial admin can never be disabled (server 409s it too). */}
+                {canWrite && row.username !== INITIAL_ADMIN_USERNAME && (
+                  <button
+                    type="button"
+                    aria-label={row.disabled ? `Enable ${row.username}` : `Disable ${row.username}`}
+                    title={row.disabled ? 'Re-enable account' : 'Disable account (blocks login + ends sessions)'}
+                    className={`rounded-md p-1.5 hover:bg-muted ${row.disabled ? 'text-green-700' : 'text-secondary hover:text-foreground'}`}
+                    onClick={() => {
+                      if (!window.confirm(row.disabled ? `Re-enable "${row.username}"?` : `Disable "${row.username}"? They will be signed out and blocked from logging in.`)) return;
+                      toggleStatus.mutate({ id: row.id, disabled: !row.disabled });
+                    }}
+                  >
+                    {row.disabled ? <UserCheck className="h-4 w-4" /> : <UserX className="h-4 w-4" />}
                   </button>
                 )}
                 {/* The initial admin can never be deleted (server 409s it too). */}
@@ -496,6 +530,7 @@ export default function Users() {
                   </p>
                   <PolicyEditor
                     value={userPolicyQuery.data.policy}
+                    override={userPolicyQuery.data.override ?? null}
                     onChange={(body) => saveUserPolicy.mutate(body)}
                   />
                   {userPolicyQuery.data.source === 'user' && (

@@ -8,11 +8,30 @@ import { requireAuth, requirePermission } from '../auth/middleware';
 import { generateSecret, buildOtpAuthUri } from '../auth/totp';
 import { buildRegistrationOptions, verifyRegistration } from '../auth/webauthn';
 import { ALL_PERMISSIONS, PERMISSION_DESCRIPTIONS, KNOWN_ROLES, INITIAL_ADMIN_USERNAME } from '../auth/permissions';
+import { resolveCredentialPolicy, getGlobalPolicy, effectiveMinPasswordLength } from '../auth/credentialPolicy';
 
 const router = Router();
 
-/** Minimum length for (re)set passwords. */
+/** Built-in floor for (re)set passwords when a policy leaves the minimum unset. */
 const MIN_PASSWORD_LENGTH = 8;
+
+/** The effective minimum length for a NEW user — only the global default applies. */
+async function minLenForNewUser(): Promise<number> {
+  try {
+    return effectiveMinPasswordLength(await getGlobalPolicy());
+  } catch {
+    return MIN_PASSWORD_LENGTH;
+  }
+}
+
+/** The effective minimum length for a TARGET user (per-user override merged onto global). */
+async function minLenForUser(userId: string): Promise<number> {
+  try {
+    return effectiveMinPasswordLength(await resolveCredentialPolicy(userId));
+  } catch {
+    return MIN_PASSWORD_LENGTH;
+  }
+}
 
 // GET /permissions — the canonical permission catalog + role definitions
 // (open to any authenticated user). Drives the checkbox grids on the Users
@@ -80,6 +99,11 @@ export async function serializeUser(row: typeof schema.users.$inferSelect) {
     totpEnabled: Boolean(row.totpSecret),
     passkeyCount,
     createdAt: row.createdAt,
+    // Credential-policy state (see credentialPolicies): disabled accounts are
+    // rejected at login and their live sessions terminate; lastLoginAt drives
+    // the inactivity auto-disable sweep.
+    disabled: Boolean(row.disabled),
+    lastLoginAt: row.lastLoginAt ?? null,
   };
 }
 
@@ -150,8 +174,13 @@ router.post('/users', requireAuth, requirePermission('users:create'), async (req
   }
   const username = body.username.trim();
 
-  if (typeof body.password !== 'string' || body.password.length < MIN_PASSWORD_LENGTH) {
-    res.status(400).json({ error: `"password" must be at least ${MIN_PASSWORD_LENGTH} characters` });
+  if (typeof body.password !== 'string') {
+    res.status(400).json({ error: '"password" is required' });
+    return;
+  }
+  const minLen = await minLenForNewUser();
+  if (body.password.length < minLen) {
+    res.status(400).json({ error: `"password" must be at least ${minLen} characters` });
     return;
   }
 
@@ -181,6 +210,8 @@ router.post('/users', requireAuth, requirePermission('users:create'), async (req
     roles: JSON.stringify(roles),
     permissions: JSON.stringify(permissions),
     createdAt: new Date().toISOString(),
+    // A freshly created account has a fresh password — no forced rotation.
+    passwordChangedAt: new Date().toISOString(),
   });
 
   const created = await db.query.users.findFirst({ where: eq(schema.users.username, username) });
@@ -288,6 +319,34 @@ router.delete('/users/:id', requireAuth, requirePermission('users:write'), async
   res.status(204).send();
 });
 
+// PATCH /users/:id/status — enable/disable an account (requires users:write).
+// Disabling is the manual counterpart to the inactivity auto-disable sweep: a
+// disabled user is rejected at login and their live sessions terminate. The
+// initial seeded admin can never be disabled (it would lock out the last
+// guaranteed human path into the system).
+router.patch('/users/:id/status', requireAuth, requirePermission('users:write'), async (req, res) => {
+  const targetId = req.params.id;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  if (typeof body.disabled !== 'boolean') {
+    res.status(400).json({ error: '"disabled" must be a boolean' });
+    return;
+  }
+
+  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, targetId) });
+  if (!existing) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+  if (body.disabled && existing.username === INITIAL_ADMIN_USERNAME) {
+    res.status(409).json({ error: `The initial admin user "${INITIAL_ADMIN_USERNAME}" cannot be disabled.` });
+    return;
+  }
+
+  await db.update(schema.users).set({ disabled: body.disabled }).where(eq(schema.users.id, targetId));
+  const updated = await db.query.users.findFirst({ where: eq(schema.users.id, targetId) });
+  res.status(200).json(await serializeUser(updated!));
+});
+
 /**
  * Permission check for credential operations (password reset / TOTP) on a
  * target user. Self-operations need `users:self-credentials`; operating on
@@ -315,14 +374,21 @@ router.post('/users/:id/password', requireAuth, async (req: Request, res: Respon
   }
 
   const body = (req.body ?? {}) as Record<string, unknown>;
-  if (typeof body.newPassword !== 'string' || body.newPassword.length < MIN_PASSWORD_LENGTH) {
-    res.status(400).json({ error: `"newPassword" must be at least ${MIN_PASSWORD_LENGTH} characters` });
+  if (typeof body.newPassword !== 'string') {
+    res.status(400).json({ error: '"newPassword" is required' });
     return;
   }
 
   const existing = await db.query.users.findFirst({ where: eq(schema.users.id, req.params.id) });
   if (!existing) {
     res.status(404).json({ error: 'User not found' });
+    return;
+  }
+
+  // Enforce the target user's effective minimum length (per-user override wins).
+  const minLen = await minLenForUser(existing.id);
+  if (body.newPassword.length < minLen) {
+    res.status(400).json({ error: `"newPassword" must be at least ${minLen} characters` });
     return;
   }
 
@@ -339,7 +405,7 @@ router.post('/users/:id/password', requireAuth, async (req: Request, res: Respon
   }
 
   await db.update(schema.users)
-    .set({ passwordHash: bcrypt.hashSync(body.newPassword, 10) })
+    .set({ passwordHash: bcrypt.hashSync(body.newPassword, 10), passwordChangedAt: new Date().toISOString() })
     .where(eq(schema.users.id, existing.id));
 
   const updated = await db.query.users.findFirst({ where: eq(schema.users.id, existing.id) });

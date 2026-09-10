@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import bcrypt from 'bcryptjs';
 import { eq } from 'drizzle-orm';
 import { db, pool } from '../db';
 import * as schema from '../db/schema';
@@ -18,6 +19,7 @@ import {
 import { expandRolePermissions } from './roles';
 import { serializeUser } from './users';
 import { getEffectiveSettingValue } from '../systemSettings';
+import { resolveCredentialPolicy, effectiveSessionTtl, effectiveMinPasswordLength } from '../auth/credentialPolicy';
 
 const router = Router();
 
@@ -25,7 +27,10 @@ const router = Router();
  * Mints the platform JWT from a verified identity assertion (shared by the
  * TOTP and WebAuthn completion paths). Effective permissions = explicit grants
  * + every permission of the user's roles, computed here so role changes take
- * effect at the next login.
+ * effect at the next login. The token TTL is the global session timeout CAPPED
+ * by any per-user `sessionTimeoutSeconds` override (a shorter lifetime for one
+ * account), and a successful authentication stamps `lastLoginAt` — which drives
+ * the inactivity auto-disable sweep.
  */
 async function mintSession(identity: {
   userId: string;
@@ -39,7 +44,15 @@ async function mintSession(identity: {
     Array.isArray(identity.permissions) ? identity.permissions : []
   );
 
-  const tokenTtlSeconds = Number(await getEffectiveSettingValue('sessionTimeoutSeconds')) || 3600;
+  const globalTtlSeconds = Number(await getEffectiveSettingValue('sessionTimeoutSeconds')) || 3600;
+  let tokenTtlSeconds = globalTtlSeconds;
+  try {
+    const policy = await resolveCredentialPolicy(identity.userId);
+    tokenTtlSeconds = effectiveSessionTtl(globalTtlSeconds, policy);
+  } catch {
+    // Policy lookup hiccup — fall back to the global TTL.
+  }
+
   const accessToken = signToken(
     {
       sub: identity.userId,
@@ -50,6 +63,16 @@ async function mintSession(identity: {
     },
     tokenTtlSeconds
   );
+
+  // Stamp the last successful authentication (best-effort — a failure here must
+  // not break sign-in; the sweep simply keeps the previous timestamp).
+  try {
+    await db.update(schema.users)
+      .set({ lastLoginAt: new Date().toISOString() })
+      .where(eq(schema.users.id, identity.userId));
+  } catch (err) {
+    console.error('[auth] failed to stamp lastLoginAt:', err);
+  }
 
   return {
     accessToken,
@@ -183,13 +206,20 @@ router.post('/auth/login', async (req, res) => {
     res.status(200).json({
       challengeToken: result.challengeToken,
       twoFactorRequired: result.twoFactorRequired,
+      // The webapp keeps this across the 2FA step and forces a password change
+      // right after sign-in completes when true.
+      passwordExpired: Boolean(result.passwordExpired),
     });
   } catch (err) {
-    const e = err as { status?: number; message?: string };
-    // Distinct code so the webapp can point to 2FA enrollment instead of
-    // showing a generic failure.
+    const e = err as { status?: number; message?: string; code?: string };
+    // Distinct codes so the webapp can point to the right remedy instead of a
+    // generic failure.
     if (e.message === 'no_2fa_enrolled') {
       res.status(403).json({ error: 'No enrolled second factor satisfies the credential policy', code: 'no_2fa_enrolled' });
+      return;
+    }
+    if (e.code === 'user_disabled') {
+      res.status(403).json({ error: 'Account is disabled — contact an administrator', code: 'user_disabled' });
       return;
     }
     res.status(e.status ?? 500).json({ error: e.message ?? 'Authentication failed' });
@@ -338,6 +368,54 @@ router.post('/auth/revalidate/webauthn/verify', requireAuth, async (req, res) =>
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Passkey revalidation failed' });
   }
+});
+
+// POST /auth/me/password — the CALLER rotates their own password. Used by the
+// forced-change flow when a login reports `passwordExpired` (and available to
+// any user with users:self-credentials). The current password must be proven,
+// and the new one must satisfy the caller's effective minimum length policy.
+router.post('/auth/me/password', requireAuth, async (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  if (typeof body.currentPassword !== 'string' || typeof body.newPassword !== 'string') {
+    res.status(400).json({ error: '"currentPassword" and "newPassword" are required' });
+    return;
+  }
+
+  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, req.user!.sub) });
+  if (!existing) {
+    res.status(401).json({ error: 'User no longer exists' });
+    return;
+  }
+  if (existing.disabled) {
+    res.status(403).json({ error: 'Account is disabled — contact an administrator', code: 'user_disabled' });
+    return;
+  }
+
+  const policy = await resolveCredentialPolicy(existing.id);
+  const minLen = effectiveMinPasswordLength(policy);
+  if (body.newPassword.length < minLen) {
+    res.status(400).json({ error: `"newPassword" must be at least ${minLen} characters` });
+    return;
+  }
+
+  try {
+    const ok = await bcrypt.compare(body.currentPassword, existing.passwordHash);
+    if (!ok) {
+      res.status(401).json({ error: 'Current password is incorrect' });
+      return;
+    }
+  } catch (err) {
+    console.error('[auth] current-password check failed:', err);
+    res.status(500).json({ error: 'Internal server error' });
+    return;
+  }
+
+  await db.update(schema.users)
+    .set({ passwordHash: bcrypt.hashSync(body.newPassword, 10), passwordChangedAt: new Date().toISOString() })
+    .where(eq(schema.users.id, existing.id));
+
+  const updated = await db.query.users.findFirst({ where: eq(schema.users.id, existing.id) });
+  res.status(200).json(await serializeUser(updated!));
 });
 
 export default router;

@@ -33,6 +33,7 @@ import { startConfigJobWorker } from './workers/configJob';
 import { startPlanExecutorWorker } from './workers/planExecutor';
 import { startLogRetentionWorker } from './workers/logRetention';
 import { startPluginMetricsWorker } from './workers/pluginMetrics';
+import { startInactiveUsersWorker } from './workers/inactiveUsers';
 import { LEADER_KEYS, runAsLeader } from './workers/leader';
 import { initWorker } from './workers/stats';
 import { attachConsoleProxy } from './consoleProxy';
@@ -187,6 +188,8 @@ async function main(): Promise<void> {
     void runAsLeader(LEADER_KEYS.pluginMetrics, 'pluginMetrics', () => startPluginMetricsWorker()).then((stop) => workerStops.push(stop));
     // Notification maintenance: auto-resolve recovered device states + retention.
     void runAsLeader(LEADER_KEYS.notifications, 'notifications', () => startNotificationsWorker()).then((stop) => workerStops.push(stop));
+    // Inactivity auto-disable (credential policy inactiveDisableAfterDays).
+    void runAsLeader(LEADER_KEYS.inactiveUsers, 'inactiveUsers', () => startInactiveUsersWorker()).then((stop) => workerStops.push(stop));
 
     // Discover plugins via mDNS/DNS-SD, with HTTP polling as a fallback for
     // Docker bridge networks where multicast is isolated. Leader-gated: the

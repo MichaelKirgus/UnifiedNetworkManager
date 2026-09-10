@@ -5,7 +5,7 @@ import * as schema from '../db/schema';
 /**
  * Credential policy engine.
  *
- * A credential policy controls two things:
+ * A credential policy controls:
  *   1. `requiredMethods` — which enrolled 2nd factors satisfy login step 2
  *      ('totp' | 'webauthn'). Empty array = no 2FA required at all. If none of
  *      the allowed methods is enrolled, login is blocked with a distinct error
@@ -14,10 +14,17 @@ import * as schema from '../db/schema';
  *   2. `gateAmrs` — which JWT `amr` values satisfy require2FA (privileged
  *      endpoints like config-job submission). Evaluated LIVE per request, so
  *      admin changes apply immediately to existing sessions.
+ *   3. Password rules — `minPasswordLength` (floor for new/reset passwords),
+ *      `passwordMaxAgeDays` (force rotation after N days; null = off) and
+ *      `inactiveDisableAfterDays` (auto-disable after N days without a login;
+ *      null = off).
+ *   4. `sessionTimeoutSeconds` — an optional per-user CAP on the global session
+ *      timeout, so one account can be forced to expire sooner than everyone else.
  *
- * Resolution: a per-user row (unique on userId) overrides the GLOBAL row
- * (`userId IS NULL`) entirely — user policy wins over global. When neither
- * exists we fall back to the built-in default (TOTP required + gate).
+ * Resolution: a per-user row (unique on userId) OVERRIDES the GLOBAL row
+ * (`userId IS NULL`) FIELD BY FIELD — each rule is resolved independently and an
+ * override only needs to carry the fields it changes (the rest inherit from
+ * global). When neither exists we fall back to DEFAULT_CREDENTIAL_POLICY.
  */
 
 export type SecondFactorMethod = 'totp' | 'webauthn';
@@ -28,10 +35,17 @@ export type AmrValue = (typeof KNOWN_AMRS)[number];
 
 const SECOND_FACTOR_METHODS: SecondFactorMethod[] = ['totp', 'webauthn'];
 
+/** Built-in floor for password length when a policy leaves it unset. */
+export const BUILTIN_MIN_PASSWORD_LENGTH = 8;
+
 /** Built-in fallback when no policy row exists at all. */
 export const DEFAULT_CREDENTIAL_POLICY: CredentialPolicy = {
   requiredMethods: ['totp'],
   gateAmrs: ['totp'],
+  minPasswordLength: BUILTIN_MIN_PASSWORD_LENGTH,
+  passwordMaxAgeDays: null,
+  inactiveDisableAfterDays: null,
+  sessionTimeoutSeconds: null,
 };
 
 export interface CredentialPolicy {
@@ -39,12 +53,34 @@ export interface CredentialPolicy {
   requiredMethods: SecondFactorMethod[];
   /** Session AMRs that satisfy require2FA. */
   gateAmrs: AmrValue[];
+  /** Minimum characters for any new/reset password (null = built-in default of 8). */
+  minPasswordLength: number | null;
+  /** Force a password change after this many days (null = no forced rotation). */
+  passwordMaxAgeDays: number | null;
+  /** Auto-disable the account if it has not logged on for this many days (null = off). */
+  inactiveDisableAfterDays: number | null;
+  /** Per-user cap on session lifetime in seconds — sessions expire at min(global, this) (null = inherit global). */
+  sessionTimeoutSeconds: number | null;
 }
 
 interface PolicyRow extends CredentialPolicy {
   id: string;
   userId: string | null;
   updatedAt: string;
+}
+
+/** The effective minimum password length for a policy (built-in floor when unset). */
+export function effectiveMinPasswordLength(policy: Pick<CredentialPolicy, 'minPasswordLength'>): number {
+  return typeof policy.minPasswordLength === 'number' && policy.minPasswordLength > 0
+    ? policy.minPasswordLength
+    : BUILTIN_MIN_PASSWORD_LENGTH;
+}
+
+/** Coerce a nullable integer column into `number | null` (null/invalid = null). */
+function parseNullableInt(raw: unknown): number | null {
+  if (raw === null || raw === undefined) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.round(n) : null;
 }
 
 function parseStringArray<T extends string>(raw: string, allowed: readonly T[]): T[] {
@@ -64,6 +100,10 @@ function toPolicy(row: typeof schema.credentialPolicies.$inferSelect): PolicyRow
     userId: row.userId,
     requiredMethods: parseStringArray<SecondFactorMethod>(row.requiredMethods, SECOND_FACTOR_METHODS),
     gateAmrs: parseStringArray<AmrValue>(row.gateAmrs, KNOWN_AMRS),
+    minPasswordLength: parseNullableInt(row.minPasswordLength),
+    passwordMaxAgeDays: parseNullableInt(row.passwordMaxAgeDays),
+    inactiveDisableAfterDays: parseNullableInt(row.inactiveDisableAfterDays),
+    sessionTimeoutSeconds: parseNullableInt(row.sessionTimeoutSeconds),
     updatedAt: row.updatedAt,
   };
 }
@@ -85,15 +125,67 @@ export async function getUserPolicy(userId: string): Promise<PolicyRow | null> {
 }
 
 /**
- * Resolves the effective policy for a user: per-user override wins over the
- * global default. Never throws — falls back to DEFAULT_CREDENTIAL_POLICY when
- * no rows exist (e.g. before initDb seeding).
+ * Merges a per-user override onto the global policy FIELD BY FIELD. A field is
+ * taken from the user row only when it carries an explicit value — array fields
+ * are "explicit" whenever the row exists (an empty requiredMethods array is a
+ * meaningful "no 2FA"), while nullable integer fields fall back to the global
+ * value when null (null = "inherit"). This lets an override change just one
+ * rule without re-specifying the rest.
+ */
+export function mergePolicy(global: CredentialPolicy, user: PolicyRow | null): CredentialPolicy {
+  if (!user) return { ...global };
+  return {
+    requiredMethods: [...user.requiredMethods],
+    gateAmrs: [...user.gateAmrs],
+    minPasswordLength: user.minPasswordLength ?? global.minPasswordLength,
+    passwordMaxAgeDays: user.passwordMaxAgeDays ?? global.passwordMaxAgeDays,
+    inactiveDisableAfterDays: user.inactiveDisableAfterDays ?? global.inactiveDisableAfterDays,
+    sessionTimeoutSeconds: user.sessionTimeoutSeconds ?? global.sessionTimeoutSeconds,
+  };
+}
+
+/**
+ * Resolves the effective policy for a user: per-user override merged onto the
+ * global default (field by field — see mergePolicy). Never throws — falls back
+ * to DEFAULT_CREDENTIAL_POLICY when no rows exist (e.g. before initDb seeding).
  */
 export async function resolveCredentialPolicy(userId: string): Promise<PolicyRow> {
   const [userRow, globalRow] = await Promise.all([getUserPolicy(userId), getGlobalPolicy()]);
-  if (userRow) return userRow;
-  if (globalRow.userId === null && globalRow.id) return globalRow;
-  return { ...DEFAULT_CREDENTIAL_POLICY, id: '', userId: null, updatedAt: '' };
+  return { ...mergePolicy(globalRow, userRow), id: '', userId: null, updatedAt: '' };
+}
+
+/**
+ * The effective session lifetime (seconds) for a user: the global setting capped
+ * by any per-user `sessionTimeoutSeconds` override. Returns the global value
+ * unchanged when no cap applies.
+ */
+export function effectiveSessionTtl(globalSeconds: number, policy: Pick<CredentialPolicy, 'sessionTimeoutSeconds'>): number {
+  const cap = policy.sessionTimeoutSeconds;
+  if (typeof cap === 'number' && cap > 0) return Math.min(globalSeconds, cap);
+  return globalSeconds;
+}
+
+/**
+ * True when the user's password is older than `passwordMaxAgeDays` and must be
+ * rotated. A NULL/missing `passwordChangedAt` means "unknown age" — treated as
+ * fresh so existing accounts are not locked out on first deploy.
+ */
+export function isPasswordExpired(policy: Pick<CredentialPolicy, 'passwordMaxAgeDays'>, passwordChangedAt: string | null): boolean {
+  if (typeof policy.passwordMaxAgeDays !== 'number' || policy.passwordMaxAgeDays <= 0) return false;
+  if (!passwordChangedAt) return false;
+  const changed = Date.parse(passwordChangedAt);
+  if (Number.isNaN(changed)) return false;
+  return Date.now() - changed > policy.passwordMaxAgeDays * 24 * 60 * 60 * 1000;
+}
+
+/** True when a user has not logged on within `inactiveDisableAfterDays`. */
+export function isInactiveDisabled(policy: Pick<CredentialPolicy, 'inactiveDisableAfterDays'>, lastLoginAt: string | null): boolean {
+  if (typeof policy.inactiveDisableAfterDays !== 'number' || policy.inactiveDisableAfterDays <= 0) return false;
+  const ref = lastLoginAt ? Date.parse(lastLoginAt) : NaN;
+  // Never disable an account that has never logged on — it would lock out a
+  // freshly created user before their first sign-in.
+  if (Number.isNaN(ref)) return false;
+  return Date.now() - ref > policy.inactiveDisableAfterDays * 24 * 60 * 60 * 1000;
 }
 
 /** Validates a policy body from the API. Returns an error message or null. */
@@ -122,6 +214,24 @@ export function validatePolicyBody(body: unknown): string | null {
     return 'gateAmrs must contain at least one AMR value';
   }
 
+  for (const key of ['minPasswordLength', 'passwordMaxAgeDays', 'inactiveDisableAfterDays', 'sessionTimeoutSeconds'] as const) {
+    const value = obj[key];
+    if (value === undefined || value === null) continue; // omitted/null = inherit / clear
+    if (typeof value !== 'number' || !Number.isFinite(value)) return `${key} must be a number or null`;
+  }
+
+  for (const key of ['minPasswordLength', 'passwordMaxAgeDays', 'inactiveDisableAfterDays'] as const) {
+    const value = obj[key];
+    if (typeof value === 'number' && value < 1) return `${key} must be at least 1`;
+  }
+
+  // A per-user session cap that is LONGER than the global timeout would be a no-op
+  // (sessions expire at min(global, cap)); reject it so the UI never stores a
+  // misleading "override" that does nothing.
+  if (typeof obj.sessionTimeoutSeconds === 'number' && obj.sessionTimeoutSeconds < 300) {
+    return 'sessionTimeoutSeconds must be at least 300';
+  }
+
   return null;
 }
 
@@ -131,5 +241,9 @@ export function serializePolicy(row: PolicyRow): CredentialPolicy & { userId: st
     userId: row.userId,
     requiredMethods: [...row.requiredMethods],
     gateAmrs: [...row.gateAmrs],
+    minPasswordLength: row.minPasswordLength,
+    passwordMaxAgeDays: row.passwordMaxAgeDays,
+    inactiveDisableAfterDays: row.inactiveDisableAfterDays,
+    sessionTimeoutSeconds: row.sessionTimeoutSeconds,
   };
 }

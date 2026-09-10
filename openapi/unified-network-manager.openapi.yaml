@@ -106,12 +106,16 @@ paths:
                 properties:
                   challengeToken: { type: string }
                   twoFactorRequired: { type: boolean }
+                  # True when the user's password has exceeded its max age — the
+                  # client must force a change right after sign-in completes.
+                  passwordExpired: { type: boolean }
         '401':
           description: Invalid username or password
         '403':
           description: >-
             No enrolled second factor satisfies the user's credential policy
-            (error code `no_2fa_enrolled`) — enroll TOTP/passkey first.
+            (error code `no_2fa_enrolled`) — enroll TOTP/passkey first. A
+            disabled account is also rejected here (error code `user_disabled`).
         '429':
           description: Too many login attempts
 
@@ -391,7 +395,39 @@ paths:
         '401':
           description: Authentication required
 
-  # --- Credential policies (2FA requirements + gate AMrs) -------------------
+  /auth/me/password:
+    post:
+      tags: [Authentication]
+      summary: Rotate the caller's own password (forced-change flow)
+      description: >-
+        The authenticated user changes their OWN password. Used by the forced
+        change flow when a login reports `passwordExpired`. The current password
+        must be proven, and the new one must satisfy the caller's effective
+        minimum-length policy. Stamps `passwordChangedAt` (clears any expiry).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string, format: password }
+                newPassword: { type: string, format: password }
+      responses:
+        '200':
+          description: Updated user profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400':
+          description: Missing fields or newPassword below the policy minimum
+        '401':
+          description: Authentication required / current password incorrect
+        '403':
+          description: Account is disabled (error code `user_disabled`)
+
+  # --- Credential policies (2FA requirements + gate AMRs) -------------------
   # A per-user row overrides the global default entirely (user policy wins).
   # The require2FA gate reads these rows LIVE on every privileged request.
 
@@ -3469,6 +3505,46 @@ paths:
         '404':
           description: User not found
 
+  /users/{id}/status:
+    patch:
+      tags: [Users]
+      summary: Enable or disable a user account
+      description: >-
+        Requires `users:write`. Disabling is the manual counterpart to the
+        inactivity auto-disable sweep: a disabled user is rejected at login and
+        their live sessions terminate. The initial seeded admin can never be
+        disabled (409).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [disabled]
+              properties:
+                disabled: { type: boolean }
+      responses:
+        '200':
+          description: Updated user profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400':
+          description: "disabled must be a boolean"
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing users:write permission
+        '404':
+          description: User not found
+        '409':
+          description: The initial admin user cannot be disabled
+
   /users/{id}/totp/enroll:
     post:
       tags: [Users]
@@ -4347,6 +4423,9 @@ components:
         totpEnabled: { type: boolean, description: "Whether a TOTP secret is enrolled" }
         passkeyCount: { type: integer, minimum: 0, description: "Number of enrolled passkeys (one per device)" }
         createdAt: { type: string, format: date-time }
+        # Credential-policy state: disabled accounts are rejected at login and their live sessions terminate.
+        disabled: { type: boolean, description: "Whether the account is disabled (manual or inactivity auto-disable)" }
+        lastLoginAt: { type: [string, 'null'], format: date-time, description: "Most recent successful authentication; drives the inactivity sweep" }
 
     # --- Per-user UI preferences (nav order + hidden pages) -----------------
 
@@ -4489,6 +4568,14 @@ components:
           type: array
           minItems: 1
           items: { type: string, enum: [pwd, totp, webauthn] }
+        # Minimum characters for new/reset passwords; null = built-in default of 8.
+        minPasswordLength: { type: [integer, 'null'], minimum: 1 }
+        # Force a password change after this many days; null = no forced rotation.
+        passwordMaxAgeDays: { type: [integer, 'null'], minimum: 1 }
+        # Auto-disable the account if it has not logged on for this many days; null = off.
+        inactiveDisableAfterDays: { type: [integer, 'null'], minimum: 1 }
+        # Per-user cap on session lifetime (seconds); sessions expire at min(global, this); null = inherit global.
+        sessionTimeoutSeconds: { type: [integer, 'null'], minimum: 300 }
 
     CredentialPolicyUpdateRequest:
       type: object
@@ -4501,14 +4588,25 @@ components:
           type: array
           minItems: 1
           items: { type: string, enum: [pwd, totp, webauthn] }
+        # Omitted = unchanged; null clears the rule (inherit / off).
+        minPasswordLength: { type: [integer, 'null'], minimum: 1 }
+        passwordMaxAgeDays: { type: [integer, 'null'], minimum: 1 }
+        inactiveDisableAfterDays: { type: [integer, 'null'], minimum: 1 }
+        sessionTimeoutSeconds: { type: [integer, 'null'], minimum: 300 }
 
     CredentialPolicyWithSource:
       type: object
       required: [policy, source]
       properties:
+        # The EFFECTIVE policy (per-user override merged onto the global default).
         policy: { $ref: '#/components/schemas/CredentialPolicy' }
-        # Where the effective policy comes from.
-        source: { type: string, enum: [user, global, default] }
+        # The raw per-user override row; null when no override exists.
+        override:
+          oneOf:
+            - $ref: '#/components/schemas/CredentialPolicy'
+            - type: 'null'
+        # Where the effective policy comes from (user = has an override).
+        source: { type: string, enum: [user, global] }
 
     UserUpdateRequest:
       type: object

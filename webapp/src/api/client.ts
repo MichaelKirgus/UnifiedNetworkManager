@@ -55,6 +55,8 @@ export interface SecretProvider {
 export interface LoginResponse {
   challengeToken: string;
   twoFactorRequired: boolean;
+  /** True when the user's password has exceeded its max age — force a change right after sign-in. */
+  passwordExpired?: boolean;
 }
 
 export interface AuthFlow {
@@ -1006,20 +1008,35 @@ export interface User {
   totpEnabled?: boolean;
   passkeyCount?: number;
   createdAt?: string;
+  /** Disabled accounts are rejected at login and their live sessions terminate. */
+  disabled?: boolean;
+  /** Most recent successful authentication (drives the inactivity auto-disable sweep). */
+  lastLoginAt?: string | null;
 }
 
-/** Credential policy — which 2nd factors are required at login and which AMRs satisfy the privileged-action gate. */
+/** Credential policy — 2FA requirements, password rules and session caps. A per-user override wins over the global default field by field. */
 export interface CredentialPolicy {
   /** Enrolled methods that satisfy login step 2 (empty = no 2FA). */
   requiredMethods: ('totp' | 'webauthn')[];
   /** Session AMRs that satisfy require2FA (config-job submission etc.). */
   gateAmrs: string[];
+  /** Minimum characters for new/reset passwords (null = built-in default of 8). */
+  minPasswordLength: number | null;
+  /** Force a password change after this many days (null = no forced rotation). */
+  passwordMaxAgeDays: number | null;
+  /** Auto-disable the account if it has not logged on for this many days (null = off). */
+  inactiveDisableAfterDays: number | null;
+  /** Per-user cap on session lifetime in seconds — sessions expire at min(global, this) (null = inherit global). */
+  sessionTimeoutSeconds: number | null;
 }
 
 export interface PolicyWithSource {
+  /** The EFFECTIVE policy (per-user override merged onto the global default). */
   policy: CredentialPolicy;
-  /** Where the effective policy comes from. */
-  source: 'user' | 'global' | 'default';
+  /** The raw per-user override row; null when no override exists. */
+  override: CredentialPolicy | null;
+  /** Where the effective policy comes from (user = has an override). */
+  source: 'user' | 'global';
 }
 
 /** TOTP enrollment payload returned by user-create / totp-enroll. */
@@ -1561,6 +1578,14 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
     } catch {
       // ignore body parse errors, fall back to generic message
     }
+    // A 401 with a policy code means the session was terminated server-side —
+    // either the account got DISABLED or its (per-user-capped) lifetime ended.
+    // Drop the token and bounce to /login so the user sees why, not a wall of
+    // failing requests. Only when we actually held a token (not on the login page).
+    if (res.status === 401 && code && token && window.location.pathname !== '/login') {
+      localStorage.removeItem('accessToken');
+      window.location.assign('/login' + (code === 'user_disabled' ? '?reason=disabled' : ''));
+    }
     throw new ApiError(message, res.status, fieldErrors, code);
   }
   if (res.status === 204) {
@@ -1583,6 +1608,9 @@ export const api = {
     apiFetch<VerifyResponse>('/auth/webauthn/verify', { method: 'POST', body: JSON.stringify(body) }),
   /** The caller's own profile (no users:read needed). */
   me: () => apiFetch<User & { effectivePermissions: string[] }>('/auth/me'),
+  /** Rotate the caller's own password (forced-change flow after an expired login). */
+  changeOwnPassword: (body: { currentPassword: string; newPassword: string }) =>
+    apiFetch<User>('/auth/me/password', { method: 'POST', body: JSON.stringify(body) }),
   devices: () => apiFetch<Device[]>('/devices'),
   createDevice: (body: DeviceCreateRequest) =>
     apiFetch<Device & { plugins?: DevicePluginAssignment[] }>('/devices', {
@@ -1902,6 +1930,9 @@ export const api = {
   updateUser: (id: string, body: { roles?: string[]; permissions?: string[] }) =>
     apiFetch<User>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteUser: (id: string) => apiFetch<void>(`/users/${id}`, { method: 'DELETE' }),
+  /** Enable/disable a user account (requires users:write). */
+  setUserStatus: (id: string, disabled: boolean) =>
+    apiFetch<User>(`/users/${id}/status`, { method: 'PATCH', body: JSON.stringify({ disabled }) }),
   // Credential management (self needs users:self-credentials, others need users:manage-credentials).
   resetUserPassword: (id: string, body: { newPassword: string; currentPassword?: string }) =>
     apiFetch<User>(`/users/${id}/password`, { method: 'POST', body: JSON.stringify(body) }),
