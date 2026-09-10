@@ -341,7 +341,57 @@ paths:
         '401':
           description: Authentication required
 
-  # --- Credential policies (2FA requirements + gate AMRs) -------------------
+  /auth/me/preferences:
+    get:
+      tags: [Authentication]
+      summary: Get the caller's own UI preferences (nav order + hidden pages)
+      responses:
+        '200':
+          description: Stored preferences (empty arrays when none saved yet)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserPreferences' }
+        '401':
+          description: Authentication required
+    put:
+      tags: [Authentication]
+      summary: Persist the caller's own UI preferences
+      description: >-
+        Upserts the user's navigation order and hidden-page list. Omitted fields
+        are left unchanged; present-but-invalid values are treated as empty.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserPreferencesUpdateRequest' }
+      responses:
+        '200':
+          description: Stored preferences after the update
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserPreferences' }
+        '401':
+          description: Authentication required
+
+  /counts:
+    get:
+      tags: [Authentication]
+      summary: Aggregated nav-badge counts (permission-aware)
+      description: >-
+        Returns actionable item counts for the sidebar badges in a single call.
+        Each key is present only when the caller holds that page's read
+        permission. Keys: `notifications` (open), `configJobs` (queued+running),
+        `plans` (executing/ready/draft).
+      responses:
+        '200':
+          description: Count object (keys omitted for missing permissions)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NavCountsResponse' }
+        '401':
+          description: Authentication required
+
+  # --- Credential policies (2FA requirements + gate AMrs) -------------------
   # A per-user row overrides the global default entirely (user policy wins).
   # The require2FA gate reads these rows LIVE on every privileged request.
 
@@ -4297,6 +4347,39 @@ components:
         totpEnabled: { type: boolean, description: "Whether a TOTP secret is enrolled" }
         passkeyCount: { type: integer, minimum: 0, description: "Number of enrolled passkeys (one per device)" }
         createdAt: { type: string, format: date-time }
+
+    # --- Per-user UI preferences (nav order + hidden pages) -----------------
+
+    UserPreferences:
+      type: object
+      required: [navOrder, hiddenPages]
+      properties:
+        navOrder:
+          type: array
+          items: { type: string }
+          description: "Nav path strings in the user's chosen order (e.g. ['/devices','/networks'])"
+        hiddenPages:
+          type: array
+          items: { type: string }
+          description: "Nav path strings the user has hidden from the sidebar"
+
+    UserPreferencesUpdateRequest:
+      type: object
+      properties:
+        navOrder:
+          type: array
+          items: { type: string }
+        hiddenPages:
+          type: array
+          items: { type: string }
+
+    NavCountsResponse:
+      type: object
+      description: "Keys present only when the caller has the corresponding read permission"
+      properties:
+        notifications: { type: integer, minimum: 0, description: "Open notifications visible to the user" }
+        configJobs: { type: integer, minimum: 0, description: "Config jobs in queued or running state" }
+        plans: { type: integer, minimum: 0, description: "Plans in executing/ready/draft state" }
 
     UserCreateRequest:
       type: object

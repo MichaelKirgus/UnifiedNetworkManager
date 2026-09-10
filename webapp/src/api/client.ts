@@ -579,6 +579,20 @@ export interface NotificationPrefs {
   visibility: Record<string, NotificationSeverity[]>;
 }
 
+/** Which nav items can carry a badge count (mirrors the API's /counts keys). */
+export type NavCountKey = 'notifications' | 'configJobs' | 'plans';
+
+/** Per-user navigation preferences (order + hidden pages), additive over defaults. */
+export interface NavPreferences {
+  /** Nav path strings in the user's chosen order; unknown paths are ignored on merge. */
+  navOrder: string[];
+  /** Nav path strings the user has hidden from the sidebar. */
+  hiddenPages: string[];
+}
+
+/** Aggregated nav-badge counts (keys present only when the caller may read that page). */
+export type NavCounts = Partial<Record<NavCountKey, number>>;
+
 // --- System/HA (Workers page) -------------------------------------------------
 
 /** Runtime state of one worker role on THIS instance (GET /system/status). */
@@ -1870,6 +1884,12 @@ export const api = {
   notificationPrefs: () => apiFetch<NotificationPrefs>('/notifications/prefs'),
   setNotificationPrefs: (visibility: Record<string, NotificationSeverity[]>) =>
     apiFetch<NotificationPrefs>('/notifications/prefs', { method: 'PUT', body: JSON.stringify({ visibility }) }),
+  // Per-user navigation preferences (order + hidden pages) — self-service.
+  getNavPrefs: () => apiFetch<NavPreferences>('/auth/me/preferences'),
+  setNavPrefs: (prefs: Partial<NavPreferences>) =>
+    apiFetch<NavPreferences>('/auth/me/preferences', { method: 'PUT', body: JSON.stringify(prefs) }),
+  // Aggregated nav-badge counts for the sidebar (permission-aware).
+  navCounts: () => apiFetch<NavCounts>('/counts'),
   // Runtime self-metrics of a plugin process (CPU/memory/lag/poll stats).
   pluginSelfMetrics: (pluginId: string, limit = 120) =>
     apiFetch<{ pluginId: string; latest: PluginSelfMetricsSample | null; history: PluginSelfMetricsSample[] }>(

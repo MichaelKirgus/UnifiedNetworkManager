@@ -1183,6 +1183,23 @@ export const notificationPrefs = pgTable(
   }
 );
 
+// Per-user UI preferences (navigation order + hidden pages). One row per user;
+// missing row = defaults. Values are ADDITIVE over the webapp's NAV_ITEMS —
+// only paths that exist in the client are honored, so adding/removing a page
+// later needs no migration here.
+export const userPreferences = pgTable(
+  'user_preferences',
+  {
+    userId: text('userId').primaryKey(),
+    // JSON array of nav path strings (e.g. ["/devices","/networks"]) in the
+    // user's chosen order. Paths absent from NAV_ITEMS are ignored on merge.
+    navOrder: text('navOrder').notNull().default('[]'),
+    // JSON array of nav path strings the user has hidden from the sidebar.
+    hiddenPages: text('hiddenPages').notNull().default('[]'),
+    updatedAt: text('updatedAt').notNull(),
+  }
+);
+
 // Add index for config_jobs
 // Note: Drizzle's index definition inside the table definition is 
 // usually the best way to handle this. I'll add it to configJobs.

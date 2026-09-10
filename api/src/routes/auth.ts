@@ -75,6 +75,52 @@ router.get('/auth/me', requireAuth, async (req, res) => {
   res.status(200).json({ ...(await serializeUser(row)), effectivePermissions: req.user?.permissions ?? [] });
 });
 
+/** Coerce an unknown value into a clean string[] (drops non-strings, dedupes). */
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry === 'string' && entry.length > 0 && !seen.has(entry)) seen.add(entry);
+  }
+  return [...seen];
+}
+
+/** The caller's own UI preferences (nav order + hidden pages). No extra permission. */
+router.get('/auth/me/preferences', requireAuth, async (req, res) => {
+  const row = await db.query.userPreferences.findFirst({ where: eq(schema.userPreferences.userId, req.user!.sub) });
+  let navOrder: string[] = [];
+  let hiddenPages: string[] = [];
+  if (row) {
+    try { navOrder = asStringArray(JSON.parse(row.navOrder)); } catch { /* keep [] */ }
+    try { hiddenPages = asStringArray(JSON.parse(row.hiddenPages)); } catch { /* keep [] */ }
+  }
+  res.status(200).json({ navOrder, hiddenPages });
+});
+
+/** Persist the caller's own UI preferences (upsert; missing row created on first save). */
+router.put('/auth/me/preferences', requireAuth, async (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  // Omitted field = leave unchanged; present-but-invalid = treated as empty.
+  const existing = await db.query.userPreferences.findFirst({ where: eq(schema.userPreferences.userId, req.user!.sub) });
+  let navOrder: string[];
+  let hiddenPages: string[];
+  if (body.navOrder === undefined) {
+    try { navOrder = existing ? asStringArray(JSON.parse(existing.navOrder)) : []; } catch { navOrder = []; }
+  } else {
+    navOrder = asStringArray(body.navOrder);
+  }
+  if (body.hiddenPages === undefined) {
+    try { hiddenPages = existing ? asStringArray(JSON.parse(existing.hiddenPages)) : []; } catch { hiddenPages = []; }
+  } else {
+    hiddenPages = asStringArray(body.hiddenPages);
+  }
+  const now = new Date().toISOString();
+  await db.insert(schema.userPreferences)
+    .values({ userId: req.user!.sub, navOrder: JSON.stringify(navOrder), hiddenPages: JSON.stringify(hiddenPages), updatedAt: now })
+    .onConflictDoUpdate({ target: [schema.userPreferences.userId], set: { navOrder: JSON.stringify(navOrder), hiddenPages: JSON.stringify(hiddenPages), updatedAt: now } });
+  res.status(200).json({ navOrder, hiddenPages });
+});
+
 /**
  * Reports the authentication flow of the active identity provider so the
  * webapp can adapt its login UI (e.g. password + TOTP vs. an OAuth2 redirect).

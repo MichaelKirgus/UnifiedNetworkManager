@@ -774,6 +774,14 @@ export async function initDb(): Promise<void> {
       visibility TEXT NOT NULL DEFAULT '{}',
       "updatedAt" TEXT NOT NULL
     )`);
+  // Per-user UI preferences (nav order + hidden pages). Missing row = defaults.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_preferences (
+      "userId" TEXT PRIMARY KEY,
+      "navOrder" TEXT NOT NULL DEFAULT '[]',
+      "hiddenPages" TEXT NOT NULL DEFAULT '[]',
+      "updatedAt" TEXT NOT NULL
+    )`);
   // The legacy singular columns are superseded by device_plugins. There is no
   // production data to migrate (confirmed), so drop them outright — any dev
   // devices must be recreated via the new multi-plugin create flow.

@@ -24,6 +24,7 @@ import logsRouter from './routes/logs';
 import notificationsRouter from './routes/notifications';
 import systemRouter from './routes/system';
 import settingsRouter from './routes/settings';
+import countsRouter from './routes/counts';
 import { startNotificationsWorker } from './workers/notifications';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startTelemetryRetentionWorker } from './workers/telemetryRetention';
@@ -125,6 +126,8 @@ async function main(): Promise<void> {
   api.use(systemRouter);
   // Central system settings (the Settings page) — app-wide knobs.
   api.use(settingsRouter);
+  // Aggregated nav-badge counts for the sidebar (permission-aware).
+  api.use(countsRouter);
   // The plans router defines its own /plans/... paths (like the devices router),
   // so it is mounted without an extra prefix.
   api.use(plansRouter);

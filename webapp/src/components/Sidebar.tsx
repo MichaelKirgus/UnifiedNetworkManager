@@ -1,99 +1,51 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import clsx from 'clsx';
-import {
-  Activity,
-  BellRing,
-  Box,
-  Cable,
-  KeyRound,
-  Laptop,
-  ListChecks,
-  LogOut,
-  MapPin,
-  Network,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Puzzle,
-  GitGraph,
-  Layers as LayersIcon,
-  Route as RouteIcon,
-  ScrollText,
-  HardDrive,
-  Monitor,
-  Server,
-  Waypoints,
-  KeySquare,
-  Shield,
-  ShieldHalf,
-  ShieldCheck,
-  Settings2,
-  UserRound,
-  Users as UsersIcon,
-  Wifi as WifiIcon,
-} from 'lucide-react';
-import { can, clearPermissions, clearUsername } from '../auth/permissions';
-
-// Every entry carries the read permission its page's route guard enforces —
-// keep in sync with PAGE_PERMISSIONS in App.tsx. Entries without a permission
-// (Layers) are visible to every signed-in user.
-const NAV_ITEMS = [
-  { to: '/devices', label: 'Devices', icon: Server, requiresPermission: 'devices:read' },
-  // Cross-device inventory views (populated by the telemetry worker).
-  { to: '/networks', label: 'Networks', icon: Network, requiresPermission: 'networks:read' },
-  { to: '/hosts', label: 'Hosts', icon: Laptop, requiresPermission: 'hosts:read' },
-  // Cable stands in for a tunnel link (lucide's `Tunnel` icon is not in the installed version).
-  { to: '/tunnels', label: 'Tunnels', icon: Cable, requiresPermission: 'tunnels:read' },
-  // Firewall rules across devices (filter + NAT kinds) — ShieldHalf reads as a
-  // protective barrier and is distinct from the Roles (Shield) entry.
-  { to: '/firewall', label: 'Firewall', icon: ShieldHalf, requiresPermission: 'firewall:read' },
-  // Waypoints — Route is already used by the Plans item.
-  { to: '/routes', label: 'Routes', icon: Waypoints, requiresPermission: 'routes:read' },
-  // Structured log entries shipped by plugins (gated — logs can carry critical details).
-  { to: '/logs', label: 'Logs', icon: ScrollText, requiresPermission: 'logs:read' },
-  // Notification center — full history + filters (the bell lives in the top bar).
-  { to: '/notifications', label: 'Notifications', icon: BellRing, requiresPermission: 'notifications:read' },
-  { to: '/wifi', label: 'WiFi', icon: WifiIcon, requiresPermission: 'wifi:read' },
-  // Cross-device storage inventory (filesystems/pools/datasets + physical disks).
-  { to: '/storage', label: 'Storage', icon: HardDrive, requiresPermission: 'storage:read' },
-  // Cross-device container/App workloads (TrueNAS SCALE Apps — docker under the hood).
-  { to: '/containers', label: 'Containers', icon: Box, requiresPermission: 'containers:read' },
-  // Cross-device virtual machines (TrueNAS SCALE VMs today; generic key for future hypervisor plugins).
-  { to: '/vms', label: 'VMs', icon: Monitor, requiresPermission: 'vms:read' },
-  // Physical + logical network graph (inferred cables + per-VLAN segments).
-  { to: '/topology', label: 'Topology', icon: GitGraph, requiresPermission: 'topology:read' },
-  // Layer registry — the topology view's horizontal bands (open to all users).
-  { to: '/layers', label: 'Layers', icon: LayersIcon },
-  { to: '/sites', label: 'Sites', icon: MapPin, requiresPermission: 'sites:read' },
-  { to: '/secrets', label: 'Secrets', icon: KeyRound, requiresPermission: 'secrets:read' },
-  { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks, requiresPermission: 'config-jobs:read' },
-  // Multi-device execution plans (create/execute additionally require configs:apply + 2FA).
-  { to: '/plans', label: 'Plans', icon: RouteIcon, requiresPermission: 'plans:read' },
-  { to: '/plugins', label: 'Plugins', icon: Puzzle },
-  // Only visible to users who may read user accounts/permissions.
-  { to: '/users', label: 'Users', icon: UsersIcon, requiresPermission: 'users:read' },
-  // Role management (create/edit/delete roles + permission bundles).
-  { to: '/roles', label: 'Roles', icon: Shield, requiresPermission: 'users:write' },
-  // Credential policies (2FA requirements + gate AMRs) — readable by everyone,
-  // editing is gated in-page on auth:policies:write.
-  { to: '/credential-policies', label: 'Credential Policies', icon: ShieldCheck },
-  // Long-lived API tokens for agents/scripts (MCP server).
-  { to: '/tokens', label: 'Tokens', icon: KeySquare, requiresPermission: 'tokens:manage' },
-  // Worker/HA monitoring + runtime tuning (gated — exposes internal topology).
-  { to: '/workers', label: 'Workers & HA', icon: Activity, requiresPermission: 'system:read' },
-  // Central system settings (app-wide knobs) — gated like the Workers page.
-  { to: '/settings', label: 'Settings', icon: Settings2, requiresPermission: 'system:read' },
-];
-
-// Self-service portal — visible to every signed-in user; credential sections
-// inside are gated on `users:self-credentials`.
-const MY_ACCOUNT_ITEM = { to: '/my-account', label: 'My Account', icon: UserRound };
+import { useQuery } from '@tanstack/react-query';
+import { LogOut, Network, PanelLeftClose, PanelLeftOpen, SlidersHorizontal } from 'lucide-react';
+import { clearPermissions, clearUsername } from '../auth/permissions';
+import { api } from '../api/client';
+import { MY_ACCOUNT_ITEM, orderedNavItems, BADGE_COLORS, type NavItem } from './navItems';
+import { NavCustomizer } from './NavCustomizer';
 
 const COLLAPSED_KEY = 'unm:sidebar-collapsed';
 
+/** One sidebar row (icon + label) with an optional count badge. */
+function NavRow({ item, collapsed, count }: { item: NavItem; collapsed: boolean; count?: number }) {
+  const Icon = item.icon;
+  return (
+    <NavLink
+      to={item.to}
+      title={collapsed ? item.label : undefined}
+      className={({ isActive }) =>
+        clsx(
+          'relative flex items-center gap-3 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
+          collapsed && 'justify-center px-0',
+          isActive ? 'bg-primary text-white' : 'text-secondary hover:bg-muted'
+        )
+      }
+    >
+      <Icon className="h-5 w-5 shrink-0" />
+      {!collapsed && <span className="truncate">{item.label}</span>}
+      {item.countKey && count ? (
+        <span
+          className={clsx(
+            'absolute right-1 top-1/2 -translate-y-1/2 flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[10px] font-bold leading-none text-white',
+            BADGE_COLORS[item.countKey]
+          )}
+        >
+          {count > 99 ? '99+' : count}
+        </span>
+      ) : null}
+    </NavLink>
+  );
+}
+
 /**
- * Collapsible left sidebar. Expanded shows icons + labels; collapsed is an
- * icon rail (tooltips via `title`). The user's choice persists in localStorage.
+ * Collapsible left sidebar. Expanded shows icons + labels; collapsed is an icon
+ * rail (tooltips via `title`). The user's choice persists in localStorage. Nav
+ * order + hidden pages are per-user prefs (DB-backed); a "Customize" button opens
+ * the reorder/hide panel. Actionable items show a count badge from /counts.
  */
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState<boolean>(() => {
@@ -112,6 +64,27 @@ export function Sidebar() {
     }
   }, [collapsed]);
 
+  const [customizing, setCustomizing] = useState(false);
+
+  const prefsQuery = useQuery({ queryKey: ['navPrefs'], queryFn: api.getNavPrefs });
+  const countsQuery = useQuery({
+    queryKey: ['navCounts'],
+    queryFn: api.navCounts,
+    refetchInterval: 30_000,
+  });
+
+  // Permission-visible items in the user's order (the customizer lists ALL of these,
+  // including hidden ones so they can be re-shown).
+  const allOrderedItems = useMemo(() => orderedNavItems(prefsQuery.data), [prefsQuery.data]);
+
+  // The sidebar itself hides pages the user has marked hidden.
+  const visibleItems = useMemo(() => {
+    const hidden = new Set(prefsQuery.data?.hiddenPages ?? []);
+    return allOrderedItems.filter((item) => !hidden.has(item.to));
+  }, [allOrderedItems, prefsQuery.data]);
+
+  const counts = countsQuery.data ?? {};
+
   return (
     <aside
       className={clsx(
@@ -128,30 +101,41 @@ export function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav className={clsx('flex flex-1 flex-col gap-1 p-2', collapsed && 'items-center')}>
-        {[...NAV_ITEMS.filter((item) => !item.requiresPermission || can(item.requiresPermission)), MY_ACCOUNT_ITEM].map(
-          (item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              title={collapsed ? item.label : undefined}
-              className={({ isActive }) =>
-                clsx(
-                  'flex items-center gap-3 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
-                  collapsed && 'justify-center px-0',
-                  isActive ? 'bg-primary text-white' : 'text-secondary hover:bg-muted'
-                )
-              }
-            >
-              <item.icon className="h-5 w-5 shrink-0" />
-              {!collapsed && <span className="truncate">{item.label}</span>}
-            </NavLink>
-          )
-        )}
+      <nav className={clsx('flex flex-1 flex-col gap-1 overflow-y-auto p-2', collapsed && 'items-center')}>
+        {visibleItems.map((item) => (
+          <NavRow key={item.to} item={item} collapsed={collapsed} count={item.countKey ? counts[item.countKey] : undefined} />
+        ))}
+        {/* My Account is pinned last and never hidden/reordered. */}
+        <NavRow item={MY_ACCOUNT_ITEM} collapsed={collapsed} />
       </nav>
 
-      {/* Footer: collapse toggle + sign out */}
+      {customizing && (
+        <div className="border-t border-border">
+          <NavCustomizer
+            items={allOrderedItems}
+            initialOrder={(prefsQuery.data?.navOrder ?? []).filter((p) => allOrderedItems.some((i) => i.to === p))}
+            initialHidden={prefsQuery.data?.hiddenPages ?? []}
+            onClose={() => setCustomizing(false)}
+          />
+        </div>
+      )}
+
+      {/* Footer: customize + collapse toggle + sign out */}
       <div className={clsx('flex gap-1 border-t border-border p-2', collapsed && 'flex-col items-center')}>
+        <button
+          type="button"
+          aria-label="Customize navigation"
+          title="Customize navigation"
+          onClick={() => setCustomizing((v) => !v)}
+          className={clsx(
+            'flex items-center gap-2 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
+            customizing ? 'bg-primary text-white' : 'text-secondary hover:bg-muted',
+            collapsed && 'justify-center px-0'
+          )}
+        >
+          <SlidersHorizontal className="h-5 w-5 shrink-0" />
+          {!collapsed && <span>Customize</span>}
+        </button>
         <button
           type="button"
           aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
