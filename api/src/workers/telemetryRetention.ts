@@ -3,6 +3,7 @@ import { db } from '../db';
 import * as schema from '../db/schema';
 import { LEADER_KEYS } from './leader';
 import { initWorker, trackBeat } from './stats';
+import { getEffectiveSettingValue } from '../systemSettings';
 
 /**
  * Retention for raw telemetry snapshots (see workers/telemetry.ts).
@@ -22,11 +23,11 @@ import { initWorker, trackBeat } from './stats';
  * and hold only current-state rows, not history.
  */
 
-const RETENTION_DAYS = Math.max(1, Number(process.env.TELEMETRY_RETENTION_DAYS ?? 7));
 const SWEEP_INTERVAL_MS = 3_600_000; // hourly — same cadence as log retention
 
 async function sweepExpiredTelemetry(): Promise<void> {
-  const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const retentionDays = Number(await getEffectiveSettingValue('telemetryRetentionDays')) || 7;
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
   await db.delete(schema.telemetry).where(lt(schema.telemetry.collectedAt, cutoff));
 }
 
@@ -37,7 +38,7 @@ async function sweepExpiredTelemetry(): Promise<void> {
 export function startTelemetryRetentionWorker(): NodeJS.Timeout {
   initWorker('telemetryRetention', LEADER_KEYS.telemetryRetention);
   // eslint-disable-next-line no-console
-  console.log(`[telemetry-retention] worker started, keeping ${RETENTION_DAYS} days of raw telemetry`);
+  console.log('[telemetry-retention] worker started (retention read live from Settings)');
 
   // First sweep runs immediately so stale rows from before the feature (or a
   // retention change) are cleaned up without waiting an hour.

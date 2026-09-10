@@ -3864,6 +3864,84 @@ paths:
         '403':
           description: Missing system:write permission
 
+  /settings:
+    get:
+      tags: [System]
+      summary: List all central system settings
+      description: >-
+        Every app-wide setting (retention windows, session/timeout behaviour,
+        worker cadence, execution budgets) with its effective value, default,
+        type, limits and help text. Requires permission `system:read`.
+      responses:
+        '200':
+          description: All settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsListResponse'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing system:read permission
+
+  /settings/{key}:
+    put:
+      tags: [System]
+      summary: Update one system setting
+      description: >-
+        Validates + clamps a single setting and persists it. Takes effect on the
+        next worker beat — no restart. Requires permission `system:write`.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettingUpdateRequest'
+      responses:
+        '200':
+          description: Updated setting
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingResponse'
+        '400':
+          description: Invalid value (type or out of range)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing system:write permission
+        '404':
+          description: Unknown setting key
+    delete:
+      tags: [System]
+      summary: Reset one system setting to its default
+      description: >-
+        Deletes the stored override so the setting reverts to its env/default
+        baseline. Requires permission `system:write`.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Reset setting (now at default)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingResponse'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing system:write permission
+        '404':
+          description: Unknown setting key
+
 components:
   securitySchemes:
     bearerAuth:
@@ -5927,3 +6005,42 @@ components:
                 MAX_CONCURRENCY: { type: integer }
                 MIN_JITTER_PERCENT: { type: integer }
                 MAX_JITTER_PERCENT: { type: integer }
+
+    SettingView:
+      type: object
+      required: [key, label, type, category, help, value, defaultValue, isModified]
+      properties:
+        key: { type: string, description: "Stable settings key (system_settings.key)" }
+        label: { type: string, description: "Human-friendly display name" }
+        type: { type: string, enum: [integer, string, boolean] }
+        category: { type: string, description: "Grouping for the Settings table (e.g. Retention, Security)" }
+        help: { type: string, description: "Help text describing the setting" }
+        unit: { type: string, nullable: true, description: "Display unit hint (ms, s, days, %)" }
+        value: { description: "Effective value (stored override ⊕ env default), already clamped", oneOf: [{ type: integer }, { type: string }, { type: boolean }] }
+        defaultValue: { description: "Baseline the setting reverts to on reset", oneOf: [{ type: integer }, { type: string }, { type: boolean }] }
+        isModified: { type: boolean, description: "True when a stored override differs from the baseline" }
+        min: { type: integer, nullable: true }
+        max: { type: integer, nullable: true }
+        pattern: { type: string, nullable: true }
+
+    SettingsListResponse:
+      type: object
+      required: [settings]
+      properties:
+        settings:
+          type: array
+          items:
+            $ref: '#/components/schemas/SettingView'
+
+    SettingUpdateRequest:
+      type: object
+      required: [value]
+      properties:
+        value: { description: "The new setting value (integer, string or boolean)", oneOf: [{ type: integer }, { type: string }, { type: boolean }] }
+
+    SettingResponse:
+      type: object
+      required: [setting]
+      properties:
+        setting:
+          $ref: '#/components/schemas/SettingView'

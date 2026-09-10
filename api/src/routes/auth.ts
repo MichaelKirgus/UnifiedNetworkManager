@@ -17,10 +17,9 @@ import {
 } from '../auth/identityProvider';
 import { expandRolePermissions } from './roles';
 import { serializeUser } from './users';
+import { getEffectiveSettingValue } from '../systemSettings';
 
 const router = Router();
-
-const TOKEN_TTL_SECONDS = 3600;
 
 /**
  * Mints the platform JWT from a verified identity assertion (shared by the
@@ -40,6 +39,7 @@ async function mintSession(identity: {
     Array.isArray(identity.permissions) ? identity.permissions : []
   );
 
+  const tokenTtlSeconds = Number(await getEffectiveSettingValue('sessionTimeoutSeconds')) || 3600;
   const accessToken = signToken(
     {
       sub: identity.userId,
@@ -48,12 +48,12 @@ async function mintSession(identity: {
       permissions: effectivePermissions,
       amr: identity.amr,
     },
-    TOKEN_TTL_SECONDS
+    tokenTtlSeconds
   );
 
   return {
     accessToken,
-    expiresIn: TOKEN_TTL_SECONDS,
+    expiresIn: tokenTtlSeconds,
     username: identity.username,
     roles: identity.roles,
     permissions: effectivePermissions,

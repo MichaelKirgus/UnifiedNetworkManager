@@ -5,6 +5,7 @@ import { getSecretFresh } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from './slotCredentials';
+import { getEffectiveSettingValue } from '../systemSettings';
 
 /**
  * Dispatch a single-device action to one of the device's plugin assignments —
@@ -29,8 +30,10 @@ export async function dispatchPluginAction(
   pluginId: string,
   actionId: string,
   input: Record<string, unknown>,
-  timeoutMs = 30_000
+  timeoutMs?: number
 ): Promise<PluginDispatchResult> {
+  // Default dispatch timeout is a system setting; callers may override explicitly.
+  const effectiveTimeout = timeoutMs ?? (Number(await getEffectiveSettingValue('pluginDispatchTimeoutMs')) || 30_000);
   try {
     const device = await db.query.devices.findFirst({ where: (d, { eq }) => eq(d.id, deviceId) });
     if (!device) return { ok: false, error: 'Device not found' };
@@ -59,7 +62,7 @@ export async function dispatchPluginAction(
     const response = await axios.post(
       `${plugin.endpoint.replace(/\/$/, '')}/config`,
       { deviceId: device.id, managementAddress: device.managementAddress, credentials, actionId, input },
-      { timeout: timeoutMs, headers }
+      { timeout: effectiveTimeout, headers }
     );
     const body = (response.data ?? {}) as { success?: boolean; result?: Record<string, unknown> };
     if (body.success === false) return { ok: false, error: String(body.result?.error ?? 'Plugin reported failure'), result: body.result };

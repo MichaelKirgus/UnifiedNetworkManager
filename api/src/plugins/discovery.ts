@@ -6,6 +6,7 @@ import * as schema from '../db/schema';
 import type { PluginOptionDescriptor } from '../types/pluginOptions';
 import type { DeviceModelEntry } from '../types/deviceModels';
 import { CredentialSlotDescriptor, normalizeCredentialSlots } from '../types/credentialSlots';
+import { getEffectiveSettingValue } from '../systemSettings';
 
 /**
  * Self-describing identity that every plugin MUST expose, either via its
@@ -268,12 +269,13 @@ async function pollEndpoints(endpoints: string[]): Promise<void> {
  * Returns a cleanup function that stops both mechanisms.
  */
 export function startPluginDiscovery(options: DiscoveryOptions = {}): () => void {
-  const pollIntervalMs = options.pollIntervalMs ?? 60_000;
+  const fallbackIntervalMs = options.pollIntervalMs ?? 60_000;
   const pollEndpointsList = options.pollEndpoints ?? [];
 
   let bonjour: Bonjour | null = null;
   let browser: ReturnType<Bonjour['find']> | null = null;
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  let stopped = false;
 
   // mDNS browsing
   try {
@@ -297,15 +299,30 @@ export function startPluginDiscovery(options: DiscoveryOptions = {}): () => void
     console.warn('[discovery] mDNS browsing unavailable, using polling only:', (err as Error).message);
   }
 
-  // HTTP polling fallback
+  // HTTP polling fallback. The interval is re-read from Settings on every cycle
+  // (self-rescheduling timer), so changing the discovery poll interval takes
+  // effect without a restart.
   if (pollEndpointsList.length > 0) {
-    void pollEndpoints(pollEndpointsList);
-    pollTimer = setInterval(() => void pollEndpoints(pollEndpointsList), pollIntervalMs);
+    const scheduleNext = () => {
+      if (stopped) return;
+      void getEffectiveSettingValue('discoveryPollIntervalMs')
+        .then((v) => Number(v) || fallbackIntervalMs)
+        .catch(() => fallbackIntervalMs)
+        .then((ms) => {
+          pollTimer = setTimeout(async () => {
+            await pollEndpoints(pollEndpointsList);
+            scheduleNext();
+          }, ms);
+        });
+    };
+    void pollEndpoints(pollEndpointsList); // initial pass
+    scheduleNext();
   }
 
   return () => {
+    stopped = true;
     if (browser) browser.stop();
     if (bonjour) bonjour.destroy();
-    if (pollTimer) clearInterval(pollTimer);
+    if (pollTimer) clearTimeout(pollTimer);
   };
 }

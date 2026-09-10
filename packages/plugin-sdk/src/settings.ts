@@ -27,6 +27,32 @@ export function readSettings(
   return defaults;
 }
 
+/**
+ * Reads the app-wide GLOBAL settings the API injects on every call from the
+ * `x-unm-global-settings` JSON header, merged over the caller's declared
+ * fallbacks so a missing/malformed header still yields sane values.
+ *
+ * These are the system-level knobs that are NOT plugin- or device-specific (e.g.
+ * telemetry poll window, plan step timeout) — as opposed to readSettings(),
+ * which reads THIS plugin's own options from `x-unm-settings`. The API only
+ * sends keys it has flagged for plugins; pass your fallbacks so a key the API
+ * does not send still resolves to something sensible.
+ */
+export function readGlobalSettings(
+  req: { headers?: Record<string, unknown> },
+  defaults: Record<string, unknown> = {}
+): Record<string, unknown> {
+  const raw = req.headers?.['x-unm-global-settings'];
+  if (typeof raw !== 'string' || raw.trim() === '') return { ...defaults };
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') return { ...defaults, ...(parsed as Record<string, unknown>) };
+  } catch {
+    // Malformed header: fall back to defaults rather than failing the call.
+  }
+  return { ...defaults };
+}
+
 /** Clamps an unknown value into [min, max]; non-integers fall back. */
 export function clampInt(value: unknown, min: number, max: number, fallback: number): number {
   const n = typeof value === 'number' && Number.isInteger(value) ? value : fallback;

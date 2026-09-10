@@ -676,6 +676,28 @@ export interface SystemSettingsResponse extends SystemSettings {
   };
 }
 
+/** One central system setting (GET /settings). */
+export interface SettingView {
+  key: string;
+  label: string;
+  type: 'integer' | 'string' | 'boolean';
+  category: string;
+  help: string;
+  unit?: string | null;
+  /** Effective value (stored override ⊕ env default), already clamped. */
+  value: number | string | boolean;
+  /** Baseline the setting reverts to on reset. */
+  defaultValue: number | string | boolean;
+  isModified: boolean;
+  min?: number | null;
+  max?: number | null;
+  pattern?: string | null;
+}
+
+export interface SettingsListResponse {
+  settings: SettingView[];
+}
+
 /** One distinct (band, channel) pair broadcasting an SSID. */
 export interface WifiChannelRef {
   /** '2.4' | '5' | '6'; '' when the device cannot say which band. */
@@ -1981,4 +2003,10 @@ export const api = {
   systemSettings: () => apiFetch<SystemSettingsResponse>('/system/settings'),
   saveSystemSettings: (body: SystemSettings) =>
     apiFetch<SystemSettingsResponse>('/system/settings', { method: 'PUT', body: JSON.stringify(body) }),
+  // Central system settings (the Settings page).
+  listSettings: () => apiFetch<SettingsListResponse>('/settings'),
+  updateSetting: (key: string, value: number | string | boolean) =>
+    apiFetch<{ setting: SettingView }>(`/settings/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ value }) }),
+  resetSetting: (key: string) =>
+    apiFetch<{ setting: SettingView }>(`/settings/${encodeURIComponent(key)}`, { method: 'DELETE' }),
 };

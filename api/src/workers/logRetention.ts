@@ -3,6 +3,7 @@ import { db } from '../db';
 import * as schema from '../db/schema';
 import { LEADER_KEYS } from './leader';
 import { initWorker, trackBeat } from './stats';
+import { getEffectiveSettingValue } from '../systemSettings';
 
 /**
  * Retention for plugin log entries (see routes/internal.ts POST /plugin/logs)
@@ -13,11 +14,11 @@ import { initWorker, trackBeat } from './stats';
  * comparison is safe against the TEXT timestamp columns.
  */
 
-const RETENTION_DAYS = Math.max(1, Number(process.env.LOG_RETENTION_DAYS ?? 7));
 const SWEEP_INTERVAL_MS = 3_600_000; // hourly — log volume makes this cheap enough to run often
 
 async function sweepExpiredLogs(): Promise<void> {
-  const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const retentionDays = Number(await getEffectiveSettingValue('logRetentionDays')) || 7;
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
   await db.delete(schema.pluginLogs).where(lt(schema.pluginLogs.timestamp, cutoff));
   // Self-metrics samples share the retention window (one row per plugin per
   // 30s — ~2.9k rows/plugin/week at default settings; cheap to keep a week).
@@ -31,7 +32,7 @@ async function sweepExpiredLogs(): Promise<void> {
 export function startLogRetentionWorker(): () => void {
   initWorker('retention', LEADER_KEYS.retention);
   // eslint-disable-next-line no-console
-  console.log(`[log-retention] worker started, keeping ${RETENTION_DAYS} days of plugin logs`);
+  console.log('[log-retention] worker started (retention read live from Settings)');
 
   // First sweep runs immediately so stale rows from before the feature (or a
   // retention change) are cleaned up without waiting an hour.

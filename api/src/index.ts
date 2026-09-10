@@ -23,6 +23,7 @@ import topologyRouter from './routes/topology';
 import logsRouter from './routes/logs';
 import notificationsRouter from './routes/notifications';
 import systemRouter from './routes/system';
+import settingsRouter from './routes/settings';
 import { startNotificationsWorker } from './workers/notifications';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startTelemetryRetentionWorker } from './workers/telemetryRetention';
@@ -122,6 +123,8 @@ async function main(): Promise<void> {
   api.use(notificationsRouter);
   // System/HA observability + runtime tuning (/system/status, /system/settings).
   api.use(systemRouter);
+  // Central system settings (the Settings page) — app-wide knobs.
+  api.use(settingsRouter);
   // The plans router defines its own /plans/... paths (like the devices router),
   // so it is mounted without an extra prefix.
   api.use(plansRouter);

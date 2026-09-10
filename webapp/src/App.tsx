@@ -30,6 +30,7 @@ import Users from './pages/Users';
 import Roles from './pages/Roles';
 import Tokens from './pages/Tokens';
 import Workers from './pages/Workers';
+import Settings from './pages/Settings';
 import CredentialPolicies from './pages/CredentialPolicies';
 import MyAccount from './pages/MyAccount';
 import { can } from './auth/permissions';
@@ -69,6 +70,8 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
   { path: '/roles', permission: 'users:write' },
   { path: '/tokens', permission: 'tokens:manage' },
   { path: '/workers', permission: 'system:read' },
+  // Central system settings (app-wide knobs) — gated like the Workers page.
+  { path: '/settings', permission: 'system:read' },
 ];
 
 /** Auth + page-read-permission guard (the sidebar hides what this blocks). */
@@ -134,6 +137,8 @@ export default function App() {
       <Route path="/tokens" element={<Page permission="tokens:manage"><Tokens /></Page>} />
       {/* Workers/HA monitoring — gated by system:read (nav item hidden without it). */}
       <Route path="/workers" element={<Page permission="system:read"><Workers /></Page>} />
+      {/* Central system settings (app-wide knobs) — gated like the Workers page. */}
+      <Route path="/settings" element={<Page permission="system:read"><Settings /></Page>} />
       <Route path="/my-account" element={<Page><MyAccount /></Page>} />
       <Route path="/" element={<HomeRedirect />} />
       <Route path="*" element={<HomeRedirect />} />

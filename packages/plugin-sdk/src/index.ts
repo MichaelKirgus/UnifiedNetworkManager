@@ -16,7 +16,7 @@ export { SshTerminalSession, SshTerminalConnection, createTerminalPool } from '.
 export type { TerminalCredentials, TerminalPtyOptions, TerminalConnectionOptions, TerminalPool, TerminalPoolOptions } from './terminal';
 export { makeConsoleUpgrade } from './consoleWs';
 export type { ConsoleEndpointOptions, ConsoleUpgradeHandler } from './consoleWs';
-export { readSettings, clampInt, hostFromAddress, pickString, pickNumber } from './settings';
+export { readSettings, readGlobalSettings, clampInt, hostFromAddress, pickString, pickNumber } from './settings';
 export { suggestPortLayout, portNumberFromKey } from './portLayout';
 export { INVENTORY_INTERVAL_MS, errorDescriptor, modelFirmwareDescriptors, gaugeMetric, textMetric, tableMetric } from './metrics';
 export { validateInput, isValidInput, createRegistry } from './actions';

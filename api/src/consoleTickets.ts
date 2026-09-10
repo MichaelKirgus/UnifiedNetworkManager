@@ -37,7 +37,12 @@ interface TicketRecord {
   consumed: boolean;
 }
 
-const TICKET_TTL_MS = 60_000;
+import { getCachedSettingValue } from './systemSettings';
+
+/** Lifetime of a single-use console ticket (ms) — read live from Settings. */
+function ticketTtlMs(): number {
+  return Number(getCachedSettingValue('consoleTicketTtlMs')) || 60_000;
+}
 const tickets = new Map<string, TicketRecord>();
 
 /** Lazy sweep of expired/consumed entries (cheap at console scale). */
@@ -56,7 +61,7 @@ export function mintConsoleTicket(deviceId: string, pluginId?: string, context?:
     deviceId,
     ...(pluginId ? { pluginId } : {}),
     ...(context && Object.keys(context).length > 0 ? { context } : {}),
-    expiresAt: Date.now() + TICKET_TTL_MS,
+    expiresAt: Date.now() + ticketTtlMs(),
     consumed: false,
   });
   return id;
@@ -83,6 +88,6 @@ export function redeemConsoleTicket(ticketId: string): TicketRecord | null {
   }
   t.consumed = true;
   // Keep the record briefly so a racing double-redeem gets "consumed", not "unknown".
-  setTimeout(() => tickets.delete(ticketId), TICKET_TTL_MS).unref?.();
+  setTimeout(() => tickets.delete(ticketId), ticketTtlMs()).unref?.();
   return t;
 }

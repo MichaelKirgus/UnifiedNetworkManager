@@ -1,5 +1,6 @@
 import { initWorker, trackBeat } from './stats';
 import { LEADER_KEYS } from './leader';
+import { getEffectiveSettingValue } from '../systemSettings';
 import { autoResolveStaleDeviceNotifications, pruneOldNotifications } from '../notifications';
 
 /**
@@ -18,13 +19,12 @@ import { autoResolveStaleDeviceNotifications, pruneOldNotifications } from '../n
  */
 
 const SWEEP_INTERVAL_MS = 60_000;
-const RETENTION_DAYS_DEFAULT = Number(process.env.NOTIFICATION_RETENTION_DAYS ?? 30);
 
 export function startNotificationsWorker(): () => void {
   initWorker('notifications', LEADER_KEYS.notifications);
   // eslint-disable-next-line no-console
   console.log(
-    `[notifications] worker started (sweep every ${SWEEP_INTERVAL_MS / 1000}s, retention ${RETENTION_DAYS_DEFAULT}d)`
+    `[notifications] worker started (sweep every ${SWEEP_INTERVAL_MS / 1000}s, retention read live from Settings)`
   );
 
   let stopped = false;
@@ -39,7 +39,8 @@ export function startNotificationsWorker(): () => void {
       }
 
       // 2. Retention sweep for terminal rows.
-      const cutoff = new Date(Date.now() - RETENTION_DAYS_DEFAULT * 24 * 60 * 60 * 1000).toISOString();
+      const retentionDays = Number(await getEffectiveSettingValue('notificationRetentionDays')) || 30;
+      const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
       const pruned = await pruneOldNotifications(cutoff);
       if (pruned > 0) {
         // eslint-disable-next-line no-console

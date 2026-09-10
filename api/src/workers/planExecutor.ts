@@ -10,10 +10,9 @@ import { settingsHeaders } from '../pluginSettings';
 import { emitNotification } from '../notifications';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
+import { getEffectiveSettingValue } from '../systemSettings';
 
 const PROCESS_INTERVAL_MS = 5_000;
-/** Default per-step dispatch timeout (ms); catalog entries may override via timeoutMs. */
-const DEFAULT_STEP_TIMEOUT_MS = 60_000;
 
 interface StepRecord {
   id: string;
@@ -288,7 +287,9 @@ async function processPlan(planId: string): Promise<void> {
     });
 
     const entry = catalog.find((c) => c.id === step.actionId);
-    const timeoutMs = typeof entry?.timeoutMs === 'number' ? entry.timeoutMs : DEFAULT_STEP_TIMEOUT_MS;
+    // Default per-step timeout is a system setting; catalog entries may override via timeoutMs.
+    const defaultStepTimeoutMs = Number(await getEffectiveSettingValue('planStepTimeoutMs')) || 60_000;
+    const timeoutMs = typeof entry?.timeoutMs === 'number' ? entry.timeoutMs : defaultStepTimeoutMs;
     const headers = await settingsHeaders(plan.pluginId, step.deviceId).catch(() => ({}));
 
     let stored: StoredStepResult;

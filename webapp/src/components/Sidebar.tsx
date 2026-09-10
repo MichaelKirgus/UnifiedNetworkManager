@@ -27,6 +27,7 @@ import {
   Shield,
   ShieldHalf,
   ShieldCheck,
+  Settings2,
   UserRound,
   Users as UsersIcon,
   Wifi as WifiIcon,
@@ -80,6 +81,8 @@ const NAV_ITEMS = [
   { to: '/tokens', label: 'Tokens', icon: KeySquare, requiresPermission: 'tokens:manage' },
   // Worker/HA monitoring + runtime tuning (gated — exposes internal topology).
   { to: '/workers', label: 'Workers & HA', icon: Activity, requiresPermission: 'system:read' },
+  // Central system settings (app-wide knobs) — gated like the Workers page.
+  { to: '/settings', label: 'Settings', icon: Settings2, requiresPermission: 'system:read' },
 ];
 
 // Self-service portal — visible to every signed-in user; credential sections

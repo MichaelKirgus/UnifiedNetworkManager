@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { db } from './db';
 import * as schema from './db/schema';
 import type { PluginOptionDescriptor, StringOption, IntegerOption } from './types/pluginOptions';
+import { getPluginGlobalSettings } from './systemSettings';
 
 /**
  * Plugin settings broker.
@@ -394,7 +395,15 @@ export async function settingsHeaders(
   pluginId: string,
   deviceId?: string | null
 ): Promise<Record<string, string>> {
-  const values = await getEffectiveSettings(pluginId, deviceId);
-  if (Object.keys(values).length === 0) return {};
-  return { 'x-unm-settings': JSON.stringify(values) };
+  // Per-plugin effective settings (device override → global → default) plus the
+  // app-wide global settings flagged exposeToPlugins. Both ride on every call so
+  // plugins can read either via readSettings() / readGlobalSettings().
+  const [values, global] = await Promise.all([
+    getEffectiveSettings(pluginId, deviceId),
+    getPluginGlobalSettings().catch(() => ({})),
+  ]);
+  const headers: Record<string, string> = {};
+  if (Object.keys(values).length > 0) headers['x-unm-settings'] = JSON.stringify(values);
+  if (Object.keys(global).length > 0) headers['x-unm-global-settings'] = JSON.stringify(global);
+  return headers;
 }
