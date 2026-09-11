@@ -12,7 +12,7 @@
  * "initiated").
  */
 
-import { ActionDescriptor, ActionResult, createRegistry, pickString, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { ActionDescriptor, ActionResult, createRegistry, dynamicSshHostVerifier, pickString, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
 import { normalizeVmDevice, sshPool } from './enrich';
 
@@ -1614,7 +1614,8 @@ const containersLogsReadAction: ActionDescriptor<TruenasActionContext> = {
     // ONE combined SSH command — every container in a single exec (reuses the pooled session).
     const cmd = parts.map((id) => `echo "=== ${id}"; docker logs --tail ${tail} --timestamps ${id} 2>&1 | tail -c 512000`).join(' ; ');
     try {
-      const client = await sshPool.get(host, 22, sshCreds);
+      // The dynamic host-key verifier pins the SSH handshake against UNM's inventory.
+      const client = await sshPool.get(host, 22, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host) });
       const r = await client.exec(cmd, sshCreds);
       if (r.code !== 0 && !r.stdout) {
         return { success: false, details: { error: `docker logs over SSH failed (exit ${r.code}): ${r.stderr.slice(0, 300) || 'no output'}` } };

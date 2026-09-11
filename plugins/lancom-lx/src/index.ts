@@ -16,6 +16,8 @@ import {
   resolvePluginIdentity,
   resolveSshCredentials,
   TtlCache,
+  createPinningGuard,
+  dynamicSshHostVerifier,
   collectDeviceCertificates,
   parseProbeTarget,
   CertificateRow,
@@ -108,6 +110,12 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 const CERT_TTL_MS = 10 * 60_000;
 const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray(v) });
 
+// Certificate pinning — one process-wide guard for every credential-bearing
+// entry point. Strict mode + a known fingerprint MISMATCH throws before any
+// credentials are transmitted; unknown endpoints are TOFU-accepted and land in
+// UNM's inventory via the `certificates` metric.
+const assertPinned = createPinningGuard();
+
 // --- Interactive SSH console (capability 'sshConsole') -------------------------
 // LX access points expose a CLI over SSH (port 22). The webapp's DeviceDetail page
 // renders a generic "Shell" button for any plugin advertising 'sshConsole'; the API
@@ -131,6 +139,10 @@ const consoleUpgrade = makeConsoleUpgrade({
       throw new Error('No SSH credential bound — bind a usernamePassword secret to the assignment\'s "ssh" slot (LX does not support public keys).');
     }
     const conn = await termPool.get(host, 22, creds, {
+      // UNM certificate pinning — resolves the freshest trusted fingerprint at
+      // handshake time (pooled sessions outlive single requests). A mismatch
+      // rejects the handshake BEFORE any auth message is sent.
+      hostKeyVerifier: dynamicSshHostVerifier(host),
       onHostKey: (fp) => console.warn(`[lancom-lx-plugin] observed host key for ${host}:22 → ${fp} (pin it in the device's SSH settings to enforce strict verification)`),
     });
     return conn.openShell(creds); // a plain LX login shell, like PuTTY
@@ -231,6 +243,11 @@ app.post('/monitoring', async (req, res) => {
   if (error || !creds) return fail('critical', error ?? 'Missing SNMP credentials.');
 
   try {
+    // Certificate pinning — verify the AP's TLS cert against UNM's inventory
+    // BEFORE any credentials are transmitted (throws on mismatch). LX has no
+    // web-transport option; 'auto' matches its default HTTPS management UI.
+    await assertPinned(req, managementAddress, 'auto');
+
     // Slow path: targeted parallel LCOS walks (only the subtrees we use),
     // TTL-cached per host with a quality gate against partial-failure data.
     const inventory = await getLcosInventory(host, creds, opts, {

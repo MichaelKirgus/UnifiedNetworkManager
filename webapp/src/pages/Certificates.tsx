@@ -1,8 +1,134 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Check, History, ShieldAlert } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
-import { api, CertificateRow } from '../api/client';
+import { api, CertificateHistoryRow, CertificateRow } from '../api/client';
+import { can } from '../auth/permissions';
+
+/** Short fingerprint for inline display ("SHA256:abc…xyz"). */
+function shortFp(fp?: string | null): string {
+  if (!fp) return '—';
+  const body = fp.replace(/^SHA256:/i, '');
+  return body.length > 16 ? `${body.slice(0, 8)}…${body.slice(-6)}` : body;
+}
+
+/** Formats an ISO timestamp as a short local date-time. */
+function fmtStamp(iso?: string | null): string {
+  if (!iso) return '—';
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return iso;
+  return new Date(t).toLocaleString();
+}
+
+/**
+ * Expandable detail for a MISMATCHED endpoint: shows the trusted vs observed key,
+ * the fingerprint history (which key was used when), and an "Accept" action that
+ * re-pins the currently-observed key (clears the condition after a legit re-key).
+ */
+function MismatchDetail({ row }: { row: CertificateRow }) {
+  const queryClient = useQueryClient();
+
+  const historyQuery = useQuery({
+    queryKey: ['certificateHistory', row.deviceId, row.name],
+    queryFn: () => api.certificateHistory(row.deviceId, row.name, 20),
+  });
+
+  const acceptMutation = useMutation({
+    mutationFn: (fp?: string) => api.acceptCertificate(row.deviceId, row.name, fp),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['certificates'] });
+      void queryClient.invalidateQueries({ queryKey: ['navCounts'] });
+    },
+  });
+
+  const canWrite = can('certificates:write');
+  const history = historyQuery.data ?? [];
+
+  return (
+    <div className="space-y-3 py-1">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+        <span className="inline-flex items-center gap-1.5 font-medium text-danger-fg">
+          <ShieldAlert className="h-4 w-4" /> Certificate / host key changed — strict pinning is refusing connections
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2">
+        <div>
+          <div className="text-[10px] uppercase tracking-wide text-faint">Trusted (pinned)</div>
+          <span className="font-mono text-xs break-all">{row.trustedFingerprint ?? '—'}</span>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase tracking-wide text-faint">Observed now</div>
+          <span className="font-mono text-xs break-all text-danger-fg">{row.fingerprint ?? '—'}</span>
+        </div>
+      </div>
+
+      {canWrite && (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => acceptMutation.mutate(undefined)}
+            disabled={acceptMutation.isPending}
+            title="Set the trusted fingerprint to the key currently presented by the endpoint"
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+          >
+            <Check className="h-3.5 w-3.5" />
+            {acceptMutation.isPending ? 'Accepting…' : 'Accept new key (re-pin)'}
+          </button>
+          {acceptMutation.isSuccess && (
+            <span className="text-xs text-success-fg">Accepted — the endpoint is pinned to its current key.</span>
+          )}
+          {acceptMutation.isError && (
+            <span className="text-xs text-danger-fg">{(acceptMutation.error as Error).message}</span>
+          )}
+        </div>
+      )}
+
+      <div>
+        <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-faint">
+          <History className="h-3.5 w-3.5" /> Fingerprint history (newest first)
+        </div>
+        {historyQuery.isLoading && <span className="text-xs text-secondary">Loading…</span>}
+        {!historyQuery.isLoading && history.length === 0 && (
+          <span className="text-xs text-faint">No history recorded yet.</span>
+        )}
+        {history.length > 0 && (
+          <div className="overflow-x-auto rounded border border-border">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-background/60 text-[10px] uppercase tracking-wide text-faint">
+                <tr>
+                  <th className="px-2 py-1.5 font-medium">Fingerprint</th>
+                  <th className="px-2 py-1.5 font-medium">Key</th>
+                  <th className="px-2 py-1.5 font-medium">First seen</th>
+                  <th className="px-2 py-1.5 font-medium">Last seen</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {history.map((h: CertificateHistoryRow) => (
+                  <tr key={h.fingerprint} className={h.fingerprint === row.trustedFingerprint ? 'bg-success/10' : h.fingerprint === row.fingerprint ? 'bg-danger/10' : undefined}>
+                    <td className="px-2 py-1.5 font-mono text-[11px] break-all">
+                      {shortFp(h.fingerprint)}
+                      {h.fingerprint === row.trustedFingerprint && (
+                        <span className="ml-1.5 rounded bg-success/20 px-1 py-0.5 text-[9px] font-semibold uppercase text-success-fg">trusted</span>
+                      )}
+                      {h.fingerprint !== row.trustedFingerprint && h.fingerprint === row.fingerprint && (
+                        <span className="ml-1.5 rounded bg-danger/20 px-1 py-0.5 text-[9px] font-semibold uppercase text-danger-fg">observed</span>
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[11px]">{h.keyAlgorithm || '—'}{h.keySizeBits ? ` ${h.keySizeBits}` : ''}</td>
+                    <td className="whitespace-nowrap px-2 py-1.5 text-secondary">{fmtStamp(h.firstSeenAt)}</td>
+                    <td className="whitespace-nowrap px-2 py-1.5 text-secondary">{fmtStamp(h.lastSeenAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /** Small colored pill for the endpoint kind. */
 const TYPE_STYLES: Record<CertificateRow['type'], string> = {
@@ -104,6 +230,8 @@ function SummaryStrip({ rows }: { rows: CertificateRow[] }) {
     (r) => !isExpired(r) && r.daysToExpiry != null && r.daysToExpiry >= 0 && r.daysToExpiry <= 30
   ).length;
   const invalid = https.filter((r) => r.valid === false).length;
+  // Key changed since UNM pinned it — strict pinning refuses these endpoints.
+  const mismatched = rows.filter((r) => r.fingerprintMismatch).length;
 
   const cell = (label: string, value: number | string, tone?: 'danger' | 'warning') => (
     <div className="flex items-baseline gap-2 rounded-lg border bg-card px-3 py-2">
@@ -123,6 +251,7 @@ function SummaryStrip({ rows }: { rows: CertificateRow[] }) {
       {expired > 0 ? cell('expired', expired, 'danger') : null}
       {expiringSoon > 0 ? cell('expiring ≤30d', expiringSoon, 'warning') : null}
       {invalid > 0 ? cell('invalid chain', invalid, 'danger') : null}
+      {mismatched > 0 ? cell('key changed', mismatched, 'danger') : null}
     </div>
   );
 }
@@ -213,9 +342,19 @@ export default function Certificates() {
       exportValue: (row) => row.fingerprint ?? '',
       render: (row) =>
         row.fingerprint ? (
-          <span className="font-mono text-[11px] break-all" title={row.fingerprint}>
-            {row.fingerprint.length > 28 ? `${row.fingerprint.slice(0, 25)}…` : row.fingerprint}
-          </span>
+          <div className="flex flex-col gap-0.5">
+            {row.fingerprintMismatch && (
+              <span
+                title={`Trusted ${row.trustedFingerprint} — observed ${row.fingerprint}. Strict pinning refuses connections until the new key is accepted.`}
+                className="inline-flex w-fit cursor-help items-center gap-1 rounded bg-danger/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-danger-fg"
+              >
+                <ShieldAlert className="h-3 w-3" /> key changed
+              </span>
+            )}
+            <span className="font-mono text-[11px] break-all" title={row.fingerprint}>
+              {row.fingerprint.length > 28 ? `${row.fingerprint.slice(0, 25)}…` : row.fingerprint}
+            </span>
+          </div>
         ) : (
           <span className="text-faint">—</span>
         ),
@@ -251,6 +390,9 @@ export default function Certificates() {
             autoRefresh={{ intervalMs: 60_000, queries: [certsQuery] }}
             searchPlaceholder="Search certificates…"
             emptyMessage="No certificates collected yet — assign a router plugin (OPNsense, RouterOS, LANCOM, TrueNAS or FRITZ!Box) to a device and wait for the next inventory poll."
+            renderRowDetail={(row) =>
+              row.fingerprintMismatch ? <MismatchDetail row={row} /> : null
+            }
           />
         </>
       )}

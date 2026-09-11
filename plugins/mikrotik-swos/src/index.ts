@@ -13,6 +13,7 @@ import {
   readSettings,
   resolvePluginIdentity,
   stateHandler,
+  createPinningGuard,
   StateRequestBody,
   CertificateRow,
 } from '@unm/plugin-sdk';
@@ -117,6 +118,18 @@ const logger = createPluginLogger(identity);
 const CERT_TTL_MS = 10 * 60_000;
 const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray(v) });
 
+// Certificate pinning — one process-wide guard for every credential-bearing entry
+// point. Strict mode + a known fingerprint MISMATCH throws before any credentials
+// are transmitted; unknown endpoints are TOFU-accepted and land in UNM's inventory.
+const assertPinned = createPinningGuard();
+
+/** SwOS is HTTP-only unless the address carries an explicit https:// prefix — mirror
+ *  that here so the pinning guard only runs a TLS preflight when the client actually
+ *  speaks TLS (an http box has no certificate to pin). */
+function swosTransportOf(address: string): 'http' | 'https' {
+  return /^https:\/\//i.test(String(address ?? '').trim()) ? 'https' : 'http';
+}
+
 /** Resolves collection options from effective settings. */
 function resolveOptions(settings: Record<string, unknown>): SwosOptions {
   return {
@@ -152,6 +165,9 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   // `credentials` (secret type `usernamePassword`) — same model as /monitoring.
   const { creds, error } = resolveCredentials(body as unknown as Record<string, unknown>);
   if (error || !creds) throw new Error(error ?? 'Missing credentials.');
+
+  // Certificate pinning — /state reads live data with credentials; verify first.
+  await assertPinned(req, body.managementAddress, swosTransportOf(body.managementAddress));
 
   const result = await getMonitoring(body.managementAddress.trim(), creds, opts);
   return buildSwosState(result.snapshot);
@@ -189,6 +205,11 @@ app.post('/monitoring', async (req, res) => {
   if (error || !creds) return fail('critical', error ?? 'Missing credentials.');
 
   try {
+    // Certificate pinning — verify the switch's TLS cert against UNM's inventory
+    // BEFORE any credentials are transmitted (throws on mismatch). Skipped for
+    // HTTP-only boxes (no certificate to pin).
+    await assertPinned(req, managementAddress, swosTransportOf(managementAddress));
+
     const result: MonitoringResult = await getMonitoring(managementAddress.trim(), creds, opts);
     const s = result.snapshot;
 
@@ -324,6 +345,10 @@ app.post('/config', async (req, res) => {
   const creds = (body.credentials && typeof body.credentials === 'object' ? body.credentials : {}) as Record<string, unknown>;
 
   try {
+    // Certificate pinning — a config action transmits real credentials; refuse
+    // the connection when the switch's key differs from UNM's inventory.
+    await assertPinned(req, managementAddress, swosTransportOf(managementAddress));
+
     const ctx = await buildActionContext({ host: managementAddress, deviceId: typeof deviceId === 'string' ? deviceId : undefined, credentials: creds, settings });
 
     // Validate input against the action's declared schema — the plugin is the

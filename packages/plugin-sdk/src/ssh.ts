@@ -290,6 +290,11 @@ export interface SshClientOptions {
   /** Called once after a successful connect with the OBSERVED fingerprint.
    *  Plugins should ship it to UNM logs so users can review + pin it. */
   onHostKey?: (fingerprint: SshFingerprint) => void;
+  /** Full host-key verifier override — takes precedence over hostKeyFingerprint.
+   *  Used for UNM certificate pinning (makeSshHostVerifier): the callback runs
+   *  during the handshake, BEFORE any authentication message is sent, so a
+   *  rejected key means no credentials ever reach the host. */
+  hostKeyVerifier?: ((key: unknown, cb: (ok: boolean) => void) => void) | null;
 }
 
 interface PoolEntry {
@@ -354,8 +359,9 @@ export class SshClient {
     // blob of the server host key (string(type) || key material) — exactly what
     // OpenSSH hashes for its SHA-256 fingerprints, so computeFingerprint() yields
     // the same value `ssh-keygen -lf` prints. We either enforce the pin or surface
-    // the fingerprint via onHostKey for logging/pinning.
-    const hostVerifier = (key: unknown, cb: (ok: boolean) => void): void => {
+    // the fingerprint via onHostKey for logging/pinning. A full verifier override
+    // (hostKeyVerifier — UNM certificate pinning) takes precedence over the pin.
+    const hostVerifier = o.hostKeyVerifier ?? ((key: unknown, cb: (ok: boolean) => void): void => {
       try {
         if (!Buffer.isBuffer(key)) {
           cb(true); // unexpected shape — accept (nothing to compare against)
@@ -375,7 +381,7 @@ export class SshClient {
       } catch {
         cb(true); // verifier must never throw into ssh2's internals
       }
-    };
+    });
 
     const config: ConnectConfig = {
       host: o.host,

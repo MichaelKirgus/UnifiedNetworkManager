@@ -1,5 +1,5 @@
 import { Router, Request } from 'express';
-import { and, eq, exists, not, notInArray, sql, inArray } from 'drizzle-orm';
+import { and, eq, exists, not, notInArray, or, sql, inArray } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth } from '../auth/middleware';
@@ -17,7 +17,7 @@ const router = Router();
  */
 interface CountSpec {
   /** Response key + the permission required to see it. */
-  key: 'notifications' | 'configJobs' | 'plans';
+  key: 'notifications' | 'configJobs' | 'plans' | 'certificates';
   permission: string;
   compute: (req: Request, userId: string) => Promise<number>;
 }
@@ -44,6 +44,33 @@ const COUNTS: CountSpec[] = [
           and(
             inArray(schema.configJobs.status, ['queued', 'running']),
             allowed !== null ? inArray(schema.configJobs.deviceId, [...allowed]) : undefined
+          )
+        );
+      return row?.n ?? 0;
+    },
+  },
+  {
+    // Certificate endpoints that are NOT healthy right now: expired leaf or
+    // issuer, chain-invalid, or presenting a DIFFERENT key than trusted (a live
+    // pinning mismatch). Surfaced as the red badge on the Certificates nav item.
+    key: 'certificates',
+    permission: 'certificates:read',
+    compute: async (req) => {
+      const allowed = await allowedDeviceIds(req);
+      if (allowed !== null && allowed.size === 0) return 0;
+      const [row] = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(schema.certificates)
+        .where(
+          and(
+            or(
+              sql`"daysToExpiry" < 0`,
+              sql`"chainDaysToExpiry" < 0`,
+              eq(schema.certificates.valid, false),
+              // fingerprint set AND differs from the trusted pin (both non-null).
+              sql`"fingerprint" IS NOT NULL AND "trustedFingerprint" IS NOT NULL AND "fingerprint" <> "trustedFingerprint"`
+            ),
+            allowed !== null ? inArray(schema.certificates.deviceId, [...allowed]) : undefined
           )
         );
       return row?.n ?? 0;

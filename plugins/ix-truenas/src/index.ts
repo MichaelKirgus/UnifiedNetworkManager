@@ -29,6 +29,8 @@ import {
   resolveSshCredentials,
   makeConsoleUpgrade,
   createTerminalPool,
+  createPinningGuard,
+  dynamicSshHostVerifier,
   TtlCache,
   collectDeviceCertificates,
   parseProbeTarget,
@@ -267,6 +269,12 @@ const clientCache = new Map<string, TruenasClient>();
 const CERT_TTL_MS = 10 * 60_000;
 const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray(v) });
 
+// Certificate pinning — one process-wide guard for every credential-bearing
+// entry point. Strict mode + a known fingerprint MISMATCH throws before any
+// credentials are transmitted; unknown endpoints are TOFU-accepted and land in
+// UNM's inventory via the `certificates` metric.
+const assertPinned = createPinningGuard();
+
 /** TEMP DEBUG (log-once): hosts+methods whose storage-extra outcome was already logged. */
 const storageDebugLogged = new Set<string>();
 
@@ -357,7 +365,10 @@ async function openConsoleSession(
   sshCreds: SshCredentials,
   context: Record<string, unknown> | undefined,
 ): Promise<SshTerminalSession> {
-  const conn = await termPool.get(host, 22, sshCreds);
+  // UNM certificate pinning — resolves the freshest trusted fingerprint at
+  // handshake time (pooled sessions outlive single requests). A mismatch
+  // rejects the handshake BEFORE any auth message is sent.
+  const conn = await termPool.get(host, 22, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host) });
   const ctx: Record<string, unknown> = context ?? {};
   const kind = typeof ctx['kind'] === 'string' ? (ctx['kind'] as string) : '';
 
@@ -373,8 +384,9 @@ async function openConsoleSession(
     }
 
     // Resolve the real docker name with ONE `docker ps -a` over the plugin's shared
-    // (non-PTY) exec pool — clean output, no terminal artifacts.
-    const probeClient = await sshPool.get(host, 22, sshCreds);
+    // (non-PTY) exec pool — clean output, no terminal artifacts. The dynamic host-key
+    // verifier pins the SSH handshake against UNM's inventory before auth.
+    const probeClient = await sshPool.get(host, 22, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host) });
     const listingRes = await probeClient.exec(`docker ps -a --format '{{.Names}}' 2>/dev/null`, sshCreds);
     const names = new Set(listingRes.stdout.split('\n').map((l) => l.trim()).filter(Boolean));
     const dockerName = candidates.find((c) => names.has(c)) ?? null;
@@ -1413,6 +1425,12 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   logger.setEnabled(settings.logToApi === true);
   notifier.setEnabled(settings.notifyAlerts === true);
   const transport = transportOf(settings);
+
+  // Certificate pinning — verify the appliance's TLS cert against UNM's
+  // inventory BEFORE any credentials are transmitted (throws on mismatch;
+  // the /monitoring wrapper turns it into a health=critical poll result).
+  await assertPinned(req, body.managementAddress, transport);
+
   const timeoutMs = clampInt(settings.timeoutMs, 500, 60000, 5000);
   // App/Container collection toggle — off = skip app.query/docker.network + all
   // enrichment and emit empty containers[]/dockerHosts[] to clear stale rows.
@@ -2161,6 +2179,10 @@ app.post('/config', async (req, res) => {
   }
 
   try {
+    // Certificate pinning — a config action transmits real credentials; refuse
+    // the connection when the appliance's key differs from UNM's inventory.
+    await assertPinned(req, host, transport);
+
     // host + rawCredentials let slot-based actions (e.g. containers.logs.read over SSH)
     // reach the appliance on a different channel than the RPC socket.
     const ctx: TruenasActionContext = { client: getClient(host, transport, timeoutMs), creds, host, rawCredentials: body.credentials as Record<string, unknown> | null };
@@ -2190,6 +2212,9 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   const apiKeyUsername = typeof settings.apiKeyUsername === 'string' ? settings.apiKeyUsername.trim() : '';
   const { creds, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined, apiKeyUsername);
   if (!creds) throw new Error(credError ?? 'Missing credentials');
+
+  // Certificate pinning — /state reads live data with credentials; verify first.
+  await assertPinned(req, host, transport);
 
   const client = getClient(host, transport, timeoutMs);
   const [sysInfoRes, poolsRes, ifacesRes] = await Promise.allSettled([
@@ -2239,6 +2264,9 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   // Only the ssh slot counts — the primary username/password must NOT be reused.
   const sshCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
   if (!sshCreds) throw new Error('No SSH credential bound — live probe data unavailable');
+
+  // Certificate pinning — the probe transmits SSH credentials; verify first.
+  await assertPinned(req, host, transportOf(settings));
 
   // Which keys did the caller ask for? Absent/empty = default set. Unknown keys ignored.
   const requested = Array.isArray(body.keys) && body.keys.length > 0 ? body.keys : ['containerStats'];
@@ -2353,6 +2381,9 @@ app.post(
     const sshCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
     if (!sshCreds) throw new Error('No SSH credential bound — filesystem browsing unavailable');
 
+    // Certificate pinning — SFTP transmits credentials; verify first.
+    await assertPinned(req, body.managementAddress, transportOf(settings));
+
     // Resolve the SFTP root from the caller's context (what to browse).
     const ctx = body.context ?? {};
     let root: string;
@@ -2377,7 +2408,8 @@ app.post(
     }
 
     // One pooled SFTP session per host+root; every path is confined to `root`.
-    const session = await fsSftpPool.get(host, 22, sshCreds, { root, timeoutMs: 30_000 });
+    // The dynamic host-key verifier pins the SSH handshake against UNM's inventory.
+    const session = await fsSftpPool.get(host, 22, sshCreds, { root, timeoutMs: 30_000, hostKeyVerifier: dynamicSshHostVerifier(host) });
     const op = body.op;
     const relPath = typeof body.path === 'string' ? body.path : '';
 

@@ -442,6 +442,7 @@ export async function initDb(): Promise<void> {
       host TEXT NOT NULL DEFAULT '',
       port INTEGER,
       fingerprint TEXT,
+      "trustedFingerprint" TEXT,
       "commonName" TEXT NOT NULL DEFAULT '',
       subject TEXT NOT NULL DEFAULT '',
       issuer TEXT NOT NULL DEFAULT '',
@@ -464,6 +465,38 @@ export async function initDb(): Promise<void> {
     )`);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_certificates_device ON certificates ("deviceId")`);
+
+  // Trusted-fingerprint column for certificate pinning (added after the initial
+  // certificates table shipped to existing deployments).
+  await pool.query(`ALTER TABLE certificates ADD COLUMN IF NOT EXISTS "trustedFingerprint" TEXT`);
+
+  // Certificate HISTORY (append-only) — one row per DISTINCT fingerprint ever
+  // observed on an endpoint. The telemetry worker inserts when a key changes or
+  // first appears; re-observing the same key only refreshes lastSeenAt. Lets the
+  // Certificates page show "which key was used when" and audit re-keying events.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS certificate_history (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'https',
+      fingerprint TEXT NOT NULL,
+      "commonName" TEXT NOT NULL DEFAULT '',
+      subject TEXT NOT NULL DEFAULT '',
+      issuer TEXT NOT NULL DEFAULT '',
+      "selfSigned" BOOLEAN NOT NULL DEFAULT FALSE,
+      "notBefore" TEXT NOT NULL DEFAULT '',
+      "notAfter" TEXT NOT NULL DEFAULT '',
+      "keyAlgorithm" TEXT NOT NULL DEFAULT '',
+      "keySizeBits" INTEGER,
+      "curveName" TEXT,
+      "signatureAlgorithm" TEXT NOT NULL DEFAULT '',
+      "firstSeenAt" TEXT NOT NULL,
+      "lastSeenAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name, fingerprint)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_certificate_history_device ON certificate_history ("deviceId")`);
 
   // Added after the initial release — existing deployments need the columns.
   await pool.query(`ALTER TABLE firewall_rules ADD COLUMN IF NOT EXISTS "ipVersion" TEXT NOT NULL DEFAULT 'v4'`);

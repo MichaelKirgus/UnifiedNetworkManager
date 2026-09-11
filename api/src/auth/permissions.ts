@@ -31,6 +31,9 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'routes:read': 'View the Routes page (static and dynamic routes across devices)',
   'firewall:read': 'View the Firewall page (filter + NAT rules across devices)',
   'certificates:read': 'View the Certificates page (TLS certs + SSH host keys across devices)',
+  // Accepting a CHANGED certificate/host key re-pins it for strict pinning — a
+  // security-relevant action, so it is gated separately from reading.
+  'certificates:write': 'Accept changed certificates / SSH host keys (re-pin endpoints)',
   'wifi:read': 'View the WiFi page (SSIDs, spectrum and neighbors)',
   'storage:read': 'View the Storage page (filesystems, pools/datasets and physical disks across devices)',
   'containers:read': 'View the Containers page (Apps/container workloads across devices)',

@@ -56,8 +56,10 @@ export const NAV_ITEMS: NavItem[] = [
   // Firewall rules across devices (filter + NAT kinds) — ShieldHalf reads as a
   // protective barrier and is distinct from the Roles (Shield) entry.
   { to: '/firewall', label: 'Firewall', icon: ShieldHalf, requiresPermission: 'firewall:read' },
-  // TLS certs + SSH host keys across devices (expiry/chain validation).
-  { to: '/certificates', label: 'Certificates', icon: FileKey2, requiresPermission: 'certificates:read' },
+  // TLS certs + SSH host keys across devices (expiry/chain validation). The
+  // badge counts endpoints that are NOT healthy right now — expired leaf or
+  // issuer, chain-invalid, or presenting a different key than trusted.
+  { to: '/certificates', label: 'Certificates', icon: FileKey2, requiresPermission: 'certificates:read', countKey: 'certificates' },
   // Waypoints — Route is already used by the Plans item.
   { to: '/routes', label: 'Routes', icon: Waypoints, requiresPermission: 'routes:read' },
   // Structured log entries shipped by plugins (gated — logs can carry critical details).
@@ -106,6 +108,7 @@ export const BADGE_COLORS: Record<NavCountKey, string> = {
   notifications: 'bg-red-500',
   configJobs: 'bg-amber-500',
   plans: 'bg-blue-500',
+  certificates: 'bg-red-500',
 };
 
 /**

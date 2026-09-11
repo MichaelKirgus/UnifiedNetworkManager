@@ -1,5 +1,5 @@
-import { Router, Response } from 'express';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { Router, Request, Response } from 'express';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
@@ -735,6 +735,10 @@ router.get('/certificates', requireAuth, requirePermission('certificates:read'),
           ...r,
           sanNames: safeParseJson<string[]>(r.sanNames),
           chain: safeParseJson<Record<string, unknown>[]>(r.chain),
+          // True when the endpoint currently presents a DIFFERENT key than the
+          // trusted (pinned) one — strict pinning refuses connections until the
+          // new key is accepted via POST /certificates/accept.
+          fingerprintMismatch: !!(r.fingerprint && r.trustedFingerprint && r.fingerprint !== r.trustedFingerprint),
           deviceName: device?.name ?? null,
           managementAddress: device?.managementAddress ?? null,
           siteName: device?.siteName ?? null,
@@ -742,6 +746,110 @@ router.get('/certificates', requireAuth, requirePermission('certificates:read'),
         };
       })
     );
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// GET /certificates/history - Append-only fingerprint history for one endpoint.
+// Query params: deviceId + name (both required — the page opens this per row),
+// limit (default 20, max 100). Newest first. Powers the "certificate changed"
+// audit view: every distinct key ever observed on the endpoint with its
+// first/last-seen window and cert metadata as of that observation.
+router.get('/certificates/history', requireAuth, requirePermission('certificates:read'), async (req: Request, res: Response) => {
+  try {
+    const { deviceId, name } = req.query as Record<string, string | undefined>;
+    if (!deviceId || !name) {
+      res.status(400).json({ error: 'deviceId and name are required' });
+      return;
+    }
+
+    // Device-level access control — scoped callers only see their devices.
+    const allowed = await allowedDeviceIds(req);
+    if (allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json([]);
+      return;
+    }
+
+    const limitRaw = Number((req.query as Record<string, string | undefined>)['limit']);
+    const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? Math.trunc(limitRaw) : 20, 1), 100);
+
+    const rows = await db.query.certificateHistory.findMany({
+      where: and(
+        eq(schema.certificateHistory.deviceId, deviceId),
+        eq(schema.certificateHistory.name, name)
+      ),
+      orderBy: [desc(schema.certificateHistory.lastSeenAt)],
+      limit,
+    });
+
+    res.status(200).json(rows);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// POST /certificates/accept - Accept the CURRENTLY OBSERVED key of an endpoint
+// as the new trusted (pinned) fingerprint. Body: { deviceId, name }. This is the
+// explicit user action that clears a "certificate changed" condition after a
+// legitimate re-key; it also lets a user RE-PIN to a previously-seen key from
+// history by passing `fingerprint` in the body (must match a history row).
+// Gated on certificates:write — accepting a key is a security decision.
+router.post('/certificates/accept', requireAuth, requirePermission('certificates:write'), async (req: Request, res: Response) => {
+  try {
+    const body = req.body as Record<string, unknown>;
+    const deviceId = typeof body['deviceId'] === 'string' ? body['deviceId'].trim() : '';
+    const name = typeof body['name'] === 'string' ? body['name'].trim() : '';
+    if (!deviceId || !name) {
+      res.status(400).json({ error: 'deviceId and name are required' });
+      return;
+    }
+
+    // Device-level access control — scoped callers may only re-pin their devices.
+    const allowed = await allowedDeviceIds(req);
+    if (allowed !== null && !allowed.has(deviceId)) {
+      res.status(403).json({ error: 'No access to this device' });
+      return;
+    }
+
+    const row = await db.query.certificates.findFirst({
+      where: and(eq(schema.certificates.deviceId, deviceId), eq(schema.certificates.name, name)),
+    });
+    if (!row) {
+      res.status(404).json({ error: `No certificate endpoint "${name}" on this device` });
+      return;
+    }
+
+    // Default: pin the key currently observed. An explicit fingerprint must be a
+    // previously-seen one (history row) — never an arbitrary string.
+    let target = row.fingerprint;
+    if (typeof body['fingerprint'] === 'string' && body['fingerprint'].trim() !== '') {
+      const wanted = body['fingerprint'].trim();
+      const hist = await db.query.certificateHistory.findFirst({
+        where: and(
+          eq(schema.certificateHistory.deviceId, deviceId),
+          eq(schema.certificateHistory.name, name),
+          eq(schema.certificateHistory.fingerprint, wanted)
+        ),
+      });
+      if (!hist) {
+        res.status(400).json({ error: 'Fingerprint is not in this endpoint\'s history' });
+        return;
+      }
+      target = wanted;
+    }
+    if (!target) {
+      res.status(409).json({ error: 'No fingerprint observed for this endpoint yet — nothing to accept' });
+      return;
+    }
+
+    await db.update(schema.certificates)
+      .set({ trustedFingerprint: target })
+      .where(and(eq(schema.certificates.deviceId, deviceId), eq(schema.certificates.name, name)));
+
+    res.status(200).json({ ok: true, deviceId, name, trustedFingerprint: target });
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

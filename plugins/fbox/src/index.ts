@@ -20,6 +20,7 @@ import {
   parseProbeTarget,
   readSettings,
   resolvePluginIdentity,
+  createPinningGuard,
   CertificateRow,
 } from '@unm/plugin-sdk';
 import { FBoxAuthError, FBoxCredentials, FBoxNotFritzError, FBoxTransport } from './fboxClient';
@@ -90,6 +91,12 @@ const logger = createPluginLogger(identity);
 const CERT_TTL_MS = 10 * 60_000;
 const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray(v) });
 
+// Certificate pinning — one process-wide guard for the credential-bearing entry
+// point. Strict mode + a known fingerprint MISMATCH throws before any credentials
+// are transmitted; unknown endpoints are TOFU-accepted and land in UNM's inventory
+// via the `certificates` metric.
+const assertPinned = createPinningGuard();
+
 function resolveOptions(settings: Record<string, unknown>): FBoxOptions & { transport: FBoxTransport } {
   const t = typeof settings.transport === 'string' ? settings.transport : 'auto';
   return {
@@ -141,6 +148,10 @@ app.post('/monitoring', async (req, res) => {
   if (error || !creds) return fail('critical', error ?? 'Missing credentials.');
 
   try {
+    // Certificate pinning — verify the box's TLS cert against UNM's inventory
+    // BEFORE any credentials are transmitted (throws on mismatch).
+    await assertPinned(req, managementAddress, opts.transport);
+
     const result = await getMonitoring(managementAddress.trim(), creds, opts);
     const s = result.snapshot;
 

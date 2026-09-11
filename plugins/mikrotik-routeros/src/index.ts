@@ -15,6 +15,8 @@ import {
   pickString,
   readSettings,
   resolvePluginIdentity,
+  createPinningGuard,
+  dynamicSshHostVerifier,
 } from '@unm/plugin-sdk';
 import { RouterOsAuthError } from './routerosClient';
 import { DEFAULT_OPTIONS, MonitoringResult, RouterOsOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
@@ -132,6 +134,12 @@ function resolveRouterOsSsh(creds?: Record<string, unknown> | null): SshCredenti
   return { username, password: pickString(creds, ['password']) ?? '' };
 }
 
+// Certificate pinning — one process-wide guard for every credential-bearing
+// entry point. Strict mode + a known fingerprint MISMATCH throws before any
+// credentials are transmitted; unknown endpoints are TOFU-accepted and land in
+// UNM's inventory via the `certificates` metric.
+const assertPinned = createPinningGuard();
+
 const termPool = createTerminalPool();
 process.on('SIGTERM', () => termPool.closeAll());
 process.on('SIGINT', () => termPool.closeAll());
@@ -147,6 +155,10 @@ const consoleUpgrade = makeConsoleUpgrade({
       throw new Error('No usable SSH credential — the primary username/password secret (or a bound "ssh" slot) is required.');
     }
     const conn = await termPool.get(host, 22, creds, {
+      // UNM certificate pinning — resolves the freshest trusted fingerprint at
+      // handshake time (pooled sessions outlive single requests). A mismatch
+      // rejects the handshake BEFORE any auth message is sent.
+      hostKeyVerifier: dynamicSshHostVerifier(host),
       onHostKey: (fp) => console.warn(`[mikrotik-routeros-plugin] observed host key for ${host}:22 → ${fp} (pin it in the device's SSH settings to enforce strict verification)`),
     });
     return conn.openShell(creds); // a plain RouterOS login shell, like PuTTY
@@ -242,6 +254,10 @@ app.post('/monitoring', async (req, res) => {
   if (error || !creds) return fail('critical', error ?? 'Missing credentials.');
 
   try {
+    // Certificate pinning — verify the router's TLS cert against UNM's
+    // inventory BEFORE any credentials are transmitted (throws on mismatch).
+    await assertPinned(req, managementAddress, opts.schemeMode);
+
     const result: MonitoringResult = await getMonitoring(managementAddress.trim(), creds, opts);
     const s = result.snapshot;
 

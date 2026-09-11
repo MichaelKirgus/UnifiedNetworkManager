@@ -23,7 +23,7 @@
  *     cycle); the whole collection is a single exec() round-trip.
  */
 
-import { createSshPool, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { createSshPool, dynamicSshHostVerifier, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 
 /** Process-wide SSH pool — one session per appliance, kept alive between polls. */
 const sshPool = createSshPool();

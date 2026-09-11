@@ -15,6 +15,7 @@ import {
   StateRequestBody,
   collectDeviceCertificates,
   parseProbeTarget,
+  createPinningGuard,
 } from '@unm/plugin-sdk';
 import {
   getSystemStatus,
@@ -127,6 +128,12 @@ const inventoryCache = new Map<string, InventorySnapshot>();
 /** In-flight cold collections per host — concurrent /monitoring calls share ONE
  * fetch instead of each starting its own (see getInventory). */
 const inventoryInFlight = new Map<string, Promise<InventorySnapshot>>();
+
+// Certificate pinning guard: before ANY credentials are transmitted to an
+// appliance, the management endpoint's TLS certificate is verified against UNM's
+// certificate inventory (strict mode — a mismatch throws and the request stops;
+// unknown endpoints are accepted once via TOFU). See @unm/plugin-sdk/pinning.
+const assertPinned = createPinningGuard();
 
 /**
  * Normalizes one interface entry from `interfaces_info?details=true` into zero
@@ -1229,6 +1236,10 @@ app.post('/monitoring', async (req, res) => {
   const collectInventory = body.collectInventory !== false;
 
   try {
+    // Certificate pinning — verify the appliance's TLS cert against UNM's
+    // inventory BEFORE any credentials are transmitted (throws on mismatch).
+    await assertPinned(req, managementAddress, transport);
+
     const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret, transport, deviceId, credentials, collectInventory);
 
     // Echo of the user-selected model/firmware (mirrors the LANCOM plugin) —
@@ -1341,6 +1352,10 @@ app.post('/config', async (req, res) => {
   };
 
   try {
+    // Certificate pinning — a config action transmits real credentials; refuse
+    // the connection when the appliance's key differs from UNM's inventory.
+    await assertPinned(req, managementAddress, transport);
+
     const ctx = await buildActionContext({
       host: managementAddress,
       deviceId: typeof deviceId === 'string' ? deviceId : undefined,
@@ -1466,6 +1481,9 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   const creds = (body.credentials && typeof body.credentials === 'object' ? body.credentials : {}) as Record<string, unknown>;
   const apiKey = typeof creds['apiKey'] === 'string' ? (creds['apiKey'] as string) : '';
   const apiSecret = typeof creds['apiSecret'] === 'string' ? (creds['apiSecret'] as string) : '';
+
+  // Certificate pinning — /state reads live data with credentials; verify first.
+  await assertPinned(req, body.managementAddress, transport);
 
   // `creds` also carries bound slots (slots.ssh) for the optional ZFS path.
   const snapshot = await getInventory(body.managementAddress, apiKey, apiSecret, transport, creds);

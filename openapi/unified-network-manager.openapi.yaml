@@ -2863,6 +2863,86 @@ paths:
         '401':
           description: Authentication required
 
+  /certificates/history:
+    get:
+      tags: [Inventory]
+      summary: Fingerprint history of one certificate endpoint
+      description: >-
+        Append-only audit trail for ONE endpoint (deviceId + name): every distinct
+        fingerprint ever observed on it, with the cert metadata as of that
+        observation and its first/last-seen window. Newest first. Powers the
+        "certificate changed" view — a re-keyed or swapped key stays auditable even
+        after it is accepted or rolled back.
+      parameters:
+        - in: query
+          name: deviceId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: name
+          required: true
+          schema: { type: string, description: "Endpoint identity (e.g. https:443, ssh:22)" }
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: History rows (newest first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CertificateHistoryRow'
+        '400':
+          description: Missing deviceId or name
+        '401':
+          description: Authentication required
+
+  /certificates/accept:
+    post:
+      tags: [Inventory]
+      summary: Accept the observed key of an endpoint as trusted (re-pin)
+      description: >-
+        Explicit user action that clears a "certificate changed" condition after a
+        legitimate re-key: sets the endpoint's trustedFingerprint to the CURRENTLY
+        OBSERVED fingerprint. Pass `fingerprint` in the body to pin a previously-seen
+        key from history instead (must match a history row). Requires certificates:write.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId, name]
+              properties:
+                deviceId: { type: string }
+                name: { type: string, description: "Endpoint identity (e.g. https:443, ssh:22)" }
+                fingerprint: { type: string, description: "Optional — pin this previously-seen key instead of the currently observed one" }
+      responses:
+        '200':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  deviceId: { type: string }
+                  name: { type: string }
+                  trustedFingerprint: { type: string }
+        '400':
+          description: Missing fields or fingerprint not in history
+        '401':
+          description: Authentication required
+        '403':
+          description: No access to this device (device scope)
+        '404':
+          description: Endpoint not found on the device
+        '409':
+          description: No fingerprint observed yet — nothing to accept
+
   /routes:
     get:
       tags: [Inventory]
@@ -5130,7 +5210,9 @@ components:
           description: "What kind of credential material is presented — TLS certificate vs. SSH host key"
         host: { type: string, description: "Hostname/IP probed (the management address); '' = unknown" }
         port: { type: [integer, 'null'], description: "Port probed (443 for https, 22 for ssh)" }
-        fingerprint: { type: [string, 'null'], description: "SHA-256 fingerprint of the leaf cert / SSH host key (OpenSSH-style SHA256:<base64>)" }
+        fingerprint: { type: [string, 'null'], description: "SHA-256 fingerprint of the leaf cert / SSH host key currently OBSERVED (OpenSSH-style SHA256:<base64>)" }
+        trustedFingerprint: { type: [string, 'null'], description: "The TRUSTED (pinned) fingerprint — what plugins verify against before transmitting credentials. Seeded from the first observation; changed only by explicit acceptance (POST /certificates/accept)." }
+        fingerprintMismatch: { type: boolean, description: "True when the endpoint currently presents a DIFFERENT key than trusted — strict pinning refuses connections until accepted" }
         commonName: { type: string, description: "Subject Common Name; ssh rows carry a synthetic label like 'SSH Host Key'" }
         subject: { type: string, description: "Full subject distinguished name" }
         issuer: { type: string, description: "Issuer distinguished name" }
@@ -5175,6 +5257,30 @@ components:
           type: array
           items: { type: string }
         serialNumber: { type: string }
+
+    CertificateHistoryRow:
+      type: object
+      required: [deviceId, pluginId, name, type, fingerprint, firstSeenAt, lastSeenAt]
+      properties:
+        deviceId: { type: string }
+        pluginId: { type: string }
+        name: { type: string, description: "Endpoint identity (e.g. https:443, ssh:22)" }
+        type:
+          type: string
+          enum: [https, ssh]
+        fingerprint: { type: string, description: "SHA-256 fingerprint of the key observed during this window" }
+        commonName: { type: string }
+        subject: { type: string }
+        issuer: { type: string }
+        selfSigned: { type: boolean }
+        notBefore: { type: string, format: date-time }
+        notAfter: { type: string, format: date-time }
+        keyAlgorithm: { type: string }
+        keySizeBits: { type: [integer, 'null'] }
+        curveName: { type: [string, 'null'] }
+        signatureAlgorithm: { type: string }
+        firstSeenAt: { type: string, format: date-time, description: "First time this fingerprint was observed on the endpoint" }
+        lastSeenAt: { type: string, format: date-time, description: "Last time it was still the current key" }
 
     RouteRow:
       type: object

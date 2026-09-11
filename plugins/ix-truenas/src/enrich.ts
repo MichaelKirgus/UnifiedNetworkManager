@@ -25,7 +25,7 @@
  * the gaps above (and only what the user opted into).
  */
 
-import { CounterTracker, createSshPool, pickString, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { CounterTracker, createSshPool, dynamicSshHostVerifier, pickString, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import type { TruenasClient, TruenasCredentials } from './client/truenasClient';
 
 // ---------------------------------------------------------------------------
@@ -340,7 +340,7 @@ async function collectDockerViaSsh(
 ): Promise<{ infos: DockerContainerInfo[]; stats: Map<string, DockerStatsRaw> } | null> {
   if (!sshCreds) return null; // no ssh slot bound — API-only mode
   try {
-    const client = await sshPool.get(host, 22, sshCreds);
+    const client = await sshPool.get(host, 22, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host) });
     const r = await client.exec(buildDockerInspectCommand(containerIds.slice(0, MAX_CONTAINERS)), sshCreds);
     if (r.code !== 0 && !r.stdout) {
       log?.('warn', `SSH docker inspect on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`);
@@ -436,7 +436,7 @@ async function collectProbeStatsInner(
   log?: (level: 'info' | 'warn', message: string) => void
 ): Promise<Map<string, ProbeContainerStat> | null> {
   try {
-    const client = await sshPool.get(host, 22, sshCreds);
+    const client = await sshPool.get(host, 22, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host) });
     const list = `$(docker ps -q 2>/dev/null | head -n ${MAX_CONTAINERS})`;
     const cmd = `docker stats --no-stream ${list} --format 'STAT|{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.NetIO}}|{{.BlockIO}}' 2>/dev/null`;
     const r = await client.exec(cmd, sshCreds);
@@ -511,7 +511,7 @@ async function collectProbeStatesInner(
   log?: (level: 'info' | 'warn', message: string) => void
 ): Promise<Map<string, ProbeContainerState> | null> {
   try {
-    const client = await sshPool.get(host, 22, sshCreds);
+    const client = await sshPool.get(host, 22, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host) });
     const r = await client.exec(`docker ps -a --format 'PS|{{.State}}|{{.Names}}' 2>/dev/null`, sshCreds);
     if (r.code !== 0 && !r.stdout) {
       probeFailLog(host, `SSH docker ps probe on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`, log);
@@ -577,7 +577,7 @@ async function collectProbeVmStatesInner(
   log?: (level: 'info' | 'warn', message: string) => void
 ): Promise<Map<string, ProbeVmState> | null> {
   try {
-    const client = await sshPool.get(host, 22, sshCreds);
+    const client = await sshPool.get(host, 22, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host) });
     const r = await client.exec(buildVirshCommand(), sshCreds);
     if (r.code !== 0 && !r.stdout) {
       probeFailLog(host, `SSH virsh list probe on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`, log);
@@ -742,7 +742,7 @@ async function collectVmIpsViaSsh(
 ): Promise<Map<string, string> | null> {
   if (!sshCreds) return null; // no ssh slot bound — API-only mode
   try {
-    const client = await sshPool.get(host, 22, sshCreds);
+    const client = await sshPool.get(host, 22, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host) });
     const r = await client.exec(buildVirshCommand(), sshCreds);
     if (r.code !== 0 && !r.stdout) {
       log?.('warn', `SSH VM IP collection on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`);

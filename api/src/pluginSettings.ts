@@ -398,10 +398,44 @@ export async function settingsHeaders(
   // Per-plugin effective settings (device override → global → default) plus the
   // app-wide global settings flagged exposeToPlugins. Both ride on every call so
   // plugins can read either via readSettings() / readGlobalSettings().
-  const [values, global] = await Promise.all([
+  const [values, globalRaw] = await Promise.all([
     getEffectiveSettings(pluginId, deviceId),
     getPluginGlobalSettings().catch(() => ({})),
   ]);
+  // Mutable copy — the pinning block below may add `knownCertificates`.
+  const global: Record<string, unknown> = { ...(globalRaw as Record<string, unknown>) };
+
+  // Certificate pinning: in strict mode the plugin must verify a device's
+  // certificate/SSH host key against UNM's inventory BEFORE transmitting
+  // credentials. The known fingerprints ride in the same global-settings header,
+  // keyed "https:<host>:<port>" / "ssh:<host>:<port>" (the certificates table's
+  // name/fingerprint columns). Best-effort — a lookup failure must never break
+  // dispatch; plugins treat a missing map as "nothing pinned yet" (TOFU).
+  if (deviceId && global['certPinningMode'] === 'strict') {
+    try {
+      const rows = await db.query.certificates.findMany({ where: eq(schema.certificates.deviceId, deviceId) });
+      const known: Record<string, { fingerprint: string; commonName?: string | null }> = {};
+      for (const r of rows) {
+        if (!r.fingerprint || !r.host) continue; // no key recorded yet / unknown host
+        // Pin against the TRUSTED fingerprint — the user-accepted key. The observed
+        // `fingerprint` auto-updates on every poll, so pinning to it would never
+        // detect a re-key (it would just track whatever the endpoint presents).
+        // Fall back to observed only when trust has not been seeded yet.
+        const trusted = r.trustedFingerprint || r.fingerprint;
+        // Lowercase host — the SDK normalizes its lookup keys the same way, so an
+        // uppercase hostname in the inventory still matches (otherwise strict mode
+        // would silently degrade to TOFU for that endpoint).
+        known[`${r.type}:${String(r.host).toLowerCase()}:${r.port ?? (r.type === 'ssh' ? 22 : 443)}`] = {
+          fingerprint: trusted,
+          commonName: r.commonName || null,
+        };
+      }
+      if (Object.keys(known).length > 0) global['knownCertificates'] = known;
+    } catch {
+      // DB hiccup — send the header without pins (plugins fall back to TOFU).
+    }
+  }
+
   const headers: Record<string, string> = {};
   if (Object.keys(values).length > 0) headers['x-unm-settings'] = JSON.stringify(values);
   if (Object.keys(global).length > 0) headers['x-unm-global-settings'] = JSON.stringify(global);

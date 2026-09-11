@@ -441,29 +441,37 @@ export async function pruneOldNotifications(cutoffIso: string): Promise<number> 
   return result.rowCount ?? 0;
 }
 /**
- * Auto-resolve sweep for certificate expiry/invalidity notifications. A row whose
- * dedupeKey is `cert-expiry:<deviceId>:<name>` stays live only while that device's
- * certificate endpoint STILL warrants a warning (expired, near-expiry within the
- * configured window, or chain-invalid). Once renewed — valid AND comfortably past
- * the warn window — it resolves itself. Returns the number of rows resolved.
+ * Auto-resolve sweep for certificate notifications. Two dedupe-key families:
+ *   - `cert-expiry:<deviceId>:<name>` — stays live only while the endpoint STILL
+ *     warrants a warning (expired, near-expiry within the configured window, or
+ *     chain-invalid). Once renewed it resolves itself.
+ *   - `cert-change:<deviceId>:<name>` — stays live only while the observed key
+ *     DIFFERS from the trusted one; resolving happens when the user accepts the
+ *     new key (trusted := observed) or the old key returns.
+ * NOTE: `<name>` contains a colon ("https:443"), so it must be extracted by
+ * slicing off the fixed prefix — NOT by split(':').pop() (that yields "443").
+ * Returns the number of rows resolved.
  */
 export async function autoResolveStaleCertificateNotifications(warnDays: number): Promise<number> {
   const candidates = await db.query.notifications.findMany({
     where: and(
       inArray(schema.notifications.status, ['open', 'acknowledged']),
       eq(schema.notifications.source, 'device'),
-      sql`"dedupeKey" LIKE 'cert-expiry:%'`
+      or(sql`"dedupeKey" LIKE 'cert-expiry:%'`, sql`"dedupeKey" LIKE 'cert-change:%'`)
     ),
   });
   if (candidates.length === 0) return 0;
 
   // Group candidate rows by deviceId so we load each device's cert rows once.
-  const byDevice = new Map<string, { id: string; name: string }[]>();
+  const byDevice = new Map<string, { id: string; name: string; kind: 'expiry' | 'change' }[]>();
   for (const row of candidates) {
     if (!row.deviceId || !row.dedupeKey) continue;
-    const name = row.dedupeKey.split(':').pop() ?? '';
+    const isChange = row.dedupeKey.startsWith('cert-change:');
+    const prefix = `${isChange ? 'cert-change' : 'cert-expiry'}:${row.deviceId}:`;
+    if (!row.dedupeKey.startsWith(prefix)) continue; // malformed — leave it alone
+    const name = row.dedupeKey.slice(prefix.length);
     const list = byDevice.get(row.deviceId) ?? [];
-    list.push({ id: row.id, name });
+    list.push({ id: row.id, name, kind: isChange ? 'change' : 'expiry' });
     byDevice.set(row.deviceId, list);
   }
 
@@ -479,10 +487,16 @@ export async function autoResolveStaleCertificateNotifications(warnDays: number)
         resolved++;
         continue;
       }
-      const stillBad =
-        (cert.daysToExpiry !== null && cert.daysToExpiry <= warnDays) ||
-        (cert.chainDaysToExpiry !== null && cert.chainDaysToExpiry < 0) ||
-        cert.valid === false;
+      let stillBad: boolean;
+      if (entry.kind === 'change') {
+        // Mismatch persists only while observed key != trusted key.
+        stillBad = !!cert.fingerprint && !!cert.trustedFingerprint && cert.fingerprint !== cert.trustedFingerprint;
+      } else {
+        stillBad =
+          (cert.daysToExpiry !== null && cert.daysToExpiry <= warnDays) ||
+          (cert.chainDaysToExpiry !== null && cert.chainDaysToExpiry < 0) ||
+          cert.valid === false;
+      }
       if (!stillBad) {
         await resolveNotification(entry.id);
         resolved++;

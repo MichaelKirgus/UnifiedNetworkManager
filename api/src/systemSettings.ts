@@ -176,6 +176,18 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     help:
       'A certificate expiring within this many days raises a warning notification; an already-expired cert (or one whose issuer is expired) raises a critical one. The condition auto-resolves once the renewed cert is collected.',
   },
+  {
+    key: 'certPinningMode',
+    label: 'Certificate pinning mode',
+    type: 'string',
+    category: 'Security',
+    default: 'strict',
+    envVar: 'CERT_PINNING_MODE',
+    pattern: '^(strict|ignore)$',
+    exposeToPlugins: true,
+    help:
+      'How plugins react when a device presents a DIFFERENT certificate or SSH host key than UNM has in its inventory. "strict" (default): the connection is refused and NO credentials are transmitted — a mismatch means re-keying OR an active man-in-the-middle; unknown endpoints are accepted once (TOFU) and pinned from then on. "ignore": legacy behavior, certificates are not verified against the inventory.',
+  },
 
   // Security / session behaviour.
   {

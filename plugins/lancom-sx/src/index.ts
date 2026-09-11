@@ -15,6 +15,7 @@ import {
   resolvePluginIdentity,
   stateHandler,
   TtlCache,
+  createPinningGuard,
   collectDeviceCertificates,
   parseProbeTarget,
   CertificateRow,
@@ -139,6 +140,12 @@ const logger = createPluginLogger(identity);
 const CERT_TTL_MS = 10 * 60_000;
 const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray(v) });
 
+// Certificate pinning — one process-wide guard for every credential-bearing
+// entry point. Strict mode + a known fingerprint MISMATCH throws before any
+// credentials are transmitted; unknown endpoints are TOFU-accepted and land in
+// UNM's inventory via the `certificates` metric.
+const assertPinned = createPinningGuard();
+
 /** Resolves SNMP walk options from effective settings. */
 function resolveOptions(settings: Record<string, unknown>): SxOptions {
   return {
@@ -197,6 +204,10 @@ app.post('/monitoring', async (req, res) => {
   if (error || !creds) return fail('critical', error ?? 'Missing SNMP credentials.');
 
   try {
+    // Certificate pinning — verify the switch's TLS cert against UNM's
+    // inventory BEFORE any credentials are transmitted (throws on mismatch).
+    await assertPinned(req, managementAddress, 'auto');
+
     // Slow path: targeted parallel LCOS-SX walks (only the subtrees we use),
     // TTL-cached per host with a quality gate against partial-failure data.
     const inventory = await getSxInventory(host, creds, opts, {
@@ -496,6 +507,10 @@ app.post('/config', async (req, res) => {
   };
 
   try {
+    // Certificate pinning — a config action transmits real credentials;
+    // refuse the connection when the switch's key differs from UNM's inventory.
+    await assertPinned(req, managementAddress, 'auto');
+
     const ctx = await buildActionContext({
       host: hostFromAddress(managementAddress),
       address: managementAddress,
@@ -581,6 +596,9 @@ app.post(
     const opts = resolveOptions(settings);
     const host = hostFromAddress(body.managementAddress);
     if (!host) throw new Error('No target address — set the device management address.');
+
+    // Certificate pinning — /state reads live data with credentials; verify first.
+    await assertPinned(req, body.managementAddress, 'auto');
 
     const { creds, error } = resolveCredentials((body.credentials ?? {}) as Record<string, unknown>);
     if (error || !creds) throw new Error(error ?? 'Missing SNMP credentials.');

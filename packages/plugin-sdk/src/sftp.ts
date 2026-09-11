@@ -96,6 +96,10 @@ export interface SftpSessionOptions {
   hostKeyFingerprint?: string | null;
   /** Called once after a successful connect with the OBSERVED fingerprint. */
   onHostKey?: (fingerprint: import('./ssh').SshFingerprint) => void;
+  /** Full host-key verifier override — takes precedence over hostKeyFingerprint
+   *  (UNM certificate pinning via makeSshHostVerifier). Runs during the handshake,
+   *  before any authentication message is sent. */
+  hostKeyVerifier?: ((key: unknown, cb: (ok: boolean) => void) => void) | null;
   /** Optional root directory that all paths are resolved against and confined to.
    *  When set, every operation's path is resolved relative to this root and any
    *  attempt to escape it (or use `..`) throws SftpPathError. This is how a plugin
@@ -232,7 +236,9 @@ export class SftpSession {
     const o = this.opts;
     const pinned = normalizeFingerprint(o.hostKeyFingerprint);
 
-    const hostVerifier = (key: unknown, cb: (ok: boolean) => void): void => {
+    // A full verifier override (hostKeyVerifier — UNM certificate pinning) takes
+    // precedence over the built-in hostKeyFingerprint logic.
+    const hostVerifier = o.hostKeyVerifier ?? ((key: unknown, cb: (ok: boolean) => void): void => {
       try {
         if (!Buffer.isBuffer(key)) {
           cb(true); // unexpected shape — accept (nothing to compare against)
@@ -252,7 +258,7 @@ export class SftpSession {
       } catch {
         cb(true); // verifier must never throw into ssh2's internals
       }
-    };
+    });
 
     const config: ConnectConfig = {
       host: o.host,

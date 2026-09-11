@@ -376,7 +376,12 @@ export interface CertificateRow {
   type: 'https' | 'ssh';
   host?: string;
   port?: number | null;
+  /** SHA-256 fingerprint of the key currently OBSERVED on the endpoint. */
   fingerprint?: string | null;
+  /** The TRUSTED (pinned) fingerprint — what plugins verify before transmitting credentials. */
+  trustedFingerprint?: string | null;
+  /** True when observed !== trusted — strict pinning refuses connections until accepted. */
+  fingerprintMismatch?: boolean;
   commonName?: string;
   subject?: string;
   issuer?: string;
@@ -399,6 +404,30 @@ export interface CertificateRow {
   /** Full served chain, leaf first (parsed array). */
   chain?: CertificateInfo[];
   collectedAt: string;
+}
+
+/** One distinct fingerprint ever observed on a certificate endpoint (history row). */
+export interface CertificateHistoryRow {
+  deviceId: string;
+  pluginId: string;
+  /** Stable endpoint identity, e.g. "https:443" / "ssh:22". */
+  name: string;
+  type: 'https' | 'ssh';
+  fingerprint: string;
+  commonName?: string;
+  subject?: string;
+  issuer?: string;
+  selfSigned?: boolean;
+  notBefore?: string;
+  notAfter?: string;
+  keyAlgorithm?: string;
+  keySizeBits?: number | null;
+  curveName?: string | null;
+  signatureAlgorithm?: string;
+  /** First time this fingerprint was observed on the endpoint. */
+  firstSeenAt: string;
+  /** Last time it was still the current key. */
+  lastSeenAt: string;
 }
 
 /** One discovered host matched by a firewall rule address (merged across devices). */
@@ -637,7 +666,7 @@ export interface NotificationPrefs {
 }
 
 /** Which nav items can carry a badge count (mirrors the API's /counts keys). */
-export type NavCountKey = 'notifications' | 'configJobs' | 'plans';
+export type NavCountKey = 'notifications' | 'configJobs' | 'plans' | 'certificates';
 
 /** Per-user navigation preferences (order + hidden pages), additive over defaults. */
 export interface NavPreferences {
@@ -1877,6 +1906,17 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<CertificateRow[]>(`/certificates${suffix}`);
   },
+  /** Fingerprint history of one endpoint (newest first). */
+  certificateHistory: (deviceId: string, name: string, limit = 20) => {
+    const qs = new URLSearchParams({ deviceId, name, limit: String(limit) });
+    return apiFetch<CertificateHistoryRow[]>(`/certificates/history?${qs.toString()}`);
+  },
+  /** Accept the currently observed key (or a previously-seen one) as trusted. */
+  acceptCertificate: (deviceId: string, name: string, fingerprint?: string) =>
+    apiFetch<{ ok: boolean; deviceId: string; name: string; trustedFingerprint: string }>('/certificates/accept', {
+      method: 'POST',
+      body: JSON.stringify({ deviceId, name, ...(fingerprint ? { fingerprint } : {}) }),
+    }),
   firewallRules: (params?: { deviceId?: string; siteId?: string; ruleType?: 'filter' | 'dnat' | 'snat' | 'one-to-one' | 'npt' }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);

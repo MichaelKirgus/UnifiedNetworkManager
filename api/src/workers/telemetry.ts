@@ -635,9 +635,17 @@ async function ingestInventory(
     // the notifications worker once renewed).
     const rawCertificates = Array.isArray(metrics['certificates']) ? (metrics['certificates'] as unknown[]) : null;
     if (rawCertificates !== null) {
+      // Load the CURRENT rows BEFORE the upsert overwrites them: needed to seed
+      // trustedFingerprint on first observation, detect fingerprint CHANGES
+      // (critical notification + history row), and preserve trust across polls.
+      const prevCerts = await db.query.certificates.findMany({
+        where: and(eq(schema.certificates.deviceId, deviceId), eq(schema.certificates.pluginId, pluginId)),
+      });
+      const prevByName = new Map(prevCerts.map((r) => [r.name, r]));
+
       const values: {
         deviceId: string; pluginId: string; name: string; type: string; host: string; port: number | null;
-        fingerprint: string | null; commonName: string; subject: string; issuer: string; selfSigned: boolean;
+        fingerprint: string | null; trustedFingerprint: string | null; commonName: string; subject: string; issuer: string; selfSigned: boolean;
         notBefore: string; notAfter: string; keyAlgorithm: string; keySizeBits: number | null; curveName: string | null;
         signatureAlgorithm: string; sanNames: string; serialNumber: string; valid: boolean | null; invalidReason: string | null;
         daysToExpiry: number | null; chainDaysToExpiry: number | null; chain: string; collectedAt: string;
@@ -650,6 +658,19 @@ async function ingestInventory(
         const type = typeof r['type'] === 'string' && (r['type'] as string).trim().toLowerCase() === 'ssh' ? 'ssh' : 'https';
         const cert = (r['cert'] ?? null) as Record<string, unknown> | null;
         const chainArr = Array.isArray(r['chain']) ? (r['chain'] as unknown[]) : [];
+        const fingerprint = typeof r['fingerprint'] === 'string' && (r['fingerprint'] as string).trim() !== '' ? (r['fingerprint'] as string).trim() : null;
+        // Trusted-fingerprint lifecycle: an EXISTING trust is never touched by
+        // ingestion (a changed key stays a mismatch until the user accepts or
+        // rolls it back); a FIRST observation seeds trust from the observed key
+        // (TOFU — "if no certificate is known, save it and allow the connection").
+        const prev = prevByName.get(name);
+        let trustedFingerprint: string | null = null;
+        if (fingerprint) {
+          trustedFingerprint = prev?.trustedFingerprint ?? fingerprint;
+        } else if (prev?.trustedFingerprint) {
+          // No key readable this poll (endpoint down) — keep the old trust.
+          trustedFingerprint = prev.trustedFingerprint;
+        }
         values.push({
           deviceId,
           pluginId,
@@ -657,7 +678,8 @@ async function ingestInventory(
           type,
           host: typeof r['host'] === 'string' ? (r['host'] as string).trim() : '',
           port: typeof r['port'] === 'number' && Number.isFinite(r['port']) ? Math.trunc(r['port']) : null,
-          fingerprint: typeof r['fingerprint'] === 'string' && (r['fingerprint'] as string).trim() !== '' ? (r['fingerprint'] as string).trim() : null,
+          fingerprint,
+          trustedFingerprint,
           commonName: cert && typeof cert['commonName'] === 'string' ? (cert['commonName'] as string) : '',
           subject: cert && typeof cert['subject'] === 'string' ? (cert['subject'] as string) : '',
           issuer: cert && typeof cert['issuer'] === 'string' ? (cert['issuer'] as string) : '',
@@ -688,6 +710,7 @@ async function ingestInventory(
             host: sql`excluded.host`,
             port: sql`excluded.port`,
             fingerprint: sql`excluded.fingerprint`,
+            trustedFingerprint: sql`excluded."trustedFingerprint"`,
             commonName: sql`excluded."commonName"`,
             subject: sql`excluded.subject`,
             issuer: sql`excluded.issuer`,
@@ -724,6 +747,75 @@ async function ingestInventory(
             notInArray(schema.certificates.name, Array.from(seenCertNames))
           )
         );
+      }
+
+      // Certificate HISTORY — append-only audit of every fingerprint ever seen on
+      // an endpoint. One row per (endpoint, fingerprint): first observation
+      // inserts; re-observation refreshes lastSeenAt only. This is what lets the
+      // Certificates page show "which key was used when" and makes a changed key
+      // auditable even after it is accepted or rolled back.
+      for (const v of values) {
+        if (!v.fingerprint) continue;
+        await db.insert(schema.certificateHistory).values({
+          deviceId,
+          pluginId,
+          name: v.name,
+          type: v.type,
+          fingerprint: v.fingerprint,
+          commonName: v.commonName,
+          subject: v.subject,
+          issuer: v.issuer,
+          selfSigned: v.selfSigned,
+          notBefore: v.notBefore,
+          notAfter: v.notAfter,
+          keyAlgorithm: v.keyAlgorithm,
+          keySizeBits: v.keySizeBits,
+          curveName: v.curveName,
+          signatureAlgorithm: v.signatureAlgorithm,
+          firstSeenAt: collectedAt,
+          lastSeenAt: collectedAt,
+        }).onConflictDoUpdate({
+          target: [schema.certificateHistory.deviceId, schema.certificateHistory.pluginId, schema.certificateHistory.name, schema.certificateHistory.fingerprint],
+          set: {
+            commonName: sql`excluded."commonName"`,
+            subject: sql`excluded.subject`,
+            issuer: sql`excluded.issuer`,
+            selfSigned: sql`excluded."selfSigned"`,
+            notBefore: sql`excluded."notBefore"`,
+            notAfter: sql`excluded."notAfter"`,
+            keyAlgorithm: sql`excluded."keyAlgorithm"`,
+            keySizeBits: sql`excluded."keySizeBits"`,
+            curveName: sql`excluded."curveName"`,
+            signatureAlgorithm: sql`excluded."signatureAlgorithm"`,
+            lastSeenAt: sql`excluded."lastSeenAt"`,
+          },
+        });
+      }
+
+      // Fingerprint CHANGE DETECTION — the observed key differs from the TRUSTED
+      // one (a re-key OR a possible MITM). Critical notification with a stable
+      // dedupe key; it stays live while the mismatch persists and auto-resolves
+      // once the user accepts the new key (or the old key returns).
+      try {
+        const deviceRow = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+        const deviceName = deviceRow?.name ?? null;
+        for (const v of values) {
+          if (!v.fingerprint || !v.trustedFingerprint) continue;
+          if (v.fingerprint === v.trustedFingerprint) continue; // in sync — nothing to flag
+          await emitNotification({
+            severity: 'critical',
+            source: 'device',
+            title: `Certificate changed on ${deviceName ?? deviceId}`,
+            message: `${v.commonName || v.name} (${v.name}) now presents a DIFFERENT key than UNM has trusted. ` +
+              `Expected ${v.trustedFingerprint}, observed ${v.fingerprint}. Strict pinning refuses connections to this endpoint until the new key is accepted on the Certificates page.`,
+            dedupeKey: `cert-change:${deviceId}:${v.name}`,
+            deviceId,
+            pluginId,
+            context: { certName: v.name, type: v.type, expectedFingerprint: v.trustedFingerprint, observedFingerprint: v.fingerprint },
+          });
+        }
+      } catch {
+        // best-effort — never break the poll cycle over notifications.
       }
 
       // Mirror expiry/invalidity into the notification center (best-effort — a

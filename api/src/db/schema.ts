@@ -632,6 +632,12 @@ export const certificates = pgTable(
     port: integer('port'),
     // SHA-256 fingerprint of the leaf cert / SSH host key ("SHA256:<base64>").
     fingerprint: text('fingerprint'),
+    // The TRUSTED (pinned) fingerprint — what plugins verify against before
+    // transmitting credentials. Seeded from `fingerprint` on first observation
+    // (TOFU) and changed ONLY by explicit user acceptance (POST /certificates/accept).
+    // A row where fingerprint !== trustedFingerprint is a live mismatch: strict
+    // pinning refuses the connection until the new key is accepted or rolled back.
+    trustedFingerprint: text('trustedFingerprint'),
     // Subject Common Name (ssh rows carry a synthetic label like "SSH Host Key").
     commonName: text('commonName').notNull().default(''),
     subject: text('subject').notNull().default(''),
@@ -666,6 +672,51 @@ export const certificates = pgTable(
         columns: [table.deviceId, table.pluginId, table.name],
       }),
       idxCertificatesDevice: index('idx_certificates_device').on(table.deviceId),
+    };
+  }
+);
+
+/**
+ * Append-only history of certificate endpoints — one row per DISTINCT
+ * fingerprint observed on an endpoint. The telemetry worker inserts a row when
+ * an endpoint's fingerprint CHANGES (or first appears), so the Certificates page
+ * can show "which key was used when" and users can audit re-keying events.
+ * Identity is (deviceId, pluginId, name, fingerprint) — re-observing the same
+ * key only refreshes `lastSeenAt`; a new key adds a row (the old one stays).
+ */
+export const certificateHistory = pgTable(
+  'certificate_history',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Stable endpoint identity on the device, e.g. "https:443", "ssh:22". Part of PK.
+    name: text('name').notNull(),
+    // https | ssh — normalized to lowercase at ingest.
+    type: text('type').notNull().default('https'),
+    // SHA-256 fingerprint ("SHA256:<base64>"). Part of the PK — one row per key.
+    fingerprint: text('fingerprint').notNull(),
+    commonName: text('commonName').notNull().default(''),
+    subject: text('subject').notNull().default(''),
+    issuer: text('issuer').notNull().default(''),
+    selfSigned: boolean('selfSigned').notNull().default(false),
+    notBefore: text('notBefore').notNull().default(''),
+    notAfter: text('notAfter').notNull().default(''),
+    keyAlgorithm: text('keyAlgorithm').notNull().default(''),
+    keySizeBits: integer('keySizeBits'),
+    curveName: text('curveName'),
+    signatureAlgorithm: text('signatureAlgorithm').notNull().default(''),
+    // First time this fingerprint was observed on the endpoint.
+    firstSeenAt: text('firstSeenAt').notNull(),
+    // Last time it was still the current key (refreshed while unchanged).
+    lastSeenAt: text('lastSeenAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkCertificateHistory: primaryKey({
+        name: 'certificate_history_pkey',
+        columns: [table.deviceId, table.pluginId, table.name, table.fingerprint],
+      }),
+      idxCertHistoryDevice: index('idx_certificate_history_device').on(table.deviceId),
     };
   }
 );
