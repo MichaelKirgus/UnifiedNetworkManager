@@ -3,11 +3,16 @@ import fs from 'fs';
 import {
   Health,
   PluginOptionDescriptor,
+  SshCredentials,
   clampInt,
   createPluginLogger,
   createPluginServer,
+  createTerminalPool,
   errorDescriptor,
+  hostFromAddress,
+  makeConsoleUpgrade,
   modelFirmwareDescriptors,
+  pickString,
   readSettings,
   resolvePluginIdentity,
 } from '@unm/plugin-sdk';
@@ -35,7 +40,9 @@ const identity = resolvePluginIdentity({
   // same as mikrotik-swos).
   version: '0.1.0',
   vendors: ['mikrotik'],
-  capabilities: ['monitoring', 'inventory'],
+  // monitoring + inventory over the REST API, plus an interactive SSH console
+  // ('sshConsole') — RouterOS exposes a full CLI shell over SSH (port 22).
+  capabilities: ['monitoring', 'inventory', 'sshConsole'],
 });
 
 /**
@@ -95,16 +102,81 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 // built (dist/src/) runs — resolve whichever contains the icons dir.
 const ICONS_DIR = [path.join(__dirname, '../icons'), path.join(__dirname, '../../icons')].find((p) => fs.existsSync(p)) ?? path.join(__dirname, '../../icons');
 
+// --- Interactive SSH console (capability 'sshConsole') -------------------------
+// RouterOS exposes a full interactive CLI over SSH (port 22). The webapp's
+// DeviceDetail page renders a generic "Shell" button for any plugin advertising
+// 'sshConsole'; the API proxies the browser's xterm.js to our /console WebSocket,
+// which opens a PTY. Unlike LCOS/LX, RouterOS uses ONE credential set for both the
+// REST API and the SSH console — so the primary username/password secret doubles as
+// the SSH login (no extra binding needed). An optional `ssh` slot can override it
+// with a dedicated user or an ed25519/rsa key. A local resolver is used instead of
+// the SDK's because RouterOS default admin often has an EMPTY password, which the
+// SDK's username+password check would reject.
+function resolveRouterOsSsh(creds?: Record<string, unknown> | null): SshCredentials | undefined {
+  if (!creds || typeof creds !== 'object') return undefined;
+  const slots = (creds['slots'] ?? {}) as Record<string, Record<string, string>>;
+  // A bound ssh slot wins — it may carry a key or a dedicated user.
+  const slot = slots['ssh'];
+  if (slot && typeof slot === 'object') {
+    const privateKey = pickString(slot, ['privateKey']);
+    if (privateKey) {
+      return { username: pickString(slot, ['username']) ?? 'admin', privateKey, ...(pickString(slot, ['passphrase']) ? { passphrase: pickString(slot, ['passphrase']) } : {}) };
+    }
+    const slotUser = pickString(slot, ['username']);
+    if (slotUser) return { username: slotUser, password: pickString(slot, ['password']) ?? '' };
+  }
+  // Fallback: the primary username/password secret IS the SSH login. An empty
+  // password is legitimate on RouterOS (default admin has none).
+  const username = pickString(creds, ['username']);
+  if (!username) return undefined;
+  return { username, password: pickString(creds, ['password']) ?? '' };
+}
+
+const termPool = createTerminalPool();
+process.on('SIGTERM', () => termPool.closeAll());
+process.on('SIGINT', () => termPool.closeAll());
+
+const consoleUpgrade = makeConsoleUpgrade({
+  expectedApiKey: () => process.env.PLUGIN_API_KEY ?? null,
+  path: '/console',
+  onOpen: async (hello) => {
+    const host = hostFromAddress(hello.managementAddress);
+    if (!host) throw new Error('Missing management address');
+    const creds = resolveRouterOsSsh(hello.credentials as Record<string, unknown> | undefined);
+    if (!creds) {
+      throw new Error('No usable SSH credential — the primary username/password secret (or a bound "ssh" slot) is required.');
+    }
+    const conn = await termPool.get(host, 22, creds, {
+      onHostKey: (fp) => console.warn(`[mikrotik-routeros-plugin] observed host key for ${host}:22 → ${fp} (pin it in the device's SSH settings to enforce strict verification)`),
+    });
+    return conn.openShell(creds); // a plain RouterOS login shell, like PuTTY
+  },
+});
+
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
   identity,
   logTag: 'mikrotik-routeros-plugin',
+  // Interactive SSH console (capability 'sshConsole') — WS upgrades for /console.
+  wsUpgrade: consoleUpgrade,
   iconsDir: ICONS_DIR,
   discovery: {
     // Credentials come from the existing 'usernamePassword' secret type — RouterOS
     // REST uses HTTP Basic authentication with a console username/password pair.
     requiredSecretType: 'usernamePassword',
+    // Optional dedicated SSH credential. When unbound, the primary username/password
+    // secret is reused for the interactive shell (RouterOS shares one login across
+    // REST + SSH). Bind here to use a separate user or an ed25519/rsa key.
+    credentialSlots: [
+      {
+        name: 'ssh',
+        secretTypes: ['usernamePassword', 'sshKeyPair'],
+        required: false,
+        description:
+          "Optional dedicated SSH access (port 22) for the interactive web console. Leave unbound to reuse the primary username/password login; bind a usernamePassword or sshKeyPair secret here to use a separate user or key.",
+      },
+    ],
     options: PLUGIN_OPTIONS,
     iconUrl: '/icons/routeros.svg',
     deviceModels: DEVICE_MODELS,

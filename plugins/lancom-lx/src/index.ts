@@ -6,12 +6,15 @@ import {
   clampInt,
   createPluginLogger,
   createPluginServer,
+  createTerminalPool,
   errorDescriptor,
   hostFromAddress,
   INVENTORY_INTERVAL_MS,
+  makeConsoleUpgrade,
   modelFirmwareDescriptors,
   readSettings,
   resolvePluginIdentity,
+  resolveSshCredentials,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 import { LcosOptions, getLcosInventory, walkLcosCounters } from './lcosClient';
@@ -36,7 +39,9 @@ const identity = resolvePluginIdentity({
   // objects; actions require a separate transport (future phase).
   version: '0.1.0',
   vendors: ['lancom'],
-  capabilities: ['monitoring', 'inventory'],
+  // monitoring + inventory over the LCOS-LX MIB, plus an interactive SSH console
+  // ('sshConsole') — LX access points expose a CLI shell over SSH (port 22).
+  capabilities: ['monitoring', 'inventory', 'sshConsole'],
 });
 
 /**
@@ -93,17 +98,53 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
   },
 ];
 
+// --- Interactive SSH console (capability 'sshConsole') -------------------------
+// LX access points expose a CLI over SSH (port 22). The webapp's DeviceDetail page
+// renders a generic "Shell" button for any plugin advertising 'sshConsole'; the API
+// proxies the browser's xterm.js to our /console WebSocket, which opens a PTY on the
+// bound `ssh` credential slot. LX's PRIMARY secret is SNMP (a community string cannot
+// log into a shell), so an explicit ssh slot MUST be bound — hence slotOnly. Unlike
+// LCOS routers, LX only supports username/password SSH login (no public keys).
+const termPool = createTerminalPool();
+process.on('SIGTERM', () => termPool.closeAll());
+process.on('SIGINT', () => termPool.closeAll());
+
+const consoleUpgrade = makeConsoleUpgrade({
+  expectedApiKey: () => process.env.PLUGIN_API_KEY ?? null,
+  path: '/console',
+  onOpen: async (hello) => {
+    const host = hostFromAddress(hello.managementAddress);
+    if (!host) throw new Error('Missing management address');
+    // Only the bound ssh slot counts — the primary SNMP secret must NOT be reused.
+    const creds = resolveSshCredentials(hello.credentials as Record<string, unknown> | undefined, { slotOnly: true });
+    if (!creds) {
+      throw new Error('No SSH credential bound — bind a usernamePassword secret to the assignment\'s "ssh" slot (LX does not support public keys).');
+    }
+    const conn = await termPool.get(host, 22, creds, {
+      onHostKey: (fp) => console.warn(`[lancom-lx-plugin] observed host key for ${host}:22 → ${fp} (pin it in the device's SSH settings to enforce strict verification)`),
+    });
+    return conn.openShell(creds); // a plain LX login shell, like PuTTY
+  },
+});
+
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
   identity,
   logTag: 'lancom-lx-plugin',
+  // Interactive SSH console (capability 'sshConsole') — WS upgrades for /console.
+  wsUpgrade: consoleUpgrade,
   // Static icon assets (plugin + per-model icons), advertised in /discover and
   // fetched by the API's icon proxy. dist/src/../../icons = <plugin root>/icons.
   iconsDir: path.join(__dirname, '../../icons'),
   discovery: {
     // Credentials come from the existing 'snmp' secret type (version + community for v1/v2c, USM fields for v3).
     requiredSecretType: 'snmp',
+    // Optional SSH login for the interactive web console. LX only supports
+    // username/password over SSH — no public keys.
+    credentialSlots: [
+      { name: 'ssh', secretType: 'usernamePassword', required: false, description: 'SSH login (port 22) for the interactive web console — username/password only' },
+    ],
     metrics: DISCOVER_METRICS,
     options: PLUGIN_OPTIONS,
     // Icon + supported device model catalog — drives the webapp's Model/Firmware

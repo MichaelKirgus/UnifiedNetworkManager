@@ -6,12 +6,15 @@ import {
   clampInt,
   createPluginLogger,
   createPluginServer,
+  createTerminalPool,
   errorDescriptor,
   hostFromAddress,
   INVENTORY_INTERVAL_MS,
+  makeConsoleUpgrade,
   modelFirmwareDescriptors,
   readSettings,
   resolvePluginIdentity,
+  resolveSshCredentials,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 import { LcosOptions, getLcosInventory, walkLcosCounters } from './lcosClient';
@@ -39,8 +42,9 @@ const identity = resolvePluginIdentity({
   version: '0.1.0',
   vendors: ['lancom'],
   // All four capabilities: monitoring (SNMP walks), inventory (networks/hosts),
-  // configuration (SNMP SET actions) + planning (multi-device fan-out).
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning'],
+  // configuration (SNMP SET actions) + planning (multi-device fan-out). Plus an
+  // interactive SSH console ('sshConsole') — LCOS exposes a full CLI over SSH.
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'sshConsole'],
 });
 
 /**
@@ -104,6 +108,34 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
   },
 ];
 
+// --- Interactive SSH console (capability 'sshConsole') -------------------------
+// LCOS exposes a full interactive CLI over SSH (port 22). The webapp's DeviceDetail
+// page renders a generic "Shell" button for any plugin advertising 'sshConsole'; the
+// API proxies the browser's xterm.js to our /console WebSocket, which opens a PTY on
+// the bound `ssh` credential slot. LCOS's PRIMARY secret is SNMP (a community string
+// cannot log into a shell), so an explicit ssh slot MUST be bound — hence slotOnly.
+const termPool = createTerminalPool();
+process.on('SIGTERM', () => termPool.closeAll());
+process.on('SIGINT', () => termPool.closeAll());
+
+const consoleUpgrade = makeConsoleUpgrade({
+  expectedApiKey: () => process.env.PLUGIN_API_KEY ?? null,
+  path: '/console',
+  onOpen: async (hello) => {
+    const host = hostFromAddress(hello.managementAddress);
+    if (!host) throw new Error('Missing management address');
+    // Only the bound ssh slot counts — the primary SNMP secret must NOT be reused.
+    const creds = resolveSshCredentials(hello.credentials as Record<string, unknown> | undefined, { slotOnly: true });
+    if (!creds) {
+      throw new Error('No SSH credential bound — bind a usernamePassword or sshKeyPair secret to the assignment\'s "ssh" slot.');
+    }
+    const conn = await termPool.get(host, 22, creds, {
+      onHostKey: (fp) => console.warn(`[lancom-lcos-plugin] observed host key for ${host}:22 → ${fp} (pin it in the device's SSH settings to enforce strict verification)`),
+    });
+    return conn.openShell(creds); // a plain LCOS login shell, like PuTTY
+  },
+});
+
 // Pre-wired app: cors + json (32mb — plan-step inputs can carry a substituted
 // ${steps[N].result.details.backupBase64} token) + /healthz + /discover (+ static
 // icons, mDNS on listen) come from @unm/plugin-sdk — this file only registers
@@ -111,6 +143,8 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 const server = createPluginServer({
   identity,
   logTag: 'lancom-lcos-plugin',
+  // Interactive SSH console (capability 'sshConsole') — WS upgrades for /console.
+  wsUpgrade: consoleUpgrade,
   jsonLimit: '32mb',
   // Static icon assets, advertised in /discover and fetched by the API's icon proxy.
   iconsDir: path.join(__dirname, '../../icons'),
@@ -122,6 +156,13 @@ const server = createPluginServer({
     // system was designed for — one device, two distinct credentials (SNMP primary + web UI).
     credentialSlots: [
       { name: 'web', secretType: 'usernamePassword', required: false, description: 'Web-UI login for config backup/restore' },
+      {
+        name: 'ssh',
+        secretTypes: ['usernamePassword', 'sshKeyPair'],
+        required: false,
+        description:
+          "Optional SSH access (port 22) for the interactive web console — a full LCOS CLI shell, like PuTTY. The primary SNMP credential cannot log into a shell, so bind a usernamePassword or sshKeyPair secret here to enable the Shell button on the device page.",
+      },
     ],
     metrics: DISCOVER_METRICS,
     options: PLUGIN_OPTIONS,
