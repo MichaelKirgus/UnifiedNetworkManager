@@ -2819,6 +2819,50 @@ paths:
         '401':
           description: Authentication required
 
+  /certificates:
+    get:
+      tags: [Inventory]
+      summary: List all certificate endpoints across devices
+      description: >-
+        Cross-device view of the normalized `certificates` inventory table, populated
+        by the telemetry worker from each plugin's /monitoring metrics. One row per
+        endpoint on one device — the management HTTPS certificate (type https) and/or
+        the SSH host key presented on port 22 (type ssh). Rows carry issuer,
+        validity window, key algorithm/size, SAN names and a real chain-validation
+        verdict (an expired ISSUER invalidates the row even when the leaf is still
+        nominally valid). Rows not refreshed within 24h are swept away.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: type
+          required: false
+          schema:
+            type: string
+            enum: [https, ssh]
+          description: Filter by endpoint kind (TLS cert vs. SSH host key)
+      responses:
+        '200':
+          description: Certificate rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CertificateRow'
+        '400':
+          description: Invalid type filter value
+        '401':
+          description: Authentication required
+
   /routes:
     get:
       tags: [Inventory]
@@ -5068,6 +5112,69 @@ components:
           additionalProperties: true
           description: "Type-specific extras (ikeType, cryptAlg, mode, allowedIPs, ...)"
         collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this tunnel" }
+
+    CertificateRow:
+      type: object
+      required: [deviceId, pluginId, name, type, host, commonName, subject, issuer, selfSigned, notBefore, notAfter, keyAlgorithm, signatureAlgorithm, sanNames, serialNumber, chain, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this endpoint belongs to" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this endpoint" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        name: { type: string, description: "Stable endpoint identity on the device (e.g. https:443, ssh:22)" }
+        type:
+          type: string
+          enum: [https, ssh]
+          description: "What kind of credential material is presented — TLS certificate vs. SSH host key"
+        host: { type: string, description: "Hostname/IP probed (the management address); '' = unknown" }
+        port: { type: [integer, 'null'], description: "Port probed (443 for https, 22 for ssh)" }
+        fingerprint: { type: [string, 'null'], description: "SHA-256 fingerprint of the leaf cert / SSH host key (OpenSSH-style SHA256:<base64>)" }
+        commonName: { type: string, description: "Subject Common Name; ssh rows carry a synthetic label like 'SSH Host Key'" }
+        subject: { type: string, description: "Full subject distinguished name" }
+        issuer: { type: string, description: "Issuer distinguished name" }
+        selfSigned: { type: boolean, description: "True when issuer === subject (self-signed)" }
+        notBefore: { type: string, format: date-time, description: "Validity start; empty for ssh host keys" }
+        notAfter: { type: string, format: date-time, description: "Expiry; empty for ssh host keys" }
+        keyAlgorithm: { type: string, description: "Public key algorithm (RSA, ECDSA, ED25519, ...)" }
+        keySizeBits: { type: [integer, 'null'], description: "Key size in bits (RSA modulus); null for EC/Ed keys" }
+        curveName: { type: [string, 'null'], description: "Elliptic curve name for EC keys; null otherwise" }
+        signatureAlgorithm: { type: string, description: "Signature algorithm (friendly name when known)" }
+        sanNames:
+          type: array
+          items: { type: string }
+          description: "SAN DNS names + IPs as reported by the certificate; empty for ssh rows"
+        serialNumber: { type: string, description: "Serial number (hex); empty for ssh rows" }
+        valid: { type: [boolean, 'null'], description: "Chain-validation verdict — every cert in the served chain inside its validity window AND signatures verify. Null when no cert could be read." }
+        invalidReason: { type: [string, 'null'], description: "Human-readable reason when valid === false (e.g. expired issuer), else null" }
+        daysToExpiry: { type: [integer, 'null'], description: "Days until the LEAF expires (negative = already expired); null when n/a" }
+        chainDaysToExpiry: { type: [integer, 'null'], description: "Days until the EARLIEST chain element expires — an issuer expiring before its leaf is a real break; null when n/a" }
+        chain:
+          type: array
+          items:
+            $ref: '#/components/schemas/CertificateInfo'
+          description: "Full served chain (leaf first) for issuer validation"
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this endpoint" }
+
+    CertificateInfo:
+      type: object
+      required: [commonName, subject, issuer, selfSigned, notBefore, notAfter, keyAlgorithm, signatureAlgorithm, sanNames, serialNumber]
+      properties:
+        commonName: { type: string }
+        subject: { type: string }
+        issuer: { type: string }
+        selfSigned: { type: boolean }
+        notBefore: { type: string, format: date-time }
+        notAfter: { type: string, format: date-time }
+        keyAlgorithm: { type: string }
+        keySizeBits: { type: [integer, 'null'] }
+        curveName: { type: [string, 'null'] }
+        signatureAlgorithm: { type: string }
+        sanNames:
+          type: array
+          items: { type: string }
+        serialNumber: { type: string }
 
     RouteRow:
       type: object

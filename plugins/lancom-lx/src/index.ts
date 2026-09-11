@@ -15,6 +15,10 @@ import {
   readSettings,
   resolvePluginIdentity,
   resolveSshCredentials,
+  TtlCache,
+  collectDeviceCertificates,
+  parseProbeTarget,
+  CertificateRow,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 import { LcosOptions, getLcosInventory, walkLcosCounters } from './lcosClient';
@@ -97,6 +101,12 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
       'Ship structured log entries (SNMP walk failures) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
   },
 ];
+
+// --- Certificates (capability: cross-device Certificates page) -----------------
+// Certificate rows are probed on a slower cadence than the inventory walk — they
+// change rarely and each probe opens fresh TLS/SSH connections to the device.
+const CERT_TTL_MS = 10 * 60_000;
+const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray(v) });
 
 // --- Interactive SSH console (capability 'sshConsole') -------------------------
 // LX access points expose a CLI over SSH (port 22). The webapp's DeviceDetail page
@@ -498,6 +508,30 @@ app.post('/monitoring', async (req, res) => {
       signalDbm: n.signalDbm,
     }));
     if (emitInventory && wifiNeighbors.length > 0) metrics['wifiNeighbors'] = wifiNeighbors;
+
+    // --- Certificates (normalized for the cross-device Certificates page) ----
+    // Management HTTPS cert + SSH host key on port 22. Both probes are
+    // credential-free and best-effort; a failure simply contributes no row.
+    if (emitInventory) {
+      const cachedCerts = certCache.get(host, CERT_TTL_MS) ?? null;
+      let certRows: CertificateRow[] | null = cachedCerts;
+      if (!certRows) {
+        // LX APs default to an HTTPS management UI — probe TLS on 443 (no row is
+        // contributed when the box is HTTP-only) plus the SSH host key on port 22.
+        const target = parseProbeTarget(managementAddress, 443);
+        certRows = target
+          ? await collectDeviceCertificates({
+              host: target.host,
+              httpsPort: target.port,
+              servername: target.host,
+              sshEnabled: true,
+              timeoutMs: 5_000,
+            })
+          : [];
+        certCache.set(host, certRows);
+      }
+      if (certRows.length > 0) metrics['certificates'] = certRows;
+    }
 
     // --- Health -------------------------------------------------------------
     let health: Health = 'ok';

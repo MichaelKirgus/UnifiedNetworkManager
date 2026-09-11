@@ -1,6 +1,7 @@
 import { TunnelRow } from './tunnels';
 import { RouteRow } from './routes';
 import { FirewallRuleRow } from './firewall';
+import type { CertificateRow } from '@unm/plugin-sdk';
 
 /**
  * The cached inventory snapshot for one appliance (see getInventory in index.ts).
@@ -32,4 +33,7 @@ export interface InventorySnapshot {
    * Empty arrays = appliance has no ZFS/USB storage endpoints (404). */
   filesystems: Record<string, unknown>[];
   disks: Record<string, unknown>[];
+  /** Certificate endpoints (management HTTPS cert + SSH host key) for the
+   * Certificates page. [] = nothing readable this cycle (e.g. plain-http UI). */
+  certificates: CertificateRow[];
 }

@@ -22,6 +22,7 @@ import {
   Shield,
   ShieldHalf,
   ShieldCheck,
+  FileKey2,
   Settings2,
   UserRound,
   Users as UsersIcon,
@@ -55,6 +56,8 @@ export const NAV_ITEMS: NavItem[] = [
   // Firewall rules across devices (filter + NAT kinds) — ShieldHalf reads as a
   // protective barrier and is distinct from the Roles (Shield) entry.
   { to: '/firewall', label: 'Firewall', icon: ShieldHalf, requiresPermission: 'firewall:read' },
+  // TLS certs + SSH host keys across devices (expiry/chain validation).
+  { to: '/certificates', label: 'Certificates', icon: FileKey2, requiresPermission: 'certificates:read' },
   // Waypoints — Route is already used by the Plans item.
   { to: '/routes', label: 'Routes', icon: Waypoints, requiresPermission: 'routes:read' },
   // Structured log entries shipped by plugins (gated — logs can carry critical details).

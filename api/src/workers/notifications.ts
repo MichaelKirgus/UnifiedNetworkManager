@@ -1,7 +1,7 @@
 import { initWorker, trackBeat } from './stats';
 import { LEADER_KEYS } from './leader';
 import { getEffectiveSettingValue } from '../systemSettings';
-import { autoResolveStaleDeviceNotifications, pruneOldNotifications } from '../notifications';
+import { autoResolveStaleCertificateNotifications, autoResolveStaleDeviceNotifications, pruneOldNotifications } from '../notifications';
 
 /**
  * Notifications worker (leader-gated).
@@ -38,7 +38,16 @@ export function startNotificationsWorker(): () => void {
         console.log(`[notifications] auto-resolved ${resolved} stale device notification(s)`);
       }
 
-      // 2. Retention sweep for terminal rows.
+      // 2. Auto-resolve certificate expiry/invalidity conditions that cleared
+      //    (renewed cert now valid + past the warn window, or endpoint removed).
+      const warnDays = Number(await getEffectiveSettingValue('certExpiryWarnDays')) || 30;
+      const resolvedCerts = await autoResolveStaleCertificateNotifications(warnDays);
+      if (resolvedCerts > 0) {
+        // eslint-disable-next-line no-console
+        console.log(`[notifications] auto-resolved ${resolvedCerts} stale certificate notification(s)`);
+      }
+
+      // 3. Retention sweep for terminal rows.
       const retentionDays = Number(await getEffectiveSettingValue('notificationRetentionDays')) || 30;
       const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
       const pruned = await pruneOldNotifications(cutoff);

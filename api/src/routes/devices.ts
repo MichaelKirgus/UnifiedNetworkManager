@@ -777,6 +777,7 @@ router.delete('/devices/:deviceId', requireAuth, requirePermission('devices:writ
     await db.delete(schema.containers).where(eq(schema.containers.deviceId, deviceId));
     await db.delete(schema.dockerImages).where(eq(schema.dockerImages.deviceId, deviceId));
     await db.delete(schema.vms).where(eq(schema.vms.deviceId, deviceId));
+    await db.delete(schema.certificates).where(eq(schema.certificates.deviceId, deviceId));
     await db.delete(schema.storageFilesystems).where(eq(schema.storageFilesystems.deviceId, deviceId));
     await db.delete(schema.storageDisks).where(eq(schema.storageDisks.deviceId, deviceId));
     await db.delete(schema.deviceIps).where(eq(schema.deviceIps.deviceId, deviceId));

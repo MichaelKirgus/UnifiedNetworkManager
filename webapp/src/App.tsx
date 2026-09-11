@@ -15,6 +15,7 @@ import Networks from './pages/Networks';
 import Hosts from './pages/Hosts';
 import Tunnels from './pages/Tunnels';
 import Firewall from './pages/Firewall';
+import Certificates from './pages/Certificates';
 import RoutesPage from './pages/Routes';
 import Logs from './pages/Logs';
 import Notifications from './pages/Notifications';
@@ -46,6 +47,7 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
   { path: '/hosts', permission: 'hosts:read' },
   { path: '/tunnels', permission: 'tunnels:read' },
   { path: '/firewall', permission: 'firewall:read' },
+  { path: '/certificates', permission: 'certificates:read' },
   { path: '/routes', permission: 'routes:read' },
   { path: '/logs', permission: 'logs:read' },
   // Notification center — full history + filters (the bell is visible to everyone
@@ -107,6 +109,7 @@ export default function App() {
       <Route path="/hosts" element={<Page permission="hosts:read"><Hosts /></Page>} />
       <Route path="/tunnels" element={<Page permission="tunnels:read"><Tunnels /></Page>} />
       <Route path="/firewall" element={<Page permission="firewall:read"><Firewall /></Page>} />
+      <Route path="/certificates" element={<Page permission="certificates:read"><Certificates /></Page>} />
       <Route path="/routes" element={<Page permission="routes:read"><RoutesPage /></Page>} />
       <Route path="/logs" element={<Page permission="logs:read"><Logs /></Page>} />
       {/* Notification center — full history with filters + visibility settings. */}

@@ -667,6 +667,87 @@ router.get('/tunnels', requireAuth, requirePermission('tunnels:read'), async (_r
   }
 });
 
+// GET /certificates - All certificate endpoints across devices (Certificates page).
+// Query params: deviceId (exact), siteId (filter by device's site),
+// type ('https'|'ssh'). One row per endpoint on a device — the management HTTPS
+// cert and/or the SSH host key. No cross-device merge needed (a row is already one
+// logical endpoint on one device). `sanNames`/`chain` are returned as parsed arrays.
+router.get('/certificates', requireAuth, requirePermission('certificates:read'), async (_req, res: Response) => {
+  try {
+    const { deviceId, siteId, type } = _req.query as Record<string, string | undefined>;
+
+    if (type && !['https', 'ssh'].includes(type)) {
+      res.status(400).json({ error: '"type" must be one of: https, ssh' });
+      return;
+    }
+
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json([]);
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json([]);
+      return;
+    }
+
+    let where;
+    const typeClause = type ? eq(schema.certificates.type, type) : undefined;
+    if (deviceId && siteId) {
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) {
+        res.status(200).json([]);
+        return;
+      }
+      where = typeClause ? and(eq(schema.certificates.deviceId, deviceId), typeClause) : eq(schema.certificates.deviceId, deviceId);
+    } else if (deviceId) {
+      where = typeClause ? and(eq(schema.certificates.deviceId, deviceId), typeClause) : eq(schema.certificates.deviceId, deviceId);
+    } else if (siteId) {
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
+      if (deviceIds.length === 0) {
+        res.status(200).json([]);
+        return;
+      }
+      const deviceClause = inArray(schema.certificates.deviceId, deviceIds);
+      where = typeClause ? and(deviceClause, typeClause) : deviceClause;
+    } else if (typeClause) {
+      where = allowed !== null ? and(typeClause, inArray(schema.certificates.deviceId, [...allowed])) : typeClause;
+    } else if (allowed !== null) {
+      where = inArray(schema.certificates.deviceId, [...allowed]);
+    }
+
+    const rows = await db.query.certificates.findMany({
+      ...(where ? { where } : {}),
+      orderBy: [asc(schema.certificates.deviceId), asc(schema.certificates.type), asc(schema.certificates.name)],
+    });
+
+    const [deviceViews, pluginNames] = await Promise.all([
+      loadDeviceViews(Array.from(new Set(rows.map((r) => r.deviceId)))),
+      loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId)))),
+    ]);
+
+    res.status(200).json(
+      rows.map((r) => {
+        const device = deviceViews.get(r.deviceId);
+        return {
+          ...r,
+          sanNames: safeParseJson<string[]>(r.sanNames),
+          chain: safeParseJson<Record<string, unknown>[]>(r.chain),
+          deviceName: device?.name ?? null,
+          managementAddress: device?.managementAddress ?? null,
+          siteName: device?.siteName ?? null,
+          pluginName: pluginNames.get(r.pluginId) ?? null,
+        };
+      })
+    );
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 // GET /routes - All route entries across devices (Routes page).
 // Query params: deviceId (exact), siteId (filter by device's site),
 // protocol ('static'|'connected'|'ospf'|'bgp'|'rip'|'other').

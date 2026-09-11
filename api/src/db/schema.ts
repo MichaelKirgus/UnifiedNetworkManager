@@ -610,6 +610,66 @@ export const firewallRules = pgTable(
   }
 );
 
+// One row per certificate endpoint on one device, as reported by a plugin's
+// `certificates` metric. Powers the cross-device Certificates page with the same
+// upsert-per-poll + delete-on-absent + 24h-sweep lifecycle as tunnels/routes.
+// A device contributes an https row (the TLS cert served by its management
+// endpoint) and/or an ssh row (the SSH host key on port 22). `name` is the stable
+// identity ("https:443" / "ssh:22") so re-probes never churn rows. For ssh rows
+// the X.509 fields are synthetic (no issuer/expiry) — only fingerprint + key
+// algorithm/size are meaningful; `valid` reflects that a host key was read.
+export const certificates = pgTable(
+  'certificates',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Stable endpoint identity on the device, e.g. "https:443", "ssh:22". Part of PK.
+    name: text('name').notNull(),
+    // https | ssh — normalized to lowercase at ingest.
+    type: text('type').notNull().default('https'),
+    // Hostname/IP probed (the management address). '' = unknown.
+    host: text('host').notNull().default(''),
+    port: integer('port'),
+    // SHA-256 fingerprint of the leaf cert / SSH host key ("SHA256:<base64>").
+    fingerprint: text('fingerprint'),
+    // Subject Common Name (ssh rows carry a synthetic label like "SSH Host Key").
+    commonName: text('commonName').notNull().default(''),
+    subject: text('subject').notNull().default(''),
+    issuer: text('issuer').notNull().default(''),
+    selfSigned: boolean('selfSigned').notNull().default(false),
+    // Validity window (ISO). Empty for ssh host keys.
+    notBefore: text('notBefore').notNull().default(''),
+    notAfter: text('notAfter').notNull().default(''),
+    keyAlgorithm: text('keyAlgorithm').notNull().default(''),
+    keySizeBits: integer('keySizeBits'),
+    curveName: text('curveName'),
+    signatureAlgorithm: text('signatureAlgorithm').notNull().default(''),
+    // SAN DNS names + IPs (JSON array). Empty for ssh rows.
+    sanNames: text('sanNames').notNull().default('[]'),
+    serialNumber: text('serialNumber').notNull().default(''),
+    // Chain-validation verdict (null = unknown / not a cert, e.g. some ssh rows).
+    valid: boolean('valid'),
+    invalidReason: text('invalidReason'),
+    // Days until the LEAF expires (negative = expired); null when n/a.
+    daysToExpiry: integer('daysToExpiry'),
+    // Days until the EARLIEST chain element expires — an issuer expiring before
+    // its leaf is a real break even though the leaf itself is still valid.
+    chainDaysToExpiry: integer('chainDaysToExpiry'),
+    // Full served chain (leaf first) as JSON array of CertificateInfo objects.
+    chain: text('chain').notNull().default('[]'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkCertificates: primaryKey({
+        name: 'certificates_pkey',
+        columns: [table.deviceId, table.pluginId, table.name],
+      }),
+      idxCertificatesDevice: index('idx_certificates_device').on(table.deviceId),
+    };
+  }
+);
+
 // One row per SSID×band as reported by a plugin's `wifiNetworks` metric.
 // Powers the cross-device WiFi page (grouped by SSID name across devices).
 export const wifiSsids = pgTable(

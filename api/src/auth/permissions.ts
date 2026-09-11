@@ -30,6 +30,7 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'tunnels:read': 'View the Tunnels page (configured + live tunnel state)',
   'routes:read': 'View the Routes page (static and dynamic routes across devices)',
   'firewall:read': 'View the Firewall page (filter + NAT rules across devices)',
+  'certificates:read': 'View the Certificates page (TLS certs + SSH host keys across devices)',
   'wifi:read': 'View the WiFi page (SSIDs, spectrum and neighbors)',
   'storage:read': 'View the Storage page (filesystems, pools/datasets and physical disks across devices)',
   'containers:read': 'View the Containers page (Apps/container workloads across devices)',

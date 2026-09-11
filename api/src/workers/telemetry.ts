@@ -7,7 +7,7 @@ import { getSecret } from '../secretsProvider';
 import { getEffectiveSettings, settingsHeaders } from '../pluginSettings';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
-import { getSystemSettings, type SystemSettings } from '../systemSettings';
+import { getEffectiveSettingValue, getSystemSettings, type SystemSettings } from '../systemSettings';
 import {
   deviceStatusDedupeKey,
   emitNotification,
@@ -48,7 +48,7 @@ const INVENTORY_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 /** Metric keys that carry cross-device inventory (ingested into their own tables). */
 const INVENTORY_METRIC_KEYS = [
   'networks', 'arp', 'ndp', 'hosts', 'dhcpLeases', 'wlanClients', 'macTable', 'dockerHosts', 'vmHosts',
-  'tunnels', 'routes', 'firewallRules',
+  'tunnels', 'routes', 'firewallRules', 'certificates',
   'wifiNetworks', 'wifiAirtime', 'wifiRadios', 'wifiNeighbors',
   'ports', 'filesystems', 'disks', 'containers', 'images', 'vms',
 ] as const;
@@ -621,6 +621,156 @@ async function ingestInventory(
             or(...staleFw.map((k) => and(eq(schema.firewallRules.ruleType, k.ruleType), eq(schema.firewallRules.vendorRuleId, k.vendorRuleId))))
           )
         );
+      }
+    }
+
+    // --- certificates (management HTTPS cert + SSH host key) -----------------
+    // Same present-vs-absent contract as routes/firewallRules: a PRESENT-but-empty
+    // array is authoritative ("this device reports no certificate endpoints right
+    // now") so stale rows are wiped; an ABSENT key means "plugin doesn't report
+    // certificates" and must not touch the table (24h sweep still applies).
+    // Identity is `name` ("https:443"/"ssh:22") — one row per endpoint. After the
+    // upsert we mirror expiry/invalidity into the notification center so users get
+    // alerted when a cert expires or its chain fails validation (auto-resolved by
+    // the notifications worker once renewed).
+    const rawCertificates = Array.isArray(metrics['certificates']) ? (metrics['certificates'] as unknown[]) : null;
+    if (rawCertificates !== null) {
+      const values: {
+        deviceId: string; pluginId: string; name: string; type: string; host: string; port: number | null;
+        fingerprint: string | null; commonName: string; subject: string; issuer: string; selfSigned: boolean;
+        notBefore: string; notAfter: string; keyAlgorithm: string; keySizeBits: number | null; curveName: string | null;
+        signatureAlgorithm: string; sanNames: string; serialNumber: string; valid: boolean | null; invalidReason: string | null;
+        daysToExpiry: number | null; chainDaysToExpiry: number | null; chain: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawCertificates) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        if (!name) continue; // part of the conflict key
+        const type = typeof r['type'] === 'string' && (r['type'] as string).trim().toLowerCase() === 'ssh' ? 'ssh' : 'https';
+        const cert = (r['cert'] ?? null) as Record<string, unknown> | null;
+        const chainArr = Array.isArray(r['chain']) ? (r['chain'] as unknown[]) : [];
+        values.push({
+          deviceId,
+          pluginId,
+          name,
+          type,
+          host: typeof r['host'] === 'string' ? (r['host'] as string).trim() : '',
+          port: typeof r['port'] === 'number' && Number.isFinite(r['port']) ? Math.trunc(r['port']) : null,
+          fingerprint: typeof r['fingerprint'] === 'string' && (r['fingerprint'] as string).trim() !== '' ? (r['fingerprint'] as string).trim() : null,
+          commonName: cert && typeof cert['commonName'] === 'string' ? (cert['commonName'] as string) : '',
+          subject: cert && typeof cert['subject'] === 'string' ? (cert['subject'] as string) : '',
+          issuer: cert && typeof cert['issuer'] === 'string' ? (cert['issuer'] as string) : '',
+          selfSigned: !!(cert && cert['selfSigned'] === true),
+          notBefore: cert && typeof cert['notBefore'] === 'string' ? (cert['notBefore'] as string) : '',
+          notAfter: cert && typeof cert['notAfter'] === 'string' ? (cert['notAfter'] as string) : '',
+          keyAlgorithm: cert && typeof cert['keyAlgorithm'] === 'string' ? (cert['keyAlgorithm'] as string) : '',
+          keySizeBits: cert && typeof cert['keySizeBits'] === 'number' && Number.isFinite(cert['keySizeBits']) ? Math.trunc(cert['keySizeBits'] as number) : null,
+          curveName: cert && typeof cert['curveName'] === 'string' ? (cert['curveName'] as string) : null,
+          signatureAlgorithm: cert && typeof cert['signatureAlgorithm'] === 'string' ? (cert['signatureAlgorithm'] as string) : '',
+          sanNames: Array.isArray(cert?.['sanNames']) ? JSON.stringify(cert['sanNames']) : '[]',
+          serialNumber: cert && typeof cert['serialNumber'] === 'string' ? (cert['serialNumber'] as string) : '',
+          valid: typeof r['valid'] === 'boolean' ? r['valid'] : null,
+          invalidReason: typeof r['invalidReason'] === 'string' && (r['invalidReason'] as string).trim() !== '' ? (r['invalidReason'] as string).trim() : null,
+          daysToExpiry: typeof r['daysToExpiry'] === 'number' && Number.isFinite(r['daysToExpiry']) ? Math.trunc(r['daysToExpiry'] as number) : null,
+          chainDaysToExpiry: typeof r['chainDaysToExpiry'] === 'number' && Number.isFinite(r['chainDaysToExpiry']) ? Math.trunc(r['chainDaysToExpiry'] as number) : null,
+          chain: JSON.stringify(chainArr),
+          collectedAt,
+        });
+      }
+      const certByName = new Map<string, typeof values[number]>();
+      for (const v of values) certByName.set(`${v.deviceId}|${v.pluginId}|${v.name}`, v);
+      if (certByName.size > 0) {
+        await db.insert(schema.certificates).values(Array.from(certByName.values())).onConflictDoUpdate({
+          target: [schema.certificates.deviceId, schema.certificates.pluginId, schema.certificates.name],
+          set: {
+            type: sql`excluded.type`,
+            host: sql`excluded.host`,
+            port: sql`excluded.port`,
+            fingerprint: sql`excluded.fingerprint`,
+            commonName: sql`excluded."commonName"`,
+            subject: sql`excluded.subject`,
+            issuer: sql`excluded.issuer`,
+            selfSigned: sql`excluded."selfSigned"`,
+            notBefore: sql`excluded."notBefore"`,
+            notAfter: sql`excluded."notAfter"`,
+            keyAlgorithm: sql`excluded."keyAlgorithm"`,
+            keySizeBits: sql`excluded."keySizeBits"`,
+            curveName: sql`excluded."curveName"`,
+            signatureAlgorithm: sql`excluded."signatureAlgorithm"`,
+            sanNames: sql`excluded."sanNames"`,
+            serialNumber: sql`excluded."serialNumber"`,
+            valid: sql`excluded.valid`,
+            invalidReason: sql`excluded."invalidReason"`,
+            daysToExpiry: sql`excluded."daysToExpiry"`,
+            chainDaysToExpiry: sql`excluded."chainDaysToExpiry"`,
+            chain: sql`excluded.chain`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      // A cert endpoint removed on the device must vanish, not linger until sweep.
+      const existingCertNames = await db
+        .select({ name: schema.certificates.name })
+        .from(schema.certificates)
+        .where(and(eq(schema.certificates.deviceId, deviceId), eq(schema.certificates.pluginId, pluginId)));
+      const seenCertNames = new Set(values.map((v) => v.name));
+      const staleCerts = existingCertNames.filter((k) => !seenCertNames.has(k.name));
+      if (staleCerts.length > 0) {
+        await db.delete(schema.certificates).where(
+          and(
+            eq(schema.certificates.deviceId, deviceId),
+            eq(schema.certificates.pluginId, pluginId),
+            notInArray(schema.certificates.name, Array.from(seenCertNames))
+          )
+        );
+      }
+
+      // Mirror expiry/invalidity into the notification center (best-effort — a
+      // notification failure must never break the poll cycle). Expired or
+      // near-expiry certs and chain-invalid certs each carry a stable dedupe key;
+      // the notifications worker auto-resolves them once renewed.
+      try {
+        const deviceRow = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+        const deviceName = deviceRow?.name ?? null;
+        const warnDays = Number(await getEffectiveSettingValue('certExpiryWarnDays')) || 30;
+        for (const v of values) {
+          if (v.type !== 'https') continue; // ssh host keys have no expiry/chain
+          let severity: 'warning' | 'critical' | null = null;
+          let title = '';
+          let message = '';
+          const dn = v.commonName || v.name;
+          if (v.daysToExpiry !== null && v.daysToExpiry < 0) {
+            severity = 'critical';
+            title = `Certificate expired on ${deviceName ?? deviceId}`;
+            message = `${dn} (${v.name}) expired ${Math.abs(v.daysToExpiry)} day(s) ago.`;
+          } else if (v.chainDaysToExpiry !== null && v.chainDaysToExpiry < 0) {
+            severity = 'critical';
+            title = `Certificate issuer expired on ${deviceName ?? deviceId}`;
+            message = `${dn} (${v.name}) — an issuer in its chain is already expired.`;
+          } else if (v.daysToExpiry !== null && v.daysToExpiry <= warnDays) {
+            severity = 'warning';
+            title = `Certificate expiring soon on ${deviceName ?? deviceId}`;
+            message = `${dn} (${v.name}) expires in ${v.daysToExpiry} day(s).`;
+          } else if (v.valid === false && v.invalidReason) {
+            severity = 'critical';
+            title = `Invalid certificate chain on ${deviceName ?? deviceId}`;
+            message = `${dn} (${v.name}): ${v.invalidReason}`;
+          }
+          if (!severity) continue;
+          await emitNotification({
+            severity,
+            source: 'device',
+            title,
+            message,
+            dedupeKey: `cert-expiry:${deviceId}:${v.name}`,
+            deviceId,
+            pluginId,
+            context: { certName: v.name, type: v.type, commonName: v.commonName, daysToExpiry: v.daysToExpiry },
+          });
+        }
+      } catch {
+        // best-effort — never break the poll cycle over notifications.
       }
     }
 
@@ -1374,6 +1524,7 @@ async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
   await db.delete(schema.tunnels).where(lt(schema.tunnels.collectedAt, cutoff));
   await db.delete(schema.routes).where(lt(schema.routes.collectedAt, cutoff));
   await db.delete(schema.firewallRules).where(lt(schema.firewallRules.collectedAt, cutoff));
+  await db.delete(schema.certificates).where(lt(schema.certificates.collectedAt, cutoff));
   await db.delete(schema.wifiSsids).where(lt(schema.wifiSsids.collectedAt, cutoff));
   await db.delete(schema.wifiChannels).where(lt(schema.wifiChannels.collectedAt, cutoff));
   await db.delete(schema.wifiRadios).where(lt(schema.wifiRadios.collectedAt, cutoff));

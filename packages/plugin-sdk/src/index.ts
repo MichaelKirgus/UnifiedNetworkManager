@@ -40,4 +40,6 @@ export type { SshCredentials, SshClientOptions, ExecResult, SshPool, SshPoolOpti
 export { SshError, SshAuthError, SshHostKeyError, SshTimeoutError } from './ssh';
 // SFTP file-system access for plugins (shared transport + path safety). See sftp.ts.
 export { SftpSession, createSftpPool, resolvePath, SftpPathError } from './sftp';
-export type { SftpCredentials, SftpSessionOptions, SftpPool, SftpPoolOptions, FsEntry, FsListResult, FsStat } from './sftp';
+export type { SftpCredentials, SftpSessionOptions, SftpPool, SftpPoolOptions, FsEntry, FsListResult, FsStat } from './sftp';// Certificate collection + chain validation for the Certificates page. See certificates.ts.
+export { parseCertificate, validateChain, probeTlsEndpoint, probeSshHostKey, collectDeviceCertificates, collectCertificatesForBaseUrl, parseProbeTarget } from './certificates';
+export type { CertificateInfo, RawCertificate, CertificateRow, TlsProbeOptions, TlsProbeResult, SshProbeOptions, SshProbeResult, DeviceCertOptions, ChainValidation } from './certificates';

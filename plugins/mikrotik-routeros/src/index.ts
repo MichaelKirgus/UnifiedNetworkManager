@@ -258,6 +258,11 @@ app.post('/monitoring', async (req, res) => {
     }
 
     const metrics = buildMetrics(s, selectedModel, selectedFirmware);
+    // Certificates (management HTTPS cert + SSH host key) — emitted when present;
+    // an empty array is authoritative for this device+plugin at ingest.
+    if (result.certificates.length > 0) {
+      metrics['certificates'] = result.certificates;
+    }
     if (health !== 'ok') metrics['system.error'] = warnings.join('; ');
 
     let descriptors = [...buildDescriptors(s), ...modelFirmwareDescriptors(selectedModel, selectedFirmware)];

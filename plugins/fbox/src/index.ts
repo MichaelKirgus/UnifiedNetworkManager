@@ -11,12 +11,16 @@ import path from 'path';
 import {
   Health,
   PluginOptionDescriptor,
+  TtlCache,
   clampInt,
+  collectDeviceCertificates,
   createPluginLogger,
   createPluginServer,
   errorDescriptor,
+  parseProbeTarget,
   readSettings,
   resolvePluginIdentity,
+  CertificateRow,
 } from '@unm/plugin-sdk';
 import { FBoxAuthError, FBoxCredentials, FBoxNotFritzError, FBoxTransport } from './fboxClient';
 import { DEFAULT_OPTIONS, FBoxOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
@@ -79,6 +83,12 @@ const server = createPluginServer({
 const app = server.app;
 
 const logger = createPluginLogger(identity);
+
+// --- Certificates (capability: cross-device Certificates page) -----------------
+// Certificate rows are probed on a slower cadence than the 30 s poll — they
+// change rarely and each probe opens fresh TLS/SSH connections to the box.
+const CERT_TTL_MS = 10 * 60_000;
+const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray(v) });
 
 function resolveOptions(settings: Record<string, unknown>): FBoxOptions & { transport: FBoxTransport } {
   const t = typeof settings.transport === 'string' ? settings.transport : 'auto';
@@ -150,6 +160,31 @@ app.post('/monitoring', async (req, res) => {
 
     const metrics = buildMetrics(s, selectedModel, selectedFirmware);
     if (health !== 'ok') metrics['system.error'] = result.warnings.join('; ');
+
+    // --- Certificates (normalized for the cross-device Certificates page) ----
+    // Management HTTPS cert + SSH host key on port 22. Both probes are
+    // credential-free and best-effort; a failure simply contributes no row.
+    {
+      const cachedCerts = certCache.get(managementAddress, CERT_TTL_MS) ?? null;
+      let certRows: CertificateRow[] | null = cachedCerts;
+      if (!certRows) {
+        // FRITZ!Boxes default to an HTTPS management UI — probe TLS on 443
+        // (no row is contributed when the box is HTTP-only) plus SSH host key.
+        const target = parseProbeTarget(managementAddress, 443);
+        certRows =
+          target && opts.transport !== 'http'
+            ? await collectDeviceCertificates({
+                host: target.host,
+                httpsPort: target.port,
+                servername: target.host,
+                sshEnabled: true,
+                timeoutMs: 5_000,
+              })
+            : [];
+        certCache.set(managementAddress, certRows);
+      }
+      if (certRows.length > 0) metrics['certificates'] = certRows;
+    }
 
     let descriptors = buildDescriptors(s, selectedModel, selectedFirmware);
     if (health !== 'ok') descriptors = [...descriptors, errorDescriptor()];

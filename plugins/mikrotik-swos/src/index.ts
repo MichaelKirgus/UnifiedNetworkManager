@@ -2,15 +2,19 @@ import path from 'path';
 import {
   Health,
   PluginOptionDescriptor,
+  TtlCache,
   clampInt,
+  collectDeviceCertificates,
   createPluginLogger,
   createPluginServer,
   errorDescriptor,
   modelFirmwareDescriptors,
+  parseProbeTarget,
   readSettings,
   resolvePluginIdentity,
   stateHandler,
   StateRequestBody,
+  CertificateRow,
 } from '@unm/plugin-sdk';
 import { SwosClient, SwosAuthError } from './swosClient';
 import { createPlatform } from './platform';
@@ -107,6 +111,12 @@ const app = server.app;
 // flows through the settings loop, so it works globally and per-device.
 const logger = createPluginLogger(identity);
 
+// --- Certificates (capability: cross-device Certificates page) -----------------
+// Certificate rows are probed on a slower cadence than the 60 s snapshot — they
+// change rarely and each probe opens fresh TLS/SSH connections to the switch.
+const CERT_TTL_MS = 10 * 60_000;
+const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray(v) });
+
 /** Resolves collection options from effective settings. */
 function resolveOptions(settings: Record<string, unknown>): SwosOptions {
   return {
@@ -196,6 +206,40 @@ app.post('/monitoring', async (req, res) => {
 
     const metrics = buildMetrics(s, selectedModel, selectedFirmware);
     if (health !== 'ok') metrics['system.error'] = warnings.join('; ');
+
+    // --- Certificates (normalized for the cross-device Certificates page) ----
+    // SwOS Lite is HTTP-only — there is no management HTTPS cert to read unless
+    // an explicit https:// address was configured. The SSH host key on port 22
+    // IS available and always probed. Both probes are credential-free and
+    // best-effort; a failure simply contributes no row.
+    {
+      const cachedCerts = certCache.get(managementAddress, CERT_TTL_MS) ?? null;
+      let certRows: CertificateRow[] | null = cachedCerts;
+      if (!certRows) {
+        const target = parseProbeTarget(managementAddress, 443);
+        const explicitHttps = /^https:\/\//i.test(managementAddress.trim());
+        certRows =
+          target && explicitHttps
+            ? await collectDeviceCertificates({
+                host: target.host,
+                httpsPort: target.port,
+                servername: target.host,
+                sshEnabled: true,
+                timeoutMs: 5_000,
+              })
+            : target
+              ? await collectDeviceCertificates({
+                  host: target.host,
+                  httpsPort: null, // HTTP-only management UI — no TLS cert to read
+                  servername: target.host,
+                  sshEnabled: true,
+                  timeoutMs: 5_000,
+                })
+              : [];
+        certCache.set(managementAddress, certRows);
+      }
+      if (certRows.length > 0) metrics['certificates'] = certRows;
+    }
 
     let descriptors = [...buildDescriptors(s), ...modelFirmwareDescriptors(selectedModel, selectedFirmware)];
     if (health !== 'ok') {

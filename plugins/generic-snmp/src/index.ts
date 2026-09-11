@@ -2,14 +2,18 @@ import {
   Health,
   MetricDescriptor,
   PluginOptionDescriptor,
+  TtlCache,
   clampInt,
+  collectDeviceCertificates,
   createPluginLogger,
   createPluginServer,
   errorDescriptor,
   INVENTORY_INTERVAL_MS,
   hostFromAddress,
+  parseProbeTarget,
   readSettings,
   resolvePluginIdentity,
+  CertificateRow,
 } from '@unm/plugin-sdk';
 import {
   SnmpCredentials,
@@ -37,6 +41,12 @@ export const PLUGIN_NAME = 'Generic SNMP Plugin';
  * the instance id is appended: "Generic SNMP Plugin (site-a)". Unset = single-instance behavior.
  * (Convention implemented in @unm/plugin-sdk's resolvePluginIdentity.)
  */
+// --- Certificates (capability: cross-device Certificates page) -----------------
+// Certificate rows are probed on a slower cadence than the inventory walk — they
+// change rarely and each probe opens fresh TLS/SSH connections to the device.
+const CERT_TTL_MS = 10 * 60_000;
+const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray(v) });
+
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
@@ -240,6 +250,28 @@ app.post('/monitoring', async (req, res) => {
       mac: i.mac || '—',
       status: i.status,
     }));
+
+    // --- Certificates (normalized for the cross-device Certificates page) ----
+    // Management HTTPS cert + SSH host key on port 22. Both probes are
+    // credential-free and best-effort; a failure simply contributes no row.
+    {
+      const cachedCerts = certCache.get(host, CERT_TTL_MS) ?? null;
+      let certRows: CertificateRow[] | null = cachedCerts;
+      if (!certRows) {
+        const target = parseProbeTarget(managementAddress, 443);
+        certRows = target
+          ? await collectDeviceCertificates({
+              host: target.host,
+              httpsPort: target.port,
+              servername: target.host,
+              sshEnabled: true,
+              timeoutMs: 5_000,
+            })
+          : [];
+        certCache.set(host, certRows);
+      }
+      if (certRows.length > 0) metrics['certificates'] = certRows;
+    }
 
     // WiFi (IEEE 802.11 MIBs): emitted only when collection is enabled AND the
     // device actually exposed WLAN data — absence on non-AP devices is normal

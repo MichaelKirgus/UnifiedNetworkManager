@@ -15,6 +15,10 @@ import {
   readSettings,
   resolvePluginIdentity,
   resolveSshCredentials,
+  TtlCache,
+  collectDeviceCertificates,
+  parseProbeTarget,
+  CertificateRow,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 import { LcosOptions, getLcosInventory, walkLcosCounters } from './lcosClient';
@@ -107,6 +111,12 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
       'Ship structured log entries (SNMP walk failures, config/plan errors) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
   },
 ];
+
+// --- Certificates (capability: cross-device Certificates page) -----------------
+// Certificate rows are probed on a slower cadence than the inventory walk — they
+// change rarely and each probe opens fresh TLS/SSH connections to the device.
+const CERT_TTL_MS = 10 * 60_000;
+const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray(v) });
 
 // --- Interactive SSH console (capability 'sshConsole') -------------------------
 // LCOS exposes a full interactive CLI over SSH (port 22). The webapp's DeviceDetail
@@ -368,6 +378,30 @@ app.post('/monitoring', async (req, res) => {
       });
     }
     if (emitInventory && tunnelRows.length > 0) metrics['tunnels'] = tunnelRows;
+
+    // --- Certificates (normalized for the cross-device Certificates page) ----
+    // Management HTTPS cert (only when the web UI actually speaks TLS — an 'http'
+    // transport has no certificate to read) + SSH host key on port 22. Both probes
+    // are credential-free and best-effort; a failure simply contributes no row.
+    if (emitInventory) {
+      const cachedCerts = certCache.get(host, CERT_TTL_MS) ?? null;
+      let certRows: CertificateRow[] | null = cachedCerts;
+      if (!certRows) {
+        const target = parseProbeTarget(managementAddress, 443);
+        certRows =
+          target && webTransportOf(settings) !== 'http'
+            ? await collectDeviceCertificates({
+                host: target.host,
+                httpsPort: target.port,
+                servername: target.host,
+                sshEnabled: true,
+                timeoutMs: 5_000,
+              })
+            : [];
+        certCache.set(host, certRows);
+      }
+      if (certRows.length > 0) metrics['certificates'] = certRows;
+    }
 
     // --- Routes (normalized for the cross-device Routes page) ----------------
     // The active routing table carries static AND dynamically-learned routes in

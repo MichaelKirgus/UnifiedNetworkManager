@@ -427,6 +427,44 @@ export async function initDb(): Promise<void> {
     )`);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_firewall_rules_device ON firewall_rules ("deviceId")`);
+
+  // Certificates inventory table (Certificates page) — same lifecycle as tunnels/routes.
+  // One row per certificate endpoint on one device: the management HTTPS cert and/or
+  // the SSH host key. PK = deviceId+pluginId+name so re-probes upsert in place; a
+  // present-but-empty `certificates` array at ingest wipes this device's rows (a
+  // plugin that stops reporting certs must not leave stale ones behind).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS certificates (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'https',
+      host TEXT NOT NULL DEFAULT '',
+      port INTEGER,
+      fingerprint TEXT,
+      "commonName" TEXT NOT NULL DEFAULT '',
+      subject TEXT NOT NULL DEFAULT '',
+      issuer TEXT NOT NULL DEFAULT '',
+      "selfSigned" BOOLEAN NOT NULL DEFAULT FALSE,
+      "notBefore" TEXT NOT NULL DEFAULT '',
+      "notAfter" TEXT NOT NULL DEFAULT '',
+      "keyAlgorithm" TEXT NOT NULL DEFAULT '',
+      "keySizeBits" INTEGER,
+      "curveName" TEXT,
+      "signatureAlgorithm" TEXT NOT NULL DEFAULT '',
+      "sanNames" TEXT NOT NULL DEFAULT '[]',
+      "serialNumber" TEXT NOT NULL DEFAULT '',
+      valid BOOLEAN,
+      "invalidReason" TEXT,
+      "daysToExpiry" INTEGER,
+      "chainDaysToExpiry" INTEGER,
+      chain TEXT NOT NULL DEFAULT '[]',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_certificates_device ON certificates ("deviceId")`);
+
   // Added after the initial release — existing deployments need the columns.
   await pool.query(`ALTER TABLE firewall_rules ADD COLUMN IF NOT EXISTS "ipVersion" TEXT NOT NULL DEFAULT 'v4'`);
   await pool.query(`ALTER TABLE firewall_rules ADD COLUMN IF NOT EXISTS packets DOUBLE PRECISION`);

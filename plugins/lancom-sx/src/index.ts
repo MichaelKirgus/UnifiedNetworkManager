@@ -14,6 +14,10 @@ import {
   readSettings,
   resolvePluginIdentity,
   stateHandler,
+  TtlCache,
+  collectDeviceCertificates,
+  parseProbeTarget,
+  CertificateRow,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 import { SxOptions, getSxInventory, walkSxCounters } from './sxClient';
@@ -128,6 +132,12 @@ const app = server.app;
 // Emission is gated per call by the `logToApi` option via setEnabled() — it
 // flows through the settings loop, so it works globally and per-device.
 const logger = createPluginLogger(identity);
+
+// --- Certificates (capability: cross-device Certificates page) -----------------
+// Certificate rows are probed on a slower cadence than the inventory walk — they
+// change rarely and each probe opens fresh TLS/SSH connections to the device.
+const CERT_TTL_MS = 10 * 60_000;
+const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray(v) });
 
 /** Resolves SNMP walk options from effective settings. */
 function resolveOptions(settings: Record<string, unknown>): SxOptions {
@@ -336,6 +346,30 @@ app.post('/monitoring', async (req, res) => {
           extra: macs.length > 0 ? { macs } : {},
         };
       });
+    }
+
+    // --- Certificates (normalized for the cross-device Certificates page) ----
+    // Management HTTPS cert + SSH host key on port 22. Both probes are
+    // credential-free and best-effort; a failure simply contributes no row.
+    if (emitInventory) {
+      const cachedCerts = certCache.get(host, CERT_TTL_MS) ?? null;
+      let certRows: CertificateRow[] | null = cachedCerts;
+      if (!certRows) {
+        // SX switches default to an HTTPS management UI — probe TLS on 443 (no
+        // row is contributed when the box is HTTP-only) plus SSH host key on 22.
+        const target = parseProbeTarget(managementAddress, 443);
+        certRows = target
+          ? await collectDeviceCertificates({
+              host: target.host,
+              httpsPort: target.port,
+              servername: target.host,
+              sshEnabled: true,
+              timeoutMs: 5_000,
+            })
+          : [];
+        certCache.set(host, certRows);
+      }
+      if (certRows.length > 0) metrics['certificates'] = certRows;
     }
 
     // --- Health -------------------------------------------------------------

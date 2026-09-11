@@ -440,7 +440,57 @@ export async function pruneOldNotifications(cutoffIso: string): Promise<number> 
   );
   return result.rowCount ?? 0;
 }
+/**
+ * Auto-resolve sweep for certificate expiry/invalidity notifications. A row whose
+ * dedupeKey is `cert-expiry:<deviceId>:<name>` stays live only while that device's
+ * certificate endpoint STILL warrants a warning (expired, near-expiry within the
+ * configured window, or chain-invalid). Once renewed — valid AND comfortably past
+ * the warn window — it resolves itself. Returns the number of rows resolved.
+ */
+export async function autoResolveStaleCertificateNotifications(warnDays: number): Promise<number> {
+  const candidates = await db.query.notifications.findMany({
+    where: and(
+      inArray(schema.notifications.status, ['open', 'acknowledged']),
+      eq(schema.notifications.source, 'device'),
+      sql`"dedupeKey" LIKE 'cert-expiry:%'`
+    ),
+  });
+  if (candidates.length === 0) return 0;
 
+  // Group candidate rows by deviceId so we load each device's cert rows once.
+  const byDevice = new Map<string, { id: string; name: string }[]>();
+  for (const row of candidates) {
+    if (!row.deviceId || !row.dedupeKey) continue;
+    const name = row.dedupeKey.split(':').pop() ?? '';
+    const list = byDevice.get(row.deviceId) ?? [];
+    list.push({ id: row.id, name });
+    byDevice.set(row.deviceId, list);
+  }
+
+  let resolved = 0;
+  for (const [deviceId, entries] of byDevice) {
+    const rows = await db.query.certificates.findMany({ where: eq(schema.certificates.deviceId, deviceId) });
+    const rowByName = new Map(rows.map((r) => [r.name, r]));
+    for (const entry of entries) {
+      const cert = rowByName.get(entry.name);
+      // Endpoint gone → condition cleared.
+      if (!cert) {
+        await resolveNotification(entry.id);
+        resolved++;
+        continue;
+      }
+      const stillBad =
+        (cert.daysToExpiry !== null && cert.daysToExpiry <= warnDays) ||
+        (cert.chainDaysToExpiry !== null && cert.chainDaysToExpiry < 0) ||
+        cert.valid === false;
+      if (!stillBad) {
+        await resolveNotification(entry.id);
+        resolved++;
+      }
+    }
+  }
+  return resolved;
+}
 /** Convenience: is this severity worth mirroring a device status change for? */
 export function statusToSeverity(status: string): NotificationSeverity | null {
   switch (status) {

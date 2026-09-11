@@ -162,6 +162,21 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'How many days terminal (resolved/closed) notifications are kept before the sweep prunes them. Active notifications are never pruned.',
   },
 
+  // Certificate monitoring (Certificates page).
+  {
+    key: 'certExpiryWarnDays',
+    label: 'Certificate expiry warning window',
+    type: 'integer',
+    category: 'Security',
+    unit: 'days',
+    min: 1,
+    max: 365,
+    default: 30,
+    envVar: 'CERT_EXPIRY_WARN_DAYS',
+    help:
+      'A certificate expiring within this many days raises a warning notification; an already-expired cert (or one whose issuer is expired) raises a critical one. The condition auto-resolves once the renewed cert is collected.',
+  },
+
   // Security / session behaviour.
   {
     key: 'sessionTimeoutSeconds',

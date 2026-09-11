@@ -346,6 +346,61 @@ export interface TunnelRow {
   collectedAt: string;
 }
 
+/** The X.509 leaf certificate of one endpoint (ssh rows carry synthetic fields). */
+export interface CertificateInfo {
+  commonName: string;
+  subject: string;
+  issuer: string;
+  selfSigned: boolean;
+  notBefore: string;
+  notAfter: string;
+  keyAlgorithm: string;
+  keySizeBits?: number | null;
+  curveName?: string | null;
+  signatureAlgorithm: string;
+  sanNames: string[];
+  serialNumber: string;
+}
+
+/** One certificate endpoint on one device (management HTTPS cert or SSH host key). */
+export interface CertificateRow {
+  deviceId: string;
+  pluginId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  /** Display name of the reporting plugin instance. */
+  pluginName?: string | null;
+  /** Stable endpoint identity, e.g. "https:443" / "ssh:22". */
+  name: string;
+  type: 'https' | 'ssh';
+  host?: string;
+  port?: number | null;
+  fingerprint?: string | null;
+  commonName?: string;
+  subject?: string;
+  issuer?: string;
+  selfSigned?: boolean;
+  notBefore?: string;
+  notAfter?: string;
+  keyAlgorithm?: string;
+  keySizeBits?: number | null;
+  curveName?: string | null;
+  signatureAlgorithm?: string;
+  sanNames?: string[];
+  serialNumber?: string;
+  /** Chain-validation verdict (null = unknown / not a cert). */
+  valid?: boolean | null;
+  invalidReason?: string | null;
+  /** Days until the leaf expires (negative = expired); null when n/a. */
+  daysToExpiry?: number | null;
+  /** Days until the earliest chain element expires (issuer expiry). */
+  chainDaysToExpiry?: number | null;
+  /** Full served chain, leaf first (parsed array). */
+  chain?: CertificateInfo[];
+  collectedAt: string;
+}
+
 /** One discovered host matched by a firewall rule address (merged across devices). */
 export interface FirewallResolvedHost {
   mac: string;
@@ -1813,6 +1868,14 @@ export const api = {
     if (params?.type) qs.set('type', params.type);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<TunnelRow[]>(`/tunnels${suffix}`);
+  },
+  certificates: (params?: { deviceId?: string; siteId?: string; type?: 'https' | 'ssh' }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.type) qs.set('type', params.type);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<CertificateRow[]>(`/certificates${suffix}`);
   },
   firewallRules: (params?: { deviceId?: string; siteId?: string; ruleType?: 'filter' | 'dnat' | 'snat' | 'one-to-one' | 'npt' }) => {
     const qs = new URLSearchParams();

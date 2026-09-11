@@ -13,6 +13,8 @@ import {
   stateHandler,
   PortRow,
   StateRequestBody,
+  collectDeviceCertificates,
+  parseProbeTarget,
 } from '@unm/plugin-sdk';
 import {
   getSystemStatus,
@@ -27,7 +29,7 @@ import {
   OpnsenseTransport,
 } from './opnsenseClient';
 import { DEVICE_MODELS } from './deviceModels';
-import { createClient, OpnsenseCredentials } from './client/http';
+import { createClient, OpnsenseCredentials, resolveBase } from './client/http';
 import { resolveEdition } from './client/editions';
 import { detectDnsBackend, DnsBackend } from './client/dns';
 import { detectDhcpBackend, DhcpBackend, searchKeaLeases, searchDnsmasqLeases } from './client/dhcp';
@@ -394,7 +396,7 @@ async function collectInventory(
   // Raw interfaces_info entries — kept for the PPPoE tunnel detector (which
   // needs the interface TYPE fields that parseNetworkRows discards).
   let ifEntries: Record<string, unknown>[] = [];
-  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [], routes: [], firewallRules: null, gateways: [], filesystems: [], disks: [] };
+  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [], routes: [], firewallRules: null, gateways: [], filesystems: [], disks: [], certificates: [] };
   if (info?.ok && info.data && typeof info.data === 'object') {
     const d = info.data as Record<string, unknown>;
     if (d['name'] !== undefined) snap.hostname = String(d['name']);
@@ -509,6 +511,27 @@ async function collectInventory(
   const storage = collectStorage(diskRes);
   snap.filesystems = storage.filesystems;
   snap.disks = storage.disks;
+
+  // Certificates (Certificates page) — probe the management HTTPS cert (only when
+  // the UI actually speaks TLS; a plain-http appliance has no cert to read) plus
+  // the SSH host key on port 22. Both are credential-free and best-effort, so a
+  // failure simply contributes no row. Collected at inventory cadence.
+  try {
+    const base = resolveBase(host, transport);
+    const target = parseProbeTarget(base, 443);
+    if (target) {
+      const isHttps = /^https:/i.test(base);
+      snap.certificates = await collectDeviceCertificates({
+        host: target.host,
+        httpsPort: isHttps ? target.port : null,
+        servername: target.host,
+        sshEnabled: true,
+        timeoutMs: 5_000,
+      });
+    }
+  } catch {
+    // best-effort — a failing cert probe must not sink the inventory cache
+  }
 
   // Optional SSH ZFS enrichment (best-effort, inventory cadence): when an `ssh`
   // slot is bound, the full pool/dataset tree REPLACES the API's single zfs-root
@@ -1168,6 +1191,12 @@ async function collectMetrics(
         );
       }
       metrics['firewallRules'] = fwRows;
+    }
+    // Certificates — emit the collected rows (HTTPS cert + SSH host key). Always
+    // emitted when present so a renewed/changed cert refreshes in place; an empty
+    // array is authoritative for this device+plugin (delete-on-absent at ingest).
+    if (inventory.certificates.length > 0) {
+      metrics['certificates'] = inventory.certificates;
     }
   }
 

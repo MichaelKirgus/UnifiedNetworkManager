@@ -29,6 +29,10 @@ import {
   resolveSshCredentials,
   makeConsoleUpgrade,
   createTerminalPool,
+  TtlCache,
+  collectDeviceCertificates,
+  parseProbeTarget,
+  CertificateRow,
   type SshCredentials,
   type SshTerminalSession,
 } from '@unm/plugin-sdk';
@@ -256,6 +260,12 @@ function transportOf(settings: Record<string, unknown>): TruenasTransport {
  * handshake + login exchange) on every 30 s poll. Keyed by host+transport.
  */
 const clientCache = new Map<string, TruenasClient>();
+
+// --- Certificates (capability: cross-device Certificates page) -----------------
+// Certificate rows are probed on a slower cadence than the inventory RPCs — they
+// change rarely and each probe opens fresh TLS/SSH connections to the appliance.
+const CERT_TTL_MS = 10 * 60_000;
+const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray(v) });
 
 /** TEMP DEBUG (log-once): hosts+methods whose storage-extra outcome was already logged. */
 const storageDebugLogged = new Set<string>();
@@ -1775,6 +1785,31 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     routes = parseRoutes(ifacesRes.value as Record<string, unknown>[]);
   }
   if (collectInventory && routes !== undefined) metrics['routes'] = routes;
+
+  // --- Certificates (normalized for the cross-device Certificates page) ----
+  // Management HTTPS cert + SSH host key on port 22. Both probes are
+  // credential-free and best-effort; a failure simply contributes no row.
+  if (collectInventory) {
+    const cachedCerts = certCache.get(host, CERT_TTL_MS) ?? null;
+    let certRows: CertificateRow[] | null = cachedCerts;
+    if (!certRows) {
+      // TrueNAS defaults to an HTTPS management UI — probe TLS on the address's
+      // port (443 when unspecified; no row is contributed for plain-http).
+      const target = parseProbeTarget(host, 443);
+      certRows =
+        target && transport !== 'http'
+          ? await collectDeviceCertificates({
+              host: target.host,
+              httpsPort: target.port,
+              servername: target.host,
+              sshEnabled: true,
+              timeoutMs: 5_000,
+            })
+          : [];
+      certCache.set(host, certRows);
+    }
+    if (certRows.length > 0) metrics['certificates'] = certRows;
+  }
 
   // --- app.query (+ docker.network.query): containers inventory --------------
   // Best-effort extra — never counts toward health. Emitted even when EMPTY so

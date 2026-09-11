@@ -13,8 +13,8 @@
  */
 
 import { createHash } from 'crypto';
-import type { MetricDescriptor } from '@unm/plugin-sdk';
-import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
+import type { MetricDescriptor, CertificateRow } from '@unm/plugin-sdk';
+import { CounterTracker, TtlCache, collectDeviceCertificates, parseProbeTarget } from '@unm/plugin-sdk';
 import { RouterOsClient, rosNumber, rosString, parseCidr, parseSpeedBitsPerSec } from './routerosClient';
 
 export interface RouterOsOptions {
@@ -579,11 +579,18 @@ function rememberLastKnown(key: string, snapshot: RouterOsSnapshot): void {
   }
 }
 
+/** Certificate rows are probed on a slower cadence than the 60 s snapshot —
+ *  they change rarely and each probe opens a fresh TLS/SSH connection. */
+const CERT_TTL_MS = 10 * 60_000;
+const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray(v) });
+
 export interface MonitoringResult {
   snapshot: RouterOsSnapshot;
   /** True when the served snapshot is stale (re-collection failed). */
   stale: boolean;
   error?: string;
+  /** Certificate endpoints (management HTTPS cert + SSH host key); [] = none readable. */
+  certificates: CertificateRow[];
 }
 
 /**
@@ -602,7 +609,7 @@ export async function getMonitoring(
 
   const cached = snapshotCache.get(key, opts.cacheTtlMs);
   if (cached) {
-    return { snapshot: cached, stale: false };
+    return { snapshot: cached, stale: false, certificates: certCache.get(address, CERT_TTL_MS) ?? [] };
   }
 
   try {
@@ -613,19 +620,45 @@ export async function getMonitoring(
       insecureTls: opts.insecureTls,
       schemeMode: opts.schemeMode,
     });
-    const snapshot = await collectSnapshot(client);
+    // Snapshot + certificate probes run in parallel — the cert probes are
+    // credential-free (plain TLS/SSH connect) and independent of REST.
+    const [snapshot, certificates] = await Promise.all([
+      collectSnapshot(client),
+      collectRouterOsCertificates(address, opts.schemeMode).catch(() => [] as CertificateRow[]),
+    ]);
+    certCache.set(address, certificates);
     snapshotCache.set(key, snapshot);
     rememberLastKnown(key, snapshot);
-    return { snapshot, stale: false };
+    return { snapshot, stale: false, certificates };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const stale = lastKnown.get(key); // expired-but-usable fallback
     if (stale) {
       // Serve the last good data rather than flapping to critical on a blip.
-      return { snapshot: stale, stale: true, error: `Snapshot is stale — refresh failed: ${message}` };
+      return { snapshot: stale, stale: true, error: `Snapshot is stale — refresh failed: ${message}`, certificates: certCache.get(address, CERT_TTL_MS) ?? [] };
     }
     throw err;
   }
+}
+
+/**
+ * Probes the RouterOS management endpoint for its TLS certificate (only when the
+ * scheme isn't pinned to plain http — an HTTP-only box has no cert to read) plus
+ * the SSH host key on port 22. Best-effort: any failure yields [].
+ */
+async function collectRouterOsCertificates(address: string, schemeMode: RouterOsOptions['schemeMode']): Promise<CertificateRow[]> {
+  if (schemeMode === 'http') return [];
+  const target = parseProbeTarget(address, 443);
+  if (!target) return [];
+  // In auto mode we don't know which scheme won without a REST round-trip —
+  // probing the TLS port is cheap and simply yields no row on an HTTP-only box.
+  return collectDeviceCertificates({
+    host: target.host,
+    httpsPort: target.port,
+    servername: target.host,
+    sshEnabled: true,
+    timeoutMs: 5_000,
+  });
 }
 
 /** Test hook: clears the per-host cache, stale fallbacks + rate baselines. */
