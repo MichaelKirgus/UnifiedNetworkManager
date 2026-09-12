@@ -44,7 +44,7 @@ services:
       # Docker bridge networks). Ensures the provider plugins are registered.
       # All plugins listen on the conventional internal port 4080 (see
       # docs/PLUGIN-DEVELOPMENT.md); compose maps distinct HOST ports to it.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080,http://openwrt-plugin:4080}
     depends_on:
       - postgres
     restart: unless-stopped
@@ -328,6 +328,28 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
+  # OpenWRT plugin: dual-transport monitoring + configuration for OpenWrt
+  # routers. LuCI ubus-over-HTTP for structured reads when reachable, SSH
+  # (dropbear) for uci config writes, /proc metrics and the interactive shell.
+  # Transport mode is configurable per device: auto | luci | ssh.
+  openwrt-plugin:
+    # Root context — the image also builds the shared @unm/plugin-sdk package.
+    build:
+      context: .
+      dockerfile: plugins/openwrt/Dockerfile
+    ports:
+      - "4014:4080"
+    environment:
+      - PORT=4080
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://openwrt-plugin:4080
+      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
+      - UNM_API_URL=http://api:3000/v1
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    depends_on:
+      - api
+    restart: unless-stopped
+
   # MCP server for AI agents: exposes the API's OpenAPI operations as MCP tools
   # over Streamable HTTP. Two endpoints:
   #   POST :3901/mcp        — production-safe (OpenAPI tools only; scope the
@@ -355,7 +377,7 @@ services:
       # Same database as the API — used by the debug SQL tool only.
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
       # Endpoints probed by the plugin_probe debug tool (same list as the api).
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080,http://openwrt-plugin:4080}
     depends_on:
       - api
     restart: unless-stopped

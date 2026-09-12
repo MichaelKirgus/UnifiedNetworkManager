@@ -29,6 +29,7 @@ const SERVICE_HOST_PORTS: Record<string, number> = {
   'fbox-plugin': 4010,
   'ix-truenas-plugin': 4011, // pre-existing gap — added with the routeros entry
   'mikrotik-routeros-plugin': 4012,
+  'openwrt-plugin': 4014,
 };
 
 /** True when the API is running on the host (not inside a Docker container). */

@@ -20,6 +20,7 @@ setup:
 	  (cd plugins/fbox && npm install) & \
 	  (cd plugins/mikrotik-routeros && npm install) & \
 	  (cd plugins/docker && npm install) & \
+	  (cd plugins/openwrt && npm install) & \
 	  (cd mcp && npm install) & \
 	  wait )
 	@echo "Dependencies installed successfully."
@@ -37,7 +38,7 @@ build:
 	cd packages/plugin-sdk && npm run build
 	cd packages/snmp-client && npm run build
 	@echo "Refreshing file:-linked copies in dependent plugins + api..."
-	for p in icmp snmp lancom-lx lancom-sx lancom-cos opnsense swos fbox ix-truenas mikrotik-routeros docker basic-auth secrets-provider; do \
+	for p in icmp snmp lancom-lx lancom-sx lancom-cos opnsense swos fbox ix-truenas mikrotik-routeros docker openwrt basic-auth secrets-provider; do \
 	  rm -rf plugins/$$p/node_modules/@unm/plugin-sdk; \
 	  cp -r packages/plugin-sdk plugins/$$p/node_modules/@unm/plugin-sdk; \
 	done
@@ -62,6 +63,7 @@ build:
 	  (cd plugins/ix-truenas && npm run build) & \
 	  (cd plugins/mikrotik-routeros && npm run build) & \
 	  (cd plugins/docker && npm run build) & \
+	  (cd plugins/openwrt && npm run build) & \
 	  (cd mcp && npm run build) & \
 	  wait )
 	@echo "Build complete."
@@ -72,9 +74,9 @@ build:
 up:
 	@echo "Starting infrastructure..."
 	@if command -v docker-compose &> /dev/null; then \
-		docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-cos-plugin mikrotik-swos-plugin fbox-plugin ix-truenas-plugin mikrotik-routeros-plugin docker-plugin mcp; \
+		docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-cos-plugin mikrotik-swos-plugin fbox-plugin ix-truenas-plugin mikrotik-routeros-plugin docker-plugin openwrt-plugin mcp; \
 	else \
-		docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-cos-plugin mikrotik-swos-plugin fbox-plugin ix-truenas-plugin mikrotik-routeros-plugin docker-plugin mcp; \
+		docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-cos-plugin mikrotik-swos-plugin fbox-plugin ix-truenas-plugin mikrotik-routeros-plugin docker-plugin openwrt-plugin mcp; \
 	fi
 	@echo "Infrastructure is up."
 
@@ -122,5 +124,5 @@ clean:
 		echo "Error: No docker-compose or docker compose found"; \
 		exit 1; \
 	fi
-	rm -rf api/node_modules webapp/node_modules mcp/node_modules plugins/opnsense/node_modules plugins/basic-auth/node_modules plugins/secrets-provider/node_modules plugins/icmp/node_modules plugins/generic-snmp/node_modules plugins/mikrotik-swos/node_modules plugins/fbox/node_modules plugins/ix-truenas/node_modules plugins/mikrotik-routeros/node_modules plugins/lancom-lx/node_modules plugins/lancom-sx/node_modules plugins/lancom-cos/node_modules
+	rm -rf api/node_modules webapp/node_modules mcp/node_modules plugins/opnsense/node_modules plugins/basic-auth/node_modules plugins/secrets-provider/node_modules plugins/icmp/node_modules plugins/generic-snmp/node_modules plugins/mikrotik-swos/node_modules plugins/fbox/node_modules plugins/ix-truenas/node_modules plugins/mikrotik-routeros/node_modules plugins/lancom-lx/node_modules plugins/lancom-sx/node_modules plugins/lancom-cos/node_modules plugins/openwrt/node_modules
 	@echo "Cleanup complete."
