@@ -2,7 +2,7 @@ import { finalizePlan, PlanningError } from '@unm/plugin-sdk';
 import type { Plan, PlanDevice as SdkPlanDevice, PlanRequest as SdkPlanRequest, PlanStep, ProvisionRequest, InputSchema, RiskLevel } from '@unm/plugin-sdk';
 import * as dnsClient from './client/dns';
 import * as dhcpClient from './client/dhcp';
-import { createClient, OpnsenseCredentials, OpnsenseTransport } from './client/http';
+import { createClient, OpnsenseCredentials, OpnsensePorts, OpnsenseTransport } from './client/http';
 import { resolveEdition, SyncClass } from './client/editions';
 import { getAction, listActions } from './actions/registry';
 import { ActionDescriptor, validateInput } from './actions/types';
@@ -29,6 +29,8 @@ import { ActionDescriptor, validateInput } from './actions/types';
 // overrides (normally injected by the API via settings).
 export interface PlanRequest extends SdkPlanRequest<OpnsenseCredentials> {
   transport?: OpnsenseTransport;
+  /** Configured endpoint ports (normally injected by the API via settings). */
+  ports?: OpnsensePorts;
   /** Plugin option overrides (normally injected by the API via settings). */
   editionOverride?: string;
   dnsBackend?: 'auto' | 'dnsmasq' | 'unbound';
@@ -66,7 +68,7 @@ async function resolveDeviceContext(
   const hit = memo.get(key);
   if (hit) return hit;
 
-  const client = createClient(device.managementAddress, device.credentials, req.transport);
+  const client = createClient(device.managementAddress, device.credentials, req.transport, req.ports);
   const [editionInfo, dnsBackend, dhcpBackend] = await Promise.all([
     resolveEdition(client, device.managementAddress, req.editionOverride),
     req.dnsBackend && req.dnsBackend !== 'auto' ? Promise.resolve(req.dnsBackend) : dnsClient.detectDnsBackend(client),

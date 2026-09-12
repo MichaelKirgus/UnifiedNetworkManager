@@ -104,6 +104,7 @@ export function getCachedFBoxClient(host: string, creds: FBoxCredentials, option
     crypto.createHash('sha256').update(creds.password ?? '').digest('hex'),
     options.transport ?? 'auto',
     String(options.timeoutMs ?? 4000),
+    `p${options.httpsPort ?? ''}/${options.httpPort ?? ''}`,
   ].join('|');
   let client = clientCache.get(key);
   if (!client) {
@@ -115,6 +116,16 @@ export function getCachedFBoxClient(host: string, creds: FBoxCredentials, option
 export interface FBoxClientOptions {
   transport?: FBoxTransport;
   timeoutMs?: number;
+  /** HTTPS management port when the address has no explicit port (default 443). */
+  httpsPort?: number;
+  /** Plain-HTTP management port (default 80) — used for auto-mode fallbacks. */
+  httpPort?: number;
+}
+
+/** Appends `:<port>` to a scheme+host base when the port differs from the scheme default. */
+function withPort(base: string, port: number | undefined, schemeDefault: number): string {
+  if (port === undefined || !Number.isFinite(port) || port <= 0 || port > 65535) return base;
+  return port === schemeDefault ? base : `${base}:${Math.floor(port)}`;
 }
 
 /** Extract the SID value from a Set-Cookie header list ('' when absent). */
@@ -334,6 +345,9 @@ export class FBoxClient {
   private readonly password: string;
   private readonly timeoutMs: number;
   private readonly transport: FBoxTransport;
+  /** Configured management ports (defaults 443/80) — an explicit port in the address wins. */
+  private readonly httpsPort?: number;
+  private readonly httpPort?: number;
 
   /** Pinned base URL — set only after a SUCCESSFUL login (see pinBase()). */
   private base: string | null = null;
@@ -355,6 +369,12 @@ export class FBoxClient {
     this.password = credentials?.password ?? '';
     this.timeoutMs = options.timeoutMs ?? 4000;
     this.transport = options.transport ?? 'auto';
+    // An explicit port in the address (host:8443) wins over the configured default.
+    const hasExplicitPort = /:\d+$/.test(this.host.split('/')[0]);
+    if (!hasExplicitPort) {
+      this.httpsPort = options.httpsPort;
+      this.httpPort = options.httpPort;
+    }
   }
 
   /** The host as given (for cache keys / log messages). */
@@ -696,7 +716,8 @@ export class FBoxClient {
     const schemes = this.transport === 'http' ? ['http'] : this.transport === 'https' ? ['https'] : ['https', 'http'];
     let lastErr: unknown = null;
     for (const scheme of schemes) {
-      const base = `${scheme}://${this.host}`;
+      // Configured port per scheme (defaults 443/80); an explicit address port wins.
+      const base = withPort(`${scheme}://${this.host}`, scheme === 'https' ? this.httpsPort : this.httpPort, scheme === 'https' ? 443 : 80);
       try {
         const result = await fn(base, this.makeClient(base));
         this.lastWorkingBase = base; // pinned only after a successful login

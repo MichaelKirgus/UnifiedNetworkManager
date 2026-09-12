@@ -153,6 +153,7 @@ export function attachConsoleProxy(server: Server): void {
             managementAddress: target.managementAddress,
             ipAddresses: target.ipAddresses,
             credentials: target.credentials,
+            ...(target.settings && Object.keys(target.settings).length > 0 ? { settings: target.settings } : {}),
             ...(peeked.context && Object.keys(peeked.context).length > 0 ? { context: peeked.context } : {}),
           }),
         );

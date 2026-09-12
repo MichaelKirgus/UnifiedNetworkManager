@@ -76,6 +76,10 @@ export interface ActionContext {
   webTransport: 'auto' | 'http' | 'https';
   /** Configured backup endpoint path (see the `backupPath` option). */
   backupPath: string;
+  /** Configured HTTPS management port (default 443) — used by web-UI actions. */
+  httpsPort?: number;
+  /** Configured plain-HTTP management port (default 80) — used by web-UI fallbacks. */
+  httpPort?: number;
 }
 
 /** Declares what durable credentials a multi-device intent needs (called by the planner). */

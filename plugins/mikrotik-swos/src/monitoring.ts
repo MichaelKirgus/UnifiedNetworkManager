@@ -20,6 +20,10 @@ export interface SwosOptions {
   cacheTtlMs: number;
   /** Per-request timeout for individual .b fetches (ms). */
   requestTimeoutMs: number;
+  /** Configured HTTPS port (undefined = scheme default 443) — used only when the address has no explicit port. */
+  httpsPort?: number;
+  /** Configured plain-HTTP port (undefined = scheme default 80). */
+  httpPort?: number;
 }
 
 export const DEFAULT_OPTIONS: SwosOptions = {
@@ -589,7 +593,12 @@ export async function getMonitoring(
   }
 
   try {
-    const client = new SwosClient(address, credentials, opts.requestTimeoutMs);
+    const client = new SwosClient(
+      address,
+      credentials,
+      opts.requestTimeoutMs,
+      { httpPort: opts.httpPort, httpsPort: opts.httpsPort }
+    );
     const snapshot = await collectSnapshot(client);
     snapshotCache.set(key, snapshot);
     rememberLastKnown(key, snapshot);

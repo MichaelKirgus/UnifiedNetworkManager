@@ -37,6 +37,12 @@ import {
 export interface FBoxOptions {
   transport?: FBoxTransport;
   requestTimeoutMs: number;
+  /** HTTPS management port when the address has no explicit port (default 443). */
+  httpsPort?: number;
+  /** Plain-HTTP management port (default 80) — used for auto-mode fallbacks. */
+  httpPort?: number;
+  /** SSH daemon port for the host-key inventory probe (default 22). */
+  sshPort?: number;
 }
 
 export const DEFAULT_OPTIONS: FBoxOptions = {
@@ -78,7 +84,12 @@ export interface MonitoringResult {
 export async function getMonitoring(host: string, creds: FBoxCredentials, opts: FBoxOptions): Promise<MonitoringResult> {
   // CACHED per (host, credentials) — a fresh client would force a full login
   // on every poll and trip the box' web-UI rate limit (see fboxClient.ts).
-  const client = getCachedFBoxClient(host, creds, { transport: opts.transport ?? 'auto', timeoutMs: opts.requestTimeoutMs });
+  const client = getCachedFBoxClient(host, creds, {
+    transport: opts.transport ?? 'auto',
+    timeoutMs: opts.requestTimeoutMs,
+    httpsPort: opts.httpsPort,
+    httpPort: opts.httpPort,
+  });
 
   // Login first — it also pins the transport scheme (auto: https→http) and
   // detects the UI generation. html2 boxes have NO classic endpoints at all.

@@ -17,6 +17,9 @@ import {
   resolvePluginIdentity,
   createPinningGuard,
   dynamicSshHostVerifier,
+  resolveHttpsPort,
+  resolveHttpPort,
+  resolveSshPort,
 } from '@unm/plugin-sdk';
 import { RouterOsAuthError } from './routerosClient';
 import { DEFAULT_OPTIONS, MonitoringResult, RouterOsOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
@@ -97,6 +100,35 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     description:
       'Ship structured log entries (poll failures) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
   },
+  {
+    key: 'httpsPort',
+    label: 'HTTPS port',
+    type: 'integer' as const,
+    default: 443,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the router's HTTPS REST API (www-ssl). Used when the management address carries no explicit port (an explicit https://host:<port> always wins). Also the port certificate pinning verifies against.",
+  },
+  {
+    key: 'httpPort',
+    label: 'HTTP port',
+    type: 'integer' as const,
+    default: 80,
+    min: 1,
+    max: 65535,
+    description: "TCP port of the router's plain-HTTP REST API (www) — used when schemeMode is http or auto falls back to it.",
+  },
+  {
+    key: 'sshPort',
+    label: 'SSH port',
+    type: 'integer' as const,
+    default: 22,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the router's SSH daemon. Used for the interactive web console and host-key pinning when the management address carries no explicit port.",
+  },
 ];
 
 // Static icon assets (plugin + per-model icons), advertised in /discover and
@@ -154,12 +186,15 @@ const consoleUpgrade = makeConsoleUpgrade({
     if (!creds) {
       throw new Error('No usable SSH credential — the primary username/password secret (or a bound "ssh" slot) is required.');
     }
-    const conn = await termPool.get(host, 22, creds, {
+    // Configured SSH port (plugin option `sshPort`, default 22) — delivered by
+    // the API in the console hello frame so a per-device override is honored.
+    const sshPort = resolveSshPort(hello.settings?.['sshPort']);
+    const conn = await termPool.get(host, sshPort, creds, {
       // UNM certificate pinning — resolves the freshest trusted fingerprint at
       // handshake time (pooled sessions outlive single requests). A mismatch
       // rejects the handshake BEFORE any auth message is sent.
-      hostKeyVerifier: dynamicSshHostVerifier(host),
-      onHostKey: (fp) => console.warn(`[mikrotik-routeros-plugin] observed host key for ${host}:22 → ${fp} (pin it in the device's SSH settings to enforce strict verification)`),
+      hostKeyVerifier: dynamicSshHostVerifier(host, sshPort),
+      onHostKey: (fp) => console.warn(`[mikrotik-routeros-plugin] observed host key for ${host}:${sshPort} → ${fp} (pin it in the device's SSH settings to enforce strict verification)`),
     });
     return conn.openShell(creds); // a plain RouterOS login shell, like PuTTY
   },
@@ -209,7 +244,17 @@ function resolveOptions(settings: Record<string, unknown>): RouterOsOptions {
     requestTimeoutMs: clampInt(settings.requestTimeoutMs, 500, 9_000, DEFAULT_OPTIONS.requestTimeoutMs),
     insecureTls: settings.insecureTls === true,
     schemeMode: schemeRaw === 'https' || schemeRaw === 'http' ? schemeRaw : 'auto',
+    httpsPort: resolveHttpsPort(settings.httpsPort) !== 443 ? resolveHttpsPort(settings.httpsPort) : undefined,
+    httpPort: resolveHttpPort(settings.httpPort) !== 80 ? resolveHttpPort(settings.httpPort) : undefined,
+    sshPort: resolveSshPort(settings.sshPort) !== 22 ? resolveSshPort(settings.sshPort) : undefined,
   };
+}
+
+/** Extracts the configured endpoint ports from injected settings (defaults 443/80). */
+function portsOf(settings: Record<string, unknown>): { httpsPort?: number; httpPort?: number } {
+  const hp = resolveHttpsPort(settings.httpsPort);
+  const tp = resolveHttpPort(settings.httpPort);
+  return { httpsPort: hp !== 443 ? hp : undefined, httpPort: tp !== 80 ? tp : undefined };
 }
 
 /** Extracts username/password credentials from the monitoring body (decrypted by the API). */
@@ -256,7 +301,7 @@ app.post('/monitoring', async (req, res) => {
   try {
     // Certificate pinning — verify the router's TLS cert against UNM's
     // inventory BEFORE any credentials are transmitted (throws on mismatch).
-    await assertPinned(req, managementAddress, opts.schemeMode);
+    await assertPinned(req, managementAddress, opts.schemeMode, portsOf(settings));
 
     const result: MonitoringResult = await getMonitoring(managementAddress.trim(), creds, opts);
     const s = result.snapshot;

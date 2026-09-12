@@ -205,6 +205,12 @@ function parseDigestChallenge(header: string): DigestChallenge | null {
  * One instance per management address; safe to create per request — the digest
  * exchange costs one extra round-trip only on the first call of a process.
  */
+/** Appends `:<port>` to a scheme+host base when the port differs from the scheme default. */
+function withPort(base: string, port: number | undefined, schemeDefault: number): string {
+  if (port === undefined || !Number.isFinite(port) || port <= 0 || port > 65535) return base;
+  return port === schemeDefault ? base : `${base}:${Math.floor(port)}`;
+}
+
 export class SwosClient {
   private readonly baseUrl: string;
   private readonly username: string;
@@ -230,11 +236,31 @@ export class SwosClient {
   /**
    * @param address bare host ("192.168.88.1") or full URL ("http://…"). SwOS Lite
    *                is HTTP-only; an explicit https:// scheme is honored when given.
+   * @param ports configured management ports (defaults 80/443) — used only when the
+   *              address carries no explicit port.
    */
-  constructor(address: string, credentials: SwosCredentials, timeoutMs = 4000) {
+  constructor(
+    address: string,
+    credentials: SwosCredentials,
+    timeoutMs = 4000,
+    ports?: { httpPort?: number; httpsPort?: number }
+  ) {
     const trimmed = (address ?? '').trim().replace(/\/+$/, '');
-    this.baseUrl = trimmed.includes('://') ? trimmed : `http://${trimmed}`;
-    if (!this.baseUrl) throw new Error('No management address');
+    if (!trimmed) throw new Error('No management address');
+    // Strip any scheme to inspect the host:port part for an explicit port.
+    const bareHost = trimmed.replace(/^https?:\/\//i, '').split('/')[0];
+    const hasExplicitPort = /:\d+$/.test(bareHost);
+    let base: string;
+    if (trimmed.includes('://')) {
+      base = trimmed; // explicit scheme (+ port) wins as-is
+    } else {
+      base = `http://${trimmed}`; // SwOS Lite is HTTP-only by default
+    }
+    if (!hasExplicitPort) {
+      const isHttps = base.startsWith('https://');
+      base = withPort(base, isHttps ? ports?.httpsPort : ports?.httpPort, isHttps ? 443 : 80);
+    }
+    this.baseUrl = base;
     this.username = credentials?.username ?? '';
     this.password = credentials?.password ?? '';
     this.timeoutMs = timeoutMs;

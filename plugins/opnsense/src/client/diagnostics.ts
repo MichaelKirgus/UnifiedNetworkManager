@@ -1,7 +1,7 @@
 import { AxiosInstance } from 'axios';
 import * as https from 'https';
 import * as http from 'http';
-import { get, post, OpnsenseApiResult, resolveBase, OpnsenseCredentials, OpnsenseTransport } from './http';
+import { get, post, OpnsenseApiResult, resolveBase, OpnsenseCredentials, OpnsensePorts, OpnsenseTransport } from './http';
 
 /**
  * Diagnostics module: interface names/statistics, neighbor tables (ARP/NDP)
@@ -48,9 +48,10 @@ export function getNdpTable(client: AxiosInstance, query?: Record<string, unknow
 export async function getCpuUsage(
   host: string,
   credentials: OpnsenseCredentials,
-  transport?: OpnsenseTransport
+  transport?: OpnsenseTransport,
+  ports?: OpnsensePorts
 ): Promise<{ total: number; user: number; sys: number; intr: number; idle: number } | undefined> {
-  const base = resolveBase(host, transport);
+  const base = resolveBase(host, transport, ports);
   if (!base) return undefined;
   const isHttps = base.startsWith('https://');
   const lib = isHttps ? https : http;

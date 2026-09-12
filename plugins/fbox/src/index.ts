@@ -21,6 +21,9 @@ import {
   readSettings,
   resolvePluginIdentity,
   createPinningGuard,
+  resolveHttpsPort,
+  resolveHttpPort,
+  resolveSshPort,
   CertificateRow,
 } from '@unm/plugin-sdk';
 import { FBoxAuthError, FBoxCredentials, FBoxNotFritzError, FBoxTransport } from './fboxClient';
@@ -47,6 +50,35 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     pattern: '^(auto|http|https)$',
     description:
       "How to reach the box's web UI. 'auto' (default) tries https first — FRITZ!Boxes serve self-signed TLS by default — and falls back to plain http only on network-level failures.",
+  },
+  {
+    key: 'httpsPort',
+    label: 'HTTPS port',
+    type: 'integer' as const,
+    default: 443,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the box's HTTPS web UI. Used when the management address carries no explicit port (an explicit https://host:<port> always wins). Also the port certificate pinning verifies against.",
+  },
+  {
+    key: 'httpPort',
+    label: 'HTTP port',
+    type: 'integer' as const,
+    default: 80,
+    min: 1,
+    max: 65535,
+    description: "TCP port of the box's plain-HTTP web UI (used when transport is http or auto falls back to it).",
+  },
+  {
+    key: 'sshPort',
+    label: 'SSH port',
+    type: 'integer' as const,
+    default: 22,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the box's SSH daemon. Used for the host-key inventory probe when the management address carries no explicit port.",
   },
   {
     key: 'requestTimeoutMs',
@@ -102,7 +134,17 @@ function resolveOptions(settings: Record<string, unknown>): FBoxOptions & { tran
   return {
     transport: (t === 'http' || t === 'https' ? t : 'auto') as FBoxTransport,
     requestTimeoutMs: clampInt(settings.requestTimeoutMs, 500, 9_000, DEFAULT_OPTIONS.requestTimeoutMs),
+    httpsPort: resolveHttpsPort(settings.httpsPort) !== 443 ? resolveHttpsPort(settings.httpsPort) : undefined,
+    httpPort: resolveHttpPort(settings.httpPort) !== 80 ? resolveHttpPort(settings.httpPort) : undefined,
+    sshPort: resolveSshPort(settings.sshPort) !== 22 ? resolveSshPort(settings.sshPort) : undefined,
   };
+}
+
+/** Extracts the configured endpoint ports from injected settings (defaults 443/80). */
+function portsOf(settings: Record<string, unknown>): { httpsPort?: number; httpPort?: number } {
+  const hp = resolveHttpsPort(settings.httpsPort);
+  const tp = resolveHttpPort(settings.httpPort);
+  return { httpsPort: hp !== 443 ? hp : undefined, httpPort: tp !== 80 ? tp : undefined };
 }
 
 /** Extracts username/password credentials from the monitoring body (decrypted by the API). */
@@ -150,7 +192,7 @@ app.post('/monitoring', async (req, res) => {
   try {
     // Certificate pinning — verify the box's TLS cert against UNM's inventory
     // BEFORE any credentials are transmitted (throws on mismatch).
-    await assertPinned(req, managementAddress, opts.transport);
+    await assertPinned(req, managementAddress, opts.transport, portsOf(settings));
 
     const result = await getMonitoring(managementAddress.trim(), creds, opts);
     const s = result.snapshot;
@@ -179,9 +221,10 @@ app.post('/monitoring', async (req, res) => {
       const cachedCerts = certCache.get(managementAddress, CERT_TTL_MS) ?? null;
       let certRows: CertificateRow[] | null = cachedCerts;
       if (!certRows) {
-        // FRITZ!Boxes default to an HTTPS management UI — probe TLS on 443
-        // (no row is contributed when the box is HTTP-only) plus SSH host key.
-        const target = parseProbeTarget(managementAddress, 443);
+        // FRITZ!Boxes default to an HTTPS management UI — probe TLS on the
+        // configured port (default 443; no row when the box is HTTP-only) plus SSH.
+        const p = portsOf(settings);
+        const target = parseProbeTarget(managementAddress, p.httpsPort ?? 443);
         certRows =
           target && opts.transport !== 'http'
             ? await collectDeviceCertificates({
@@ -189,6 +232,7 @@ app.post('/monitoring', async (req, res) => {
                 httpsPort: target.port,
                 servername: target.host,
                 sshEnabled: true,
+                sshPort: resolveSshPort(settings.sshPort),
                 timeoutMs: 5_000,
               })
             : [];

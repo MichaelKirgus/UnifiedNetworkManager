@@ -26,6 +26,12 @@ export interface RouterOsOptions {
   insecureTls: boolean;
   /** Scheme policy: auto = HTTPS first + HTTP fallback, https/http pinned. */
   schemeMode: 'auto' | 'https' | 'http';
+  /** HTTPS management port when the address has no explicit port (default 443). */
+  httpsPort?: number;
+  /** Plain-HTTP management port (default 80) — used for auto-mode fallbacks. */
+  httpPort?: number;
+  /** SSH daemon port for the host-key inventory probe (default 22). */
+  sshPort?: number;
 }
 
 export const DEFAULT_OPTIONS: RouterOsOptions = {
@@ -619,12 +625,14 @@ export async function getMonitoring(
       timeoutMs: opts.requestTimeoutMs,
       insecureTls: opts.insecureTls,
       schemeMode: opts.schemeMode,
+      httpsPort: opts.httpsPort,
+      httpPort: opts.httpPort,
     });
     // Snapshot + certificate probes run in parallel — the cert probes are
     // credential-free (plain TLS/SSH connect) and independent of REST.
     const [snapshot, certificates] = await Promise.all([
       collectSnapshot(client),
-      collectRouterOsCertificates(address, opts.schemeMode).catch(() => [] as CertificateRow[]),
+      collectRouterOsCertificates(address, opts.schemeMode, opts.httpsPort, opts.sshPort).catch(() => [] as CertificateRow[]),
     ]);
     certCache.set(address, certificates);
     snapshotCache.set(key, snapshot);
@@ -646,9 +654,15 @@ export async function getMonitoring(
  * scheme isn't pinned to plain http — an HTTP-only box has no cert to read) plus
  * the SSH host key on port 22. Best-effort: any failure yields [].
  */
-async function collectRouterOsCertificates(address: string, schemeMode: RouterOsOptions['schemeMode']): Promise<CertificateRow[]> {
+async function collectRouterOsCertificates(
+  address: string,
+  schemeMode: RouterOsOptions['schemeMode'],
+  httpsPort?: number,
+  sshPort?: number
+): Promise<CertificateRow[]> {
   if (schemeMode === 'http') return [];
-  const target = parseProbeTarget(address, 443);
+  // Probe the SAME endpoint the client talks to — configured ports included.
+  const target = parseProbeTarget(address, httpsPort ?? 443);
   if (!target) return [];
   // In auto mode we don't know which scheme won without a REST round-trip —
   // probing the TLS port is cheap and simply yields no row on an HTTP-only box.
@@ -657,6 +671,7 @@ async function collectRouterOsCertificates(address: string, schemeMode: RouterOs
     httpsPort: target.port,
     servername: target.host,
     sshEnabled: true,
+    sshPort,
     timeoutMs: 5_000,
   });
 }

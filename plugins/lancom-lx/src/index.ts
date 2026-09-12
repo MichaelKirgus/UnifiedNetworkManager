@@ -20,6 +20,9 @@ import {
   dynamicSshHostVerifier,
   collectDeviceCertificates,
   parseProbeTarget,
+  resolveHttpsPort,
+  resolveHttpPort,
+  resolveSshPort,
   CertificateRow,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
@@ -102,6 +105,35 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     description:
       'Ship structured log entries (SNMP walk failures) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
   },
+  {
+    key: 'httpsPort',
+    label: 'HTTPS port',
+    type: 'integer' as const,
+    default: 443,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the AP's HTTPS management UI. Used when the management address carries no explicit port (an explicit https://host:<port> always wins). Also the port certificate pinning verifies against.",
+  },
+  {
+    key: 'httpPort',
+    label: 'HTTP port',
+    type: 'integer' as const,
+    default: 80,
+    min: 1,
+    max: 65535,
+    description: "TCP port of the AP's plain-HTTP management UI (used when auto falls back to it).",
+  },
+  {
+    key: 'sshPort',
+    label: 'SSH port',
+    type: 'integer' as const,
+    default: 22,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the AP's SSH daemon. Used for the interactive web console and host-key pinning when the management address carries no explicit port.",
+  },
 ];
 
 // --- Certificates (capability: cross-device Certificates page) -----------------
@@ -115,6 +147,18 @@ const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray
 // credentials are transmitted; unknown endpoints are TOFU-accepted and land in
 // UNM's inventory via the `certificates` metric.
 const assertPinned = createPinningGuard();
+
+/** Extracts the configured endpoint ports from injected settings (defaults 443/80). */
+function portsOf(settings: Record<string, unknown>): { httpsPort?: number; httpPort?: number } {
+  const hp = resolveHttpsPort(settings.httpsPort);
+  const tp = resolveHttpPort(settings.httpPort);
+  return { httpsPort: hp !== 443 ? hp : undefined, httpPort: tp !== 80 ? tp : undefined };
+}
+
+/** Extracts the configured SSH port from injected settings (default 22). */
+function sshPortOf(settings: Record<string, unknown>): number {
+  return resolveSshPort(settings.sshPort);
+}
 
 // --- Interactive SSH console (capability 'sshConsole') -------------------------
 // LX access points expose a CLI over SSH (port 22). The webapp's DeviceDetail page
@@ -138,12 +182,15 @@ const consoleUpgrade = makeConsoleUpgrade({
     if (!creds) {
       throw new Error('No SSH credential bound — bind a usernamePassword secret to the assignment\'s "ssh" slot (LX does not support public keys).');
     }
-    const conn = await termPool.get(host, 22, creds, {
+    // Configured SSH port (plugin option `sshPort`, default 22) — delivered by
+    // the API in the console hello frame so a per-device override is honored.
+    const sshPort = resolveSshPort(hello.settings?.['sshPort']);
+    const conn = await termPool.get(host, sshPort, creds, {
       // UNM certificate pinning — resolves the freshest trusted fingerprint at
       // handshake time (pooled sessions outlive single requests). A mismatch
       // rejects the handshake BEFORE any auth message is sent.
-      hostKeyVerifier: dynamicSshHostVerifier(host),
-      onHostKey: (fp) => console.warn(`[lancom-lx-plugin] observed host key for ${host}:22 → ${fp} (pin it in the device's SSH settings to enforce strict verification)`),
+      hostKeyVerifier: dynamicSshHostVerifier(host, sshPort),
+      onHostKey: (fp) => console.warn(`[lancom-lx-plugin] observed host key for ${host}:${sshPort} → ${fp} (pin it in the device's SSH settings to enforce strict verification)`),
     });
     return conn.openShell(creds); // a plain LX login shell, like PuTTY
   },
@@ -246,7 +293,7 @@ app.post('/monitoring', async (req, res) => {
     // Certificate pinning — verify the AP's TLS cert against UNM's inventory
     // BEFORE any credentials are transmitted (throws on mismatch). LX has no
     // web-transport option; 'auto' matches its default HTTPS management UI.
-    await assertPinned(req, managementAddress, 'auto');
+    await assertPinned(req, managementAddress, 'auto', portsOf(settings));
 
     // Slow path: targeted parallel LCOS walks (only the subtrees we use),
     // TTL-cached per host with a quality gate against partial-failure data.
@@ -533,15 +580,17 @@ app.post('/monitoring', async (req, res) => {
       const cachedCerts = certCache.get(host, CERT_TTL_MS) ?? null;
       let certRows: CertificateRow[] | null = cachedCerts;
       if (!certRows) {
-        // LX APs default to an HTTPS management UI — probe TLS on 443 (no row is
-        // contributed when the box is HTTP-only) plus the SSH host key on port 22.
-        const target = parseProbeTarget(managementAddress, 443);
+        // LX APs default to an HTTPS management UI — probe TLS on the configured
+        // port (default 443) plus the SSH host key on the configured port.
+        const p = portsOf(settings);
+        const target = parseProbeTarget(managementAddress, p.httpsPort ?? 443);
         certRows = target
           ? await collectDeviceCertificates({
               host: target.host,
               httpsPort: target.port,
               servername: target.host,
               sshEnabled: true,
+              sshPort: sshPortOf(settings),
               timeoutMs: 5_000,
             })
           : [];

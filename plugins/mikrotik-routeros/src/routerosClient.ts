@@ -71,6 +71,16 @@ export interface RouterOsClientOptions {
   insecureTls: boolean;
   /** Scheme policy — see SchemeMode. */
   schemeMode: SchemeMode;
+  /** HTTPS management port when the address has no explicit port (default 443). */
+  httpsPort?: number;
+  /** Plain-HTTP management port (default 80) — used for auto-mode fallbacks. */
+  httpPort?: number;
+}
+
+/** Appends `:<port>` to a scheme+host base when the port differs from the scheme default. */
+function withPort(base: string, port: number | undefined, schemeDefault: number): string {
+  if (port === undefined || !Number.isFinite(port) || port <= 0 || port > 65535) return base;
+  return port === schemeDefault ? base : `${base}:${Math.floor(port)}`;
 }
 
 interface RawResponse {
@@ -157,9 +167,10 @@ export class RouterOsClient {
   /** Ordered candidate base URLs for the current scheme policy. */
   private candidates(): string[] {
     const addr = this.address;
-    if (/^https?:\/\//i.test(addr)) return [addr]; // explicit scheme always wins
-    const httpsBase = `https://${addr}`;
-    const httpBase = `http://${addr}`;
+    if (/^https?:\/\//i.test(addr)) return [addr]; // explicit scheme (+ port) always wins
+    // Configured ports (defaults 443/80) — an explicit port in the address wins.
+    const httpsBase = withPort(`https://${addr}`, this.opts.httpsPort, 443);
+    const httpBase = withPort(`http://${addr}`, this.opts.httpPort, 80);
     switch (this.opts.schemeMode) {
       case 'https':
         return [httpsBase];

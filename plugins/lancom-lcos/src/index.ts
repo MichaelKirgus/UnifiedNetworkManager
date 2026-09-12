@@ -20,6 +20,9 @@ import {
   dynamicSshHostVerifier,
   collectDeviceCertificates,
   parseProbeTarget,
+  resolveHttpsPort,
+  resolveHttpPort,
+  resolveSshPort,
   CertificateRow,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
@@ -97,6 +100,35 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
       "How to reach the router's web UI for backup/restore. auto = HTTPS with self-signed certificates accepted, falling back to HTTP (default). https = force TLS. http = plaintext.",
   },
   {
+    key: 'httpsPort',
+    label: 'HTTPS port',
+    type: 'integer' as const,
+    default: 443,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the router's HTTPS management UI. Used when the management address carries no explicit port (an explicit https://host:<port> always wins). Also the port certificate pinning verifies against.",
+  },
+  {
+    key: 'httpPort',
+    label: 'HTTP port',
+    type: 'integer' as const,
+    default: 80,
+    min: 1,
+    max: 65535,
+    description: "TCP port of the router's plain-HTTP management UI (used when webTransport is http or auto falls back to it).",
+  },
+  {
+    key: 'sshPort',
+    label: 'SSH port',
+    type: 'integer' as const,
+    default: 22,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the router's SSH daemon. Used for the interactive web console and host-key pinning when the management address carries no explicit port.",
+  },
+  {
     key: 'backupPath',
     label: 'Config backup endpoint path',
     type: 'string' as const,
@@ -147,12 +179,15 @@ const consoleUpgrade = makeConsoleUpgrade({
     if (!creds) {
       throw new Error('No SSH credential bound — bind a usernamePassword or sshKeyPair secret to the assignment\'s "ssh" slot.');
     }
-    const conn = await termPool.get(host, 22, creds, {
+    // Configured SSH port (plugin option `sshPort`, default 22) — delivered by
+    // the API in the console hello frame so a per-device override is honored.
+    const sshPort = resolveSshPort(hello.settings?.['sshPort']);
+    const conn = await termPool.get(host, sshPort, creds, {
       // UNM certificate pinning — resolves the freshest trusted fingerprint at
       // handshake time (pooled sessions outlive single requests). A mismatch
       // rejects the handshake BEFORE any auth message is sent.
-      hostKeyVerifier: dynamicSshHostVerifier(host),
-      onHostKey: (fp) => console.warn(`[lancom-lcos-plugin] observed host key for ${host}:22 → ${fp} (pin it in the device's SSH settings to enforce strict verification)`),
+      hostKeyVerifier: dynamicSshHostVerifier(host, sshPort),
+      onHostKey: (fp) => console.warn(`[lancom-lcos-plugin] observed host key for ${host}:${sshPort} → ${fp} (pin it in the device's SSH settings to enforce strict verification)`),
     });
     return conn.openShell(creds); // a plain LCOS login shell, like PuTTY
   },
@@ -224,6 +259,18 @@ function backupPathOf(settings: Record<string, unknown>): string {
   return v;
 }
 
+/** Extracts the configured endpoint ports from injected settings (defaults 443/80). */
+function portsOf(settings: Record<string, unknown>): { httpsPort?: number; httpPort?: number } {
+  const hp = resolveHttpsPort(settings.httpsPort);
+  const tp = resolveHttpPort(settings.httpPort);
+  return { httpsPort: hp !== 443 ? hp : undefined, httpPort: tp !== 80 ? tp : undefined };
+}
+
+/** Extracts the configured SSH port from injected settings (default 22). */
+function sshPortOf(settings: Record<string, unknown>): number {
+  return resolveSshPort(settings.sshPort);
+}
+
 /** Extracts SNMP credentials from a body/query field map (decrypted by the API). */
 function resolveCredentials(fields: Record<string, unknown>): { creds?: SnmpCredentials; error?: string } {
   return buildSnmpCredentials(fields);
@@ -274,7 +321,7 @@ app.post('/monitoring', async (req, res) => {
   try {
     // Certificate pinning — verify the router's TLS cert against UNM's
     // inventory BEFORE any credentials are transmitted (throws on mismatch).
-    await assertPinned(req, managementAddress, webTransportOf(settings));
+    await assertPinned(req, managementAddress, webTransportOf(settings), portsOf(settings));
 
     // Slow path: targeted parallel LCOS walks (only the subtrees we use),
     // TTL-cached per host with a quality gate against partial-failure data.
@@ -403,7 +450,8 @@ app.post('/monitoring', async (req, res) => {
       const cachedCerts = certCache.get(host, CERT_TTL_MS) ?? null;
       let certRows: CertificateRow[] | null = cachedCerts;
       if (!certRows) {
-        const target = parseProbeTarget(managementAddress, 443);
+        const p = portsOf(settings);
+        const target = parseProbeTarget(managementAddress, p.httpsPort ?? 443);
         certRows =
           target && webTransportOf(settings) !== 'http'
             ? await collectDeviceCertificates({
@@ -411,6 +459,7 @@ app.post('/monitoring', async (req, res) => {
                 httpsPort: target.port,
                 servername: target.host,
                 sshEnabled: true,
+                sshPort: sshPortOf(settings),
                 timeoutMs: 5_000,
               })
             : [];
@@ -663,6 +712,8 @@ async function buildActionContext(args: {
     opts,
     webTransport: webTransportOf(args.settings),
     backupPath: backupPathOf(args.settings),
+    httpsPort: resolveHttpsPort(args.settings.httpsPort),
+    httpPort: resolveHttpPort(args.settings.httpPort),
   };
 }
 
@@ -720,7 +771,7 @@ app.post('/config', async (req, res) => {
     // Certificate pinning — a config action transmits real credentials (web-UI
     // Basic auth over HTTPS); refuse the connection when the router's key
     // differs from UNM's inventory.
-    await assertPinned(req, managementAddress, webTransportOf(settings));
+    await assertPinned(req, managementAddress, webTransportOf(settings), portsOf(settings));
 
     const ctx = await buildActionContext({
       host: hostFromAddress(managementAddress),

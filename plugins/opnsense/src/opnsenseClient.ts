@@ -14,27 +14,45 @@ import * as diagnostics from './client/diagnostics';
  * on every call.
  */
 
-export type { OpnsenseApiResult, OpnsenseTransport } from './client/http';
+export type { OpnsenseApiResult, OpnsensePorts, OpnsenseTransport } from './client/http';
 export const resolveBase = http.resolveBase;
 
-function clientFor(host: string, apiKey: string, apiSecret: string, transport?: http.OpnsenseTransport): AxiosInstance {
-  return http.createClient(host, { apiKey, apiSecret }, transport);
+function clientFor(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  transport?: http.OpnsenseTransport,
+  ports?: http.OpnsensePorts
+): AxiosInstance {
+  return http.createClient(host, { apiKey, apiSecret }, transport, ports);
 }
 
 /**
  * Fetches high-level system status (uptime, version, load) from OPNsense.
  * GET /api/core/system/status
  */
-export function getSystemStatus(host: string, apiKey: string, apiSecret: string, transport?: http.OpnsenseTransport): Promise<http.OpnsenseApiResult> {
-  return system.getSystemStatus(clientFor(host, apiKey, apiSecret, transport));
+export function getSystemStatus(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  transport?: http.OpnsenseTransport,
+  ports?: http.OpnsensePorts
+): Promise<http.OpnsenseApiResult> {
+  return system.getSystemStatus(clientFor(host, apiKey, apiSecret, transport, ports));
 }
 
 /**
  * Fetches system resource usage (memory total/used in bytes).
  * GET /api/diagnostics/system/system_resources
  */
-export function getSystemResources(host: string, apiKey: string, apiSecret: string, transport?: http.OpnsenseTransport): Promise<http.OpnsenseApiResult> {
-  return system.getSystemResources(clientFor(host, apiKey, apiSecret, transport));
+export function getSystemResources(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  transport?: http.OpnsenseTransport,
+  ports?: http.OpnsensePorts
+): Promise<http.OpnsenseApiResult> {
+  return system.getSystemResources(clientFor(host, apiKey, apiSecret, transport, ports));
 }
 
 /**
@@ -42,32 +60,56 @@ export function getSystemResources(host: string, apiKey: string, apiSecret: stri
  * API exposes — there is no ZFS pool/dataset listing endpoint). Size fields
  * are base-10 human strings. GET /api/diagnostics/system/system_disk/
  */
-export function getSystemDisk(host: string, apiKey: string, apiSecret: string, transport?: http.OpnsenseTransport): Promise<http.OpnsenseApiResult> {
-  return system.getSystemDisk(clientFor(host, apiKey, apiSecret, transport));
+export function getSystemDisk(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  transport?: http.OpnsenseTransport,
+  ports?: http.OpnsensePorts
+): Promise<http.OpnsenseApiResult> {
+  return system.getSystemDisk(clientFor(host, apiKey, apiSecret, transport, ports));
 }
 
 /**
  * Fetches system information (hostname, versions).
  * GET /api/diagnostics/system/system_information
  */
-export function getSystemInformation(host: string, apiKey: string, apiSecret: string, transport?: http.OpnsenseTransport): Promise<http.OpnsenseApiResult> {
-  return system.getSystemInformation(clientFor(host, apiKey, apiSecret, transport));
+export function getSystemInformation(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  transport?: http.OpnsenseTransport,
+  ports?: http.OpnsensePorts
+): Promise<http.OpnsenseApiResult> {
+  return system.getSystemInformation(clientFor(host, apiKey, apiSecret, transport, ports));
 }
 
 /**
  * Fetches the configured interface names/details.
  * GET /api/diagnostics/interface/get_interface_names
  */
-export function getInterfaces(host: string, apiKey: string, apiSecret: string, transport?: http.OpnsenseTransport): Promise<http.OpnsenseApiResult> {
-  return diagnostics.getInterfaces(clientFor(host, apiKey, apiSecret, transport));
+export function getInterfaces(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  transport?: http.OpnsenseTransport,
+  ports?: http.OpnsensePorts
+): Promise<http.OpnsenseApiResult> {
+  return diagnostics.getInterfaces(clientFor(host, apiKey, apiSecret, transport, ports));
 }
 
 /**
  * Fetches per-interface traffic statistics (byte counters).
  * GET /api/diagnostics/interface/get_interface_statistics
  */
-export function getInterfaceStats(host: string, apiKey: string, apiSecret: string, transport?: http.OpnsenseTransport): Promise<http.OpnsenseApiResult> {
-  return diagnostics.getInterfaceStats(clientFor(host, apiKey, apiSecret, transport));
+export function getInterfaceStats(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  transport?: http.OpnsenseTransport,
+  ports?: http.OpnsensePorts
+): Promise<http.OpnsenseApiResult> {
+  return diagnostics.getInterfaceStats(clientFor(host, apiKey, apiSecret, transport, ports));
 }
 
 /**
@@ -76,8 +118,14 @@ export function getInterfaceStats(host: string, apiKey: string, apiSecret: strin
  *   { total, rowCount, current, rows: [{ mac, ip, intf, manufacturer, intf_description, ... }] }
  * POST /api/diagnostics/interface/search_arp/
  */
-export function getArpTable(host: string, apiKey: string, apiSecret: string, transport?: http.OpnsenseTransport): Promise<http.OpnsenseApiResult> {
-  return diagnostics.getArpTable(clientFor(host, apiKey, apiSecret, transport));
+export function getArpTable(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  transport?: http.OpnsenseTransport,
+  ports?: http.OpnsensePorts
+): Promise<http.OpnsenseApiResult> {
+  return diagnostics.getArpTable(clientFor(host, apiKey, apiSecret, transport, ports));
 }
 
 /**
@@ -85,8 +133,14 @@ export function getArpTable(host: string, apiKey: string, apiSecret: string, tra
  *   { total, rowCount, current, rows: [{ mac, ip, intf, manufacturer, ... }] }
  * POST /api/diagnostics/interface/search_ndp/
  */
-export function getNdpTable(host: string, apiKey: string, apiSecret: string, transport?: http.OpnsenseTransport): Promise<http.OpnsenseApiResult> {
-  return diagnostics.getNdpTable(clientFor(host, apiKey, apiSecret, transport));
+export function getNdpTable(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  transport?: http.OpnsenseTransport,
+  ports?: http.OpnsensePorts
+): Promise<http.OpnsenseApiResult> {
+  return diagnostics.getNdpTable(clientFor(host, apiKey, apiSecret, transport, ports));
 }
 
 /**
@@ -109,9 +163,10 @@ export function getCpuUsage(
   host: string,
   apiKey: string,
   apiSecret: string,
-  transport?: http.OpnsenseTransport
+  transport?: http.OpnsenseTransport,
+  ports?: http.OpnsensePorts
 ): Promise<{ total: number; user: number; sys: number; intr: number; idle: number } | undefined> {
-  return diagnostics.getCpuUsage(host, { apiKey, apiSecret }, transport);
+  return diagnostics.getCpuUsage(host, { apiKey, apiSecret }, transport, ports);
 }
 
 /**

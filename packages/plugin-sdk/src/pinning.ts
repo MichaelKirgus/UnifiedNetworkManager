@@ -323,6 +323,46 @@ export interface EndpointCheckOptions {
   /** Transport mode the client will use ('auto' | 'http' | 'https'). */
   transport?: 'auto' | 'http' | 'https';
   timeoutMs?: number;
+  /** Port to probe when the address carries no explicit port (default 443). */
+  httpsPort?: number;
+  /** Port for plain-HTTP endpoints (default 80) — informational, TLS is never probed. */
+  httpPort?: number;
+}
+
+/** Configurable endpoint ports a plugin can pass to the pinning guard. */
+export interface PinningPorts {
+  /** Management HTTPS port when the address has no explicit port (default 443). */
+  httpsPort?: number;
+  /** Plain-HTTP management port (default 80) — used for key resolution only. */
+  httpPort?: number;
+}
+
+/** Resolves the effective port for an endpoint given a parsed URL + configured ports. */
+function resolveEndpointPort(u: URL, ports?: PinningPorts): number {
+  if (u.port !== '') return Number(u.port);
+  const def = u.protocol === 'https:' ? (ports?.httpsPort ?? 443) : (ports?.httpPort ?? 80);
+  return Number.isFinite(def) && def > 0 ? Math.floor(def) : (u.protocol === 'https:' ? 443 : 80);
+}
+
+/** Validates a configured port value; falls back to `fallback` when out of range. */
+function validPort(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' && Number.isInteger(value) ? value : Number(value);
+  return Number.isFinite(n) && n >= 1 && n <= 65535 ? Math.floor(n) : fallback;
+}
+
+/** Resolves the effective HTTPS port from a plugin setting (default 443). */
+export function resolveHttpsPort(value?: unknown): number {
+  return validPort(value, 443);
+}
+
+/** Resolves the effective plain-HTTP port from a plugin setting (default 80). */
+export function resolveHttpPort(value?: unknown): number {
+  return validPort(value, 80);
+}
+
+/** Resolves the effective SSH port from a plugin setting (default 22). */
+export function resolveSshPort(value?: unknown): number {
+  return validPort(value, 22);
 }
 
 /**
@@ -353,7 +393,7 @@ export async function verifyEndpointForRequest(
   const host = u.hostname.replace(/^\[|\]$/g, '');
   if (!host) return null;
   try {
-    return await verifyTlsFingerprint(ctx, { host, port: Number(u.port) || (u.protocol === 'https:' ? 443 : 80), timeoutMs: opts.timeoutMs });
+    return await verifyTlsFingerprint(ctx, { host, port: resolveEndpointPort(u, opts), timeoutMs: opts.timeoutMs });
   } catch (e) {
     if (e instanceof CertificatePinningError) throw e; // real security verdict — propagate
     return null; // transport problem — not a pinning decision
@@ -374,7 +414,8 @@ export interface PinningGuardOptions {
 export type PinningGuard = (
   req: { headers?: Record<string, unknown> },
   address: string,
-  transport?: 'auto' | 'http' | 'https'
+  transport?: 'auto' | 'http' | 'https',
+  ports?: PinningPorts
 ) => Promise<void>;
 
 /**
@@ -383,9 +424,14 @@ export type PinningGuard = (
  *
  *   const assertPinned = createPinningGuard();          // module scope, once
  *   app.post('/monitoring', async (req, res) => {
- *     await assertPinned(req, managementAddress, transport);  // throws on mismatch
+ *     await assertPinned(req, managementAddress, transport, ports);  // throws on mismatch
  *     ...
  *   });
+ *
+ * `ports` carries the plugin's CONFIGURED endpoint ports (httpsPort/httpPort —
+ * defaults 443/80). Pass the SAME values your HTTP client uses so the preflight
+ * probes exactly the endpoint credentials would be sent to. An explicit port in
+ * the management address always wins over the configured default.
  *
  * Semantics: strict mode + known pin MISMATCH → throws CertificatePinningError
  * (the handler must stop — no credentials may be transmitted). The check runs
@@ -399,7 +445,7 @@ export type PinningGuard = (
 export function createPinningGuard(opts: PinningGuardOptions = {}): PinningGuard {
   const timeoutMs = opts.timeoutMs ?? 5_000;
 
-  return async function assertPinned(req, address, transport): Promise<void> {
+  return async function assertPinned(req, address, transport, ports): Promise<void> {
     const ctx = pinningContextFromRequest(req);
     // Remember the freshest context for this endpoint — SSH verifiers (which may
     // run later on a pooled session) read it via currentPinningContextFor().
@@ -415,7 +461,7 @@ export function createPinningGuard(opts: PinningGuardOptions = {}): PinningGuard
     }
     const host = u.hostname.replace(/^\[|\]$/g, '');
     if (!host) return;
-    const port = Number(u.port) || (u.protocol === 'https:' ? 443 : 80);
+    const port = resolveEndpointPort(u, ports);
 
     // A known pin for this endpoint is what makes the check meaningful.
     const known = knownFingerprint(ctx, 'https', host, port);

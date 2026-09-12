@@ -23,7 +23,7 @@
  *     cycle); the whole collection is a single exec() round-trip.
  */
 
-import { createSshPool, dynamicSshHostVerifier, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { createSshPool, dynamicSshHostVerifier, resolveSshCredentials, resolveSshPort, SshError } from '@unm/plugin-sdk';
 
 /** Process-wide SSH pool — one session per appliance, kept alive between polls. */
 const sshPool = createSshPool();
@@ -237,15 +237,19 @@ function parseSnapshots(section: string): Map<string, { count: number; usedBytes
 export async function collectZfsViaSsh(
   host: string,
   credentials: Record<string, unknown> | undefined,
-  log?: (level: 'info' | 'warn', message: string) => void
+  log?: (level: 'info' | 'warn', message: string) => void,
+  opts?: { port?: number }
 ): Promise<ZfsSshResult | null> {
   // slotOnly: the primary secret is an apiKey (or could be username/password) —
   // never fall back to top-level fields, only a bound `ssh` slot counts.
   const creds = resolveSshCredentials(credentials, { slotOnly: true });
   if (!creds) return null; // no ssh slot bound — API-only mode
 
+  // Configured SSH port (plugin option `sshPort`, default 22). The host-key
+  // verifier pins the key against UNM's inventory BEFORE any auth is sent.
+  const port = resolveSshPort(opts?.port);
   try {
-    const client = await sshPool.get(host, 22, creds);
+    const client = await sshPool.get(host, port, creds, { hostKeyVerifier: dynamicSshHostVerifier(host, port) });
     const r = await client.exec(ZFS_SSH_COMMAND, creds);
     if (r.code !== 0 && !r.stdout.includes('__ZFS_LIST__')) {
       log?.('warn', `SSH ZFS collection on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`);

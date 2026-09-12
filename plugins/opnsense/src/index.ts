@@ -16,6 +16,9 @@ import {
   collectDeviceCertificates,
   parseProbeTarget,
   createPinningGuard,
+  resolveHttpsPort,
+  resolveHttpPort,
+  resolveSshPort,
 } from '@unm/plugin-sdk';
 import {
   getSystemStatus,
@@ -30,7 +33,7 @@ import {
   OpnsenseTransport,
 } from './opnsenseClient';
 import { DEVICE_MODELS } from './deviceModels';
-import { createClient, OpnsenseCredentials, resolveBase } from './client/http';
+import { createClient, OpnsenseCredentials, OpnsensePorts, resolveBase } from './client/http';
 import { resolveEdition } from './client/editions';
 import { detectDnsBackend, DnsBackend } from './client/dns';
 import { detectDhcpBackend, DhcpBackend, searchKeaLeases, searchDnsmasqLeases } from './client/dhcp';
@@ -356,7 +359,9 @@ async function getInventory(
   apiKey: string,
   apiSecret: string,
   transport?: OpnsenseTransport,
-  credentials?: Record<string, unknown>
+  credentials?: Record<string, unknown>,
+  ports?: OpnsensePorts,
+  sshPort = 22
 ): Promise<InventorySnapshot> {
   const cached = inventoryCache.get(host);
   if (cached && Date.now() - cached.collectedAt < INVENTORY_INTERVAL_MS) {
@@ -369,7 +374,7 @@ async function getInventory(
   // slow collection completes and warms the cache; later polls are fast.
   const inFlight = inventoryInFlight.get(host);
   if (inFlight) return inFlight;
-  const p = collectInventory(host, apiKey, apiSecret, transport, credentials).finally(() => {
+  const p = collectInventory(host, apiKey, apiSecret, transport, credentials, ports, sshPort).finally(() => {
     inventoryInFlight.delete(host);
   });
   inventoryInFlight.set(host, p);
@@ -384,20 +389,22 @@ async function collectInventory(
   apiKey: string,
   apiSecret: string,
   transport?: OpnsenseTransport,
-  credentials?: Record<string, unknown>
+  credentials?: Record<string, unknown>,
+  ports?: OpnsensePorts,
+  sshPort = 22
 ): Promise<InventorySnapshot> {
   // The client-lib calls need a bound axios instance for this appliance.
-  const client = createClient(host, { apiKey, apiSecret }, transport);
+  const client = createClient(host, { apiKey, apiSecret }, transport, ports);
 
   const [info, arp, ndp, ifInfo, vlanRes, gwRes, diskRes] = await Promise.all([
-    getSystemInformation(host, apiKey, apiSecret, transport).catch(() => undefined),
-    getArpTable(host, apiKey, apiSecret, transport).catch(() => undefined),
-    getNdpTable(host, apiKey, apiSecret, transport).catch(() => undefined),
+    getSystemInformation(host, apiKey, apiSecret, transport, ports).catch(() => undefined),
+    getArpTable(host, apiKey, apiSecret, transport, ports).catch(() => undefined),
+    getNdpTable(host, apiKey, apiSecret, transport, ports).catch(() => undefined),
     getInterfacesInfo(client).catch(() => undefined),
     vlans.get(client).catch(() => undefined),
     searchGateways(client).catch(() => undefined),
     // Storage (best-effort — the only storage data OPNsense exposes):
-    getSystemDisk(host, apiKey, apiSecret, transport).catch(() => undefined),
+    getSystemDisk(host, apiKey, apiSecret, transport, ports).catch(() => undefined),
   ]);
 
   // Raw interfaces_info entries — kept for the PPPoE tunnel detector (which
@@ -524,8 +531,10 @@ async function collectInventory(
   // the SSH host key on port 22. Both are credential-free and best-effort, so a
   // failure simply contributes no row. Collected at inventory cadence.
   try {
-    const base = resolveBase(host, transport);
-    const target = parseProbeTarget(base, 443);
+    // Probe the SAME endpoint the client talks to — configured ports included
+    // (an explicit port in the management address wins over the option default).
+    const base = resolveBase(host, transport, ports);
+    const target = parseProbeTarget(base, ports?.httpsPort ?? 443);
     if (target) {
       const isHttps = /^https:/i.test(base);
       snap.certificates = await collectDeviceCertificates({
@@ -533,6 +542,7 @@ async function collectInventory(
         httpsPort: isHttps ? target.port : null,
         servername: target.host,
         sshEnabled: true,
+        sshPort,
         timeoutMs: 5_000,
       });
     }
@@ -547,7 +557,7 @@ async function collectInventory(
   const sshZfs = await collectZfsViaSsh(host, credentials, (level, message) => {
     if (level === 'warn') logger.warn(message);
     else logger.info(message);
-  });
+  }, { port: sshPort });
   if (sshZfs && sshZfs.filesystems.length > 0) {
     // Keep non-ZFS API rows; SSH rows win on name collisions (the zroot pool).
     const apiNonZfs = snap.filesystems.filter((f) => f['type'] !== 'zfs-pool');
@@ -850,6 +860,35 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
       'How to reach the appliance. auto = HTTPS with self-signed certificates accepted (default, matches historical behavior). https = force TLS. http = plaintext HTTP for appliances without a certificate.',
   },
   {
+    key: 'httpsPort',
+    label: 'HTTPS port',
+    type: 'integer' as const,
+    default: 443,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the appliance's HTTPS management UI. Used when the management address carries no explicit port (an explicit https://host:<port> always wins). Also the port certificate pinning verifies against.",
+  },
+  {
+    key: 'httpPort',
+    label: 'HTTP port',
+    type: 'integer' as const,
+    default: 80,
+    min: 1,
+    max: 65535,
+    description: "TCP port of the appliance's plain-HTTP management UI (used when transport is http or auto falls back to it).",
+  },
+  {
+    key: 'sshPort',
+    label: 'SSH port',
+    type: 'integer' as const,
+    default: 22,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the appliance's SSH daemon. Used for the optional ZFS inventory (ssh slot) and host-key pinning when the management address carries no explicit port.",
+  },
+  {
     key: 'editionOverride',
     label: 'Edition override',
     type: 'string' as const,
@@ -929,6 +968,16 @@ function transportOf(settings: Record<string, unknown>): OpnsenseTransport {
     : 'auto';
 }
 
+/** Extracts the configured endpoint ports from injected settings (defaults 443/80). */
+function portsOf(settings: Record<string, unknown>): OpnsensePorts {
+  return { httpsPort: resolveHttpsPort(settings.httpsPort), httpPort: resolveHttpPort(settings.httpPort) };
+}
+
+/** Extracts the configured SSH port from injected settings (default 22). */
+function sshPortOf(settings: Record<string, unknown>): number {
+  return resolveSshPort(settings.sshPort);
+}
+
 /** Reads an optional string setting. */
 function strSetting(settings: Record<string, unknown>, key: string): string | undefined {
   const v = settings[key];
@@ -943,9 +992,10 @@ async function resolveRuntimeContext(
   host: string,
   credentials: OpnsenseCredentials,
   transport: OpnsenseTransport,
-  settings: Record<string, unknown>
+  settings: Record<string, unknown>,
+  ports?: OpnsensePorts
 ): Promise<{ edition: 'ce' | 'be'; syncClasses: unknown[]; dnsBackend: DnsBackend; dhcpBackend: DhcpBackend }> {
-  const client = createClient(host, credentials, transport);
+  const client = createClient(host, credentials, transport, ports);
   const [editionInfo, dnsBackend, dhcpBackend] = await Promise.all([
     resolveEdition(client, host, strSetting(settings, 'editionOverride')).catch(() => ({ edition: 'ce' as const, classes: [] })),
     (strSetting(settings, 'dnsBackend') && strSetting(settings, 'dnsBackend') !== 'auto'
@@ -984,7 +1034,9 @@ async function collectMetrics(
   transport?: OpnsenseTransport,
   deviceId?: string | null,
   credentials?: Record<string, unknown>,
-  collectInventory?: boolean
+  collectInventory?: boolean,
+  ports?: OpnsensePorts,
+  sshPort = 22
 ): Promise<{ metrics: Record<string, unknown>; interfaces: string[] }> {
   const metrics: Record<string, unknown> = {};
   const interfaces: string[] = [];
@@ -992,7 +1044,7 @@ async function collectMetrics(
 
   // System status (health + basic info). OPNsense returns
   // { metadata: { system: { status: 0|1|2 } } } — capture the status code.
-  const status = await getSystemStatus(host, apiKey, apiSecret, transport);
+  const status = await getSystemStatus(host, apiKey, apiSecret, transport, ports);
   if (status.ok && status.data && typeof status.data === 'object') {
     const d = status.data as Record<string, unknown>;
     const meta = d['metadata'] as Record<string, unknown> | undefined;
@@ -1005,7 +1057,7 @@ async function collectMetrics(
   // Emits { total, user, nice, sys, intr, idle } per second; `total` is the
   // percentage of CPU in use. Best-effort — older firmware may not expose it.
   try {
-    const cpu = await getCpuUsage(host, apiKey, apiSecret, transport);
+    const cpu = await getCpuUsage(host, apiKey, apiSecret, transport, ports);
     if (cpu && typeof cpu.total === 'number') {
       metrics['cpu.percent'] = cpu.total;
       metrics['cpu.user'] = cpu.user;
@@ -1019,7 +1071,7 @@ async function collectMetrics(
   // Memory usage (bytes) from /api/diagnostics/system/system_resources.
   // Shape: { memory: { total: "<bytes>", used: <bytes>, ... } }
   try {
-    const resources = await getSystemResources(host, apiKey, apiSecret, transport);
+    const resources = await getSystemResources(host, apiKey, apiSecret, transport, ports);
     if (resources.ok && resources.data && typeof resources.data === 'object') {
       const d = resources.data as Record<string, unknown>;
       const mem = d['memory'] as Record<string, unknown> | undefined;
@@ -1045,7 +1097,7 @@ async function collectMetrics(
   // cheap system-info call so the device view never blanks between windows.
   let inventory: InventorySnapshot | null = null;
   if (!wantsInventory(collectInventory)) {
-    const info = await getSystemInformation(host, apiKey, apiSecret, transport).catch(() => undefined);
+    const info = await getSystemInformation(host, apiKey, apiSecret, transport, ports).catch(() => undefined);
     if (info?.ok && info.data && typeof info.data === 'object') {
       const d = info.data as Record<string, unknown>;
       if (d['name'] !== undefined) metrics['hostname'] = String(d['name']);
@@ -1053,7 +1105,7 @@ async function collectMetrics(
       if (Array.isArray(versions) && versions.length > 0) metrics['version'] = String(versions[0]);
     }
   } else {
-    inventory = await getInventory(host, apiKey, apiSecret, transport, credentials);
+    inventory = await getInventory(host, apiKey, apiSecret, transport, credentials, ports, sshPort);
     if (inventory.hostname) metrics['hostname'] = inventory.hostname;
     if (inventory.version) metrics['version'] = inventory.version;
     if (inventory.arp.length > 0) metrics['arp'] = inventory.arp;
@@ -1099,7 +1151,7 @@ async function collectMetrics(
 
   // Interface names (for the traffic table rows)
   try {
-    const ifaces = await getInterfaces(host, apiKey, apiSecret, transport);
+    const ifaces = await getInterfaces(host, apiKey, apiSecret, transport, ports);
     if (ifaces.ok && ifaces.data && typeof ifaces.data === 'object') {
       interfaces.push(...Object.keys(ifaces.data as Record<string, unknown>));
     }
@@ -1114,7 +1166,7 @@ async function collectMetrics(
   // so the webapp can render it as a table (rows = interfaces, columns = rx/tx).
   const traffic: Record<string, Record<string, number>> = {};
   try {
-    const stats = await getInterfaceStats(host, apiKey, apiSecret, transport);
+    const stats = await getInterfaceStats(host, apiKey, apiSecret, transport, ports);
     if (stats.ok && stats.data && typeof stats.data === 'object') {
       const data = stats.data as Record<string, unknown>;
       const statistics = (data['statistics'] ?? data) as Record<string, unknown>;
@@ -1166,17 +1218,17 @@ async function collectMetrics(
 
     const tunnelPromise: Promise<unknown> | null =
       inventory.tunnels.length > 0
-        ? enrichTunnelsWithLiveState(createClient(host, { apiKey, apiSecret }, transport), inventory.tunnels).catch(() => inventory.tunnels)
+        ? enrichTunnelsWithLiveState(createClient(host, { apiKey, apiSecret }, transport, ports), inventory.tunnels).catch(() => inventory.tunnels)
         : null;
     const routePromise: Promise<unknown> | null =
       allRoutes.length > 0
-        ? enrichRoutesWithGatewayStatus(createClient(host, { apiKey, apiSecret }, transport), allRoutes, {
+        ? enrichRoutesWithGatewayStatus(createClient(host, { apiKey, apiSecret }, transport, ports), allRoutes, {
             log: (_level, message, context) => logger.warn(message, { deviceId, context }),
           }).catch(() => allRoutes)
         : null;
     const fwStatsPromise: Promise<Map<string, { packets: number | null; bytes: number | null; states: number | null }>> | null =
       inventory.firewallRules !== null && inventory.firewallRules.length > 0
-        ? fetchFilterRuleStats(createClient(host, { apiKey, apiSecret }, transport)).catch(() => new Map())
+        ? fetchFilterRuleStats(createClient(host, { apiKey, apiSecret }, transport, ports)).catch(() => new Map())
         : null;
 
     const [tunnelsOut, routesOut, fwStats] = await Promise.all([tunnelPromise, routePromise, fwStatsPromise]);
@@ -1226,6 +1278,8 @@ app.post('/monitoring', async (req, res) => {
     typeof settings.transport === 'string' && ['auto', 'http', 'https'].includes(settings.transport)
       ? (settings.transport as OpnsenseTransport)
       : 'auto';
+  const ports = portsOf(settings);
+  const sshPort = sshPortOf(settings);
 
   // Decrypted assignment fields incl. bound slots (slots.ssh when the user
   // bound an SSH credential) — forwarded to the inventory for ZFS enrichment.
@@ -1238,9 +1292,9 @@ app.post('/monitoring', async (req, res) => {
   try {
     // Certificate pinning — verify the appliance's TLS cert against UNM's
     // inventory BEFORE any credentials are transmitted (throws on mismatch).
-    await assertPinned(req, managementAddress, transport);
+    await assertPinned(req, managementAddress, transport, ports);
 
-    const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret, transport, deviceId, credentials, collectInventory);
+    const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret, transport, deviceId, credentials, collectInventory, ports, sshPort);
 
     // Echo of the user-selected model/firmware (mirrors the LANCOM plugin) —
     // informational only; shown as text cards in the device detail view.
@@ -1325,6 +1379,7 @@ app.post('/config', async (req, res) => {
   const settings = readSettings(req, PLUGIN_OPTIONS);
   logger.setEnabled(settings.logToApi === true);
   const transport = transportOf(settings);
+  const ports = portsOf(settings);
 
   if (!actionId) {
     res.status(400).json({ success: false, result: { error: 'Missing actionId (or legacy "action")' } });
@@ -1354,7 +1409,7 @@ app.post('/config', async (req, res) => {
   try {
     // Certificate pinning — a config action transmits real credentials; refuse
     // the connection when the appliance's key differs from UNM's inventory.
-    await assertPinned(req, managementAddress, transport);
+    await assertPinned(req, managementAddress, transport, ports);
 
     const ctx = await buildActionContext({
       host: managementAddress,
@@ -1362,6 +1417,7 @@ app.post('/config', async (req, res) => {
       credentials: stepCredentials,
       transport,
       settings,
+      ports,
     });
 
     // Validate input against the action's declared schema — the plugin is the
@@ -1390,14 +1446,16 @@ async function buildActionContext(args: {
   credentials: StepCredentials;
   transport: OpnsenseTransport;
   settings: Record<string, unknown>;
+  ports?: OpnsensePorts;
 }): Promise<ActionContext> {
-  const { host, deviceId, credentials, transport, settings } = args;
-  const client = createClient(host, { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }, transport);
+  const { host, deviceId, credentials, transport, settings, ports } = args;
+  const client = createClient(host, { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }, transport, ports);
   const runtime = await resolveRuntimeContext(
     host,
     { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret },
     transport,
-    settings
+    settings,
+    ports
   );
   return {
     client,
@@ -1428,6 +1486,7 @@ app.post('/plan', async (req, res) => {
   logger.setEnabled(settings.logToApi === true);
 
   const planReq: PlanRequest = {
+    ports: portsOf(settings),
     intent: {
       actionId: typeof body.intent?.actionId === 'string' ? body.intent.actionId : '',
       inputs: (body.intent?.inputs && typeof body.intent.inputs === 'object' ? body.intent.inputs : {}) as Record<string, unknown>,
@@ -1475,6 +1534,7 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   const settings = readSettings(req, PLUGIN_OPTIONS);
   logger.setEnabled(settings.logToApi === true);
   const transport = transportOf(settings);
+  const ports = portsOf(settings);
 
   // Credentials: the assignment's decrypted fields are at top level of
   // `credentials` (secret type `apiKey`) — same model as /config.
@@ -1483,10 +1543,10 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   const apiSecret = typeof creds['apiSecret'] === 'string' ? (creds['apiSecret'] as string) : '';
 
   // Certificate pinning — /state reads live data with credentials; verify first.
-  await assertPinned(req, body.managementAddress, transport);
+  await assertPinned(req, body.managementAddress, transport, ports);
 
   // `creds` also carries bound slots (slots.ssh) for the optional ZFS path.
-  const snapshot = await getInventory(body.managementAddress, apiKey, apiSecret, transport, creds);
+  const snapshot = await getInventory(body.managementAddress, apiKey, apiSecret, transport, creds, ports, sshPortOf(settings));
 
   // Interface MACs: the networks rows already carry `mac` from interfaces_info;
   // fall back to the live interface-statistics MACs collected this poll.

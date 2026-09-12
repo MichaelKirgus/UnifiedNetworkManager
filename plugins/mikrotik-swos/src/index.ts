@@ -11,6 +11,9 @@ import {
   modelFirmwareDescriptors,
   parseProbeTarget,
   readSettings,
+  resolveHttpsPort,
+  resolveHttpPort,
+  resolveSshPort,
   resolvePluginIdentity,
   stateHandler,
   createPinningGuard,
@@ -65,6 +68,36 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     max: 600,
     description:
       'How long a collected switch snapshot stays fresh. The API polls every 30 s with a hard 10 s budget, so the full state (system + ports + PoE + LAG + VLANs + MAC table) is cached and only re-collected when stale.',
+  },
+  {
+    key: 'httpsPort',
+    label: 'HTTPS port',
+    type: 'integer' as const,
+    default: 443,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the switch's HTTPS web UI. Used when the management address carries no explicit port (an explicit https://host:<port> always wins). Also the port certificate pinning verifies against.",
+  },
+  {
+    key: 'httpPort',
+    label: 'HTTP port',
+    type: 'integer' as const,
+    default: 80,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the switch's plain-HTTP web UI (SwOS Lite is HTTP-only by default).",
+  },
+  {
+    key: 'sshPort',
+    label: 'SSH port',
+    type: 'integer' as const,
+    default: 22,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the switch's SSH daemon. Used for the host-key inventory probe when the management address carries no explicit port.",
   },
   {
     key: 'requestTimeoutMs',
@@ -135,7 +168,16 @@ function resolveOptions(settings: Record<string, unknown>): SwosOptions {
   return {
     cacheTtlMs: clampInt(settings.cacheTtlSeconds, 10, 600, Math.round(DEFAULT_OPTIONS.cacheTtlMs / 1_000)) * 1_000,
     requestTimeoutMs: clampInt(settings.requestTimeoutMs, 500, 9_000, DEFAULT_OPTIONS.requestTimeoutMs),
+    httpsPort: resolveHttpsPort(settings.httpsPort) !== 443 ? resolveHttpsPort(settings.httpsPort) : undefined,
+    httpPort: resolveHttpPort(settings.httpPort) !== 80 ? resolveHttpPort(settings.httpPort) : undefined,
   };
+}
+
+/** Extracts the configured endpoint ports from injected settings (defaults 443/80). */
+function portsOf(settings: Record<string, unknown>): { httpsPort?: number; httpPort?: number } {
+  const hp = resolveHttpsPort(settings.httpsPort);
+  const tp = resolveHttpPort(settings.httpPort);
+  return { httpsPort: hp !== 443 ? hp : undefined, httpPort: tp !== 80 ? tp : undefined };
 }
 
 /** Extracts username/password credentials from the monitoring body (decrypted by the API). */
@@ -167,7 +209,7 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   if (error || !creds) throw new Error(error ?? 'Missing credentials.');
 
   // Certificate pinning — /state reads live data with credentials; verify first.
-  await assertPinned(req, body.managementAddress, swosTransportOf(body.managementAddress));
+  await assertPinned(req, body.managementAddress, swosTransportOf(body.managementAddress), portsOf(settings));
 
   const result = await getMonitoring(body.managementAddress.trim(), creds, opts);
   return buildSwosState(result.snapshot);
@@ -208,7 +250,7 @@ app.post('/monitoring', async (req, res) => {
     // Certificate pinning — verify the switch's TLS cert against UNM's inventory
     // BEFORE any credentials are transmitted (throws on mismatch). Skipped for
     // HTTP-only boxes (no certificate to pin).
-    await assertPinned(req, managementAddress, swosTransportOf(managementAddress));
+    await assertPinned(req, managementAddress, swosTransportOf(managementAddress), portsOf(settings));
 
     const result: MonitoringResult = await getMonitoring(managementAddress.trim(), creds, opts);
     const s = result.snapshot;
@@ -237,7 +279,8 @@ app.post('/monitoring', async (req, res) => {
       const cachedCerts = certCache.get(managementAddress, CERT_TTL_MS) ?? null;
       let certRows: CertificateRow[] | null = cachedCerts;
       if (!certRows) {
-        const target = parseProbeTarget(managementAddress, 443);
+        const p = portsOf(settings);
+        const target = parseProbeTarget(managementAddress, p.httpsPort ?? 443);
         const explicitHttps = /^https:\/\//i.test(managementAddress.trim());
         certRows =
           target && explicitHttps
@@ -246,6 +289,7 @@ app.post('/monitoring', async (req, res) => {
                 httpsPort: target.port,
                 servername: target.host,
                 sshEnabled: true,
+                sshPort: resolveSshPort(settings.sshPort),
                 timeoutMs: 5_000,
               })
             : target
@@ -254,6 +298,7 @@ app.post('/monitoring', async (req, res) => {
                   httpsPort: null, // HTTP-only management UI — no TLS cert to read
                   servername: target.host,
                   sshEnabled: true,
+                  sshPort: resolveSshPort(settings.sshPort),
                   timeoutMs: 5_000,
                 })
               : [];
@@ -304,7 +349,7 @@ async function buildActionContext(args: { host: string; deviceId?: string; crede
   const password = typeof args.credentials.password === 'string' ? (args.credentials.password as string) : '';
   if (!username) throw new Error('Missing username in the assigned secret');
   const opts = resolveOptions(args.settings);
-  const client = new SwosClient(args.host, { username, password }, opts.requestTimeoutMs);
+  const client = new SwosClient(args.host, { username, password }, opts.requestTimeoutMs, portsOf(args.settings));
   const platform = await createPlatform(client);
   return { client, platform, host: args.host, deviceId: args.deviceId };
 }
@@ -347,7 +392,7 @@ app.post('/config', async (req, res) => {
   try {
     // Certificate pinning — a config action transmits real credentials; refuse
     // the connection when the switch's key differs from UNM's inventory.
-    await assertPinned(req, managementAddress, swosTransportOf(managementAddress));
+    await assertPinned(req, managementAddress, swosTransportOf(managementAddress), portsOf(settings));
 
     const ctx = await buildActionContext({ host: managementAddress, deviceId: typeof deviceId === 'string' ? deviceId : undefined, credentials: creds, settings });
 

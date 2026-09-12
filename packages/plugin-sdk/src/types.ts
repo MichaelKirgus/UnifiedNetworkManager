@@ -510,8 +510,9 @@ export interface ConsoleHelloFrame {
   /** Plugin-owned context naming WHAT to attach to. E.g. `{ kind: 'host' }` for a
    *  login shell, or `{ kind: 'container', name?, service? }` for an exec into a
    *  container (the plugin resolves the docker name + entrypoint). */
-  context?: Record<string, unknown>;
-}
+  context?: Record<string, unknown>;  /** The assignment's effective plugin settings (defaults ⊕ overrides) — lets onOpen()
+   *  resolve per-device options such as a non-default SSH port. Absent on older APIs. */
+  settings?: Record<string, unknown>;}
 
 /** Control messages carried in TEXT frames on the console WebSocket. */
 export type ConsoleControlMessage =

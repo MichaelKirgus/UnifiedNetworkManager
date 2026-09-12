@@ -59,13 +59,25 @@ export const DEFAULT_TIMEOUT_MS = 5_000;
  * `transport: 'auto'`/`https` → wss with self-signed certificates accepted
  * (TrueNAS ships one out of the box), `http` → plain ws.
  */
-export function resolveWsUrl(host: string, transport?: TruenasTransport): string {
+/** Appends `:<port>` to a host when the port differs from the scheme default. */
+function withPort(host: string, port: number | undefined, schemeDefault: number): string {
+  if (port === undefined || !Number.isFinite(port) || port <= 0 || port > 65535) return host;
+  return port === schemeDefault ? host : `${host}:${Math.floor(port)}`;
+}
+
+export function resolveWsUrl(host: string, transport?: TruenasTransport, ports?: { httpsPort?: number; httpPort?: number }): string {
   let h = (host ?? '').trim().replace(/\/+$/, '');
   if (!h) return '';
   const m = h.match(/^https?:\/\/(.*)$/i);
-  if (m) h = m[1]; // explicit scheme wins — converted to ws(s) below
+  if (m) h = m[1]; // explicit scheme (+ port) wins — converted to ws(s) below
   const t = transport ?? 'auto';
   const scheme = t === 'http' ? 'ws://' : 'wss://';
+  // Configured management port (default 443 for wss / 80 for ws) — an explicit
+  // port in the address already wins because it is part of `h`.
+  const hasExplicitPort = m !== null && /:\d+$/.test(m[1].replace(/\/.*$/, ''));
+  if (!hasExplicitPort) {
+    h = withPort(h, t === 'http' ? ports?.httpPort : ports?.httpsPort, t === 'http' ? 80 : 443);
+  }
   return `${scheme}${h}/api/current`;
 }
 
@@ -106,8 +118,13 @@ export class TruenasClient {
   private nextId = 1;
   private readonly pending = new Map<number, PendingCall>();
 
-  constructor(host: string, transport?: TruenasTransport, timeoutMs: number = DEFAULT_TIMEOUT_MS) {
-    this.wsUrl = resolveWsUrl(host, transport);
+  constructor(
+    host: string,
+    transport?: TruenasTransport,
+    timeoutMs: number = DEFAULT_TIMEOUT_MS,
+    ports?: { httpsPort?: number; httpPort?: number }
+  ) {
+    this.wsUrl = resolveWsUrl(host, transport, ports);
     if (!this.wsUrl) throw new Error('TruenasClient requires a non-empty host');
     this.timeoutMs = timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
   }
@@ -433,6 +450,11 @@ export class TruenasClient {
 }
 
 /** Convenience: a fresh client for one host (used by the probe script too). */
-export function createTruenasClient(host: string, transport?: TruenasTransport, timeoutMs?: number): TruenasClient {
-  return new TruenasClient(host, transport, timeoutMs);
+export function createTruenasClient(
+  host: string,
+  transport?: TruenasTransport,
+  timeoutMs?: number,
+  ports?: { httpsPort?: number; httpPort?: number }
+): TruenasClient {
+  return new TruenasClient(host, transport, timeoutMs, ports);
 }

@@ -83,12 +83,18 @@ function httpGet(
   path: string,
   transport: 'auto' | 'http' | 'https',
   auth: { username: string; password: string },
-  timeoutMs: number
+  timeoutMs: number,
+  ports?: { httpsPort?: number; httpPort?: number }
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     let start: URL;
     try {
-      const base = address.includes('://') ? address : `https://${address}`;
+      // An explicit port in the address wins over the configured default.
+      const base = address.includes('://')
+        ? address
+        : transport === 'http'
+          ? `http://${address}${ports?.httpPort && ports.httpPort !== 80 ? `:${ports.httpPort}` : ''}`
+          : `https://${address}${ports?.httpsPort && ports.httpsPort !== 443 ? `:${ports.httpsPort}` : ''}`;
       start = new URL(path.startsWith('/') ? path : `/${path}`, base);
     } catch (err) {
       return reject(new Error(`Invalid management address "${address}": ${(err as Error).message}`));
@@ -142,10 +148,11 @@ function httpGet(
         }
       );
       req.on('error', (err) => {
-        // 'auto': an HTTPS failure falls back to plain HTTP once.
+        // 'auto': an HTTPS failure falls back to plain HTTP once (configured port).
         if (!onFallback && preferHttps && !followedRedirect) {
           const httpUrl = new URL(url);
           httpUrl.protocol = 'http:';
+          if (ports?.httpPort && ports.httpPort !== 80) httpUrl.port = String(ports.httpPort);
           attempt(httpUrl, true, followedRedirect);
         } else {
           done(() => reject(new Error(`Web UI request failed: ${err.message}`)));
@@ -186,7 +193,14 @@ const configBackupDownload: ActionDescriptor = {
       return { success: false, error: 'Backup endpoint not configured — set the plugin\'s `backupPath` option to the router\'s web-UI backup URL.' };
     }
     const auth = webCreds(ctx);
-    const data = await httpGet(ctx.address, ctx.backupPath, ctx.webTransport, auth, 55_000);
+    const data = await httpGet(
+      ctx.address,
+      ctx.backupPath,
+      ctx.webTransport,
+      auth,
+      55_000,
+      { httpsPort: ctx.httpsPort, httpPort: ctx.httpPort }
+    );
     if (data.length === 0) {
       return { success: false, error: 'Router returned an empty backup — check the `backupPath` option and web-UI credentials.' };
     }

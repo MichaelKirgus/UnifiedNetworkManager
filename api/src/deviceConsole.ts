@@ -4,6 +4,7 @@ import * as schema from './db/schema';
 import { getSecretFresh } from './secretsProvider';
 import { parseExtraCredentials } from './types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from './utils/slotCredentials';
+import { getEffectiveSettings } from './pluginSettings';
 
 /**
  * Device-console broker (capability 'sshConsole').
@@ -34,6 +35,9 @@ export interface ConsoleTarget {
   ipAddresses: DeviceAddressView[];
   /** Fresh decrypted credentials (primary + bound slots) — same shape as /monitoring. */
   credentials: Record<string, unknown>;
+  /** The assignment's effective plugin settings (defaults ⊕ overrides) — lets the
+   *  plugin's console onOpen() resolve per-device options such as a non-default SSH port. */
+  settings?: Record<string, unknown>;
 }
 
 /** Error carrying an HTTP status so routes can map it directly. */
@@ -95,11 +99,22 @@ export async function resolveConsoleTarget(deviceId: string, pluginId?: string):
     await decryptCredentialSlots(parseExtraCredentials(assignment.extraCredentials), { fresh: true })
   );
 
+  // Effective plugin settings (best-effort) — the console hello carries them so a
+  // non-default SSH port configured per device is honored by the PTY session.
+  let settings: Record<string, unknown> | undefined;
+  try {
+    const s = await getEffectiveSettings(effectivePluginId, deviceId);
+    if (s && Object.keys(s).length > 0) settings = s;
+  } catch {
+    // Unknown plugin/assignment — the plugin falls back to its own defaults.
+  }
+
   return {
     pluginId: effectivePluginId,
     endpoint: plugin.endpoint,
     managementAddress: device.managementAddress,
     ipAddresses,
     credentials,
+    ...(settings ? { settings } : {}),
   };
 }

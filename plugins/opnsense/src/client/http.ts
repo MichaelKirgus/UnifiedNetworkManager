@@ -22,6 +22,14 @@ export interface OpnsenseApiResult<T = unknown> {
 /** Transport choice owned by this plugin via its `transport` option. */
 export type OpnsenseTransport = 'auto' | 'http' | 'https';
 
+/** Configurable endpoint ports (plugin options httpsPort/httpPort, defaults 443/80). */
+export interface OpnsensePorts {
+  /** HTTPS management port when the address has no explicit port (default 443). */
+  httpsPort?: number;
+  /** Plain-HTTP management port (default 80). */
+  httpPort?: number;
+}
+
 // OPNsense appliances almost always present a self-signed TLS certificate.
 // Rejecting it (axios default) makes every poll fail with "self-signed
 // certificate" and the device stays offline. Use an agent that accepts it.
@@ -30,21 +38,31 @@ const httpsAgent = new HttpsAgent({ rejectUnauthorized: false });
 /** Default per-request timeout; long-running actions may override per call. */
 export const DEFAULT_TIMEOUT_MS = 10_000;
 
+/** Appends `:<port>` to a scheme+host base when the port differs from the scheme default. */
+function withPort(base: string, port: number | undefined, schemeDefault: number): string {
+  if (port === undefined || !Number.isFinite(port) || port <= 0 || port > 65535) return base;
+  return port === schemeDefault ? base : `${base}:${Math.floor(port)}`;
+}
+
 /**
  * Resolves the absolute base URL for a device address given the transport
  * option:
- *  - host already carries a scheme (legacy full-URL managementAddress) → kept.
- *  - `transport: 'http'` / `'https'` → that scheme is forced onto bare hosts.
+ *  - host already carries a scheme (legacy full-URL managementAddress) → kept,
+ *    including any explicit port in it.
+ *  - `transport: 'http'` / `'https'` → that scheme is forced onto bare hosts;
+ *    an explicit port in the address wins over the configured default.
  *  - `auto` (default, preserves historical behavior) → https with self-signed
  *    certificates accepted — OPNsense appliances almost always present one.
  */
-export function resolveBase(host: string, transport?: OpnsenseTransport): string {
+export function resolveBase(host: string, transport?: OpnsenseTransport, ports?: OpnsensePorts): string {
   const h = (host ?? '').trim().replace(/\/$/, '');
   if (!h) return '';
-  if (/^https?:\/\//i.test(h)) return h; // explicit scheme wins
+  if (/^https?:\/\//i.test(h)) return h; // explicit scheme (+ port) wins
   const t = transport ?? 'auto';
-  const scheme = t === 'http' ? 'http://' : 'https://';
-  return `${scheme}${h}`;
+  if (t === 'http') {
+    return withPort(`http://${h}`, ports?.httpPort, 80);
+  }
+  return withPort(`https://${h}`, ports?.httpsPort, 443);
 }
 
 /** Credentials for one appliance: the API key/secret pair (Basic auth). */
@@ -62,10 +80,17 @@ export interface RequestOptions {
 
 /**
  * Builds a bound client for one appliance. All module clients receive this so
- * credentials/transport stay out of every individual call signature.
+ * credentials/transport stay out of every individual call signature. `ports`
+ * carries the configured https/http ports (defaults 443/80) — an explicit port
+ * in the management address always wins.
  */
-export function createClient(host: string, credentials: OpnsenseCredentials, transport?: OpnsenseTransport): AxiosInstance {
-  const base = resolveBase(host, transport);
+export function createClient(
+  host: string,
+  credentials: OpnsenseCredentials,
+  transport?: OpnsenseTransport,
+  ports?: OpnsensePorts
+): AxiosInstance {
+  const base = resolveBase(host, transport, ports);
   return axios.create({
     baseURL: base,
     auth: { username: credentials.apiKey, password: credentials.apiSecret },

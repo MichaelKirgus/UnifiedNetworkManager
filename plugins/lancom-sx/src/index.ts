@@ -18,6 +18,9 @@ import {
   createPinningGuard,
   collectDeviceCertificates,
   parseProbeTarget,
+  resolveHttpsPort,
+  resolveHttpPort,
+  resolveSshPort,
   CertificateRow,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
@@ -102,8 +105,35 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       'Ship structured log entries (SNMP walk failures, config/plan errors) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
+  },  {
+    key: 'httpsPort',
+    label: 'HTTPS port',
+    type: 'integer' as const,
+    default: 443,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the switch's HTTPS management UI. Used when the management address carries no explicit port (an explicit https://host:<port> always wins). Also the port certificate pinning verifies against.",
   },
-];
+  {
+    key: 'httpPort',
+    label: 'HTTP port',
+    type: 'integer' as const,
+    default: 80,
+    min: 1,
+    max: 65535,
+    description: "TCP port of the switch's plain-HTTP management UI (used when auto falls back to it).",
+  },
+  {
+    key: 'sshPort',
+    label: 'SSH port',
+    type: 'integer' as const,
+    default: 22,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the switch's SSH daemon. Used for the host-key inventory probe when the management address carries no explicit port.",
+  },];
 
 // Pre-wired app: cors + json (32mb for base64 config payloads) + /healthz +
 // /discover (+ static icons, mDNS on listen) come from @unm/plugin-sdk — this
@@ -145,6 +175,18 @@ const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray
 // credentials are transmitted; unknown endpoints are TOFU-accepted and land in
 // UNM's inventory via the `certificates` metric.
 const assertPinned = createPinningGuard();
+
+/** Extracts the configured endpoint ports from injected settings (defaults 443/80). */
+function portsOf(settings: Record<string, unknown>): { httpsPort?: number; httpPort?: number } {
+  const hp = resolveHttpsPort(settings.httpsPort);
+  const tp = resolveHttpPort(settings.httpPort);
+  return { httpsPort: hp !== 443 ? hp : undefined, httpPort: tp !== 80 ? tp : undefined };
+}
+
+/** Extracts the configured SSH port from injected settings (default 22). */
+function sshPortOf(settings: Record<string, unknown>): number {
+  return resolveSshPort(settings.sshPort);
+}
 
 /** Resolves SNMP walk options from effective settings. */
 function resolveOptions(settings: Record<string, unknown>): SxOptions {
@@ -206,7 +248,7 @@ app.post('/monitoring', async (req, res) => {
   try {
     // Certificate pinning — verify the switch's TLS cert against UNM's
     // inventory BEFORE any credentials are transmitted (throws on mismatch).
-    await assertPinned(req, managementAddress, 'auto');
+    await assertPinned(req, managementAddress, 'auto', portsOf(settings));
 
     // Slow path: targeted parallel LCOS-SX walks (only the subtrees we use),
     // TTL-cached per host with a quality gate against partial-failure data.
@@ -366,15 +408,17 @@ app.post('/monitoring', async (req, res) => {
       const cachedCerts = certCache.get(host, CERT_TTL_MS) ?? null;
       let certRows: CertificateRow[] | null = cachedCerts;
       if (!certRows) {
-        // SX switches default to an HTTPS management UI — probe TLS on 443 (no
-        // row is contributed when the box is HTTP-only) plus SSH host key on 22.
-        const target = parseProbeTarget(managementAddress, 443);
+        // SX switches default to an HTTPS management UI — probe TLS on the
+        // configured port (default 443) plus the SSH host key on its port.
+        const p = portsOf(settings);
+        const target = parseProbeTarget(managementAddress, p.httpsPort ?? 443);
         certRows = target
           ? await collectDeviceCertificates({
               host: target.host,
               httpsPort: target.port,
               servername: target.host,
               sshEnabled: true,
+              sshPort: sshPortOf(settings),
               timeoutMs: 5_000,
             })
           : [];
@@ -509,7 +553,7 @@ app.post('/config', async (req, res) => {
   try {
     // Certificate pinning — a config action transmits real credentials;
     // refuse the connection when the switch's key differs from UNM's inventory.
-    await assertPinned(req, managementAddress, 'auto');
+    await assertPinned(req, managementAddress, 'auto', portsOf(settings));
 
     const ctx = await buildActionContext({
       host: hostFromAddress(managementAddress),
@@ -598,7 +642,7 @@ app.post(
     if (!host) throw new Error('No target address — set the device management address.');
 
     // Certificate pinning — /state reads live data with credentials; verify first.
-    await assertPinned(req, body.managementAddress, 'auto');
+    await assertPinned(req, body.managementAddress, 'auto', portsOf(settings));
 
     const { creds, error } = resolveCredentials((body.credentials ?? {}) as Record<string, unknown>);
     if (error || !creds) throw new Error(error ?? 'Missing SNMP credentials.');

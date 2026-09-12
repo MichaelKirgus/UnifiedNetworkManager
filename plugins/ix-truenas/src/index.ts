@@ -31,6 +31,9 @@ import {
   createTerminalPool,
   createPinningGuard,
   dynamicSshHostVerifier,
+  resolveHttpsPort,
+  resolveHttpPort,
+  resolveSshPort,
   TtlCache,
   collectDeviceCertificates,
   parseProbeTarget,
@@ -49,6 +52,7 @@ import {
   getVmEnrichment,
   monitoringInFlight,
   normalizeVmDevice,
+  setHostSshPort,
   serviceNetDetails,
   sshHostOf,
   sshPool,
@@ -149,6 +153,35 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     pattern: '^(auto|http|https)$',
     description:
       'How to reach the appliance. auto = HTTPS with self-signed certificates accepted (default — TrueNAS ships a self-signed cert out of the box). https = force TLS. http = plaintext HTTP.',
+  },
+  {
+    key: 'httpsPort',
+    label: 'HTTPS port',
+    type: 'integer' as const,
+    default: 443,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the appliance's HTTPS management UI / WebSocket API. Used when the management address carries no explicit port (an explicit https://host:<port> always wins). Also the port certificate pinning verifies against.",
+  },
+  {
+    key: 'httpPort',
+    label: 'HTTP port',
+    type: 'integer' as const,
+    default: 80,
+    min: 1,
+    max: 65535,
+    description: "TCP port of the appliance's plain-HTTP management UI (used when transport is http or auto falls back to it).",
+  },
+  {
+    key: 'sshPort',
+    label: 'SSH port',
+    type: 'integer' as const,
+    default: 22,
+    min: 1,
+    max: 65535,
+    description:
+      "TCP port of the appliance's SSH daemon. Used for container/VM enrichment, live probes, the filesystem browser and the interactive console when the management address carries no explicit port.",
   },
   {
     key: 'timeoutMs',
@@ -256,10 +289,22 @@ function transportOf(settings: Record<string, unknown>): TruenasTransport {
   return typeof t === 'string' && ['auto', 'http', 'https'].includes(t) ? (t as TruenasTransport) : 'auto';
 }
 
+/** Extracts the configured endpoint ports from injected settings (defaults 443/80). */
+function portsOf(settings: Record<string, unknown>): { httpsPort?: number; httpPort?: number } {
+  const hp = resolveHttpsPort(settings.httpsPort);
+  const tp = resolveHttpPort(settings.httpPort);
+  return { httpsPort: hp !== 443 ? hp : undefined, httpPort: tp !== 80 ? tp : undefined };
+}
+
+/** Extracts the configured SSH port from injected settings (default 22). */
+function sshPortOf(settings: Record<string, unknown>): number {
+  return resolveSshPort(settings.sshPort);
+}
+
 /**
  * Per-host client cache — the WebSocket transport keeps ONE authenticated
  * socket per appliance, so we must NOT create a fresh client (and thus a new
- * handshake + login exchange) on every 30 s poll. Keyed by host+transport.
+ * handshake + login exchange) on every 30 s poll. Keyed by host+transport+port.
  */
 const clientCache = new Map<string, TruenasClient>();
 
@@ -278,11 +323,16 @@ const assertPinned = createPinningGuard();
 /** TEMP DEBUG (log-once): hosts+methods whose storage-extra outcome was already logged. */
 const storageDebugLogged = new Set<string>();
 
-function getClient(host: string, transport: TruenasTransport, timeoutMs: number): TruenasClient {
-  const key = `${host}|${transport}`;
+function getClient(
+  host: string,
+  transport: TruenasTransport,
+  timeoutMs: number,
+  ports?: { httpsPort?: number; httpPort?: number }
+): TruenasClient {
+  const key = `${host}|${transport}|${ports?.httpsPort ?? ''}|${ports?.httpPort ?? ''}`;
   let c = clientCache.get(key);
   if (!c) {
-    c = new TruenasClient(host, transport, timeoutMs);
+    c = new TruenasClient(host, transport, timeoutMs, ports);
     clientCache.set(key, c);
   }
   return c;
@@ -364,11 +414,12 @@ async function openConsoleSession(
   host: string,
   sshCreds: SshCredentials,
   context: Record<string, unknown> | undefined,
+  sshPort = 22
 ): Promise<SshTerminalSession> {
   // UNM certificate pinning — resolves the freshest trusted fingerprint at
   // handshake time (pooled sessions outlive single requests). A mismatch
   // rejects the handshake BEFORE any auth message is sent.
-  const conn = await termPool.get(host, 22, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host) });
+  const conn = await termPool.get(host, sshPort, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host, sshPort) });
   const ctx: Record<string, unknown> = context ?? {};
   const kind = typeof ctx['kind'] === 'string' ? (ctx['kind'] as string) : '';
 
@@ -386,7 +437,7 @@ async function openConsoleSession(
     // Resolve the real docker name with ONE `docker ps -a` over the plugin's shared
     // (non-PTY) exec pool — clean output, no terminal artifacts. The dynamic host-key
     // verifier pins the SSH handshake against UNM's inventory before auth.
-    const probeClient = await sshPool.get(host, 22, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host) });
+    const probeClient = await sshPool.get(host, sshPort, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host, sshPort) });
     const listingRes = await probeClient.exec(`docker ps -a --format '{{.Names}}' 2>/dev/null`, sshCreds);
     const names = new Set(listingRes.stdout.split('\n').map((l) => l.trim()).filter(Boolean));
     const dockerName = candidates.find((c) => names.has(c)) ?? null;
@@ -415,7 +466,11 @@ const consoleUpgrade = makeConsoleUpgrade({
     // Only the bound ssh slot counts — the primary username/password must NOT be reused.
     const sshCreds = resolveSshCredentials(hello.credentials as Record<string, unknown> | undefined, { slotOnly: true });
     if (!sshCreds) throw new Error('No SSH credential bound — console unavailable');
-    return openConsoleSession(host, sshCreds, hello.context);
+    // Configured SSH port (plugin option `sshPort`, default 22) — delivered by
+    // the API in the console hello frame so a per-device override is honored.
+    const sshPort = resolveSshPort(hello.settings?.['sshPort']);
+    setHostSshPort(host, sshPort);
+    return openConsoleSession(host, sshCreds, hello.context, sshPort);
   },
 });
 
@@ -1425,11 +1480,15 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   logger.setEnabled(settings.logToApi === true);
   notifier.setEnabled(settings.notifyAlerts === true);
   const transport = transportOf(settings);
+  const ports = portsOf(settings);
+  // Register the configured SSH port for this host — every internal sshPool.get()
+  // (enrichment, probes) reads it via hostSshPort() without a threaded parameter.
+  setHostSshPort(host, sshPortOf(settings));
 
   // Certificate pinning — verify the appliance's TLS cert against UNM's
   // inventory BEFORE any credentials are transmitted (throws on mismatch;
   // the /monitoring wrapper turns it into a health=critical poll result).
-  await assertPinned(req, body.managementAddress, transport);
+  await assertPinned(req, body.managementAddress, transport, ports);
 
   const timeoutMs = clampInt(settings.timeoutMs, 500, 60000, 5000);
   // App/Container collection toggle — off = skip app.query/docker.network + all
@@ -1458,7 +1517,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  const client = getClient(host, transport, timeoutMs);
+  const client = getClient(host, transport, timeoutMs, ports);
   const metrics: Record<string, unknown> = {};
   let failures = 0;
   let firstError = '';
@@ -1812,8 +1871,8 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     let certRows: CertificateRow[] | null = cachedCerts;
     if (!certRows) {
       // TrueNAS defaults to an HTTPS management UI — probe TLS on the address's
-      // port (443 when unspecified; no row is contributed for plain-http).
-      const target = parseProbeTarget(host, 443);
+      // port (configured httpsPort, default 443; no row for plain-http).
+      const target = parseProbeTarget(host, ports.httpsPort ?? 443);
       certRows =
         target && transport !== 'http'
           ? await collectDeviceCertificates({
@@ -1821,6 +1880,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
               httpsPort: target.port,
               servername: target.host,
               sshEnabled: true,
+              sshPort: sshPortOf(settings),
               timeoutMs: 5_000,
             })
           : [];
@@ -2145,6 +2205,8 @@ app.post('/config', async (req, res) => {
   const settings = readSettings(req, PLUGIN_OPTIONS);
   logger.setEnabled(settings.logToApi === true);
   const transport = transportOf(settings);
+  const ports = portsOf(settings);
+  setHostSshPort(host, sshPortOf(settings));
   const timeoutMs = clampInt(settings.timeoutMs, 500, 60000, 5000);
 
   if (!actionId) {
@@ -2181,11 +2243,11 @@ app.post('/config', async (req, res) => {
   try {
     // Certificate pinning — a config action transmits real credentials; refuse
     // the connection when the appliance's key differs from UNM's inventory.
-    await assertPinned(req, host, transport);
+    await assertPinned(req, host, transport, ports);
 
     // host + rawCredentials let slot-based actions (e.g. containers.logs.read over SSH)
     // reach the appliance on a different channel than the RPC socket.
-    const ctx: TruenasActionContext = { client: getClient(host, transport, timeoutMs), creds, host, rawCredentials: body.credentials as Record<string, unknown> | null };
+    const ctx: TruenasActionContext = { client: getClient(host, transport, timeoutMs, ports), creds, host, rawCredentials: body.credentials as Record<string, unknown> | null };
     const result = await action.execute(ctx, input);
     res.status(200).json({ success: result.success, result });
   } catch (err) {
@@ -2204,6 +2266,7 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   const settings = readSettings(req, PLUGIN_OPTIONS);
   logger.setEnabled(settings.logToApi === true);
   const transport = transportOf(settings);
+  const ports = portsOf(settings);
   const timeoutMs = clampInt(settings.timeoutMs, 500, 60000, 5000);
 
   const host = applianceHost(body.managementAddress);
@@ -2214,9 +2277,9 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   if (!creds) throw new Error(credError ?? 'Missing credentials');
 
   // Certificate pinning — /state reads live data with credentials; verify first.
-  await assertPinned(req, host, transport);
+  await assertPinned(req, host, transport, ports);
 
-  const client = getClient(host, transport, timeoutMs);
+  const client = getClient(host, transport, timeoutMs, ports);
   const [sysInfoRes, poolsRes, ifacesRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
@@ -2265,8 +2328,11 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   const sshCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
   if (!sshCreds) throw new Error('No SSH credential bound — live probe data unavailable');
 
+  // Register the configured SSH port for this host — the probe collectors read it.
+  setHostSshPort(host, sshPortOf(settings));
+
   // Certificate pinning — the probe transmits SSH credentials; verify first.
-  await assertPinned(req, host, transportOf(settings));
+  await assertPinned(req, host, transportOf(settings), portsOf(settings));
 
   // Which keys did the caller ask for? Absent/empty = default set. Unknown keys ignored.
   const requested = Array.isArray(body.keys) && body.keys.length > 0 ? body.keys : ['containerStats'];
@@ -2381,8 +2447,11 @@ app.post(
     const sshCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
     if (!sshCreds) throw new Error('No SSH credential bound — filesystem browsing unavailable');
 
+    // Register the configured SSH port for this host (the SFTP session below uses it).
+    setHostSshPort(host, sshPortOf(settings));
+
     // Certificate pinning — SFTP transmits credentials; verify first.
-    await assertPinned(req, body.managementAddress, transportOf(settings));
+    await assertPinned(req, body.managementAddress, transportOf(settings), portsOf(settings));
 
     // Resolve the SFTP root from the caller's context (what to browse).
     const ctx = body.context ?? {};
@@ -2396,7 +2465,7 @@ app.post(
       const apiKeyUsername = typeof settings.apiKeyUsername === 'string' ? settings.apiKeyUsername.trim() : '';
       const { creds, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined, apiKeyUsername);
       if (!creds) throw new Error(credError ?? 'Missing appliance credentials');
-      const client = getClient(host, transportOf(settings), 5000);
+      const client = getClient(host, transportOf(settings), 5000, portsOf(settings));
       const mp = await resolveDatasetMountpoint(client, creds, name);
       if (!mp) throw new Error(`Dataset "${name}" is not mounted (or is a zvol) — nothing to browse`);
       root = mp;
@@ -2409,7 +2478,8 @@ app.post(
 
     // One pooled SFTP session per host+root; every path is confined to `root`.
     // The dynamic host-key verifier pins the SSH handshake against UNM's inventory.
-    const session = await fsSftpPool.get(host, 22, sshCreds, { root, timeoutMs: 30_000, hostKeyVerifier: dynamicSshHostVerifier(host) });
+    const fsPort = resolveSshPort(settings.sshPort);
+    const session = await fsSftpPool.get(host, fsPort, sshCreds, { root, timeoutMs: 30_000, hostKeyVerifier: dynamicSshHostVerifier(host, fsPort) });
     const op = body.op;
     const relPath = typeof body.path === 'string' ? body.path : '';
 
