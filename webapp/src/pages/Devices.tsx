@@ -77,7 +77,7 @@ export default function Devices() {
   // Existing plugin assignments captured when entering edit mode.
   const [initialAssignments, setInitialAssignments] = useState<DevicePluginAssignment[]>([]);
 
-  const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
+  const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices, refetchInterval: 30_000 });
   // Reference data for the create/edit form — only fetched when the user may
   // actually write (the API gates these on plugins:read / secrets:read /
   // sites:read). Read-only users get a placeholder icon and empty pickers.
@@ -923,6 +923,7 @@ export default function Devices() {
           rows={devicesQuery.data}
           rowKey={(row) => row.id}
           storageKey="devices"
+          autoRefresh={{ intervalMs: 30_000, queries: [devicesQuery] }}
           emptyMessage="No devices registered yet."
           selectable={canWriteDevices}
           bulkActions={canWriteDevices ? [
