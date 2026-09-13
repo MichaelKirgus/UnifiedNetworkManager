@@ -1406,6 +1406,92 @@ router.get('/storage', requireAuth, requirePermission('storage:read'), async (_r
   }
 });
 
+// GET /shares - Cross-device file-share overview (Shares page).
+// Returns the normalized `shares` rows (SMB/CIFS, NFS, iSCSI and NVMe-oF exports)
+// with device + plugin views joined, plus the live `share_sessions` rows (active
+// CIFS/SMB + NFS client connections) for the page's bottom panel. No cross-device
+// merge — a row is one share/session on one device. Query params: deviceId (exact),
+// siteId (filter by device's site).
+router.get('/shares', requireAuth, requirePermission('shares:read'), async (_req, res: Response) => {
+  try {
+    const { deviceId, siteId } = _req.query as Record<string, string | undefined>;
+
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json({ shares: [], sessions: [] });
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json({ shares: [], sessions: [] });
+      return;
+    }
+
+    // Resolve the device filter once, then build per-table where clauses.
+    let shareWhere;
+    let sessionWhere;
+    if (deviceId && siteId) {
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) {
+        res.status(200).json({ shares: [], sessions: [] });
+        return;
+      }
+      shareWhere = eq(schema.shares.deviceId, deviceId);
+      sessionWhere = eq(schema.shareSessions.deviceId, deviceId);
+    } else if (deviceId) {
+      shareWhere = eq(schema.shares.deviceId, deviceId);
+      sessionWhere = eq(schema.shareSessions.deviceId, deviceId);
+    } else if (siteId) {
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
+      if (deviceIds.length === 0) {
+        res.status(200).json({ shares: [], sessions: [] });
+        return;
+      }
+      shareWhere = inArray(schema.shares.deviceId, deviceIds);
+      sessionWhere = inArray(schema.shareSessions.deviceId, deviceIds);
+    } else if (allowed !== null) {
+      shareWhere = inArray(schema.shares.deviceId, [...allowed]);
+      sessionWhere = inArray(schema.shareSessions.deviceId, [...allowed]);
+    }
+
+    const [shareRows, sessionRows] = await Promise.all([
+      db.query.shares.findMany({
+        ...(shareWhere ? { where: shareWhere } : {}),
+        orderBy: [asc(schema.shares.deviceId), asc(schema.shares.type), asc(schema.shares.name)],
+      }),
+      db.query.shareSessions.findMany({
+        ...(sessionWhere ? { where: sessionWhere } : {}),
+        orderBy: [asc(schema.shareSessions.deviceId), asc(schema.shareSessions.type), asc(schema.shareSessions.shareName)],
+      }),
+    ]);
+
+    const [deviceViews, pluginNames] = await Promise.all([
+      loadDeviceViews(Array.from(new Set([...shareRows.map((r) => r.deviceId), ...sessionRows.map((r) => r.deviceId)]))),
+      loadPluginNames(Array.from(new Set([...shareRows.map((r) => r.pluginId), ...sessionRows.map((r) => r.pluginId)]))),
+    ]);
+
+    const decorate = <T extends { deviceId: string; pluginId: string }>(row: T) => {
+      const device = deviceViews.get(row.deviceId);
+      return {
+        ...row,
+        deviceName: device?.name ?? null,
+        managementAddress: device?.managementAddress ?? null,
+        siteName: device?.siteName ?? null,
+        pluginName: pluginNames.get(row.pluginId) ?? null,
+      };
+    };
+
+    res.status(200).json({
+      shares: shareRows.map(decorate),
+      sessions: sessionRows.map(decorate),
+    });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 // GET /containers - Cross-device container/App overview (Containers page).
 // Returns the normalized `containers` rows (TrueNAS SCALE Apps today; any plugin
 // may emit the generic `containers[]` metric) with device + plugin views joined,

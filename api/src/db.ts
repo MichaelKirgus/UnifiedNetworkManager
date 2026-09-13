@@ -657,6 +657,44 @@ export async function initDb(): Promise<void> {
   // Plugin-specific details for disk rows — added after the initial release.
   await pool.query(`ALTER TABLE storage_disks ADD COLUMN IF NOT EXISTS extra TEXT NOT NULL DEFAULT '{}'`);
 
+  // Shares inventory table (Shares page) — one row per file-share export
+  // (SMB/CIFS, NFS, iSCSI, NVMe-oF), upserted per poll from the plugin's `shares`
+  // metric. Same lifecycle as storage_filesystems (upsert + delete-on-absent +
+  // 24h sweep). `type` is part of the PK so two protocols sharing a name coexist.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS shares (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'other',
+      path TEXT,
+      status TEXT NOT NULL DEFAULT 'unknown',
+      "sessionCount" INTEGER,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name, type)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_shares_device ON shares ("deviceId")`);
+
+  // Share-session table (Shares page bottom panel) — one row per ACTIVE CIFS/SMB
+  // or NFS client session. LIVE state: replaced wholesale per device+plugin each
+  // poll (delete-all-then-insert), not upserted. No PK — a single share can have
+  // many concurrent sessions, and the same client may hold several.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS share_sessions (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'smb',
+      "shareName" TEXT NOT NULL,
+      "clientAddress" TEXT NOT NULL DEFAULT '',
+      "user" TEXT,
+      "uptimeSeconds" DOUBLE PRECISION,
+      "collectedAt" TEXT NOT NULL
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_share_sessions_device ON share_sessions ("deviceId")`);
+
   // Containers inventory table (Containers page) — one row per App/container
   // workload, upserted per poll from the plugin's `containers` metric. Same
   // lifecycle as storage_filesystems (upsert + delete-on-absent + 24h sweep).

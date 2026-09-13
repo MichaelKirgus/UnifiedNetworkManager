@@ -36,6 +36,10 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'certificates:write': 'Accept changed certificates / SSH host keys (re-pin endpoints)',
   'wifi:read': 'View the WiFi page (SSIDs, spectrum and neighbors)',
   'storage:read': 'View the Storage page (filesystems, pools/datasets and physical disks across devices)',
+  // File-share exports (SMB/CIFS, NFS, iSCSI, NVMe-oF) + live client sessions.
+  // Shares are managed through the plan/config workflow (configs:apply), so this
+  // read permission only gates viewing the cross-device Shares page.
+  'shares:read': 'View the Shares page (SMB/NFS/iSCSI/NVMe-oF shares and active client sessions across devices)',
   'containers:read': 'View the Containers page (Apps/container workloads across devices)',
   'vms:read': 'View the VMs page (virtual machines and their NICs across devices)',
   'topology:read': 'View the Topology page (physical + logical network graph)',

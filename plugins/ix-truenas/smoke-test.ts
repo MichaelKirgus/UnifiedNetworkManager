@@ -167,6 +167,53 @@ wss.on('connection', (ws: WebSocket) => {
       case 'system.shutdown':
         if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
         return reply(43);
+      // --- Shares-page methods (SMB/NFS exports + live client sessions) -------
+      case 'sharing.smb.query':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // MODERN shape (25.10+/26): rows carry their own path + enabled.
+        return reply([
+          { id: 1, name: 'tank/vm', path: '/mnt/tank/vm', dataset: 'tank/vm', enabled: true, comment: 'VM exports' },
+          { id: 2, name: 'public', path: '/mnt/public', dataset: null, enabled: false, comment: '' },
+        ]);
+      case 'sharing.nfs.query':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // NFS shares are keyed by their exported path.
+        return reply([
+          { id: 38, path: '/mnt/tank/vm', ro: false, hosts: ['*'], enabled: true },
+          { id: 42, path: '/mnt/tank/legacy', ro: true, hosts: [], enabled: true },
+        ]);
+      case 'smb.status':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // NO info-level filter → includes per-share share_connections. Two sessions:
+        // one with two open shares (tank/vm + public), one IPC$-only (no rows).
+        return reply([
+          {
+            session_id: '100', username: 'alice', remote_machine: '192.168.50.20',
+            creation_time: new Date(Date.now() - 3_600_000).toISOString(), session_dialect: 'SMB3_11',
+            share_connections: [
+              { service: 'tank/vm', machine: '192.168.50.20' },
+              { service: 'public', machine: '192.168.50.20' },
+            ],
+          },
+          {
+            session_id: '200', username: 'bob', remote_machine: '192.168.50.30',
+            creation_time: new Date(Date.now() - 60_000).toISOString(), session_dialect: 'SMB2_10',
+            share_connections: [{ service: 'IPC$', machine: '192.168.50.30' }],
+          },
+        ]);
+      case 'nfs.get_nfs3_clients':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // export = "<client>:/mnt/path" — the path IS the NFS share's identity.
+        return reply([
+          { ip: '192.168.50.40', export: '192.168.50.40:/mnt/tank/vm' },
+          { ip: '192.168.50.41', export: '192.168.50.41:/mnt/tank/legacy' },
+        ]);
+      case 'nfs.get_nfs4_clients':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // Wrappers of {info:{address, clientid, status}} — no per-export identity.
+        return reply([
+          { info: { address: '192.168.50.42', clientid: '0xabc', status: 'ACTIVE' } },
+        ]);
       default:
         return reply(null, { code: -32601, message: `Method ${msg.method} does not exist` });
     }
@@ -199,8 +246,8 @@ async function main(): Promise<void> {
   const caps = (disc.capabilities ?? []) as string[];
   check('capabilities include configuration+planning+deviceState', ['configuration', 'planning', 'deviceState'].every((c) => caps.includes(c)), caps);
   const actions = (disc.actions ?? []) as { id: string; riskLevel: string }[];
-  check('action catalog has all expected actions', ['containers.stop','containers.start','containers.restart','containers.upgrade','containers.delete','images.delete','compose.config.read','containers.update','alerts.dismiss','alerts.undismiss'].every((id) => actions.some((a) => a.id === id)), `count=${actions.length}`);
-  check('dangerous destructive/power actions marked', actions.filter((a) => a.riskLevel === 'dangerous').map((a) => a.id).sort().join(',') === ['containers.delete','images.delete','system.reboot','system.shutdown'].sort().join(','));
+  check('action catalog has all expected actions', ['containers.stop','containers.start','containers.restart','containers.upgrade','containers.delete','images.delete','compose.config.read','containers.update','alerts.dismiss','alerts.undismiss','shares.smb.create','shares.smb.update','shares.smb.delete','shares.nfs.create','shares.nfs.update','shares.nfs.delete','shares.iscsi.create','shares.iscsi.delete','shares.nvmeof.create','shares.nvmeof.delete'].every((id) => actions.some((a) => a.id === id)), `count=${actions.length}`);
+  check('dangerous destructive/power actions marked', actions.filter((a) => a.riskLevel === 'dangerous').map((a) => a.id).sort().join(',') === ['containers.delete','images.delete','system.reboot','system.shutdown','vms.delete','storage.delete','shares.smb.delete','shares.nfs.delete','shares.iscsi.delete','shares.nvmeof.delete'].sort().join(','));
 
   // --- /monitoring ---------------------------------------------------------------------
   const mon = (await post('/monitoring', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds })) as Response;
@@ -246,6 +293,26 @@ async function main(): Promise<void> {
   check('disk without ACTIVE smart alert → healthy (dismissed CRITICAL ignored)', diskRows.some((d) => d.name === 'da0' && d.health === 'healthy'), diskRows);
   check('WARNING smart alert → degraded + text in extra', diskRows.some((d) => d.name === 'da1' && d.health === 'degraded' && typeof (d.extra as Record<string, unknown>)?.['smart'] === 'string'), diskRows);
   check('WARNING smart alert with /dev/ prefix stripped → degraded', diskRows.some((d) => d.name === 'da3' && d.health === 'degraded'), diskRows);
+
+  // --- Shares inventory + live sessions (Shares page) -------------------------
+  const shareRows = (m['shares'] ?? []) as Record<string, unknown>[];
+  check('shares[] emitted: 2 SMB + 2 NFS', shareRows.length === 4 && shareRows.filter((r) => r.type === 'smb').length === 2 && shareRows.filter((r) => r.type === 'nfs').length === 2, shareRows);
+  const smbVmShare = shareRows.find((r) => r.type === 'smb' && r.name === 'tank/vm');
+  check('SMB share carries its own path (modern sharing.smb.query shape)', smbVmShare?.path === '/mnt/tank/vm', smbVmShare);
+  check('disabled SMB share reported as disabled', shareRows.find((r) => r.type === 'smb' && r.name === 'public')?.status === 'disabled', shareRows);
+  // Live session counts stamped onto SMB/NFS shares (IPC$-only sessions excluded).
+  check('SMB share sessionCount stamped from live data', smbVmShare?.sessionCount === 1 && shareRows.find((r) => r.type === 'smb' && r.name === 'public')?.sessionCount === 1, shareRows);
+  check('NFS share sessionCount stamped by exported path', shareRows.find((r) => r.type === 'nfs' && r.name === '/mnt/tank/vm')?.sessionCount === 1 && shareRows.find((r) => r.type === 'nfs' && r.name === '/mnt/tank/legacy')?.sessionCount === 1, shareRows);
+  const sessionRows = (m['shareSessions'] ?? []) as Record<string, unknown>[];
+  // 2 SMB share-connections + 2 NFSv3 clients + 1 NFSv4 client = 5 rows.
+  check('shareSessions[] emitted: 2 smb + 3 nfs', sessionRows.length === 5 && sessionRows.filter((r) => r.type === 'smb').length === 2 && sessionRows.filter((r) => r.type === 'nfs').length === 3, sessionRows);
+  const aliceVm = sessionRows.find((r) => r.type === 'smb' && r.shareName === 'tank/vm');
+  check('SMB session carries user + client address', aliceVm?.user === 'alice' && aliceVm?.clientAddress === '192.168.50.20', aliceVm);
+  check('SMB session uptime computed from creation_time', typeof aliceVm?.uptimeSeconds === 'number' && (aliceVm!.uptimeSeconds as number) >= 3_500, aliceVm);
+  const nfs3Row = sessionRows.find((r) => r.type === 'nfs' && r.clientAddress === '192.168.50.40');
+  check('NFSv3 export prefix stripped → share path', nfs3Row?.shareName === '/mnt/tank/vm', nfs3Row);
+  const nfs4Row = sessionRows.find((r) => r.type === 'nfs' && r.clientAddress === '192.168.50.42');
+  check('NFSv4 client row (no per-export identity)', !!nfs4Row && nfs4Row.shareName === '', nfs4Row);
 
   // --- /state --------------------------------------------------------------------------
   const stateRes = await post('/state', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds });

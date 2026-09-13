@@ -67,6 +67,7 @@ import {
 import { alertDedupeKey, registry as actionRegistry, TruenasActionContext } from './actions';
 import { buildTruenasState } from './state';
 import { buildPlan, PlanningError } from './plan';
+import { collectShares, collectShareSessions, isMethodMissing, withSessionCounts } from './shares';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000009';
 export const PLUGIN_NAME = 'TrueNAS Plugin';
@@ -133,7 +134,21 @@ const identity = resolvePluginIdentity({
   // (the docker name is resolved live from `docker ps`). Requires a bound ssh slot.
   // GENERIC contract: any future plugin serving /console with the SDK's
   // makeConsoleUpgrade gets the webapp's Shell button + container consoles for free.
-  version: '0.10.0',
+  // 0.11.0 — file-share support for the Shares page: /monitoring now emits
+  // `shares[]` (SMB/CIFS, NFS, iSCSI and NVMe-oF exports via smb.share.query /
+  // nfs.shares.query / iscsi.target.query / nvmet.subsystem.query) + live
+  // `shareSessions[]` (CIFS/SMB + NFS client connections). New CRUD actions:
+  // shares.smb.{create,update,delete}, shares.nfs.{create,update,delete},
+  // shares.iscsi.{create,delete} and shares.nvmeof.{create,delete}. GENERIC
+  // contract: any future storage plugin implementing the same ids gets the
+  // webapp's Shares page row + bulk actions.
+  // 0.12.0 — live share sessions now come from the TrueNAS JSON-RPC API (the
+  // SAME methods that back the appliance's own Web UI session pages: smb.status
+  // for CIFS/SMB, nfs.get_nfs3_clients + nfs.get_nfs4_clients for NFS) instead of
+  // SSH scraping. No ssh slot is required — every device we can authenticate to
+  // exposes these, so even API-key-only devices get session data. SMB/NFS share
+  // rows now carry a live `sessionCount` too.
+  version: '0.12.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole'],
 });
@@ -1567,6 +1582,24 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     collectVms ? client.call<Record<string, unknown>[]>('vm.query', [], creds) : Promise.resolve(undefined),
   ]);
 
+  // Shares-page live sessions (best-effort — never count toward health). The
+  // SAME three RPCs that back the appliance's own Web UI session pages:
+  // smb.status (NO info-level filter — ['SESSIONS'] omits the per-share
+  // share_connections we need), nfs.get_nfs3_clients, nfs.get_nfs4_clients.
+  // LIVE state → run on EVERY poll (not gated on collectInventory); a missing
+  // method on an older release or a transient failure yields no rows for that
+  // protocol only. No SSH required — works on API-key-only devices too.
+  // Deliberately NOT in the big parallel batch above: TrueNAS caps JSON-RPC at
+  // ~20 concurrent calls per session, and the inventory batch already fills it —
+  // when two polls overlapped (force-refresh + scheduled) these trailing calls
+  // failed with "Maximum number of concurrent calls". Running them in their own
+  // small batch AFTER the main one settles keeps every poll under the cap.
+  const [smbStatusRes, nfs3ClientsRes, nfs4ClientsRes] = await Promise.allSettled([
+    client.call<unknown>('smb.status', [], creds),
+    client.call<unknown>('nfs.get_nfs3_clients', [], creds),
+    client.call<unknown>('nfs.get_nfs4_clients', [], creds),
+  ]);
+
   // TEMP DEBUG (log-once per host): the storage extras are best-effort — their
   // failures never count toward health. Log each method's outcome ONCE so a
   // wrong/renamed RPC surfaces in container logs without spamming every poll.
@@ -1738,6 +1771,49 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
       if (boot && !diskRows.some((r) => r.name === boot.name)) diskRows.push(boot);
     }
     metrics['disks'] = diskRows;
+    }
+  }
+
+  // --- Shares (SMB/CIFS, NFS, iSCSI, NVMe-oF exports) -----------------------
+  // CONFIG objects → gated on collectInventory like filesystems/disks. Emitted
+  // even when EMPTY so a share removed on the appliance vanishes from the Shares
+  // page on the next inventory poll (present-but-empty = authoritative; an absent
+  // key would not wipe). Best-effort — a protocol RPC failure drops only that
+  // protocol's rows, never device health. SMB backing paths reuse the pool.dataset
+  // .query result already fetched above for the Storage page (no extra RPC).
+  // --- Share sessions (live CIFS/SMB + NFS client connections) --------------
+  // LIVE state from the TrueNAS API — the same three RPCs that back the
+  // appliance's own Web UI session pages, fetched in the parallel batch above on
+  // EVERY poll. Best-effort: a missing method (older release) or transient failure
+  // yields no rows for that protocol only; they never count toward device health.
+  // No SSH required — works on API-key-only devices too. An array (even empty)
+  // is authoritative → the API replaces the table wholesale per poll.
+  const shareSessionRows = collectShareSessions(
+    smbStatusRes.status === 'fulfilled' ? smbStatusRes.value : null,
+    nfs3ClientsRes.status === 'fulfilled' ? nfs3ClientsRes.value : null,
+    nfs4ClientsRes.status === 'fulfilled' ? nfs4ClientsRes.value : null,
+  );
+  for (const [label, r] of [
+    ['smb.status', smbStatusRes],
+    ['nfs.get_nfs3_clients', nfs3ClientsRes],
+    ['nfs.get_nfs4_clients', nfs4ClientsRes],
+  ] as const) {
+    // A missing method (older release) is expected — only log real failures.
+    if (r.status === 'rejected' && !isMethodMissing(r.reason)) console.warn(`[shares] ${label} failed: ${errMsg(r.reason)}`);
+  }
+  metrics['shareSessions'] = shareSessionRows;
+
+  if (collectInventory) {
+    try {
+      const datasetRows = datasetsRes.status === 'fulfilled' && Array.isArray(datasetsRes.value)
+        ? (datasetsRes.value as Record<string, unknown>[])
+        : [];
+      // Stamp each SMB/NFS share with its live session count from the snapshot
+      // above (SMB by share name, NFS by exported path) — best-effort enrichment.
+      metrics['shares'] = withSessionCounts(await collectShares(client, creds, datasetRows), shareSessionRows);
+    } catch (e) {
+      // Best-effort — a share-collection failure must not sink the poll.
+      console.warn(`[shares] collection failed for ${host}: ${errMsg(e)}`);
     }
   }
 
@@ -2145,6 +2221,26 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
       type: 'string',
       visualization: 'table',
       columns: ['name', 'model', 'serial', 'capacityBytes', 'rotationRate', 'health', 'poolName'],
+      group: 'Storage',
+    });
+  }
+  if (Array.isArray(metrics['shares']) && (metrics['shares'] as unknown[]).length > 0) {
+    out.push({
+      key: 'shares',
+      label: 'Shares',
+      type: 'string',
+      visualization: 'table',
+      columns: ['name', 'type', 'path', 'status', 'sessionCount'],
+      group: 'Storage',
+    });
+  }
+  if (Array.isArray(metrics['shareSessions']) && (metrics['shareSessions'] as unknown[]).length > 0) {
+    out.push({
+      key: 'shareSessions',
+      label: 'Active Share Sessions',
+      type: 'string',
+      visualization: 'table',
+      columns: ['type', 'shareName', 'clientAddress', 'user'],
       group: 'Storage',
     });
   }

@@ -21,6 +21,7 @@ import Logs from './pages/Logs';
 import Notifications from './pages/Notifications';
 import Wifi from './pages/Wifi';
 import Storage from './pages/Storage';
+import Shares from './pages/Shares';
 import Containers from './pages/Containers';
 import ContainerLogsPage from './pages/ContainerLogsPage';
 import ConsolePage from './pages/ConsolePage';
@@ -55,6 +56,7 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
   { path: '/notifications', permission: 'notifications:read' },
   { path: '/wifi', permission: 'wifi:read' },
   { path: '/storage', permission: 'storage:read' },
+  { path: '/shares', permission: 'shares:read' },
   { path: '/containers', permission: 'containers:read' },
   { path: '/vms', permission: 'vms:read' },
   { path: '/topology', permission: 'topology:read' },
@@ -116,6 +118,8 @@ export default function App() {
       <Route path="/notifications" element={<Page permission="notifications:read"><Notifications /></Page>} />
       <Route path="/wifi" element={<Page permission="wifi:read"><Wifi /></Page>} />
       <Route path="/storage" element={<Page permission="storage:read"><Storage /></Page>} />
+      {/* Cross-device file-share exports (SMB/NFS/iSCSI/NVMe-oF) + live sessions. */}
+      <Route path="/shares" element={<Page permission="shares:read"><Shares /></Page>} />
       {/* Cross-device container/App workloads (TrueNAS SCALE Apps). */}
       <Route path="/containers" element={<Page permission="containers:read"><Containers /></Page>} />
       {/* Standalone SSH console window — popped out of the ConsoleDialog; needs devices:write

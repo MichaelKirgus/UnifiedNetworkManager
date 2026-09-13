@@ -12,7 +12,7 @@
  * "initiated").
  */
 
-import { ActionDescriptor, ActionResult, createRegistry, dynamicSshHostVerifier, pickString, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { ActionDescriptor, ActionResult, createRegistry, dynamicSshHostVerifier, pickNumber, pickString, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
 import { normalizeVmDevice, sshPool } from './enrich';
 
@@ -1337,6 +1337,397 @@ const storageDeleteAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// File-share CRUD actions (Shares page) — a GENERIC contract any storage plugin
+// can implement. One action per protocol × operation, so the webapp's Shares page
+// offers create/edit/delete for SMB/CIFS, NFS, iSCSI and NVMe-oF shares and fans
+// one step out per selected row. All target documented TrueNAS JSON-RPC methods:
+//   smb.share.{create,update,delete}      (name-keyed; update needs the id)
+//   nfs.shares.{create,update,delete}     (path-keyed; update needs the id)
+//   iscsi.target.{create,delete}          (id-keyed delete; LUNs via iscsi.extent)
+//   nvmet.subsystem.{create,delete}       (TrueNAS 24.10+; id-keyed delete)
+// Mutating methods are @job on some releases — a job id or an immediate result both
+// mean "applied". Deletes resolve the appliance id by name/path first so re-running
+// is idempotent (already gone = skipped, not failed).
+// ---------------------------------------------------------------------------
+
+/** Reads a non-empty string from input. */
+function inStr(input: Record<string, unknown>, key: string): string | undefined {
+  const v = input[key];
+  return typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
+}
+
+/** Reads an optional boolean (undefined when absent). */
+function inBool(input: Record<string, unknown>, key: string): boolean | undefined {
+  const v = input[key];
+  return typeof v === 'boolean' ? v : undefined;
+}
+
+/** Resolves a TrueNAS id from a query result by matching name OR path. Returns the
+ * row (with its `id`) or null when not found — callers treat null as "already gone". */
+async function findShareId(ctx: TruenasActionContext, method: string, matchName?: string, matchPath?: string): Promise<{ id: number; name?: string } | null> {
+  const rows = await callWithRetry<Record<string, unknown>[]>(ctx, method, []);
+  for (const r of rows ?? []) {
+    if (!r || typeof r !== 'object') continue;
+    const id = pickNumber(r, ['id']);
+    if (typeof id !== 'number') continue;
+    if (matchName && pickString(r, ['name']) === matchName) return { id, name: matchName };
+    if (matchPath && pickString(r, ['path']) === matchPath) return { id, name: matchPath };
+  }
+  return null;
+}
+
+/** True when a JSON-RPC error means "already exists" (idempotent create skip). */
+function isAlreadyExists(e: unknown): boolean {
+  if (!(e instanceof TruenasRpcError)) return false;
+  return /already exist|duplicate|unique/i.test(e.message);
+}
+
+// --- SMB/CIFS -----------------------------------------------------------------
+
+const smbShareCreateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'shares.smb.create',
+  label: 'Create SMB share',
+  description: 'Creates a new SMB/CIFS share (sharing.smb.create) exporting the given dataset path.',
+  module: 'Shares',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'Share name (the \\server\\name clients connect to)' },
+    path: { type: 'string', required: true, minLength: 1, description: 'Dataset or mountpoint to export (e.g. /mnt/tank/public)' },
+    comment: { type: 'string', required: false, description: 'Optional share comment' },
+    home: { type: 'boolean', required: false, default: false, description: 'Expose as a per-user home share' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = inStr(input, 'name');
+    const path = inStr(input, 'path');
+    if (!name || !path) return { success: false, details: { error: 'Both "name" and "path" are required' } };
+    const params: Record<string, unknown> = { name, path };
+    const comment = inStr(input, 'comment');
+    if (comment) params['comment'] = comment;
+    // Modern sharing.smb model nests per-user-home under `options` — a top-level
+    // `home` key is rejected by the schema's additionalProperties:false.
+    const home = inBool(input, 'home');
+    if (home !== undefined) params['options'] = { home };
+    try {
+      await ctx.client.call('sharing.smb.create', [params], ctx.creds);
+      return { success: true, applied: true, details: { name, path } };
+    } catch (e) {
+      if (isAlreadyExists(e)) return { success: true, applied: false, details: { name, note: 'Share already exists' } };
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e), name } };
+    }
+  },
+};
+
+const smbShareUpdateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'shares.smb.update',
+  label: 'Edit SMB share',
+  description: 'Updates an existing SMB/CIFS share (sharing.smb.update) — resolves the appliance id by name first.',
+  module: 'Shares',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'Share name to update' },
+    path: { type: 'string', required: false, description: 'New dataset/mountpoint to export (omit to keep)' },
+    comment: { type: 'string', required: false, description: 'New share comment (empty clears it)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = inStr(input, 'name');
+    if (!name) return { success: false, details: { error: '"name" is required' } };
+    const found = await findShareId(ctx, 'sharing.smb.query', name);
+    if (!found) return { success: true, applied: false, details: { name, note: 'Share not found — nothing to update' } };
+    // sharing.smb.update takes (id, params) as two positional args.
+    const params: Record<string, unknown> = {};
+    const path = inStr(input, 'path');
+    if (path) params['path'] = path;
+    if ('comment' in input) params['comment'] = inStr(input, 'comment') ?? '';
+    try {
+      await ctx.client.call('sharing.smb.update', [found.id, params], ctx.creds);
+      return { success: true, applied: true, details: { name } };
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e), name } };
+    }
+  },
+};
+
+const smbShareDeleteAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'shares.smb.delete',
+  label: 'Delete SMB share(s)',
+  description: 'DELETES the selected SMB/CIFS shares (sharing.smb.delete). Removes only the export — the underlying dataset and its data are untouched.',
+  module: 'Shares',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'Share names to delete' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No share names provided' } };
+    let deleted = 0;
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      const found = await findShareId(ctx, 'sharing.smb.query', n);
+      if (!found) { missing.push(n); continue; } // already gone — idempotent skip
+      try {
+        await ctx.client.call('sharing.smb.delete', [found.id], ctx.creds);
+        deleted++;
+      } catch (e) {
+        errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+// --- NFS ----------------------------------------------------------------------
+
+const nfsShareCreateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'shares.nfs.create',
+  label: 'Create NFS share',
+  description: 'Creates a new NFS export (sharing.nfs.create) of the given path with host access rules.',
+  module: 'Shares',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    path: { type: 'string', required: true, minLength: 1, description: 'Dataset/mountpoint to export (e.g. /mnt/tank/nfs)' },
+    hosts: { type: 'array', required: false, items: { type: 'string' }, description: 'Allowed client host/CIDR list (empty = all hosts)' },
+    readOnly: { type: 'boolean', required: false, default: false, description: 'Export read-only' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const path = inStr(input, 'path');
+    if (!path) return { success: false, details: { error: '"path" is required' } };
+    const hostsRaw = Array.isArray(input['hosts']) ? (input['hosts'] as unknown[]) : [];
+    const params: Record<string, unknown> = { path, hosts: hostsRaw.filter((h): h is string => typeof h === 'string') };
+    if (inBool(input, 'readOnly')) params['ro'] = true;
+    try {
+      await ctx.client.call('sharing.nfs.create', [params], ctx.creds);
+      return { success: true, applied: true, details: { path } };
+    } catch (e) {
+      if (isAlreadyExists(e)) return { success: true, applied: false, details: { path, note: 'NFS export already exists' } };
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e), path } };
+    }
+  },
+};
+
+const nfsShareUpdateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'shares.nfs.update',
+  label: 'Edit NFS share',
+  description: 'Updates an existing NFS export (sharing.nfs.update) — resolves the appliance id by path first.',
+  module: 'Shares',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    path: { type: 'string', required: true, minLength: 1, description: 'Exported path to update' },
+    hosts: { type: 'array', required: false, items: { type: 'string' }, description: 'New allowed client host/CIDR list (empty = all hosts)' },
+    readOnly: { type: 'boolean', required: false, default: false, description: 'Export read-only' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const path = inStr(input, 'path');
+    if (!path) return { success: false, details: { error: '"path" is required' } };
+    const found = await findShareId(ctx, 'sharing.nfs.query', undefined, path);
+    if (!found) return { success: true, applied: false, details: { path, note: 'NFS export not found — nothing to update' } };
+    // sharing.nfs.update takes (id, params) as two positional args.
+    const hostsRaw = Array.isArray(input['hosts']) ? (input['hosts'] as unknown[]) : [];
+    const params: Record<string, unknown> = { path, hosts: hostsRaw.filter((h): h is string => typeof h === 'string') };
+    if ('readOnly' in input) params['ro'] = inBool(input, 'readOnly') ?? false;
+    try {
+      await ctx.client.call('sharing.nfs.update', [found.id, params], ctx.creds);
+      return { success: true, applied: true, details: { path } };
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e), path } };
+    }
+  },
+};
+
+const nfsShareDeleteAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'shares.nfs.delete',
+  label: 'Delete NFS share(s)',
+  description: 'DELETES the selected NFS exports (sharing.nfs.delete). Removes only the export — the underlying dataset and its data are untouched.',
+  module: 'Shares',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    paths: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'Exported paths to delete' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const paths = strArray(input, 'paths');
+    if (paths.length === 0) return { success: false, details: { error: 'No export paths provided' } };
+    let deleted = 0;
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const p of paths) {
+      const found = await findShareId(ctx, 'sharing.nfs.query', undefined, p);
+      if (!found) { missing.push(p); continue; } // already gone — idempotent skip
+      try {
+        await ctx.client.call('sharing.nfs.delete', [found.id], ctx.creds);
+        deleted++;
+      } catch (e) {
+        errors[p] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+// --- iSCSI --------------------------------------------------------------------
+
+const iscsiTargetCreateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'shares.iscsi.create',
+  label: 'Create iSCSI target',
+  description: 'Creates a new iSCSI target (iscsi.target.create) with one LUN backed by the given dataset.',
+  module: 'Shares',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'Target name (e.g. iqn.2024-01.org.unm:tank)' },
+    path: { type: 'string', required: false, description: 'Dataset to expose as a LUN (omit for an empty target)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = inStr(input, 'name');
+    if (!name) return { success: false, details: { error: '"name" is required' } };
+    try {
+      await ctx.client.call('iscsi.target.create', [{ name }], ctx.creds);
+      // Attach a LUN when a backing dataset was given. Modern TrueNAS keeps the
+      // target↔extent association in its OWN table (iscsi.targetextent) — extents
+      // are created standalone, then linked to the target by id.
+      const path = inStr(input, 'path');
+      if (path) {
+        const target = await findShareId(ctx, 'iscsi.target.query', name);
+        if (!target) return { success: true, applied: true, details: { name, note: 'Target created but could not be re-resolved for LUN attach' } };
+        try {
+          // Reuse an existing extent on the same path (idempotent), else create one.
+          let extent = await findShareId(ctx, 'iscsi.extent.query', undefined, path);
+          if (!extent) {
+            const extentName = path.split('/').filter(Boolean).pop() || `lun-${target.id}`;
+            await ctx.client.call('iscsi.extent.create', [{ name: extentName, type: 'FILE', path }], ctx.creds);
+            extent = await findShareId(ctx, 'iscsi.extent.query', undefined, path) ?? (await findShareId(ctx, 'iscsi.extent.query', extentName));
+          }
+          if (!extent) return { success: true, applied: true, details: { name, note: `Target created but LUN could not be resolved for ${path}` } };
+          await ctx.client.call('iscsi.targetextent.create', [{ target: target.id, extent: extent.id }], ctx.creds);
+        } catch (e) {
+          return { success: true, applied: true, details: { name, note: `Target created but LUN attach failed: ${e instanceof Error ? e.message : String(e)}` } };
+        }
+      }
+      return { success: true, applied: true, details: { name, ...(path ? { path } : {}) } };
+    } catch (e) {
+      if (isAlreadyExists(e)) return { success: true, applied: false, details: { name, note: 'iSCSI target already exists' } };
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e), name } };
+    }
+  },
+};
+
+const iscsiTargetDeleteAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'shares.iscsi.delete',
+  label: 'Delete iSCSI target(s)',
+  description: 'DELETES the selected iSCSI targets (iscsi.target.delete). Removes only the target/LUNs — the underlying datasets are untouched.',
+  module: 'Shares',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'Target names to delete' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No target names provided' } };
+    let deleted = 0;
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      const found = await findShareId(ctx, 'iscsi.target.query', n);
+      if (!found) { missing.push(n); continue; } // already gone — idempotent skip
+      try {
+        await ctx.client.call('iscsi.target.delete', [found.id], ctx.creds);
+        deleted++;
+      } catch (e) {
+        errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+// --- NVMe-oF (TrueNAS 24.10+) -------------------------------------------------
+
+const nvmeofSubsystemCreateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'shares.nvmeof.create',
+  label: 'Create NVMe-oF subsystem',
+  description: 'Creates a new NVMe-oF subsystem (nvmet.subsys.create, TrueNAS 24.10+) with one file-based namespace backed by the given dataset.',
+  module: 'Shares',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'Subsystem NQN (e.g. nqn.2024-01.org.unm:tank)' },
+    path: { type: 'string', required: false, description: 'Dataset to expose as a namespace (omit for an empty subsystem)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = inStr(input, 'name');
+    if (!name) return { success: false, details: { error: '"name" is required' } };
+    try {
+      // The subsystem collection is `nvmet.subsys.*` (NOT "subsystem") — verified
+      // against the live method catalog on 25.10 + 26 BETA appliances.
+      await ctx.client.call('nvmet.subsys.create', [{ name }], ctx.creds);
+      const path = inStr(input, 'path');
+      if (path) {
+        const found = await findShareId(ctx, 'nvmet.subsys.query', name);
+        if (found) {
+          try {
+            // namespace.create requires subsys_id + device_type + device_path.
+            // A dataset-backed namespace is a FILE-type namespace on its mountpoint.
+            await ctx.client.call('nvmet.namespace.create', [{ subsys_id: found.id, device_type: 'FILE', device_path: path }], ctx.creds);
+          } catch (e) {
+            return { success: true, applied: true, details: { name, note: `Subsystem created but namespace attach failed: ${e instanceof Error ? e.message : String(e)}` } };
+          }
+        }
+      }
+      return { success: true, applied: true, details: { name, ...(path ? { path } : {}) } };
+    } catch (e) {
+      if (isAlreadyExists(e)) return { success: true, applied: false, details: { name, note: 'NVMe-oF subsystem already exists' } };
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e), name } };
+    }
+  },
+};
+
+const nvmeofSubsystemDeleteAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'shares.nvmeof.delete',
+  label: 'Delete NVMe-oF subsystem(s)',
+  description: 'DELETES the selected NVMe-oF subsystems (nvmet.subsys.delete, TrueNAS 24.10+). Removes only the subsystem/namespaces — the underlying datasets are untouched.',
+  module: 'Shares',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'Subsystem NQNs to delete' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No subsystem NQNs provided' } };
+    let deleted = 0;
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      const found = await findShareId(ctx, 'nvmet.subsys.query', n);
+      if (!found) { missing.push(n); continue; } // already gone — idempotent skip
+      try {
+        await ctx.client.call('nvmet.subsys.delete', [found.id], ctx.creds);
+        deleted++;
+      } catch (e) {
+        errors[n] = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
 const imagesDeleteAction: ActionDescriptor<TruenasActionContext> = {
   id: 'images.delete',
   label: 'Delete image(s)',
@@ -2096,6 +2487,16 @@ export const registry = createRegistry<TruenasActionContext>([
   storageMountAction,
   storageUnmountAction,
   storageDeleteAction,
+  smbShareCreateAction,
+  smbShareUpdateAction,
+  smbShareDeleteAction,
+  nfsShareCreateAction,
+  nfsShareUpdateAction,
+  nfsShareDeleteAction,
+  iscsiTargetCreateAction,
+  iscsiTargetDeleteAction,
+  nvmeofSubsystemCreateAction,
+  nvmeofSubsystemDeleteAction,
   imagesDeleteAction,
   composeConfigReadAction,
   containersLogsReadAction,

@@ -929,6 +929,59 @@ export interface StorageOverview {
   disks: StorageDiskRow[];
 }
 
+// --- Shares (cross-device file-share exports + live client sessions) -------
+
+/** One file-share export row from GET /shares. */
+export interface ShareRow {
+  deviceId: string;
+  pluginId: string;
+  /** Share/export name as reported (SMB share name, NFS path, iSCSI target, NVMe-oF NQN). */
+  name: string;
+  /** smb | nfs | iscsi | nvmeof (lowercase). */
+  type: 'smb' | 'nfs' | 'iscsi' | 'nvmeof' | string;
+  /** Dataset/path backing the share (null for block-protocol targets without a path). */
+  path?: string | null;
+  /** up | down | enabled | disabled | unknown (lowercase). */
+  status: string;
+  /** Number of active client sessions on this share (null when not observable). */
+  sessionCount?: number | null;
+  /** Plugin-specific details (JSON): smb {comment}, nfs {readOnly, hosts[]},
+   * iscsi {id, iscsiName, datasets[]}, nvmeof {id, serialNumber, modelNumber, namespaces[]}. */
+  extra?: Record<string, unknown>;
+  collectedAt: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+/** One live file-share client session row from GET /shares (bottom panel). */
+export interface ShareSessionRow {
+  deviceId: string;
+  pluginId: string;
+  /** smb | nfs — the protocol of this session. */
+  type: 'smb' | 'nfs';
+  /** Share/export name the client is connected to ('' for NFS sessions without a resolvable share). */
+  shareName: string;
+  /** Client host address (IP or hostname as reported); '' = unknown. */
+  clientAddress: string;
+  /** Client username (SMB); null for NFS. */
+  user?: string | null;
+  /** Seconds this session has been open (null when not observable). */
+  uptimeSeconds?: number | null;
+  collectedAt: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+/** Response of GET /shares — share exports (top table) + live sessions (bottom panel). */
+export interface SharesOverview {
+  shares: ShareRow[];
+  sessions: ShareSessionRow[];
+}
+
 // --- Containers (cross-device Apps/container workloads) --------------------
 
 /** One docker network as reported in a container row's `extra.networks`. */
@@ -1945,6 +1998,13 @@ export const api = {
     if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<StorageOverview>(`/storage${suffix}`);
+  },
+  shares: (params?: { deviceId?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<SharesOverview>(`/shares${suffix}`);
   },
   containers: (params?: { deviceId?: string; siteId?: string }) => {
     const qs = new URLSearchParams();

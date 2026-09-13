@@ -15,6 +15,7 @@ import {
   Route as RouteIcon,
   ScrollText,
   HardDrive,
+  Share2,
   Monitor,
   Server,
   Waypoints,
@@ -69,6 +70,8 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/wifi', label: 'WiFi', icon: WifiIcon, requiresPermission: 'wifi:read' },
   // Cross-device storage inventory (filesystems/pools/datasets + physical disks).
   { to: '/storage', label: 'Storage', icon: HardDrive, requiresPermission: 'storage:read' },
+  // Cross-device file-share exports (SMB/CIFS, NFS, iSCSI, NVMe-oF) + live client sessions.
+  { to: '/shares', label: 'Shares', icon: Share2, requiresPermission: 'shares:read' },
   // Cross-device container/App workloads (TrueNAS SCALE Apps — docker under the hood).
   { to: '/containers', label: 'Containers', icon: Box, requiresPermission: 'containers:read' },
   // Cross-device virtual machines (TrueNAS SCALE VMs today; generic key for future hypervisor plugins).

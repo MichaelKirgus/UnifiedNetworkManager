@@ -1309,6 +1309,103 @@ async function ingestInventory(
       }
     }
 
+    // --- Shares (SMB/CIFS, NFS, iSCSI, NVMe-oF exports) ---------------------
+    // Generic key — any plugin may emit it:
+    //   shares[] { name, type?, path?, status?, sessionCount?, extra? }
+    // CONFIG objects → upsert-per-poll + delete-on-absent (a share removed on the
+    // device must vanish from the Shares page, not linger until the 24h sweep).
+    // `type` is part of the conflict key so two protocols sharing a name coexist.
+    const rawShares = Array.isArray(metrics['shares']) ? (metrics['shares'] as unknown[]) : null;
+    if (rawShares !== null) {
+      const values: {
+        deviceId: string; pluginId: string; name: string; type: string; path: string | null;
+        status: string; sessionCount: number | null; extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawShares) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        const type = typeof r['type'] === 'string' && (r['type'] as string).trim() !== '' ? (r['type'] as string).trim().toLowerCase() : 'other';
+        if (!name) continue; // name is part of the conflict key
+        values.push({
+          deviceId,
+          pluginId,
+          name,
+          type,
+          path: typeof r['path'] === 'string' && (r['path'] as string).trim() !== '' ? (r['path'] as string).trim() : null,
+          status: typeof r['status'] === 'string' && (r['status'] as string).trim() !== '' ? (r['status'] as string).trim().toLowerCase() : 'unknown',
+          sessionCount: numOrNull(r['sessionCount']),
+          extra: extraOf(r),
+          collectedAt,
+        });
+      }
+      const shareByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        shareByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}|${v.type}`, v);
+      }
+      if (shareByKey.size > 0) {
+        await db.insert(schema.shares).values(Array.from(shareByKey.values())).onConflictDoUpdate({
+          target: [schema.shares.deviceId, schema.shares.pluginId, schema.shares.name, schema.shares.type],
+          set: {
+            path: sql`excluded.path`,
+            status: sql`excluded.status`,
+            sessionCount: sql`excluded."sessionCount"`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      // A share deleted on the device must vanish — drop rows this snapshot no
+      // longer reports (only when the key is present at all).
+      const seenShareKeys = new Set(values.map((v) => `${v.name}|${v.type}`));
+      if (seenShareKeys.size > 0) {
+        await db.delete(schema.shares)
+          .where(and(
+            eq(schema.shares.deviceId, deviceId),
+            eq(schema.shares.pluginId, pluginId),
+            notInArray(sql`${schema.shares.name} || '|' || ${schema.shares.type}`, Array.from(seenShareKeys))
+          ));
+      }
+    }
+
+    // --- Share sessions (live CIFS/SMB + NFS client connections) ------------
+    // Generic key — any plugin may emit it:
+    //   shareSessions[] { type?, shareName, clientAddress?, user?, uptimeSeconds? }
+    // LIVE state, not config → REPLACED wholesale per device+plugin each poll
+    // (delete-all-then-insert). A session that closed simply does not reappear.
+    // An ABSENT key means "plugin doesn't report sessions" (no wipe); a present
+    // array — even empty — is authoritative for this device+plugin.
+    const rawShareSessions = Array.isArray(metrics['shareSessions']) ? (metrics['shareSessions'] as unknown[]) : null;
+    if (rawShareSessions !== null) {
+      await db.delete(schema.shareSessions).where(and(
+        eq(schema.shareSessions.deviceId, deviceId),
+        eq(schema.shareSessions.pluginId, pluginId),
+      ));
+      const values: {
+        deviceId: string; pluginId: string; type: string; shareName: string; clientAddress: string;
+        user: string | null; uptimeSeconds: number | null; collectedAt: string;
+      }[] = [];
+      for (const raw of rawShareSessions) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const shareName = typeof r['shareName'] === 'string' ? (r['shareName'] as string).trim() : '';
+        if (!shareName) continue; // shareName is required to be useful
+        values.push({
+          deviceId,
+          pluginId,
+          type: typeof r['type'] === 'string' && (r['type'] as string).trim() !== '' ? (r['type'] as string).trim().toLowerCase() : 'smb',
+          shareName,
+          clientAddress: typeof r['clientAddress'] === 'string' ? (r['clientAddress'] as string).trim() : '',
+          user: typeof r['user'] === 'string' && (r['user'] as string).trim() !== '' ? (r['user'] as string).trim() : null,
+          uptimeSeconds: numOrNull(r['uptimeSeconds']),
+          collectedAt,
+        });
+      }
+      if (values.length > 0) {
+        await db.insert(schema.shareSessions).values(values);
+      }
+    }
+
     // --- Containers (Apps) --------------------------------------------------
     // Generic key — any plugin may emit it:
     //   containers[] { name, state?, image?, version?, upgradeAvailable?, extra? }
@@ -1624,6 +1721,10 @@ async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
   await db.delete(schema.wifiClients).where(lt(schema.wifiClients.lastSeenAt, cutoff));
   await db.delete(schema.storageFilesystems).where(lt(schema.storageFilesystems.collectedAt, cutoff));
   await db.delete(schema.storageDisks).where(lt(schema.storageDisks.collectedAt, cutoff));
+  await db.delete(schema.shares).where(lt(schema.shares.collectedAt, cutoff));
+  // Live share sessions age out the same way — a device that stops reporting
+  // drops its (stale) session rows after the sweep window.
+  await db.delete(schema.shareSessions).where(lt(schema.shareSessions.collectedAt, cutoff));
   await db.delete(schema.containers).where(lt(schema.containers.collectedAt, cutoff));
   await db.delete(schema.dockerImages).where(lt(schema.dockerImages.collectedAt, cutoff));
   await db.delete(schema.vms).where(lt(schema.vms.collectedAt, cutoff));

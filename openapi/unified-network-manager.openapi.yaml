@@ -3094,6 +3094,40 @@ paths:
         '401':
           description: Authentication required
 
+  /shares:
+    get:
+      tags: [Inventory]
+      summary: Cross-device file-share overview (Shares page)
+      description: >-
+        Returns the normalized `shares` rows (SMB/CIFS, NFS, iSCSI and NVMe-oF
+        exports), populated by the telemetry worker from each plugin's /monitoring
+        metrics (`shares[]`), with device + plugin views joined — plus the live
+        `share_sessions` rows (active CIFS/SMB + NFS client connections) for the
+        page's bottom panel. One row per share/session on one device — no merging;
+        devices without share data contribute no rows. Shares are managed through
+        the plan/config workflow (configs:apply); this route is read-only and gated
+        on `shares:read`. Rows not refreshed within 24h are swept away.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+      responses:
+        '200':
+          description: Share exports + live client sessions (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SharesOverview'
+        '401':
+          description: Authentication required
+
   /containers:
     get:
       tags: [Inventory]
@@ -5472,6 +5506,68 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/StorageDiskRow'
+
+    ShareRow:
+      type: object
+      required: [deviceId, pluginId, name, type, status, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this share lives on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this share" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        name: { type: string, description: "Share/export name (SMB share name, NFS path, iSCSI target, NVMe-oF NQN)" }
+        type:
+          type: string
+          enum: [smb, nfs, iscsi, nvmeof]
+          description: "Share protocol — normalized to lowercase at ingest"
+        path: { type: [string, 'null'], description: "Dataset/path backing the share; null for block-protocol targets without a path" }
+        status:
+          type: string
+          enum: [up, down, enabled, disabled, unknown]
+          description: "Share state as observed by the plugin — lowercase at ingest"
+        sessionCount: { type: [integer, 'null'], description: "Number of active client sessions on this share; null when not observable" }
+        extra:
+          type: object
+          additionalProperties: true
+          description: >-
+            Plugin-specific details (JSON): smb {comment}, nfs {readOnly, hosts[]},
+            iscsi {id, iscsiName, datasets[]}, nvmeof {id, serialNumber, modelNumber, namespaces[]}.
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this share" }
+
+    ShareSessionRow:
+      type: object
+      required: [deviceId, pluginId, type, shareName, clientAddress, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this session is on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this session" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        type:
+          type: string
+          enum: [smb, nfs]
+          description: "Protocol of this client session — lowercase at ingest"
+        shareName: { type: string, description: "Share/export name the client is connected to; empty for NFS sessions without a resolvable share" }
+        clientAddress: { type: string, description: "Client host address (IP or hostname); empty when unknown" }
+        user: { type: [string, 'null'], description: "Client username (SMB); null for NFS" }
+        uptimeSeconds: { type: [number, 'null'], description: "Seconds this session has been open; null when not observable" }
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this session" }
+
+    SharesOverview:
+      type: object
+      required: [shares, sessions]
+      properties:
+        shares:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShareRow'
+        sessions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShareSessionRow'
 
     ContainerRow:
       type: object

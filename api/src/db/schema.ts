@@ -985,6 +985,76 @@ export const storageDisks = pgTable(
   }
 );
 
+// One row per file-share export on one device, as reported by a plugin's
+// `shares` metric. Powers the cross-device Shares page (SMB/CIFS, NFS, iSCSI and
+// NVMe-oF shares). Same upsert-per-poll + delete-on-absent lifecycle as
+// storage_filesystems: a share removed on the device must vanish from the table,
+// not linger until the 24h sweep. `type` is part of the PK so two protocols that
+// happen to reuse a name (e.g. an SMB and an NFS export both called "tank") can
+// coexist on one device. A device without share data contributes no rows.
+export const shares = pgTable(
+  'shares',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Share/export name as reported (e.g. "tank", "public", "iscsi0").
+    name: text('name').notNull(),
+    // smb | nfs | iscsi | nvmeof — normalized to lowercase at ingest.
+    type: text('type').notNull().default('other'),
+    // The dataset/path backing the share (e.g. "/mnt/tank", "tank/public").
+    path: text('path'),
+    // up | down | enabled | disabled | unknown — plugins report what they can observe.
+    status: text('status').notNull().default('unknown'),
+    // Number of active client sessions on this share (null when not observable).
+    sessionCount: integer('sessionCount'),
+    // Type-specific extras (JSON object): smb {comment, users[], acl}, nfs {hosts[],
+    // read-only flag}, iscsi {target, luns[]}, nvmeof {subsystem, namespaces[]} — same
+    // contract as storage_filesystems.extra.
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkShares: primaryKey({
+        name: 'shares_pkey',
+        columns: [table.deviceId, table.pluginId, table.name, table.type],
+      }),
+      idxSharesDevice: index('idx_shares_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per ACTIVE file-share client session on one device, as reported by a
+// plugin's `shareSessions` metric. Powers the bottom panel of the Shares page —
+// live CIFS/SMB and NFS connections (who is connected to which share right now).
+// These are LIVE state, not config: they change every poll, so the table is
+// REPLACED wholesale per device+plugin each cycle (delete-all-then-insert) rather
+// than upserted — a session that closed simply does not reappear. A device whose
+// plugin reports no sessions contributes an empty set (authoritative wipe).
+export const shareSessions = pgTable(
+  'share_sessions',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // smb | nfs — the protocol of this session.
+    type: text('type').notNull().default('smb'),
+    // Share/export name the client is connected to (e.g. "tank").
+    shareName: text('shareName').notNull(),
+    // Client host address (IP or hostname as reported). '' = unknown.
+    clientAddress: text('clientAddress').notNull().default(''),
+    // Client username (SMB); null for NFS (no per-user identity in the session table).
+    user: text('user'),
+    // Seconds this session has been open (null when not observable).
+    uptimeSeconds: doublePrecision('uptimeSeconds'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      idxShareSessionsDevice: index('idx_share_sessions_device').on(table.deviceId),
+    };
+  }
+);
+
 // One row per App/container workload as reported by a plugin's `containers`
 // metric. Powers the cross-device Containers page (TrueNAS SCALE Apps today;
 // any plugin may emit the generic key). Same upsert-per-poll + delete-on-absent
