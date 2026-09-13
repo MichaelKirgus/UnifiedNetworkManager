@@ -68,3 +68,14 @@ export function formatValue(value: unknown, unit?: string, format?: string): str
   }
   return String(value);
 }
+
+/** Rounds a value up to the next "nice" bound (1/2/5 × 10ⁿ) for auto-scaled gauges. */
+export function niceCeil(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 1;
+  const exp = Math.floor(Math.log10(value));
+  const base = Math.pow(10, exp);
+  for (const m of [1, 2, 5, 10]) {
+    if (value <= m * base) return m * base;
+  }
+  return 10 * base;
+}

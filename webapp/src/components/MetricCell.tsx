@@ -1,5 +1,5 @@
 import { SummaryMetric } from '../api/client';
-import { formatValue } from './formatMetric';
+import { formatValue, niceCeil } from './formatMetric';
 
 /**
  * Renders a single "summary" metric inline in the device overview table.
@@ -40,8 +40,10 @@ function InlineText({ metric }: { metric: SummaryMetric }) {
 
 function MiniGauge({ metric }: { metric: SummaryMetric }) {
   const min = metric.min ?? 0;
-  const max = metric.max ?? 100;
+  // Explicit max wins; otherwise auto-scale to a "nice" bound above the current
+  // value so unbounded gauges (e.g. bandwidth in bits/sec) render a meaningful bar.
   const num = typeof metric.value === 'number' ? metric.value : 0;
+  const max = metric.max ?? Math.max(niceCeil(num), min + 1);
   const clamped = Math.max(min, Math.min(max, num));
   const pct = max > min ? ((clamped - min) / (max - min)) * 100 : 0;
   const color = metric.color ?? '#3b82f6';

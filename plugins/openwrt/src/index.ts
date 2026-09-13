@@ -576,7 +576,7 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   const [cpu, mem, traffic, services] = await Promise.all([
     wanted.has('systemStats') ? backend.cpuLoad().catch(() => null) : Promise.resolve(null),
     wanted.has('systemStats') ? backend.memory().catch(() => null) : Promise.resolve(null),
-    wanted.has('traffic') ? backend.traffic().catch(() => ({} as Record<string, { rx: number; tx: number }>)) : Promise.resolve(null),
+    wanted.has('traffic') ? backend.traffic().catch(() => ({ counters: {}, rates: {} } as { counters: Record<string, { rx: number; tx: number }>; rates: Record<string, { rxBitsPerSec: number; txBitsPerSec: number }> })) : Promise.resolve(null),
     wanted.has('serviceStates') ? backend.services().catch(() => null) : Promise.resolve(null),
   ]);
 
@@ -594,9 +594,16 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
     if (m.percent !== null) metrics['memory.percent'] = m.percent;
   }
   if (wanted.has('traffic')) {
-    const t = traffic ?? {};
+    const t = traffic?.counters ?? {};
     // Flat map keyed by interface NAME — the webapp joins it onto its rows.
     metrics['traffic'] = t;
+    let rxTotal = 0, txTotal = 0;
+    for (const r of Object.values(traffic?.rates ?? {})) {
+      rxTotal += r.rxBitsPerSec;
+      txTotal += r.txBitsPerSec;
+    }
+    if (rxTotal > 0) metrics['bandwidth.rx'] = rxTotal;
+    if (txTotal > 0) metrics['bandwidth.tx'] = txTotal;
   }
   if (wanted.has('serviceStates')) {
     // null = collection failure → 502 (webapp keeps last good data); an EMPTY

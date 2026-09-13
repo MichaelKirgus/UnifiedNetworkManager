@@ -1,5 +1,5 @@
 import { MetricDescriptor } from '../api/client';
-import { formatValue } from './formatMetric';
+import { formatValue, niceCeil } from './formatMetric';
 
 /**
  * Generic metric renderer. Renders a single metric according to its
@@ -43,8 +43,10 @@ function MetricText({ descriptor, value }: { descriptor: MetricDescriptor; value
 
 function Gauge({ descriptor, value }: { descriptor: MetricDescriptor; value?: unknown }) {
   const min = descriptor.min ?? 0;
-  const max = descriptor.max ?? 100;
+  // Explicit max wins. Otherwise auto-scale to a "nice" bound above the current
+  // value so unbounded gauges (e.g. bandwidth in bits/sec) render a meaningful bar.
   const num = typeof value === 'number' ? value : 0;
+  const max = descriptor.max ?? Math.max(niceCeil(num), min + 1);
   const clamped = Math.max(min, Math.min(max, num));
   const pct = max > min ? ((clamped - min) / (max - min)) * 100 : 0;
   const color = descriptor.color ?? '#3b82f6';
@@ -62,8 +64,8 @@ function Gauge({ descriptor, value }: { descriptor: MetricDescriptor; value?: un
         />
       </div>
       <div className="mt-1 flex justify-between text-[10px] text-faint">
-        <span>{min}</span>
-        <span>{max}</span>
+        <span>{formatValue(min, descriptor.unit, descriptor.format)}</span>
+        <span>{formatValue(max, descriptor.unit, descriptor.format)}</span>
       </div>
     </div>
   );

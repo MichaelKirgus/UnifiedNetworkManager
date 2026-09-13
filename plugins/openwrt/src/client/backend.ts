@@ -55,6 +55,15 @@ const hostStates = new Map<string, HostState>();
 /** In-flight probes — concurrent polls share one resolution. */
 const inFlight = new Map<string, Promise<HostState>>();
 
+// --- Module-level counter baselines -------------------------------------------
+// Backend instances are created PER REQUEST (only transport state is cached), so
+// any delta-based metric must keep its baseline at module scope keyed by host —
+// otherwise every poll would see a "first sample" and never emit CPU % or rates.
+/** Per-host /proc/stat busy-time baselines for the CPU gauge. */
+const statBaselines = new Map<string, { total: number; idle: number; at: number }>();
+/** Per-host byte-counter baselines for bandwidth rate computation. */
+const trafficBaselines = new Map<string, { at: number; counters: Record<string, { rx: number; tx: number }> }>();
+
 export interface BackendOptions {
   /** Management address as stored (may carry scheme/port). */
   address: string;
@@ -240,20 +249,23 @@ export class Backend {
     return { percent, load1, load5, load15 };
   }
 
-  /** Per-host /proc/stat busy-time baselines (module-level). */
-  private statBaselines = new Map<string, { total: number; idle: number; at: number }>();
-
   private cpuPercentFromStat(statLine: string): number | null {
-    const m = statLine.match(/^cpu\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
+    // Sum ALL jiffies on the aggregate `cpu` line so busy/total deltas are
+    // always positive (using only user/nice/system/idle can under-count and
+    // yield dTotal<=0, which would leave the CPU gauge empty).
+    const m = statLine.match(/^cpu\s+([\d\s]+)/);
     if (!m) return null;
-    const user = Number(m[1]), nice = Number(m[2]), system = Number(m[3]), idle = Number(m[4]);
-    const total = user + nice + system + idle;
+    const fields = m[1].trim().split(/\s+/).map(Number);
+    if (fields.length < 4 || fields.some((n) => !Number.isFinite(n))) return null;
+    const total = fields.reduce((a, b) => a + b, 0);
+    // idle is field index 3; iowait (index 4) also counts as idle time.
+    const idle = fields[3] + (fields[4] ?? 0);
     const now = Date.now();
-    const prev = this.statBaselines.get(this.host);
-    this.statBaselines.set(this.host, { total, idle, at: now });
+    const prev = statBaselines.get(this.host);
+    statBaselines.set(this.host, { total, idle, at: now });
     if (!prev || now <= prev.at) return null; // first sample — no delta yet
     const dTotal = total - prev.total;
-    const dIdle = idle - prev.idle;
+    const dIdle = Math.max(0, idle - prev.idle);
     if (dTotal <= 0) return null; // counter reset/wrap
     return Math.max(0, Math.min(100, Math.round(((dTotal - dIdle) / dTotal) * 100)));
   }
@@ -342,9 +354,38 @@ export class Backend {
     });
   }
 
-  /** Per-interface traffic counters — LuCI `network.interface@X status`, else SSH /sys. */
-  async traffic(): Promise<Record<string, { rx: number; tx: number }>> {
-    const out: Record<string, { rx: number; tx: number }> = {};
+  /**
+   * Computes per-interface byte rates (bits/sec) from cumulative counter deltas.
+   * Baselines are recorded for EVERY interface seen (even idle ones) so the very
+   * next poll can produce a rate; only non-zero rates are returned. A negative
+   * delta means a counter reset/wrap — that interface is skipped this round.
+   */
+  private computeRates(counters: Record<string, { rx: number; tx: number }>): Record<string, { rxBitsPerSec: number; txBitsPerSec: number }> {
+    const now = Date.now();
+    const prev = trafficBaselines.get(this.host);
+    trafficBaselines.set(this.host, { at: now, counters });
+
+    const rates: Record<string, { rxBitsPerSec: number; txBitsPerSec: number }> = {};
+    if (!prev) return rates; // first sample — no delta yet
+    const dtMs = now - prev.at;
+    if (dtMs <= 0) return rates;
+
+    for (const [name, c] of Object.entries(counters)) {
+      const p = prev.counters[name];
+      if (!p) continue;
+      const drx = c.rx - p.rx;
+      const dtx = c.tx - p.tx;
+      if (drx < 0 || dtx < 0) continue; // counter reset/wrap — skip this round
+      const rxBitsPerSec = Math.round((drx * 8) / (dtMs / 1000));
+      const txBitsPerSec = Math.round((dtx * 8) / (dtMs / 1000));
+      if (rxBitsPerSec > 0 || txBitsPerSec > 0) rates[name] = { rxBitsPerSec, txBitsPerSec };
+    }
+    return rates;
+  }
+
+  /** Per-interface traffic counters + live byte rates — LuCI `network.interface@X status`, else SSH /sys. */
+  async traffic(): Promise<{ counters: Record<string, { rx: number; tx: number }>; rates: Record<string, { rxBitsPerSec: number; txBitsPerSec: number }> }> {
+    const counters: Record<string, { rx: number; tx: number }> = {};
 
     if (this.luciClient) {
       // One dump gives us the interface list; per-interface status carries ibytes/obytes.
@@ -355,24 +396,24 @@ export class Backend {
           if (!s.ok || !s.data) continue;
           const rx = num(s.data['ibytes']);
           const tx = num(s.data['obytes']);
-          if (rx !== null && tx !== null && (rx > 0 || tx > 0)) out[name] = { rx, tx };
+          if (rx !== null && tx !== null) counters[name] = { rx, tx };
         }
       }
-      return out;
+    } else if (this.sshBackend) {
+      const r = await this.sshBackend.exec(
+        "for i in /sys/class/net/*; do n=$(basename $i); [ -f \"$i/statistics/rx_bytes\" ] && echo \"$n $(cat $i/statistics/rx_bytes) $(cat $i/statistics/tx_bytes)\"; done"
+      ).catch(() => null);
+      if (r && r.code === 0) {
+        for (const line of r.stdout.split('\n')) {
+          const [name, rxS, txS] = line.trim().split(/\s+/);
+          if (!name) continue;
+          const rx = Number(rxS), tx = Number(txS);
+          if (Number.isFinite(rx) && Number.isFinite(tx)) counters[name] = { rx, tx };
+        }
+      }
     }
 
-    if (!this.sshBackend) return out;
-    const r = await this.sshBackend.exec(
-      "for i in /sys/class/net/*; do n=$(basename $i); [ -f \"$i/statistics/rx_bytes\" ] && echo \"$n $(cat $i/statistics/rx_bytes) $(cat $i/statistics/tx_bytes)\"; done"
-    ).catch(() => null);
-    if (!r || r.code !== 0) return out;
-    for (const line of r.stdout.split('\n')) {
-      const [name, rxS, txS] = line.trim().split(/\s+/);
-      if (!name) continue;
-      const rx = Number(rxS), tx = Number(txS);
-      if (Number.isFinite(rx) && Number.isFinite(tx) && (rx > 0 || tx > 0)) out[name] = { rx, tx };
-    }
-    return out;
+    return { counters, rates: this.computeRates(counters) };
   }
 
   /** ARP + NDP neighbor tables — SSH only (/proc/net/arp + ip -6 neigh). */

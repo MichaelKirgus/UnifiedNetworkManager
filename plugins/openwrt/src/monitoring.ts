@@ -69,7 +69,7 @@ export async function collectLive(backend: Backend): Promise<LiveMetrics> {
   const [cpu, mem, traffic] = await Promise.all([
     backend.cpuLoad().catch(() => ({ percent: null, load1: null, load5: null, load15: null })),
     backend.memory().catch(() => ({ used: null, total: null, percent: null })),
-    backend.traffic().catch(() => ({} as Record<string, { rx: number; tx: number }>)),
+    backend.traffic().catch(() => ({ counters: {}, rates: {} } as { counters: Record<string, { rx: number; tx: number }>; rates: Record<string, { rxBitsPerSec: number; txBitsPerSec: number }> })),
   ]);
 
   if (cpu.percent !== null) metrics['cpu.percent'] = cpu.percent;
@@ -81,10 +81,21 @@ export async function collectLive(backend: Backend): Promise<LiveMetrics> {
   if (mem.percent !== null) metrics['memory.percent'] = mem.percent;
 
   const interfaces: string[] = [];
-  for (const [name, t] of Object.entries(traffic)) {
+  for (const name of Object.keys(traffic.counters)) {
     if (!interfaces.includes(name)) interfaces.push(name);
   }
-  if (Object.keys(traffic).length > 0) metrics['traffic'] = traffic;
+  if (Object.keys(traffic.counters).length > 0) metrics['traffic'] = traffic.counters;
+
+  // Aggregate bandwidth gauge: sum the live byte rates across all interfaces.
+  // Scalar bits/sec values so they render as gauges in both the metrics view and
+  // the device overview table (no explicit max → the webapp auto-scales the bar).
+  let rxTotal = 0, txTotal = 0;
+  for (const r of Object.values(traffic.rates)) {
+    rxTotal += r.rxBitsPerSec;
+    txTotal += r.txBitsPerSec;
+  }
+  if (rxTotal > 0) metrics['bandwidth.rx'] = rxTotal;
+  if (txTotal > 0) metrics['bandwidth.tx'] = txTotal;
 
   // Degraded transport: auto mode with LuCI unreachable but SSH working.
   const degraded = backend.state.mode === 'auto' && !backend.state.luciBaseUrl && backend.state.sshAvailable;
@@ -221,6 +232,14 @@ export function descriptorsFromMetrics(metrics: Record<string, unknown>): Metric
   }
   if (typeof metrics['memory.percent'] === 'number') {
     push({ key: 'memory.percent', label: 'Memory', unit: '%', type: 'number', visualization: 'gauge', group: 'System', min: 0, max: 100, color: '#8b5cf6', summary: true });
+  }
+  // Bandwidth gauges (aggregate rx/tx across all interfaces). No explicit max —
+  // the webapp auto-scales the bar to a "nice" bound for whatever rate is seen.
+  if (typeof metrics['bandwidth.rx'] === 'number') {
+    push({ key: 'bandwidth.rx', label: 'Bandwidth RX', unit: 'bps', format: 'bits', type: 'number', visualization: 'gauge', group: 'Network', color: '#22c55e', summary: true });
+  }
+  if (typeof metrics['bandwidth.tx'] === 'number') {
+    push({ key: 'bandwidth.tx', label: 'Bandwidth TX', unit: 'bps', format: 'bits', type: 'number', visualization: 'gauge', group: 'Network', color: '#06b6d4', summary: true });
   }
   if (typeof metrics['memory.used'] === 'number') {
     push({ key: 'memory.used', label: 'Memory Used', unit: 'bytes', format: 'bytes', type: 'number', visualization: 'text', group: 'System' });
