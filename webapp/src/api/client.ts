@@ -1083,6 +1083,43 @@ export interface ContainersOverview {
   images: DockerImageRow[];
 }
 
+// --- Device time (cross-device clock overview, Time page) -------------------
+
+/** One device's reported clock from GET /device-time.
+ * `available` is false when the assigned plugin can't read a wall clock
+ * (SNMP-only / ICMP / …) or the reading has no resolvable instant — those
+ * devices still appear so the page shows which boxes are covered. */
+export interface DeviceTimeRow {
+  deviceId: string;
+  name: string;
+  managementAddress: string;
+  siteId?: string | null;
+  /** Plugin that produced the latest snapshot (null when no telemetry yet). */
+  pluginId?: string | null;
+  /** ISO timestamp of the underlying telemetry row (null = never polled). */
+  collectedAt?: string | null;
+  available: boolean;
+  /** Device's local wall clock as reported (ISO-8601, may carry an offset). */
+  localIso?: string | null;
+  /** IANA timezone identifier when known. */
+  timezone?: string | null;
+  /** Fixed UTC offset in minutes baked into the reading (when no IANA zone). */
+  utcOffsetMinutes?: number | null;
+  /** Absolute instant of the device clock, epoch ms (null = not resolvable). */
+  deviceEpochMs?: number | null;
+  /** UNM's own clock at response time, epoch ms. */
+  unmNowMs: number;
+  /** deviceEpochMs − unmNowMs — positive = device ahead, negative = behind. */
+  driftMs?: number | null;
+}
+
+/** Response of GET /device-time — every device with its clock + drift vs UNM. */
+export interface DeviceTimeOverview {
+  /** UNM's own clock at response time, epoch ms (the reference for all rows). */
+  unmNowMs: number;
+  devices: DeviceTimeRow[];
+}
+
 /** One device attached to a VM — NIC, disk, display, CD-ROM, PCIe passthrough…
  * (from the plugin's `vms` metric, extra.devices[]). Generic across hypervisor
  * plugins: `dtype` is the appliance-native type; `label`/`detail` are pre-formatted. */
@@ -2012,6 +2049,14 @@ export const api = {
     if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<ContainersOverview>(`/containers${suffix}`);
+  },
+  /** Cross-device clock overview — every device's local time + drift vs UNM. */
+  deviceTime: (params?: { deviceId?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<DeviceTimeOverview>(`/device-time${suffix}`);
   },
   vms: (params?: { deviceId?: string; siteId?: string }) => {
     const qs = new URLSearchParams();

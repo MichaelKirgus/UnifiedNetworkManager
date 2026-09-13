@@ -75,6 +75,18 @@ export const SX4_SYS = {
   memoryFreeMb: `${SX4_BASE}.1.1.1.204.0`, // Integer32 "Free memory in RAM(MB)"
 } as const;
 
+/** lcsSystemTimeZone (…14.1.2.2.1) — writable timezone config on the unified 4.x tree. */
+export const SX4_TIMEZONE = {
+  /** lcsSystemTimeZoneConf — Integer32, UTC offset in MINUTES (-7200..7201), read-write. */
+  conf: `${SX4_BASE}.1.2.2.1.1`,
+} as const;
+
+/** gs2310SystemTime (…800.3.2313.1.2.1) — writable clock config on the legacy 3.x tree. */
+export const SX3_TIME = {
+  /** gs2310SystemTimeManualTimeZoneOffset — Integer32, UTC offset in MINUTES (-720..780), read-write. */
+  timezoneOffset: `${SX3_BASE}.1.2.1.3`,
+} as const;
+
 /** lcsPowerInformation scalars (…14.1.1.2.N) — dual-PSU status. */
 export const SX4_PSU = {
   base: `${SX4_BASE}.1.1.2`,

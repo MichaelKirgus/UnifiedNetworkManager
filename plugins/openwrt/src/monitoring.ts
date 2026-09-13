@@ -12,7 +12,7 @@
  * authoritative. firewallRules uses null-on-failure for the same reason.
  */
 
-import { INVENTORY_INTERVAL_MS } from '@unm/plugin-sdk';
+import { INVENTORY_INTERVAL_MS, buildDeviceTimeInfo } from '@unm/plugin-sdk';
 import type { CertificateRow, MetricDescriptor } from '@unm/plugin-sdk';
 import type { Backend } from './client/backend';
 import type { InventorySnapshot, NetworkRow, PortRowLike, TunnelRow } from './types';
@@ -66,11 +66,20 @@ export interface LiveMetrics {
 /** Collects the fast per-poll metrics (CPU/load/memory/traffic). */
 export async function collectLive(backend: Backend): Promise<LiveMetrics> {
   const metrics: Record<string, unknown> = {};
-  const [cpu, mem, traffic] = await Promise.all([
+  const [cpu, mem, traffic, deviceTime] = await Promise.all([
     backend.cpuLoad().catch(() => ({ percent: null, load1: null, load5: null, load15: null })),
     backend.memory().catch(() => ({ used: null, total: null, percent: null })),
     backend.traffic().catch(() => ({ counters: {}, rates: {} } as { counters: Record<string, { rx: number; tx: number }>; rates: Record<string, { rxBitsPerSec: number; txBitsPerSec: number }> })),
+    // Device clock (Time page) — SSH `date -Iseconds` + zone. Best-effort; a box
+    // without an SSH transport simply omits system.deviceTime.
+    backend.deviceTime().catch(() => null),
   ]);
+
+  if (deviceTime && deviceTime.localIso) {
+    // `date -Iseconds` carries a UTC offset → epochMs resolves even without the zone.
+    // Fall back to the bare local clock so the Time page can still display it.
+    metrics['system.deviceTime'] = buildDeviceTimeInfo(deviceTime.localIso, deviceTime.timezone) ?? { localIso: deviceTime.localIso };
+  }
 
   if (cpu.percent !== null) metrics['cpu.percent'] = cpu.percent;
   if (cpu.load1 !== null) metrics['load.1m'] = cpu.load1;

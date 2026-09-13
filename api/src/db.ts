@@ -308,6 +308,26 @@ export async function initDb(): Promise<void> {
     `ALTER TABLE config_jobs ADD COLUMN IF NOT EXISTS "planId" TEXT`
   );
 
+  // Device clock table (Time page) — one row per (device, plugin) that can read a
+  // wall clock. Populated by the telemetry worker from each poll's `system.deviceTime`
+  // metric; only clock-capable plugins ever write here, so "newest row per device"
+  // is always valid clock data and never masked by an ICMP/SNMP poll (those emit no
+  // such key). Keeps GET /device-time a trivial indexed read instead of scanning the
+  // multi-GB telemetry table. See workers/telemetry.ts ingestDeviceTime().
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_times (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      "localIso" TEXT,
+      "timezone" TEXT,
+      "utcOffsetMinutes" INTEGER,
+      "epochMs" BIGINT,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId")
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_times_device ON device_times ("deviceId")`);
+
   // Normalized inventory tables (Networks + Hosts pages). Populated by the
   // telemetry worker from plugin /monitoring metrics — see workers/telemetry.ts.
   await pool.query(`

@@ -129,6 +129,44 @@ const systemRebootAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+const systemTimezoneReadAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'system.timezone.read',
+  label: 'Read timezone + NTP servers',
+  description: 'Fetches the configured IANA timezone (system.general.config) and active NTP servers for the Time page.',
+  module: 'System',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  async execute(ctx: TruenasActionContext): Promise<ActionResult> {
+    const [general, ntp] = await Promise.all([
+      ctx.client.call<Record<string, unknown>>('system.general.config', [], ctx.creds),
+      ctx.client.call<unknown>('system.ntpserver.get_config', [], ctx.creds).catch(() => null),
+    ]);
+    return { success: true, details: { timezone: pickString(general as Record<string, unknown>, ['timezone']) ?? null, ntp } };
+  },
+};
+
+const systemTimezoneSetAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'system.timezone.set',
+  label: 'Set device timezone',
+  description:
+    'Changes the appliance IANA timezone via `system.general.update` (e.g. "Europe/Berlin"). Reversible; does NOT force UTC — it sets whatever zone you choose.',
+  module: 'System',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 30_000,
+  inputSchema: {
+    timezone: { type: 'string', required: true, minLength: 2, maxLength: 64, description: 'IANA timezone identifier (e.g. "Europe/Berlin", "UTC")' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const tz = str(input, 'timezone');
+    if (!tz) throw new Error('timezone is required');
+    // system.general.update takes a PARTIAL object — only the fields we change.
+    await ctx.client.call<unknown>('system.general.update', [{ timezone: tz }], ctx.creds);
+    return { success: true, applied: true, details: { timezone: tz } };
+  },
+};
+
 const systemShutdownAction: ActionDescriptor<TruenasActionContext> = {
   id: 'system.shutdown',
   label: 'Shut down the appliance',
@@ -2463,6 +2501,8 @@ export const registry = createRegistry<TruenasActionContext>([
   poolsReadAction,
   interfacesReadAction,
   systemRebootAction,
+  systemTimezoneReadAction,
+  systemTimezoneSetAction,
   systemShutdownAction,
   alertsDismissAction,
   alertsUndismissAction,

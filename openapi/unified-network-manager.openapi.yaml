@@ -3163,6 +3163,40 @@ paths:
         '401':
           description: Authentication required
 
+  /device-time:
+    get:
+      tags: [Inventory]
+      summary: Cross-device clock overview (Time page)
+      description: >-
+        For every device, reads the LATEST telemetry row's `system.deviceTime`
+        metric (emitted by plugins that can read a wall clock — OPNsense, TrueNAS,
+        RouterOS, OpenWrt, LANCOM SX/LCOS) and computes drift against UNM's own
+        clock. Drift is timezone-aware: devices keep their OWN zone; the API only
+        normalizes to an absolute instant (epoch ms) for comparison, never forcing
+        UTC. `available` is false when the plugin can't read a clock or the reading
+        has no resolvable instant — those devices still appear so the page shows
+        which boxes are covered. Gated on `time:read`.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+      responses:
+        '200':
+          description: Every device with its local time + drift vs UNM's own clock
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceTimeOverview'
+        '401':
+          description: Authentication required
+
   /vms:
     get:
       tags: [Inventory]
@@ -5638,6 +5672,34 @@ components:
           description: "Docker image inventory for the page's collapsible images panel (generic `images[]` metric)"
           items:
             $ref: '#/components/schemas/DockerImageRow'
+
+    DeviceTimeRow:
+      type: object
+      required: [deviceId, name, managementAddress, available, unmNowMs]
+      properties:
+        deviceId: { type: string }
+        name: { type: string }
+        managementAddress: { type: string }
+        siteId: { type: [string, 'null'] }
+        pluginId: { type: [string, 'null'], description: "Plugin that produced the latest snapshot (lets the page target a live probe)" }
+        collectedAt: { type: [string, 'null'], format: date-time, description: "ISO timestamp of the underlying telemetry row" }
+        available: { type: boolean, description: "True when an absolute instant could be resolved from the device's reported clock" }
+        localIso: { type: [string, 'null'], description: "Device's local wall clock as reported (ISO-8601, may carry an offset)" }
+        timezone: { type: [string, 'null'], description: "IANA timezone identifier when known" }
+        utcOffsetMinutes: { type: [integer, 'null'], description: "Fixed UTC offset in minutes baked into the reading (when no IANA zone)" }
+        deviceEpochMs: { type: [integer, 'null'], description: "Absolute instant of the device clock, epoch ms" }
+        unmNowMs: { type: integer, description: "UNM's own clock at response time, epoch ms" }
+        driftMs: { type: [integer, 'null'], description: "deviceEpochMs − unmNowMs — positive = device ahead, negative = behind" }
+
+    DeviceTimeOverview:
+      type: object
+      required: [unmNowMs, devices]
+      properties:
+        unmNowMs: { type: integer, description: "UNM's own clock at response time, epoch ms (the reference for all rows)" }
+        devices:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeviceTimeRow'
 
     VmRow:
       type: object

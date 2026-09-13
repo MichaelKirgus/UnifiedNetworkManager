@@ -224,6 +224,49 @@ export class Backend {
     };
   }
 
+  /**
+   * Device clock (Time page) — the box's current local wall time + IANA zone.
+   * LuCI/ubus exposes no clock endpoint, so this is SSH-only: `date -Iseconds`
+   * yields ISO-8601 WITH a UTC offset (pinning an absolute instant), and the
+   * zone comes from /etc/timezone or the /etc/localtime symlink target. Returns
+   * null when there's no usable SSH transport — the caller then omits the metric.
+   */
+  async deviceTime(): Promise<{ localIso: string; timezone: string | null } | null> {
+    if (!this.sshBackend) return null;
+    const sections = await this.sshBackend.runSections([
+      { name: 'date', cmd: "date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z" },
+      // IANA zone, LABELLED so the two sources can be told apart when parsed:
+      // TZFILE = /etc/timezone content ("Europe/Berlin", bare "UTC", or empty);
+      // SYMLINK = /etc/localtime target with any .../zoneinfo/ prefix stripped.
+      { name: 'tz', cmd: "echo \"TZFILE=$(cat /etc/timezone 2>/dev/null)\"; echo \"SYMLINK=$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/##')\"" },
+    ]).catch(() => new Map<string, string>());
+
+    const localIso = (sections.get('date') ?? '').trim().split('\n')[0]?.trim() ?? '';
+    if (!localIso) return null;
+
+    // IANA zone: prefer /etc/timezone; fall back to the localtime symlink target.
+    // Both candidates must look like a real zone identifier — some boxes COPY the
+    // file (e.g. → /tmp/localtime), which is NOT a zone name and would poison the
+    // display + drift resolution. `date -Iseconds` already carries an explicit
+    // offset, so a missing zone only costs display precision, never drift.
+    const isZone = (s: string): boolean =>
+      s.length > 0 && s.length <= 40 && !/\s/.test(s) && /^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/.test(s);
+
+    let timezone: string | null = null;
+    const tzLines = (sections.get('tz') ?? '').split('\n');
+    for (const line of tzLines) {
+      const m = line.match(/^TZFILE=(.*)$/);
+      if (m && isZone(m[1].trim())) { timezone = m[1].trim(); break; }
+    }
+    if (!timezone) {
+      for (const line of tzLines) {
+        const m = line.match(/^SYMLINK=(.*)$/);
+        if (m && isZone(m[1].trim())) { timezone = m[1].trim(); break; }
+      }
+    }
+    return { localIso, timezone };
+  }
+
   /** CPU usage % (from /proc/stat delta) + load averages — SSH only. */
   async cpuLoad(): Promise<{ percent: number | null; load1: number | null; load5: number | null; load15: number | null }> {
     if (!this.sshBackend) return { percent: null, load1: null, load5: null, load15: null };

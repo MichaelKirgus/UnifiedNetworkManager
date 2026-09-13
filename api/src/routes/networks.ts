@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
-import { db } from '../db';
+import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { allowedDeviceIds } from '../deviceAccess';
@@ -1486,6 +1486,108 @@ router.get('/shares', requireAuth, requirePermission('shares:read'), async (_req
       shares: shareRows.map(decorate),
       sessions: sessionRows.map(decorate),
     });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// GET /device-time - Cross-device clock overview (Time page).
+// Reads the dedicated `device_times` table — one row per (device, plugin) that can
+// read a wall clock, upserted by the telemetry worker on EVERY poll from the
+// `system.deviceTime` metric. Only clock-capable plugins ever write there, so the
+// newest row per device is always valid clock data and never masked by an ICMP/SNMP
+// poll (those emit no such key). This keeps the route a trivial indexed read instead
+// of scanning the multi-GB telemetry table. Two design points:
+//   - drift = deviceEpochMs − readingInstant: comparing against Date.now() would
+//     bake the reading's staleness into every value; measuring at the reading time
+//     yields a stable offset (the page shows how old each reading is separately).
+//   - Drift is timezone-aware: we compare absolute instants (epoch ms), so a device
+//     in any IANA zone compares correctly without being forced to UTC — the app
+//     normalizes only for comparison, never rewriting the device's displayed time.
+// `available` is false when no clock reading exists or it has no resolvable instant;
+// those devices still appear so the page shows which boxes are covered. Query params:
+// deviceId (exact), siteId (filter by device's site).
+router.get('/device-time', requireAuth, requirePermission('time:read'), async (_req, res: Response) => {
+  try {
+    const { deviceId, siteId } = _req.query as Record<string, string | undefined>;
+
+    // Device-level access control — scoped callers only see their own devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json({ unmNowMs: Date.now(), devices: [] });
+      return;
+    }
+
+    let deviceWhere;
+    if (deviceId && siteId) {
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) { res.status(200).json({ unmNowMs: Date.now(), devices: [] }); return; }
+      deviceWhere = eq(schema.devices.id, deviceId);
+    } else if (deviceId) {
+      deviceWhere = eq(schema.devices.id, deviceId);
+    } else if (siteId) {
+      deviceWhere = eq(schema.devices.siteId, siteId);
+    }
+
+    let devices = await db.query.devices.findMany({ ...(deviceWhere ? { where: deviceWhere } : {}) });
+    if (allowed !== null) devices = devices.filter((d) => allowed.has(d.id));
+    if (devices.length === 0) { res.status(200).json({ unmNowMs: Date.now(), devices: [] }); return; }
+
+    // Newest clock row per device — DISTINCT ON over the small dedicated table
+    // (one row per device+plugin, upserted every poll): a single indexed read.
+    const { rows: latestRows } = await pool.query(
+      `SELECT DISTINCT ON ("deviceId") "deviceId", "pluginId", "localIso", "timezone", "utcOffsetMinutes", "epochMs", "collectedAt"
+         FROM device_times
+        WHERE "deviceId" = ANY($1)
+        ORDER BY "deviceId", "collectedAt" DESC`,
+      [devices.map((d) => d.id)],
+    );
+    const latestByDevice = new Map<string, {
+      pluginId: string; localIso: string | null; timezone: string | null;
+      utcOffsetMinutes: number | null; epochMs: number | null; collectedAt: string;
+    }>();
+    for (const r of latestRows as Array<{ deviceId: string; pluginId: string; localIso: string | null; timezone: string | null; utcOffsetMinutes: number | null; epochMs: string | number | null; collectedAt: string }>) {
+      // pg returns BIGINT as a STRING — coerce to a JS number (epoch ms ~1.7e12,
+      // well within safe-integer range) so the JSON contract stays `type: integer`.
+      const epochMs = r.epochMs === null || r.epochMs === undefined ? null : Number(r.epochMs);
+      latestByDevice.set(r.deviceId, {
+        pluginId: r.pluginId, localIso: r.localIso, timezone: r.timezone,
+        utcOffsetMinutes: r.utcOffsetMinutes, epochMs: Number.isFinite(epochMs as number) ? (epochMs as number) : null, collectedAt: r.collectedAt,
+      });
+    }
+
+    const unmNowMs = Date.now();
+    const out: Array<Record<string, unknown>> = [];
+    for (const d of devices) {
+      const t = latestByDevice.get(d.id);
+      // epochMs was resolved ONCE at ingest (immutable reading). Drift is measured
+      // against the READING's own timestamp — not Date.now() — so a stale reading
+      // yields its true offset instead of baking staleness into every value.
+      const deviceEpochMs = t?.epochMs ?? null;
+      const readingInstantMs = t ? Date.parse(t.collectedAt) : NaN;
+      const driftMs = deviceEpochMs !== null && Number.isFinite(readingInstantMs) ? deviceEpochMs - readingInstantMs : null;
+
+      out.push({
+        deviceId: d.id,
+        name: d.name,
+        managementAddress: d.managementAddress,
+        siteId: d.siteId,
+        // Plugin that produced the latest clock reading — lets the page target a
+        // live probe at exactly that plugin (a device may have several assignments).
+        pluginId: t?.pluginId ?? null,
+        collectedAt: t?.collectedAt ?? null,
+        available: deviceEpochMs !== null,
+        localIso: t?.localIso ?? null,
+        timezone: t?.timezone ?? null,
+        utcOffsetMinutes: t?.utcOffsetMinutes ?? null,
+        deviceEpochMs,
+        unmNowMs,
+        driftMs,
+      });
+    }
+
+    res.status(200).json({ unmNowMs, devices: out });
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

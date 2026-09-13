@@ -120,6 +120,7 @@ export interface SxSwitchSnapshot {
     serialNumber: string;
     hostMac: string; // normalized, '' when unavailable
     uptimeText: string; // DisplayString as reported
+    systemDate: string; // device wall clock (DisplayString), '' when absent — Time page
     cpuLoadPct: number | null;
     memoryTotalMb: number | null;
     memoryFreeMb: number | null;
@@ -655,6 +656,7 @@ function parseSx4(out: Map<string, SnmpValue>, get: (oid: string) => SnmpValue):
       serialNumber: String(get(SX4_SYS.serialNumber)).trim(),
       hostMac: normalizeMac(get(SX4_SYS.hostMacAddress)),
       uptimeText: String(get(SX4_SYS.uptime)).trim(),
+      systemDate: String(get(SX4_SYS.systemDate)).trim(),
       cpuLoadPct: parseCpuLoadPct(get(SX4_SYS.cpuLoad)),
       memoryTotalMb: memTotal,
       memoryFreeMb: memFree,
@@ -725,6 +727,7 @@ function parseSx3(out: Map<string, SnmpValue>, get: (oid: string) => SnmpValue):
       serialNumber: String(get(SX3_SYS.serialNumber)).trim(),
       hostMac: normalizeMac(get(SX3_SYS.hostMacAddress)),
       uptimeText: String(get(SX3_SYS.uptime)).trim(),
+      systemDate: String(get(SX3_SYS.systemDate)).trim(),
       cpuLoadPct: parseCpuLoadPct(get(SX3_SYS.cpuLoad)),
       memoryTotalMb: ramSizeMb,
       memoryFreeMb: memFreeKb !== null ? Math.round(memFreeKb / 1024) : null,

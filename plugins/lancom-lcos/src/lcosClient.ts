@@ -21,6 +21,7 @@ import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 import {
   LCOS_BASE, SYS, HW, FIRMWARE, LAN_IF, LAN_BYTES, WAN_BYTES, WAN_IP,
   NET_LIST, ARP, DHCP, VPN_CONN, IP_ROUTES, IP_CIDR_ROUTES, WLAN_NET, WLAN_RADIO, WLAN_STATION, TEMP_EXTREMES,
+  TIME, lcosTimezoneToMinutes,
 } from './lcosOids';
 
 /* ------------------------------------------------------------------ *
@@ -150,6 +151,8 @@ export interface LcosRouterSnapshot {
     modelNumber: string;
     cpuType: string;
     uptimeText: string; // DisplayString as reported ("3 days, 4 hours")
+    systemDate: string; // device wall clock (DisplayString), '' when absent — Time page
+    timezoneMinutes: number | null; // UTC offset in minutes from the lcsStatusTime enum
     cpuLoadPct: number | null;
     memoryTotalKb: number | null;
     memoryFreeKb: number | null;
@@ -328,6 +331,7 @@ function rememberLastKnown(host: string, snapshot: LcosRouterSnapshot): void {
 const INVENTORY_WALKS: string[] = [
   `${LCOS_BASE}.2.1`, // device name — single config-mirror scalar (no secrets)
   HW.base, // system/hardware scalars (mem, serial, sw version, CPU load, model)
+  TIME.base, // wall clock + timezone (Time page)
   FIRMWARE.versionTableBase, // per-module firmware versions
   LAN_IF.base, // per-port link state + connector + MACs
   WAN_IP.base, // WAN IP configuration mirror
@@ -739,6 +743,8 @@ function parseLcosStatus(out: Map<string, SnmpValue>): LcosRouterSnapshot {
       modelNumber: String(get(HW.modelNumber)),
       cpuType: String(get(HW.cpuType)),
       uptimeText: String(get(SYS.operatingTime)),
+      systemDate: String(get(TIME.currentTime)).trim(),
+      timezoneMinutes: lcosTimezoneToMinutes(toInt(get(TIME.timezone))),
       cpuLoadPct: cpuRaw,
       memoryTotalKb: memTotal,
       memoryFreeKb: memFree,

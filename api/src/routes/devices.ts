@@ -770,6 +770,7 @@ router.delete('/devices/:deviceId', requireAuth, requirePermission('devices:writ
     await db.delete(schema.pluginSettings).where(eq(schema.pluginSettings.deviceId, deviceId));
     await db.delete(schema.networks).where(eq(schema.networks.deviceId, deviceId));
     await db.delete(schema.hosts).where(eq(schema.hosts.deviceId, deviceId));
+    await db.delete(schema.deviceTimes).where(eq(schema.deviceTimes.deviceId, deviceId));
     await db.delete(schema.devicePorts).where(eq(schema.devicePorts.deviceId, deviceId));
     // Cross-device inventory rows (Containers/Storage pages) — without these a
     // deleted device leaves orphaned rows behind (they only carry deviceId +

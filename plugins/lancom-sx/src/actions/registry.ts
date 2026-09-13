@@ -14,7 +14,7 @@
 
 import { createRegistry } from '@unm/plugin-sdk';
 import { snmpGet, snmpSet, snmpWalk, SnmpValue } from '@unm/snmp-client';
-import { SX4_PORT_CONF, SX4_POE_CONF, SX4_LACP_CONF, SX4_VLAN, SX3_PORT_CONF } from '../sxOids';
+import { SX4_PORT_CONF, SX4_POE_CONF, SX4_LACP_CONF, SX4_VLAN, SX3_PORT_CONF, SX4_TIMEZONE, SX3_TIME } from '../sxOids';
 import { detectVariant, SxOptions } from '../sxClient';
 import { ActionContext, ActionDescriptor } from './types';
 
@@ -372,9 +372,69 @@ const portsStateRead: ActionDescriptor = {
   },
 };
 
+/** Resolves an IANA zone to a UTC offset in MINUTES at the given instant (or null). */
+function ianaToOffsetMinutes(timeZone: string, atMs = Date.now()): number | null {
+  let fmt: Intl.DateTimeFormat;
+  try {
+    fmt = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset' });
+  } catch {
+    return null; // unknown/invalid IANA zone
+  }
+  const part = fmt.formatToParts(new Date(atMs)).find((p) => p.type === 'timeZoneName');
+  if (!part || !/^GMT([+-]\d{2}:?\d{2})?$/.test(part.value)) return null;
+  const m = part.value.match(/^GMT([+-])(\d{2}):?(\d{2})$/);
+  if (!m) return 0; // plain "GMT" → zero offset
+  const sign = m[1] === '-' ? -1 : 1;
+  return sign * (parseInt(m[2], 10) * 60 + parseInt(m[3], 10));
+}
+
+/** Set the switch's timezone — a UTC offset in minutes over SNMP SET. */
+const systemTimezoneSet: ActionDescriptor = {
+  id: 'system.timezone.set',
+  label: 'Set device timezone (UTC offset)',
+  description:
+    "Sets the switch's timezone as a fixed UTC offset via SNMP SET (lcsSystemTimeZoneConf on 4.x, gs2310SystemTimeManualTimeZoneOffset on 3.x). Pass an IANA zone name (resolved to its current offset) or explicit minutes. Re-reads to verify.",
+  module: 'System',
+  riskLevel: 'write',
+  deviceCount: 1,
+  timeoutMs: 30_000,
+  inputSchema: {
+    timezone: { type: 'string', required: false, description: 'IANA zone (e.g. "Europe/Berlin") — resolved to its current UTC offset' },
+    utcOffsetMinutes: { type: 'number', required: false, min: -7200, max: 780, description: 'Explicit UTC offset in minutes (wins over timezone)' },
+  },
+  async execute(ctx, input) {
+    const variant = await requireVariant(ctx);
+    // Resolve the target offset: explicit minutes win; else resolve the IANA zone.
+    let minutes: number | null = null;
+    if (typeof input.utcOffsetMinutes === 'number' && Number.isFinite(input.utcOffsetMinutes)) {
+      minutes = Math.round(input.utcOffsetMinutes as number);
+    } else if (str(input, 'timezone')) {
+      minutes = ianaToOffsetMinutes(str(input, 'timezone')!);
+      if (minutes === null) return { success: false, error: `Unknown IANA timezone "${str(input, 'timezone')}".` };
+    } else {
+      return { success: false, error: 'Provide either "timezone" or "utcOffsetMinutes".' };
+    }
+
+    const oid = variant === 'sx4' ? SX4_TIMEZONE.conf : SX3_TIME.timezoneOffset;
+    // 3.x range is narrower (-720..780) than 4.x (-7200..7201).
+    if (variant === 'sx3' && (minutes < -720 || minutes > 780)) {
+      return { success: false, error: `Offset ${minutes}m out of range for this firmware line (-720..780).` };
+    }
+
+    const before = await readScalar(ctx, oid);
+    if (before !== null && Number(before) === minutes) {
+      return { success: true, applied: false, verified: true, details: { timezoneMinutes: minutes, note: 'Already set — no change.' } };
+    }
+    await snmpSet(ctx.host, ctx.credentials.snmp, oid, 'i', minutes, sxOpts(ctx));
+    const after = await readScalar(ctx, oid);
+    const verified = after !== null && Number(after) === minutes;
+    return { success: verified, applied: true, verified, details: { timezoneMinutes: minutes, before: before === null ? null : String(before), after: after === null ? null : String(after) } };
+  },
+};
+
 // --- Registry ---------------------------------------------------------------------------
 
-const ALL_ACTIONS: ActionDescriptor[] = [portSpeedModeSet, poeModeSet, poePrioritySet, lacpPortSet, vlanPvidSet, vlanModeSet, portsStateRead];
+const ALL_ACTIONS: ActionDescriptor[] = [portSpeedModeSet, poeModeSet, poePrioritySet, lacpPortSet, vlanPvidSet, vlanModeSet, portsStateRead, systemTimezoneSet];
 
 /** The shared registry factory (@unm/plugin-sdk) — one source for /discover, /plan and /config. */
 export const registry = createRegistry(ALL_ACTIONS);

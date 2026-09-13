@@ -30,6 +30,25 @@ export function getSystemInformation(client: AxiosInstance): Promise<OpnsenseApi
   return get(client, '/api/diagnostics/system/system_information');
 }
 
+/**
+ * GET /api/diagnostics/system/system_time — the appliance's CURRENT date/time
+ * (device-local wall clock) + uptime + loadavg. This is the source for the Time
+ * page's `system.deviceTime` metric: OPNsense has no separate "clock" endpoint,
+ * and this one returns the live local time string directly.
+ */
+export function getSystemTime(client: AxiosInstance): Promise<OpnsenseApiResult> {
+  return get(client, '/api/diagnostics/system/system_time');
+}
+
+/**
+ * GET /api/system/timezone/get_timezone — the appliance's configured IANA
+ * timezone (e.g. "Europe/Berlin"). Combined with `system_time`'s local wall
+ * clock this lets the Time page resolve an absolute instant and compute drift.
+ */
+export function getSystemTimezone(client: AxiosInstance): Promise<OpnsenseApiResult> {
+  return get(client, '/api/system/timezone/get_timezone');
+}
+
 /** GET /api/diagnostics/system/system_resources — memory/cpu/uptime details. */
 export function getSystemResources(client: AxiosInstance): Promise<OpnsenseApiResult> {
   return get(client, '/api/diagnostics/system/system_resources');

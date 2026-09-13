@@ -28,6 +28,7 @@ import {
   UserRound,
   Users as UsersIcon,
   Wifi as WifiIcon,
+  Clock,
 } from 'lucide-react';
 import { can } from '../auth/permissions';
 import type { NavCountKey } from '../api/client';
@@ -74,6 +75,8 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/shares', label: 'Shares', icon: Share2, requiresPermission: 'shares:read' },
   // Cross-device container/App workloads (TrueNAS SCALE Apps — docker under the hood).
   { to: '/containers', label: 'Containers', icon: Box, requiresPermission: 'containers:read' },
+  // Cross-device clock overview — each device's local time + drift vs UNM's own clock.
+  { to: '/time', label: 'Time', icon: Clock, requiresPermission: 'time:read' },
   // Cross-device virtual machines (TrueNAS SCALE VMs today; generic key for future hypervisor plugins).
   { to: '/vms', label: 'VMs', icon: Monitor, requiresPermission: 'vms:read' },
   // Physical + logical network graph (inferred cables + per-VLAN segments).

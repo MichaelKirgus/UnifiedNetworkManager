@@ -21,9 +21,25 @@ import {
   resolveHttpsPort,
   resolveHttpPort,
   resolveSshPort,
+  buildDeviceTimeInfo,
   CertificateRow,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
+
+/**
+ * Normalizes a LANCOM-SX `systemDate` DisplayString to a naive ISO-8601 wall clock.
+ * Handles "YYYY-MM-DD HH:MM:SS" (and the dotted "DD.MM.YYYY HH:MM:SS" variant some
+ * firmware prints). Returns null when unparseable so the caller omits the metric.
+ */
+function lancomDateToIso(raw: string): string | null {
+  const s = raw.trim();
+  if (!s) return null;
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] ?? '00'}`;
+  m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:${m[6] ?? '00'}`;
+  return null;
+}
 import { SxOptions, getSxInventory, walkSxCounters } from './sxClient';
 import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 import { DEVICE_MODELS } from './deviceModels';
@@ -281,6 +297,17 @@ app.post('/monitoring', async (req, res) => {
     metrics['system.serialNumber'] = sys.serialNumber || null;
     metrics['system.hostMac'] = sys.hostMac || null;
     metrics['system.uptime'] = sys.uptimeText || null; // DisplayString as reported
+    // Device clock (Time page): the switch's wall clock from lcsSystemInfoSystemDate.
+    // LANCOM-SX exposes no IANA zone over SNMP, so we emit localIso only — the Time
+    // page shows the local time and marks drift "not computable" rather than guessing.
+    if (sys.systemDate) {
+      const iso = lancomDateToIso(sys.systemDate);
+      if (iso) {
+        // No IANA zone over SNMP → emit the local wall clock so the Time page can
+        // display it; drift is "not computable" without a resolvable instant.
+        metrics['system.deviceTime'] = buildDeviceTimeInfo(iso, null) ?? { localIso: iso };
+      }
+    }
     metrics['system.cpuLoad'] = sys.cpuLoadPct;
     if (sys.memoryTotalMb !== null && sys.memoryFreeMb !== null && sys.memoryTotalMb > 0) {
       const usedPct = Math.round(((sys.memoryTotalMb - sys.memoryFreeMb) / sys.memoryTotalMb) * 100);

@@ -14,8 +14,24 @@ import http from 'http';
 import https from 'https';
 import { createRegistry } from '@unm/plugin-sdk';
 import { snmpGet, snmpSet, snmpWalk, SnmpValue } from '@unm/snmp-client';
-import { SETUP } from '../lcosOids';
+import { SETUP, SETUP_TIME, lcosMinutesToTimezoneEnum } from '../lcosOids';
 import { ActionContext, ActionDescriptor, ActionResult } from './types';
+
+/** Resolves an IANA zone to a UTC offset in MINUTES at the given instant (or null). */
+function ianaToOffsetMinutes(timeZone: string, atMs = Date.now()): number | null {
+  let fmt: Intl.DateTimeFormat;
+  try {
+    fmt = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset' });
+  } catch {
+    return null; // unknown/invalid IANA zone
+  }
+  const part = fmt.formatToParts(new Date(atMs)).find((p) => p.type === 'timeZoneName');
+  if (!part || !/^GMT([+-]\d{2}:?\d{2})?$/.test(part.value)) return null;
+  const m = part.value.match(/^GMT([+-])(\d{2}):?(\d{2})$/);
+  if (!m) return 0; // plain "GMT" → zero offset
+  const sign = m[1] === '-' ? -1 : 1;
+  return sign * (parseInt(m[2], 10) * 60 + parseInt(m[3], 10));
+}
 
 // --- Small helpers --------------------------------------------------------------------
 
@@ -358,9 +374,48 @@ const networkStateRead: ActionDescriptor = {
   },
 };
 
+/** Set the router's timezone — a whole-hour UTC offset over SNMP SET. */
+const systemTimezoneSet: ActionDescriptor = {
+  id: 'system.timezone.set',
+  label: 'Set device timezone (UTC offset)',
+  description:
+    "Sets the router's timezone via lcsSetupTimeTimezone (SNMP SET). The MIB is whole-hour granularity, so an IANA zone is resolved to its current UTC offset and rounded. Pass a zone name or explicit minutes. Re-reads to verify.",
+  module: 'System',
+  riskLevel: 'write',
+  deviceCount: 1,
+  timeoutMs: 30_000,
+  inputSchema: {
+    timezone: { type: 'string', required: false, description: 'IANA zone (e.g. "Europe/Berlin") — resolved to its current UTC offset' },
+    utcOffsetMinutes: { type: 'number', required: false, min: -720, max: 840, description: 'Explicit UTC offset in minutes (wins over timezone)' },
+  },
+  async execute(ctx, input) {
+    let minutes: number | null = null;
+    if (typeof input.utcOffsetMinutes === 'number' && Number.isFinite(input.utcOffsetMinutes)) {
+      minutes = Math.round(input.utcOffsetMinutes as number);
+    } else if (str(input, 'timezone')) {
+      minutes = ianaToOffsetMinutes(str(input, 'timezone')!);
+      if (minutes === null) return { success: false, error: `Unknown IANA timezone "${str(input, 'timezone')}".` };
+    } else {
+      return { success: false, error: 'Provide either "timezone" or "utcOffsetMinutes".' };
+    }
+
+    const enumVal = lcosMinutesToTimezoneEnum(minutes);
+    if (enumVal === null) return { success: false, error: `Offset ${minutes}m is not representable (whole hours −12..+14 only).` };
+
+    const before = await readScalar(ctx, SETUP_TIME.timezone);
+    if (before !== null && Number(before) === enumVal) {
+      return { success: true, applied: false, verified: true, details: { timezoneMinutes: minutes, note: 'Already set — no change.' } };
+    }
+    await snmpSet(ctx.host, ctx.credentials.snmp, SETUP_TIME.timezone, 'i', enumVal, ctx.opts);
+    const after = await readScalar(ctx, SETUP_TIME.timezone);
+    const verified = after !== null && Number(after) === enumVal;
+    return { success: verified, applied: true, verified, details: { timezoneMinutes: minutes, before: before === null ? null : String(before), after: after === null ? null : String(after) } };
+  },
+};
+
 // --- Registry ---------------------------------------------------------------------------
 
-const ALL_ACTIONS: ActionDescriptor[] = [configBackupDownload, ntpServersSet, dnsServersSet, lanIfcStateSet, networkStateRead];
+const ALL_ACTIONS: ActionDescriptor[] = [configBackupDownload, ntpServersSet, dnsServersSet, lanIfcStateSet, networkStateRead, systemTimezoneSet];
 
 /** The shared registry factory (@unm/plugin-sdk) — one source for /discover, /plan and /config. */
 export const registry = createRegistry(ALL_ACTIONS);

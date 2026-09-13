@@ -42,6 +42,7 @@ import {
   resolveHttpPort,
   resolveSshPort,
   resolveSshCredentials,
+  buildDeviceTimeInfo,
 } from '@unm/plugin-sdk';
 import type { CertificateRow, ProbeRequestBody, StateRequestBody } from '@unm/plugin-sdk';
 
@@ -552,7 +553,7 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
 //     service list` — an EMPTY map is a valid answer and distinct from failure.
 // Unknown keys are ignored; an empty/absent list means "the default set".
 // ---------------------------------------------------------------------------
-const PROBE_KEYS = new Set(['systemStats', 'traffic', 'serviceStates']);
+const PROBE_KEYS = new Set(['systemStats', 'traffic', 'serviceStates', 'deviceTime']);
 
 app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   const settings = readSettings(req, PLUGIN_OPTIONS);
@@ -573,11 +574,13 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
 
   // All collectors share the pooled session; run them in parallel when several
   // are requested.
-  const [cpu, mem, traffic, services] = await Promise.all([
+  const [cpu, mem, traffic, services, deviceTime] = await Promise.all([
     wanted.has('systemStats') ? backend.cpuLoad().catch(() => null) : Promise.resolve(null),
     wanted.has('systemStats') ? backend.memory().catch(() => null) : Promise.resolve(null),
     wanted.has('traffic') ? backend.traffic().catch(() => ({ counters: {}, rates: {} } as { counters: Record<string, { rx: number; tx: number }>; rates: Record<string, { rxBitsPerSec: number; txBitsPerSec: number }> })) : Promise.resolve(null),
     wanted.has('serviceStates') ? backend.services().catch(() => null) : Promise.resolve(null),
+    // 'deviceTime' — the box's current local wall clock + zone (SSH `date -Iseconds`).
+    wanted.has('deviceTime') ? backend.deviceTime().catch(() => null) : Promise.resolve(null),
   ]);
 
   const metrics: Record<string, unknown> = {};
@@ -612,6 +615,13 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
     const flat: Record<string, unknown> = {};
     for (const s of services) flat[s.name] = { enabled: s.enabled, running: s.running };
     metrics['serviceStates'] = flat;
+  }
+  if (wanted.has('deviceTime')) {
+    // null = no SSH transport → 502. `date -Iseconds` carries a UTC offset so the
+    // SDK resolves an absolute instant even without the IANA zone name.
+    const localIso = deviceTime?.localIso ?? '';
+    if (!localIso) throw new Error('Device time probe returned no data');
+    metrics['system.deviceTime'] = buildDeviceTimeInfo(localIso, deviceTime?.timezone ?? null) ?? { localIso };
   }
 
   return { collectedAt: new Date().toISOString(), metrics };

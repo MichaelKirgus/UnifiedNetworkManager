@@ -34,7 +34,10 @@ export type { PluginLogger, PluginLoggerOptions, PluginLogEntry, LogLevel, LogCa
 export { createNotifier, NOTIFICATION_SEVERITIES } from './notifications';
 export type { PluginNotifier, NotifierOptions, PluginNotification, NotificationSeverity } from './notifications';
 export { createSelfMetrics } from './selfMetrics';
-export type { PluginSelfMetrics, SelfMetricsOptions, SelfMetricsLoggerLike } from './selfMetrics';// SSH access for plugins (shared transport + credential resolution). See ssh.ts.
+export type { PluginSelfMetrics, SelfMetricsOptions, SelfMetricsLoggerLike } from './selfMetrics';
+// Device clock / timezone contract for the Time page (see deviceTime.ts).
+export { parseDeviceTimeToEpochMs, buildDeviceTimeInfo } from './deviceTime';
+export type { DeviceTimeInfo } from './deviceTime';// SSH access for plugins (shared transport + credential resolution). See ssh.ts.
 export { SshClient, createSshPool, resolveSshCredentials, normalizeFingerprint, fingerprintMatches, computeFingerprint, normalizePrivateKey } from './ssh';
 export type { SshCredentials, SshClientOptions, ExecResult, SshPool, SshPoolOptions, SshFingerprint } from './ssh';
 export { SshError, SshAuthError, SshHostKeyError, SshTimeoutError } from './ssh';

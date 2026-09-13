@@ -38,6 +38,7 @@ import {
   collectDeviceCertificates,
   parseProbeTarget,
   CertificateRow,
+  buildDeviceTimeInfo,
   type SshCredentials,
   type SshTerminalSession,
 } from '@unm/plugin-sdk';
@@ -52,6 +53,7 @@ import {
   getVmEnrichment,
   monitoringInFlight,
   normalizeVmDevice,
+  hostSshPort,
   setHostSshPort,
   serviceNetDetails,
   sshHostOf,
@@ -1600,6 +1602,38 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     client.call<unknown>('nfs.get_nfs4_clients', [], creds),
   ]);
 
+  // --- Device clock (Time page) --------------------------------------------
+  // The appliance's CURRENT local wall time + IANA timezone. TrueNAS has no RPC
+  // that returns the live datetime, so we read it over SSH (`date -Iseconds` —
+  // ISO-8601 WITH a UTC offset, which pins an absolute instant without needing
+  // the zone) and take the zone from system.general.config for display. Runs in
+  // its OWN small batch AFTER the main inventory batch settles (same reason as
+  // the shares-session calls above: TrueNAS caps JSON-RPC at ~20 concurrent
+  // calls, so trailing work must not share that batch). Best-effort — a device
+  // without an SSH slot bound simply omits system.deviceTime.
+  const sshCredsForTime = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
+  if (sshCredsForTime) {
+    const [dateRes, tzRes] = await Promise.allSettled([
+      (async () => {
+        const c = await sshPool.get(host, hostSshPort(host), sshCredsForTime, { hostKeyVerifier: dynamicSshHostVerifier(host, hostSshPort(host)) });
+        return c.exec('date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z', sshCredsForTime);
+      })(),
+      client.call<Record<string, unknown>>('system.general.config', [], creds),
+    ]);
+    if (dateRes.status === 'fulfilled' && typeof dateRes.value.stdout === 'string') {
+      const localIso = dateRes.value.stdout.trim().replace(/\s+$/, '');
+      let tz: string | null = null;
+      if (tzRes.status === 'fulfilled' && tzRes.value && typeof tzRes.value === 'object') {
+        const z = pickString(tzRes.value as Record<string, unknown>, ['timezone']);
+        if (z) tz = z;
+      }
+      // `date -Iseconds` already carries an offset → buildDeviceTimeInfo resolves
+      // epochMs. If resolution somehow fails we still emit the local wall clock so
+      // the Time page can display it (drift "not computable").
+      if (localIso) metrics['system.deviceTime'] = buildDeviceTimeInfo(localIso, tz) ?? { localIso };
+    }
+  }
+
   // TEMP DEBUG (log-once per host): the storage extras are best-effort — their
   // failures never count toward health. Log each method's outcome ONCE so a
   // wrong/renamed RPC surfaces in container logs without spamming every poll.
@@ -2411,7 +2445,7 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
 //     `names` selection + empty-map semantics as containerStates.
 // Unknown keys are ignored; an empty/absent list means "the default set".
 // ---------------------------------------------------------------------------
-const PROBE_KEYS = new Set(['containerStats', 'containerStates', 'vmStates']);
+const PROBE_KEYS = new Set(['containerStats', 'containerStates', 'vmStates', 'deviceTime']);
 
 app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   const settings = readSettings(req, PLUGIN_OPTIONS);
@@ -2443,10 +2477,17 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   // cover everything running). Absent/empty = full collection.
   const nameSel = Array.isArray(body.names) && body.names.length > 0 ? body.names : undefined;
 
-  const [stats, states, vmStates] = await Promise.all([
+  const [stats, states, vmStates, deviceTime] = await Promise.all([
     wanted.has('containerStats') ? collectProbeStats(host, sshCreds, logFn) : Promise.resolve(null),
     wanted.has('containerStates') ? collectProbeStates(host, sshCreds, logFn, nameSel) : Promise.resolve(null),
     wanted.has('vmStates') ? collectProbeVmStates(host, sshCreds, logFn, nameSel) : Promise.resolve(null),
+    // 'deviceTime' — the appliance's CURRENT local wall clock via one cheap SSH
+    // `date -Iseconds` (ISO-8601 WITH a UTC offset → an absolute instant without
+    // needing the IANA zone). Powers live drift analysis on the Time page.
+    wanted.has('deviceTime') ? (async () => {
+      const c = await sshPool.get(host, hostSshPort(host), sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host, hostSshPort(host)) });
+      return c.exec('date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z', sshCreds);
+    })() : Promise.resolve(null),
   ]);
 
   const metrics: Record<string, unknown> = {};
@@ -2471,6 +2512,13 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
     const flat: Record<string, ProbeVmState> = {};
     for (const [name, s] of vmStates) flat[name] = s;
     metrics['vmStates'] = flat;
+  }
+  if (wanted.has('deviceTime')) {
+    // null = SSH failure → 502. `date -Iseconds` carries a UTC offset so the SDK
+    // resolves an absolute instant even without the IANA zone name.
+    const localIso = deviceTime && typeof deviceTime.stdout === 'string' ? deviceTime.stdout.trim().replace(/\s+$/, '') : '';
+    if (!localIso) throw new Error('SSH date probe returned no data');
+    metrics['system.deviceTime'] = buildDeviceTimeInfo(localIso, null) ?? { localIso };
   }
 
   return { collectedAt: new Date().toISOString(), metrics };

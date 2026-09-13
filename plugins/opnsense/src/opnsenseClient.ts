@@ -85,6 +85,35 @@ export function getSystemInformation(
 }
 
 /**
+ * Fetches the appliance's current date/time (device-local wall clock).
+ * GET /api/diagnostics/system/system_time — source for the Time page metric.
+ */
+export function getSystemTime(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  transport?: http.OpnsenseTransport,
+  ports?: http.OpnsensePorts
+): Promise<http.OpnsenseApiResult> {
+  return system.getSystemTime(clientFor(host, apiKey, apiSecret, transport, ports));
+}
+
+/**
+ * Fetches the configured IANA timezone.
+ * GET /api/system/timezone/get_timezone — combined with `system_time` this makes
+ * the Time page's drift computable (local wall clock + zone → absolute instant).
+ */
+export function getSystemTimezone(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  transport?: http.OpnsenseTransport,
+  ports?: http.OpnsensePorts
+): Promise<http.OpnsenseApiResult> {
+  return system.getSystemTimezone(clientFor(host, apiKey, apiSecret, transport, ports));
+}
+
+/**
  * Fetches the configured interface names/details.
  * GET /api/diagnostics/interface/get_interface_names
  */

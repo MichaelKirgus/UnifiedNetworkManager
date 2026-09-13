@@ -391,6 +391,38 @@ export const pluginMetrics = pgTable(
 // plugin's `networks` metric: { name, ip, prefix, version ('v4'|'v6'), vlanId?,
 // mac?, status? }. Interfaces without an IP are stored with ip = '' so their
 // MAC/name stay available for topology detection.
+// One row per (device, plugin) that can read a wall clock — the Time page's
+// fast path. Populated by the telemetry worker from each poll's `system.deviceTime`
+// metric; ONLY clock-capable plugins ever write here, so "newest row per device"
+// is always valid clock data and never masked by an ICMP/SNMP poll (those emit no
+// such key). Drift is computed at read time against the reading's own timestamp.
+export const deviceTimes = pgTable(
+  'device_times',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Device's local wall clock as reported (ISO-8601, may carry an offset).
+    localIso: text('localIso'),
+    // IANA timezone identifier when known.
+    timezone: text('timezone'),
+    // Fixed UTC offset in minutes baked into the reading (when no IANA zone).
+    utcOffsetMinutes: integer('utcOffsetMinutes'),
+    // Absolute instant pre-computed by the plugin, epoch ms (null = derive at read).
+    epochMs: bigint('epochMs', { mode: 'number' }),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      // Name matches Postgres' auto-generated <table>_pkey (see networks above).
+      pkDeviceTimes: primaryKey({
+        name: 'device_times_pkey',
+        columns: [table.deviceId, table.pluginId],
+      }),
+      idxDeviceTimesDevice: index('idx_device_times_device').on(table.deviceId),
+    };
+  }
+);
+
 export const networks = pgTable(
   'networks',
   {

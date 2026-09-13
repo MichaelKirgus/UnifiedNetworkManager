@@ -40,6 +40,10 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // Shares are managed through the plan/config workflow (configs:apply), so this
   // read permission only gates viewing the cross-device Shares page.
   'shares:read': 'View the Shares page (SMB/NFS/iSCSI/NVMe-oF shares and active client sessions across devices)',
+  // Cross-device clock overview — each device's current time/timezone + drift vs UNM.
+  // Time is managed through the plan/config workflow (configs:apply), so this read
+  // permission only gates viewing the cross-device Time page.
+  'time:read': 'View the Time page (device clocks, timezones and clock drift across devices)',
   'containers:read': 'View the Containers page (Apps/container workloads across devices)',
   'vms:read': 'View the VMs page (virtual machines and their NICs across devices)',
   'topology:read': 'View the Topology page (physical + logical network graph)',

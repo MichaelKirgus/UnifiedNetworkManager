@@ -5,6 +5,7 @@
 import type { ActionDescriptor } from './types';
 import { sshAvailable, noSshResult } from './types';
 import { okResult, failResult, runCommands } from './helpers';
+import { uciSetCmd, uciCommitCmd } from '../client/sshBackend';
 
 export const SYSTEM_ACTIONS: ActionDescriptor[] = [
   {
@@ -67,6 +68,31 @@ export const SYSTEM_ACTIONS: ActionDescriptor[] = [
       if (!name) return failResult('Invalid service name.');
       const r = await runCommands(ctx.backend.ssh!, [`/etc/init.d/${name} restart`]);
       return r.ok ? okResult({ service: name }) : failResult(`Restart of ${name} failed: ${r.stderr.slice(0, 300)}`);
+    },
+  },
+  {
+    id: 'system.timezone.set',
+    label: 'Set device timezone',
+    description:
+      'Sets the system IANA timezone via uci (e.g. "Europe/Berlin") and restarts the system service to apply it. Reversible — sets whatever zone you choose, never forces UTC.',
+    module: 'System',
+    riskLevel: 'write',
+    deviceCount: 1,
+    timeoutMs: 30_000,
+    inputSchema: {
+      timezone: { type: 'string', required: true, minLength: 2, maxLength: 64, description: 'IANA timezone identifier (e.g. "Europe/Berlin", "UTC")' },
+    },
+    execute: async (ctx, input) => {
+      if (!sshAvailable(ctx)) return noSshResult();
+      const tz = String(input.timezone).trim();
+      // IANA identifiers are [A-Za-z0-9_+-/]; reject anything else before it hits the shell.
+      if (!/^[A-Za-z0-9_+\-/]+$/.test(tz)) return failResult('Invalid timezone identifier.');
+      const r = await runCommands(ctx.backend.ssh!, [
+        uciSetCmd('system', '@system[0]', 'timezone', tz),
+        uciCommitCmd(),
+        '/etc/init.d/system restart >/dev/null 2>&1 || true',
+      ]);
+      return r.ok ? okResult({ timezone: tz }) : failResult(`Setting timezone failed: ${r.stderr.slice(0, 300)}`);
     },
   },
   {

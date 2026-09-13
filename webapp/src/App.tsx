@@ -23,6 +23,7 @@ import Wifi from './pages/Wifi';
 import Storage from './pages/Storage';
 import Shares from './pages/Shares';
 import Containers from './pages/Containers';
+import Time from './pages/Time';
 import ContainerLogsPage from './pages/ContainerLogsPage';
 import ConsolePage from './pages/ConsolePage';
 import FileBrowserPage from './pages/FileBrowserPage';
@@ -58,6 +59,8 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
   { path: '/storage', permission: 'storage:read' },
   { path: '/shares', permission: 'shares:read' },
   { path: '/containers', permission: 'containers:read' },
+  // Cross-device clock overview — each device's local time + drift vs UNM.
+  { path: '/time', permission: 'time:read' },
   { path: '/vms', permission: 'vms:read' },
   { path: '/topology', permission: 'topology:read' },
   // Layers is open to every authenticated user (no read permission).
@@ -122,6 +125,7 @@ export default function App() {
       <Route path="/shares" element={<Page permission="shares:read"><Shares /></Page>} />
       {/* Cross-device container/App workloads (TrueNAS SCALE Apps). */}
       <Route path="/containers" element={<Page permission="containers:read"><Containers /></Page>} />
+      <Route path="/time" element={<Page permission="time:read"><Time /></Page>} />
       {/* Standalone SSH console window — popped out of the ConsoleDialog; needs devices:write
           because minting a console ticket is gated on it server-side. */}
       <Route path="/console/:deviceId" element={<Page permission="devices:write"><ConsolePage /></Page>} />

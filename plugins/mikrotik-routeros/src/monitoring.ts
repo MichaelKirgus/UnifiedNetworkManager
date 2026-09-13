@@ -14,7 +14,7 @@
 
 import { createHash } from 'crypto';
 import type { MetricDescriptor, CertificateRow } from '@unm/plugin-sdk';
-import { CounterTracker, TtlCache, collectDeviceCertificates, parseProbeTarget } from '@unm/plugin-sdk';
+import { CounterTracker, TtlCache, buildDeviceTimeInfo, collectDeviceCertificates, parseProbeTarget } from '@unm/plugin-sdk';
 import { RouterOsClient, rosNumber, rosString, parseCidr, parseSpeedBitsPerSec } from './routerosClient';
 
 export interface RouterOsOptions {
@@ -130,6 +130,12 @@ export interface RouterOsSnapshot {
   freeDiskBytes: number | null;
   totalDiskBytes: number | null;
   uptimeSeconds: number | null;
+  // Device clock (Time page) — /system/clock. `clockDate`/`clockTime` are the
+  // router's local wall clock ("YYYY-MM-DD" / "HH:MM:SS"); `timezone` is its IANA
+  // zone (or "" when set to auto). Combined into system.deviceTime in buildMetrics.
+  clockDate: string | null;
+  clockTime: string | null;
+  timezone: string | null;
   interfaces: RosInterfaceInfo[];
   addresses: RosAddressRow[];
   arp: RosArpRow[];
@@ -373,7 +379,7 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
   // failing the whole poll. Total budget stays well under the API's 10 s cap:
   // per-request timeout × 2 (auto scheme fallback) ≈ 8 s worst case, and the
   // batch runs concurrently.
-  const [identityRes, ifaceRes, addrRes, arpRes, dhcpRes, routeRes, fwFilterRes, fwNatRes, fwAddrListRes, wlanRes] = await Promise.allSettled([
+  const [identityRes, ifaceRes, addrRes, arpRes, dhcpRes, routeRes, fwFilterRes, fwNatRes, fwAddrListRes, wlanRes, clockRes] = await Promise.allSettled([
     client.get('/system/identity'),
     client.get<Record<string, unknown>[]>('/interface'),
     client.get<Record<string, unknown>[]>('/ip/address'),
@@ -384,9 +390,11 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
     client.get<Record<string, unknown>[]>('/ip/firewall/nat'), // NAT rules (srcnat/dstnat chains)
     client.get<Record<string, unknown>[]>('/ip/firewall/address-list'), // list contents — expands rule src/dst-address-list refs
     client.get<Record<string, unknown>[]>('/interface/wifi/registration-table'), // ROS 7 WiFi; absent on legacy wireless stacks
+    client.get('/system/clock'), // device wall clock + timezone (Time page)
   ]);
 
   const identity = identityRes.status === 'fulfilled' ? firstRow(identityRes.value) : {};
+  const clock = clockRes.status === 'fulfilled' ? firstRow(clockRes.value) : {};
 
   // --- system ------------------------------------------------------------------
   const cpuLoadRaw = rosNumber(resource, ['cpu-load']);
@@ -404,6 +412,9 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
     freeDiskBytes: rosNumber(resource, ['free-disk-space', 'free-disk']) ?? null,
     totalDiskBytes: rosNumber(resource, ['total-disk-space', 'total-disk']) ?? null,
     uptimeSeconds: parseUptimeSeconds(rosString(resource, ['uptime'])),
+    clockDate: rosString(clock, ['date']) ?? null,
+    clockTime: rosString(clock, ['time']) ?? null,
+    timezone: rosString(clock, ['timezone', 'time-zone']) ?? null,
     interfaces: [],
     addresses: [],
     arp: [],
@@ -745,6 +756,18 @@ export function buildMetrics(s: RouterOsSnapshot, selectedModel?: string | null,
   m['system.boardName'] = s.boardName || null;
   m['system.hostname'] = s.hostname || null;
   m['system.uptime'] = s.uptimeSeconds;
+
+  // Device clock (Time page): /system/clock gives local date + time + IANA zone.
+  // Combine into a naive ISO wall clock and let the SDK resolve the absolute
+  // instant from the zone. When the router uses auto-timezone with no explicit
+  // zone name we can't place it on the timeline → omit (drift "not computable").
+  if (s.clockDate && s.clockTime) {
+    const localIso = `${s.clockDate}T${s.clockTime}`;
+    const tz = s.timezone && s.timezone.trim() !== '' ? s.timezone : null;
+    // With a zone the SDK resolves an absolute instant (drift computable); without
+    // one we still emit the local wall clock so the Time page can display it.
+    m['system.deviceTime'] = buildDeviceTimeInfo(localIso, tz) ?? { localIso };
+  }
 
   // User-selected model/firmware (device form) — echoed like the other plugins.
   if (selectedModel) m['system.model'] = selectedModel;

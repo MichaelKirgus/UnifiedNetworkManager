@@ -8,6 +8,7 @@ import { getEffectiveSettings, settingsHeaders } from '../pluginSettings';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
 import { getEffectiveSettingValue, getSystemSettings, type SystemSettings } from '../systemSettings';
+import { parseDeviceTimeToEpochMs } from '@unm/plugin-sdk';
 import {
   deviceStatusDedupeKey,
   emitNotification,
@@ -195,6 +196,11 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
       metricDescriptors: metricDescriptors ? JSON.stringify(metricDescriptors) : null,
     });
 
+    // Normalize the device clock (Time page) into the dedicated `device_times`
+    // table — runs on EVERY poll (not inventory-gated) so drift stays fresh.
+    // Best-effort; a parse failure must never break the telemetry cycle.
+    ingestDeviceTime(target.deviceId, target.pluginId, metrics, collectedAt);
+
     // Normalize the inventory parts of this snapshot into the cross-device
     // tables (Networks + Hosts pages) — ONLY on inventory-due polls. Metrics-
     // only polls carry no inventory keys, so ingesting them would be a no-op;
@@ -212,6 +218,60 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
       (err as Error).message
     );
     return { health: 'unknown', reachable: false, inventoryEmitted: false, error: (err as Error).message };
+  }
+}
+
+/**
+ * Normalizes the device clock from one monitoring snapshot into the dedicated
+ * `device_times` table (Time page). Only plugins that CAN read a wall clock emit
+ * the `system.deviceTime` key, so this upserts exactly once per poll for those —
+ * and never for ICMP/SNMP-only assignments. The row is keyed by (deviceId, pluginId)
+ * and refreshed in place; drift is computed at READ time against `collectedAt`, not
+ * here. Best-effort: a malformed blob must not break the telemetry cycle.
+ */
+async function ingestDeviceTime(
+  deviceId: string,
+  pluginId: string,
+  metrics: Record<string, unknown>,
+  collectedAt: string
+): Promise<void> {
+  try {
+    const dt = metrics['system.deviceTime'];
+    if (!dt || typeof dt !== 'object') return; // no clock key → nothing to store
+    const r = dt as Record<string, unknown>;
+    const localIso = typeof r['localIso'] === 'string' && (r['localIso'] as string).trim() !== '' ? (r['localIso'] as string) : null;
+    if (!localIso) return; // a clock blob without a wall-clock value is useless
+
+    const timezone = typeof r['timezone'] === 'string' && (r['timezone'] as string).trim() !== '' ? (r['timezone'] as string) : null;
+    const utcOffsetMinutes = typeof r['utcOffsetMinutes'] === 'number' && Number.isFinite(r['utcOffsetMinutes']) ? Math.round(r['utcOffsetMinutes'] as number) : null;
+    // Resolve the absolute instant ONCE at ingest (the reading is immutable):
+    // prefer the plugin's pre-computed epochMs, else derive it from localIso +
+    // zone/offset via the SDK helper. Null = unresolvable → the page shows the
+    // local time with drift "not computable" instead of a fake value.
+    const precomputed = typeof r['epochMs'] === 'number' && Number.isFinite(r['epochMs']) ? Math.round(r['epochMs'] as number) : null;
+    const epochMs = precomputed ?? parseDeviceTimeToEpochMs({ localIso, timezone, utcOffsetMinutes });
+
+    await db.insert(schema.deviceTimes).values({
+      deviceId,
+      pluginId,
+      localIso,
+      timezone,
+      utcOffsetMinutes,
+      epochMs,
+      collectedAt,
+    }).onConflictDoUpdate({
+      target: [schema.deviceTimes.deviceId, schema.deviceTimes.pluginId],
+      set: {
+        localIso: sql`excluded."localIso"`,
+        timezone: sql`excluded."timezone"`,
+        utcOffsetMinutes: sql`excluded."utcOffsetMinutes"`,
+        epochMs: sql`excluded."epochMs"`,
+        collectedAt: sql`excluded."collectedAt"`,
+      },
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`[telemetry] failed to ingest device time for ${deviceId} via ${pluginId}:`, (err as Error).message);
   }
 }
 

@@ -30,6 +30,40 @@ export const SYS = {
   setupName: `${LCOS_BASE}.2.1.0`,
 } as const;
 
+/** lcsStatusTime group (11.1.21) — the router's wall clock + timezone (read-only). */
+export const TIME = {
+  base: `${LCOS_BASE}.1.21`,
+  /** lcsStatusTimeCurrentTime — device-local wall clock as DisplayString. */
+  currentTime: `${LCOS_BASE}.1.21.1.0`,
+  /** lcsStatusTimeUtcInSeconds — Counter32 (seconds since epoch, coarse). */
+  utcSeconds: `${LCOS_BASE}.1.21.7.0`,
+  /** lcsStatusTimeTimezone — INTEGER enum: e0(0)…eplus14(14), eminus12(244)……eminus1(255). */
+  timezone: `${LCOS_BASE}.1.21.10.0`,
+} as const;
+
+/** Maps the LCOS lcsStatusTimeTimezone enum to a UTC offset in minutes (or null). */
+export function lcosTimezoneToMinutes(v: number | null): number | null {
+  if (v === null || !Number.isFinite(v)) return null;
+  if (v >= 0 && v <= 14) return v * 60; // e0..eplus14 → +0h..+14h
+  if (v >= 244 && v <= 255) return (v - 256) * 60; // eminus12(244)..eminus1(255) → −12h..−1h
+  return null;
+}
+
+/** Inverse of lcosTimezoneToMinutes: UTC offset in minutes → enum value (or null). */
+export function lcosMinutesToTimezoneEnum(minutes: number | null): number | null {
+  if (minutes === null || !Number.isFinite(minutes)) return null;
+  const hours = Math.round(minutes / 60); // the MIB is whole-hour granularity
+  if (hours >= 0 && hours <= 14) return hours;
+  if (hours >= -12 && hours < 0) return 256 + hours;
+  return null;
+}
+
+/** lcsSetupTime group (11.2.14) — writable timezone config (the clock itself is RO). */
+export const SETUP_TIME = {
+  /** lcsSetupTimeTimezone — INTEGER enum, read-write (same values as the status enum). */
+  timezone: `${LCOS_BASE}.2.14.10.0`,
+} as const;
+
 /** lcsStatusHardwareInfo group (11.1.47) — scalars, all with trailing .0. */
 export const HW = {
   base: `${LCOS_BASE}.1.47`,
