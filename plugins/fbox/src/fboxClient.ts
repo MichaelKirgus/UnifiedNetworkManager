@@ -34,7 +34,7 @@
 
 import axios, { AxiosInstance } from 'axios';
 import crypto from 'crypto';
-import { Agent as HttpsAgent } from 'https';
+import { insecureHttpsAgent, isNetworkLevelError, withPort } from '@unm/plugin-sdk';
 
 export type FBoxTransport = 'auto' | 'http' | 'https';
 
@@ -57,23 +57,9 @@ export class FBoxNotFritzError extends Error {
   }
 }
 
-/** Network-level axios error codes that justify an https→http fallback. */
-const NETWORK_ERROR_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'EHOSTUNREACH', 'EPROTO', 'ERR_SSL']);
-
-/** TLS handshake failures surface as EPROTO with an OpenSSL message — a plain-HTTP box. */
-const TLS_FAILURE_PATTERN = /packet length too long|wrong version number|ssl routines|tls routines|record layer failure/i;
-
-function isNetworkError(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const e = err as { code?: string; message?: string };
-  if (typeof e.code === 'string' && NETWORK_ERROR_CODES.has(e.code)) return true;
-  const msg = String(e.message ?? '');
-  return /timeout|timed out|ECONNREFUSED|ENOTFOUND/i.test(msg) || TLS_FAILURE_PATTERN.test(msg);
-}
-
-// FRITZ!Boxes almost always present a self-signed TLS certificate. Rejecting it
-// (axios default) makes every poll fail — accept it, like the OPNsense client.
-const httpsAgent = new HttpsAgent({ rejectUnauthorized: false });
+// Network-vs-HTTP error classification and self-signed-TLS acceptance come from
+// the shared SDK transport layer (isNetworkLevelError / insecureHttpsAgent) —
+// FRITZ!Boxes, like every other UNM appliance, present a self-signed cert by default.
 
 export interface FBoxCredentials {
   username: string;
@@ -120,12 +106,6 @@ export interface FBoxClientOptions {
   httpsPort?: number;
   /** Plain-HTTP management port (default 80) — used for auto-mode fallbacks. */
   httpPort?: number;
-}
-
-/** Appends `:<port>` to a scheme+host base when the port differs from the scheme default. */
-function withPort(base: string, port: number | undefined, schemeDefault: number): string {
-  if (port === undefined || !Number.isFinite(port) || port <= 0 || port > 65535) return base;
-  return port === schemeDefault ? base : `${base}:${Math.floor(port)}`;
 }
 
 /** Extract the SID value from a Set-Cookie header list ('' when absent). */
@@ -723,7 +703,7 @@ export class FBoxClient {
         this.lastWorkingBase = base; // pinned only after a successful login
         return result;
       } catch (err) {
-        if (!isNetworkError(err)) throw err; // HTTP-level outcome — final for this client
+        if (!isNetworkLevelError(err)) throw err; // HTTP-level outcome — final for this client
         lastErr = err;
       }
     }
@@ -737,7 +717,7 @@ export class FBoxClient {
       // Keep the response body RAW — axios' default transform parses JSON into
       // objects, which breaks Buffer.from() in rawGet(). We parse ourselves.
       transformResponse: [(d) => d],
-      ...(base.startsWith('https://') ? { httpsAgent } : {}),
+      ...(base.startsWith('https://') ? { httpsAgent: insecureHttpsAgent() } : {}),
     });
   }
 }

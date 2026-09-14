@@ -1,4 +1,5 @@
 import WebSocket, { RawData } from 'ws';
+import { toWsUrl, withPort } from '@unm/plugin-sdk';
 
 /**
  * Core transport for the TrueNAS SCALE API client.
@@ -59,26 +60,23 @@ export const DEFAULT_TIMEOUT_MS = 5_000;
  * `transport: 'auto'`/`https` → wss with self-signed certificates accepted
  * (TrueNAS ships one out of the box), `http` → plain ws.
  */
-/** Appends `:<port>` to a host when the port differs from the scheme default. */
-function withPort(host: string, port: number | undefined, schemeDefault: number): string {
-  if (port === undefined || !Number.isFinite(port) || port <= 0 || port > 65535) return host;
-  return port === schemeDefault ? host : `${host}:${Math.floor(port)}`;
-}
-
+/**
+ * Resolves the WebSocket URL for a device address — shared SDK helpers:
+ * `withPort` applies the configured management port (an explicit port in the
+ * address already wins because it is part of the host), and `toWsUrl` converts
+ * the resolved http(s) base to its ws(s) equivalent.
+ */
 export function resolveWsUrl(host: string, transport?: TruenasTransport, ports?: { httpsPort?: number; httpPort?: number }): string {
   let h = (host ?? '').trim().replace(/\/+$/, '');
   if (!h) return '';
   const m = h.match(/^https?:\/\/(.*)$/i);
   if (m) h = m[1]; // explicit scheme (+ port) wins — converted to ws(s) below
   const t = transport ?? 'auto';
-  const scheme = t === 'http' ? 'ws://' : 'wss://';
-  // Configured management port (default 443 for wss / 80 for ws) — an explicit
-  // port in the address already wins because it is part of `h`.
-  const hasExplicitPort = m !== null && /:\d+$/.test(m[1].replace(/\/.*$/, ''));
+  const hasExplicitPort = /:\d+$/.test(h.replace(/\/.*$/, ''));
   if (!hasExplicitPort) {
     h = withPort(h, t === 'http' ? ports?.httpPort : ports?.httpsPort, t === 'http' ? 80 : 443);
   }
-  return `${scheme}${h}/api/current`;
+  return `${toWsUrl(`${t === 'http' ? 'http://' : 'https://'}${h}`)}/api/current`;
 }
 
 /** How the plugin authenticates: username/password or a TrueNAS API key. */

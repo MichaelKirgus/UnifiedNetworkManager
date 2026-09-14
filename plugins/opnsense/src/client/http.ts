@@ -1,5 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
-import { Agent as HttpsAgent } from 'https';
+import { resolveEndpointCandidates, insecureHttpsAgent } from '@unm/plugin-sdk';
 
 /**
  * Core transport for the OPNsense API client library.
@@ -13,6 +13,11 @@ import { Agent as HttpsAgent } from 'https';
  * http via the transport option.
  */
 
+/**
+ * Result of one OPNsense API call. Stricter than the SDK's `DeviceApiResult`:
+ * `data` is ALWAYS present (the transport fills it with whatever body came back,
+ * even on non-2xx) so callers can inspect error payloads without narrowing.
+ */
 export interface OpnsenseApiResult<T = unknown> {
   ok: boolean;
   status: number;
@@ -30,39 +35,18 @@ export interface OpnsensePorts {
   httpPort?: number;
 }
 
-// OPNsense appliances almost always present a self-signed TLS certificate.
-// Rejecting it (axios default) makes every poll fail with "self-signed
-// certificate" and the device stays offline. Use an agent that accepts it.
-const httpsAgent = new HttpsAgent({ rejectUnauthorized: false });
-
 /** Default per-request timeout; long-running actions may override per call. */
 export const DEFAULT_TIMEOUT_MS = 10_000;
 
-/** Appends `:<port>` to a scheme+host base when the port differs from the scheme default. */
-function withPort(base: string, port: number | undefined, schemeDefault: number): string {
-  if (port === undefined || !Number.isFinite(port) || port <= 0 || port > 65535) return base;
-  return port === schemeDefault ? base : `${base}:${Math.floor(port)}`;
-}
-
 /**
  * Resolves the absolute base URL for a device address given the transport
- * option:
- *  - host already carries a scheme (legacy full-URL managementAddress) → kept,
- *    including any explicit port in it.
- *  - `transport: 'http'` / `'https'` → that scheme is forced onto bare hosts;
- *    an explicit port in the address wins over the configured default.
- *  - `auto` (default, preserves historical behavior) → https with self-signed
- *    certificates accepted — OPNsense appliances almost always present one.
+ * option — shared SDK resolver (explicit scheme in the address wins, configured
+ * default ports applied, HTTPS preferred in auto mode). OPNsense appliances
+ * almost always present a self-signed TLS certificate, so https candidates are
+ * used with an agent that accepts it (see createClient below).
  */
 export function resolveBase(host: string, transport?: OpnsenseTransport, ports?: OpnsensePorts): string {
-  const h = (host ?? '').trim().replace(/\/$/, '');
-  if (!h) return '';
-  if (/^https?:\/\//i.test(h)) return h; // explicit scheme (+ port) wins
-  const t = transport ?? 'auto';
-  if (t === 'http') {
-    return withPort(`http://${h}`, ports?.httpPort, 80);
-  }
-  return withPort(`https://${h}`, ports?.httpsPort, 443);
+  return resolveEndpointCandidates(host, { transport, ports })[0] ?? '';
 }
 
 /** Credentials for one appliance: the API key/secret pair (Basic auth). */
@@ -96,7 +80,7 @@ export function createClient(
     auth: { username: credentials.apiKey, password: credentials.apiSecret },
     timeout: DEFAULT_TIMEOUT_MS,
     validateStatus: () => true, // we surface non-2xx as ok:false results, not exceptions
-    ...(base.startsWith('https://') ? { httpsAgent } : {}),
+    ...(base.startsWith('https://') ? { httpsAgent: insecureHttpsAgent() } : {}),
   });
 }
 

@@ -1,6 +1,7 @@
 import { AxiosInstance } from 'axios';
 import * as https from 'https';
 import * as http from 'http';
+import { basicAuthHeader, insecureHttpsAgent } from '@unm/plugin-sdk';
 import { get, post, OpnsenseApiResult, resolveBase, OpnsenseCredentials, OpnsensePorts, OpnsenseTransport } from './http';
 
 /**
@@ -71,11 +72,11 @@ export async function getCpuUsage(
       {
         method: 'GET',
         headers: {
-          Authorization: `Basic ${Buffer.from(`${credentials.apiKey}:${credentials.apiSecret}`).toString('base64')}`,
+          Authorization: basicAuthHeader(credentials.apiKey, credentials.apiSecret),
           Accept: 'text/event-stream',
         },
-        // OPNsense presents a self-signed cert — accept it.
-        rejectUnauthorized: false,
+        // OPNsense presents a self-signed cert — accept it (shared SDK agent).
+        ...(isHttps ? { agent: insecureHttpsAgent() } : {}),
       },
       (res) => {
         const code = res.statusCode ?? 0;

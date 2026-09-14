@@ -12,7 +12,7 @@
  * instead of touching an OID that doesn't exist there.
  */
 
-import { createRegistry } from '@unm/plugin-sdk';
+import { createRegistry, ianaZoneToOffsetMinutes } from '@unm/plugin-sdk';
 import { snmpGet, snmpSet, snmpWalk, SnmpValue } from '@unm/snmp-client';
 import { SX4_PORT_CONF, SX4_POE_CONF, SX4_LACP_CONF, SX4_VLAN, SX3_PORT_CONF, SX4_TIMEZONE, SX3_TIME } from '../sxOids';
 import { detectVariant, SxOptions } from '../sxClient';
@@ -372,21 +372,8 @@ const portsStateRead: ActionDescriptor = {
   },
 };
 
-/** Resolves an IANA zone to a UTC offset in MINUTES at the given instant (or null). */
-function ianaToOffsetMinutes(timeZone: string, atMs = Date.now()): number | null {
-  let fmt: Intl.DateTimeFormat;
-  try {
-    fmt = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset' });
-  } catch {
-    return null; // unknown/invalid IANA zone
-  }
-  const part = fmt.formatToParts(new Date(atMs)).find((p) => p.type === 'timeZoneName');
-  if (!part || !/^GMT([+-]\d{2}:?\d{2})?$/.test(part.value)) return null;
-  const m = part.value.match(/^GMT([+-])(\d{2}):?(\d{2})$/);
-  if (!m) return 0; // plain "GMT" → zero offset
-  const sign = m[1] === '-' ? -1 : 1;
-  return sign * (parseInt(m[2], 10) * 60 + parseInt(m[3], 10));
-}
+// IANA zone → UTC-offset-minutes resolution comes from the shared SDK
+// (ianaZoneToOffsetMinutes) — previously a local copy of the same Intl logic.
 
 /** Set the switch's timezone — a UTC offset in minutes over SNMP SET. */
 const systemTimezoneSet: ActionDescriptor = {
@@ -409,7 +396,7 @@ const systemTimezoneSet: ActionDescriptor = {
     if (typeof input.utcOffsetMinutes === 'number' && Number.isFinite(input.utcOffsetMinutes)) {
       minutes = Math.round(input.utcOffsetMinutes as number);
     } else if (str(input, 'timezone')) {
-      minutes = ianaToOffsetMinutes(str(input, 'timezone')!);
+      minutes = ianaZoneToOffsetMinutes(str(input, 'timezone')!);
       if (minutes === null) return { success: false, error: `Unknown IANA timezone "${str(input, 'timezone')}".` };
     } else {
       return { success: false, error: 'Provide either "timezone" or "utcOffsetMinutes".' };

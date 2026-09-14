@@ -19,6 +19,7 @@ import {
   createPinningGuard,
   StateRequestBody,
   CertificateRow,
+  resolveUserPass,
 } from '@unm/plugin-sdk';
 import { SwosClient, SwosAuthError } from './swosClient';
 import { createPlatform } from './platform';
@@ -182,12 +183,9 @@ function portsOf(settings: Record<string, unknown>): { httpsPort?: number; httpP
 
 /** Extracts username/password credentials from the monitoring body (decrypted by the API). */
 function resolveCredentials(body: Record<string, unknown>): { creds?: { username: string; password: string }; error?: string } {
-  const credentials = (body.credentials ?? {}) as Record<string, unknown>;
-  const username = typeof credentials.username === 'string' ? credentials.username : '';
-  const password = typeof credentials.password === 'string' ? credentials.password : '';
-  if (!username) return { error: 'Missing username in the assigned secret.' };
-  // An empty password is legitimate on SwOS (default admin has none).
-  return { creds: { username, password } };
+  // Shared SDK helper — a username IS required here; an empty password is
+  // legitimate on SwOS (default admin has none).
+  return resolveUserPass((body.credentials ?? {}) as Record<string, unknown>, { requireUsername: true });
 }
 
 /**

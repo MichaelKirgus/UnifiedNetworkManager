@@ -17,8 +17,12 @@
  * by the config actions in src/actions/, never by this module.
  */
 
-import { SnmpCredentials, SnmpValue, TransportOptions, snmpGet, snmpWalkMulti, suffixOf, normalizeMac } from '@unm/snmp-client';
-import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
+import { SnmpCredentials, SnmpValue, TransportOptions, snmpGet, snmpWalkMulti, normalizeMac } from '@unm/snmp-client';
+import { CounterTracker } from '@unm/plugin-sdk';
+import {
+  splitRow, label, netmaskToPrefix, createSnapshotCaches, runSlowPath, accumulateRate,
+  LcosLogSink, ProbeOutcome,
+} from '@unm/lancom-shared';
 import {
   DETECT, SX4_BASE, SX3_BASE,
   SX4_SYS, SX4_PSU, SX4_PORT_CONF, SX4_PORT_TRAFFIC, SX4_VLAN, SX4_SVI, SX4_NEIGHBOR,
@@ -144,12 +148,8 @@ export interface SxSwitchSnapshot {
 
 const VLAN_MODES: Record<number, string> = { 0: 'access', 1: 'trunk', 2: 'hybrid' };
 
-function label(map: Record<number, string>, raw: SnmpValue | undefined): string {
-  if (raw === undefined || raw === '') return '';
-  const n = Number(raw);
-  return Number.isFinite(n) ? map[n] ?? String(n) : String(raw);
-}
-
+// SX's integer picker truncates (Math.trunc) — differs from the shared toInt,
+// so it stays local; label() and netmaskToPrefix() come from @unm/lancom-shared.
 function toInt(value: SnmpValue | undefined): number | null {
   if (value === undefined || value === '') return null;
   const n = Number(value);
@@ -201,35 +201,10 @@ function toMbLoose(value: SnmpValue | undefined): number | null {
 }
 
 /* ------------------------------------------------------------------ *
- * OID row decoding — LANCOM addresses table rows COLUMN-FIRST:
- *   <tableBase>.1.<column>.<index…>
- * (the leading "1" is the not-accessible entry object). All SX tables are
- * indexed by plain Integer32 values, so index recovery is trivial.
+ * OID row decoding (column-first splitRow) + netmaskToPrefix now live in
+ * @unm/lancom-shared — imported above. All SX tables are indexed by plain
+ * Integer32 values, so index recovery is trivial.
  * ------------------------------------------------------------------ */
-
-/** Splits a column-first row OID into column number + index components. */
-function splitRow(oid: string, base: string): { col: number; idx: string[] } | null {
-  const suffix = suffixOf(oid, base); // "<entry>.<col>.<idx…>"
-  if (!suffix) return null;
-  const parts = suffix.split('.');
-  if (parts.length < 3 || parts[0] !== '1') return null; // entry + col + ≥1 idx part
-  const col = Number(parts[1]);
-  if (!Number.isInteger(col)) return null;
-  return { col, idx: parts.slice(2) };
-}
-
-/** Converts a dotted-quad netmask to its CIDR prefix length (null on bad input). */
-function netmaskToPrefix(netmask: SnmpValue | undefined): number | null {
-  const parts = String(netmask ?? '').split('.').map(Number);
-  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return null;
-  let prefix = 0;
-  for (const part of parts) {
-    let octet = part;
-    while (octet & 0x80) { prefix++; octet = (octet << 1) & 0xff; }
-    if (octet !== 0) return null; // non-contiguous mask — don't guess
-  }
-  return prefix === 0 ? null : prefix;
-}
 
 /* ------------------------------------------------------------------ *
  * Firmware-line auto-detection
@@ -294,16 +269,9 @@ export async function detectVariant(
  * ------------------------------------------------------------------ */
 
 // Fresh-snapshot cache (TTL-gated) + a last-known map so a failed refresh can
-// still fall back to the most recent data even after TTL expiry.
-const inventoryCache = new TtlCache<SxSwitchSnapshot>();
-const lastKnown = new Map<string, SxSwitchSnapshot>();
-function rememberLastKnown(host: string, snapshot: SxSwitchSnapshot): void {
-  lastKnown.set(host, snapshot);
-  if (lastKnown.size > 512) {
-    const oldest = lastKnown.keys().next().value; // Map iteration = insertion order
-    if (oldest !== undefined) lastKnown.delete(oldest);
-  }
-}
+// still fall back to the most recent data even after TTL expiry. Shared trio —
+// see @unm/lancom-shared snapshotCache.ts.
+const caches = createSnapshotCaches<SxSwitchSnapshot>();
 
 /** The exact subtrees the slow path needs per variant — nothing else. */
 function inventoryWalks(variant: SxVariant): string[] {
@@ -333,97 +301,68 @@ function enrichmentWalks(): string[] {
   return [QB_FDB.base];
 }
 
-/** Optional structured-log sink for walk failures (wired to the plugin logger). */
-export interface SxLogSink {
-  log(level: 'warn' | 'error', message: string, context?: Record<string, unknown>): void;
-}
-
 /**
  * Returns the cached SX snapshot for a host, re-walking only when the cache
  * is empty or older than `inventoryTtlMs`. Never throws — degrades to stale/empty
  * data with an explanatory error. A null snapshot means "not a recognized
  * Lancom SX switch" (the caller maps that to health 'unknown').
+ *
+ * The orchestration (cache → probe gate → combined walk → quality gate → stale
+ * fallback) is the shared @unm/lancom-shared slow-path runner; only the probe
+ * step (two-OID variant detection), the opt-in FDB enrichment and the parser are
+ * SX-specific. All inventory subtrees go out in ONE strictly-sequential combined
+ * GetBulk stream — the safe mode verified on a GS-3510XP, where concurrent
+ * sessions race the agent's response buffer and corrupt DisplayString values.
  */
 export async function getSxInventory(
   host: string,
   creds: SnmpCredentials,
   opts: SxOptions,
-  log?: SxLogSink
+  log?: LcosLogSink
 ): Promise<{ snapshot: SxSwitchSnapshot | null; fromCache: boolean; error?: string }> {
-  const cached = inventoryCache.get(host, opts.inventoryTtlMs);
-  if (cached) {
-    return { snapshot: cached, fromCache: true };
-  }
-  const stale = lastKnown.get(host); // expired-but-usable fallback
-
   // Probe gate first — cheap rejection of non-SX devices / bad credentials.
-  const det = await detectVariant(host, creds, opts);
-  if (det.error) {
-    return { snapshot: stale ?? null, fromCache: stale !== undefined, error: det.error };
-  }
-  if (!det.variant) {
-    // Agent answered but has neither SX tree — not a Lancom SX switch.
-    variantCache.delete(host); // allow re-detection after a firmware upgrade
-    return { snapshot: null, fromCache: false, error: 'No LCOS-SX MIB data on this device.' };
-  }
-
-  const out = new Map<string, SnmpValue>();
-  // All inventory subtrees in ONE combined GetBulk stream on a single shared
-  // session. This is STRICTLY SEQUENTIAL (one PDU at a time), which is the safe
-  // mode verified on a GS-3510XP: concurrent sessions race the agent's response
-  // buffer and corrupt DisplayString values with fragments of other rows. The
-  // combined stream keeps that guarantee while cutting PDUs + socket churn.
-  let failures = 0;
-  try {
-    const walked = await snmpWalkMulti(host, creds, inventoryWalks(det.variant), opts);
-    for (const [k, v] of walked) out.set(k, v);
-  } catch (e: unknown) {
-    failures++;
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error('[lancom-sx] inventory walk failed:', msg);
-    log?.log('warn', `SNMP inventory walk failed on ${host}: ${msg}`, { host });
-  }
-
-  // Opt-in FDB enrichment (slow on populated switches — see SxOptions).
-  if (opts.enrichHostPorts) {
-    for (const oid of enrichmentWalks()) {
-      try {
-        const r = await snmpWalkMulti(host, creds, [oid], opts);
-        for (const [k, v] of r) out.set(k, v);
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error(`[lancom-sx] FDB enrichment walk failed:`, msg);
-        log?.log('warn', `Q-BRIDGE FDB enrichment walk ${oid} failed on ${host}: ${msg}`, { oid, host });
-        // Best-effort — host rows simply lack port info this cycle.
-      }
-    }
-  }
-
-  if (out.size === 0 && failures > 0) {
-    return { snapshot: stale ?? null, fromCache: stale !== undefined, error: 'SNMP walk of the LCOS-SX status tree failed.' };
-  }
-  if (out.size === 0) {
-    variantCache.delete(host);
-    return { snapshot: null, fromCache: false, error: 'No LCOS-SX MIB data on this device.' };
-  }
-
-  const snapshot = parseSxStatus(out, det.variant);
-
-  // Quality gate before caching: the serial number comes from a WALK (not the
-  // probe scalar), and any walk failure leaves whole table groups empty — a
-  // partial artifact must never be served from cache for the whole TTL. It's
-  // returned once and the next poll retries fresh.
-  const complete = snapshot.system.serialNumber !== '' && failures === 0;
-  if (complete) {
-    inventoryCache.set(host, snapshot);
-    rememberLastKnown(host, snapshot);
-  }
-
-  return {
-    snapshot,
-    fromCache: false,
-    error: complete ? undefined : 'Partial LCOS-SX data — some SNMP walks failed; retrying next cycle.',
+  const probe = async (): Promise<ProbeOutcome> => {
+    const det = await detectVariant(host, creds, opts);
+    if (det.error) return { kind: 'transport-error', error: det.error };
+    if (!det.variant) return { kind: 'not-device' }; // agent answered but has neither SX tree
+    return { kind: 'ok', seed: new Map(), ctx: det.variant };
   };
+
+  return runSlowPath(caches, {
+    host,
+    creds,
+    opts,
+    log,
+    probe,
+    walks: (ctx) => inventoryWalks(ctx as SxVariant),
+    // Opt-in FDB enrichment (slow on populated switches — see SxOptions).
+    enrich: async (out, ctx) => {
+      if (!opts.enrichHostPorts) return;
+      for (const oid of enrichmentWalks()) {
+        try {
+          const r = await snmpWalkMulti(host, creds, [oid], opts);
+          for (const [k, v] of r) out.set(k, v);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error(`[lancom-sx] FDB enrichment walk failed:`, msg);
+          log?.log('warn', `Q-BRIDGE FDB enrichment walk ${oid} failed on ${host}: ${msg}`, { oid, host });
+          // Best-effort — host rows simply lack port info this cycle.
+        }
+      }
+    },
+    parse: (out, ctx) => parseSxStatus(out, ctx as SxVariant),
+    // Quality gate: the serial number comes from a WALK (not the probe scalar),
+    // and any walk failure leaves whole table groups empty — never cache partial.
+    isComplete: (s, f) => s.system.serialNumber !== '' && f === 0,
+    errors: {
+      walkFailed: 'SNMP walk of the LCOS-SX status tree failed.',
+      notDevice: 'No LCOS-SX MIB data on this device.',
+      partial: 'Partial LCOS-SX data — some SNMP walks failed; retrying next cycle.',
+    },
+    // A "not a device" conclusion (probe or empty walks) clears the variant cache
+    // so re-detection can run after a firmware upgrade.
+    onNotDevice: () => { variantCache.delete(host); },
+  });
 }
 
 /** Parses the targeted SX walk output into a typed snapshot. */
@@ -814,12 +753,7 @@ export async function walkSxCounters(
     if (!Number.isFinite(n)) continue;
     const dir = row.col === SX4_PORT_TRAFFIC.COL_RX_OCTETS ? 'rx' : 'tx';
     // Integer bits/s, as before — the tracker returns a float rate.
-    const r = rateTracker.sample(`${host}:${port}:${dir}`, n, now);
-    if (r === null) continue;
-    const cur = rates[`P${port}`] ?? (rates[`P${port}`] = { rx: null, tx: null });
-    const bitsPerSec = Math.round(r);
-    if (dir === 'rx') cur.rx = bitsPerSec;
-    else cur.tx = bitsPerSec;
+    accumulateRate(rates, `P${port}`, dir, rateTracker.sample(`${host}:${port}:${dir}`, n, now));
   }
 
   return rates;

@@ -19,6 +19,7 @@
 import axios, { AxiosInstance } from 'axios';
 import http from 'http';
 import https from 'https';
+import type { DeviceApiResult } from '@unm/plugin-sdk';
 
 /** Transport choice owned by this plugin via its `transport` option. */
 export type DockerTransport = 'auto' | 'tcp' | 'tls' | 'socket';
@@ -43,13 +44,15 @@ export interface DockerClientOptions {
   timeoutMs?: number;
 }
 
-export interface DockerApiResult<T = unknown> {
-  ok: boolean;
-  status: number;
+/**
+ * Result of one Docker Engine API call — the SDK's canonical device-API envelope
+ * with `data` always present (the transport fills it even on failure) plus the
+ * transport actually used in auto mode.
+ */
+export interface DockerApiResult<T = unknown> extends DeviceApiResult<T> {
   data: T;
   /** Transport actually used (useful for health detail in auto mode). */
   transportUsed?: 'tcp' | 'tls' | 'socket';
-  error?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 8_000; // the API gives the whole poll a hard 10 s budget

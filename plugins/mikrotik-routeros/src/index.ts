@@ -20,6 +20,7 @@ import {
   resolveHttpsPort,
   resolveHttpPort,
   resolveSshPort,
+  resolveUserPass,
 } from '@unm/plugin-sdk';
 import { RouterOsAuthError } from './routerosClient';
 import { DEFAULT_OPTIONS, MonitoringResult, RouterOsOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
@@ -259,12 +260,9 @@ function portsOf(settings: Record<string, unknown>): { httpsPort?: number; httpP
 
 /** Extracts username/password credentials from the monitoring body (decrypted by the API). */
 function resolveCredentials(body: Record<string, unknown>): { creds?: { username: string; password: string }; error?: string } {
-  const credentials = (body.credentials ?? {}) as Record<string, unknown>;
-  const username = typeof credentials.username === 'string' ? credentials.username : '';
-  const password = typeof credentials.password === 'string' ? credentials.password : '';
-  if (!username) return { error: 'Missing username in the assigned secret.' };
-  // An empty password is legitimate on RouterOS (default admin has none).
-  return { creds: { username, password } };
+  // Shared SDK helper — a username IS required here; an empty password is
+  // legitimate on RouterOS (default admin has none).
+  return resolveUserPass((body.credentials ?? {}) as Record<string, unknown>, { requireUsername: true });
 }
 
 app.post('/monitoring', async (req, res) => {

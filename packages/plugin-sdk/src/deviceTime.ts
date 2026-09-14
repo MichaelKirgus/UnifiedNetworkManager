@@ -89,24 +89,33 @@ export function parseDeviceTimeToEpochMs(info: Pick<DeviceTimeInfo, 'localIso' |
 }
 
 /**
- * Reads the zone's UTC offset (ms, positive east of Greenwich) at a given instant
- * using Intl's `longOffset` name (e.g. "GMT+02:00"). Returns null for an unknown
- * timezone — that is how we detect invalid IANA names without relying on throw
- * behavior differing across runtimes.
+ * Resolves an IANA zone to its UTC offset in MINUTES at the given instant
+ * (positive east of Greenwich), using Intl's `longOffset` name (e.g. "GMT+02:00").
+ *
+ * Exported for plugins whose WRITE API only accepts a fixed offset instead of an
+ * IANA zone (SNMP timezone enums, whole-hour offsets) — they pass the user-chosen
+ * zone and set the resolved minutes. Returns null for an unknown/invalid IANA name
+ * (detected via constructor throw + format check, not runtime-specific behavior).
  */
-function zoneOffsetMsAt(epochMs: number, timeZone: string): number | null {
+export function ianaZoneToOffsetMinutes(timeZone: string, atMs: number = Date.now()): number | null {
   let fmt: Intl.DateTimeFormat;
   try {
     fmt = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset' });
   } catch {
     return null; // unknown/invalid IANA zone
   }
-  const part = fmt.formatToParts(new Date(epochMs)).find((p) => p.type === 'timeZoneName');
+  const part = fmt.formatToParts(new Date(atMs)).find((p) => p.type === 'timeZoneName');
   if (!part || !/^GMT([+-]\d{2}:?\d{2})?$/.test(part.value)) return null; // "GMT" (no offset) or unexpected
   const m = part.value.match(/^GMT([+-])(\d{2}):?(\d{2})$/);
   if (!m) return 0; // plain "GMT" → zero offset
   const sign = m[1] === '-' ? -1 : 1;
-  return sign * (parseInt(m[2], 10) * 60 + parseInt(m[3], 10)) * 60_000;
+  return sign * (parseInt(m[2], 10) * 60 + parseInt(m[3], 10));
+}
+
+/** Reads the zone's UTC offset in ms at a given instant (internal — see ianaZoneToOffsetMinutes). */
+function zoneOffsetMsAt(epochMs: number, timeZone: string): number | null {
+  const minutes = ianaZoneToOffsetMinutes(timeZone, epochMs);
+  return minutes === null ? null : minutes * 60_000;
 }
 
 /**
@@ -147,4 +156,109 @@ export function buildDeviceTimeInfo(localIso: string, timezone?: string | null, 
   if (epochMs === null) return null; // unresolvable → caller omits the key
   base.epochMs = epochMs;
   return base;
+}
+
+// --- Loose device-datetime parsing ----------------------------------------------------
+//
+// Vendor APIs report wall clocks in a handful of loose formats. Plugins used to
+// each carry their own parser (OPNsense's asctime, LANCOM-LCOS's dotted/US dates);
+// this is the shared superset so every plugin gets drift support for free.
+
+/** Month abbreviations for asctime(3) parsing ("Jan".."Dec"). */
+const MONTH_ABBR_TO_NUM: Record<string, number> = {
+  Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6,
+  Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12,
+};
+
+/** Result of {@link parseLooseDeviceDatetime}. */
+export interface LooseDeviceDatetime {
+  /** Naive ISO-8601 wall clock (no offset), e.g. "2026-09-13T23:06:02". */
+  localIso: string;
+  /** POSIX tzname abbreviation when the source carried one (e.g. "CEST"), else null. */
+  tzAbbr?: string | null;
+}
+
+/**
+ * Normalizes a vendor-reported wall-clock string to a naive ISO-8601 datetime.
+ *
+ * Accepted forms, tried in order:
+ *   1. ISO-ish:        "YYYY-MM-DD HH:MM[:SS]" (or with 'T')
+ *   2. asctime(3):     "Sun Sep 13 23:06:02 CEST 2026" — day may be space-padded
+ *                      ("Sep  5"); the optional timezone abbreviation is surfaced
+ *                      in `tzAbbr` so callers can map it via {@link tzAbbrToOffsetMinutes}
+ *   3. EU dotted:      "DD.MM.YYYY HH:MM[:SS]"
+ *   4. Slash:          "M/D/YYYY HH:MM[:SS]" — a component >12 forces its position
+ *                      (first>12 → DD/MM); otherwise MM/DD is assumed (the observed
+ *                      firmware default)
+ *
+ * Returns null when unparseable so the caller omits the metric key rather than
+ * emitting a fake reading. Combine with {@link buildDeviceTimeInfo} to get an
+ * absolute instant for drift computation.
+ */
+export function parseLooseDeviceDatetime(raw: string): LooseDeviceDatetime | null {
+  const s = String(raw ?? '').trim();
+  if (!s) return null;
+
+  // 1. ISO-ish: "2026-09-13 14:32:07" or with 'T'.
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (m) return { localIso: `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] ?? '00'}`, tzAbbr: null };
+
+  // 2. asctime(3): "Sun Sep 13 23:06:02 CEST 2026" (day may be space-padded).
+  m = s.match(/^([A-Z][a-z]{2}) ([A-Z][a-z]{2}) +?(\d{1,2}) (\d{2}):(\d{2}):(\d{2})(?:\s+([A-Za-z]+))?\s+(\d{4})$/);
+  if (m) {
+    const month = MONTH_ABBR_TO_NUM[m[2]];
+    if (!month) return null;
+    const day = parseInt(m[3], 10);
+    if (day < 1 || day > 31) return null;
+    return {
+      localIso: `${m[8]}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${m[4]}:${m[5]}:${m[6]}`,
+      tzAbbr: m[7] ?? null,
+    };
+  }
+
+  // 3. EU dotted: "13.09.2026 23:06:22" (DD.MM.YYYY).
+  m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (m) {
+    const day = parseInt(m[1], 10), month = parseInt(m[2], 10);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    return { localIso: `${m[3]}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${m[4]}:${m[5]}:${m[6] ?? '00'}`, tzAbbr: null };
+  }
+
+  // 4. Slash: "09/13/2026 23:06:22" — disambiguate day/month (>12 forces position,
+  //    otherwise assume MM/DD, the firmware's observed default).
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (m) {
+    const a = parseInt(m[1], 10), b = parseInt(m[2], 10);
+    let month: number, day: number;
+    if (a > 12 && b <= 12) { day = a; month = b; } // DD/MM forced by first>12
+    else { month = a; day = b; }                   // MM/DD (default + second>12 case)
+    const year = m[3];
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    return { localIso: `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${m[4]}:${m[5]}:${m[6] ?? '00'}`, tzAbbr: null };
+  }
+
+  return null;
+}
+
+/**
+ * Common POSIX tzname abbreviations → fixed UTC offset in minutes. Used to place
+ * an asctime(3) reading on the timeline when the appliance exposes no IANA zone.
+ * (DST-aware zones are approximated by their STANDARD+DAYLIGHT pair — good enough
+ * for drift detection, which only needs a stable offset.)
+ */
+export const TZ_ABBR_OFFSET_MINUTES: Record<string, number> = {
+  UTC: 0, GMT: 0, Z: 0,
+  WET: 0, WEST: 60,
+  CET: 60, CEST: 120, MET: 60, MEST: 120, BST: 60,
+  EET: 120, EEST: 180, FET: 180, FEET: 240,
+  EST: -300, EDT: -240, CST: -360, CDT: -300,
+  MST: -420, MDT: -360, PST: -480, PDT: -420, HST: -600, AKST: -540, AKDT: -480,
+};
+
+/** Maps a tzname abbreviation (e.g. "CEST") to its fixed UTC offset in minutes; null when unknown. */
+export function tzAbbrToOffsetMinutes(abbr: string | null | undefined): number | null {
+  if (typeof abbr !== 'string') return null;
+  const a = abbr.trim().toUpperCase();
+  if (!a) return null;
+  return Object.prototype.hasOwnProperty.call(TZ_ABBR_OFFSET_MINUTES, a) ? TZ_ABBR_OFFSET_MINUTES[a] : null;
 }

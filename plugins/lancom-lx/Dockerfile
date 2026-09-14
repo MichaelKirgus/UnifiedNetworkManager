@@ -24,6 +24,13 @@ COPY packages/snmp-client/scripts/ packages/snmp-client/scripts/
 COPY packages/snmp-client/src/ packages/snmp-client/src/
 RUN cd packages/snmp-client && npm install --legacy-peer-deps && npm run build
 
+# Shared LANCOM MIB helpers (row decoding + slow-path runner). Depends on both
+# packages above, so it builds after them; the plugin's tsc build follows the
+# file: link to compile against its sources and dist/ is needed at run time.
+COPY packages/lancom-shared/package.json packages/lancom-shared/tsconfig.json packages/lancom-shared/
+COPY packages/lancom-shared/src/ packages/lancom-shared/src/
+RUN cd packages/lancom-shared && npm install --legacy-peer-deps && npm run build
+
 # Plugin: `npm install` links @unm/snmp-client → ../../packages/snmp-client.
 COPY plugins/lancom-lx/package*.json plugins/lancom-lx/tsconfig.json plugins/lancom-lx/
 RUN cd plugins/lancom-lx && npm install --legacy-peer-deps

@@ -19,64 +19,25 @@
  */
 
 import axios, { AxiosInstance } from 'axios';
-import https from 'https';
+import { insecureHttpsAgent, resolveEndpointCandidates, type DeviceApiResult } from '@unm/plugin-sdk';
 
-/** Result of one LuCI call — mirrors the opnsense client's result shape. */
-export interface LuciResult<T = unknown> {
-  ok: boolean;
-  status: number;
-  data?: T;
-  error?: string;
-}
+/** Result of one LuCI call — the SDK's canonical device-API envelope. */
+export type LuciResult<T = unknown> = DeviceApiResult<T>;
 
 const DEFAULT_TIMEOUT_MS = 8_000;
 const PROBE_TIMEOUT_MS = 5_000;
-/** Appliances present self-signed certs (or none at all) — never reject. */
-const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 /**
- * Resolves the candidate base URLs for a management address + configured ports.
- * An explicit scheme in the address always wins (including its port). A bare
- * "host:port" keeps that port for BOTH schemes (repo convention: an explicit
- * port beats the configured default). Otherwise both schemes are candidates,
- * HTTPS first — credentials over TLS preferred; a plain-HTTP-only box simply
- * fails the https probe and falls through to http.
+ * Resolves the candidate base URLs for a management address + configured ports
+ * — shared SDK resolver. An explicit scheme in the address always wins (including
+ * its port); a bare "host:port" keeps that port for BOTH schemes; otherwise both
+ * schemes are candidates, HTTPS first (credentials over TLS preferred).
  */
 export function resolveLuciCandidates(
   address: string,
   ports?: { httpsPort?: number; httpPort?: number }
 ): string[] {
-  const raw = String(address ?? '').trim();
-  if (!raw) return [];
-  if (/^https?:\/\//i.test(raw)) return [raw];
-
-  // Bare address: split host from an optional explicit port (IPv6 literals ok).
-  let host = raw;
-  let explicitPort: number | null = null;
-  const v6 = raw.match(/^\[([^\]]+)\](?::(\d+))?$/);
-  if (v6) {
-    host = v6[1];
-    if (v6[2]) explicitPort = Number(v6[2]);
-  } else {
-    const idx = raw.lastIndexOf(':');
-    if (idx > 0 && /^\d+$/.test(raw.slice(idx + 1))) {
-      host = raw.slice(0, idx);
-      explicitPort = Number(raw.slice(idx + 1));
-    }
-  }
-  const validPort = typeof explicitPort === 'number' ? explicitPort : NaN;
-  if (!host || !Number.isFinite(validPort) || validPort < 1 || validPort > 65535) {
-    explicitPort = null;
-  }
-
-  const port: number | null = explicitPort; // capture the narrowed value for TS control flow
-  const out: string[] = [];
-  if (port !== null && Number.isFinite(port)) {
-    out.push(`https://${raw}`, `http://${raw}`);
-  } else {
-    out.push(`https://${host}:${ports?.httpsPort ?? 443}`, `http://${host}:${ports?.httpPort ?? 80}`);
-  }
-  return [...new Set(out)];
+  return resolveEndpointCandidates(address, { ports });
 }
 
 /** Extracts the stok CSRF token from a LuCI login page (HTML + set-cookie). */
@@ -116,7 +77,7 @@ export class LuciClient {
     this.http = axios.create({
       baseURL: baseUrl,
       timeout: DEFAULT_TIMEOUT_MS,
-      httpsAgent,
+      httpsAgent: insecureHttpsAgent(),
       validateStatus: () => true, // never throw on HTTP failure — we interpret status ourselves
       maxRedirects: 0, // login answers with a 302 whose Set-Cookie we must read directly
     });

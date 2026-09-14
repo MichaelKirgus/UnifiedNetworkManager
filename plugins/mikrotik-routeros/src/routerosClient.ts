@@ -20,6 +20,7 @@
 
 import http from 'http';
 import https from 'https';
+import { basicAuthHeader, resolveEndpointCandidates } from '@unm/plugin-sdk';
 
 /** Transport scheme policy (plugin option `schemeMode`). */
 export type SchemeMode = 'auto' | 'https' | 'http';
@@ -75,12 +76,6 @@ export interface RouterOsClientOptions {
   httpsPort?: number;
   /** Plain-HTTP management port (default 80) — used for auto-mode fallbacks. */
   httpPort?: number;
-}
-
-/** Appends `:<port>` to a scheme+host base when the port differs from the scheme default. */
-function withPort(base: string, port: number | undefined, schemeDefault: number): string {
-  if (port === undefined || !Number.isFinite(port) || port <= 0 || port > 65535) return base;
-  return port === schemeDefault ? base : `${base}:${Math.floor(port)}`;
 }
 
 interface RawResponse {
@@ -164,34 +159,31 @@ export class RouterOsClient {
     this.opts = opts;
   }
 
-  /** Ordered candidate base URLs for the current scheme policy. */
+  /** Ordered candidate base URLs for the current scheme policy (shared SDK resolver). */
   private candidates(): string[] {
     const addr = this.address;
     if (/^https?:\/\//i.test(addr)) return [addr]; // explicit scheme (+ port) always wins
-    // Configured ports (defaults 443/80) — an explicit port in the address wins.
-    const httpsBase = withPort(`https://${addr}`, this.opts.httpsPort, 443);
-    const httpBase = withPort(`http://${addr}`, this.opts.httpPort, 80);
+    const ports = { httpsPort: this.opts.httpsPort, httpPort: this.opts.httpPort };
     switch (this.opts.schemeMode) {
       case 'https':
-        return [httpsBase];
+        return resolveEndpointCandidates(addr, { transport: 'https', ports });
       case 'http':
-        return [httpBase];
-      case 'auto':
-      default:
+        return resolveEndpointCandidates(addr, { transport: 'http', ports });
+      default: {
+        const [httpsBase, httpBase] = resolveEndpointCandidates(addr, { ports }); // HTTPS first
         // Remembered scheme first, the other one as fallback.
         if (this.resolvedBase === httpsBase || this.resolvedBase === httpBase) {
-          const other = this.resolvedBase === httpsBase ? httpBase : httpsBase;
-          return [this.resolvedBase, other];
+          return [this.resolvedBase, this.resolvedBase === httpsBase ? httpBase : httpsBase];
         }
         return [httpsBase, httpBase]; // default: HTTPS first, then HTTP
+      }
     }
   }
 
   /** Executes one REST call across the candidate schemes. HTTP-level errors (auth/API) propagate immediately — only network/TLS failures trigger a scheme fallback. */
   private async request<T>(path: string, method: 'GET' | 'POST', body?: Record<string, unknown>): Promise<T> {
-    const auth = Buffer.from(`${this.opts.username}:${this.opts.password}`, 'utf8').toString('base64');
     const headers: Record<string, string> = {
-      Authorization: `Basic ${auth}`,
+      Authorization: basicAuthHeader(this.opts.username, this.opts.password),
       Accept: 'application/json',
     };
     let lastErr: unknown = null;

@@ -70,6 +70,32 @@ const MAX_BATCH = 100; // API caps requests at 100 entries
 const DEFAULT_FLUSH_INTERVAL_MS = 2000;
 const MAX_RETRIES_PER_ENTRY = 1;
 
+// --- warnOnce — stdout-visible one-shot diagnostics ---------------------------------
+//
+// The SDK logger ships to the API (gated by logToApi) and is INVISIBLE in docker
+// logs. For "why is metric X missing on host Y" style diagnostics, plugins need a
+// console.warn that fires exactly ONCE per process per key — not once per poll.
+
+const warnOnceSeen = new Map<string, Set<string>>();
+
+/**
+ * Logs `msg` via console.warn EXACTLY ONCE per (scope, key) pair per process.
+ *
+ * Use for one-shot diagnostics that must be visible in container stdout — e.g.
+ * "no usable clock from host X: endpoint returned …". The SDK logger is the
+ * right tool for structured per-poll logging; this is the right tool for a
+ * single human-readable explanation of why something is absent.
+ *
+ *   warnOnce('opnsense', host, `deviceTime: no usable clock — datetime=${raw}`)
+ */
+export function warnOnce(scope: string, key: string, msg: string): void {
+  let seen = warnOnceSeen.get(scope);
+  if (!seen) { seen = new Set(); warnOnceSeen.set(scope, seen); }
+  if (seen.has(key)) return;
+  seen.add(key);
+  console.warn(`[${scope}] ${msg}`);
+}
+
 interface QueuedEntry {
   entry: PluginLogEntry;
   retries: number;

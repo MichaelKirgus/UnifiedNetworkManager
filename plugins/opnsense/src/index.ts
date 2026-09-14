@@ -20,6 +20,9 @@ import {
   resolveHttpPort,
   resolveSshPort,
   buildDeviceTimeInfo,
+  parseLooseDeviceDatetime,
+  tzAbbrToOffsetMinutes,
+  warnOnce,
   type DeviceTimeInfo,
 } from '@unm/plugin-sdk';
 import {
@@ -926,8 +929,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 // flows through the settings loop, so it works globally and per-device.
 const logger = createPluginLogger(identity);
 
-/** Hosts whose clock collection has already been diagnosed (log-once). */
-const clockDebugged = new Set<string>();
+
 
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
@@ -1034,51 +1036,12 @@ function wantsInventory(collectInventory: unknown): boolean {
   return collectInventory !== false;
 }
 
-/** Common POSIX tzname abbreviations → fixed UTC offset in minutes. Used to
- *  resolve OPNsense's C-locale asctime datetime when the appliance has no
- *  get_timezone endpoint (observed: "Endpoint not found" on 24.x). */
-const TZ_ABBR_OFFSET_MINUTES: Record<string, number> = {
-  UTC: 0, GMT: 0, Z: 0,
-  WET: 0, WEST: 60,
-  CET: 60, CEST: 120, MET: 60, MEST: 120, BST: 60,
-  EET: 120, EEST: 180, FET: 180, FEET: 240,
-  EST: -300, EDT: -240, CST: -360, CDT: -300,
-  MST: -420, MDT: -360, PST: -480, PDT: -420, HST: -600, AKST: -540, AKDT: -480,
-};
-
-const OPN_MONTHS: Record<string, number> = {
-  Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12,
-};
-
-/**
- * Normalizes OPNsense's `system_time` datetime to a naive ISO-8601 wall clock.
- * Two observed forms: "YYYY-MM-DD HH:MM:SS" (some builds) and the C-locale
- * asctime(3) form "Sun Sep 13 23:06:02 CEST 2026" (observed live on 24.x). The
- * asctime's timezone abbreviation is mapped to a fixed offset so the caller can
- * resolve an absolute instant even without an IANA zone. Returns null when the
- * string is unparseable so the caller omits the metric.
- */
-function parseOpnsenseDatetime(raw: string): { localIso: string; tzOffsetMinutes: number | null } | null {
-  const s = raw.trim();
-  if (!s) return null;
-  // ISO-ish: "2026-09-13 14:32:07" or with 'T'.
-  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
-  if (m) return { localIso: `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] ?? '00'}`, tzOffsetMinutes: null };
-  // asctime(3): "Sun Sep 13 23:06:02 CEST 2026" (day may be space-padded, e.g. "Sep  5").
-  m = s.match(/^([A-Z][a-z]{2}) ([A-Z][a-z]{2}) +(\d{1,2}) (\d{2}):(\d{2}):(\d{2})(?:\s+([A-Za-z]+))?\s+(\d{4})$/);
-  if (m) {
-    const month = OPN_MONTHS[m[2]];
-    if (!month) return null;
-    const day = parseInt(m[3], 10);
-    if (day < 1 || day > 31) return null;
-    const abbr = m[7] ?? '';
-    return {
-      localIso: `${m[8]}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${m[4]}:${m[5]}:${m[6]}`,
-      tzOffsetMinutes: abbr in TZ_ABBR_OFFSET_MINUTES ? TZ_ABBR_OFFSET_MINUTES[abbr] : null,
-    };
-  }
-  return null;
-}
+// OPNsense's `system_time` datetime is normalized by the shared SDK parser
+// (parseLooseDeviceDatetime): it handles both observed forms — "YYYY-MM-DD
+// HH:MM:SS" and the C-locale asctime(3) form "Sun Sep 13 23:06:02 CEST 2026"
+// (observed live on 24.x). The asctime's timezone abbreviation is mapped to a
+// fixed offset via tzAbbrToOffsetMinutes so an absolute instant can be resolved
+// even when the appliance has no get_timezone endpoint.
 
 async function collectMetrics(
   host: string,
@@ -1110,7 +1073,7 @@ async function collectMetrics(
       if (typeof dtRaw === 'string' && dtRaw.trim() !== '') {
         // OPNsense returns either "2026-09-13 14:32:07" or the C-locale asctime
         // form "Sun Sep 13 23:06:02 CEST 2026" (observed live) — normalize both.
-        const parsed = parseOpnsenseDatetime(dtRaw);
+        const parsed = parseLooseDeviceDatetime(dtRaw);
         if (parsed) {
           // Prefer the IANA zone from get_timezone (newer appliances); older ones
           // return "Endpoint not found", so fall back to a FIXED offset derived
@@ -1119,19 +1082,21 @@ async function collectMetrics(
           const ianaZone = typeof tzRaw === 'string' && tzRaw.trim() !== '' ? tzRaw.trim() : null;
           let info: DeviceTimeInfo | null = null;
           if (ianaZone) info = buildDeviceTimeInfo(parsed.localIso, ianaZone);
-          else if (parsed.tzOffsetMinutes !== null) info = buildDeviceTimeInfo(parsed.localIso, null, parsed.tzOffsetMinutes);
+          else {
+            const abbrOffset = tzAbbrToOffsetMinutes(parsed.tzAbbr);
+            if (abbrOffset !== null) info = buildDeviceTimeInfo(parsed.localIso, null, abbrOffset);
+          }
           metrics['system.deviceTime'] = info ?? { localIso: parsed.localIso };
         }
       }
     }
-    // One-shot diagnostic: when no clock blob ended up in metrics, log exactly
-    // what the endpoints returned so a wrong field name / auth failure / missing
-    // endpoint surfaces once per host. console.warn (NOT the SDK logger): the SDK
-    // logger ships to the API and is gated by logToApi — invisible in stdout.
-    if (!('system.deviceTime' in metrics) && !clockDebugged.has(host)) {
-      clockDebugged.add(host);
+    // One-shot diagnostic (stdout-visible, once per host): when no clock blob
+    // ended up in metrics, log exactly what the endpoints returned so a wrong
+    // field name / auth failure / missing endpoint surfaces. warnOnce is NOT the
+    // SDK logger — that one ships to the API and is invisible in docker logs.
+    if (!('system.deviceTime' in metrics)) {
       const dtRaw0 = st.ok && st.data && typeof st.data === 'object' ? (st.data as Record<string, unknown>)['datetime'] : null;
-      console.warn(`[opnsense-plugin] deviceTime: no usable clock from ${host} — system_time ok=${st.ok} status=${st.status} datetime=${JSON.stringify(dtRaw0)}; timezone ok=${tzRes?.ok ?? false}`);
+      warnOnce('opnsense-plugin', host, `deviceTime: no usable clock from ${host} — system_time ok=${st.ok} status=${st.status} datetime=${JSON.stringify(dtRaw0)}; timezone ok=${tzRes?.ok ?? false}`);
     }
   } catch { /* best-effort — a missing clock must never break monitoring */ }
 

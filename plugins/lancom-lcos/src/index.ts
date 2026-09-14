@@ -24,38 +24,17 @@ import {
   resolveHttpPort,
   resolveSshPort,
   buildDeviceTimeInfo,
+  parseLooseDeviceDatetime,
+  warnOnce,
   CertificateRow,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 
-/**
- * Normalizes a LANCOM-LCOS `lcsStatusTimeCurrentTime` DisplayString to a naive
- * ISO-8601 wall clock. Handles "YYYY-MM-DD HH:MM:SS", the dotted European
- * "DD.MM.YYYY HH:MM:SS" variant, and the US-style "MM/DD/YYYY HH:MM:SS" that some
- * firmware reports (observed live: "09/13/2026 23:06:22"). Returns null when
- * unparseable so the caller omits the metric.
- */
-function lcosDateToIso(raw: string): string | null {
-  const s = raw.trim();
-  if (!s) return null;
-  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
-  if (m) return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] ?? '00'}`;
-  m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?/);
-  if (m) return `${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:${m[6] ?? '00'}`;
-  // US-style slash form. Disambiguate day/month: a component >12 forces its
-  // position; otherwise assume MM/DD (the firmware's observed default).
-  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?$/);
-  if (m) {
-    const a = parseInt(m[1], 10), b = parseInt(m[2], 10);
-    let month: number, day: number;
-    if (a > 12 && b <= 12) { day = a; month = b; } // DD/MM forced by first>12
-    else { month = a; day = b; }                   // MM/DD (default + second>12 case)
-    const year = m[3];
-    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${m[4]}:${m[5]}:${m[6] ?? '00'}`;
-  }
-  return null;
-}
+// The LCOS `lcsStatusTimeCurrentTime` DisplayString is normalized by the shared
+// SDK parser (parseLooseDeviceDatetime): it handles "YYYY-MM-DD HH:MM:SS", the
+// dotted European "DD.MM.YYYY HH:MM:SS" variant, and the US-style
+// "MM/DD/YYYY HH:MM:SS" that some firmware reports (observed live:
+// "09/13/2026 23:06:22"). Unparseable → null so the caller omits the metric.
 import { LcosOptions, getLcosInventory, walkLcosCounters } from './lcosClient';
 import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 import { DEVICE_MODELS } from './deviceModels';
@@ -268,9 +247,6 @@ const app = server.app;
 // flows through the settings loop, so it works globally and per-device.
 const logger = createPluginLogger(identity);
 
-/** Hosts whose clock collection has already been diagnosed (log-once). */
-const lcosClockDebugged = new Set<string>();
-
 /** Resolves SNMP walk options from effective settings. */
 function resolveOptions(settings: Record<string, unknown>): LcosOptions {
   return {
@@ -392,15 +368,14 @@ app.post('/monitoring', async (req, res) => {
     // drift IS computable for LCOS routers (unlike zone-less SNMP devices).
     let lcosClockEmitted = false;
     if (sys.systemDate) {
-      const iso = lcosDateToIso(sys.systemDate);
-      if (iso) { metrics['system.deviceTime'] = buildDeviceTimeInfo(iso, null, sys.timezoneMinutes ?? undefined) ?? { localIso: iso }; lcosClockEmitted = true; }
+      const parsed = parseLooseDeviceDatetime(sys.systemDate);
+      if (parsed) { metrics['system.deviceTime'] = buildDeviceTimeInfo(parsed.localIso, null, sys.timezoneMinutes ?? undefined) ?? { localIso: parsed.localIso }; lcosClockEmitted = true; }
     }
-    // One-shot diagnostic: when no clock blob is emitted, log the raw SNMP value
-    // so a missing OID / empty DisplayString surfaces once per host.
-    if (!lcosClockEmitted && !lcosClockDebugged.has(host)) {
-      lcosClockDebugged.add(host);
-      // console.warn (NOT the SDK logger): see OPNsense — must reach stdout always.
-      console.warn(`[lancom-lcos-plugin] deviceTime: no usable clock from ${host} — systemDate=${JSON.stringify(sys.systemDate)} timezoneMinutes=${sys.timezoneMinutes}`);
+    // One-shot diagnostic (stdout-visible, once per host): when no clock blob is
+    // emitted, log the raw SNMP value so a missing OID / empty DisplayString
+    // surfaces. warnOnce is NOT the SDK logger — that one ships to the API.
+    if (!lcosClockEmitted) {
+      warnOnce('lancom-lcos-plugin', host, `deviceTime: no usable clock from ${host} — systemDate=${JSON.stringify(sys.systemDate)} timezoneMinutes=${sys.timezoneMinutes}`);
     }
     metrics['system.cpuLoad'] = sys.cpuLoadPct;
     if (sys.memoryTotalKb !== null && sys.memoryFreeKb !== null && sys.memoryTotalKb > 0) {

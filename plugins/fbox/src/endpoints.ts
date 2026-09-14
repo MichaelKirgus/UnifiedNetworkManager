@@ -15,6 +15,8 @@
  * pinned down by `live-probe.ts` against real hardware before release.
  */
 
+import { normalizeMac } from '@unm/plugin-sdk';
+
 // --- candidate-key pickers ------------------------------------------------------
 
 type Obj = Record<string, unknown>;
@@ -66,14 +68,8 @@ export function maskToPrefix(mask: unknown): number | null {
   return bits >= 8 && bits <= 32 ? bits : null;
 }
 
-/** Normalize a MAC to lowercase colon form ('' when unparseable). */
-export function normalizeMac(raw: unknown): string {
-  if (typeof raw !== 'string') return '';
-  const hex = raw.replace(/[^0-9a-fA-F]/g, '').toLowerCase();
-  if (hex.length === 12) return hex.replace(/([0-9a-f]{2})(?=[0-9a-f])/g, '$1:').slice(0, 17);
-  if (/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(raw.trim().toLowerCase())) return raw.trim().toLowerCase();
-  return '';
-}
+/** Canonical MAC normalization (lowercase colon form, '' when unparseable) — shared SDK helper. */
+export { normalizeMac };
 
 /** Strip the vendor brand prefix from a device-reported product name → plain model number. */
 export function normalizeModelName(raw: unknown): string {

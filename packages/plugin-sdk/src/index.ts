@@ -16,7 +16,11 @@ export { SshTerminalSession, SshTerminalConnection, createTerminalPool } from '.
 export type { TerminalCredentials, TerminalPtyOptions, TerminalConnectionOptions, TerminalPool, TerminalPoolOptions } from './terminal';
 export { makeConsoleUpgrade } from './consoleWs';
 export type { ConsoleEndpointOptions, ConsoleUpgradeHandler } from './consoleWs';
-export { readSettings, readGlobalSettings, clampInt, hostFromAddress, pickString, pickNumber } from './settings';
+export { readSettings, readGlobalSettings, clampInt, hostFromAddress, pickString, pickNumber, pickBool, normalizeMac, resolveUserPass } from './settings';
+export type { UserPassCreds, ResolveUserPassResult } from './settings';
+// Outbound device-HTTP shared layer (endpoint resolution + TLS/error primitives). See http.ts.
+export { withPort, resolveEndpointCandidates, toWsUrl, insecureHttpsAgent, isNetworkLevelError, basicAuthHeader } from './http';
+export type { DeviceApiResult, EndpointTransport, EndpointPorts, EndpointOptions } from './http';
 export { suggestPortLayout, portNumberFromKey } from './portLayout';
 export { INVENTORY_INTERVAL_MS, errorDescriptor, modelFirmwareDescriptors, gaugeMetric, textMetric, tableMetric } from './metrics';
 export { validateInput, isValidInput, createRegistry } from './actions';
@@ -29,15 +33,15 @@ export { TtlCache } from './ttlCache';
 export type { TtlCacheOptions } from './ttlCache';
 export { createApiClient, isNotFound } from './apiClient';
 export type { ApiClientOptions } from './apiClient';
-export { createPluginLogger, LOG_LEVELS } from './logging';
+export { createPluginLogger, warnOnce, LOG_LEVELS } from './logging';
 export type { PluginLogger, PluginLoggerOptions, PluginLogEntry, LogLevel, LogCallOptions } from './logging';
 export { createNotifier, NOTIFICATION_SEVERITIES } from './notifications';
 export type { PluginNotifier, NotifierOptions, PluginNotification, NotificationSeverity } from './notifications';
 export { createSelfMetrics } from './selfMetrics';
 export type { PluginSelfMetrics, SelfMetricsOptions, SelfMetricsLoggerLike } from './selfMetrics';
 // Device clock / timezone contract for the Time page (see deviceTime.ts).
-export { parseDeviceTimeToEpochMs, buildDeviceTimeInfo } from './deviceTime';
-export type { DeviceTimeInfo } from './deviceTime';// SSH access for plugins (shared transport + credential resolution). See ssh.ts.
+export { parseDeviceTimeToEpochMs, buildDeviceTimeInfo, ianaZoneToOffsetMinutes, parseLooseDeviceDatetime, tzAbbrToOffsetMinutes, TZ_ABBR_OFFSET_MINUTES } from './deviceTime';
+export type { DeviceTimeInfo, LooseDeviceDatetime } from './deviceTime';// SSH access for plugins (shared transport + credential resolution). See ssh.ts.
 export { SshClient, createSshPool, resolveSshCredentials, normalizeFingerprint, fingerprintMatches, computeFingerprint, normalizePrivateKey } from './ssh';
 export type { SshCredentials, SshClientOptions, ExecResult, SshPool, SshPoolOptions, SshFingerprint } from './ssh';
 export { SshError, SshAuthError, SshHostKeyError, SshTimeoutError } from './ssh';

@@ -12,26 +12,10 @@
 
 import http from 'http';
 import https from 'https';
-import { createRegistry } from '@unm/plugin-sdk';
+import { createRegistry, ianaZoneToOffsetMinutes } from '@unm/plugin-sdk';
 import { snmpGet, snmpSet, snmpWalk, SnmpValue } from '@unm/snmp-client';
 import { SETUP, SETUP_TIME, lcosMinutesToTimezoneEnum } from '../lcosOids';
 import { ActionContext, ActionDescriptor, ActionResult } from './types';
-
-/** Resolves an IANA zone to a UTC offset in MINUTES at the given instant (or null). */
-function ianaToOffsetMinutes(timeZone: string, atMs = Date.now()): number | null {
-  let fmt: Intl.DateTimeFormat;
-  try {
-    fmt = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset' });
-  } catch {
-    return null; // unknown/invalid IANA zone
-  }
-  const part = fmt.formatToParts(new Date(atMs)).find((p) => p.type === 'timeZoneName');
-  if (!part || !/^GMT([+-]\d{2}:?\d{2})?$/.test(part.value)) return null;
-  const m = part.value.match(/^GMT([+-])(\d{2}):?(\d{2})$/);
-  if (!m) return 0; // plain "GMT" → zero offset
-  const sign = m[1] === '-' ? -1 : 1;
-  return sign * (parseInt(m[2], 10) * 60 + parseInt(m[3], 10));
-}
 
 // --- Small helpers --------------------------------------------------------------------
 
@@ -393,7 +377,7 @@ const systemTimezoneSet: ActionDescriptor = {
     if (typeof input.utcOffsetMinutes === 'number' && Number.isFinite(input.utcOffsetMinutes)) {
       minutes = Math.round(input.utcOffsetMinutes as number);
     } else if (str(input, 'timezone')) {
-      minutes = ianaToOffsetMinutes(str(input, 'timezone')!);
+      minutes = ianaZoneToOffsetMinutes(str(input, 'timezone')!);
       if (minutes === null) return { success: false, error: `Unknown IANA timezone "${str(input, 'timezone')}".` };
     } else {
       return { success: false, error: 'Provide either "timezone" or "utcOffsetMinutes".' };

@@ -25,6 +25,7 @@ import {
   resolveHttpPort,
   resolveSshPort,
   CertificateRow,
+  resolveUserPass,
 } from '@unm/plugin-sdk';
 import { FBoxAuthError, FBoxCredentials, FBoxNotFritzError, FBoxTransport } from './fboxClient';
 import { DEFAULT_OPTIONS, FBoxOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
@@ -149,14 +150,11 @@ function portsOf(settings: Record<string, unknown>): { httpsPort?: number; httpP
 
 /** Extracts username/password credentials from the monitoring body (decrypted by the API). */
 function resolveCredentials(body: Record<string, unknown>): { creds?: FBoxCredentials; error?: string } {
-  const credentials = (body.credentials ?? {}) as Record<string, unknown>;
-  let username = typeof credentials.username === 'string' ? credentials.username : '';
-  const password = typeof credentials.password === 'string' ? credentials.password : '';
   // FRITZ!Boxes without a configured user list authenticate PASSWORD-ONLY — the
   // secret stores "none" (or empty) as a placeholder for "no username", and the
-  // login request must carry an EMPTY username in that case.
-  if (username.trim().toLowerCase() === 'none') username = '';
-  return { creds: { username, password } };
+  // login request must carry an EMPTY username in that case. Shared SDK helper:
+  // no username required + "none" normalized to ''.
+  return resolveUserPass((body.credentials ?? {}) as Record<string, unknown>, { requireUsername: false, treatNoneAsEmpty: true });
 }
 
 app.post('/monitoring', async (req, res) => {

@@ -17,7 +17,11 @@
  */
 
 import { SnmpCredentials, SnmpValue, TransportOptions, snmpGet, snmpWalkMulti, suffixOf, normalizeMac } from '@unm/snmp-client';
-import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
+import { CounterTracker } from '@unm/plugin-sdk';
+import {
+  splitRow, decodeSingleText, decodeIpIndex, decodeIpTextIndex, label, toInt, netmaskToPrefix,
+  createSnapshotCaches, runSlowPath, accumulateRate, LcosLogSink, ProbeOutcome,
+} from '@unm/lancom-shared';
 import {
   LCOS_BASE, SYS, HW, FIRMWARE, LAN_IF, LAN_BYTES, WAN_BYTES, WAN_IP,
   NET_LIST, ARP, DHCP, VPN_CONN, IP_ROUTES, IP_CIDR_ROUTES, WLAN_NET, WLAN_RADIO, WLAN_STATION, TEMP_EXTREMES,
@@ -231,95 +235,19 @@ const IP_ROUTE_TYPES: Record<number, { protocol: LcosRoute['protocol']; label: s
   13: { protocol: 'other', label: 'dhcp' },
 };
 
-function label(map: Record<number, string>, raw: SnmpValue | undefined): string {
-  if (raw === undefined || raw === '') return '';
-  const n = Number(raw);
-  return Number.isFinite(n) ? map[n] ?? String(n) : String(raw);
-}
-
-function toInt(value: SnmpValue | undefined): number | null {
-  if (value === undefined || value === '') return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
 /* ------------------------------------------------------------------ *
- * OID row decoding — LANCOM's LCOS agent addresses table rows COLUMN-FIRST:
- *   <table>.1.<column>.<index…>          (standard SNMP is index-first!)
- * and encodes OCTET STRING indices as LENGTH-PREFIXED decimal octets:
- *   "WLAN-1" → 6.87.76.65.78.45.49       (len=6, then ASCII bytes)
- * IP-address indices are the raw four decimal octets ("10.25.1.1" → 10.25.1.1).
- * Index columns are not-accessible, so row keys can ONLY be recovered from
- * the OID suffix — every table above has its index shape verified against the MIB.
+ * OID row decoding (column-first + length-prefixed OCTET STRING / IP indices)
+ * and enum/integer pickers now live in @unm/lancom-shared — imported above.
  * ------------------------------------------------------------------ */
-
-/** Decodes one length-prefixed OCTET STRING index component (e.g. "WLAN-1"). */
-function decodePrefixedText(parts: string[], start: number): { text: string; next: number } | null {
-  const len = Number(parts[start]);
-  if (!Number.isInteger(len) || len <= 0 || len > 64 || start + 1 + len > parts.length) return null;
-  let text = '';
-  for (let i = 1; i <= len; i++) {
-    const p = parts[start + i];
-    if (!/^\d+$/.test(p)) return null;
-    const n = Number(p);
-    text += n >= 32 && n <= 126 ? String.fromCharCode(n) : ''; // non-printable → drop
-  }
-  return { text, next: start + 1 + len };
-}
-
-/** Decodes a raw four-octet IPv4 index run to dotted-quad (or null). */
-function decodeIpIndex(parts: string[], start: number): string | null {
-  if (start + 4 > parts.length) return null;
-  const octets = parts.slice(start, start + 4);
-  if (!octets.every((p) => /^\d+$/.test(p) && Number(p) <= 255)) return null;
-  return octets.map(Number).join('.');
-}
-
-/**
- * Splits a column-first row OID into column number + index components.
- * Row shape relative to the table base: `<base>.1.<column>.<index…>` — the
- * leading "1" is the (not-accessible) entry object, always sub-identifier 1
- * in every LCOS table (`::= { <table> 1 }`).
- */
-function splitRow(oid: string, base: string): { col: number; idx: string[] } | null {
-  const suffix = suffixOf(oid, base); // "<entry>.<col>.<idx…>"
-  if (!suffix) return null;
-  const parts = suffix.split('.');
-  if (parts.length < 3 || parts[0] !== '1') return null; // entry + col + ≥1 idx part
-  const col = Number(parts[1]);
-  if (!Number.isInteger(col)) return null;
-  return { col, idx: parts.slice(2) };
-}
-
-/** Decodes a single-component text index ("WLAN-1", "LAN-1", peer names). */
-function decodeSingleText(idx: string[]): string | null {
-  const d = decodePrefixedText(idx, 0);
-  return d && d.next === idx.length ? d.text : null;
-}
-
-/** Decodes a [ip(4 octets), text] index (DHCP leases). */
-function decodeIpTextIndex(idx: string[]): { ip: string; text: string } | null {
-  const ip = decodeIpIndex(idx, 0);
-  if (!ip) return null;
-  const d = decodePrefixedText(idx, 4);
-  return d && d.next === idx.length ? { ip, text: d.text } : null;
-}
 
 /* ------------------------------------------------------------------ *
  * Slow path — targeted parallel walks of the runtime-status subtrees we use
  * ------------------------------------------------------------------ */
 
 // Fresh-snapshot cache (TTL-gated) + a last-known map so a failed refresh can
-// still fall back to the most recent data even after TTL expiry.
-const inventoryCache = new TtlCache<LcosRouterSnapshot>();
-const lastKnown = new Map<string, LcosRouterSnapshot>();
-function rememberLastKnown(host: string, snapshot: LcosRouterSnapshot): void {
-  lastKnown.set(host, snapshot);
-  if (lastKnown.size > 512) {
-    const oldest = lastKnown.keys().next().value; // Map iteration = insertion order
-    if (oldest !== undefined) lastKnown.delete(oldest);
-  }
-}
+// still fall back to the most recent data even after TTL expiry. Shared trio —
+// see @unm/lancom-shared snapshotCache.ts.
+const caches = createSnapshotCaches<LcosRouterSnapshot>();
 
 /**
  * The exact subtrees the slow path needs — nothing else. Deliberately NOT a
@@ -347,16 +275,17 @@ const INVENTORY_WALKS: string[] = [
   TEMP_EXTREMES.base, // temperature min/max extremes
 ];
 
-/** Optional structured-log sink for walk failures (wired to the plugin logger). */
-export interface LcosLogSink {
-  log(level: 'warn' | 'error', message: string, context?: Record<string, unknown>): void;
-}
-
 /**
  * Returns the cached LCOS snapshot for a host, re-walking only when the cache
  * is empty or older than `inventoryTtlMs`. Never throws — degrades to
  * stale/empty data with an explanatory error. Partial walk failures (some
  * subtrees missing) still yield a usable snapshot; total failure does not.
+ *
+ * The orchestration (cache → probe gate → combined walk → quality gate → stale
+ * fallback) is the shared @unm/lancom-shared slow-path runner; only the probe
+ * step and parser are LCOS-specific. All inventory subtrees go out in ONE
+ * strictly-sequential combined GetBulk stream (~17 PDUs / ~1.2s live-profiled),
+ * which never stresses the embedded agents' tiny concurrent-request queues.
  */
 export async function getLcosInventory(
   host: string,
@@ -364,81 +293,38 @@ export async function getLcosInventory(
   opts: LcosOptions,
   log?: LcosLogSink
 ): Promise<{ snapshot: LcosRouterSnapshot | null; fromCache: boolean; error?: string }> {
-  const cached = inventoryCache.get(host, opts.inventoryTtlMs);
-  if (cached) {
-    return { snapshot: cached, fromCache: true };
-  }
-  const stale = lastKnown.get(host); // expired-but-usable fallback
-
   // Probe gate: one cheap snmpget against a scalar every LCOS router exposes
   // (hardware-info sw version). Non-LANCOM devices answer "No Such Object" in
   // ~100ms and are rejected here instead of burning ~13 walks × timeout
   // budget; unreachable hosts fail fast on the single PDU.
-  let probe: Map<string, SnmpValue>;
-  try {
-    probe = await snmpGet(host, creds, [HW.swVersion], opts);
-  } catch {
-    return {
-      snapshot: stale ?? null,
-      fromCache: stale !== undefined,
-      error: 'SNMP query failed — device unreachable or credentials rejected.',
-    };
-  }
-  if (probe.size === 0) {
-    // Agent answered but has no LCOS tree — not a Lancom LCOS router.
-    return { snapshot: null, fromCache: false, error: 'No LCOS MIB data on this device.' };
-  }
-
-  const out = new Map<string, SnmpValue>();
-  for (const [k, v] of probe) out.set(k, v); // reuse the probed scalar
-
-  // All inventory subtrees in ONE combined GetBulk stream on a single shared
-  // session: each PDU advances every subtree at once (~17 PDUs / ~1.2s live-
-  // profiled vs ~52 PDUs / ~4.7s for the old batched single walks). The stream
-  // is strictly sequential, so the embedded agents' tiny concurrent-request
-  // queues are never stressed — no batching or settle pauses needed.
-  let failures = 0;
-  try {
-    const walked = await snmpWalkMulti(host, creds, INVENTORY_WALKS, opts);
-    for (const [k, v] of walked) out.set(k, v);
-  } catch (err) {
-    failures++;
-    const msg = err instanceof Error ? err.message : String(err ?? 'unknown error');
-    console.error('[lancom-lcos] inventory walk failed:', msg);
-    log?.log('warn', `SNMP inventory walk failed on ${host}: ${msg}`, { host });
-  }
-
-  if (out.size === 0 && failures > 0) {
-    return {
-      snapshot: stale ?? null,
-      fromCache: stale !== undefined,
-      error: 'SNMP walk of the LCOS status tree failed.',
-    };
-  }
-
-  if (out.size === 0) {
-    // Walks succeeded but returned nothing — this device is not a Lancom router.
-    return { snapshot: null, fromCache: false, error: 'No LCOS MIB data on this device.' };
-  }
-
-  const snapshot = parseLcosStatus(out);
-
-  // Quality gate before caching: the serial number comes from the hardware-info
-  // WALK (11.1.47), not from the probe scalar — so a cached snapshot is only
-  // stored when that walk actually succeeded. A partial-failure artifact must
-  // never be served from cache for the whole TTL; it's returned once and the
-  // next poll retries fresh.
-  const complete = snapshot.system.serialNumber !== '';
-  if (complete) {
-    inventoryCache.set(host, snapshot);
-    rememberLastKnown(host, snapshot);
-  }
-
-  return {
-    snapshot,
-    fromCache: false,
-    error: complete ? undefined : 'Partial LCOS data — some SNMP walks failed; retrying next cycle.',
+  const probe = async (): Promise<ProbeOutcome> => {
+    let m: Map<string, SnmpValue>;
+    try {
+      m = await snmpGet(host, creds, [HW.swVersion], opts);
+    } catch {
+      return { kind: 'transport-error', error: 'SNMP query failed — device unreachable or credentials rejected.' };
+    }
+    if (m.size === 0) return { kind: 'not-device' }; // agent answered but has no LCOS tree
+    return { kind: 'ok', seed: m };
   };
+
+  return runSlowPath(caches, {
+    host,
+    creds,
+    opts,
+    log,
+    probe,
+    walks: () => INVENTORY_WALKS,
+    parse: (out) => parseLcosStatus(out),
+    // Quality gate: the serial number comes from the hardware-info WALK
+    // (11.1.47), not the probe scalar — only cache when that walk succeeded.
+    isComplete: (s) => s.system.serialNumber !== '',
+    errors: {
+      walkFailed: 'SNMP walk of the LCOS status tree failed.',
+      notDevice: 'No LCOS MIB data on this device.',
+      partial: 'Partial LCOS data — some SNMP walks failed; retrying next cycle.',
+    },
+  });
 }
 
 /** Parses the targeted LCOS walk output into a typed snapshot. */
@@ -769,19 +655,6 @@ function parseLcosStatus(out: Map<string, SnmpValue>): LcosRouterSnapshot {
   };
 }
 
-/** Converts a dotted-quad netmask to its CIDR prefix length (null on bad input). */
-function netmaskToPrefix(netmask: SnmpValue | undefined): number | null {
-  const parts = String(netmask ?? '').split('.').map(Number);
-  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return null;
-  let prefix = 0;
-  for (const part of parts) {
-    let octet = part;
-    while (octet & 0x80) { prefix++; octet = (octet << 1) & 0xff; }
-    if (octet !== 0) return null; // non-contiguous mask — don't guess
-  }
-  return prefix === 0 ? null : prefix;
-}
-
 /**
  * Decodes the network-list interface enum (verified against the MIB):
  *   eLan1(256)…eLan16(271) → "LAN-<n-255>"
@@ -840,12 +713,7 @@ export async function walkLcosCounters(
     if (!Number.isFinite(n)) continue;
     const dir = row.col === LAN_BYTES.COL_RX ? 'rx' : 'tx';
     // Integer bits/s, as before — the tracker returns a float rate.
-    const r = rateTracker.sample(`lan:${key}:${dir}`, n, now);
-    if (r !== null) {
-      const cur = lanRates[key] ?? (lanRates[key] = { rx: null, tx: null });
-      if (dir === 'rx') cur.rx = Math.round(r);
-      else cur.tx = Math.round(r);
-    }
+    accumulateRate(lanRates, key, dir, rateTracker.sample(`lan:${key}:${dir}`, n, now));
   }
 
   const wanRates: LcosRates = {};
@@ -858,12 +726,7 @@ export async function walkLcosCounters(
     const n = Number(value);
     if (!Number.isFinite(n)) continue;
     const dir = row.col === WAN_BYTES.COL_HRX ? 'rx' : 'tx';
-    const r = rateTracker.sample(`wan:${key}:${dir}`, n, now);
-    if (r !== null) {
-      const cur = wanRates[key] ?? (wanRates[key] = { rx: null, tx: null });
-      if (dir === 'rx') cur.rx = Math.round(r);
-      else cur.tx = Math.round(r);
-    }
+    accumulateRate(wanRates, key, dir, rateTracker.sample(`wan:${key}:${dir}`, n, now));
   }
 
   return { lanRates, wanRates };
