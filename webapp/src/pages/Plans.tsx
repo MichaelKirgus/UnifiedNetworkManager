@@ -1,7 +1,7 @@
 import { FormEvent, useMemo, useState } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { Plus, RotateCcw, X } from 'lucide-react';
+import { Play, Plus, RotateCcw, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
@@ -56,6 +56,21 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) setReauth({ label: `Retry ${plan.intentActionId}`, retry: attempt });
       else setNotice(`Retry failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Execute a saved (never-run) plan directly from the list — the follow-up to
+  // the top-bar Plan mode, where actions were saved without executing.
+  async function handleExecute(plan: Plan) {
+    const attempt = async () => {
+      await api.executePlan(plan.id);
+      window.location.href = `/plans/${plan.id}`;
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth({ label: `Execute ${plan.intentActionId}`, retry: attempt });
+      else setNotice(`Execute failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -135,18 +150,33 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
       sortable: false,
       filterable: false,
       excludeFromExport: true,
-      width: 90,
-      render: (row) =>
-        canApply && row.status !== 'executing' ? (
-          <button
-            onClick={() => handleRetry(row)}
-            title="Retry — duplicates this plan (same payload + secrets) and executes the copy"
-            aria-label={`Retry ${row.intentActionId}`}
-            className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs font-medium text-secondary hover:bg-muted disabled:opacity-50"
-          >
-            <RotateCcw className="h-3.5 w-3.5" /> Retry
-          </button>
-        ) : null,
+      width: 150,
+      render: (row) => {
+        if (!canApply || row.status === 'executing') return null;
+        const neverRun = ['draft', 'ready'].includes(row.status);
+        return (
+          <div className="flex items-center gap-1">
+            {neverRun && (
+              <button
+                onClick={() => handleExecute(row)}
+                title="Execute this saved plan now"
+                aria-label={`Execute ${row.intentActionId}`}
+                className="flex items-center gap-1 rounded border border-success-border bg-success px-2 py-1 text-xs font-medium text-success-fg hover:opacity-90"
+              >
+                <Play className="h-3.5 w-3.5" /> Execute
+              </button>
+            )}
+            <button
+              onClick={() => handleRetry(row)}
+              title="Retry — duplicates this plan (same payload + secrets) and executes the copy"
+              aria-label={`Retry ${row.intentActionId}`}
+              className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs font-medium text-secondary hover:bg-muted disabled:opacity-50"
+            >
+              <RotateCcw className="h-3.5 w-3.5" /> Retry
+            </button>
+          </div>
+        );
+      },
     },
   ];
 

@@ -1,8 +1,20 @@
-import { ReactNode } from 'react';
+import { ReactNode, useEffect } from 'react';
 import { Sidebar } from './Sidebar';
 import { NotificationCenter } from './NotificationCenter';
 import { PlansCenter } from './PlansCenter';
 import { ThemeToggle } from './ThemeToggle';
+import { ExecutionModeToggle } from './ExecutionModeToggle';
+import { useExecutionMode } from '../executionMode';
+
+/** Pages whose actions flow through the plan workflow (create + execute).
+ *  On every other page the top-bar Execute/Plan toggle renders disabled. */
+const PLAN_ACTION_PATHS = ['/storage', '/shares', '/containers', '/vms'];
+
+function isPlanActionPath(pathname: string): boolean {
+  if (PLAN_ACTION_PATHS.some((p) => pathname === p || pathname.startsWith(p + '/'))) return true;
+  // Per-device Config page — its state sections trigger catalog actions.
+  return /^\/devices\/[^/]+\/config$/.test(pathname);
+}
 
 export interface LayoutProps {
   children: ReactNode;
@@ -20,11 +32,19 @@ export interface LayoutProps {
  * The plans icon and notification bell sit far right in every view.
  */
 export function Layout({ children, title, actions }: LayoutProps) {
+  const { setApplicable } = useExecutionMode();
+
+  // The Execute/Plan toggle only applies on pages whose actions flow through
+  // the plan workflow — everywhere else it renders disabled.
+  useEffect(() => {
+    setApplicable(isPlanActionPath(window.location.pathname));
+  }, [setApplicable]);
+
   return (
     <div className="flex h-screen overflow-hidden bg-background">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Top bar — page title + actions on the left/right, plans icon + bell far right. */}
+        {/* Top bar — page title + actions on the left/right, mode toggle + plans icon + bell far right. */}
         <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card pl-6 pr-4">
           {title != null && (
             <h1 className="min-w-0 overflow-hidden whitespace-nowrap text-base font-semibold text-foreground">{title}</h1>
@@ -32,6 +52,7 @@ export function Layout({ children, title, actions }: LayoutProps) {
           <div className="ml-auto flex shrink-0 items-center gap-2">
             {actions}
             <ThemeToggle />
+            <ExecutionModeToggle />
             <PlansCenter />
             <NotificationCenter />
           </div>

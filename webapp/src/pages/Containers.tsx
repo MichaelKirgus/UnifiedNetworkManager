@@ -1,6 +1,6 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ArrowUpCircle, ChevronDown, ChevronRight, ChevronUp, Container, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Container, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { ConsoleDialog } from '../components/ConsoleDialog';
 import { ContainerLogsView } from '../components/ContainerLogs';
@@ -12,6 +12,7 @@ import { DataTable, DataTableColumn, ExpandChildContext } from '../components/Da
 import { DeviceChip } from '../components/DeviceChip';
 import { formatBytes, formatDuration } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
+import { runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, CatalogEntry, ContainerNetwork, ContainerRow, ContainerServiceDetail, DockerImageRow } from '../api/client';
 
 /** One container's live stat snapshot from a probe (key 'containerStats'). */
@@ -117,23 +118,31 @@ function liveStateOf(row: ContainerRow, states?: Record<string, string>): string
  * out across devices that share the same plugin. Throws on failure — callers catch
  * ApiError 401 to offer two-factor revalidation and then retry from scratch.
  */
+/** Creates a plan for ONE plugin. In Execute mode it is also executed in the
+ * background (no navigation); in Plan mode it is saved WITHOUT executing and
+ * only its id is returned — callers surface a "saved" notice instead of
+ * tracking execution progress. Throws on failure — callers catch ApiError 401
+ * to offer two-factor revalidation and then retry from scratch. */
 async function createAndExecutePlan(
   pluginId: string,
   actionId: string,
   steps: Array<{ deviceId: string; input: Record<string, unknown> }>,
+  mode: ExecutionMode,
 ): Promise<string> {
   const first = steps[0];
-  const plan = await api.createPlan({
-    pluginId,
-    intentActionId: actionId,
-    inputs: first.input,
-    devices: [{ deviceId: first.deviceId }],
-  });
-  if (steps.length > 1) {
-    await api.addPlanStepsBulk(plan.id, steps.slice(1).map((s) => ({ deviceId: s.deviceId, actionId, input: s.input })));
-  }
-  await api.executePlan(plan.id);
-  return plan.id;
+  const create = async () => {
+    const plan = await api.createPlan({
+      pluginId,
+      intentActionId: actionId,
+      inputs: first.input,
+      devices: [{ deviceId: first.deviceId }],
+    });
+    if (steps.length > 1) {
+      await api.addPlanStepsBulk(plan.id, steps.slice(1).map((s) => ({ deviceId: s.deviceId, actionId, input: s.input })));
+    }
+    return plan;
+  };
+  return runAction(create, (id) => api.executePlan(id), mode);
 }
 
 /** Groups selected rows by (pluginId, deviceId), collecting a per-row value. */
@@ -157,11 +166,15 @@ function groupByDevice<T>(rows: T[], keyOf: (r: T) => { pluginId: string; device
  * schema and have no editable string, so this is only offered for custom apps.
  */
 function YamlEditorDialog({ app, onClose }: { app: ContainerRow; onClose: () => void }) {
+  const { mode } = useExecutionMode();
+  const isPlanMode = mode === 'plan';
   const [yaml, setYaml] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [reauth, setReauth] = useState(false);
+  // Plan mode: the compose plan was saved without executing.
+  const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -182,13 +195,48 @@ function YamlEditorDialog({ app, onClose }: { app: ContainerRow; onClose: () => 
     setSaving(true);
     setError(null);
     try {
-      await createAndExecutePlan(app.pluginId, 'containers.update', [{ deviceId: app.deviceId, input: { name: app.name, composeString: yaml } }]);
+      await createAndExecutePlan(app.pluginId, 'containers.update', [{ deviceId: app.deviceId, input: { name: app.name, composeString: yaml } }], mode);
+      if (isPlanMode) {
+        setSaved(true);
+        return;
+      }
       onClose();
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) setReauth(true);
       else setError(err instanceof Error ? err.message : String(err));
       setSaving(false);
     }
+  }
+
+  // Plan mode: the plan was saved without executing — offer to close.
+  if (saved) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
+        <div
+          className="mt-8 w-full max-w-2xl rounded-md border border-border bg-card shadow-xl"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <header className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h2 className="text-base font-semibold text-foreground">Edit compose — {app.name}</h2>
+            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
+              <X size={16} />
+            </button>
+          </header>
+          <div className="space-y-3 p-4">
+            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+              Compose change saved as a plan — it was NOT executed and the app was not redeployed. Open the Plans
+              center to run it later (or schedule it).
+            </div>
+          </div>
+          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover">
+              Close
+            </button>
+          </footer>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -233,7 +281,8 @@ function YamlEditorDialog({ app, onClose }: { app: ContainerRow; onClose: () => 
                   Cancel
                 </button>
                 <button type="button" onClick={save} disabled={saving || yaml.trim() === ''} className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-40">
-                  {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />} Apply &amp; redeploy
+                  {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {isPlanMode ? 'Save as plan' : 'Apply & redeploy'}
                 </button>
               </div>
             </>
@@ -851,6 +900,10 @@ function ChildRow({ node, ctx, actions }: { node: TreeNode; ctx: ExpandChildCont
 }
 
 export default function Containers() {
+  // Global Execute/Plan mode — decides whether page actions run immediately or
+  // are saved as (unexecuted) plans for later execution/scheduling.
+  const { mode } = useExecutionMode();
+
   // The API polls plugins every ~30s and upserts these rows — refresh at the
   // same cadence so the view tracks live inventory.
   const containersQuery = useQuery({
@@ -1293,13 +1346,25 @@ export default function Containers() {
     buildGroups: () => Array<{ pluginId: string; actionId: string; steps: Array<{ deviceId: string; input: Record<string, unknown> }> }>,
   ) {
     const attempt = async () => {
+      let savedCount = 0;
       for (const g of buildGroups()) {
         if (g.steps.length === 0) continue;
-        const planId = await createAndExecutePlan(g.pluginId, g.actionId, g.steps);
+        const planId = await createAndExecutePlan(g.pluginId, g.actionId, g.steps, mode);
+        if (mode === 'plan') {
+          // Saved without executing — nothing to track; one notice at the end.
+          savedCount += 1;
+          continue;
+        }
         // Track per group so the touched devices refresh when execution settles.
         const deviceIds = Array.from(new Set(g.steps.map((s) => s.deviceId)));
         const names = Array.isArray(g.steps[0].input['names']) ? (g.steps[0].input['names'] as string[]) : [];
         trackPlan(planId, deviceIds, names);
+      }
+      if (mode === 'plan' && savedCount > 0) {
+        setNotice({
+          kind: 'ok',
+          text: `${label}: ${savedCount} plan${savedCount === 1 ? '' : 's'} saved without executing — open the Plans center to run them later.`,
+        });
       }
     };
     try {
@@ -1314,12 +1379,16 @@ export default function Containers() {
    * (2FA-gated), tracked so the device is force-refreshed when execution settles.
    * Throws on failure so the dialog can surface it; a 401 opens the reauth flow
    * AND throws, keeping the dialog open for retry after revalidation. */
-  async function runInstall(candidate: CreateAppCandidate, mode: AppMode, input: Record<string, unknown>) {
-    const actionId = candidate.actions[mode];
-    if (!actionId) throw new Error(`No install action for mode '${mode}' on ${candidate.deviceName}`);
+  async function runInstall(candidate: CreateAppCandidate, appMode: AppMode, input: Record<string, unknown>) {
+    const actionId = candidate.actions[appMode];
+    if (!actionId) throw new Error(`No install action for mode '${appMode}' on ${candidate.deviceName}`);
     const label = `Create app ${String(input['name'])}`;
     const attempt = async () => {
-      const planId = await createAndExecutePlan(candidate.pluginId, actionId, [{ deviceId: candidate.deviceId, input }]);
+      const planId = await createAndExecutePlan(candidate.pluginId, actionId, [{ deviceId: candidate.deviceId, input }], mode);
+      if (mode === 'plan') {
+        setNotice({ kind: 'ok', text: `App creation saved as a plan — not executed. Open the Plans center to run it later.` });
+        return;
+      }
       trackPlan(planId, [candidate.deviceId], typeof input['name'] === 'string' ? [input['name']] : []);
     };
     try {
@@ -1338,7 +1407,11 @@ export default function Containers() {
    * auto-refreshes when execution settles. Same 401 → reauth flow as bulk. */
   async function singleApp(row: ContainerRow, actionId: string, label: string) {
     const attempt = async () => {
-      const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input: { names: [row.name] } }]);
+      const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input: { names: [row.name] } }], mode);
+      if (mode === 'plan') {
+        setNotice({ kind: 'ok', text: `${label} ${row.name}: saved as a plan — not executed. Open the Plans center to run it later.` });
+        return;
+      }
       trackPlan(planId, [row.deviceId], [row.name]);
     };
     try {
@@ -1358,7 +1431,11 @@ export default function Containers() {
     const name = node.service ?? '';
     if (!node.deviceId || !node.pluginId || !name) return;
     const attempt = async () => {
-      const planId = await createAndExecutePlan(node.pluginId!, actionId, [{ deviceId: node.deviceId!, input: { names: [name] } }]);
+      const planId = await createAndExecutePlan(node.pluginId!, actionId, [{ deviceId: node.deviceId!, input: { names: [name] } }], mode);
+      if (mode === 'plan') {
+        setNotice({ kind: 'ok', text: `${label} ${name}: saved as a plan — not executed. Open the Plans center to run it later.` });
+        return;
+      }
       trackPlan(planId, [node.deviceId!], []);
     };
     try {

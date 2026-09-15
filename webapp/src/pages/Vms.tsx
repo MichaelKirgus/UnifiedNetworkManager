@@ -1,12 +1,13 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { Loader2, Monitor, Pause, Play, Plug, RotateCw, Square, Trash2, Unplug, X, Zap } from 'lucide-react';
+import { CheckCircle2, Loader2, Monitor, Pause, Play, Plug, RotateCw, Square, Trash2, Unplug, X, Zap } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { formatBytes, formatDuration } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
+import { runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, VmDevice, VmNic, VmRow } from '../api/client';
 
 // ---------------------------------------------------------------------------
@@ -180,26 +181,30 @@ function ChildRow({ node, ctx, actions }: { node: VmNode; ctx: ExpandChildContex
 // Plan helpers (same contract as the Containers page)
 // ---------------------------------------------------------------------------
 
-/** Creates a plan for ONE plugin and executes it in the background. The first
- * step is the plan's intent; further steps are appended in one bulk round-trip.
+/** Creates a plan for ONE plugin. In Execute mode it is also executed in the
+ * background; in Plan mode it is saved WITHOUT executing and only its id is
+ * returned — callers surface a "saved" notice instead of tracking execution.
  * Throws on failure — callers catch ApiError 401 to offer two-factor revalidation. */
 async function createAndExecutePlan(
   pluginId: string,
   actionId: string,
   steps: Array<{ deviceId: string; input: Record<string, unknown> }>,
+  mode: ExecutionMode,
 ): Promise<string> {
   const first = steps[0];
-  const plan = await api.createPlan({
-    pluginId,
-    intentActionId: actionId,
-    inputs: first.input,
-    devices: [{ deviceId: first.deviceId }],
-  });
-  if (steps.length > 1) {
-    await api.addPlanStepsBulk(plan.id, steps.slice(1).map((s) => ({ deviceId: s.deviceId, actionId, input: s.input })));
-  }
-  await api.executePlan(plan.id);
-  return plan.id;
+  const create = async () => {
+    const plan = await api.createPlan({
+      pluginId,
+      intentActionId: actionId,
+      inputs: first.input,
+      devices: [{ deviceId: first.deviceId }],
+    });
+    if (steps.length > 1) {
+      await api.addPlanStepsBulk(plan.id, steps.slice(1).map((s) => ({ deviceId: s.deviceId, actionId, input: s.input })));
+    }
+    return plan;
+  };
+  return runAction(create, (id) => api.executePlan(id), mode);
 }
 
 /** Groups selected rows by (pluginId, deviceId), collecting a per-row value. */
@@ -224,6 +229,8 @@ interface NicAttachTarget {
 }
 
 function NicAttachDialog({ target, onClose }: { target: NicAttachTarget; onClose: () => void }) {
+  const { mode } = useExecutionMode();
+  const isPlanMode = mode === 'plan';
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [bridges, setBridges] = useState<string[]>([]);
@@ -233,6 +240,8 @@ function NicAttachDialog({ target, onClose }: { target: NicAttachTarget; onClose
   const [mac, setMac] = useState('');
   const [saving, setSaving] = useState(false);
   const [reauth, setReauth] = useState(false);
+  // Plan mode: the NIC-attach plan was saved without executing.
+  const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -264,7 +273,11 @@ function NicAttachDialog({ target, onClose }: { target: NicAttachTarget; onClose
     const input: Record<string, unknown> = { name: target.row.name, nicAttach: selected, type: nicType };
     if (mac.trim()) input['mac'] = mac.trim().toUpperCase();
     const attempt = async () => {
-      await createAndExecutePlan(target.row.pluginId, 'vms.nic-attach', [{ deviceId: target.row.deviceId, input }]);
+      await createAndExecutePlan(target.row.pluginId, 'vms.nic-attach', [{ deviceId: target.row.deviceId, input }], mode);
+      if (isPlanMode) {
+        setSaved(true);
+        return;
+      }
       onClose();
     };
     try {
@@ -274,6 +287,36 @@ function NicAttachDialog({ target, onClose }: { target: NicAttachTarget; onClose
       else setError(err instanceof Error ? err.message : String(err));
       setSaving(false);
     }
+  }
+
+  // Plan mode: the plan was saved without executing — offer to close.
+  if (saved) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
+        <div
+          className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <header className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h2 className="text-base font-semibold text-foreground">Attach NIC — {target.row.name}</h2>
+            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
+              <X size={16} />
+            </button>
+          </header>
+          <div className="space-y-3 px-4 py-4">
+            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+              NIC attach saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
+            </div>
+          </div>
+          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">
+              Close
+            </button>
+          </footer>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -344,7 +387,7 @@ function NicAttachDialog({ target, onClose }: { target: NicAttachTarget; onClose
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {saving && <Loader2 size={12} className="animate-spin" />}
-            Attach NIC
+            {isPlanMode ? 'Save as plan' : 'Attach NIC'}
           </button>
         </footer>
 
@@ -368,6 +411,10 @@ function NicAttachDialog({ target, onClose }: { target: NicAttachTarget; onClose
 // ---------------------------------------------------------------------------
 
 export default function Vms() {
+  // Global Execute/Plan mode — decides whether page actions run immediately or
+  // are saved as (unexecuted) plans for later execution/scheduling.
+  const { mode } = useExecutionMode();
+
   // The API polls plugins every ~30s and upserts these rows — refresh at the
   // same cadence so the view tracks live inventory.
   const vmsQuery = useQuery({
@@ -517,7 +564,11 @@ export default function Vms() {
   // --- Single-VM row action ----------------------------------------------------
   async function singleVm(row: VmRow, actionId: string, label: string) {
     const attempt = async () => {
-      const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input: { names: [row.name] } }]);
+      const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input: { names: [row.name] } }], mode);
+      if (mode === 'plan') {
+        setNotice({ kind: 'ok', text: `${label} ${row.name}: saved as a plan — not executed. Open the Plans center to run it later.` });
+        return;
+      }
       trackPlan(planId, [row.deviceId]);
     };
     try {
@@ -537,9 +588,17 @@ export default function Vms() {
         return;
       }
       const attempt = async () => {
+        let savedCount = 0;
         for (const g of Array.from(groupByDevice(vms.map((n) => n.row!), (r) => ({ pluginId: r.pluginId, deviceId: r.deviceId }), (r) => r.name).values())) {
-          const planId = await createAndExecutePlan(g.pluginId, actionId, [{ deviceId: g.deviceId, input: { names: g.values } }]);
+          const planId = await createAndExecutePlan(g.pluginId, actionId, [{ deviceId: g.deviceId, input: { names: g.values } }], mode);
+          if (mode === 'plan') {
+            savedCount += 1;
+            continue;
+          }
           trackPlan(planId, [g.deviceId]);
+        }
+        if (mode === 'plan' && savedCount > 0) {
+          setNotice({ kind: 'ok', text: `${label}: ${savedCount} plan${savedCount === 1 ? '' : 's'} saved without executing — open the Plans center to run them later.` });
         }
       };
       try {
@@ -560,7 +619,11 @@ export default function Vms() {
     if (!row || !mac) return;
     if (!window.confirm(`Detach NIC ${mac} from "${row.name}"?`)) return;
     const attempt = async () => {
-      const planId = await createAndExecutePlan(row.pluginId, 'vms.nic-detach', [{ deviceId: row.deviceId, input: { name: row.name, mac } }]);
+      const planId = await createAndExecutePlan(row.pluginId, 'vms.nic-detach', [{ deviceId: row.deviceId, input: { name: row.name, mac } }], mode);
+      if (mode === 'plan') {
+        setNotice({ kind: 'ok', text: `Detach NIC ${mac} from ${row.name}: saved as a plan — not executed. Open the Plans center to run it later.` });
+        return;
+      }
       trackPlan(planId, [row.deviceId]);
     };
     (async () => {

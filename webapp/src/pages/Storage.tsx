@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ArrowDownToLine, ArrowUpFromLine, Camera, ChevronDown, ChevronRight, ChevronUp, Database, FolderOpen, Gauge, HardDrive, Loader2, Search, Trash2, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpFromLine, Camera, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Database, FolderOpen, Gauge, HardDrive, Loader2, Search, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Layout } from '../components/Layout';
 import { FileBrowserDialog } from '../components/FileBrowserDialog';
@@ -9,6 +9,7 @@ import { DeviceChip } from '../components/DeviceChip';
 import { StatusBadge } from '../components/StatusBadge';
 import { formatBytes } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
+import { runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, StorageDiskRow, StorageFilesystemRow } from '../api/client';
 
 // ---------------------------------------------------------------------------
@@ -106,26 +107,30 @@ function orDash(v?: string | null): string {
 // Plan helpers (same contract as the Containers / VMs pages)
 // ---------------------------------------------------------------------------
 
-/** Creates a plan for ONE plugin and executes it in the background. The first
- * step is the plan's intent; further steps are appended in one bulk round-trip.
+/** Creates a plan for ONE plugin. In Execute mode it is also executed in the
+ * background; in Plan mode it is saved WITHOUT executing and only its id is
+ * returned — callers surface a "saved" notice instead of tracking execution.
  * Throws on failure — callers catch ApiError 401 to offer two-factor revalidation. */
 async function createAndExecutePlan(
   pluginId: string,
   actionId: string,
   steps: Array<{ deviceId: string; input: Record<string, unknown> }>,
+  mode: ExecutionMode,
 ): Promise<string> {
   const first = steps[0];
-  const plan = await api.createPlan({
-    pluginId,
-    intentActionId: actionId,
-    inputs: first.input,
-    devices: [{ deviceId: first.deviceId }],
-  });
-  if (steps.length > 1) {
-    await api.addPlanStepsBulk(plan.id, steps.slice(1).map((s) => ({ deviceId: s.deviceId, actionId, input: s.input })));
-  }
-  await api.executePlan(plan.id);
-  return plan.id;
+  const create = async () => {
+    const plan = await api.createPlan({
+      pluginId,
+      intentActionId: actionId,
+      inputs: first.input,
+      devices: [{ deviceId: first.deviceId }],
+    });
+    if (steps.length > 1) {
+      await api.addPlanStepsBulk(plan.id, steps.slice(1).map((s) => ({ deviceId: s.deviceId, actionId, input: s.input })));
+    }
+    return plan;
+  };
+  return runAction(create, (id) => api.executePlan(id), mode);
 }
 
 /** Groups selected rows by (pluginId, deviceId), collecting a per-row value. */
@@ -145,18 +150,26 @@ function groupByDevice<T>(rows: T[], keyOf: (r: T) => { pluginId: string; device
 // ---------------------------------------------------------------------------
 
 function SnapshotDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: () => void }) {
+  const { mode } = useExecutionMode();
+  const isPlanMode = mode === 'plan';
   const [retentionDays, setRetentionDays] = useState(7);
   const [recursive, setRecursive] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reauth, setReauth] = useState(false);
+  // Plan mode: the snapshot plan was saved without executing.
+  const [saved, setSaved] = useState(false);
 
   async function submit() {
     setSaving(true);
     setError(null);
     const input: Record<string, unknown> = { name: row.name, retentionDays, recursive };
     const attempt = async () => {
-      await createAndExecutePlan(row.pluginId, 'storage.snapshot', [{ deviceId: row.deviceId, input }]);
+      await createAndExecutePlan(row.pluginId, 'storage.snapshot', [{ deviceId: row.deviceId, input }], mode);
+      if (isPlanMode) {
+        setSaved(true);
+        return;
+      }
       onClose();
     };
     try {
@@ -166,6 +179,36 @@ function SnapshotDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: 
       else setError(err instanceof Error ? err.message : String(err));
       setSaving(false);
     }
+  }
+
+  // Plan mode: the plan was saved without executing — offer to close.
+  if (saved) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
+        <div
+          className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <header className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h2 className="text-base font-semibold text-foreground">Snapshot — {row.name}</h2>
+            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
+              <X size={16} />
+            </button>
+          </header>
+          <div className="space-y-3 px-4 py-4">
+            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+              Snapshot saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
+            </div>
+          </div>
+          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">
+              Close
+            </button>
+          </footer>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -212,7 +255,7 @@ function SnapshotDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: 
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {saving && <Loader2 size={12} className="animate-spin" />}
-            Create snapshot
+            {isPlanMode ? 'Save as plan' : 'Create snapshot'}
           </button>
         </footer>
 
@@ -236,19 +279,27 @@ function SnapshotDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: 
 // ---------------------------------------------------------------------------
 
 function QuotaDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: () => void }) {
+  const { mode } = useExecutionMode();
+  const isPlanMode = mode === 'plan';
   const extra = row.extra ?? {};
   const currentQuota = typeof extra['quota'] === 'number' ? formatBytes(extra['quota'] as number) : (typeof extra['quotaParsed'] === 'string' ? (extra['quotaParsed'] as string) : null);
   const [value, setValue] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reauth, setReauth] = useState(false);
+  // Plan mode: the quota plan was saved without executing.
+  const [saved, setSaved] = useState(false);
 
   async function submit() {
     setSaving(true);
     setError(null);
     const input: Record<string, unknown> = { name: row.name, quota: value.trim() }; // empty string clears the quota
     const attempt = async () => {
-      await createAndExecutePlan(row.pluginId, 'storage.quota-set', [{ deviceId: row.deviceId, input }]);
+      await createAndExecutePlan(row.pluginId, 'storage.quota-set', [{ deviceId: row.deviceId, input }], mode);
+      if (isPlanMode) {
+        setSaved(true);
+        return;
+      }
       onClose();
     };
     try {
@@ -258,6 +309,36 @@ function QuotaDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: () 
       else setError(err instanceof Error ? err.message : String(err));
       setSaving(false);
     }
+  }
+
+  // Plan mode: the plan was saved without executing — offer to close.
+  if (saved) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
+        <div
+          className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <header className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h2 className="text-base font-semibold text-foreground">Set quota — {row.name}</h2>
+            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
+              <X size={16} />
+            </button>
+          </header>
+          <div className="space-y-3 px-4 py-4">
+            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+              Quota change saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
+            </div>
+          </div>
+          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">
+              Close
+            </button>
+          </footer>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -300,7 +381,7 @@ function QuotaDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: () 
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {saving && <Loader2 size={12} className="animate-spin" />}
-            Apply quota
+            {isPlanMode ? 'Save as plan' : 'Apply quota'}
           </button>
         </footer>
 
@@ -324,6 +405,10 @@ function QuotaDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: () 
 // ---------------------------------------------------------------------------
 
 export default function Storage() {
+  // Global Execute/Plan mode — decides whether page actions run immediately or
+  // are saved as (unexecuted) plans for later execution/scheduling.
+  const { mode } = useExecutionMode();
+
   // The API polls plugins every ~30s and upserts the storage inventory — refresh
   // at the same cadence so pools/datasets/disks track live state.
   const storageQuery = useQuery({
@@ -480,7 +565,11 @@ export default function Storage() {
   // --- Single-filesystem row action -------------------------------------------
   async function singleFs(row: StorageFilesystemRow, actionId: string, input: Record<string, unknown>, label: string) {
     const attempt = async () => {
-      const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input }]);
+      const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input }], mode);
+      if (mode === 'plan') {
+        setNotice({ kind: 'ok', text: `${label}: saved as a plan — not executed. Open the Plans center to run it later.` });
+        return;
+      }
       trackPlan(planId, [row.deviceId]);
     };
     try {
@@ -504,12 +593,20 @@ export default function Storage() {
         return;
       }
       const attempt = async () => {
+        let savedCount = 0;
         for (const g of Array.from(groupByDevice(sel, (r) => ({ pluginId: r.pluginId, deviceId: r.deviceId }), (r) => r.name).values())) {
           // Deleting a pool is recursive — it owns child datasets.
           const input: Record<string, unknown> = { names: g.values };
           if (actionId === 'storage.delete') input.recursive = true;
-          const planId = await createAndExecutePlan(g.pluginId, actionId, [{ deviceId: g.deviceId, input }]);
+          const planId = await createAndExecutePlan(g.pluginId, actionId, [{ deviceId: g.deviceId, input }], mode);
+          if (mode === 'plan') {
+            savedCount += 1;
+            continue;
+          }
           trackPlan(planId, [g.deviceId]);
+        }
+        if (mode === 'plan' && savedCount > 0) {
+          setNotice({ kind: 'ok', text: `${label}: ${savedCount} plan${savedCount === 1 ? '' : 's'} saved without executing — open the Plans center to run them later.` });
         }
       };
       try {

@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ChevronDown, ChevronUp, FolderTree, HardDrive, Loader2, Pencil, Plus, Trash2, Users, X } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronUp, FolderTree, HardDrive, Loader2, Pencil, Plus, Trash2, Users, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
@@ -8,6 +8,7 @@ import { DeviceChip } from '../components/DeviceChip';
 import { StatusBadge } from '../components/StatusBadge';
 import { formatDuration } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
+import { runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, ShareRow, ShareSessionRow } from '../api/client';
 
 // ---------------------------------------------------------------------------
@@ -46,26 +47,30 @@ function orDash(v?: string | null): string {
 // Plan helpers (same contract as the Storage page)
 // ---------------------------------------------------------------------------
 
-/** Creates a plan for ONE plugin and executes it in the background. The first
- * step is the plan's intent; further steps are appended in one bulk round-trip.
+/** Creates a plan for ONE plugin. In Execute mode it is also executed in the
+ * background; in Plan mode it is saved WITHOUT executing and only its id is
+ * returned — callers surface a "saved" notice instead of tracking execution.
  * Throws on failure — callers catch ApiError 401 to offer two-factor revalidation. */
 async function createAndExecutePlan(
   pluginId: string,
   actionId: string,
   steps: Array<{ deviceId: string; input: Record<string, unknown> }>,
+  mode: ExecutionMode,
 ): Promise<string> {
   const first = steps[0];
-  const plan = await api.createPlan({
-    pluginId,
-    intentActionId: actionId,
-    inputs: first.input,
-    devices: [{ deviceId: first.deviceId }],
-  });
-  if (steps.length > 1) {
-    await api.addPlanStepsBulk(plan.id, steps.slice(1).map((s) => ({ deviceId: s.deviceId, actionId, input: s.input })));
-  }
-  await api.executePlan(plan.id);
-  return plan.id;
+  const create = async () => {
+    const plan = await api.createPlan({
+      pluginId,
+      intentActionId: actionId,
+      inputs: first.input,
+      devices: [{ deviceId: first.deviceId }],
+    });
+    if (steps.length > 1) {
+      await api.addPlanStepsBulk(plan.id, steps.slice(1).map((s) => ({ deviceId: s.deviceId, actionId, input: s.input })));
+    }
+    return plan;
+  };
+  return runAction(create, (id) => api.executePlan(id), mode);
 }
 
 /** Groups selected rows by (pluginId, deviceId), collecting a per-row value. */
@@ -148,10 +153,15 @@ function initialForm(type: string, row?: ShareRow): ShareForm {
 }
 
 function ShareDialog({ mode, type, row, onClose }: { mode: 'create' | 'edit'; type?: string; row?: ShareRow; onClose: () => void }) {
+  // Global Execute/Plan mode (aliased — `mode` above is the dialog's create/edit mode).
+  const { mode: execMode } = useExecutionMode();
+  const isPlanMode = execMode === 'plan';
   const [form, setForm] = useState<ShareForm>(() => initialForm(type ?? 'smb', row));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reauth, setReauth] = useState(false);
+  // Plan mode: the share plan was saved without executing.
+  const [saved, setSaved] = useState(false);
 
   // In create mode the protocol is chosen in-dialog; in edit mode it is fixed.
   const setType = (t: string) => setForm((f) => ({ ...f, type: t }));
@@ -171,7 +181,11 @@ function ShareDialog({ mode, type, row, onClose }: { mode: 'create' | 'edit'; ty
 
     const input = buildShareInput(form.type, mode, form);
     const attempt = async () => {
-      await createAndExecutePlan(pluginId, actionId, [{ deviceId, input }]);
+      await createAndExecutePlan(pluginId, actionId, [{ deviceId, input }], execMode);
+      if (isPlanMode) {
+        setSaved(true);
+        return;
+      }
       onClose();
     };
     try {
@@ -184,6 +198,36 @@ function ShareDialog({ mode, type, row, onClose }: { mode: 'create' | 'edit'; ty
   }
 
   const title = mode === 'edit' ? `Edit ${TYPE_LABELS[form.type] ?? form.type} share` : 'New share';
+
+  // Plan mode: the plan was saved without executing — offer to close.
+  if (saved) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
+        <div
+          className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <header className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h2 className="text-base font-semibold text-foreground">{title}</h2>
+            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
+              <X size={16} />
+            </button>
+          </header>
+          <div className="space-y-3 px-4 py-4">
+            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+              Share change saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
+            </div>
+          </div>
+          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">
+              Close
+            </button>
+          </footer>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
@@ -299,7 +343,7 @@ function ShareDialog({ mode, type, row, onClose }: { mode: 'create' | 'edit'; ty
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {saving && <Loader2 size={12} className="animate-spin" />}
-            {mode === 'edit' ? 'Save changes' : 'Create share'}
+            {isPlanMode ? 'Save as plan' : mode === 'edit' ? 'Save changes' : 'Create share'}
           </button>
         </footer>
 
@@ -323,6 +367,10 @@ function ShareDialog({ mode, type, row, onClose }: { mode: 'create' | 'edit'; ty
 // ---------------------------------------------------------------------------
 
 export default function Shares() {
+  // Global Execute/Plan mode — decides whether page actions run immediately or
+  // are saved as (unexecuted) plans for later execution/scheduling.
+  const { mode } = useExecutionMode();
+
   // The API polls plugins every ~30s and upserts the share inventory + replaces
   // live sessions — refresh at the same cadence so both track live state.
   const sharesQuery = useQuery({
@@ -400,7 +448,11 @@ export default function Shares() {
     // NFS deletes by path, the others by name.
     const input: Record<string, unknown> = row.type === 'nfs' ? { paths: [key] } : { names: [key] };
     const attempt = async () => {
-      const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input }]);
+      const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input }], mode);
+      if (mode === 'plan') {
+        setNotice({ kind: 'ok', text: `Delete ${key}: saved as a plan — not executed. Open the Plans center to run it later.` });
+        return;
+      }
       trackPlan(planId, [row.deviceId]);
     };
     try {
@@ -417,6 +469,7 @@ export default function Shares() {
       const sel = rows.filter((r) => hasAction(r.pluginId, ACTION_IDS[r.type]?.delete ?? ''));
       if (sel.length === 0) { setNotice({ kind: 'info', text: 'No selected shares are deletable on their plugin.' }); return; }
       const attempt = async () => {
+        let savedCount = 0;
         for (const g of Array.from(groupByDevice(sel, (r) => ({ pluginId: r.pluginId, deviceId: r.deviceId }), (r) => shareKey(r)).values())) {
           // All rows in one group share a device+plugin but may span protocols —
           // delete each protocol's keys with its own action id.
@@ -430,9 +483,16 @@ export default function Shares() {
             const actionId = ACTION_IDS[type]?.delete;
             if (!actionId) continue;
             const input: Record<string, unknown> = type === 'nfs' ? { paths: keys } : { names: keys };
-            const planId = await createAndExecutePlan(g.pluginId, actionId, [{ deviceId: g.deviceId, input }]);
+            const planId = await createAndExecutePlan(g.pluginId, actionId, [{ deviceId: g.deviceId, input }], mode);
+            if (mode === 'plan') {
+              savedCount += 1;
+              continue;
+            }
             trackPlan(planId, [g.deviceId]);
           }
+        }
+        if (mode === 'plan' && savedCount > 0) {
+          setNotice({ kind: 'ok', text: `Delete selected shares: ${savedCount} plan${savedCount === 1 ? '' : 's'} saved without executing — open the Plans center to run them later.` });
         }
       };
       try {

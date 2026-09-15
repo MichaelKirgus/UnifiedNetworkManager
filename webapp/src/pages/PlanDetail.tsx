@@ -6,6 +6,7 @@ import {
   ArrowDown,
   ArrowUp,
   ChevronRight,
+  ClipboardList,
   Play,
   Plus,
   RefreshCw,
@@ -150,6 +151,17 @@ export default function PlanDetail() {
       )}
       {retryError && (
         <div className="mb-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{retryError}</div>
+      )}
+
+      {/* Saved via the top-bar Plan mode (or created without executing) — never
+          run yet. The Execute button in the header runs it; scheduling is a
+          follow-up feature. */}
+      {editable && !plan.startedAt && (
+        <div className="mb-4 flex items-start gap-2 rounded-md border border-info-border bg-info px-3 py-2 text-sm text-info-fg">
+          <ClipboardList className="mt-0.5 h-4 w-4 shrink-0" />
+          This plan is saved but has NOT been executed yet. Use “Execute” to run it now — or leave it for later (scheduling
+          will be available here).
+        </div>
       )}
 
       {/* Who + when — attribution and execution timing for the current run. */}

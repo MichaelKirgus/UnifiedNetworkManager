@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertTriangle, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, X } from 'lucide-react';
 import clsx from 'clsx';
 import { SchemaForm, validateSchema, defaultValues } from './SchemaForm';
 import { api, ApiError, CatalogEntry, InputSchema, StateItem } from '../api/client';
+import { runAction, savedPlanIdOf, useExecutionMode } from '../executionMode';
 
 /**
  * BulkActionDialog — applies ONE catalog action to MANY ports of the same
@@ -44,6 +45,9 @@ function splitFields(
 
 export function BulkActionDialog({ deviceId, pluginId, entry, items, onClose }: BulkActionDialogProps) {
   const navigate = useNavigate();
+  const { mode } = useExecutionMode();
+  // Set when the plan was created in Plan mode (not executed).
+  const [savedPlanId, setSavedPlanId] = useState<string | null>(null);
   const schema: InputSchema = entry.inputSchema ?? {};
 
   // Per-item prefills for THIS action (the state document carries one ref per item).
@@ -76,6 +80,15 @@ export function BulkActionDialog({ deviceId, pluginId, entry, items, onClose }: 
 
   const dangerous = entry.riskLevel === 'dangerous';
   const count = items.length;
+  const isPlanMode = mode === 'plan';
+  // In Plan mode nothing runs — the danger icon/wording only apply to Execute.
+  const submitLabel = pending
+    ? isPlanMode
+      ? 'Saving…'
+      : `Executing on ${count} port${count === 1 ? '' : 's'}…`
+    : isPlanMode
+      ? `Save as plan (${count} step${count === 1 ? '' : 's'})`
+      : `Execute on ${count} port${count === 1 ? '' : 's'}`;
 
   async function handleSubmit() {
     // Validate the merged input against the full schema (per-item fields are
@@ -94,30 +107,85 @@ export function BulkActionDialog({ deviceId, pluginId, entry, items, onClose }: 
       // Step 1: create the plan with the first item's full input (the plugin's
       // /plan endpoint validates it and may prepend a best-effort backup step).
       const firstInput = { ...prefills[0], ...values };
-      const plan = await api.createPlan({
-        pluginId,
-        intentActionId: entry.id,
-        inputs: firstInput,
-        devices: [{ deviceId }],
-      });
-      // Steps 2..n: append one step per remaining item (server-side validated).
-      for (let i = 1; i < count; i++) {
-        await api.addPlanStep(plan.id, {
-          deviceId,
-          actionId: entry.id,
-          input: { ...prefills[i], ...values },
+      const create = async () => {
+        const plan = await api.createPlan({
+          pluginId,
+          intentActionId: entry.id,
+          inputs: firstInput,
+          devices: [{ deviceId }],
         });
+        // Steps 2..n: append one step per remaining item (server-side validated).
+        for (let i = 1; i < count; i++) {
+          await api.addPlanStep(plan.id, {
+            deviceId,
+            actionId: entry.id,
+            input: { ...prefills[i], ...values },
+          });
+        }
+        return plan;
+      };
+      if (mode === 'plan') {
+        const plan = await create();
+        setSavedPlanId(plan.id);
+        return;
       }
-      await api.executePlan(plan.id);
-      navigate(`/plans/${plan.id}`);
+      const planId = await runAction(create, (id) => api.executePlan(id), mode);
+      navigate(`/plans/${planId}`);
     } catch (err) {
+      const savedId = savedPlanIdOf(err);
       if (err instanceof ApiError && err.status === 401) {
         setSubmitError('Two-factor authentication required — sign in again and retry.');
       } else {
-        setSubmitError(err instanceof Error ? err.message : String(err));
+        let msg = err instanceof Error ? err.message : String(err);
+        if (savedId) msg += ` The plan was saved (${savedId}) and can be executed from the Plans center.`;
+        setSubmitError(msg);
       }
       setPending(false);
     }
+  }
+
+  // Plan mode: the plan was created but not executed — offer to open it in
+  // the Plans center (where it can be run later or scheduled).
+  if (savedPlanId) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
+        <div
+          className="mt-10 w-full max-w-lg rounded-md border border-border bg-card shadow-xl"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <header className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h2 className="text-base font-semibold text-foreground">{entry.label}</h2>
+            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
+              <X className="h-4 w-4" />
+            </button>
+          </header>
+          <div className="space-y-3 p-4">
+            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+              <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              Plan saved with {count} step{count === 1 ? '' : 's'} — it was NOT executed. Open the Plans center to run it
+              later (or schedule it).
+            </div>
+            <p className="text-xs text-faint">Plan ID: {savedPlanId}</p>
+          </div>
+          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background"
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate(`/plans/${savedPlanId}`)}
+              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
+            >
+              Open in Plans
+            </button>
+          </footer>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -127,7 +195,8 @@ export function BulkActionDialog({ deviceId, pluginId, entry, items, onClose }: 
           <div>
             <h2 className="text-base font-semibold text-foreground">{entry.label}</h2>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              Applied to {count} port{count === 1 ? '' : 's'} — one plan step per port, executed in order.
+              Applied to {count} port{count === 1 ? '' : 's'} — one plan step per port,
+              {isPlanMode ? ' saved in order (not executed).' : ' executed in order.'}
             </p>
           </div>
           <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
@@ -170,17 +239,15 @@ export function BulkActionDialog({ deviceId, pluginId, entry, items, onClose }: 
                   disabled={pending}
                   className={clsx(
                     'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40',
-                    dangerous ? 'bg-red-600 hover:bg-red-700' : 'bg-primary hover:bg-primary-hover'
+                    dangerous && !isPlanMode ? 'bg-red-600 hover:bg-red-700' : 'bg-primary hover:bg-primary-hover'
                   )}
                 >
-                  {pending ? (
-                    <>Executing…</>
-                  ) : dangerous ? (
+                  {dangerous && !isPlanMode && !pending ? (
                     <>
-                      <AlertTriangle className="h-3.5 w-3.5" /> Execute on {count} ports
+                      <AlertTriangle className="h-3.5 w-3.5" /> {submitLabel}
                     </>
                   ) : (
-                    `Execute on ${count} port${count === 1 ? '' : 's'}`
+                    submitLabel
                   )}
                 </button>
               </div>
@@ -192,7 +259,10 @@ export function BulkActionDialog({ deviceId, pluginId, entry, items, onClose }: 
                 <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{submitError}</div>
               )}
               <p className="text-sm text-secondary">
-                This action takes no shared input — it will run on all {count} selected ports as plan steps.
+                This action takes no shared input —
+                {isPlanMode
+                  ? ` it will be saved as ${count} plan step${count === 1 ? '' : 's'} without executing.`
+                  : ` it will run on all ${count} selected ports as plan steps.`}
               </p>
               <div className="flex items-center justify-end gap-2 pt-1">
                 <button
@@ -209,17 +279,15 @@ export function BulkActionDialog({ deviceId, pluginId, entry, items, onClose }: 
                   disabled={pending}
                   className={clsx(
                     'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40',
-                    dangerous ? 'bg-red-600 hover:bg-red-700' : 'bg-primary hover:bg-primary-hover'
+                    dangerous && !isPlanMode ? 'bg-red-600 hover:bg-red-700' : 'bg-primary hover:bg-primary-hover'
                   )}
                 >
-                  {pending ? (
-                    <>Executing…</>
-                  ) : dangerous ? (
+                  {dangerous && !isPlanMode && !pending ? (
                     <>
-                      <AlertTriangle className="h-3.5 w-3.5" /> Execute on {count} ports
+                      <AlertTriangle className="h-3.5 w-3.5" /> {submitLabel}
                     </>
                   ) : (
-                    `Execute on ${count} port${count === 1 ? '' : 's'}`
+                    submitLabel
                   )}
                 </button>
               </div>
