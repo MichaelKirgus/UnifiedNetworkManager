@@ -26,6 +26,8 @@ export { INVENTORY_INTERVAL_MS, errorDescriptor, modelFirmwareDescriptors, gauge
 export { validateInput, isValidInput, createRegistry } from './actions';
 export type { ValidationIssue, ActionDescriptor, ActionRegistry } from './actions';
 export { PlanningError, STEP_TOKEN_PATTERN, shiftStepTokens, finalizePlan } from './planning';
+export { pollUntil, stateEquals } from './verification';
+export type { PollUntilOptions, PollUntilResult } from './verification';
 export type { FinalizePlanOptions } from './planning';
 export { CounterTracker } from './rates';
 export type { CounterTrackerOptions } from './rates';

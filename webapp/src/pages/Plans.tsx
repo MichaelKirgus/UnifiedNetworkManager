@@ -83,7 +83,7 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
 
   /** Plans that can be executed right now (draft/ready). */
   const executable = (rows: Plan[]) => rows.filter((r) => ['draft', 'ready'].includes(r.status));
-  /** Plans that can be scheduled (saved or finished — never executing). */
+  /** Plans that can be scheduled (saved or finished — never executing; unverified re-runs re-check the outcome). */
   const schedulable = (rows: Plan[]) => rows.filter((r) => r.status !== 'executing');
 
   async function bulkExecute(rows: Plan[]) {

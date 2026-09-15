@@ -1741,7 +1741,8 @@ export interface Plan {
   intentActionId: string;
   /** The raw intent inputs as submitted — the payload of every execution (re-runs and retries carry the same values). */
   intentInputs?: Record<string, unknown>;
-  status: 'draft' | 'ready' | 'scheduled' | 'executing' | 'succeeded' | 'failed' | 'cancelled' | 'skipped';
+  /** 'unverified' = applied without error but at least one write step could not be confirmed against device state. */
+  status: 'draft' | 'ready' | 'scheduled' | 'executing' | 'succeeded' | 'unverified' | 'failed' | 'cancelled' | 'skipped';
   provisionedSecrets: PlanProvisionedSecret[];
   error?: string | null;
   createdBy: string;

@@ -155,6 +155,47 @@ Declare actions with the SDK registry (`createRegistry`), advertise them via
   the SDK's `finalizePlan(...)` to get indices/dependencies/token-shifting/rollback
   right for free. Throw `PlanningError` → HTTP 400.
 
+### Verifying outcomes (`ActionResult.verified`)
+
+The API marks a plan **succeeded** only when every non-best-effort write step
+was *confirmed*, not merely acknowledged. Your action's `execute()` should:
+
+1. capture the BEFORE state (store it in `details.before` — users can then see
+   old → new, e.g. uptime 42d → 0s after a restart);
+2. apply the change;
+3. re-read device state and report it via `verified`:
+
+```ts
+import { pollUntil } from '@unm/plugin-sdk';
+
+async execute(ctx, input) {
+  const before = await readState(ctx, input);          // optional pre-capture
+  await applyChange(ctx, input);                        // the actual write
+  const wait = await pollUntil(                         // bounded re-read loop
+    () => readState(ctx, input),
+    (s) => s === TARGET_STATE,                          // e.g. 'STOPPED' / uptime reset
+    { timeoutMs: 60_000, intervalMs: 3_000 },
+  );
+  return {
+    success: true, applied: true, verified: wait.ok,
+    details: { before, after: wait.value ?? null, ...(wait.ok ? {} : { note: 'state not confirmed within timeout' }) },
+  };
+}
+```
+
+Semantics the executor applies per step (non-best-effort only):
+
+| `verified` in result | step status | plan outcome |
+|---|---|---|
+| `true` | succeeded | contributes to **succeeded** |
+| absent / `false` | succeeded | plan ends **unverified** (applied, not confirmed) + warning notification |
+| — with `success: false` | failed | plan ends **failed** |
+
+Read-only actions (`riskLevel: 'read'`) are exempt — a read is its own
+confirmation. Use the SDK's `pollUntil(probe, isDone, {timeoutMs, intervalMs})`
+helper (probe errors are swallowed; only the bounded timeout decides) and keep
+verification INSIDE `execute()` — it must not exceed the action's `timeoutMs`.
+
 ---
 
 ## 7. Device state — `POST /state` (the Config page)

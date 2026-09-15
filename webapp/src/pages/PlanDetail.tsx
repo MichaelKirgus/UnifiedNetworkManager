@@ -3,11 +3,14 @@ import { useQuery, useMutation } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
 import clsx from 'clsx';
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   CalendarClock,
+  CheckCircle2,
   ChevronRight,
   ClipboardList,
+  HelpCircle,
   Play,
   Plus,
   RefreshCw,
@@ -25,7 +28,7 @@ import { api, ApiError, CatalogEntry, Device, PlanDetail as PlanDetailType, Plan
 import { can } from '../auth/permissions';
 
 /** Statuses from which a plan can be (re-)scheduled — saved, already scheduled, or finished. */
-const SCHEDULABLE_STATUSES = ['draft', 'ready', 'scheduled', 'succeeded', 'failed', 'cancelled', 'skipped'];
+const SCHEDULABLE_STATUSES = ['draft', 'ready', 'scheduled', 'succeeded', 'unverified', 'failed', 'cancelled', 'skipped'];
 
 export default function PlanDetail() {
   const { id = '' } = useParams();
@@ -206,6 +209,16 @@ export default function PlanDetail() {
           This plan was skipped{plan.error ? `: ${plan.error}` : '.'} You can re-schedule it or retry it.
         </div>
       )}
+      {/* Unverified — applied without error, but the device state could not be confirmed. */}
+      {plan.status === 'unverified' && (
+        <div className="mb-4 flex items-start gap-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-sm text-warning-fg">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            This plan was applied without errors, but UNM could not verify the resulting device state (see the per-step “unverified” chips below).{' '}
+            Check the affected devices manually — or retry to re-apply and re-check.
+          </span>
+        </div>
+      )}
 
       {/* Who + when — attribution and execution timing for the current run. */}
       <section className="mb-5 grid grid-cols-2 gap-x-6 gap-y-3 rounded-md border border-border bg-card p-4 text-sm shadow-sm sm:grid-cols-3 lg:grid-cols-6">
@@ -278,7 +291,8 @@ export default function PlanDetail() {
         </ol>
       </section>
 
-      {plan.error && (
+      {/* Generic error bar — skipped/unverified have their own banners that already show the message. */}
+      {plan.error && plan.status !== 'skipped' && plan.status !== 'unverified' && (
         <div className="mt-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{plan.error}</div>
       )}
 
@@ -387,6 +401,20 @@ function StepRow({ step, position, total, editable, deviceName, actionLabel, onM
           </span>
         )}
         <StatusBadge status={step.status} />
+        {/* Verification chip — the plugin re-read device state post-apply and
+            reports it via ActionResult.verified; a succeeded write step without
+            that flag was acknowledged but not confirmed. */}
+        {step.status === 'succeeded' && !step.bestEffort && (
+          (step.result?.['result'] as Record<string, unknown> | undefined)?.['verified'] === true ? (
+            <span className="inline-flex items-center gap-1 rounded bg-success/15 px-1.5 py-0.5 text-[10px] font-medium text-success-fg" title="The plugin re-read the device state and confirmed the change.">
+              <CheckCircle2 className="h-3 w-3" /> verified
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning-fg" title="The device acknowledged the change, but UNM could not confirm the resulting state.">
+              <HelpCircle className="h-3 w-3" /> unverified
+            </span>
+          )
+        )}
         {editable && (
           <div className="flex shrink-0 items-center gap-0.5">
             <button onClick={() => moveMutation.mutate(position - 1)} disabled={position === 0 || moveMutation.isPending} title="Move up" aria-label="Move step up"

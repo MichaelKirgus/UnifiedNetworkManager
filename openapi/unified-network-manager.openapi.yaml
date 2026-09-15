@@ -6496,7 +6496,11 @@ components:
           description: "The raw intent inputs as submitted — the payload of every execution (re-runs and retries carry the same values)"
         status:
           type: string
-          enum: [draft, ready, scheduled, executing, succeeded, failed, cancelled, skipped]
+          enum: [draft, ready, scheduled, executing, succeeded, unverified, failed, cancelled, skipped]
+          description: >-
+            'unverified' = every step applied without error but at least one
+            non-best-effort write step could not be confirmed against device
+            state (the plugin did not report ActionResult.verified=true).
         provisionedSecrets:
           type: array
           items:

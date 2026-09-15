@@ -111,20 +111,33 @@ async function finishPlan(planId: string, status: string, error?: string | null)
     .set({ status, error: error ?? null, updatedAt: now, finishedAt: now, recentlyFinishedAt: now })
     .where(eq(schema.plans.id, planId));
 
-  // Mirror failures into the notification center (one-shot per plan).
-  if (status === 'failed') {
+  // Mirror terminal outcomes into the notification center (one-shot per plan):
+  // 'failed' is critical; 'unverified' (applied but not confirmed) is a warning.
+  if (status === 'failed' || status === 'unverified') {
     try {
       const plan = await db.query.plans.findFirst({ where: eq(schema.plans.id, planId) });
       const plugin = plan ? await db.query.plugins.findFirst({ where: eq(schema.plugins.id, plan.pluginId) }) : null;
-      await emitNotification({
-        severity: 'critical',
-        source: 'system',
-        title: `Plan execution failed${plugin ? ` (${plugin.name})` : ''}`,
-        message: error ?? 'Unknown error',
-        dedupeKey: `plan-failed:${planId}`,
-        pluginId: plan?.pluginId ?? null,
-        context: { planId, intentActionId: plan?.intentActionId ?? null },
-      });
+      await emitNotification(
+        status === 'failed'
+          ? {
+              severity: 'critical',
+              source: 'system',
+              title: `Plan execution failed${plugin ? ` (${plugin.name})` : ''}`,
+              message: error ?? 'Unknown error',
+              dedupeKey: `plan-failed:${planId}`,
+              pluginId: plan?.pluginId ?? null,
+              context: { planId, intentActionId: plan?.intentActionId ?? null },
+            }
+          : {
+              severity: 'warning',
+              source: 'system',
+              title: `Plan applied but not verified${plugin ? ` (${plugin.name})` : ''}`,
+              message: error ?? 'The device acknowledged the change, but UNM could not confirm the resulting state.',
+              dedupeKey: `plan-unverified:${planId}`,
+              pluginId: plan?.pluginId ?? null,
+              context: { planId, intentActionId: plan?.intentActionId ?? null },
+            }
+      );
     } catch {
       // Best-effort by contract.
     }
@@ -158,9 +171,12 @@ async function processPlan(planId: string): Promise<void> {
     return;
   }
 
-  // Catalog for per-action timeout overrides.
+  // Catalog for per-action timeout overrides + riskLevel (read-only actions
+  // are exempt from post-apply verification — a read IS its own confirmation).
   const catalogRaw = parseJson<unknown>(plugin.actionDescriptors ?? null, []);
-  const catalog: Array<{ id?: string; timeoutMs?: number }> = Array.isArray(catalogRaw) ? (catalogRaw as never[]) : [];
+  const catalog: Array<{ id?: string; timeoutMs?: number; riskLevel?: 'read' | 'write' | 'dangerous' }> = Array.isArray(catalogRaw)
+    ? (catalogRaw as never[])
+    : [];
 
   const steps = (await db.query.planSteps.findMany({
     where: (s) => eq(s.planId, planId),
@@ -340,7 +356,39 @@ async function processPlan(planId: string): Promise<void> {
     return;
   }
 
-  await finishPlan(planId, 'succeeded');
+  // --- Outcome aggregation -------------------------------------------------
+  // A step that the plugin ACKNOWLEDGED is not necessarily VERIFIED: plugins
+  // re-read device state post-apply and report it via ActionResult.verified
+  // (persisted on plan_steps.result). The plan's terminal status reflects the
+  // strongest claim we can make:
+  //   succeeded  — every non-best-effort step was verified, or is a read-only
+  //                action (riskLevel 'read'), which needs no verification;
+  //   unverified — everything applied without error, but at least one
+  //                non-best-effort write step could not be confirmed. The user
+  //                can retry to re-apply + re-check; the per-step result JSON
+  //                shows exactly what was and wasn't verified.
+  // NOTE: `results` is the success signal here — it only contains steps whose
+  // dispatch succeeded (the in-memory step.status rows are stale after markStep).
+  const needsVerification = steps.filter((s) => {
+    if (s.bestEffort) return false;
+    const res = results.get(s.stepIndex);
+    if (!res) return false;
+    const entry = catalog.find((c) => c.id === s.actionId);
+    if (entry?.riskLevel === 'read') return false; // reads are self-evident
+    return res.result?.['verified'] !== true;
+  });
+
+  if (needsVerification.length === 0) {
+    await finishPlan(planId, 'succeeded');
+    return;
+  }
+
+  const names = needsVerification.map((s) => s.actionId).join(', ');
+  await finishPlan(
+    planId,
+    'unverified',
+    `All steps applied without error, but ${needsVerification.length} step${needsVerification.length === 1 ? '' : 's'} could not be verified against device state: ${names}`
+  );
 }
 
 /**

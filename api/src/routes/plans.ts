@@ -138,7 +138,9 @@ type CatalogEntry = Omit<SdkCatalogEntry, 'label' | 'module' | 'riskLevel' | 'de
 const EDITABLE_STATUSES = ['draft', 'ready', 'scheduled'];
 
 /** Statuses from which a plan can be (re-)scheduled: never-run, scheduled (change the time), or finished. */
-const SCHEDULABLE_STATUSES = ['draft', 'ready', 'scheduled', 'succeeded', 'failed', 'cancelled', 'skipped'];
+// 'unverified' (applied but not confirmed) is schedulable too — re-running it
+// later re-applies and re-checks the outcome.
+const SCHEDULABLE_STATUSES = ['draft', 'ready', 'scheduled', 'succeeded', 'failed', 'cancelled', 'skipped', 'unverified'];
 
 function parseJson<T>(raw: string | null, fallback: T): T {
   if (!raw) return fallback;

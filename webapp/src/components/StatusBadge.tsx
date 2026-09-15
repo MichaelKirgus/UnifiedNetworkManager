@@ -19,6 +19,8 @@ const STATUS_STYLES: Record<string, string> = {
   scheduled: 'bg-primary/15 text-primary border-primary/40',
   executing: 'bg-info text-info-fg border-info-border',
   cancelled: 'bg-muted text-secondary border-border',
+  // Applied without error, but the plugin could not confirm the resulting state.
+  unverified: 'bg-warning text-warning-fg border-warning-border',
   // Tunnel states (Tunnels page): live up/down vs. config-level enabled/disabled.
   up: 'bg-success text-success-fg border-success-border',
   down: 'bg-danger text-danger-fg border-danger-border',
