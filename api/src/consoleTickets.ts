@@ -31,6 +31,9 @@ interface TicketRecord {
   pluginId?: string;
   /** Plugin-owned context to forward verbatim (host shell / container exec, …). */
   context?: Record<string, unknown>;
+  /** The user's chosen session credential (validated at mint time) — its fields
+   *  replace the assignment's bound `ssh` slot when the proxy builds the hello. */
+  sessionSecretId?: string;
   /** ISO expiry — tickets older than this are swept and rejected. */
   expiresAt: number;
   /** True once redeemed or expired-and-swept — a ticket is single-use. */
@@ -53,14 +56,20 @@ function sweep(): void {
   }
 }
 
-/** Mints a fresh single-use ticket for one device (+ optional assignment/context). */
-export function mintConsoleTicket(deviceId: string, pluginId?: string, context?: Record<string, unknown>): string {
+/** Mints a fresh single-use ticket for one device (+ optional assignment/context/credential). */
+export function mintConsoleTicket(
+  deviceId: string,
+  pluginId?: string,
+  context?: Record<string, unknown>,
+  sessionSecretId?: string
+): string {
   sweep();
   const id = randomBytes(24).toString('base64url');
   tickets.set(id, {
     deviceId,
     ...(pluginId ? { pluginId } : {}),
     ...(context && Object.keys(context).length > 0 ? { context } : {}),
+    ...(sessionSecretId ? { sessionSecretId } : {}),
     expiresAt: Date.now() + ticketTtlMs(),
     consumed: false,
   });

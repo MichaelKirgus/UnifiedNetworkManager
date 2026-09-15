@@ -12,6 +12,13 @@ import { DeviceStateError, fetchDeviceState } from '../deviceState';
 import { DeviceProbeError, fetchDeviceProbe } from '../deviceProbe';
 import { DeviceFilesystemError, performFilesystemOp, type FilesystemOp } from '../deviceFilesystem';
 import {
+  SessionCredentialError,
+  getSessionCredentialOptions,
+  resolveSessionCredential,
+  setSessionCredentialPreference,
+  type SessionPurpose,
+} from '../sessionCredentials';
+import {
   AssignmentError,
   addAssignment,
   listAssignmentViews,
@@ -1131,14 +1138,39 @@ router.post('/devices/:deviceId/filesystem', requireAuth, requirePermission('dev
     return;
   }
 
+  // Resolve WHICH credential this file session uses (the user's personal-secret
+  // area) — same contract as the console route. `secretId` = explicit pick from the
+  // webapp's picker; absent = auto-use or a 409 telling the client to prompt.
+  let sessionSecretId: string | undefined;
   try {
-    const result = await performFilesystemOp(deviceId, pluginId, op, {
-      path: typeof body.path === 'string' ? body.path : undefined,
-      targetPath: typeof body.targetPath === 'string' ? body.targetPath : undefined,
-      contentBase64: typeof body.contentBase64 === 'string' ? body.contentBase64 : undefined,
-      parents: typeof body.parents === 'boolean' ? body.parents : undefined,
-      context: body.context && typeof body.context === 'object' ? (body.context as Record<string, unknown>) : undefined,
-    });
+    const requestedSecretId = typeof body.secretId === 'string' && body.secretId ? body.secretId : undefined;
+    sessionSecretId = await resolveSessionCredential(req.user!.sub, deviceId, 'filesystem', requestedSecretId);
+  } catch (err) {
+    if (err instanceof SessionCredentialError) {
+      res.status(err.status).json({
+        error: err.message,
+        ...(err.code ? { code: err.code } : {}),
+        ...(err.candidates ? { candidates: err.candidates } : {}),
+      });
+      return;
+    }
+    throw err;
+  }
+
+  try {
+    const result = await performFilesystemOp(
+      deviceId,
+      pluginId,
+      op,
+      {
+        path: typeof body.path === 'string' ? body.path : undefined,
+        targetPath: typeof body.targetPath === 'string' ? body.targetPath : undefined,
+        contentBase64: typeof body.contentBase64 === 'string' ? body.contentBase64 : undefined,
+        parents: typeof body.parents === 'boolean' ? body.parents : undefined,
+        context: body.context && typeof body.context === 'object' ? (body.context as Record<string, unknown>) : undefined,
+      },
+      sessionSecretId
+    );
     res.status(200).json({ deviceId, ...result });
   } catch (err) {
     if (err instanceof DeviceFilesystemError) {
@@ -1167,11 +1199,73 @@ router.post('/devices/:deviceId/console', requireAuth, requirePermission('device
     const pluginId = typeof body.pluginId === 'string' ? body.pluginId : undefined;
     await resolveConsoleTarget(deviceId, pluginId);
 
+    // Resolve WHICH credential this session uses (the user's personal-secret area).
+    // `secretId` in the body = an explicit pick from the webapp's picker; absent =
+    // auto-use (stored default / sole candidate) or a 409 telling the client to prompt.
+    const requestedSecretId = typeof body.secretId === 'string' && body.secretId ? body.secretId : undefined;
+    const sessionSecretId = await resolveSessionCredential(req.user!.sub, deviceId, 'console', requestedSecretId);
+
     const context = body.context && typeof body.context === 'object' ? (body.context as Record<string, unknown>) : undefined;
-    const ticket = mintConsoleTicket(deviceId, pluginId, context);
+    const ticket = mintConsoleTicket(deviceId, pluginId, context, sessionSecretId);
     res.status(201).json({ deviceId, ticket });
   } catch (err) {
     if (err instanceof DeviceConsoleError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    if (err instanceof SessionCredentialError) {
+      res.status(err.status).json({
+        error: err.message,
+        ...(err.code ? { code: err.code } : {}),
+        ...(err.candidates ? { candidates: err.candidates } : {}),
+      });
+      return;
+    }
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// GET /devices/:deviceId/session-credentials?purpose=console|filesystem - the
+// caller's eligible session credentials for this device + purpose, ordered by their
+// stored preference, plus which one would be auto-used (defaultSecretId; null = the
+// client must prompt). Drives the webapp's credential picker. Gated like the
+// console/filesystem routes themselves (devices:write) — it only ever lists secrets
+// the caller is allowed to use for live sessions on this device.
+router.get('/devices/:deviceId/session-credentials', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
+  const { deviceId } = req.params;
+  const purpose = typeof req.query.purpose === 'string' ? req.query.purpose : '';
+  if (purpose !== 'console' && purpose !== 'filesystem') {
+    res.status(400).json({ error: '"purpose" must be "console" or "filesystem"' });
+    return;
+  }
+
+  try {
+    const options = await getSessionCredentialOptions(req.user!.sub, deviceId, purpose as SessionPurpose);
+    res.status(200).json({ deviceId, ...options });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// PUT /devices/:deviceId/session-credentials - store the caller's ORDERED preference
+// for a device+purpose ({ purpose, secretIds }). First entry = auto-used default;
+// the rest stay available. Non-eligible ids are dropped silently (stale-proof).
+router.put('/devices/:deviceId/session-credentials', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
+  const { deviceId } = req.params;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const purpose = typeof body.purpose === 'string' ? body.purpose : '';
+  if (purpose !== 'console' && purpose !== 'filesystem') {
+    res.status(400).json({ error: '"purpose" must be "console" or "filesystem"' });
+    return;
+  }
+
+  try {
+    const candidates = await setSessionCredentialPreference(req.user!.sub, deviceId, purpose as SessionPurpose, readStringArray(body.secretIds));
+    res.status(200).json({ deviceId, purpose, secretIds: candidates.map((c) => c.id), candidates });
+  } catch (err) {
+    if (err instanceof SessionCredentialError) {
       res.status(err.status).json({ error: err.message });
       return;
     }

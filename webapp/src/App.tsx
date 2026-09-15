@@ -43,7 +43,7 @@ import { can } from './auth/permissions';
  * guards below AND the default-redirect priority — keep in sync with the
  * sidebar's `requiresPermission` entries (components/Sidebar.tsx).
  */
-const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
+const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> = [
   { path: '/devices', permission: 'devices:read' },
   { path: '/networks', permission: 'networks:read' },
   { path: '/hosts', permission: 'hosts:read' },
@@ -69,7 +69,8 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
   // on auth:policies:write (the page renders read-only without it).
   { path: '/credential-policies' },
   { path: '/sites', permission: 'sites:read' },
-  { path: '/secrets', permission: 'secrets:read' },
+  // Global readers OR personal-area users (own secrets) may open the page.
+  { path: '/secrets', permission: ['secrets:read', 'secrets:self-write'] },
   { path: '/config-jobs', permission: 'config-jobs:read' },
   { path: '/plans', permission: 'plans:read' },
   { path: '/plugins', permission: 'plugins:read' },
@@ -81,17 +82,22 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string }> = [
   { path: '/settings', permission: 'system:read' },
 ];
 
-/** Auth + page-read-permission guard (the sidebar hides what this blocks). */
-function Page({ permission, children }: { permission?: string; children: ReactNode }) {
+/** Auth + page-read-permission guard (the sidebar hides what this blocks).
+ *  `permission` may be an array — ANY of the listed permissions suffices. */
+function Page({ permission, children }: { permission?: string | string[]; children: ReactNode }) {
   const token = localStorage.getItem('accessToken');
   if (!token) return <Navigate to="/login" replace />;
-  if (permission && !can(permission)) return <Navigate to="/" replace />;
+  if (permission && !(Array.isArray(permission) ? permission.some((p) => can(p)) : can(permission))) {
+    return <Navigate to="/" replace />;
+  }
   return <>{children}</>;
 }
 
 /** Landing redirect — first page the user may read, else My Account. */
 function HomeRedirect() {
-  const target = PAGE_PERMISSIONS.find((p) => !p.permission || can(p.permission))?.path ?? '/my-account';
+  const target = PAGE_PERMISSIONS.find((p) =>
+    !p.permission || (Array.isArray(p.permission) ? p.permission.some((x) => can(x)) : can(p.permission as string))
+  )?.path ?? '/my-account';
   return <Navigate to={target} replace />;
 }
 
@@ -100,7 +106,7 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/devices" element={<Page permission="devices:read"><Devices /></Page>} />
-      <Route path="/secrets" element={<Page permission="secrets:read"><Secrets /></Page>} />
+      <Route path="/secrets" element={<Page permission={['secrets:read', 'secrets:self-write']}><Secrets /></Page>} />
       {/* Device detail is part of the Devices page (same read permission). */}
       <Route path="/devices/:deviceId" element={<Page permission="devices:read"><DeviceDetail /></Page>} />
       {/* Per-device Config page — dynamic plugin state + actions via plans. */}

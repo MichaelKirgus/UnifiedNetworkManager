@@ -1,7 +1,8 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Terminal as TerminalIcon, X } from 'lucide-react';
-import { ConsoleStatusPill, useConsoleSession } from '../components/ConsoleDialog';
+import { ConsoleStatusPill, useConsoleSession, type CredentialPrompt } from '../components/ConsoleDialog';
+import { CredentialPicker } from '../components/CredentialPicker';
 
 /**
  * Standalone full-window SSH console — the destination of the dialog's "open in a
@@ -24,7 +25,14 @@ export default function ConsolePage() {
   const title = params.get('title') || 'Console';
   const subtitle = params.get('subtitle') || undefined;
 
-  const { hostRef, status, error, exitCode } = useConsoleSession(deviceId ?? '', pluginId, contextKey);
+  // Session-credential selection (same contract as the dialog): an explicit pick
+  // arrives via `secret`; otherwise a 409 from mint opens the picker.
+  const [chosenSecretId, setChosenSecretId] = useState<string | undefined>(params.get('secret') ?? undefined);
+  const [credentialPrompt, setCredentialPrompt] = useState<CredentialPrompt | null>(null);
+
+  const { hostRef, status, error, exitCode } = useConsoleSession(deviceId ?? '', pluginId, contextKey, chosenSecretId, (prompt) =>
+    setCredentialPrompt(prompt)
+  );
 
   /** Close the tab (works because it was script-opened via window.open); fall back to history. */
   const closeWindow = () => {
@@ -64,6 +72,22 @@ export default function ConsolePage() {
       <div className="min-h-0 flex-1 p-2">
         <div ref={hostRef} className="h-full w-full" />
       </div>
+
+      {/* Credential picker — shown when the mint endpoint needs a choice. */}
+      {credentialPrompt && (
+        <CredentialPicker
+          deviceId={deviceId ?? ''}
+          purpose="console"
+          initialCandidates={credentialPrompt.candidates}
+          initialDefaultId={credentialPrompt.defaultId}
+          title={`Choose an SSH credential — ${title}`}
+          onPick={(secretId) => {
+            setChosenSecretId(secretId);
+            setCredentialPrompt(null);
+          }}
+          onClose={() => setCredentialPrompt(null)}
+        />
+      )}
 
       {/* Footer hint */}
       <footer className="border-t border-border bg-card px-4 py-1.5 text-[11px] text-faint">

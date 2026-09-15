@@ -135,7 +135,9 @@ export function attachConsoleProxy(server: Server): void {
         const peeked = peekConsoleTicket(ticketId);
         if (!peeked || peeked.deviceId !== deviceId) throw new ProxyError(401, 'Invalid or expired console ticket');
 
-        const target = await resolveConsoleTarget(deviceId, peeked.pluginId);
+        // The ticket carries the user's chosen session credential (validated at
+        // mint time) — it replaces the assignment's bound ssh slot in the hello.
+        const target = await resolveConsoleTarget(deviceId, peeked.pluginId, peeked.sessionSecretId);
 
         // Redeem BEFORE connecting — a failed plugin connect must not leave the
         // ticket reusable (single-use by contract).

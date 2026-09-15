@@ -1268,10 +1268,92 @@ paths:
           description: Authentication required (requires devices:write)
         '404':
           description: Device or plugin endpoint not found
+        '409':
+          description: >-
+            No eligible file-access credential (code `no_credential`) or several with no
+            stored default (code `credential_selection_required`, body carries `candidates`).
         '501':
           description: This plugin does not support filesystem browsing
         '502':
           description: Plugin failed to perform the file operation
+
+  /devices/{deviceId}/session-credentials:
+    get:
+      tags: [Devices]
+      summary: List the caller's eligible session credentials for a device + purpose
+      description: >-
+        Returns every secret the CALLER may use for interactive sessions of `purpose`
+        (`console` = SSH console, `filesystem` = SFTP file access) on this device —
+        flagged secrets of an SSH-capable type that are either owned by the caller or
+        created by a global writer. Ordered by the caller's stored preference (first =
+        auto-used default); `defaultSecretId` is what would be used without prompting
+        (null = the client must show its picker). Gated on `devices:write` like the
+        console/filesystem routes themselves.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: purpose
+          required: true
+          schema: { type: string, enum: [console, filesystem] }
+      responses:
+        '200':
+          description: Eligible credentials + auto-use default
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionCredentialOptions'
+        '400':
+          description: Missing or invalid purpose
+        '401':
+          description: Authentication required (requires devices:write)
+        '403':
+          description: Missing required permission / device out of scope
+    put:
+      tags: [Devices]
+      summary: Store the caller's ordered session-credential preference for a device + purpose
+      description: >-
+        Replaces the caller's stored ORDERED list of preferred credentials for one
+        device+purpose. The first entry is auto-used on future sessions (no prompt);
+        the rest stay available for re-picking. Ids that are not currently eligible
+        for this user+purpose are dropped silently, so stale rows never break resolution.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionCredentialPreferenceRequest'
+      responses:
+        '200':
+          description: Preference stored (echoes the cleaned ordered ids + full candidate list)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deviceId, purpose, secretIds]
+                properties:
+                  deviceId: { type: string }
+                  purpose: { type: string, enum: [console, filesystem] }
+                  secretIds:
+                    type: array
+                    items: { type: string }
+                  candidates:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SessionCredentialCandidate'
+        '400':
+          description: Missing or invalid purpose
+        '401':
+          description: Authentication required (requires devices:write)
+        '403':
+          description: Missing required permission / device out of scope
 
   /devices/{deviceId}/console:
     post:
@@ -1290,7 +1372,12 @@ paths:
         for an exec into a container. The webapp's DeviceDetail page ("Shell" button)
         and the Containers page (per-container console) both drive this route; the
         WebSocket proxy then pipes bytes verbatim to the plugin's `/console` endpoint,
-        which opens a PTY session over the bound `ssh` credential slot.
+        which opens a PTY session over the `ssh` credential slot — either the one bound
+        to the assignment or, when `secretId` is supplied, the user's chosen personal
+        credential (validated against their eligible session secrets). Without an explicit
+        `secretId`, the stored per-device default / sole eligible candidate is auto-used;
+        several candidates with no valid default answer 409 `credential_selection_required`
+        so the client can show its picker.
       requestBody:
         required: false
         content:
@@ -1308,8 +1395,14 @@ paths:
           description: Plugin not assigned to this device / no assignment at all
         '401':
           description: Authentication required (requires devices:write)
+        '403':
+          description: The selected credential is not available for this session
         '404':
           description: Device or plugin endpoint not found
+        '409':
+          description: >-
+            No eligible SSH console credential (code `no_credential`) or several with no
+            stored default (code `credential_selection_required`, body carries `candidates`).
         '501':
           description: This plugin does not support an SSH console
 
@@ -1862,7 +1955,11 @@ paths:
     get:
       tags: [Secrets]
       summary: List stored secrets
-      description: Returns a list of stored secrets (metadata only, including type and providerId).
+      description: >-
+        Returns secret metadata (no decrypted values). Global readers (`secrets:read`)
+        see every secret. A user with only the personal permission `secrets:self-write`
+        sees their OWN secrets plus those created by global writers — the shared pool of
+        credentials they may use for interactive SSH / file sessions.
       responses:
         '200':
           description: Secret list
@@ -1883,7 +1980,10 @@ paths:
         Creates a typed secret via the specified (or default) secrets provider.
         The provider encrypts the fields and stores the ciphertext. The secret
         type and provider id are recorded so decryption is always routed back
-        to the correct provider.
+        to the correct provider. Requires `secrets:write` (global) OR
+        `secrets:self-write` (personal area — the secret is owned by the caller).
+        The two usage flags opt the secret in for interactive SSH console / SFTP
+        file sessions (only meaningful for usernamePassword / sshKeyPair types).
       requestBody:
         required: true
         content:
@@ -1900,6 +2000,8 @@ paths:
                   description: "Decrypted field values as declared by the provider's secret type schema"
                 label: { type: string, nullable: true }
                 expiresAt: { type: string, format: date-time, nullable: true }
+                interactiveLoginAllowed: { type: boolean, default: false, description: "Allow use for interactive SSH console sessions" }
+                fileAccessAllowed: { type: boolean, default: false, description: "Allow use for SFTP file-access sessions" }
       responses:
         '201':
           description: Secret created
@@ -2417,9 +2519,10 @@ paths:
         Updates the field values of an existing secret while preserving its id,
         so device assignments and plans referencing it keep working. Works for
         ALL secret types — the owning provider re-encrypts the new field map.
-        `fields` is a full replacement of the type's declared fields; `label`
-        and `expiresAt` are optional metadata updates (`expiresAt: null` clears
-        the expiry). Requires `secrets:write`.
+        `fields` is a full replacement of the type's declared fields; `label`,
+        `expiresAt` and the two usage flags are optional updates (absent =
+        unchanged). Requires `secrets:write` for any secret, or
+        `secrets:self-write` for the caller's own secrets.
       parameters:
         - in: path
           name: id
@@ -2439,6 +2542,8 @@ paths:
                   description: "Full replacement of the secret's field values (as declared by its type schema)"
                 label: { type: string, nullable: true }
                 expiresAt: { type: string, format: date-time, nullable: true }
+                interactiveLoginAllowed: { type: boolean, description: "Allow use for interactive SSH console sessions (absent = unchanged)" }
+                fileAccessAllowed: { type: boolean, description: "Allow use for SFTP file-access sessions (absent = unchanged)" }
       responses:
         '200':
           description: Secret updated (same id)
@@ -4304,6 +4409,14 @@ components:
         createdAt: { type: string, format: date-time }
         expiresAt: { type: string, format: date-time, nullable: true }
         username: { type: string }
+        interactiveLoginAllowed:
+          type: boolean
+          default: false
+          description: "May this secret be used for an interactive SSH console session (opt-in per secret)"
+        fileAccessAllowed:
+          type: boolean
+          default: false
+          description: "May this secret be used for SFTP file-access sessions (opt-in per secret)"
 
     SecretField:
       type: object
@@ -6012,6 +6125,12 @@ components:
         contentBase64: { type: string, description: "File contents for write, base64-encoded (binary-safe)" }
         parents: { type: boolean, description: "For mkdir: create intermediate directories as needed" }
         pluginId: { type: string, description: "Assigned plugin to use (default = primary assignment)" }
+        secretId:
+          type: string
+          description: >-
+            The user's chosen file-access credential (from the session-credential picker).
+            Absent = auto-use (stored default / sole eligible candidate); several candidates
+            with no valid default answer 409 `credential_selection_required`.
         context:
           type: object
           additionalProperties: true
@@ -6057,6 +6176,12 @@ components:
       type: object
       properties:
         pluginId: { type: string, description: "Assigned plugin to console (default = primary assignment)" }
+        secretId:
+          type: string
+          description: >-
+            The user's chosen SSH credential (from the session-credential picker).
+            Absent = auto-use (stored default / sole eligible candidate); several candidates
+            with no valid default answer 409 `credential_selection_required`.
         context:
           type: object
           additionalProperties: true
@@ -6064,6 +6189,41 @@ components:
             Plugin-owned context naming what to attach to — e.g. `{ kind: 'host' }`
             for a login shell or `{ kind: 'container', name?, service? }` for an exec
             into a container (the plugin resolves the docker name + entrypoint).
+
+    # --- Session credentials (interactive SSH console / SFTP file access) ------
+    SessionCredentialCandidate:
+      type: object
+      required: [id, own]
+      properties:
+        id: { type: string }
+        label: { type: string, nullable: true }
+        type: { type: string, description: "usernamePassword | sshKeyPair" }
+        own: { type: boolean, description: "True when this is the caller's own secret (vs. from the shared pool)" }
+
+    SessionCredentialOptions:
+      type: object
+      required: [purpose, candidates, defaultSecretId]
+      properties:
+        purpose: { type: string, enum: [console, filesystem] }
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/SessionCredentialCandidate'
+          description: "Eligible secrets ordered by the stored preference (valid entries first)"
+        defaultSecretId:
+          type: string
+          nullable: true
+          description: "The secret auto-used without prompting; null = the client must show its picker"
+
+    SessionCredentialPreferenceRequest:
+      type: object
+      required: [purpose, secretIds]
+      properties:
+        purpose: { type: string, enum: [console, filesystem] }
+        secretIds:
+          type: array
+          items: { type: string }
+          description: "Ordered preference — first = auto-used default, rest = alternatives"
 
     ConsoleTicketResponse:
       type: object

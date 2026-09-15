@@ -25,6 +25,10 @@ export interface SecretRecord {
   encryptedValue: string;
   userId: string;
   expiresAt: string | null;
+  /** May this secret be used for an interactive SSH console session? */
+  interactiveLoginAllowed?: boolean;
+  /** May this secret be used for SFTP file access sessions? */
+  fileAccessAllowed?: boolean;
   createdAt: string;
 }
 
@@ -36,6 +40,8 @@ export interface SecretMeta {
   providerId: string | null;
   userId: string;
   expiresAt: string | null;
+  interactiveLoginAllowed?: boolean;
+  fileAccessAllowed?: boolean;
   createdAt: string;
 }
 
@@ -49,6 +55,8 @@ export async function storeSecret(input: {
   encryptedValue: string;
   userId: string;
   expiresAt: string | null;
+  interactiveLoginAllowed?: boolean;
+  fileAccessAllowed?: boolean;
 }): Promise<SecretRecord> {
   const res = await http.post<SecretRecord>('/plugin/secrets', input);
   return res.data;
@@ -87,12 +95,15 @@ export async function updateSecret(
   id: string,
   encryptedValue: string,
   label?: string,
-  expiresAt?: string | null
+  expiresAt?: string | null,
+  flags?: { interactiveLoginAllowed?: boolean; fileAccessAllowed?: boolean }
 ): Promise<void> {
   await http.patch(`/plugin/secrets/${encodeURIComponent(id)}`, {
     encryptedValue,
     ...(label !== undefined ? { label } : {}),
     ...(expiresAt !== undefined ? { expiresAt } : {}),
+    ...(flags?.interactiveLoginAllowed !== undefined ? { interactiveLoginAllowed: flags.interactiveLoginAllowed } : {}),
+    ...(flags?.fileAccessAllowed !== undefined ? { fileAccessAllowed: flags.fileAccessAllowed } : {}),
   });
 }
 

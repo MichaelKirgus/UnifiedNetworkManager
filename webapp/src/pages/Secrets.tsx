@@ -3,12 +3,18 @@ import { Pencil, Plus, RefreshCw, Save, Trash2, Wand2, X } from 'lucide-react';
 import { api, Secret, SecretProvider, SecretType } from '../api/client';
 import { DataTable } from '../components/DataTable';
 import { Layout } from '../components/Layout';
-import { can } from '../auth/permissions';
+import { can, getUsername } from '../auth/permissions';
+
+/** Secret types that can authenticate an interactive SSH/SFTP session. */
+const SESSION_CAPABLE_TYPES = new Set(['usernamePassword', 'sshKeyPair']);
 
 export default function Secrets() {
   // The page needs secrets:read (route guard); create/delete need their own perms.
+  // `secrets:self-write` opens the personal-secret area (own secrets only).
   const canWrite = can('secrets:write');
-  const canDelete = can('secrets:delete');
+  const canSelfWrite = can('secrets:self-write');
+  const canManageAny = canWrite || canSelfWrite;
+  const canDelete = can('secrets:delete') || canSelfWrite;
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [providers, setProviders] = useState<SecretProvider[]>([]);
   const [loading, setLoading] = useState(true);
@@ -19,6 +25,9 @@ export default function Secrets() {
   const [fields, setFields] = useState<Record<string, string>>({});
   const [label, setLabel] = useState('');
   const [expiresAt, setExpiresAt] = useState('');
+  // Interactive-session usage flags (opt-in per secret; only SSH-capable types).
+  const [interactiveLoginAllowed, setInteractiveLoginAllowed] = useState(false);
+  const [fileAccessAllowed, setFileAccessAllowed] = useState(false);
   const [generating, setGenerating] = useState(false);
   /** Non-secret material echoed back after a generate (e.g. public key line). */
   const [generatedInfo, setGeneratedInfo] = useState<{ label: string; fields: Record<string, string> } | null>(null);
@@ -40,6 +49,8 @@ export default function Secrets() {
     setFields({});
     setLabel('');
     setExpiresAt('');
+    setInteractiveLoginAllowed(false);
+    setFileAccessAllowed(false);
     setShowForm(true);
   }
 
@@ -57,6 +68,8 @@ export default function Secrets() {
     setLabel(s.label ?? '');
     // datetime-local needs "YYYY-MM-DDTHH:mm" — trim seconds/timezone from ISO.
     setExpiresAt(s.expiresAt ? s.expiresAt.slice(0, 16) : '');
+    setInteractiveLoginAllowed(!!s.interactiveLoginAllowed);
+    setFileAccessAllowed(!!s.fileAccessAllowed);
     setFields({});
     setShowForm(true);
     try {
@@ -90,6 +103,8 @@ export default function Secrets() {
     setFields({});
     setLabel('');
     setExpiresAt('');
+    setInteractiveLoginAllowed(false);
+    setFileAccessAllowed(false);
   }
 
   /** Submits the inline form — creates a new secret or updates it in place
@@ -103,6 +118,9 @@ export default function Secrets() {
           fields,
           label: label.trim(),
           expiresAt: expiresAt || null,
+          // Only send the flags for SSH-capable types — other types can't be used
+          // interactively anyway and must not gain stale flag values.
+          ...(SESSION_CAPABLE_TYPES.has(editing.type) ? { interactiveLoginAllowed, fileAccessAllowed } : {}),
         });
         closeForm();
         await loadSecrets();
@@ -120,6 +138,7 @@ export default function Secrets() {
         fields,
         label,
         expiresAt: expiresAt || undefined,
+        ...(SESSION_CAPABLE_TYPES.has(activeType?.type ?? type) ? { interactiveLoginAllowed, fileAccessAllowed } : {}),
       });
       closeForm();
       await loadSecrets();
@@ -325,7 +344,7 @@ export default function Secrets() {
     <Layout
       title="Secrets Store"
       actions={
-        canWrite && (
+        canManageAny && (
           <button
             onClick={() => (showForm ? closeForm() : openCreateForm())}
             className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover"
@@ -337,7 +356,7 @@ export default function Secrets() {
       }
     >
 
-      {canWrite && showForm && (
+      {canManageAny && showForm && (
         <div className="mb-6 rounded-md border border-border bg-card p-4 shadow-sm">
           <h2 className="mb-4 text-sm font-semibold text-foreground">{mode === 'edit' ? 'Edit Secret' : 'Create New Secret'}</h2>
           <form onSubmit={handleSubmit} className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -464,6 +483,38 @@ export default function Secrets() {
                 className="w-full rounded-md border border-border px-3 py-2 text-sm"
               />
             </div>
+
+            {/* Interactive-session usage flags — only meaningful for types that can
+                actually authenticate over SSH (username/password or key pair). */}
+            {SESSION_CAPABLE_TYPES.has(mode === 'edit' ? editing?.type ?? '' : activeType?.type ?? type) && (
+              <div className="col-span-full rounded-md border border-border bg-background p-3">
+                <p className="mb-2 text-xs font-semibold text-secondary">Interactive session usage</p>
+                <label className="flex cursor-pointer items-start gap-2 py-1 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={interactiveLoginAllowed}
+                    onChange={(e) => setInteractiveLoginAllowed(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    Allow interactive SSH console logins with this credential
+                    <span className="block text-xs text-muted-foreground">Users can pick this secret when opening a web shell on a device.</span>
+                  </span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-2 py-1 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={fileAccessAllowed}
+                    onChange={(e) => setFileAccessAllowed(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    Allow SFTP file access with this credential
+                    <span className="block text-xs text-muted-foreground">Users can pick this secret when browsing a device's files.</span>
+                  </span>
+                </label>
+              </div>
+            )}
             <div className="col-span-full flex items-center justify-end gap-2">
               {mode === 'edit' ? (
                 <button
@@ -544,6 +595,30 @@ export default function Secrets() {
             { header: 'Label', key: 'label', render: (s: Secret) => s.label },
             // Width fits the longest provider label ("OpenVPN Certificate Bundle (CA + cert + key)").
             { header: 'Type', key: 'type', width: 260, render: (s: Secret) => <TypeChip type={s.type} /> },
+            // Which interactive session kinds this secret is enabled for.
+            {
+              header: 'Sessions',
+              key: 'sessions',
+              width: 170,
+              sortable: false,
+              render: (s: Secret) =>
+                s.interactiveLoginAllowed || s.fileAccessAllowed ? (
+                  <div className="flex flex-wrap items-center gap-1">
+                    {s.interactiveLoginAllowed && (
+                      <span title="May be used for interactive SSH console logins" className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800">
+                        SSH console
+                      </span>
+                    )}
+                    {s.fileAccessAllowed && (
+                      <span title="May be used for SFTP file-access sessions" className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
+                        File access
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-xs text-faint">—</span>
+                ),
+            },
             { header: 'Created by user', key: 'username', render: (s: Secret) => s.username },
             // Diagnostic detail — available via the Columns picker but not worth
             // default screen space.
@@ -556,10 +631,12 @@ export default function Secrets() {
               excludeFromExport: true,
               width: 130,
               sortable: false,
-              render: (s: Secret) =>
-                canWrite || canDelete ? (
+              render: (s: Secret) => {
+                // Global writers manage everything; personal-area users only their own.
+                const canManageRow = canWrite || (canSelfWrite && s.username === getUsername());
+                return canManageRow ? (
                   <div className="flex items-center gap-1">
-                    {canWrite && (
+                    {canManageRow && (
                       <button
                         aria-label={`Edit secret ${s.label ?? s.id}`}
                         title="Edit secret fields"
@@ -569,7 +646,7 @@ export default function Secrets() {
                         <Pencil className="h-4 w-4" />
                       </button>
                     )}
-                    {canWrite && generatableTypes.has(s.type) && (
+                    {canManageRow && generatableTypes.has(s.type) && (
                       <button
                         aria-label={`Regenerate key material for ${s.label ?? s.id}`}
                         title="Re-generate key material (same ID — bound assignments keep working)"
@@ -579,7 +656,7 @@ export default function Secrets() {
                         <RefreshCw className="h-4 w-4" />
                       </button>
                     )}
-                    {canDelete && (
+                    {canManageRow && (
                       <button
                         aria-label={`Delete secret ${s.label ?? s.id}`}
                         title="Delete secret"
@@ -592,13 +669,14 @@ export default function Secrets() {
                   </div>
                 ) : (
                   <span aria-hidden />
-                )
+                );
+              }
             },
           ]}
           rows={secrets}
           rowKey={(s) => s.id}
           storageKey="secrets"
-          selectable={canWrite || canDelete}
+          selectable={canManageAny}
           bulkActions={
             canWrite || canDelete
               ? [

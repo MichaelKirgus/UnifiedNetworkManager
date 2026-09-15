@@ -14,7 +14,8 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { api, ApiError, type FilesystemEntry } from '../api/client';
+import { api, ApiError, type FilesystemEntry, type SessionCredentialCandidate } from '../api/client';
+import { CredentialPicker } from './CredentialPicker';
 import { formatBytes } from './formatMetric';
 import { ResizableDialog } from './ResizableDialog';
 
@@ -91,12 +92,23 @@ export interface FileBrowserDialogProps extends FileBrowserProps {
 
 /** Core file-manager body — toolbar + listing + editor overlay. Shared by the
  * in-app dialog and the full-window /file-browser page so both stay in lockstep. */
+/** The credential-selection prompt state (409 from the filesystem broker). */
+interface FileCredentialPrompt {
+  candidates: SessionCredentialCandidate[];
+}
+
 export function FileBrowser({ deviceId, pluginId, context, initialPath }: FileBrowserProps) {
   const [dir, setDir] = useState<string>(initialPath ?? '');
   const [entries, setEntries] = useState<FilesystemEntry[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Session-credential selection: when several eligible file-access credentials exist
+  // and no stored default applies, the broker answers 409 → show the picker; picking
+  // a secret re-runs every op with that id (and optionally persists it as the default).
+  const [secretId, setSecretId] = useState<string | undefined>(undefined);
+  const [credPrompt, setCredPrompt] = useState<FileCredentialPrompt | null>(null);
 
   // Editor state (read/write a file).
   const [editing, setEditing] = useState<{ name: string; content: string } | null>(null);
@@ -105,18 +117,23 @@ export function FileBrowser({ deviceId, pluginId, context, initialPath }: FileBr
   // Upload input ref.
   const uploadRef = useRef<HTMLInputElement>(null);
 
-  /** Performs one filesystem op through the broker, mapping errors to a banner. */
+  /** Performs one filesystem op through the broker, mapping errors to a banner.
+   *  A 409 `credential_selection_required` opens the picker instead of just erroring. */
   const runOp = useCallback(
     async (op: Parameters<typeof api.filesystem>[1], params: Record<string, unknown> = {}) => {
       try {
-        return await api.filesystem(deviceId, op, { ...params, context, ...(pluginId ? { pluginId } : {}) });
+        return await api.filesystem(deviceId, op, { ...params, context, ...(pluginId ? { pluginId } : {}), ...(secretId ? { secretId } : {}) });
       } catch (err) {
+        if (err instanceof ApiError && err.code === 'credential_selection_required') {
+          setCredPrompt({ candidates: err.candidates ?? [] });
+          throw err;
+        }
         const msg = err instanceof ApiError ? err.message : err instanceof Error ? err.message : String(err);
         setError(msg);
         throw err;
       }
     },
-    [deviceId, pluginId, context],
+    [deviceId, pluginId, context, secretId],
   );
 
   /** Lists the current directory. */
@@ -356,6 +373,23 @@ export function FileBrowser({ deviceId, pluginId, context, initialPath }: FileBr
               </footer>
             </div>
           </div>
+        )}
+
+      {/* Credential picker — shown when the broker needs a choice of file-access credential. */}
+        {credPrompt && (
+          <CredentialPicker
+            deviceId={deviceId}
+            purpose="filesystem"
+            initialCandidates={credPrompt.candidates}
+            title="Choose a file-access credential"
+            onPick={(sid) => {
+              setSecretId(sid);
+              setError(null);
+              setCredPrompt(null);
+              void refresh(); // re-list with the chosen credential
+            }}
+            onClose={() => setCredPrompt(null)}
+          />
         )}
     </>
   );

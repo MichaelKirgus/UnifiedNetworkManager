@@ -202,8 +202,40 @@ export const secrets = pgTable('secrets', {
   encryptedValue: text('encryptedValue').notNull(),
   userId: text('userId').notNull(),
   expiresAt: text('expiresAt'),
+  // Interactive-session usage flags. A secret is only OFFERED as a credential for
+  // an interactive SSH console / SFTP file session when the matching flag is set
+  // (see sessionCredentials.ts). Both default FALSE — opt-in per secret, so no
+  // existing secret suddenly becomes usable for live logins/file access.
+  interactiveLoginAllowed: boolean('interactiveLoginAllowed').notNull().default(false),
+  fileAccessAllowed: boolean('fileAccessAllowed').notNull().default(false),
   createdAt: text('createdAt').notNull(),
 });
+
+// Per-user, per-device session-credential defaults (SSH console / SFTP). Lets a
+// user rank WHICH of their eligible secrets is used when an interactive session
+// opens on a device — without prompting. `secretIds` is an ORDERED list: the
+// first entry is auto-used; the rest stay available for re-picking. Missing row
+// = no stored preference (the session flow falls back to "single candidate" or
+// prompts). One row per (user, device, purpose) — purpose ∈ 'console' | 'filesystem'.
+export const deviceSessionCredentials = pgTable(
+  'device_session_credentials',
+  {
+    id: text('id').primaryKey(),
+    userId: text('userId').notNull(),
+    deviceId: text('deviceId').notNull(),
+    // Which interactive session kind this preference applies to.
+    purpose: text('purpose').notNull(),
+    // Ordered secret ids (JSON array) — first = default, rest = alternatives.
+    secretIds: text('secretIds').notNull().default('[]'),
+    updatedAt: text('updatedAt').notNull(),
+  },
+  (table) => {
+    return {
+      uqDeviceSessionCreds: uniqueIndex('uq_device_session_credentials').on(table.userId, table.deviceId, table.purpose),
+      idxDeviceSessionCredsUser: index('idx_device_session_creds_user').on(table.userId),
+    };
+  }
+);
 
 export const plugins = pgTable('plugins', {
   id: text('id').primaryKey(),

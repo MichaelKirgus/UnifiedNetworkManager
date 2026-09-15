@@ -172,7 +172,7 @@ const logger = createPluginLogger(identity);
  * provider's id. Returns the new id + createdAt.
  */
 app.post('/secrets', requirePluginKey, async (req, res) => {
-  const { type, fields, label, expiresAt, userId } = req.body ?? {};
+  const { type, fields, label, expiresAt, userId, interactiveLoginAllowed, fileAccessAllowed } = req.body ?? {};
   logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
   if (!type || typeof type !== 'string') {
     res.status(400).json({ error: 'type is required' });
@@ -196,6 +196,9 @@ app.post('/secrets', requirePluginKey, async (req, res) => {
       encryptedValue,
       userId,
       expiresAt: expiresAt ?? null,
+      // Interactive-session usage flags (opt-in per secret; default false).
+      interactiveLoginAllowed: typeof interactiveLoginAllowed === 'boolean' ? interactiveLoginAllowed : false,
+      fileAccessAllowed: typeof fileAccessAllowed === 'boolean' ? fileAccessAllowed : false,
     });
     res.status(201).json({ id: record.id, createdAt: record.createdAt });
   } catch (err) {
@@ -332,7 +335,7 @@ app.post('/generate', requirePluginKey, async (req, res) => {
  * Body: { id, fields, label?, expiresAt? }  → 200 { id }   (404 if unknown)
  */
 app.post('/update', requirePluginKey, async (req, res) => {
-  const { id, fields, label, expiresAt } = req.body ?? {};
+  const { id, fields, label, expiresAt, interactiveLoginAllowed, fileAccessAllowed } = req.body ?? {};
   logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
   if (!id || typeof id !== 'string') {
     res.status(400).json({ error: 'id is required' });
@@ -360,7 +363,15 @@ app.post('/update', requirePluginKey, async (req, res) => {
       id,
       encryptedValue,
       typeof label === 'string' ? label : undefined,
-      'expiresAt' in body ? (typeof expiresAt === 'string' && expiresAt ? expiresAt : null) : undefined
+      'expiresAt' in body ? (typeof expiresAt === 'string' && expiresAt ? expiresAt : null) : undefined,
+      // Usage flags are only forwarded when the API actually sent them — a
+      // fields-only update must not reset an existing flag.
+      typeof interactiveLoginAllowed === 'boolean' || typeof fileAccessAllowed === 'boolean'
+        ? {
+            ...(typeof interactiveLoginAllowed === 'boolean' ? { interactiveLoginAllowed } : {}),
+            ...(typeof fileAccessAllowed === 'boolean' ? { fileAccessAllowed } : {}),
+          }
+        : undefined
     );
     res.status(200).json({ id: record.id });
   } catch (err) {

@@ -6,12 +6,15 @@ export class ApiError extends Error {
   /** Machine-readable error code when the API provides one (e.g. 'no_2fa_enrolled'). */
   code?: string;
   fieldErrors?: Record<string, string>;
-  constructor(message: string, status: number, fieldErrors?: Record<string, string>, code?: string) {
+  /** Session-credential candidates — present on `credential_selection_required` errors. */
+  candidates?: SessionCredentialCandidate[];
+  constructor(message: string, status: number, fieldErrors?: Record<string, string>, code?: string, candidates?: SessionCredentialCandidate[]) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.fieldErrors = fieldErrors;
     this.code = code;
+    if (candidates) this.candidates = candidates;
   }
 }
 
@@ -23,6 +26,32 @@ export interface Secret {
   createdAt: string;
   expiresAt?: string;
   username: string;
+  /** May this secret be used for an interactive SSH console session? */
+  interactiveLoginAllowed?: boolean;
+  /** May this secret be used for SFTP file-access sessions? */
+  fileAccessAllowed?: boolean;
+}
+
+// --- Session credentials (interactive SSH console / SFTP) ---------------------
+/** Which kind of interactive session a credential applies to. */
+export type SessionPurpose = 'console' | 'filesystem';
+
+/** One secret the caller may use for an interactive session on a device. */
+export interface SessionCredentialCandidate {
+  id: string;
+  label: string | null;
+  type: string;
+  /** True when this is the caller's own secret (vs. from the shared pool). */
+  own: boolean;
+}
+
+/** GET /devices/:id/session-credentials response — eligible credentials ordered by
+ *  the stored preference; `defaultSecretId` = what would be auto-used (null = prompt). */
+export interface SessionCredentialOptions {
+  deviceId: string;
+  purpose: SessionPurpose;
+  candidates: SessionCredentialCandidate[];
+  defaultSecretId: string | null;
 }
 
 export interface SecretField {
@@ -1758,11 +1787,13 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
     let message = `API error ${res.status}`;
     let fieldErrors: Record<string, string> | undefined;
     let code: string | undefined;
+    let candidates: SessionCredentialCandidate[] | undefined;
     try {
       const body = await res.json();
       if (body?.error) message = body.error;
       if (body?.fieldErrors && typeof body.fieldErrors === 'object') fieldErrors = body.fieldErrors;
       if (typeof body?.code === 'string') code = body.code;
+      if (Array.isArray(body?.candidates)) candidates = body.candidates as SessionCredentialCandidate[];
     } catch {
       // ignore body parse errors, fall back to generic message
     }
@@ -1774,7 +1805,7 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
       localStorage.removeItem('accessToken');
       window.location.assign('/login' + (code === 'user_disabled' ? '?reason=disabled' : ''));
     }
-    throw new ApiError(message, res.status, fieldErrors, code);
+    throw new ApiError(message, res.status, fieldErrors, code, candidates);
   }
   if (res.status === 204) {
     return undefined as T;
@@ -1896,7 +1927,7 @@ export const api = {
   filesystem: (
     deviceId: string,
     op: FilesystemOp,
-    params: { path?: string; targetPath?: string; contentBase64?: string; parents?: boolean; context?: Record<string, unknown>; pluginId?: string } = {},
+    params: { path?: string; targetPath?: string; contentBase64?: string; parents?: boolean; context?: Record<string, unknown>; pluginId?: string; secretId?: string } = {},
   ) =>
     apiFetch<FilesystemResponse>(`/devices/${deviceId}/filesystem`, {
       method: 'POST',
@@ -1904,11 +1935,24 @@ export const api = {
     }),
   // Mint a single-use, 60 s ticket for an interactive SSH console (capability
   // 'sshConsole'). Gated on devices:write; the plugin's capability is checked here.
-  mintConsoleTicket: (deviceId: string, params: { pluginId?: string; context?: Record<string, unknown> } = {}) =>
+  // `secretId` = the user's chosen session credential (from the picker); absent =
+  // auto-use (stored default / sole candidate) or a 409 with candidates to prompt.
+  mintConsoleTicket: (deviceId: string, params: { pluginId?: string; context?: Record<string, unknown>; secretId?: string } = {}) =>
     apiFetch<ConsoleTicketResponse>(`/devices/${deviceId}/console`, {
       method: 'POST',
       body: JSON.stringify(params),
     }),
+  // Session credentials (interactive SSH console / SFTP file access).
+  /** The caller's eligible session credentials for a device+purpose, ordered by
+   *  their stored preference; `defaultSecretId` = auto-used (null = must prompt). */
+  sessionCredentials: (deviceId: string, purpose: SessionPurpose) =>
+    apiFetch<SessionCredentialOptions>(`/devices/${deviceId}/session-credentials?purpose=${encodeURIComponent(purpose)}`),
+  /** Store the caller's ORDERED preference for a device+purpose (first = default). */
+  setSessionCredentials: (deviceId: string, purpose: SessionPurpose, secretIds: string[]) =>
+    apiFetch<{ deviceId: string; purpose: SessionPurpose; secretIds: string[]; candidates: SessionCredentialCandidate[] }>(
+      `/devices/${deviceId}/session-credentials`,
+      { method: 'PUT', body: JSON.stringify({ purpose, secretIds }) },
+    ),
   // Normalized port inventory for a device across all plugins.
   devicePorts: (deviceId: string) =>
     apiFetch<{ deviceId: string; ports: DevicePortRow[] }>(`/devices/${deviceId}/ports`),
@@ -1929,6 +1973,10 @@ export const api = {
     fields: Record<string, string>;
     label: string;
     expiresAt?: string;
+    /** Opt the secret in for interactive SSH console sessions. */
+    interactiveLoginAllowed?: boolean;
+    /** Opt the secret in for SFTP file-access sessions. */
+    fileAccessAllowed?: boolean;
   }) => apiFetch<Secret>('/secrets', { method: 'POST', body: JSON.stringify(body) }),
   /** Provider creates the key material itself (generatable types only). `fields` carries non-material context.
    *  Response may include `publicFields` = non-secret generated values to show the user (e.g. public key line). */
@@ -1945,8 +1993,9 @@ export const api = {
   /** Fetch a secret's decrypted fields for editing (works for all types). */
   getSecret: (id: string) =>
     apiFetch<{ type: string; fields: Record<string, string> }>(`/secrets/${id}`),
-  /** Update a secret's fields in place — same id, references keep working. All types supported. */
-  updateSecret: (id: string, body: { fields: Record<string, string>; label?: string; expiresAt?: string | null }) =>
+  /** Update a secret's fields in place — same id, references keep working. All types supported.
+   *  The two usage flags are only sent when provided (omitted = leave unchanged). */
+  updateSecret: (id: string, body: { fields: Record<string, string>; label?: string; expiresAt?: string | null; interactiveLoginAllowed?: boolean; fileAccessAllowed?: boolean }) =>
     apiFetch<{ id: string }>(`/secrets/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteSecret: (id: string) =>
     apiFetch<void>(`/secrets/${id}`, { method: 'DELETE' }),

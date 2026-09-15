@@ -912,6 +912,27 @@ export async function initDb(): Promise<void> {
       "updatedAt" TEXT NOT NULL
     )`);
 
+  // Interactive-session usage flags on secrets (SSH console / SFTP). Added after
+  // the initial release — existing rows default to FALSE (opt-in per secret), so
+  // no pre-existing secret becomes usable for live logins/file access by accident.
+  await pool.query(`ALTER TABLE secrets ADD COLUMN IF NOT EXISTS "interactiveLoginAllowed" BOOLEAN NOT NULL DEFAULT FALSE`);
+  await pool.query(`ALTER TABLE secrets ADD COLUMN IF NOT EXISTS "fileAccessAllowed" BOOLEAN NOT NULL DEFAULT FALSE`);
+
+  // Per-user, per-device session-credential defaults (see schema.deviceSessionCredentials).
+  // Ordered secret-id lists that decide which eligible credential an interactive SSH
+  // console / SFTP file session uses on a device — first entry auto-used, rest offered.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_session_credentials (
+      id TEXT PRIMARY KEY,
+      "userId" TEXT NOT NULL,
+      "deviceId" TEXT NOT NULL,
+      purpose TEXT NOT NULL,
+      "secretIds" TEXT NOT NULL DEFAULT '[]',
+      "updatedAt" TEXT NOT NULL,
+      UNIQUE ("userId", "deviceId", purpose)
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_device_session_creds_user ON device_session_credentials ("userId")`);
+
   // Credential-policy state on users: disabled flag + login/password timestamps.
   // Idempotent ADD COLUMN so existing deployments pick these up on restart.
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "disabled" BOOLEAN NOT NULL DEFAULT FALSE`);

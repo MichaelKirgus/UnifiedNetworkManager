@@ -38,8 +38,9 @@ export interface NavItem {
   to: string;
   label: string;
   icon: ComponentType<{ className?: string }>;
-  /** Read permission the page's route guard enforces — keep in sync with PAGE_PERMISSIONS. */
-  requiresPermission?: string;
+  /** Permission(s) the page's route guard enforces (any one suffices) — keep in
+   *  sync with PAGE_PERMISSIONS. */
+  requiresPermission?: string | string[];
   /** When set, the item shows a badge from `NavCounts[countKey]` (only if > 0). */
   countKey?: NavCountKey;
 }
@@ -84,7 +85,8 @@ export const NAV_ITEMS: NavItem[] = [
   // Layer registry — the topology view's horizontal bands (open to all users).
   { to: '/layers', label: 'Layers', icon: LayersIcon },
   { to: '/sites', label: 'Sites', icon: MapPin, requiresPermission: 'sites:read' },
-  { to: '/secrets', label: 'Secrets', icon: KeyRound, requiresPermission: 'secrets:read' },
+  // Global readers OR personal-area users (own secrets) may open the page.
+  { to: '/secrets', label: 'Secrets', icon: KeyRound, requiresPermission: ['secrets:read', 'secrets:self-write'] },
   // Config jobs still queued/running surface as a badge (actionable).
   { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks, requiresPermission: 'config-jobs:read', countKey: 'configJobs' },
   // Multi-device execution plans (create/execute additionally require configs:apply + 2FA).
@@ -124,7 +126,11 @@ export const BADGE_COLORS: Record<NavCountKey, string> = {
  * customizer can still list + re-show them. My Account is excluded (pinned separately).
  */
 export function orderedNavItems(prefs?: { navOrder?: string[] }): NavItem[] {
-  const visible = NAV_ITEMS.filter((item) => !item.requiresPermission || can(item.requiresPermission));
+  const visible = NAV_ITEMS.filter(
+    (item) =>
+      !item.requiresPermission ||
+      (Array.isArray(item.requiresPermission) ? item.requiresPermission.some((p) => can(p)) : can(item.requiresPermission))
+  );
   const order = prefs?.navOrder ?? [];
   const rank = new Map<string, number>(order.map((path, idx) => [path, idx]));
   return [...visible].sort((a, b) => {

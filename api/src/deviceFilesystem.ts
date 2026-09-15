@@ -63,7 +63,10 @@ export async function performFilesystemOp(
   deviceId: string,
   pluginId: string,
   op: FilesystemOp,
-  params: { path?: string; targetPath?: string; contentBase64?: string; parents?: boolean; context?: Record<string, unknown> }
+  params: { path?: string; targetPath?: string; contentBase64?: string; parents?: boolean; context?: Record<string, unknown> },
+  /** The user's chosen session credential (validated upstream) — its fields
+   *  replace the assignment's bound `ssh` slot for this call. */
+  sessionSecretId?: string
 ): Promise<{ pluginId: string; result: FilesystemResult }> {
   if (!VALID_OPS.includes(op)) throw new DeviceFilesystemError(400, `Unsupported filesystem op "${op}"`);
 
@@ -97,12 +100,20 @@ export async function performFilesystemOp(
 
   // Fresh credentials + bound slots (same merge as the plan executor). The ssh slot
   // (when bound) is what the plugin uses for SFTP; the primary secret is used to
-  // resolve dataset mountpoints over the appliance RPC.
+  // resolve dataset mountpoints over the appliance RPC. A validated
+  // `sessionSecretId` OVERRIDES that slot — the user's chosen personal credential
+  // rides in exactly like a bound one, so plugins need no changes.
   const decrypted = assignment.secretId ? await getSecretFresh(assignment.secretId) : null;
-  const credentials = withSlots(
-    decrypted?.fields ?? {},
-    await decryptCredentialSlots(parseExtraCredentials(assignment.extraCredentials), { fresh: true })
-  );
+  let slots = await decryptCredentialSlots(parseExtraCredentials(assignment.extraCredentials), { fresh: true });
+  if (sessionSecretId) {
+    try {
+      const sessionSecret = await getSecretFresh(sessionSecretId);
+      slots = { ...slots, ssh: sessionSecret.fields };
+    } catch (err) {
+      throw new DeviceFilesystemError(502, `Failed to load the selected file-access credential: ${(err as Error).message}`);
+    }
+  }
+  const credentials = withSlots(decrypted?.fields ?? {}, slots);
 
   // Per-device settings overrides for THIS assignment scope.
   const headers = await settingsHeaders(pluginId, deviceId).catch(() => ({}));

@@ -66,6 +66,11 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'secrets:read': 'View secrets (metadata only — values stay encrypted)',
   'secrets:write': 'Create and update secrets',
   'secrets:delete': 'Delete secrets',
+  // Personal secret area: create your OWN secrets (and edit/delete them). Distinct
+  // from the global `secrets:write` which manages ALL secrets. A user with only this
+  // permission can build their own SSH/SFTP credentials for interactive sessions but
+  // cannot touch other users' or shared secrets.
+  'secrets:self-write': "Create and manage your own personal secrets (for interactive SSH / file access)",
   'sites:write': 'Create, update and delete sites',
   // Topology layer registry (band names/colors/order) — read is open to any
   // authenticated user (the topology page needs it), write is gated.

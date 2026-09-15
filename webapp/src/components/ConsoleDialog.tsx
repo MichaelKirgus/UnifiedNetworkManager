@@ -4,7 +4,8 @@ import { Loader2, Terminal as TerminalIcon } from 'lucide-react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { api, consoleSocketUrl } from '../api/client';
+import { api, ApiError, consoleSocketUrl, SessionCredentialCandidate } from '../api/client';
+import { CredentialPicker } from './CredentialPicker';
 import { ResizableDialog } from './ResizableDialog';
 
 /**
@@ -44,12 +45,29 @@ export interface ConsoleDialogProps {
 /** Connection lifecycle as surfaced in the status bar. */
 type ConsoleStatus = 'connecting' | 'connected' | 'closed';
 
+/** The credential-selection prompt state (409 from the mint endpoint). */
+export interface CredentialPrompt {
+  candidates: SessionCredentialCandidate[];
+  defaultId: string | null;
+}
+
 /**
  * Core SSH-console session: mints a ticket, opens the proxied WebSocket and wires
  * xterm.js to it. Returns the host element ref (mount the terminal here) plus the
  * status/error/exit-code state for the surrounding shell UI.
+ *
+ * `secretId` = an explicit credential pick (from the picker); absent = auto-use
+ * (stored default / sole candidate). When the mint endpoint answers 409 with code
+ * `credential_selection_required`, `onNeedCredential` fires so the caller can show
+ * the CredentialPicker; picking a secret re-runs this hook with that id.
  */
-export function useConsoleSession(deviceId: string, pluginId?: string, contextKey = '{}') {
+export function useConsoleSession(
+  deviceId: string,
+  pluginId?: string,
+  contextKey = '{}',
+  secretId?: string,
+  onNeedCredential?: (prompt: CredentialPrompt) => void
+) {
   const hostRef = useRef<HTMLDivElement>(null);
 
   const [status, setStatus] = useState<ConsoleStatus>('connecting');
@@ -59,6 +77,11 @@ export function useConsoleSession(deviceId: string, pluginId?: string, contextKe
   // Ref mirror of exitCode — the ws.onclose closure must not read stale state.
   const exitCodeRef = useRef<number | null>(null);
   useEffect(() => { exitCodeRef.current = exitCode; }, [exitCode]);
+
+  // Callback ref — the mint effect runs once per (device, plugin, context, secret)
+  // and must not re-run just because the parent passed a fresh closure.
+  const onNeedCredentialRef = useRef(onNeedCredential);
+  useEffect(() => { onNeedCredentialRef.current = onNeedCredential; }, [onNeedCredential]);
 
   // Mint + connect exactly once per (device, plugin, context) tuple.
   useEffect(() => {
@@ -140,10 +163,16 @@ export function useConsoleSession(deviceId: string, pluginId?: string, contextKe
       let ticket: string;
       try {
         const ctx = JSON.parse(contextKey) as Record<string, unknown>;
-        const res = await api.mintConsoleTicket(deviceId, { ...(pluginId ? { pluginId } : {}), context: ctx });
+        const res = await api.mintConsoleTicket(deviceId, { ...(pluginId ? { pluginId } : {}), context: ctx, ...(secretId ? { secretId } : {}) });
         ticket = res.ticket;
       } catch (err) {
-        if (!disposed) setError(err instanceof Error ? err.message : String(err));
+        if (disposed) return;
+        // Several eligible credentials + no stored default → ask the user to pick.
+        if (err instanceof ApiError && err.code === 'credential_selection_required') {
+          onNeedCredentialRef.current?.({ candidates: err.candidates ?? [], defaultId: null });
+          return;
+        }
+        setError(err instanceof Error ? err.message : String(err));
         return;
       }
       if (disposed) return;
@@ -209,7 +238,7 @@ export function useConsoleSession(deviceId: string, pluginId?: string, contextKe
       }
       term.dispose();
     };
-  }, [deviceId, pluginId, contextKey]);
+  }, [deviceId, pluginId, contextKey, secretId]);
 
   return { hostRef, status, error, exitCode };
 }
@@ -218,7 +247,19 @@ export function ConsoleDialog({ deviceId, pluginId, context, title, subtitle, on
   // Stable key for the (caller-supplied) context object — it must reach the mint
   // endpoint but must not re-trigger the session effect on every render.
   const contextKey = JSON.stringify(context);
-  const { hostRef, status, error, exitCode } = useConsoleSession(deviceId, pluginId, contextKey);
+
+  // Session-credential selection: when several eligible credentials exist and no
+  // stored default applies, the mint endpoint answers 409 → we show the picker;
+  // picking a secret restarts the session with that id (and optionally persists it).
+  const [chosenSecretId, setChosenSecretId] = useState<string | undefined>(undefined);
+  const [credentialPrompt, setCredentialPrompt] = useState<CredentialPrompt | null>(null);
+  /** True when the user dismissed the picker without choosing — show a hint instead of "Connecting…" forever. */
+  const [promptDismissed, setPromptDismissed] = useState(false);
+
+  const { hostRef, status, error, exitCode } = useConsoleSession(deviceId, pluginId, contextKey, chosenSecretId, (prompt) => {
+    setCredentialPrompt(prompt);
+    setPromptDismissed(false);
+  });
 
   /** Pop the session out into its own full-window tab (same ticket flow). */
   const openInWindow = () => {
@@ -227,6 +268,7 @@ export function ConsoleDialog({ deviceId, pluginId, context, title, subtitle, on
     params.set('context', contextKey);
     params.set('title', title);
     if (subtitle) params.set('subtitle', subtitle);
+    if (chosenSecretId) params.set('secret', chosenSecretId);
     window.open(`${window.location.origin}/console/${deviceId}?${params.toString()}`, '_blank');
   };
 
@@ -254,10 +296,40 @@ export function ConsoleDialog({ deviceId, pluginId, context, title, subtitle, on
         </div>
       )}
 
+      {/* Dismissed-picker hint — the session can't start until a credential is chosen. */}
+      {promptDismissed && !chosenSecretId && status === 'connecting' && (
+        <div className="flex items-center justify-between gap-3 border-b border-warning-border bg-warning px-4 py-2 text-sm text-white">
+          <span>Choose an SSH credential to start the session.</span>
+          <button type="button" onClick={() => setCredentialPrompt({ candidates: [], defaultId: null })} className="shrink-0 rounded px-2 py-0.5 text-xs font-semibold hover:bg-white/10">
+            Choose…
+          </button>
+        </div>
+      )}
+
       {/* Terminal host — xterm.js renders here; the dark theme is fixed (terminals are dark). */}
       <div className="min-h-0 flex-1 bg-[#0d1117] p-2">
         <div ref={hostRef} className="h-full w-full" />
       </div>
+
+      {/* Credential picker — shown when the mint endpoint needs a choice. */}
+      {credentialPrompt && (
+        <CredentialPicker
+          deviceId={deviceId}
+          purpose="console"
+          initialCandidates={credentialPrompt.candidates}
+          initialDefaultId={credentialPrompt.defaultId}
+          title={`Choose an SSH credential — ${title}`}
+          onPick={(secretId) => {
+            // Re-running the session hook with the chosen id re-mints + reconnects.
+            setChosenSecretId(secretId);
+            setCredentialPrompt(null);
+          }}
+          onClose={() => {
+            setCredentialPrompt(null);
+            setPromptDismissed(true);
+          }}
+        />
+      )}
     </ResizableDialog>
   );
 }

@@ -204,6 +204,8 @@ export function internalRouter() {
           providerId: s.providerId,
           userId: s.userId,
           expiresAt: s.expiresAt,
+          interactiveLoginAllowed: s.interactiveLoginAllowed,
+          fileAccessAllowed: s.fileAccessAllowed,
           createdAt: s.createdAt,
         }))
       );
@@ -215,7 +217,7 @@ export function internalRouter() {
 
   // POST /plugin/secrets - store a secret (ciphertext).
   router.post('/plugin/secrets', pluginAuth, async (req: Request, res: Response) => {
-    const { type, providerId, label, encryptedValue, userId, expiresAt } = req.body ?? {};
+    const { type, providerId, label, encryptedValue, userId, expiresAt, interactiveLoginAllowed, fileAccessAllowed } = req.body ?? {};
     if (!encryptedValue || !userId) {
       return res.status(400).json({ error: 'encryptedValue and userId are required' });
     }
@@ -230,6 +232,8 @@ export function internalRouter() {
         encryptedValue: String(encryptedValue),
         userId: String(userId),
         expiresAt: expiresAt ?? null,
+        interactiveLoginAllowed: typeof interactiveLoginAllowed === 'boolean' ? interactiveLoginAllowed : false,
+        fileAccessAllowed: typeof fileAccessAllowed === 'boolean' ? fileAccessAllowed : false,
         createdAt,
       });
       res.status(201).json({ id, createdAt });
@@ -257,6 +261,8 @@ export function internalRouter() {
         encryptedValue: row.encryptedValue,
         userId: row.userId,
         expiresAt: row.expiresAt,
+        interactiveLoginAllowed: row.interactiveLoginAllowed,
+        fileAccessAllowed: row.fileAccessAllowed,
         createdAt: row.createdAt,
       });
     } catch (error) {
@@ -268,12 +274,13 @@ export function internalRouter() {
   // PATCH /plugin/secrets/:id - update a secret IN PLACE (same id). Used for key
   // rotation/regeneration and field edits so assignments + plans referencing the
   // id keep working. The provider re-encrypts and sends the new ciphertext; only
-  // encryptedValue, label and expiresAt are updatable — type/providerId/userId
-  // are immutable. `expiresAt: null` clears the expiry (absence leaves it).
+  // encryptedValue, label, expiresAt and the two usage flags are updatable —
+  // type/providerId/userId are immutable. `expiresAt: null` clears the expiry
+  // (absence leaves it); flag absence also leaves them untouched.
   router.patch('/plugin/secrets/:id', pluginAuth, async (req: Request, res: Response) => {
     const { id } = req.params;
     const body = req.body ?? {};
-    const { encryptedValue, label } = body;
+    const { encryptedValue, label, interactiveLoginAllowed, fileAccessAllowed } = body;
     if (!encryptedValue || typeof encryptedValue !== 'string') {
       return res.status(400).json({ error: 'encryptedValue (string) is required' });
     }
@@ -290,6 +297,8 @@ export function internalRouter() {
       if ('expiresAt' in body) {
         patch.expiresAt = typeof body.expiresAt === 'string' ? body.expiresAt : null;
       }
+      if (typeof interactiveLoginAllowed === 'boolean') patch.interactiveLoginAllowed = interactiveLoginAllowed;
+      if (typeof fileAccessAllowed === 'boolean') patch.fileAccessAllowed = fileAccessAllowed;
       await db.update(schema.secrets).set(patch).where(eq(schema.secrets.id, id));
       res.status(200).json({ id });
     } catch (error) {

@@ -288,6 +288,9 @@ export async function createSecret(input: {
   label?: string;
   expiresAt?: string;
   userId: string;
+  /** Interactive-session usage flags (see schema.secrets). Default false. */
+  interactiveLoginAllowed?: boolean;
+  fileAccessAllowed?: boolean;
 }): Promise<{ id: string; createdAt: string }> {
   const provider = await resolveSecretsProvider(input.providerId);
   return callProvider(provider, '/secrets', 'POST', {
@@ -296,6 +299,8 @@ export async function createSecret(input: {
     label: input.label,
     expiresAt: input.expiresAt,
     userId: input.userId,
+    interactiveLoginAllowed: input.interactiveLoginAllowed ?? false,
+    fileAccessAllowed: input.fileAccessAllowed ?? false,
   });
 }
 
@@ -418,7 +423,14 @@ export async function getSecretFields(id: string): Promise<DecryptedSecret> {
  */
 export async function updateSecret(
   id: string,
-  input: { fields?: Record<string, unknown>; label?: string | null; expiresAt?: string | null }
+  input: {
+    fields?: Record<string, unknown>;
+    label?: string | null;
+    expiresAt?: string | null;
+    /** Interactive-session usage flags — omitted = leave unchanged. */
+    interactiveLoginAllowed?: boolean;
+    fileAccessAllowed?: boolean;
+  }
 ): Promise<{ id: string }> {
   const provider = await providerForSecret(id);
   // POST /update (id in body) — same convention as the provider's /regenerate.
@@ -427,6 +439,8 @@ export async function updateSecret(
     fields: input.fields ?? {},
     ...(input.label !== undefined ? { label: input.label } : {}),
     ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+    ...(input.interactiveLoginAllowed !== undefined ? { interactiveLoginAllowed: input.interactiveLoginAllowed } : {}),
+    ...(input.fileAccessAllowed !== undefined ? { fileAccessAllowed: input.fileAccessAllowed } : {}),
   });
 }
 

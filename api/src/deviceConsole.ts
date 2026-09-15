@@ -53,8 +53,17 @@ export class DeviceConsoleError extends Error {
  * Resolves the console target for a (device, plugin) assignment. `pluginId` empty
  * = the device's primary assignment. Throws DeviceConsoleError with an HTTP status
  * when anything is missing (no assignment / no endpoint / capability not advertised).
+ *
+ * `sessionSecretId` — when set (validated upstream by sessionCredentials.ts), its
+ * decrypted fields REPLACE whatever is bound to the assignment's `ssh` slot, so a
+ * user can open a console with ANY of their eligible personal credentials without
+ * changing the device assignment. Plugins are unaffected: they read slots.ssh as before.
  */
-export async function resolveConsoleTarget(deviceId: string, pluginId?: string): Promise<ConsoleTarget> {
+export async function resolveConsoleTarget(
+  deviceId: string,
+  pluginId?: string,
+  sessionSecretId?: string
+): Promise<ConsoleTarget> {
   const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
   if (!device) throw new DeviceConsoleError(404, 'Device not found');
 
@@ -92,12 +101,20 @@ export async function resolveConsoleTarget(deviceId: string, pluginId?: string):
   ];
 
   // Fresh credentials + bound slots (same merge as the plan executor). The ssh slot
-  // (when bound) is what the plugin uses for the PTY session.
+  // (when bound) is what the plugin uses for the PTY session. A validated
+  // `sessionSecretId` OVERRIDES that slot — the user's chosen personal credential
+  // rides in exactly like a bound one, so plugins need no changes.
   const decrypted = assignment.secretId ? await getSecretFresh(assignment.secretId) : null;
-  const credentials = withSlots(
-    decrypted?.fields ?? {},
-    await decryptCredentialSlots(parseExtraCredentials(assignment.extraCredentials), { fresh: true })
-  );
+  let slots = await decryptCredentialSlots(parseExtraCredentials(assignment.extraCredentials), { fresh: true });
+  if (sessionSecretId) {
+    try {
+      const sessionSecret = await getSecretFresh(sessionSecretId);
+      slots = { ...slots, ssh: sessionSecret.fields };
+    } catch (err) {
+      throw new DeviceConsoleError(502, `Failed to load the selected SSH credential: ${(err as Error).message}`);
+    }
+  }
+  const credentials = withSlots(decrypted?.fields ?? {}, slots);
 
   // Effective plugin settings (best-effort) — the console hello carries them so a
   // non-default SSH port configured per device is honored by the PTY session.
