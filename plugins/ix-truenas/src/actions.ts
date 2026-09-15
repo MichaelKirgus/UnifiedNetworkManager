@@ -12,7 +12,7 @@
  * "initiated").
  */
 
-import { ActionDescriptor, ActionResult, createRegistry, dynamicSshHostVerifier, pickNumber, pickString, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { ActionDescriptor, ActionResult, createRegistry, dynamicSshHostVerifier, pickNumber, pickString, pollUntil, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
 import { normalizeVmDevice, sshPool } from './enrich';
 
@@ -398,6 +398,92 @@ function isAlreadyInState(e: unknown): boolean {
   return /already|not (running|stopped)|in an invalid state/i.test(e.message);
 }
 
+// --- Post-apply state verification ---------------------------------------------
+// UNM marks a plan step "verified" only when the plugin RE-READS appliance state
+// after applying and confirms the target was reached (ActionResult.verified).
+// TrueNAS `app.*` methods are @job — the RPC resolves to a JOB ID immediately
+// while the work runs server-side, so an acknowledged stop/start is NOT done.
+// These helpers poll app.query / vm.query until every driven name reaches its
+// target state (or disappears, for deletes), bounded so a stuck workload
+// surfaces as "unverified" instead of blocking forever.
+
+/** Re-reads current app states by name ('gone' when absent). Null on read failure — the caller retries. */
+async function readAppStates(ctx: TruenasActionContext, names: string[]): Promise<Record<string, string> | null> {
+  try {
+    const apps = await listApps(ctx);
+    const out: Record<string, string> = {};
+    for (const n of names) {
+      const app = apps.find((a) => a.name === n);
+      out[n] = app ? normState(app.state) : 'gone';
+    }
+    return out;
+  } catch {
+    return null; // transient RPC failure — pollUntil keeps probing until the deadline
+  }
+}
+
+/** Waits until every name is in one of `want` states. */
+async function verifyAppStates(ctx: TruenasActionContext, names: string[], want: Set<string>): Promise<boolean> {
+  if (names.length === 0) return true;
+  const wait = await pollUntil(
+    () => readAppStates(ctx, names),
+    (states) => states !== null && names.every((n) => want.has(states[n])),
+    { timeoutMs: 60_000, intervalMs: 3_000 },
+  );
+  return wait.ok;
+}
+
+/** Re-reads current VM states by name ('gone' when absent). Null on read failure. */
+async function readVmStates(ctx: TruenasActionContext, names: string[]): Promise<Record<string, string> | null> {
+  try {
+    const vms = await listVms(ctx);
+    const out: Record<string, string> = {};
+    for (const n of names) {
+      const vm = vms.find((v) => v.name === n);
+      out[n] = vm ? normState(vm.state) : 'gone';
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** Waits until every VM name is in one of `want` states. */
+async function verifyVmStates(ctx: TruenasActionContext, names: string[], want: Set<string>): Promise<boolean> {
+  if (names.length === 0) return true;
+  const wait = await pollUntil(
+    () => readVmStates(ctx, names),
+    (states) => states !== null && names.every((n) => want.has(states[n])),
+    { timeoutMs: 60_000, intervalMs: 3_000 },
+  );
+  return wait.ok;
+}
+
+/** Waits until a NIC with the given MAC is (present=true) / gone (present=false) on the VM. */
+async function verifyVmNic(ctx: TruenasActionContext, vmName: string, mac: string, present: boolean): Promise<boolean> {
+  const wait = await pollUntil(
+    async () => {
+      try {
+        const vms = await listVms(ctx);
+        const vm = vms.find((v) => v.name === vmName);
+        if (!vm) return null; // VM vanished mid-flight — keep probing (delete race)
+        for (const d of vm.devices) {
+          const dev = normalizeVmDevice(d);
+          if (!dev || dev.dtype !== 'NIC') continue;
+          const dmac = pickString(dev.attrs, ['mac']);
+          if (dmac && dmac.toLowerCase() === mac.toLowerCase()) return present;
+        }
+        return !present; // NIC absent — done when we expected it gone
+      } catch {
+        return null;
+      }
+    },
+    (found) => found === true,
+    { timeoutMs: 30_000, intervalMs: 2_000 },
+  );
+  return wait.ok;
+}
+
 /** Describes a job-method result (job id = accepted, work runs server-side). */
 function describeAccepted(result: unknown): Record<string, unknown> {
   if (typeof result === 'number') return { jobId: result, note: 'Accepted as an asynchronous appliance job.' };
@@ -435,7 +521,10 @@ const containersStopAction: ActionDescriptor<TruenasActionContext> = {
         else errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { stopped, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: app.stop is a server-side job — every driven app must actually
+    // reach STOPPED for this step to count as verified.
+    const verified = Object.keys(errors).length === 0 && (await verifyAppStates(ctx, toRun, new Set(['STOPPED'])));
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { stopped, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -467,7 +556,9 @@ const containersStartAction: ActionDescriptor<TruenasActionContext> = {
         else errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { started, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: every driven app must actually reach RUNNING.
+    const verified = Object.keys(errors).length === 0 && (await verifyAppStates(ctx, toRun, new Set(['RUNNING'])));
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { started, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -508,7 +599,9 @@ const containersRestartAction: ActionDescriptor<TruenasActionContext> = {
         errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { restarted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: a restart is only done when every driven app is RUNNING again.
+    const verified = Object.keys(errors).length === 0 && (await verifyAppStates(ctx, names.filter((n) => byName.has(n)), new Set(['RUNNING'])));
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { restarted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -552,7 +645,11 @@ const containersUpgradeAction: ActionDescriptor<TruenasActionContext> = {
         errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { upgraded, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: an upgrade redeploys the app server-side — every driven app must
+    // settle back into a stable state (RUNNING or STOPPED), not stay DEPLOYING.
+    const upgradedNames = names.filter((n) => byName.has(n) && !skipped[n]);
+    const verified = Object.keys(errors).length === 0 && (await verifyAppStates(ctx, upgradedNames, new Set(['RUNNING', 'STOPPED'])));
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { upgraded, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -589,7 +686,9 @@ const containersDeleteAction: ActionDescriptor<TruenasActionContext> = {
         errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: every driven app must be gone from app.query.
+    const verified = Object.keys(errors).length === 0 && (await verifyAppStates(ctx, names.filter((n) => byName.has(n)), new Set(['gone'])));
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -692,7 +791,9 @@ const vmsStartAction: ActionDescriptor<TruenasActionContext> = {
         else errors[vm.name] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { started, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: every driven VM must actually reach RUNNING.
+    const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, toRun.map((v) => v.name), new Set(['RUNNING'])));
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { started, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -743,7 +844,10 @@ const vmsStopAction: ActionDescriptor<TruenasActionContext> = {
         else errors[vm.name] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { stopped, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: the ACPI powerdown job settling is not enough — every driven VM
+    // must actually be STOPPED. A guest still shutting down stays "unverified".
+    const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, toRun.map((v) => v.name), new Set(['STOPPED'])));
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { stopped, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -776,7 +880,9 @@ const vmsKillAction: ActionDescriptor<TruenasActionContext> = {
         else errors[vm.name] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { killed, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: a hard kill must leave every driven VM STOPPED.
+    const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, toRun.map((v) => v.name), new Set(['STOPPED'])));
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { killed, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -832,7 +938,9 @@ const vmsRestartAction: ActionDescriptor<TruenasActionContext> = {
         errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { restarted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: a restart is only done when every driven VM is RUNNING again.
+    const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, names.filter((n) => byName.has(n)), new Set(['RUNNING'])));
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { restarted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -868,7 +976,9 @@ const vmsSuspendAction: ActionDescriptor<TruenasActionContext> = {
         else errors[vm.name] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { suspended, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: every driven VM must actually be SUSPENDED.
+    const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, toRun.map((v) => v.name), new Set(['SUSPENDED'])));
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { suspended, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -915,7 +1025,9 @@ const vmsResumeAction: ActionDescriptor<TruenasActionContext> = {
         else errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { resumed, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: every driven VM must actually be RUNNING again.
+    const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, names.filter((n) => byName.has(n)), new Set(['RUNNING'])));
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { resumed, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -967,7 +1079,9 @@ const vmsDeleteAction: ActionDescriptor<TruenasActionContext> = {
         errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, removeStorage, ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: every driven VM must be gone from vm.query.
+    const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, names.filter((n) => byName.has(n)), new Set(['gone'])));
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { deleted, missing, removeStorage, ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -1023,7 +1137,31 @@ const vmsNicAttachAction: ActionDescriptor<TruenasActionContext> = {
       const attributes: Record<string, unknown> = { dtype: 'NIC', type, nic_attach: nicAttach };
       if (mac) attributes['mac'] = mac;
       await ctx.client.call('vm.device.create', [{ id: vm.id, attributes }], ctx.creds);
-      return { success: true, applied: true, details: { name, nicAttach, type, ...(mac ? { mac } : {}), note: 'NIC attached — visible after the next inventory poll.' } };
+      // Verify by re-reading the VM's devices. When a MAC was requested it must
+      // appear; when omitted the appliance assigns one — then we confirm the NIC
+      // count grew instead (the new device is dtype NIC on nicAttach).
+      let verified = false;
+      if (mac) {
+        verified = await verifyVmNic(ctx, name, mac, true);
+      } else {
+        const beforeCount = vm.devices.filter((d) => normalizeVmDevice(d)?.dtype === 'NIC').length;
+        const wait = await pollUntil(
+          async () => {
+            try {
+              const vms2 = await listVms(ctx);
+              const vm2 = vms2.find((v) => v.name === name);
+              if (!vm2) return null;
+              return vm2.devices.filter((d) => normalizeVmDevice(d)?.dtype === 'NIC').length > beforeCount;
+            } catch {
+              return null;
+            }
+          },
+          (grew) => grew === true,
+          { timeoutMs: 30_000, intervalMs: 2_000 },
+        );
+        verified = wait.ok;
+      }
+      return { success: true, applied: true, verified, details: { name, nicAttach, type, ...(mac ? { mac } : {}) } };
     } catch (e) {
       return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
     }
@@ -1071,7 +1209,9 @@ const vmsNicDetachAction: ActionDescriptor<TruenasActionContext> = {
     try {
       const force = input['force'] === true;
       await ctx.client.call('vm.device.delete', [deviceId, force ? { force: true } : {}], ctx.creds);
-      return { success: true, applied: true, details: { name, mac: mac.toUpperCase(), deviceId, note: 'NIC detached — visible after the next inventory poll.' } };
+      // Verify by re-reading the VM's devices — the NIC with this MAC must be gone.
+      const verified = await verifyVmNic(ctx, name, mac, false);
+      return { success: true, applied: true, verified, details: { name, mac: mac.toUpperCase(), deviceId } };
     } catch (e) {
       return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
     }
@@ -2492,7 +2632,9 @@ const containersInstallAction: ActionDescriptor<TruenasActionContext> = {
     if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') {
       return { success: false, details: { jobId, state: wait.state, error: wait.error ?? `Job ended in state ${wait.state}` } };
     }
-    return { success: true, applied: true, details: { jobId, state: wait.state, name, mode } };
+    // Job SUCCESS is not enough — confirm the app actually exists now.
+    const verified = await verifyAppStates(ctx, [name], new Set(['RUNNING', 'STOPPED']));
+    return { success: true, applied: true, verified, details: { jobId, state: wait.state, name, mode } };
   },
 };
 

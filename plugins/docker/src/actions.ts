@@ -15,8 +15,8 @@
  * state is skipped, not failed — mirroring ix-truenas's app.* actions.
  */
 
-import { ActionDescriptor, ActionResult, createRegistry, createSshPool, resolveSshCredentials } from '@unm/plugin-sdk';
-import { DockerClientOptions, containerLogsRaw, dockerDelete, dockerPost, dockerRequest, listComposeMembers, listContainers } from './client';
+import { ActionDescriptor, ActionResult, createRegistry, createSshPool, pollUntil, resolveSshCredentials } from '@unm/plugin-sdk';
+import { DockerClientOptions, containerLogsRaw, dockerDelete, dockerPost, dockerRequest, listComposeMembers, listContainers, listImages } from './client';
 
 /** Executor context for one /config step — resolved client options + the raw
  *  decrypted credentials body (needed by SSH-based actions like deploy-compose). */
@@ -103,6 +103,50 @@ async function driveMembers(opts: DockerClientOptions, members: RawContainer[], 
   return firstError ? { ok: false, error: firstError } : { ok: true };
 }
 
+// --- Post-apply state verification ---------------------------------------------
+// UNM marks a plan step "verified" only when the plugin RE-READS device state
+// after applying and confirms the target was reached (ActionResult.verified).
+// The Engine API's start/stop/restart return as soon as the daemon ACKNOWLEDGES
+// the transition — a container can still be restarting, or a stop can time out
+// into a force-kill later. These helpers poll /containers/json until every
+// driven member reaches its target state (or disappears, for deletes), bounded
+// so a stuck container surfaces as "unverified" instead of blocking forever.
+
+/** Engine states that count as "stopped". */
+const STOPPED_STATES = new Set(['exited', 'created', 'dead']);
+
+/** Re-reads the current state map name→state for the given member names ('gone' when absent). */
+async function readStates(opts: DockerClientOptions, names: string[]): Promise<Record<string, string> | null> {
+  const all = await listContainers(opts);
+  if (!all.ok || !Array.isArray(all.data)) return null; // transient failure — pollUntil retries
+  const byName = new Map((all.data as RawContainer[]).map((c) => [nameOf(c), c.State ?? 'unknown']));
+  const out: Record<string, string> = {};
+  for (const n of names) out[n] = byName.get(n) ?? 'gone';
+  return out;
+}
+
+/** Waits until every member is in one of `want` states. Returns the last observed map. */
+async function verifyStates(opts: DockerClientOptions, members: RawContainer[], want: Set<string>): Promise<{ ok: boolean; after: Record<string, string> }> {
+  const names = members.map(nameOf);
+  const wait = await pollUntil(
+    () => readStates(opts, names),
+    (states) => states !== null && names.every((n) => want.has(states[n])),
+    { timeoutMs: 30_000, intervalMs: 1_500 },
+  );
+  return { ok: wait.ok, after: wait.value ?? {} };
+}
+
+/** Waits until every member has DISAPPEARED (delete verification). */
+async function verifyGone(opts: DockerClientOptions, members: RawContainer[]): Promise<{ ok: boolean; after: Record<string, string> }> {
+  const names = members.map(nameOf);
+  const wait = await pollUntil(
+    () => readStates(opts, names),
+    (states) => states !== null && names.every((n) => states[n] === 'gone'),
+    { timeoutMs: 30_000, intervalMs: 1_500 },
+  );
+  return { ok: wait.ok, after: wait.value ?? {} };
+}
+
 // --- containers.start ---------------------------------------------------------
 const containersStartAction: ActionDescriptor<DockerActionContext> = {
   id: 'containers.start',
@@ -123,13 +167,19 @@ const containersStartAction: ActionDescriptor<DockerActionContext> = {
     const skipped: Record<string, string> = {};
     const missing: string[] = [];
     const errors: Record<string, string> = {};
+    const unverifiedNames: string[] = [];
     for (const n of names) {
       const members = await resolveMembers(ctx.opts, n);
       if (!members || members.length === 0) { missing.push(n); continue; }
       const r = await driveMembers(ctx.opts, members, 'start');
-      if (r.ok) started++; else errors[n] = r.error!;
+      if (!r.ok) { errors[n] = r.error!; continue; }
+      started++;
+      // Verify: the daemon acks a start before it completes — every member must
+      // actually be running for this step to count as verified.
+      const v = await verifyStates(ctx.opts, members, new Set(['running']));
+      if (!v.ok) unverifiedNames.push(n);
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { started, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, verified: unverifiedNames.length === 0, details: { started, skipped, missing, ...(unverifiedNames.length ? { unverified: unverifiedNames } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -153,13 +203,19 @@ const containersStopAction: ActionDescriptor<DockerActionContext> = {
     const skipped: Record<string, string> = {};
     const missing: string[] = [];
     const errors: Record<string, string> = {};
+    const unverifiedNames: string[] = [];
     for (const n of names) {
       const members = await resolveMembers(ctx.opts, n);
       if (!members || members.length === 0) { missing.push(n); continue; }
       const r = await driveMembers(ctx.opts, members, 'stop');
-      if (r.ok) stopped++; else errors[n] = r.error!;
+      if (!r.ok) { errors[n] = r.error!; continue; }
+      stopped++;
+      // Verify: an explicit stop sticks (restart policies only re-fire on daemon
+      // start / crash-exit), so every member must end in a stopped state.
+      const v = await verifyStates(ctx.opts, members, STOPPED_STATES);
+      if (!v.ok) unverifiedNames.push(n);
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { stopped, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, verified: unverifiedNames.length === 0, details: { stopped, skipped, missing, ...(unverifiedNames.length ? { unverified: unverifiedNames } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -182,6 +238,7 @@ const containersRestartAction: ActionDescriptor<DockerActionContext> = {
     let restarted = 0;
     const missing: string[] = [];
     const errors: Record<string, string> = {};
+    const unverifiedNames: string[] = [];
     for (const n of names) {
       const members = await resolveMembers(ctx.opts, n);
       if (!members || members.length === 0) { missing.push(n); continue; }
@@ -189,9 +246,13 @@ const containersRestartAction: ActionDescriptor<DockerActionContext> = {
       // members in parallel so a multi-service app stays under budget.
       const results = await Promise.all(members.map((m) => drive(ctx.opts, nameOf(m), m.State === 'running' ? 'restart' : 'start')));
       const firstError = results.find((r) => !r.ok)?.error;
-      if (firstError) errors[n] = firstError; else restarted++;
+      if (firstError) { errors[n] = firstError; continue; }
+      restarted++;
+      // Verify: a restart is only done when every member is running again.
+      const v = await verifyStates(ctx.opts, members, new Set(['running']));
+      if (!v.ok) unverifiedNames.push(n);
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { restarted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, verified: unverifiedNames.length === 0, details: { restarted, missing, ...(unverifiedNames.length ? { unverified: unverifiedNames } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -228,13 +289,17 @@ const containersStopOneAction: ActionDescriptor<DockerActionContext> = {
     let stopped = 0;
     const missing: string[] = [];
     const errors: Record<string, string> = {};
+    const unverifiedNames: string[] = [];
     for (const n of names) {
       const c = await resolveExact(ctx.opts, n);
       if (!c) { missing.push(n); continue; }
       const r = await drive(ctx.opts, nameOf(c), 'stop');
-      if (r.ok) stopped++; else errors[n] = r.error!; // 304 (already stopped) counts as ok inside drive()
+      if (!r.ok) { errors[n] = r.error!; continue; } // 304 (already stopped) counts as ok inside drive()
+      stopped++;
+      const v = await verifyStates(ctx.opts, [c], STOPPED_STATES);
+      if (!v.ok) unverifiedNames.push(n);
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { stopped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, verified: unverifiedNames.length === 0, details: { stopped, missing, ...(unverifiedNames.length ? { unverified: unverifiedNames } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -258,13 +323,17 @@ const containersStartOneAction: ActionDescriptor<DockerActionContext> = {
     let started = 0;
     const missing: string[] = [];
     const errors: Record<string, string> = {};
+    const unverifiedNames: string[] = [];
     for (const n of names) {
       const c = await resolveExact(ctx.opts, n);
       if (!c) { missing.push(n); continue; }
       const r = await drive(ctx.opts, nameOf(c), 'start');
-      if (r.ok) started++; else errors[n] = r.error!; // 304 (already running) counts as ok inside drive()
+      if (!r.ok) { errors[n] = r.error!; continue; } // 304 (already running) counts as ok inside drive()
+      started++;
+      const v = await verifyStates(ctx.opts, [c], new Set(['running']));
+      if (!v.ok) unverifiedNames.push(n);
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { started, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, verified: unverifiedNames.length === 0, details: { started, missing, ...(unverifiedNames.length ? { unverified: unverifiedNames } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -288,14 +357,18 @@ const containersRestartOneAction: ActionDescriptor<DockerActionContext> = {
     let restarted = 0;
     const missing: string[] = [];
     const errors: Record<string, string> = {};
+    const unverifiedNames: string[] = [];
     for (const n of names) {
       const c = await resolveExact(ctx.opts, n);
       if (!c) { missing.push(n); continue; }
       // A stopped container can't be restarted — start it instead.
       const r = await drive(ctx.opts, nameOf(c), c.State === 'running' ? 'restart' : 'start');
-      if (r.ok) restarted++; else errors[n] = r.error!;
+      if (!r.ok) { errors[n] = r.error!; continue; }
+      restarted++;
+      const v = await verifyStates(ctx.opts, [c], new Set(['running']));
+      if (!v.ok) unverifiedNames.push(n);
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { restarted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, verified: unverifiedNames.length === 0, details: { restarted, missing, ...(unverifiedNames.length ? { unverified: unverifiedNames } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -319,15 +392,19 @@ const containersDeleteOneAction: ActionDescriptor<DockerActionContext> = {
     let deleted = 0;
     const missing: string[] = [];
     const errors: Record<string, string> = {};
+    const unverifiedNames: string[] = [];
     for (const n of names) {
       const c = await resolveExact(ctx.opts, n);
       if (!c) { missing.push(n); continue; }
       // -f forces removal of running containers; v=false keeps named volumes.
       const r = await dockerDelete<unknown>(ctx.opts, `/containers/${encodeURIComponent(nameOf(c))}?force=true&v=false`);
-      if (r.ok || r.status === 304) deleted++;
-      else errors[n] = r.error || `HTTP ${r.status}`;
+      if (!r.ok && r.status !== 304) { errors[n] = r.error || `HTTP ${r.status}`; continue; }
+      deleted++;
+      // Verify: the container must be gone from /containers/json.
+      const v = await verifyGone(ctx.opts, [c]);
+      if (!v.ok) unverifiedNames.push(n);
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, verified: unverifiedNames.length === 0, details: { deleted, missing, ...(unverifiedNames.length ? { unverified: unverifiedNames } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -351,6 +428,7 @@ const containersDeleteAction: ActionDescriptor<DockerActionContext> = {
     let deleted = 0;
     const missing: string[] = [];
     const errors: Record<string, string> = {};
+    const unverifiedNames: string[] = [];
     for (const n of names) {
       const members = await resolveMembers(ctx.opts, n);
       if (!members || members.length === 0) { missing.push(n); continue; }
@@ -363,9 +441,13 @@ const containersDeleteAction: ActionDescriptor<DockerActionContext> = {
         })
       );
       const firstError = results.find((e) => e !== undefined);
-      if (firstError) errors[n] = firstError; else deleted++;
+      if (firstError) { errors[n] = firstError; continue; }
+      deleted++;
+      // Verify: every member must be gone from /containers/json.
+      const v = await verifyGone(ctx.opts, members);
+      if (!v.ok) unverifiedNames.push(n);
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, verified: unverifiedNames.length === 0, details: { deleted, missing, ...(unverifiedNames.length ? { unverified: unverifiedNames } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -621,15 +703,36 @@ const imagesDeleteAction: ActionDescriptor<DockerActionContext> = {
     let deleted = 0;
     const missing: string[] = [];
     const errors: Record<string, string> = {};
+    const unverifiedIds: string[] = [];
     for (const id of ids) {
       // The Engine API accepts a tag OR a sha256 id in the path. A short/long
       // sha is passed through verbatim; anything else is treated as a name:tag.
       const r = await dockerDelete<unknown>(ctx.opts, `/images/${encodeURIComponent(id)}`);
       if (r.ok || r.status === 304) deleted++;
       else if (r.status === 404) missing.push(id);
-      else errors[id] = r.error || `HTTP ${r.status}`;
+      else { errors[id] = r.error || `HTTP ${r.status}`; continue; }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: every deleted id must be gone from /images/json (tag match or sha prefix).
+    const wait = await pollUntil(
+      async () => {
+        const all = await listImages(ctx.opts);
+        if (!all.ok || !Array.isArray(all.data)) return null;
+        const images = all.data as Record<string, unknown>[];
+        return ids.every((id) => {
+          const sha = id.startsWith('sha256:') ? id.slice(7) : /^[0-9a-f]{12,}$/i.test(id) ? id : null;
+          return !images.some((img) => {
+            const tags = Array.isArray(img['RepoTags']) ? (img['RepoTags'] as string[]) : [];
+            if (tags.includes(id)) return true;
+            const imgId = typeof img['Id'] === 'string' ? (img['Id'] as string).replace(/^sha256:/, '') : '';
+            return sha !== null && imgId.startsWith(sha.slice(0, 12));
+          });
+        });
+      },
+      (gone) => gone === true,
+      { timeoutMs: 30_000, intervalMs: 1_500 },
+    );
+    if (!wait.ok && deleted > 0) unverifiedIds.push(...ids.filter((id) => !missing.includes(id)));
+    return { success: Object.keys(errors).length === 0, applied: true, verified: unverifiedIds.length === 0, details: { deleted, missing, ...(unverifiedIds.length ? { unverified: unverifiedIds } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 

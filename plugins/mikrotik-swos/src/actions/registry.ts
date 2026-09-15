@@ -11,10 +11,41 @@
  * changes are applied and persisted immediately by the switch.
  */
 
-import { createRegistry } from '@unm/plugin-sdk';
+import { createRegistry, pollUntil } from '@unm/plugin-sdk';
 import { buildPostArray, buildPostData, encodeHexString, encodeIpLe, encodePortMask } from '../swosClient';
 import { getField, hasField } from '../platform';
 import { ActionContext, ActionDescriptor } from './types';
+
+// --- Post-apply state verification -------------------------------------------------------
+// UNM marks a plan step "verified" only when the plugin RE-READS device state
+// after applying and confirms the write persisted (ActionResult.verified). The
+// switch applies POSTs immediately, so one bounded re-GET of the same endpoint
+// comparing exactly the fields we sent is sufficient — no long polling needed.
+
+/** Deep-equal for the wire values we deal with (scalars + flat arrays of scalars). */
+function wireEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => x === b[i]);
+  return false;
+}
+
+/** Re-GETs `endpoint` until every field in `expected` matches what we POSTed. */
+async function verifyEndpoint(ctx: ActionContext, endpoint: string, expected: Record<string, unknown>): Promise<boolean> {
+  if (Object.keys(expected).length === 0) return true;
+  const wait = await pollUntil(
+    async () => {
+      try {
+        const data = (await ctx.client.get(endpoint)) as Record<string, unknown>;
+        return Object.entries(expected).every(([k, v]) => wireEqual(data[k], v));
+      } catch {
+        return null; // transient read failure — keep probing until the deadline
+      }
+    },
+    (ok) => ok === true,
+    { timeoutMs: 15_000, intervalMs: 1_000 },
+  );
+  return wait.ok;
+}
 
 // --- Small helpers --------------------------------------------------------------------
 
@@ -171,7 +202,9 @@ const portConfigAction: ActionDescriptor = {
     }
     await ctx.client.post('link.b', buildPostData(writable as Record<string, number | string | (number | string)[]>));
 
-    return { success: true, applied: true, details: { port, name: str(input, 'name') ?? null, enabled: input.enabled ?? null, autoNegotiation: input.autoNegotiation ?? null } };
+    // Verify the switch persisted exactly what we sent.
+    const verified = await verifyEndpoint(ctx, 'link.b', writable);
+    return { success: true, applied: true, verified, details: { port, name: str(input, 'name') ?? null, enabled: input.enabled ?? null, autoNegotiation: input.autoNegotiation ?? null } };
   },
 };
 
@@ -242,7 +275,10 @@ const poeConfigAction: ActionDescriptor = {
     if (hasField(map, 'poeLldp') && data[map.poeLldp] !== undefined) writable[map.poeLldp] = data[map.poeLldp];
 
     await ctx.client.post('poe.b', buildPostData(writable as Record<string, number | string | (number | string)[]>));
-    return { success: true, applied: true, details: { port, mode: str(input, 'mode') ?? null } };
+
+    // Verify the switch persisted exactly what we sent.
+    const verified = await verifyEndpoint(ctx, 'poe.b', writable);
+    return { success: true, applied: true, verified, details: { port, mode: str(input, 'mode') ?? null } };
   },
 };
 
@@ -288,7 +324,10 @@ const lagConfigAction: ActionDescriptor = {
       if (hasField(map, key) && data[map[key]] !== undefined) writable[map[key]] = data[map[key]];
     }
     await ctx.client.post('lacp.b', buildPostData(writable as Record<string, number | string | (number | string)[]>));
-    return { success: true, applied: true, details: { port, mode: str(input, 'mode') ?? null, group: num(input, 'group') ?? null } };
+
+    // Verify the switch persisted exactly what we sent.
+    const verified = await verifyEndpoint(ctx, 'lacp.b', writable);
+    return { success: true, applied: true, verified, details: { port, mode: str(input, 'mode') ?? null, group: num(input, 'group') ?? null } };
   },
 };
 
@@ -350,7 +389,10 @@ const vlanPortAction: ActionDescriptor = {
       if (hasField(map, key) && data[map[key]] !== undefined) writable[map[key]] = data[map[key]];
     }
     await ctx.client.post('fwd.b', buildPostData(writable as Record<string, number | string | (number | string)[]>));
-    return { success: true, applied: true, details: { port, vlanMode: str(input, 'vlanMode') ?? null, defaultVlanId: num(input, 'defaultVlanId') ?? null } };
+
+    // Verify the switch persisted exactly what we sent.
+    const verified = await verifyEndpoint(ctx, 'fwd.b', writable);
+    return { success: true, applied: true, verified, details: { port, vlanMode: str(input, 'vlanMode') ?? null, defaultVlanId: num(input, 'defaultVlanId') ?? null } };
   },
 };
 
@@ -403,7 +445,26 @@ const vlansTableAction: ActionDescriptor = {
     }
 
     await ctx.client.post('vlan.b', buildPostArray(vlanArray));
-    return { success: true, applied: true, details: { vlans: raw.length, ids: raw.map((v) => num(v, 'id')) } };
+
+    // Verify the switch persisted the full table (ids + member masks).
+    const verified = await pollUntil(
+      async () => {
+        try {
+          const data = (await ctx.client.get('vlan.b')) as Record<string, unknown>[];
+          if (!Array.isArray(data) || data.length !== vlanArray.length) return false;
+          return vlanArray.every((entry, i) =>
+            wireEqual(data[i]?.[map.vlanId], entry[map.vlanId]) &&
+            wireEqual(data[i]?.[map.vlanMembers], entry[map.vlanMembers]) &&
+            wireEqual(data[i]?.[map.vlanIgmp], entry[map.vlanIgmp]),
+          );
+        } catch {
+          return null;
+        }
+      },
+      (ok) => ok === true,
+      { timeoutMs: 15_000, intervalMs: 1_000 },
+    ).then((w) => w.ok);
+    return { success: true, applied: true, verified, details: { vlans: raw.length, ids: raw.map((v) => num(v, 'id')) } };
   },
 };
 
@@ -432,7 +493,15 @@ const snmpConfigAction: ActionDescriptor = {
     if (str(input, 'location') !== undefined) data[map.snmpLocation] = encodeHexString(str(input, 'location')!);
 
     await postObject(ctx, 'snmp.b', data);
-    return { success: true, applied: true, details: { enabled: input.enabled ?? null } };
+
+    // Verify the switch persisted exactly what we sent.
+    const expected: Record<string, unknown> = {};
+    if (typeof input.enabled === 'boolean') expected[map.snmpEnabled] = input.enabled ? 1 : 0;
+    if (str(input, 'community') !== undefined) expected[map.snmpCommunity] = encodeHexString(str(input, 'community')!);
+    if (str(input, 'contact') !== undefined) expected[map.snmpContact] = encodeHexString(str(input, 'contact')!);
+    if (str(input, 'location') !== undefined) expected[map.snmpLocation] = encodeHexString(str(input, 'location')!);
+    const verified = await verifyEndpoint(ctx, 'snmp.b', expected);
+    return { success: true, applied: true, verified, details: { enabled: input.enabled ?? null } };
   },
 };
 
@@ -452,7 +521,10 @@ const systemIdentityAction: ActionDescriptor = {
     const data = (await ctx.client.get('sys.b')) as Record<string, unknown>;
     data[map.systemIdentity] = encodeHexString(str(input, 'identity')!);
     await postWritable(ctx, 'sys.b', data, SYS_WRITABLE_KEYS);
-    return { success: true, applied: true, details: { identity: str(input, 'identity') } };
+
+    // Verify the switch persisted the new identity.
+    const verified = await verifyEndpoint(ctx, 'sys.b', { [map.systemIdentity]: encodeHexString(str(input, 'identity')!) });
+    return { success: true, applied: true, verified, details: { identity: str(input, 'identity') } };
   },
 };
 
@@ -507,9 +579,16 @@ const systemManagementAction: ActionDescriptor = {
     }
 
     await postWritable(ctx, 'sys.b', data, SYS_WRITABLE_KEYS);
+
+    // Verify the switch persisted exactly what we sent.
+    const expected: Record<string, unknown> = {};
+    if (str(input, 'addressAcquisition') !== undefined) expected[map.systemAddressAcquisition] = acqMap[str(input, 'addressAcquisition')!];
+    if (str(input, 'staticIp') !== undefined) expected[map.systemStaticIp] = encodeIpLe(str(input, 'staticIp')!);
+    const verified = await verifyEndpoint(ctx, 'sys.b', expected);
     return {
       success: true,
       applied: true,
+      verified,
       details: {
         addressAcquisition: str(input, 'addressAcquisition') ?? null,
         staticIp: str(input, 'staticIp') ?? null,
