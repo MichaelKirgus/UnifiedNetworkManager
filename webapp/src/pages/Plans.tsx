@@ -1,12 +1,14 @@
-import { FormEvent, useMemo, useState } from 'react';
+import { FormEvent, ReactNode, useMemo, useState } from 'react';
+import clsx from 'clsx';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { Play, Plus, RotateCcw, X } from 'lucide-react';
+import { CalendarClock, Play, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
-import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
+import { DataTable, DataTableBulkAction, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
 import { SchemaForm, validateSchema, defaultValues } from '../components/SchemaForm';
 import { ReauthDialog } from '../components/ReauthDialog';
+import { ScheduleDialog } from '../components/ScheduleDialog';
 import { api, ApiError, CatalogEntry, Device, Plan } from '../api/client';
 import { can } from '../auth/permissions';
 
@@ -46,6 +48,9 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
   const [reauth, setReauth] = useState<{ label: string; retry: () => Promise<void> } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // Schedule dialog — single plan (row button) or a bulk selection.
+  const [scheduleTarget, setScheduleTarget] = useState<{ plans: Plan[]; label?: string } | null>(null);
+
   async function handleRetry(plan: Plan) {
     const attempt = async () => {
       const fresh = await api.retryPlan(plan.id);
@@ -74,6 +79,94 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
     }
   }
 
+  // --- Bulk actions (selection bar) -----------------------------------------
+
+  /** Plans that can be executed right now (draft/ready). */
+  const executable = (rows: Plan[]) => rows.filter((r) => ['draft', 'ready'].includes(r.status));
+  /** Plans that can be scheduled (saved or finished — never executing). */
+  const schedulable = (rows: Plan[]) => rows.filter((r) => r.status !== 'executing');
+
+  async function bulkExecute(rows: Plan[]) {
+    const targets = executable(rows);
+    if (targets.length === 0) {
+      setNotice('None of the selected plans can be executed right now (only draft/ready plans).');
+      return;
+    }
+    const attempt = async () => {
+      let ok = 0;
+      for (const p of targets) {
+        await api.executePlan(p.id);
+        ok += 1;
+      }
+      setNotice(`Execution started for ${ok} plan${ok === 1 ? '' : 's'}.`);
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth({ label: `Execute ${targets.length} plans`, retry: attempt });
+      else setNotice(`Bulk execute failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  async function bulkUnschedule(rows: Plan[]) {
+    const targets = rows.filter((r) => r.status === 'scheduled');
+    if (targets.length === 0) {
+      setNotice('None of the selected plans are scheduled.');
+      return;
+    }
+    try {
+      let ok = 0;
+      for (const p of targets) {
+        await api.unschedulePlan(p.id);
+        ok += 1;
+      }
+      setNotice(`Schedule removed from ${ok} plan${ok === 1 ? '' : 's'}.`);
+    } catch (err) {
+      setNotice(`Unschedule failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  async function bulkDelete(rows: Plan[]) {
+    const targets = rows.filter((r) => r.status !== 'executing');
+    if (targets.length === 0) {
+      setNotice('None of the selected plans can be deleted (cancel executing plans first).');
+      return;
+    }
+    try {
+      let ok = 0;
+      for (const p of targets) {
+        await api.deletePlan(p.id);
+        ok += 1;
+      }
+      setNotice(`Deleted ${ok} plan${ok === 1 ? '' : 's'}.`);
+    } catch (err) {
+      setNotice(`Bulk delete failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  const bulkActions: DataTableBulkAction<Plan>[] = [
+    {
+      label: 'Execute',
+      confirm: (n) => `Execute the selected draft/ready plans now? (${n} selected — only startable ones are affected)`,
+      onClick: (rows) => void bulkExecute(rows),
+    },
+    {
+      label: 'Schedule…',
+      confirm: (n) => `Pick a due time for the selected plans. (${n} selected — executing plans are ignored)`,
+      onClick: (rows) => setScheduleTarget({ plans: schedulable(rows) }),
+    },
+    {
+      label: 'Unschedule',
+      confirm: (n) => `Remove the schedule from the selected scheduled plans? They return to their previous state. (${n} selected)`,
+      onClick: (rows) => void bulkUnschedule(rows),
+    },
+    {
+      label: 'Delete',
+      confirm: (n) => `Permanently delete the selected plans and their provisioned secrets? (${n} selected — executing plans are ignored)`,
+      onClick: (rows) => void bulkDelete(rows),
+    },
+  ];
+
   const columns: DataTableColumn<Plan>[] = [
     {
       header: 'Intent',
@@ -96,6 +189,26 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
       ),
     },
     { header: 'Status', key: 'status', render: (row) => <StatusBadge status={row.status} /> },
+    {
+      header: 'Scheduled',
+      key: 'scheduledAt',
+      sortable: false,
+      filterable: false,
+      width: 210,
+      exportValue: (row) => row.scheduledAt ?? '',
+      render: (row) =>
+        row.status === 'scheduled' && row.scheduledAt ? (
+          <span className="flex items-center gap-1.5 text-xs" title={`Policy: ${row.schedulePolicy === 'skip' ? 'skip if UNM/plugin is down when due' : 'retry as soon as possible if down when due'}`}>
+            <CalendarClock className="h-3.5 w-3.5 shrink-0 text-primary" />
+            <span>{fmtTime(row.scheduledAt)}</span>
+            <span className={clsx('rounded border px-1 py-px text-[10px] font-medium', row.schedulePolicy === 'skip' ? 'border-warning-border bg-warning text-warning-fg' : 'border-info-border bg-info text-info-fg')}>
+              {row.schedulePolicy === 'skip' ? 'skip if down' : 'retry if down'}
+            </span>
+          </span>
+        ) : (
+          <span className="text-faint">—</span>
+        ),
+    },
     {
       header: 'Error',
       key: 'error',
@@ -154,26 +267,45 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
       render: (row) => {
         if (!canApply || row.status === 'executing') return null;
         const neverRun = ['draft', 'ready'].includes(row.status);
+        // Icon-only action buttons — same design language as Storage/VMs/Containers.
+        const actions: { id: string; label: string; icon: ReactNode; danger?: boolean }[] = [];
+        if (neverRun) actions.push({ id: 'execute', label: `Execute ${row.intentActionId} now`, icon: <Play size={14} /> });
+        actions.push({
+          id: row.status === 'scheduled' ? 'reschedule' : 'schedule',
+          label: row.status === 'scheduled' ? `Change the schedule for ${row.intentActionId}` : `Schedule ${row.intentActionId} to run later`,
+          icon: <CalendarClock size={14} />,
+        });
+        if (row.status === 'scheduled') actions.push({ id: 'unschedule', label: `Remove the schedule from ${row.intentActionId}`, icon: <X size={14} /> });
+        actions.push({ id: 'retry', label: `Retry ${row.intentActionId} — duplicates this plan and executes the copy`, icon: <RotateCcw size={14} /> });
+        actions.push({ id: 'delete', label: `Delete ${row.intentActionId}`, icon: <Trash2 size={13} />, danger: true });
+
         return (
-          <div className="flex items-center gap-1">
-            {neverRun && (
+          <div className="flex items-center gap-0.5">
+            {actions.map((a) => (
               <button
-                onClick={() => handleExecute(row)}
-                title="Execute this saved plan now"
-                aria-label={`Execute ${row.intentActionId}`}
-                className="flex items-center gap-1 rounded border border-success-border bg-success px-2 py-1 text-xs font-medium text-success-fg hover:opacity-90"
+                key={a.id}
+                type="button"
+                aria-label={a.label}
+                title={a.label}
+                onClick={() => {
+                  if (a.id === 'execute') void handleExecute(row);
+                  else if (a.id === 'schedule' || a.id === 'reschedule') setScheduleTarget({ plans: [row] });
+                  else if (a.id === 'unschedule') void bulkUnschedule([row]);
+                  else if (a.id === 'retry') void handleRetry(row);
+                  else if (a.id === 'delete') {
+                    const msg = `Permanently delete this plan and its provisioned secrets? This cannot be undone.`;
+                    if (!window.confirm(msg)) return;
+                    void bulkDelete([row]);
+                  }
+                }}
+                className={clsx(
+                  'rounded-md p-1.5 hover:bg-muted',
+                  a.danger ? 'text-danger-fg hover:text-danger-fg' : 'text-secondary hover:text-foreground',
+                )}
               >
-                <Play className="h-3.5 w-3.5" /> Execute
+                {a.icon}
               </button>
-            )}
-            <button
-              onClick={() => handleRetry(row)}
-              title="Retry — duplicates this plan (same payload + secrets) and executes the copy"
-              aria-label={`Retry ${row.intentActionId}`}
-              className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs font-medium text-secondary hover:bg-muted disabled:opacity-50"
-            >
-              <RotateCcw className="h-3.5 w-3.5" /> Retry
-            </button>
+            ))}
           </div>
         );
       },
@@ -211,6 +343,8 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
           rows={plansQuery.data.map((p) => ({ ...p, intentActionId: p.intentActionId }))}
           rowKey={(row) => row.id}
           storageKey="plans"
+          selectable={canApply}
+          bulkActions={bulkActions}
           autoRefresh={{ intervalMs: 10_000, queries: [plansQuery] }}
           emptyMessage="No plans yet. Create one to roll out a multi-device change (e.g. a WireGuard tunnel)."
           expandable={{
@@ -222,6 +356,17 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
             childrenOf: (row) =>
               String(row.id).startsWith(PAYLOAD_CHILD_PREFIX) ? [] : [{ ...row, id: PAYLOAD_CHILD_PREFIX + row.id }],
             renderChild: (_child, parent, ctx) => <PlanPayloadRow plan={parent} ctx={ctx} />,
+          }}
+        />
+      )}
+
+      {scheduleTarget && scheduleTarget.plans.length > 0 && (
+        <ScheduleDialog
+          plans={scheduleTarget.plans}
+          onClose={() => setScheduleTarget(null)}
+          onSaved={(n) => {
+            setNotice(`Scheduled ${n} plan${n === 1 ? '' : 's'} — the scheduler will run them at their due time.`);
+            void plansQuery.refetch();
           }}
         />
       )}

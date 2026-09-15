@@ -344,6 +344,38 @@ async function processPlan(planId: string): Promise<void> {
 }
 
 /**
+ * Flips a startable plan (draft/ready/scheduled) to 'executing' and enqueues it
+ * for the worker loop — ONE place owns "reset every step + flip status", shared
+ * by POST /plans/:id/execute, POST /plans/:id/retry (the duplicate), and the
+ * scheduler worker. Consumes any pending schedule (its fields are cleared).
+ */
+export async function enqueuePlanExecution(planId: string, executedBy: string | null): Promise<void> {
+  const now = new Date().toISOString();
+  await db.update(schema.plans)
+    // Re-execution clears the "recently done" tick so it re-appears on finish,
+    // and resets every step to pending (a re-run re-applies ALL steps — the
+    // executor resolves ${steps[N].result...} tokens from THIS run's results).
+    .set({
+      status: 'executing',
+      executedBy,
+      error: null,
+      startedAt: null,
+      finishedAt: null,
+      recentlyFinishedAt: null,
+      scheduledAt: null,
+      schedulePolicy: null,
+      preScheduleStatus: null,
+      scheduleAttempts: 0,
+      updatedAt: now,
+    })
+    .where(eq(schema.plans.id, planId));
+  await db.update(schema.planSteps)
+    .set({ status: 'pending', result: null, startedAt: null, finishedAt: null })
+    .where(eq(schema.planSteps.planId, planId));
+  planQueue.add(planId, { planId });
+}
+
+/**
  * Crash recovery (user decision: fail, don't resume). If the API restarted
  * while a plan was executing, its steps may be half-applied to firewalls —
  * auto-resuming risks double-applying staged config. Mark such plans failed so

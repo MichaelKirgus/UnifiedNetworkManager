@@ -8,7 +8,7 @@ import { requireAuth, requirePermission, require2FA } from '../auth/middleware';
 import { allowedDeviceIds } from '../deviceAccess';
 import { getSecret, generateSecret, regenerateSecret, deleteSecret } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
-import { planQueue } from '../queue';
+import { enqueuePlanExecution } from '../workers/planExecutor';
 import type { CatalogEntry as SdkCatalogEntry } from '@unm/plugin-sdk';
 import { validateInput, type InputSchema } from '../utils/inputSchema';
 
@@ -46,6 +46,10 @@ interface PlanRow {
   finishedAt: string | null;
   recentlyFinishedAt: string | null;
   retriedFrom: string | null;
+  scheduledAt: string | null;
+  schedulePolicy: string | null;
+  preScheduleStatus: string | null;
+  scheduleAttempts: number;
 }
 
 /**
@@ -128,7 +132,13 @@ type CatalogEntry = Omit<SdkCatalogEntry, 'label' | 'module' | 'riskLevel' | 'de
   inputSchema?: InputSchema;
 };
 
-const EDITABLE_STATUSES = ['draft', 'ready'];
+// Step editing is only possible while the plan has never run (or is waiting to
+// run). A scheduled plan keeps its steps editable too — the user may still fix a
+// step before its due time.
+const EDITABLE_STATUSES = ['draft', 'ready', 'scheduled'];
+
+/** Statuses from which a plan can be (re-)scheduled: never-run, scheduled (change the time), or finished. */
+const SCHEDULABLE_STATUSES = ['draft', 'ready', 'scheduled', 'succeeded', 'failed', 'cancelled', 'skipped'];
 
 function parseJson<T>(raw: string | null, fallback: T): T {
   if (!raw) return fallback;
@@ -201,6 +211,9 @@ function serializePlanRow(row: PlanRow, usernames: Map<string, string>): Record<
     finishedAt: row.finishedAt,
     recentlyFinishedAt: row.recentlyFinishedAt,
     retriedFrom: row.retriedFrom,
+    // Scheduling state (null when the plan is not scheduled).
+    scheduledAt: row.scheduledAt ?? null,
+    schedulePolicy: row.schedulePolicy ?? null,
   };
 }
 
@@ -520,6 +533,8 @@ router.get('/plans/activity', requireAuth, requirePermission('plans:read'), asyn
         eq(plans.status, 'executing'),
         eq(plans.status, 'ready'),
         eq(plans.status, 'draft'),
+        // Scheduled plans are "queued for later" — they belong in the feed too.
+        eq(plans.status, 'scheduled'),
         gte(plans.recentlyFinishedAt, cutoff),
       ),
     orderBy: [desc(schema.plans.updatedAt)],
@@ -994,25 +1009,7 @@ router.post(
     // Device-level access control — executing applies changes to every step's device.
     if (!(await assertPlanAccess(req, res, req.params.id))) return;
 
-    const now = new Date().toISOString();
-    await db.update(schema.plans)
-      // Re-execution clears the "recently done" tick so it re-appears on finish,
-      // and resets every step to pending (a re-run re-applies ALL steps — the
-      // executor resolves ${steps[N].result...} tokens from THIS run's results).
-      .set({
-        status: 'executing',
-        executedBy: req.user?.sub ?? null,
-        error: null,
-        startedAt: null,
-        finishedAt: null,
-        recentlyFinishedAt: null,
-        updatedAt: now,
-      })
-      .where(eq(schema.plans.id, plan.id));
-    await db.update(schema.planSteps)
-      .set({ status: 'pending', result: null, startedAt: null, finishedAt: null })
-      .where(eq(schema.planSteps.planId, plan.id));
-    planQueue.add(plan.id, { planId: plan.id });
+    await enqueuePlanExecution(plan.id, req.user?.sub ?? null);
     res.status(202).json((await serializePlan(plan.id, true))!);
   }
 );
@@ -1085,10 +1082,7 @@ router.post(
     }
 
     // Execute the duplicate immediately (same path as a manual execute).
-    await db.update(schema.plans)
-      .set({ status: 'executing', executedBy: userId, updatedAt: now })
-      .where(eq(schema.plans.id, newId));
-    planQueue.add(newId, { planId: newId });
+    await enqueuePlanExecution(newId, userId);
 
     res.status(201).json((await serializePlan(newId, true))!);
   }
@@ -1138,6 +1132,131 @@ router.post(
       const e = err as { status?: number; message?: string };
       res.status(e.status ?? 502).json({ error: e.message ?? 'Regeneration failed' });
     }
+  }
+);
+
+/**
+ * Validates the schedule request body and returns an absolute due instant as
+ * ISO 8601 UTC — or null with a pre-built error message. Accepts either
+ * `at` (absolute date-time string) or `inMinutes` (relative, >= 1). The two are
+ * mutually exclusive; exactly one must be present.
+ */
+function parseScheduleRequest(body: Record<string, unknown>): { dueIso: string | null; error?: string } {
+  const hasAt = body.at !== undefined && body.at !== null;
+  const hasInMinutes = body.inMinutes !== undefined && body.inMinutes !== null;
+  if (hasAt === hasInMinutes) {
+    return { dueIso: null, error: 'Provide exactly one of "at" (absolute date-time) or "inMinutes" (relative)' };
+  }
+  let dueMs: number;
+  if (hasInMinutes) {
+    const mins = Number(body.inMinutes);
+    if (!Number.isFinite(mins) || mins < 1 || mins > 365 * 24 * 60) {
+      return { dueIso: null, error: '"inMinutes" must be a number between 1 and 525600 (one year)' };
+    }
+    dueMs = Date.now() + Math.round(mins * 60_000);
+  } else {
+    const parsed = new Date(String(body.at));
+    if (Number.isNaN(parsed.getTime())) {
+      return { dueIso: null, error: '"at" is not a valid date-time' };
+    }
+    dueMs = parsed.getTime();
+  }
+  // A minute of slack so "schedule for now" still works.
+  if (dueMs < Date.now() - 60_000) {
+    return { dueIso: null, error: 'The scheduled time is in the past — pick a future date/time' };
+  }
+  return { dueIso: new Date(dueMs).toISOString() };
+}
+
+// POST /plans/:id/schedule — (re-)schedule a plan. Accepts draft/ready plans and
+// finished ones (succeeded/failed/cancelled/skipped) so any completed action can
+// be re-run later. The due time is relative ("inMinutes") or absolute ("at"),
+// plus the policy for what happens when the plugin cannot be reached at the due
+// instant: 'run-asap' retries with backoff until it succeeds, 'skip' marks the
+// plan skipped. Re-scheduling replaces any existing schedule (idempotent).
+router.post(
+  '/plans/:id/schedule',
+  requireAuth,
+  requirePermission('configs:apply'),
+  async (req, res) => {
+    if (!(await assertPlanAccess(req, res, req.params.id))) return;
+    const plan = await loadPlan(req.params.id);
+    if (!plan) {
+      res.status(404).json({ error: 'Plan not found' });
+      return;
+    }
+    if (plan.status === 'executing') {
+      res.status(409).json({ error: 'This plan is executing — cancel it or wait for completion before scheduling' });
+      return;
+    }
+    if (!SCHEDULABLE_STATUSES.includes(plan.status)) {
+      res.status(409).json({ error: `Plan is ${plan.status} — only saved or finished plans can be scheduled` });
+      return;
+    }
+
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const parsed = parseScheduleRequest(body);
+    if (!parsed.dueIso) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+    const policy = body.policy === 'skip' ? 'skip' : 'run-asap';
+
+    // A finished plan keeps its last run's results visible until it runs again —
+    // only the status moves to 'scheduled'. preScheduleStatus remembers where an
+    // unschedule should return it (a re-schedule of an already-scheduled plan
+    // keeps the ORIGINAL pre-schedule status, not 'scheduled'). scheduleAttempts
+    // resets on every fresh schedule.
+    const now = new Date().toISOString();
+    await db.update(schema.plans)
+      .set({
+        status: 'scheduled',
+        scheduledAt: parsed.dueIso,
+        schedulePolicy: policy,
+        preScheduleStatus: plan.status === 'scheduled' ? (plan.preScheduleStatus ?? 'ready') : plan.status,
+        scheduleAttempts: 0,
+        error: null,
+        updatedAt: now,
+      })
+      .where(eq(schema.plans.id, plan.id));
+
+    res.status(200).json((await serializePlan(plan.id, true))!);
+  }
+);
+
+// DELETE /plans/:id/schedule — remove the schedule. The plan returns to its
+// pre-schedule status (draft/ready for never-run plans; succeeded/failed/etc.
+// for finished ones), so a scheduled-then-unscheduled plan is exactly as it was.
+router.delete(
+  '/plans/:id/schedule',
+  requireAuth,
+  requirePermission('configs:apply'),
+  async (req, res) => {
+    if (!(await assertPlanAccess(req, res, req.params.id))) return;
+    const plan = await loadPlan(req.params.id);
+    if (!plan) {
+      res.status(404).json({ error: 'Plan not found' });
+      return;
+    }
+    if (plan.status !== 'scheduled') {
+      res.status(409).json({ error: `Plan is ${plan.status} — only scheduled plans can be unscheduled` });
+      return;
+    }
+
+    const restore = SCHEDULABLE_STATUSES.includes(plan.preScheduleStatus ?? '') ? plan.preScheduleStatus! : 'ready';
+    const now = new Date().toISOString();
+    await db.update(schema.plans)
+      .set({
+        status: restore,
+        scheduledAt: null,
+        schedulePolicy: null,
+        preScheduleStatus: null,
+        scheduleAttempts: 0,
+        updatedAt: now,
+      })
+      .where(eq(schema.plans.id, plan.id));
+
+    res.status(200).json((await serializePlan(plan.id, true))!);
   }
 );
 

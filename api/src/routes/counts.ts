@@ -89,7 +89,8 @@ const COUNTS: CountSpec[] = [
         .from(schema.plans)
         .where(
           and(
-            inArray(schema.plans.status, ['executing', 'ready', 'draft']),
+            // Scheduled plans count as active too (queued for a later run).
+            inArray(schema.plans.status, ['executing', 'ready', 'draft', 'scheduled']),
             allowed !== null
               ? not(exists(
                   db.select({ id: schema.planSteps.id }).from(schema.planSteps).where(

@@ -5,6 +5,7 @@ import clsx from 'clsx';
 import {
   ArrowDown,
   ArrowUp,
+  CalendarClock,
   ChevronRight,
   ClipboardList,
   Play,
@@ -19,8 +20,12 @@ import { Layout } from '../components/Layout';
 import { StatusBadge } from '../components/StatusBadge';
 import { SchemaForm, validateSchema, defaultValues } from '../components/SchemaForm';
 import { ReauthDialog } from '../components/ReauthDialog';
+import { ScheduleDialog } from '../components/ScheduleDialog';
 import { api, ApiError, CatalogEntry, Device, PlanDetail as PlanDetailType, PlanStep } from '../api/client';
 import { can } from '../auth/permissions';
+
+/** Statuses from which a plan can be (re-)scheduled — saved, already scheduled, or finished. */
+const SCHEDULABLE_STATUSES = ['draft', 'ready', 'scheduled', 'succeeded', 'failed', 'cancelled', 'skipped'];
 
 export default function PlanDetail() {
   const { id = '' } = useParams();
@@ -62,6 +67,8 @@ export default function PlanDetail() {
   // the copy — 2FA-gated server-side, so a 401 opens in-session revalidation.
   const [reauth, setReauth] = useState<{ label: string; retry: () => Promise<void> } | null>(null);
   const [retryError, setRetryError] = useState<string | null>(null);
+  // Schedule dialog (relative/absolute due time + down-policy).
+  const [showSchedule, setShowSchedule] = useState(false);
   async function handleRetry() {
     setRetryError(null);
     const attempt = async () => {
@@ -89,6 +96,10 @@ export default function PlanDetail() {
     onSuccess: () => {
       window.location.href = '/plans';
     },
+  });
+  const unscheduleMutation = useMutation({
+    mutationFn: () => api.unschedulePlan(id),
+    onSuccess: () => planQuery.refetch(),
   });
 
   if (planQuery.isLoading) return <Layout><p className="text-sm text-muted-foreground">Loading plan…</p></Layout>;
@@ -120,6 +131,20 @@ export default function PlanDetail() {
               <Play className="h-4 w-4" /> Execute
             </button>
           )}
+          {canApply && plan.status !== 'executing' && SCHEDULABLE_STATUSES.includes(plan.status) && (
+            <button onClick={() => setShowSchedule(true)}
+              title={plan.status === 'scheduled' ? 'Change the schedule for this plan' : 'Schedule this plan to run later (relative or absolute time)'}
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
+              <CalendarClock className="h-4 w-4" /> {plan.status === 'scheduled' ? 'Reschedule' : 'Schedule'}
+            </button>
+          )}
+          {canApply && plan.status === 'scheduled' && (
+            <button onClick={() => unscheduleMutation.mutate()} disabled={unscheduleMutation.isPending}
+              title="Remove the schedule — the plan returns to its previous state"
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted disabled:opacity-50">
+              <X className="h-4 w-4" /> Unschedule
+            </button>
+          )}
           {canApply && plan.status !== 'executing' && (
             <button onClick={handleRetry} title="Duplicates this plan (same payload + secrets) and executes the copy"
               className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
@@ -144,9 +169,9 @@ export default function PlanDetail() {
     >
       <Link to="/plans" className="mb-3 inline-block text-xs text-faint hover:text-secondary">← Plans</Link>
 
-      {(executeMutation.error || cancelMutation.error) && (
+      {(executeMutation.error || cancelMutation.error || unscheduleMutation.error) && (
         <div className="mb-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
-          {describeError(executeMutation.error ?? cancelMutation.error)}
+          {describeError(executeMutation.error ?? cancelMutation.error ?? unscheduleMutation.error)}
         </div>
       )}
       {retryError && (
@@ -154,13 +179,31 @@ export default function PlanDetail() {
       )}
 
       {/* Saved via the top-bar Plan mode (or created without executing) — never
-          run yet. The Execute button in the header runs it; scheduling is a
-          follow-up feature. */}
-      {editable && !plan.startedAt && (
+          run yet. The Execute button in the header runs it; Schedule defers it. */}
+      {editable && !plan.startedAt && plan.status !== 'scheduled' && (
         <div className="mb-4 flex items-start gap-2 rounded-md border border-info-border bg-info px-3 py-2 text-sm text-info-fg">
           <ClipboardList className="mt-0.5 h-4 w-4 shrink-0" />
-          This plan is saved but has NOT been executed yet. Use “Execute” to run it now — or leave it for later (scheduling
-          will be available here).
+          This plan is saved but has NOT been executed yet. Use “Execute” to run it now — or use “Schedule” to run it later
+          (relative or absolute time).
+        </div>
+      )}
+      {/* Scheduled — show the due time + what happens if UNM/plugin is down then. */}
+      {plan.status === 'scheduled' && plan.scheduledAt && (
+        <div className="mb-4 flex items-start gap-2 rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-sm">
+          <CalendarClock className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+          <span>
+            Scheduled to run at <strong>{fmtTime(plan.scheduledAt)}</strong> (local time).
+            {plan.schedulePolicy === 'skip'
+              ? ' If UNM or the plugin is down when it is due, the plan will be marked “skipped”.'
+              : ' If UNM or the plugin is down when it is due, it will retry as soon as possible (with backoff).'}
+          </span>
+        </div>
+      )}
+      {/* Skipped — a due schedule was skipped per policy. */}
+      {plan.status === 'skipped' && (
+        <div className="mb-4 flex items-start gap-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-sm text-warning-fg">
+          <X className="mt-0.5 h-4 w-4 shrink-0" />
+          This plan was skipped{plan.error ? `: ${plan.error}` : '.'} You can re-schedule it or retry it.
         </div>
       )}
 
@@ -175,6 +218,17 @@ export default function PlanDetail() {
           muted={!plan.startedAt}
         />
         <Meta label="Finished" value={fmtTime(plan.finishedAt)} muted={!plan.finishedAt} />
+        {plan.status === 'scheduled' && plan.scheduledAt ? (
+          <Meta
+            label="Scheduled"
+            value={
+              <span className="flex items-center gap-1">
+                <CalendarClock className="h-3.5 w-3.5 text-primary" />
+                {fmtTime(plan.scheduledAt)}
+              </span>
+            }
+          />
+        ) : null}
         {plan.retriedFrom && (
           <Meta
             label="Retried from"
@@ -226,6 +280,14 @@ export default function PlanDetail() {
 
       {plan.error && (
         <div className="mt-4 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{plan.error}</div>
+      )}
+
+      {showSchedule && (
+        <ScheduleDialog
+          plan={plan}
+          onClose={() => setShowSchedule(false)}
+          onSaved={() => void planQuery.refetch()}
+        />
       )}
 
       {reauth && (

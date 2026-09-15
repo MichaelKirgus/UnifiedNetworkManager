@@ -12,8 +12,11 @@ const STATUS_STYLES: Record<string, string> = {
   succeeded: 'bg-success text-success-fg border-success-border',
   failed: 'bg-danger text-danger-fg border-danger-border',
   pending: 'bg-background text-secondary border-border',
+  // Plan-level "skipped" (a due schedule was skipped per policy) and step-level
+  // "skipped" (not run — dependency failed / cancelled) share this style.
   skipped: 'bg-muted text-muted-foreground border-border line-through',
   ready: 'bg-info text-info-fg border-info-border',
+  scheduled: 'bg-primary/15 text-primary border-primary/40',
   executing: 'bg-info text-info-fg border-info-border',
   cancelled: 'bg-muted text-secondary border-border',
   // Tunnel states (Tunnels page): live up/down vs. config-level enabled/disabled.

@@ -31,6 +31,7 @@ import { startTelemetryRetentionWorker } from './workers/telemetryRetention';
 import { startPluginDiscovery } from './plugins/discovery';
 import { startConfigJobWorker } from './workers/configJob';
 import { startPlanExecutorWorker } from './workers/planExecutor';
+import { startPlanSchedulerWorker } from './workers/planScheduler';
 import { startLogRetentionWorker } from './workers/logRetention';
 import { startPluginMetricsWorker } from './workers/pluginMetrics';
 import { startInactiveUsersWorker } from './workers/inactiveUsers';
@@ -183,6 +184,8 @@ async function main(): Promise<void> {
 
     void runAsLeader(LEADER_KEYS.telemetry, 'telemetry', () => startTelemetryWorker()).then((stop) => workerStops.push(stop));
     void runAsLeader(LEADER_KEYS.planExecutor, 'planExecutor', () => startPlanExecutorWorker()).then((stop) => workerStops.push(stop));
+    // Scheduled plans: flips due 'scheduled' plans to executing (leader-gated).
+    void runAsLeader(LEADER_KEYS.planScheduler, 'planScheduler', () => startPlanSchedulerWorker()).then((stop) => workerStops.push(stop));
     void runAsLeader(LEADER_KEYS.retention, 'retention', () => {
       const stopLogs = startLogRetentionWorker();
       return () => stopLogs();

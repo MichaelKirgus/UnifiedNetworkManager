@@ -85,7 +85,8 @@ export function PlansCenter() {
   const rows: Plan[] = query.data ?? [];
   // Badge counts in-flight work only (executing + queued). Recently-finished
   // plans are visible in the panel but don't keep a badge on the icon.
-  const activeCount = rows.filter((p) => p.status === 'executing' || p.status === 'ready' || p.status === 'draft').length;
+  // Scheduled plans count as active too — they are queued for a later run.
+  const activeCount = rows.filter((p) => p.status === 'executing' || p.status === 'ready' || p.status === 'draft' || p.status === 'scheduled').length;
 
   return (
     <div className="relative" ref={anchorRef}>

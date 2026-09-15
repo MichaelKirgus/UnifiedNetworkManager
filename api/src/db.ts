@@ -131,6 +131,15 @@ export async function initDb(): Promise<void> {
   // Plans created via retry duplicate another plan — link them for traceability.
   await pool.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS "retriedFrom" TEXT`);
 
+  // Plan scheduling (workers/planScheduler.ts): scheduledAt is the due instant,
+  // schedulePolicy decides what happens when a due run cannot reach its plugin
+  // ('run-asap' retries with backoff, 'skip' marks the plan skipped), and
+  // preScheduleStatus remembers where an unschedule should return the plan.
+  await pool.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS "scheduledAt" TEXT`);
+  await pool.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS "schedulePolicy" TEXT`);
+  await pool.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS "preScheduleStatus" TEXT`);
+  await pool.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS "scheduleAttempts" INTEGER NOT NULL DEFAULT 0`);
+
   // Roles: named bundles of permissions (see backfillAdminRole for the seed).
   await pool.query(`
     CREATE TABLE IF NOT EXISTS roles (

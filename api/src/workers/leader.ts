@@ -40,6 +40,7 @@ export const LEADER_KEYS = {
   telemetryRetention: 9006,
   notifications: 9007,
   inactiveUsers: 9008,
+  planScheduler: 9009,
 } as const;
 
 /**

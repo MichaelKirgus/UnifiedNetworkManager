@@ -1733,6 +1733,77 @@ paths:
         '409':
           description: Plan is not executing
 
+  /plans/{id}/schedule:
+    post:
+      tags: [Plans]
+      summary: (Re-)schedule a plan for later execution
+      description: >-
+        Requires permission `configs:apply`. Accepts saved plans (draft/ready),
+        already-scheduled ones (to change the time/policy) and finished ones
+        (succeeded/failed/cancelled/skipped), so any completed action can be
+        re-run later. The due time is relative (`inMinutes`) or
+        absolute (`at`); exactly one must be given. `policy` controls what
+        happens when the plugin cannot be reached at the due instant:
+        `run-asap` (default) keeps retrying with backoff until it succeeds,
+        `skip` marks the plan skipped. Re-scheduling replaces any existing
+        schedule. The scheduler worker flips due plans to executing; a plan that
+        was due while UNM itself was down is handled at startup per its policy.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanScheduleRequest'
+      responses:
+        '200':
+          description: Plan scheduled (status scheduled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '400':
+          description: Invalid or missing schedule time
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Plan not found
+        '409':
+          description: Plan is executing (or in a non-schedulable state)
+    delete:
+      tags: [Plans]
+      summary: Remove the schedule from a plan
+      description: >-
+        Requires permission `configs:apply`. Only scheduled plans can be
+        unscheduled. The plan returns to its pre-schedule status (draft/ready
+        for never-run plans, succeeded/failed/etc. for finished ones).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Schedule removed; plan restored to its pre-schedule status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Plan not found
+        '409':
+          description: Plan is not scheduled
+
   /plans/{id}/steps:
     post:
       tags: [Plans]
@@ -6353,6 +6424,22 @@ components:
           description: "stepIndex values that must succeed first (cycles rejected)"
         bestEffort: { type: boolean }
 
+    PlanScheduleRequest:
+      type: object
+      description: >-
+        Exactly one of `at` (absolute date-time) or `inMinutes` (relative, >= 1)
+        must be provided. `policy` defaults to 'run-asap'.
+      properties:
+        at: { type: string, format: date-time, description: "Absolute due instant" }
+        inMinutes: { type: number, minimum: 1, maximum: 525600, description: "Relative due time (minutes from now)" }
+        policy:
+          type: string
+          enum: [run-asap, skip]
+          default: run-asap
+          description: >-
+            Behavior when the plugin is unreachable at the due instant — 'run-asap'
+            retries with backoff until it succeeds; 'skip' marks the plan skipped.
+
     PlanProvisionedSecret:
       type: object
       required: [ref, secretId]
@@ -6409,7 +6496,7 @@ components:
           description: "The raw intent inputs as submitted — the payload of every execution (re-runs and retries carry the same values)"
         status:
           type: string
-          enum: [draft, ready, executing, succeeded, failed, cancelled]
+          enum: [draft, ready, scheduled, executing, succeeded, failed, cancelled, skipped]
         provisionedSecrets:
           type: array
           items:
@@ -6442,6 +6529,18 @@ components:
           format: date-time
           nullable: true
           description: "Last time the plan reached a terminal status (cleared on re-execution); drives the top-bar plans icon tick"
+        scheduledAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Due instant of the current schedule (null when not scheduled)"
+        schedulePolicy:
+          type: string
+          enum: [run-asap, skip]
+          nullable: true
+          description: >-
+            What happens when a due execution cannot reach its plugin — 'run-asap'
+            retries with backoff until it succeeds, 'skip' marks the plan skipped.
         stepCount: { type: integer, description: "Present on list responses" }
         stepsDone: { type: integer, description: "Present on list responses" }
 

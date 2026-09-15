@@ -1257,7 +1257,7 @@ export const plans = pgTable(
     // the plan row so the payload of every execution is transparent, including
     // re-runs and retries (which duplicate the plan with the same inputs).
     intentInputs: text('intentInputs').notNull().default('{}'),
-    // draft | ready | executing | succeeded | failed | cancelled
+    // draft | ready | scheduled | executing | succeeded | failed | cancelled | skipped
     status: text('status').notNull().default('ready'),
     // JSON object mapping provisionRequest ref -> created secret id.
     provisionedSecrets: text('provisionedSecrets').notNull().default('{}'),
@@ -1278,6 +1278,19 @@ export const plans = pgTable(
     // Set on plans created via POST /plans/:id/retry — the id of the plan this
     // one duplicates (same payload + provisioned secrets). Null otherwise.
     retriedFrom: text('retriedFrom'),
+    // Scheduling (see workers/planScheduler.ts): when set, the scheduler worker
+    // flips this plan to 'executing' at or after this instant (ISO 8601 UTC).
+    scheduledAt: text('scheduledAt'),
+    // What to do when a due execution cannot reach its plugin (stack down /
+    // plugin not responding): 'run-asap' keeps retrying with backoff until it
+    // succeeds; 'skip' marks the plan skipped after one failed attempt.
+    schedulePolicy: text('schedulePolicy'),
+    // The status the plan had when it was scheduled — restored on unschedule,
+    // so a succeeded plan can be re-scheduled and later returned to succeeded.
+    preScheduleStatus: text('preScheduleStatus'),
+    // How many times the scheduler has already attempted this schedule (drives
+    // the run-asap backoff; reset on every fresh execution).
+    scheduleAttempts: integer('scheduleAttempts').notNull().default(0),
     finishedAt: text('finishedAt'),
     // Last time this plan reached a terminal status (succeeded/failed/cancelled).
     // Distinct from finishedAt, which is cleared when the plan is re-executed —
@@ -1287,6 +1300,8 @@ export const plans = pgTable(
   (table) => {
     return {
       idxPlansPluginCreated: index('idx_plans_plugin_created').on(table.pluginId, table.createdAt),
+      // The scheduler worker scans due plans on every tick.
+      idxPlansScheduledAt: index('idx_plans_scheduled_at').on(table.scheduledAt),
     };
   }
 );

@@ -1741,7 +1741,7 @@ export interface Plan {
   intentActionId: string;
   /** The raw intent inputs as submitted — the payload of every execution (re-runs and retries carry the same values). */
   intentInputs?: Record<string, unknown>;
-  status: 'draft' | 'ready' | 'executing' | 'succeeded' | 'failed' | 'cancelled';
+  status: 'draft' | 'ready' | 'scheduled' | 'executing' | 'succeeded' | 'failed' | 'cancelled' | 'skipped';
   provisionedSecrets: PlanProvisionedSecret[];
   error?: string | null;
   createdBy: string;
@@ -1759,6 +1759,10 @@ export interface Plan {
   recentlyFinishedAt?: string | null;
   /** Set when this plan was created via retry — id of the duplicated plan. */
   retriedFrom?: string | null;
+  /** Due instant of the current schedule (null when not scheduled). */
+  scheduledAt?: string | null;
+  /** What happens if the plugin is unreachable at the due instant: 'run-asap' retries with backoff, 'skip' marks it skipped. */
+  schedulePolicy?: 'run-asap' | 'skip' | null;
   /** Present on list responses. */
   stepCount?: number;
   stepsDone?: number;
@@ -2286,6 +2290,11 @@ export const api = {
   executePlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/execute`, { method: 'POST' }),
   /** Duplicate this plan (same payload + provisioned secrets) and execute the copy. */
   retryPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/retry`, { method: 'POST' }),
+  /** (Re-)schedule a saved or finished plan for later execution. Relative (`inMinutes`) or absolute (`at`). */
+  schedulePlan: (id: string, body: { at?: string; inMinutes?: number; policy?: 'run-asap' | 'skip' }) =>
+    apiFetch<PlanDetail>(`/plans/${id}/schedule`, { method: 'POST', body: JSON.stringify(body) }),
+  /** Remove the schedule — the plan returns to its pre-schedule status. */
+  unschedulePlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/schedule`, { method: 'DELETE' }),
   cancelPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/cancel`, { method: 'POST' }),
   addPlanStep: (planId: string, body: {
     deviceId: string;
