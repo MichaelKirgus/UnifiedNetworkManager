@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertTriangle, CheckCircle2, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, EyeOff, X } from 'lucide-react';
 import clsx from 'clsx';
 import { SchemaForm, validateSchema, defaultValues } from './SchemaForm';
 import { api, ApiError, CatalogEntry } from '../api/client';
@@ -41,10 +41,13 @@ export function ActionDialog({ deviceId, pluginId, entry, prefill, onClose }: Ac
 
   const dangerous = entry.riskLevel === 'dangerous';
   const isPlanMode = mode === 'plan';
+  // Read-Only: nothing can be executed or saved — the submit control is disabled.
+  const isReadOnly = mode === 'readonly';
   // In Plan mode nothing runs — the danger icon/wording only apply to Execute.
   const submitLabel = pending ? (isPlanMode ? 'Saving…' : 'Executing…') : isPlanMode ? 'Save as plan' : 'Execute now';
 
   async function handleSubmit() {
+    if (isReadOnly) return; // Read-Only — the button is disabled; this is a safety net.
     const errors = validateSchema(entry.inputSchema ?? {}, values);
     if (Object.keys(errors).length > 0) {
       setFieldErrors(errors);
@@ -150,6 +153,13 @@ export function ActionDialog({ deviceId, pluginId, entry, prefill, onClose }: Ac
         </header>
 
         <div className="p-4">
+          {isReadOnly && (
+            <div className="mb-3 flex items-start gap-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+              <EyeOff className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              Read-only mode is active — this action cannot be executed or saved. Switch to Plan or Execute in the top bar.
+            </div>
+          )}
+
           {dangerous && (
             <div className="mb-3 flex items-start gap-2 rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -181,7 +191,8 @@ export function ActionDialog({ deviceId, pluginId, entry, prefill, onClose }: Ac
                 </button>
                 <button
                   type="submit"
-                  disabled={pending}
+                  disabled={pending || isReadOnly}
+                  title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
                   className={clsx(
                     'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40',
                     dangerous && !isPlanMode ? 'bg-red-600 hover:bg-red-700' : 'bg-primary hover:bg-primary-hover'
@@ -220,7 +231,8 @@ export function ActionDialog({ deviceId, pluginId, entry, prefill, onClose }: Ac
                 <button
                   type="button"
                   onClick={handleSubmit}
-                  disabled={pending}
+                  disabled={pending || isReadOnly}
+                  title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
                   className={clsx(
                     'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40',
                     dangerous && !isPlanMode ? 'bg-red-600 hover:bg-red-700' : 'bg-primary hover:bg-primary-hover'

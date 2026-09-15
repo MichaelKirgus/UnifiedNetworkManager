@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { CheckCircle2, ChevronDown, ChevronUp, FolderTree, HardDrive, Loader2, Pencil, Plus, Trash2, Users, X } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronUp, EyeOff, FolderTree, HardDrive, Loader2, Pencil, Plus, Trash2, Users, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
@@ -8,7 +8,7 @@ import { DeviceChip } from '../components/DeviceChip';
 import { StatusBadge } from '../components/StatusBadge';
 import { formatDuration } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
-import { runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
+import { READONLY_MESSAGE, runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, ShareRow, ShareSessionRow } from '../api/client';
 
 // ---------------------------------------------------------------------------
@@ -156,6 +156,8 @@ function ShareDialog({ mode, type, row, onClose }: { mode: 'create' | 'edit'; ty
   // Global Execute/Plan mode (aliased — `mode` above is the dialog's create/edit mode).
   const { mode: execMode } = useExecutionMode();
   const isPlanMode = execMode === 'plan';
+  // Read-Only: the share plan cannot be saved or executed.
+  const isReadOnly = execMode === 'readonly';
   const [form, setForm] = useState<ShareForm>(() => initialForm(type ?? 'smb', row));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -178,6 +180,8 @@ function ShareDialog({ mode, type, row, onClose }: { mode: 'create' | 'edit'; ty
     const deviceId = row?.deviceId ?? '';
     const actionId = mode === 'edit' ? ACTION_IDS[form.type]?.update : ACTION_IDS[form.type]?.create;
     if (!actionId) { setSaving(false); setError(`No ${mode} action available for ${TYPE_LABELS[form.type] ?? form.type}.`); return; }
+
+    if (isReadOnly) return; // Read-Only — the button is disabled; this is a safety net.
 
     const input = buildShareInput(form.type, mode, form);
     const attempt = async () => {
@@ -245,6 +249,12 @@ function ShareDialog({ mode, type, row, onClose }: { mode: 'create' | 'edit'; ty
         </header>
 
         <div className="space-y-4 px-4 py-4">
+          {isReadOnly && (
+            <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+              <EyeOff size={14} className="mt-0.5 shrink-0" />
+              Read-only mode is active — this change cannot be saved or executed. Switch to Plan or Execute in the top bar.
+            </div>
+          )}
           {error && !reauth && (
             <div className="rounded border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
           )}
@@ -338,7 +348,8 @@ function ShareDialog({ mode, type, row, onClose }: { mode: 'create' | 'edit'; ty
           <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
           <button
             type="button"
-            disabled={saving || (mode === 'edit' && !row)}
+            disabled={saving || (mode === 'edit' && !row) || isReadOnly}
+            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
             onClick={() => void submit()}
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -448,6 +459,7 @@ export default function Shares() {
     // NFS deletes by path, the others by name.
     const input: Record<string, unknown> = row.type === 'nfs' ? { paths: [key] } : { names: [key] };
     const attempt = async () => {
+      if (mode === 'readonly') { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
       const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input }], mode);
       if (mode === 'plan') {
         setNotice({ kind: 'ok', text: `Delete ${key}: saved as a plan — not executed. Open the Plans center to run it later.` });
@@ -469,6 +481,7 @@ export default function Shares() {
       const sel = rows.filter((r) => hasAction(r.pluginId, ACTION_IDS[r.type]?.delete ?? ''));
       if (sel.length === 0) { setNotice({ kind: 'info', text: 'No selected shares are deletable on their plugin.' }); return; }
       const attempt = async () => {
+        if (mode === 'readonly') { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
         let savedCount = 0;
         for (const g of Array.from(groupByDevice(sel, (r) => ({ pluginId: r.pluginId, deviceId: r.deviceId }), (r) => shareKey(r)).values())) {
           // All rows in one group share a device+plugin but may span protocols —
@@ -518,6 +531,8 @@ export default function Shares() {
 
   // --- Per-row action buttons -----------------------------------------------------
   function renderActions(row: ShareRow): ReactNode {
+    // Read-Only mode disables every share write action.
+    if (mode === 'readonly') return null;
     const ids = ACTION_IDS[row.type] ?? {};
     const canEdit = !!ids.update && hasAction(row.pluginId, ids.update);
     const canDelete = !!ids.delete && hasAction(row.pluginId, ids.delete);
@@ -742,8 +757,8 @@ export default function Shares() {
           </div>
         )}
 
-        {/* Toolbar — New share (create dialog with protocol picker). */}
-        {!sharesQuery.isLoading && !sharesQuery.isError && (
+        {/* Toolbar — New share (create dialog with protocol picker). Hidden in Read-Only mode. */}
+        {!sharesQuery.isLoading && !sharesQuery.isError && mode !== 'readonly' && (
           <div className="mb-2 flex shrink-0 items-center justify-between">
             <button
               type="button"

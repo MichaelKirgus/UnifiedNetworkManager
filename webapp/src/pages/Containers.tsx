@@ -1,6 +1,6 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ArrowUpCircle, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Container, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Container, EyeOff, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { ConsoleDialog } from '../components/ConsoleDialog';
 import { ContainerLogsView } from '../components/ContainerLogs';
@@ -12,7 +12,7 @@ import { DataTable, DataTableColumn, ExpandChildContext } from '../components/Da
 import { DeviceChip } from '../components/DeviceChip';
 import { formatBytes, formatDuration } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
-import { runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
+import { READONLY_MESSAGE, runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, CatalogEntry, ContainerNetwork, ContainerRow, ContainerServiceDetail, DockerImageRow } from '../api/client';
 
 /** One container's live stat snapshot from a probe (key 'containerStats'). */
@@ -168,6 +168,8 @@ function groupByDevice<T>(rows: T[], keyOf: (r: T) => { pluginId: string; device
 function YamlEditorDialog({ app, onClose }: { app: ContainerRow; onClose: () => void }) {
   const { mode } = useExecutionMode();
   const isPlanMode = mode === 'plan';
+  // Read-Only: the compose change cannot be saved or applied.
+  const isReadOnly = mode === 'readonly';
   const [yaml, setYaml] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -192,6 +194,7 @@ function YamlEditorDialog({ app, onClose }: { app: ContainerRow; onClose: () => 
   }, [app.pluginId, app.deviceId, app.name]);
 
   async function save() {
+    if (isReadOnly) return; // Read-Only — the button is disabled; this is a safety net.
     setSaving(true);
     setError(null);
     try {
@@ -267,6 +270,12 @@ function YamlEditorDialog({ app, onClose }: { app: ContainerRow; onClose: () => 
 
           {!loading && yaml !== '' && (
             <>
+              {isReadOnly && (
+                <div className="mb-3 flex items-start gap-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+                  <EyeOff className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  Read-only mode is active — this change cannot be saved or applied. Switch to Plan or Execute in the top bar.
+                </div>
+              )}
               {error && (
                 <div className="mb-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
               )}
@@ -280,7 +289,7 @@ function YamlEditorDialog({ app, onClose }: { app: ContainerRow; onClose: () => 
                 <button type="button" onClick={onClose} disabled={saving} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background disabled:opacity-40">
                   Cancel
                 </button>
-                <button type="button" onClick={save} disabled={saving || yaml.trim() === ''} className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-40">
+                <button type="button" onClick={save} disabled={saving || yaml.trim() === '' || isReadOnly} title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined} className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-40">
                   {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                   {isPlanMode ? 'Save as plan' : 'Apply & redeploy'}
                 </button>
@@ -693,6 +702,8 @@ interface ChildActionContext {
   canConsole?: (pluginId: string) => boolean;
   /** Opens an interactive shell INSIDE this container (docker exec over SSH). */
   openContainerConsole?: (node: TreeNode) => void;
+  /** Read-Only mode — disables the lifecycle write actions (console stays available). */
+  readOnly?: boolean;
 }
 
 /** Per-container lifecycle actions for child rows — rendered in the Actions cell
@@ -718,13 +729,14 @@ function ContainerNodeActions({ node, ctx }: { node: TreeNode; ctx: ChildActionC
     <div className="flex items-center gap-0.5">
       {actions.map((a) => {
         if (!a.available) return null;
-        const enabled = a.eligible;
+        const blockedByReadOnly = !!ctx.readOnly;
+        const enabled = a.eligible && !blockedByReadOnly;
         return (
           <button
             key={a.id}
             type="button"
             aria-label={`${a.label} ${node.service ?? ''}`}
-            title={enabled ? `${a.label} ${node.service ?? ''}` : `Not applicable in state ${state || 'unknown'}`}
+            title={enabled ? `${a.label} ${node.service ?? ''}` : blockedByReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : `Not applicable in state ${state || 'unknown'}`}
             disabled={!enabled}
             onClick={() => ctx.run(node, a.id, a.label)}
             className={clsx(
@@ -1346,6 +1358,7 @@ export default function Containers() {
     buildGroups: () => Array<{ pluginId: string; actionId: string; steps: Array<{ deviceId: string; input: Record<string, unknown> }> }>,
   ) {
     const attempt = async () => {
+      if (mode === 'readonly') { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
       let savedCount = 0;
       for (const g of buildGroups()) {
         if (g.steps.length === 0) continue;
@@ -1384,6 +1397,7 @@ export default function Containers() {
     if (!actionId) throw new Error(`No install action for mode '${appMode}' on ${candidate.deviceName}`);
     const label = `Create app ${String(input['name'])}`;
     const attempt = async () => {
+      if (mode === 'readonly') { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
       const planId = await createAndExecutePlan(candidate.pluginId, actionId, [{ deviceId: candidate.deviceId, input }], mode);
       if (mode === 'plan') {
         setNotice({ kind: 'ok', text: `App creation saved as a plan — not executed. Open the Plans center to run it later.` });
@@ -1407,6 +1421,7 @@ export default function Containers() {
    * auto-refreshes when execution settles. Same 401 → reauth flow as bulk. */
   async function singleApp(row: ContainerRow, actionId: string, label: string) {
     const attempt = async () => {
+      if (mode === 'readonly') { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
       const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input: { names: [row.name] } }], mode);
       if (mode === 'plan') {
         setNotice({ kind: 'ok', text: `${label} ${row.name}: saved as a plan — not executed. Open the Plans center to run it later.` });
@@ -1431,6 +1446,7 @@ export default function Containers() {
     const name = node.service ?? '';
     if (!node.deviceId || !node.pluginId || !name) return;
     const attempt = async () => {
+      if (mode === 'readonly') { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
       const planId = await createAndExecutePlan(node.pluginId!, actionId, [{ deviceId: node.deviceId!, input: { names: [name] } }], mode);
       if (mode === 'plan') {
         setNotice({ kind: 'ok', text: `${label} ${name}: saved as a plan — not executed. Open the Plans center to run it later.` });
@@ -1671,29 +1687,32 @@ export default function Containers() {
       render: (node) => {
         const r = node.row;
         if (!r) return null;
-        const actions: { id: string; label: string; icon: ReactNode; available: boolean; eligible: boolean; danger?: boolean }[] = [
-          { id: 'containers.start', label: 'Start', icon: <Play size={14} />, available: hasAction(r.pluginId, 'containers.start'), eligible: STOPPED_STATES.has(r.state) },
-          { id: 'containers.stop', label: 'Stop', icon: <Square size={13} />, available: hasAction(r.pluginId, 'containers.stop'), eligible: RUNNING_STATES.has(r.state), danger: true },
-          { id: 'containers.restart', label: 'Restart', icon: <RotateCw size={14} />, available: hasAction(r.pluginId, 'containers.restart'), eligible: true },
-          { id: 'containers.upgrade', label: 'Update', icon: <ArrowUpCircle size={14} />, available: hasAction(r.pluginId, 'containers.upgrade'), eligible: r.upgradeAvailable === true },
+        // Read-Only mode disables every WRITE action but keeps the log viewer.
+        const readOnly = mode === 'readonly';
+        const actions: { id: string; label: string; icon: ReactNode; available: boolean; eligible: boolean; danger?: boolean; write?: boolean }[] = [
+          { id: 'containers.start', label: 'Start', icon: <Play size={14} />, available: hasAction(r.pluginId, 'containers.start'), eligible: STOPPED_STATES.has(r.state), write: true },
+          { id: 'containers.stop', label: 'Stop', icon: <Square size={13} />, available: hasAction(r.pluginId, 'containers.stop'), eligible: RUNNING_STATES.has(r.state), danger: true, write: true },
+          { id: 'containers.restart', label: 'Restart', icon: <RotateCw size={14} />, available: hasAction(r.pluginId, 'containers.restart'), eligible: true, write: true },
+          { id: 'containers.upgrade', label: 'Update', icon: <ArrowUpCircle size={14} />, available: hasAction(r.pluginId, 'containers.upgrade'), eligible: r.upgradeAvailable === true, write: true },
           // Compose editing is offered whenever the plugin advertises BOTH the
           // read and write side of the contract (TrueNAS custom apps today).
-          { id: 'compose.config.read+containers.update', label: 'Edit compose YAML', icon: <FileCode2 size={14} />, available: hasAction(r.pluginId, 'compose.config.read') && hasAction(r.pluginId, 'containers.update'), eligible: true },
+          { id: 'compose.config.read+containers.update', label: 'Edit compose YAML', icon: <FileCode2 size={14} />, available: hasAction(r.pluginId, 'compose.config.read') && hasAction(r.pluginId, 'containers.update'), eligible: true, write: true },
           // Log viewer — read-only, no plan row. TrueNAS serves it over SSH
-          // (docker logs), the Docker plugin via the Engine API.
+          // (docker logs), the Docker plugin via the Engine API. Stays enabled in Read-Only mode.
           { id: 'containers.logs.read', label: 'View logs', icon: <ScrollText size={14} />, available: hasAction(r.pluginId, 'containers.logs.read'), eligible: true },
         ];
         return (
           <div className="flex items-center gap-0.5">
             {actions.map((a) => {
               if (!a.available) return null;
-              const enabled = a.eligible;
+              const blockedByReadOnly = readOnly && a.write === true;
+              const enabled = a.eligible && !blockedByReadOnly;
               return (
                 <button
                   key={a.id}
                   type="button"
                   aria-label={`${a.label} ${r.name}`}
-                  title={enabled ? `${a.label} ${r.name}` : `Not applicable in state ${r.state.toLowerCase()}`}
+                  title={enabled ? `${a.label} ${r.name}` : blockedByReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : `Not applicable in state ${r.state.toLowerCase()}`}
                   disabled={!enabled}
                   onClick={() => {
                     if (a.id === 'compose.config.read+containers.update') setYamlApp(r);
@@ -1904,6 +1923,7 @@ export default function Containers() {
                         browseVolume: (node) => setBrowseVolume(node),
                         canConsole,
                         openContainerConsole: (node) => setConsoleNode(node),
+                        readOnly: mode === 'readonly',
                       }}
                     />
                   ),
@@ -2019,7 +2039,7 @@ export default function Containers() {
           backend whose plugin advertises an install action. `apps` feeds the
           "Duplicate existing" source picker + clone prefill. */}
       {createOpen && createCandidates.length > 0 && (
-        <CreateAppDialog candidates={createCandidates} apps={containersQuery.data?.containers ?? []} onSubmit={(c, mode, input) => runInstall(c, mode, input)} onClose={() => setCreateOpen(false)} />
+        <CreateAppDialog candidates={createCandidates} apps={containersQuery.data?.containers ?? []} onSubmit={(c, mode, input) => runInstall(c, mode, input)} onClose={() => setCreateOpen(false)} readOnly={mode === 'readonly'} />
       )}
     </Layout>
   );

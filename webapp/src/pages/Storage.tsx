@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ArrowDownToLine, ArrowUpFromLine, Camera, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Database, FolderOpen, Gauge, HardDrive, Loader2, Search, Trash2, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpFromLine, Camera, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Database, EyeOff, FolderOpen, Gauge, HardDrive, Loader2, Search, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Layout } from '../components/Layout';
 import { FileBrowserDialog } from '../components/FileBrowserDialog';
@@ -9,7 +9,7 @@ import { DeviceChip } from '../components/DeviceChip';
 import { StatusBadge } from '../components/StatusBadge';
 import { formatBytes } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
-import { runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
+import { READONLY_MESSAGE, runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, StorageDiskRow, StorageFilesystemRow } from '../api/client';
 
 // ---------------------------------------------------------------------------
@@ -152,6 +152,8 @@ function groupByDevice<T>(rows: T[], keyOf: (r: T) => { pluginId: string; device
 function SnapshotDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: () => void }) {
   const { mode } = useExecutionMode();
   const isPlanMode = mode === 'plan';
+  // Read-Only: the snapshot plan cannot be saved or executed.
+  const isReadOnly = mode === 'readonly';
   const [retentionDays, setRetentionDays] = useState(7);
   const [recursive, setRecursive] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -161,6 +163,7 @@ function SnapshotDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: 
   const [saved, setSaved] = useState(false);
 
   async function submit() {
+    if (isReadOnly) return; // Read-Only — the button is disabled; this is a safety net.
     setSaving(true);
     setError(null);
     const input: Record<string, unknown> = { name: row.name, retentionDays, recursive };
@@ -225,6 +228,12 @@ function SnapshotDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: 
         </header>
 
         <div className="space-y-4 px-4 py-4">
+          {isReadOnly && (
+            <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+              <EyeOff size={14} className="mt-0.5 shrink-0" />
+              Read-only mode is active — this action cannot be saved or executed. Switch to Plan or Execute in the top bar.
+            </div>
+          )}
           {error && !reauth && (
             <div className="rounded border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
           )}
@@ -250,7 +259,8 @@ function SnapshotDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: 
           <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
           <button
             type="button"
-            disabled={saving}
+            disabled={saving || isReadOnly}
+            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
             onClick={() => void submit()}
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -281,6 +291,8 @@ function SnapshotDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: 
 function QuotaDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: () => void }) {
   const { mode } = useExecutionMode();
   const isPlanMode = mode === 'plan';
+  // Read-Only: the quota plan cannot be saved or executed.
+  const isReadOnly = mode === 'readonly';
   const extra = row.extra ?? {};
   const currentQuota = typeof extra['quota'] === 'number' ? formatBytes(extra['quota'] as number) : (typeof extra['quotaParsed'] === 'string' ? (extra['quotaParsed'] as string) : null);
   const [value, setValue] = useState('');
@@ -291,6 +303,7 @@ function QuotaDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: () 
   const [saved, setSaved] = useState(false);
 
   async function submit() {
+    if (isReadOnly) return; // Read-Only — the button is disabled; this is a safety net.
     setSaving(true);
     setError(null);
     const input: Record<string, unknown> = { name: row.name, quota: value.trim() }; // empty string clears the quota
@@ -357,6 +370,12 @@ function QuotaDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: () 
         </header>
 
         <div className="space-y-4 px-4 py-4">
+          {isReadOnly && (
+            <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+              <EyeOff size={14} className="mt-0.5 shrink-0" />
+              Read-only mode is active — this action cannot be saved or executed. Switch to Plan or Execute in the top bar.
+            </div>
+          )}
           {error && !reauth && (
             <div className="rounded border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
           )}
@@ -376,7 +395,8 @@ function QuotaDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: () 
           <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
           <button
             type="button"
-            disabled={saving}
+            disabled={saving || isReadOnly}
+            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
             onClick={() => void submit()}
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -565,6 +585,7 @@ export default function Storage() {
   // --- Single-filesystem row action -------------------------------------------
   async function singleFs(row: StorageFilesystemRow, actionId: string, input: Record<string, unknown>, label: string) {
     const attempt = async () => {
+      if (mode === 'readonly') { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
       const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input }], mode);
       if (mode === 'plan') {
         setNotice({ kind: 'ok', text: `${label}: saved as a plan — not executed. Open the Plans center to run it later.` });
@@ -593,6 +614,7 @@ export default function Storage() {
         return;
       }
       const attempt = async () => {
+        if (mode === 'readonly') { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
         let savedCount = 0;
         for (const g of Array.from(groupByDevice(sel, (r) => ({ pluginId: r.pluginId, deviceId: r.deviceId }), (r) => r.name).values())) {
           // Deleting a pool is recursive — it owns child datasets.
@@ -629,14 +651,16 @@ export default function Storage() {
     const pool = isRealPool(row);
     const dsLike = isDatasetLike(row);
     const mounted = isMounted(row);
+    // Read-Only mode disables every write action (Browse stays available).
+    const readOnly = mode === 'readonly';
 
     const actions: { id: string; label: string; icon: ReactNode; available: boolean; eligible: boolean; danger?: boolean }[] = [
-      { id: 'storage.scrub', label: `Scrub pool ${row.name}`, icon: <Search size={14} />, available: hasAction(row.pluginId, 'storage.scrub'), eligible: pool },
-      { id: 'storage.snapshot', label: `Snapshot ${row.name}`, icon: <Camera size={14} />, available: hasAction(row.pluginId, 'storage.snapshot'), eligible: pool || dsLike },
-      { id: 'storage.quota-set', label: `Set quota on ${row.name}`, icon: <Gauge size={14} />, available: hasAction(row.pluginId, 'storage.quota-set'), eligible: dsLike },
-      { id: 'storage.mount', label: `Mount ${row.name}`, icon: <ArrowDownToLine size={14} />, available: hasAction(row.pluginId, 'storage.mount'), eligible: dsLike && !mounted },
-      { id: 'storage.unmount', label: `Unmount ${row.name}`, icon: <ArrowUpFromLine size={14} />, available: hasAction(row.pluginId, 'storage.unmount'), eligible: dsLike && mounted },
-      { id: 'storage.delete', label: `Delete ${row.name}`, icon: <Trash2 size={13} />, available: hasAction(row.pluginId, 'storage.delete'), eligible: true, danger: true },
+      { id: 'storage.scrub', label: `Scrub pool ${row.name}`, icon: <Search size={14} />, available: hasAction(row.pluginId, 'storage.scrub') && !readOnly, eligible: pool },
+      { id: 'storage.snapshot', label: `Snapshot ${row.name}`, icon: <Camera size={14} />, available: hasAction(row.pluginId, 'storage.snapshot') && !readOnly, eligible: pool || dsLike },
+      { id: 'storage.quota-set', label: `Set quota on ${row.name}`, icon: <Gauge size={14} />, available: hasAction(row.pluginId, 'storage.quota-set') && !readOnly, eligible: dsLike },
+      { id: 'storage.mount', label: `Mount ${row.name}`, icon: <ArrowDownToLine size={14} />, available: hasAction(row.pluginId, 'storage.mount') && !readOnly, eligible: dsLike && !mounted },
+      { id: 'storage.unmount', label: `Unmount ${row.name}`, icon: <ArrowUpFromLine size={14} />, available: hasAction(row.pluginId, 'storage.unmount') && !readOnly, eligible: dsLike && mounted },
+      { id: 'storage.delete', label: `Delete ${row.name}`, icon: <Trash2 size={13} />, available: hasAction(row.pluginId, 'storage.delete') && !readOnly, eligible: true, danger: true },
     ];
 
     // Browse the contents over SFTP — only when the plugin advertises the

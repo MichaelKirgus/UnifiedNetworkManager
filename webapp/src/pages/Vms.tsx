@@ -1,13 +1,13 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { CheckCircle2, Loader2, Monitor, Pause, Play, Plug, RotateCw, Square, Trash2, Unplug, X, Zap } from 'lucide-react';
+import { CheckCircle2, EyeOff, Loader2, Monitor, Pause, Play, Plug, RotateCw, Square, Trash2, Unplug, X, Zap } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { formatBytes, formatDuration } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
-import { runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
+import { READONLY_MESSAGE, runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, VmDevice, VmNic, VmRow } from '../api/client';
 
 // ---------------------------------------------------------------------------
@@ -125,6 +125,8 @@ function DevicesCell({ row }: { row: VmRow }) {
 interface DeviceActionContext {
   hasAction: (pluginId: string, actionId: string) => boolean;
   detachNic: (node: VmNode) => void;
+  /** Read-Only mode — disables the NIC detach write action. */
+  readOnly?: boolean;
 }
 
 function nodeCell(key: string, node: VmNode, depth: number, actions?: DeviceActionContext): ReactNode {
@@ -144,13 +146,15 @@ function nodeCell(key: string, node: VmNode, depth: number, actions?: DeviceActi
       if (node.dtype !== 'NIC' || !node.label || !actions) return null;
       const pid = node.row?.pluginId ?? '';
       if (!actions.hasAction(pid, 'vms.nic-detach')) return null;
+      const blockedByReadOnly = !!actions.readOnly;
       return (
         <button
           type="button"
           aria-label={`Detach NIC ${node.label}`}
-          title={`Detach NIC ${node.label}`}
+          title={blockedByReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : `Detach NIC ${node.label}`}
+          disabled={blockedByReadOnly}
           onClick={() => actions.detachNic(node)}
-          className="rounded-md p-1 text-danger-fg hover:bg-muted hover:text-danger-fg"
+          className="rounded-md p-1 text-danger-fg hover:bg-muted hover:text-danger-fg disabled:cursor-not-allowed disabled:opacity-30"
         >
           <Unplug size={13} />
         </button>
@@ -231,6 +235,8 @@ interface NicAttachTarget {
 function NicAttachDialog({ target, onClose }: { target: NicAttachTarget; onClose: () => void }) {
   const { mode } = useExecutionMode();
   const isPlanMode = mode === 'plan';
+  // Read-Only: the NIC change cannot be saved or applied.
+  const isReadOnly = mode === 'readonly';
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [bridges, setBridges] = useState<string[]>([]);
@@ -267,6 +273,7 @@ function NicAttachDialog({ target, onClose }: { target: NicAttachTarget; onClose
   }
 
   async function submit() {
+    if (isReadOnly) return; // Read-Only — the button is disabled; this is a safety net.
     if (!selected) return;
     setSaving(true);
     setError(null);
@@ -333,6 +340,12 @@ function NicAttachDialog({ target, onClose }: { target: NicAttachTarget; onClose
         </header>
 
         <div className="space-y-4 px-4 py-4">
+          {isReadOnly && (
+            <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+              <EyeOff size={14} className="mt-0.5 shrink-0" />
+              Read-only mode is active — this change cannot be saved or applied. Switch to Plan or Execute in the top bar.
+            </div>
+          )}
           {loading && (
             <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 size={14} className="animate-spin" /> Loading available interfaces…</p>
           )}
@@ -382,7 +395,8 @@ function NicAttachDialog({ target, onClose }: { target: NicAttachTarget; onClose
           <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
           <button
             type="button"
-            disabled={!selected || saving}
+            disabled={!selected || saving || isReadOnly}
+            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
             onClick={() => void submit()}
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -564,6 +578,7 @@ export default function Vms() {
   // --- Single-VM row action ----------------------------------------------------
   async function singleVm(row: VmRow, actionId: string, label: string) {
     const attempt = async () => {
+      if (mode === 'readonly') { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
       const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input: { names: [row.name] } }], mode);
       if (mode === 'plan') {
         setNotice({ kind: 'ok', text: `${label} ${row.name}: saved as a plan — not executed. Open the Plans center to run it later.` });
@@ -588,6 +603,7 @@ export default function Vms() {
         return;
       }
       const attempt = async () => {
+        if (mode === 'readonly') { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
         let savedCount = 0;
         for (const g of Array.from(groupByDevice(vms.map((n) => n.row!), (r) => ({ pluginId: r.pluginId, deviceId: r.deviceId }), (r) => r.name).values())) {
           const planId = await createAndExecutePlan(g.pluginId, actionId, [{ deviceId: g.deviceId, input: { names: g.values } }], mode);
@@ -619,6 +635,7 @@ export default function Vms() {
     if (!row || !mac) return;
     if (!window.confirm(`Detach NIC ${mac} from "${row.name}"?`)) return;
     const attempt = async () => {
+      if (mode === 'readonly') { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
       const planId = await createAndExecutePlan(row.pluginId, 'vms.nic-detach', [{ deviceId: row.deviceId, input: { name: row.name, mac } }], mode);
       if (mode === 'plan') {
         setNotice({ kind: 'ok', text: `Detach NIC ${mac} from ${row.name}: saved as a plan — not executed. Open the Plans center to run it later.` });
@@ -757,14 +774,16 @@ export default function Vms() {
         const powerAvailable = hasAction(r.pluginId, powerActionId);
         const powerEligible = isStopped || isSuspended;
 
+        // Read-Only mode disables every VM write action.
+        const readOnly = mode === 'readonly';
         const actions: { id: string; label: string; icon: ReactNode; available: boolean; eligible: boolean; danger?: boolean }[] = [
-          { id: powerActionId, label: `${powerLabel} ${r.name}`, icon: <Play size={14} />, available: powerAvailable, eligible: powerEligible },
-          { id: 'vms.stop', label: `Stop ${r.name}`, icon: <Square size={13} />, available: hasAction(r.pluginId, 'vms.stop'), eligible: isRunning, danger: true },
-          { id: 'vms.kill', label: `Kill ${r.name}`, icon: <Zap size={14} />, available: hasAction(r.pluginId, 'vms.kill'), eligible: isRunning || isSuspended, danger: true },
-          { id: 'vms.restart', label: `Restart ${r.name}`, icon: <RotateCw size={14} />, available: hasAction(r.pluginId, 'vms.restart'), eligible: !isStopped },
-          { id: 'vms.suspend', label: `Suspend ${r.name}`, icon: <Pause size={13} />, available: hasAction(r.pluginId, 'vms.suspend'), eligible: isRunning },
-          { id: 'vms.delete', label: `Delete ${r.name}`, icon: <Trash2 size={13} />, available: hasAction(r.pluginId, 'vms.delete'), eligible: true, danger: true },
-          { id: 'vms.nic-attach', label: `Attach NIC to ${r.name}`, icon: <Plug size={14} />, available: hasAction(r.pluginId, 'vms.nic-attach'), eligible: true },
+          { id: powerActionId, label: `${powerLabel} ${r.name}`, icon: <Play size={14} />, available: powerAvailable && !readOnly, eligible: powerEligible },
+          { id: 'vms.stop', label: `Stop ${r.name}`, icon: <Square size={13} />, available: hasAction(r.pluginId, 'vms.stop') && !readOnly, eligible: isRunning, danger: true },
+          { id: 'vms.kill', label: `Kill ${r.name}`, icon: <Zap size={14} />, available: hasAction(r.pluginId, 'vms.kill') && !readOnly, eligible: isRunning || isSuspended, danger: true },
+          { id: 'vms.restart', label: `Restart ${r.name}`, icon: <RotateCw size={14} />, available: hasAction(r.pluginId, 'vms.restart') && !readOnly, eligible: !isStopped },
+          { id: 'vms.suspend', label: `Suspend ${r.name}`, icon: <Pause size={13} />, available: hasAction(r.pluginId, 'vms.suspend') && !readOnly, eligible: isRunning },
+          { id: 'vms.delete', label: `Delete ${r.name}`, icon: <Trash2 size={13} />, available: hasAction(r.pluginId, 'vms.delete') && !readOnly, eligible: true, danger: true },
+          { id: 'vms.nic-attach', label: `Attach NIC to ${r.name}`, icon: <Plug size={14} />, available: hasAction(r.pluginId, 'vms.nic-attach') && !readOnly, eligible: true },
         ];
 
         return (
@@ -881,7 +900,7 @@ export default function Vms() {
             ]}
             expandable={{
               childrenOf: (node) => tree.childMap.get(node.key) ?? [],
-              renderChild: (child, _parent, ctx) => <ChildRow node={child} ctx={ctx} actions={{ hasAction, detachNic }} />,
+              renderChild: (child, _parent, ctx) => <ChildRow node={child} ctx={ctx} actions={{ hasAction, detachNic, readOnly: mode === 'readonly' }} />,
             }}
             emptyMessage="No VMs collected yet — assign a TrueNAS plugin to a hypervisor device and wait for the next poll. NIC MAC addresses appear on the Hosts page with source “VM”."
           />

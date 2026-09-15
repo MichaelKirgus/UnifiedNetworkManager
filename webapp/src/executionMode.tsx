@@ -1,21 +1,22 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 
 /**
- * Global "Execute / Plan" mode — the top-bar toggle that decides what happens
- * when a page triggers an action:
+ * Global execution mode — the top-bar toggle that decides what happens when a
+ * page triggers an action. Ordered from safest to most dangerous:
  *
+ *  - `readonly`: NO actions are executed or saved. A banner informs the user;
+ *    any attempted action is rejected with a clear error.
+ *  - `plan`: the plan is created but NOT executed — it lands in the Plans
+ *    center as draft/ready and can be executed later by the user (or scheduled).
  *  - `execute` (default): actions run immediately through the plan workflow
  *    (create plan + execute), exactly as before.
- *  - `plan`: the same plan is created but NOT executed — it lands in the Plans
- *    center as draft/ready and can be executed later by the user (or scheduled,
- *    a future feature).
  *
  * The mode is persisted per browser (localStorage) so it survives reloads.
  * Pages that have no plan-based actions render the toggle DISABLED — see
  * `useExecutionMode().applicable` / `setApplicable`.
  */
 
-export type ExecutionMode = 'execute' | 'plan';
+export type ExecutionMode = 'readonly' | 'plan' | 'execute';
 
 const STORAGE_KEY = 'unm-execution-mode';
 
@@ -32,7 +33,9 @@ const ExecutionModeContext = createContext<ExecutionModeContextValue | null>(nul
 
 function readStored(): ExecutionMode {
   try {
-    return localStorage.getItem(STORAGE_KEY) === 'plan' ? 'plan' : 'execute';
+    const v = localStorage.getItem(STORAGE_KEY);
+    if (v === 'readonly' || v === 'plan') return v;
+    return 'execute';
   } catch {
     return 'execute';
   }
@@ -65,17 +68,31 @@ export function useExecutionMode(): ExecutionModeContextValue {
   return ctx;
 }
 
+/** Shared user-facing message for a blocked read-only action. */
+export const READONLY_MESSAGE =
+  'Read-only mode is active — no actions can be executed or saved. Switch to Plan or Execute in the top bar.';
+
+/** Error thrown when an action is attempted while in Read-Only mode. */
+export class ReadOnlyError extends Error {
+  constructor() {
+    super(READONLY_MESSAGE);
+    this.name = 'ReadOnlyError';
+  }
+}
+
 /**
  * Shared action runner — the single place where "execute now" vs. "save as plan"
  * diverges. In `plan` mode it returns the created (unexecuted) plan id so pages
  * can surface a friendly notice instead of tracking execution progress for a
- * plan that will never run on its own.
+ * plan that will never run on its own. In `readonly` mode NOTHING is created —
+ * it rejects with {@link ReadOnlyError} before any API call.
  */
 export async function runAction(
   create: () => Promise<{ id: string }>,
   execute: (planId: string) => Promise<unknown>,
   mode: ExecutionMode,
 ): Promise<string> {
+  if (mode === 'readonly') throw new ReadOnlyError();
   const plan = await create();
   if (mode === 'execute') {
     try {

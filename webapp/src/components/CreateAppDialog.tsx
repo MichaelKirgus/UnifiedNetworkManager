@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Boxes, ChevronDown, CopyPlus, Container as ContainerIcon, FileCode2, Image as ImageIcon, Loader2, Plus, Search, X } from 'lucide-react';
+import { AlertTriangle, Boxes, ChevronDown, CopyPlus, Container as ContainerIcon, EyeOff, FileCode2, Image as ImageIcon, Loader2, Plus, Search, X } from 'lucide-react';
 import clsx from 'clsx';
 import { SchemaForm, validateSchema } from './SchemaForm';
 import { api, ContainerRow, InputSchema } from '../api/client';
@@ -93,6 +93,8 @@ interface CreateAppDialogProps {
   /** Submits the install through the page's plan workflow (handles 2FA + tracking). */
   onSubmit: (candidate: CreateAppCandidate, mode: AppMode, input: Record<string, unknown>) => void;
   onClose: () => void;
+  /** Read-Only mode — disables submission and shows an inline notice. */
+  readOnly?: boolean;
 }
 
 /** Sanitizes a user-typed app name into TrueNAS/Docker slug form. */
@@ -100,7 +102,7 @@ function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
 }
 
-export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose }: CreateAppDialogProps) {
+export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, readOnly = false }: CreateAppDialogProps) {
   const [deviceIdx, setDeviceIdx] = useState(() => Math.max(0, candidates.findIndex((c) => c.modes.includes('catalog'))));
   const candidate = candidates[deviceIdx];
   const modes = candidate?.modes ?? [];
@@ -392,6 +394,7 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose }: Cr
   }
 
   async function handleSubmit() {
+    if (readOnly) return; // Read-Only — the button is disabled; this is a safety net.
     if (!candidate) return;
     setSubmitError(null);
     const slug = slugify(name);
@@ -482,6 +485,13 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose }: Cr
         </header>
 
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+          {readOnly && (
+            <div className="flex items-start gap-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+              <EyeOff size={14} className="mt-0.5 shrink-0" />
+              Read-only mode is active — no app can be created or saved. Switch to Plan or Execute in the top bar.
+            </div>
+          )}
+
           {/* Device picker — only devices whose plugin advertises an install action. */}
           {candidates.length > 1 && (
             <label className="block text-sm font-medium text-secondary">
@@ -865,7 +875,8 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose }: Cr
           </button>
           <button
             type="button"
-            disabled={pending || !candidate}
+            disabled={pending || !candidate || readOnly}
+            title={readOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
             onClick={() => void handleSubmit()}
             className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >

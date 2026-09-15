@@ -1,4 +1,5 @@
 import { ReactNode, useEffect } from 'react';
+import { EyeOff } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { NotificationCenter } from './NotificationCenter';
 import { PlansCenter } from './PlansCenter';
@@ -7,7 +8,7 @@ import { ExecutionModeToggle } from './ExecutionModeToggle';
 import { useExecutionMode } from '../executionMode';
 
 /** Pages whose actions flow through the plan workflow (create + execute).
- *  On every other page the top-bar Execute/Plan toggle renders disabled. */
+ *  On every other page the top-bar Read-Only/Plan/Execute toggle renders disabled. */
 const PLAN_ACTION_PATHS = ['/storage', '/shares', '/containers', '/vms'];
 
 function isPlanActionPath(pathname: string): boolean {
@@ -32,13 +33,15 @@ export interface LayoutProps {
  * The plans icon and notification bell sit far right in every view.
  */
 export function Layout({ children, title, actions }: LayoutProps) {
-  const { setApplicable } = useExecutionMode();
+  const { mode, setApplicable } = useExecutionMode();
 
-  // The Execute/Plan toggle only applies on pages whose actions flow through
-  // the plan workflow — everywhere else it renders disabled.
+  // The Read-Only/Plan/Execute toggle only applies on pages whose actions flow
+  // through the plan workflow — everywhere else it renders disabled.
   useEffect(() => {
     setApplicable(isPlanActionPath(window.location.pathname));
   }, [setApplicable]);
+
+  const readOnlyBanner = mode === 'readonly' && isPlanActionPath(window.location.pathname);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -57,6 +60,12 @@ export function Layout({ children, title, actions }: LayoutProps) {
             <NotificationCenter />
           </div>
         </header>
+        {readOnlyBanner && (
+          <div className="flex shrink-0 items-center gap-2 border-b border-warning-border bg-warning px-6 py-1.5 text-xs font-medium text-warning-fg">
+            <EyeOff className="h-3.5 w-3.5 shrink-0" />
+            Read-only mode is active — no actions will be executed or saved on this page. Switch to Plan or Execute in the top bar to make changes.
+          </div>
+        )}
         <main className="min-h-0 flex-1 overflow-y-auto px-6 py-6">{children}</main>
       </div>
     </div>
