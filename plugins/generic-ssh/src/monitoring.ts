@@ -102,7 +102,9 @@ export async function collectLive(backend: SshBackend): Promise<LiveMetrics> {
     { name: 'stat', cmd: "head -1 /proc/stat" },
     { name: 'loadavg', cmd: 'cat /proc/loadavg' },
     { name: 'meminfo', cmd: 'cat /proc/meminfo' },
-    { name: 'counters', cmd: "for i in /sys/class/net/*; do n=$(basename $i); [ -f \"$i/statistics/rx_bytes\" ] && echo \"$n $(cat $i/statistics/rx_bytes) $(cat $i/statistics/tx_bytes)\"; done" },
+    // lo + veth* excluded: loopback is noise, and veth pairs DOUBLE-COUNT container
+    // traffic (it appears on both ends of the pair) — would inflate the aggregate.
+    { name: 'counters', cmd: "for i in /sys/class/net/*; do n=$(basename $i); case $n in lo|veth*) continue;; esac; [ -f \"$i/statistics/rx_bytes\" ] && echo \"$n $(cat $i/statistics/rx_bytes) $(cat $i/statistics/tx_bytes)\"; done" },
     { name: 'date', cmd: "date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z" },
     { name: 'tz', cmd: "echo \"TZFILE=$(cat /etc/timezone 2>/dev/null)\"; echo \"SYMLINK=$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/##')\"" },
   ]).catch(() => new Map<string, string>());
@@ -282,42 +284,60 @@ export class GenericSshCollector {
       { name: 'ipaddr', cmd: "ip -o addr show 2>/dev/null || true" },
     ]).catch(() => new Map<string, string>());
 
-    const rows = new Map<string, NetworkRow>();
+    // Base info per interface (MAC/state/VLAN) — one entry even without IPs.
+    const base = new Map<string, { mac: string | null; status: string; vlanId: number | null }>();
     for (const line of (sections.get('ifaces') ?? '').split('\n')) {
-      const [name, mac, state, speedS] = line.split('|');
-      if (!name || name === 'lo') continue; // lo is noise on every page
-      const speed = Number(speedS);
-      rows.set(name, {
-        name,
-        ip: null,
-        prefix: null,
-        version: null,
-        vlanId: null,
+      const [name, mac, state] = line.split('|');
+      // lo + veth* are container plumbing — noise on every page and they churn
+      // with every container restart. Bridges (br-*) and docker0 stay: they are
+      // stable and meaningful for topology detection.
+      if (!name || name === 'lo' || /^veth/.test(name)) continue;
+      base.set(name, {
         mac: mac && /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/i.test(mac) ? mac.toLowerCase() : null,
-        status: state === 'up' || state === 'unknown' ? (state === 'up' ? 'up' : 'down') : state,
+        status: state === 'up' || state === 'unknown' ? (state === 'up' ? 'up' : 'down') : state ?? 'unknown',
+        vlanId: name.match(/\.(\d+)$/)?.[1] !== undefined ? Number(name.match(/\.(\d+)$/)![1]) : null,
       });
-      // VLAN id from the interface name (eth0.100 → 100).
-      const vm = name.match(/\.(\d+)$/);
-      if (vm) rows.get(name)!.vlanId = Number(vm[1]);
     }
 
-    // Attach IPs — `ip -o addr` lines: "2: eth0    inet 192.168.1.5/24 brd ... scope global eth0".
-    const ipOut = sections.get('ipaddr') ?? '';
-    if (ipOut.trim()) {
-      for (const line of ipOut.split('\n')) {
-        const m = line.match(/^\d+:\s+(\S+)\s+(?:inet|inet6)\s+(\S+)/);
-        if (!m) continue;
-        const row = rows.get(m[1]);
-        if (!row) continue; // interface vanished between reads — fine
-        const [addr, prefix] = m[2].split('/');
-        const isV6 = m[0].includes('inet6') || m[2].includes(':');
-        row.ip = addr;
-        row.prefix = prefix !== undefined ? Number(prefix) : null;
-        row.version = isV6 ? 'v6' : 'v4';
+    // Parse `ip -o addr` lines: "2: eth0    inet 192.168.1.5/24 brd ... scope global eth0".
+    type Cand = { addr: string; prefix: number | null; v6: boolean; rank: number };
+    const cands = new Map<string, Cand[]>();
+    for (const line of (sections.get('ipaddr') ?? '').split('\n')) {
+      const m = line.match(/^\d+:\s+(\S+)\s+(?:inet|inet6)\s+(\S+)/);
+      if (!m) continue;
+      const [addr, prefix] = m[2].split('/');
+      const v6 = m[0].includes('inet6') || addr.includes(':');
+      // Rank: global IPv4 (0) > global IPv6 (1) > APIPA 169.254/16 (2) > loopback (3)
+      // > fe80:: link-local / ::1 (4). Link-locals are noise on every Linux box —
+      // they must never shadow the real management address in the best-row pick.
+      let rank: number;
+      if (!v6) {
+        rank = /^169\.254\./.test(addr) ? 2 : /^127\./.test(addr) ? 3 : 0;
+      } else {
+        rank = addr.startsWith('fe80') || addr === '::1' ? 4 : 1;
+      }
+      const list = cands.get(m[1]) ?? [];
+      list.push({ addr, prefix: prefix !== undefined && Number.isFinite(Number(prefix)) ? Number(prefix) : null, v6, rank });
+      cands.set(m[1], list);
+    }
+
+    // ONE row per (interface, address) — the TrueNAS pattern. The API's networks
+    // table is keyed by (name, ip), so dual-stack interfaces yield two rows that
+    // merge into one logical network on the Networks page; an interface with no
+    // IP at all still yields a single ip-less row for topology detection.
+    const out: NetworkRow[] = [];
+    for (const [name, list] of cands) {
+      const b = base.get(name);
+      if (!b) continue; // interface vanished between reads — fine
+      list.sort((a, x) => a.rank - x.rank || a.addr.localeCompare(x.addr));
+      for (const c of list) {
+        out.push({ name, ip: c.addr, prefix: c.prefix, version: c.v6 ? 'v6' : 'v4', vlanId: b.vlanId, mac: b.mac, status: b.status });
       }
     }
-
-    return [...rows.values()];
+    for (const [name, b] of base) {
+      if (!cands.has(name)) out.push({ name, ip: null, prefix: null, version: null, vlanId: b.vlanId, mac: b.mac, status: b.status });
+    }
+    return out;
   }
 
   /** ARP + NDP neighbor tables — /proc/net/arp (always present) + ip -6 neigh. */
@@ -435,18 +455,22 @@ export class GenericSshCollector {
       this.disks().catch(() => [] as DiskRow[]),
     ]);
 
-    // Ports: one row per interface (deduped by name) → device_ports table.
-    const ports: PortRowLike[] = networks.map((n) => ({
-      name: n.name,
-      status: (n.status ?? 'unknown').toLowerCase(),
-      speed: null,
-      duplex: null,
-      vlanId: n.vlanId ?? undefined,
-      poe: null,
-      extra: {
-        ...(n.mac ? { mac: n.mac } : {}),
-        ...(n.ip ? { ip: `${n.ip}${n.prefix ? `/${n.prefix}` : ''}` } : {}),
-      },
+    // Ports: ONE row per interface (networks[] carries one row PER ADDRESS — the
+    // device_ports table is keyed by name, so merge all addresses of an interface
+    // into a single `ips` list in extra).
+    const portByIface = new Map<string, PortRowLike & { ips: string[]; extra: Record<string, unknown> }>();
+    for (const n of networks) {
+      let p = portByIface.get(n.name);
+      if (!p) {
+        p = { name: n.name, status: (n.status ?? 'unknown').toLowerCase(), speed: null, duplex: null, vlanId: n.vlanId ?? undefined, poe: null, ips: [], extra: {} };
+        portByIface.set(n.name, p);
+      }
+      if (n.mac) p.extra['mac'] = n.mac;
+      if (n.ip) p.ips.push(`${n.ip}${n.prefix !== null ? `/${n.prefix}` : ''}`);
+    }
+    const ports: PortRowLike[] = [...portByIface.values()].map(({ ips, ...rest }) => ({
+      ...rest,
+      extra: { ...rest.extra, ...(ips.length > 0 ? { ip: ips[0], ips } : {}) },
     }));
 
     return {

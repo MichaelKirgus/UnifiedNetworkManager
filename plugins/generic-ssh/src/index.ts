@@ -30,6 +30,8 @@ import {
   resolvePluginIdentity,
   probeHandler,
   filesystemHandler,
+  stateHandler,
+  validateInput,
   hostFromAddress,
   resolveSshPort,
   dynamicSshHostVerifier,
@@ -37,10 +39,15 @@ import {
   buildDeviceTimeInfo,
   createSftpPool,
 } from '@unm/plugin-sdk';
-import type { ProbeRequestBody } from '@unm/plugin-sdk';
+import type { ProbeRequestBody, StateRequestBody } from '@unm/plugin-sdk';
 
 import { SshBackend, closeSshPools, resolveGenericSshCredentials } from './client/sshClient';
 import { collectLive, collectMonitoring, getInventory } from './monitoring';
+import { buildPlan, listCatalogWithIntents, PlanningError } from './plan';
+import type { PlanRequest } from './plan';
+import { getAction } from './actions/registry';
+import type { ActionContext } from './actions/types';
+import { buildGenericSshState } from './state';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-00000000000c';
 export const PLUGIN_NAME = 'Generic SSH Plugin (Linux)';
@@ -57,11 +64,14 @@ const identity = resolvePluginIdentity({
   vendors: ['linux'],
   // monitoring + inventory: two-tier cadence collection over SSH (live metrics
   // every poll; interfaces/ARP/routes/filesystems/disks at the 15-min interval).
-  // ssh: SSH is THE data path — exec for metrics/inventory.
+  // ssh: SSH is THE data path — exec for metrics/inventory + all config actions.
   // filesystem: POST /filesystem — SFTP file manager (Storage page + DeviceDetail).
   // probe: short-cycle live telemetry for on-demand webapp polling.
   // sshConsole: interactive shell over WebSocket (/console) — the "Shell" button.
-  capabilities: ['monitoring', 'inventory', 'ssh', 'filesystem', 'probe', 'sshConsole'],
+  // configuration: POST /config — one action step (registry dispatch); Config page
+  //                actions + config jobs. planning: POST /plan — multi-device intents
+  //                (WireGuard tunnel) fanned into ordered steps with auto-snapshots.
+  capabilities: ['monitoring', 'inventory', 'ssh', 'filesystem', 'probe', 'sshConsole', 'configuration', 'planning'],
 });
 
 /**
@@ -162,6 +172,9 @@ const server = createPluginServer({
     // the UI always matches the data this specific box returned (a busybox router
     // has no lsblk; a full server does).
     metrics: [],
+    // Action catalog: single-device actions + multi-device intents. The API
+    // persists it and validates plan steps against it.
+    actions: listCatalogWithIntents(),
     options: PLUGIN_OPTIONS,
     iconUrl: '/icons/generic-ssh.svg',
   },
@@ -417,6 +430,140 @@ app.post(
     }
   }, 'generic-ssh-plugin')
 );
+
+// ---------------------------------------------------------------------------
+// POST /config — executes ONE action step against one device. This is the unit
+// of work the API's config-job worker + plan executor dispatch (registry shape:
+// {actionId, input, credentials}). The plugin owns ALL logic: it validates the
+// input against the action's schema and runs the executor; the API only propagates.
+// ---------------------------------------------------------------------------
+app.post('/config', async (req, res) => {
+  const body = req.body ?? {};
+  const deviceId = typeof body.deviceId === 'string' ? body.deviceId : null;
+  const managementAddress = typeof body.managementAddress === 'string' ? body.managementAddress : '';
+
+  // Registry shape preferred; legacy `{action, payload}` maps onto it.
+  const actionId: string | undefined = typeof body.actionId === 'string' ? body.actionId : (typeof body.action === 'string' ? body.action : undefined);
+  const input: Record<string, unknown> =
+    body.input && typeof body.input === 'object'
+      ? (body.input as Record<string, unknown>)
+      : body.payload && typeof body.payload === 'object'
+        ? (body.payload as Record<string, unknown>)
+        : {};
+
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+
+  if (!actionId) {
+    res.status(400).json({ success: false, result: { error: 'Missing actionId (or legacy "action")' } });
+    return;
+  }
+  if (!managementAddress) {
+    res.status(400).json({ success: false, result: { error: 'Missing managementAddress' } });
+    return;
+  }
+
+  const action = getAction(actionId);
+  if (!action) {
+    res.status(400).json({ success: false, result: { error: `Unknown action "${actionId}"` } });
+    return;
+  }
+
+  // Credentials: the assignment's decrypted fields are the base (the primary
+  // username/password); bound slots arrive under credentials.slots.<name>;
+  // provisioned plan material arrives namespaced by secretRef and is merged as-is.
+  const creds = (body.credentials && typeof body.credentials === 'object' ? body.credentials : {}) as Record<string, unknown>;
+
+  try {
+    const host = hostFromAddress(managementAddress);
+    if (!host) throw new Error(`Unparseable management address "${managementAddress}"`);
+    const backend = backendFor(host, sshPortOf(settings), creds);
+    if (!backend) {
+      res.status(200).json({ success: false, result: { error: 'No SSH credential bound — configuration actions unavailable.' } });
+      return;
+    }
+
+    // Validate input against the action's declared schema — the plugin is the
+    // authority on what it accepts.
+    const issues = validateInput(action.inputSchema, input);
+    if (issues.length > 0) {
+      res.status(200).json({ success: false, result: { error: `Invalid input for ${actionId}: ${issues.map((i) => `${i.path}: ${i.message}`).join('; ')}` } });
+      return;
+    }
+
+    const ctx: ActionContext = { backend, host, deviceId, credentials: creds };
+    const result = await action.execute(ctx, input);
+    if (!result.success) {
+      logger.warn(`Config action ${actionId} reported failure for ${managementAddress}: ${typeof result.error === 'string' ? result.error : JSON.stringify(result.details ?? {})}`, { deviceId, context: { host: managementAddress, actionId } });
+    }
+    res.status(200).json({ success: result.success, result: { ...result } });
+  } catch (err) {
+    logger.error(`Config action ${actionId} failed for ${managementAddress}: ${(err as Error).message}`, { deviceId, context: { host: managementAddress, actionId } });
+    res.status(200).json({ success: false, result: { error: (err as Error).message } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /plan — plans a multi-device intent (or fans out a single action across a
+// batch). The plugin does ALL the planning — cross-device references, dependency
+// ordering, credential provisioning requests. It never generates key material:
+// provisionRequests are non-secret descriptors the API persists with the plan;
+// the secrets provider owns crypto.
+// ---------------------------------------------------------------------------
+app.post('/plan', async (req, res) => {
+  const body = req.body ?? {};
+
+  const planReq: PlanRequest = {
+    intent: {
+      actionId: typeof body.intent?.actionId === 'string' ? body.intent.actionId : '',
+      inputs: (body.intent?.inputs && typeof body.intent.inputs === 'object' ? body.intent.inputs : {}) as Record<string, unknown>,
+    },
+    devices: Array.isArray(body.devices)
+      ? (body.devices as PlanRequest['devices']).map((d) => ({
+          deviceId: String(d.deviceId),
+          managementAddress: String(d.managementAddress ?? ''),
+          credentials: (d.credentials && typeof d.credentials === 'object' ? d.credentials : {}) as Record<string, unknown>,
+        }))
+      : [],
+  };
+
+  try {
+    const plan = buildPlan(planReq);
+    res.status(200).json({ plan });
+  } catch (err) {
+    if (err instanceof PlanningError) {
+      logger.error(`Planning ${planReq.intent.actionId} failed: ${err.message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    logger.error(`Planning ${planReq.intent.actionId} failed unexpectedly: ${(err as Error).message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /state — dynamic device-state document for the UNM Config page. The API
+// broker calls this with fresh credentials + injected settings and returns the
+// response verbatim to the webapp. Built from FRESH reads so it always reflects
+// current configuration; read-only (writes flow through actions).
+// ---------------------------------------------------------------------------
+app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+
+  if (!body.managementAddress) throw new Error('Missing managementAddress');
+
+  // Credentials: the assignment's decrypted fields are at top level of
+  // `credentials` (primary username/password) — same model as /config.
+  const creds = (body.credentials && typeof body.credentials === 'object' ? body.credentials : {}) as Record<string, unknown>;
+
+  const host = hostFromAddress(body.managementAddress);
+  if (!host) throw new Error(`Unparseable management address "${body.managementAddress}"`);
+  const backend = backendFor(host, sshPortOf(settings), creds);
+  if (!backend) throw new Error('No SSH credential bound — device state unavailable.');
+
+  return buildGenericSshState(backend);
+}, 'generic-ssh-plugin'));
 
 // --- Startup --------------------------------------------------------------------
 
