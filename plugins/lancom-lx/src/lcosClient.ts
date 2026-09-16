@@ -25,7 +25,7 @@ import {
 import {
   LCOS_BASE, SYS, HW, STATION, RADIOS, WLAN_IF, CHANNEL_UTIL, ENV_SCAN, WDS,
   LAN_PORTS, LAN_BYTES, BRIDGE_VLAN, IP_ADDR, SNMP_EVENT,
-  MGMT_STATE, AP_CONN, NET_PROFILE, LMC,
+  MGMT_STATE, AP_CONN, NET_PROFILE, LMC, TIME, SETUP_TIME, lxTimezoneToIana,
 } from './lcosOids';
 
 /* ------------------------------------------------------------------ *
@@ -674,3 +674,71 @@ const TRAP_NAMES: Record<string, string> = {
   AssRej: 'assocRejected',
   Connected: 'connected',
 };
+
+/* ------------------------------------------------------------------ *
+ * Device clock (Time page) — fresh per-poll read, NOT from the TTL-cached
+ * snapshot: drift is measured against the reading's own timestamp, so a
+ * 15-minute-old cached wall clock would surface as fake drift.
+ * ------------------------------------------------------------------ */
+
+/** One device-clock reading for `system.deviceTime`. */
+export interface LcosClock {
+  /** Device-local wall clock, naive ISO ("2026-09-02T16:49:52"). */
+  localIso: string;
+  /** IANA zone from the setup-timezone enum (display only), null when unknown. */
+  timezone: string | null;
+  /** Current UTC offset in minutes (from lcosLXStatusCurrentTimeOffset, seconds). */
+  utcOffsetMinutes: number | null;
+  /** Absolute instant in epoch ms — pre-computed from the device's own UTC-epoch scalar. */
+  epochMs: number;
+}
+
+/**
+ * Reads the AP's clock with ONE cheap snmpGet of four scalars:
+ *   - lcosLXStatusCurrentTimeEpoch (UTC seconds) → absolute instant, GROUND TRUTH for drift;
+ *   - lcosLXStatusCurrentTime ("MM/DD/YYYY HH:mm:ss" local string — US date order, verified
+ *     live against the epoch scalar) → display wall clock;
+ *   - lcosLXStatusCurrentTimeOffset (signed UTC offset in seconds) → cross-validation + fixed-offset display;
+ *   - lcosLXSetupTimeTimezone (IANA-ish enum) → zone name for display.
+ * The string is cross-checked against epoch+offset: on any mismatch (e.g. a firmware
+ * variant that reports DD/MM) the mathematically exact synthesized value wins.
+ * Returns null when no usable instant comes back — the caller omits system.deviceTime.
+ */
+export async function readLcosClock(
+  host: string,
+  creds: SnmpCredentials,
+  opts: LcosOptions
+): Promise<LcosClock | null> {
+  try {
+    const m = await snmpGet(host, creds, [TIME.currentTime, TIME.epoch, TIME.offset, SETUP_TIME.timezone], opts);
+
+    // Ground truth first — without a usable epoch there is no drift to report.
+    const epochSec = toInt(m.get(TIME.epoch));
+    if (epochSec === null || !Number.isFinite(epochSec) || epochSec <= 0) return null;
+    const epochMs = Math.round(epochSec * 1000); // Unsigned32 — the 2106 wrap is irrelevant for drift
+
+    const offsetSec = toInt(m.get(TIME.offset));
+    const utcOffsetMinutes = offsetSec !== null && Number.isFinite(offsetSec) ? Math.round(offsetSec / 60) : null;
+
+    // Display wall clock: parse the device's own string ("MM/DD/YYYY HH:mm:ss").
+    let localIso: string | null = null;
+    const raw = m.get(TIME.currentTime);
+    if (typeof raw === 'string') {
+      const mm = raw.trim().match(/^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}):(\d{2})(?::(\d{2}))?$/);
+      if (mm) localIso = `${mm[3]}-${mm[1]}-${mm[2]}T${mm[4]}:${mm[5]}:${mm[6] ?? '00'}`;
+    }
+
+    // Cross-validate / synthesize from epoch+offset (exact by construction).
+    if (offsetSec !== null && Number.isFinite(offsetSec)) {
+      const synth = new Date((epochSec + offsetSec) * 1000).toISOString().slice(0, 19);
+      if (!localIso || localIso !== synth) localIso = synth; // missing or mismatched → trust the math
+    } else if (!localIso) {
+      return null; // no string AND no offset to synthesize from — nothing usable
+    }
+
+    const timezone = lxTimezoneToIana(toInt(m.get(SETUP_TIME.timezone)));
+    return { localIso, timezone, utcOffsetMinutes, epochMs };
+  } catch {
+    return null; // clock read failed — the rest of the poll proceeds without it
+  }
+}

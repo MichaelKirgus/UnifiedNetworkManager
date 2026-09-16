@@ -31,6 +31,45 @@ export const SYS = {
   bootcount: `${LCOS_BASE}.3.10.0`,
 } as const;
 
+/** lcosLXStatus time scalars (13.1.18–20) — the AP's wall clock + UTC epoch + offset. */
+export const TIME = {
+  /**
+   * lcosLXStatusCurrentTime — device-local wall clock, OCTET STRING (SIZE(0..20)),
+   * format "MM/DD/YYYY HH:mm:ss" (US order — verified live against the epoch scalar).
+   */
+  currentTime: `${LCOS_BASE}.1.18.0`,
+  /** lcosLXStatusCurrentTimeEpoch — UTC seconds since epoch (Unsigned32; wraps 2106). */
+  epoch: `${LCOS_BASE}.1.19.0`,
+  /** lcosLXStatusCurrentTimeOffset — current UTC offset in SECONDS, signed (Integer32). */
+  offset: `${LCOS_BASE}.1.20.0`,
+} as const;
+
+/** lcosLXSetupTime group (13.2.14) — time config mirror (read-only). */
+export const SETUP_TIME = {
+  /** lcosLXSetupTimeTimezone — INTEGER enum of IANA-ish zones (see lxTimezoneToIana). */
+  timezone: `${LCOS_BASE}.2.14.20.0`,
+} as const;
+
+/** Maps the lcosLXSetupTimeTimezone enum to an IANA zone name (null when unknown). */
+export function lxTimezoneToIana(v: number | null): string | null {
+  if (v === null || !Number.isFinite(v)) return null;
+  const ZONES: Record<number, string> = {
+    0: 'UTC',
+    1: 'Europe/Berlin', 2: 'Europe/Vienna', 3: 'Europe/Zurich', 4: 'Europe/London',
+    5: 'Europe/Prague', 6: 'Europe/Warsaw', 7: 'Europe/Zagreb', 8: 'Europe/Copenhagen',
+    9: 'Europe/Paris', 10: 'Europe/Helsinki', 11: 'Europe/Tallinn', 12: 'Europe/Athens',
+    13: 'Europe/Budapest', 14: 'Europe/Dublin', 15: 'Europe/Rome', 16: 'Europe/Riga',
+    17: 'Europe/Vilnius', 18: 'Europe/Luxembourg', 19: 'Europe/Malta', 20: 'Europe/Amsterdam',
+    21: 'Europe/Nicosia', 22: 'Europe/Lisbon', 23: 'Europe/Bucharest', 24: 'Europe/Bratislava',
+    25: 'Europe/Ljubljana', 26: 'Europe/Madrid', 27: 'Europe/Stockholm', 28: 'Europe/Brussels',
+    29: 'Europe/Sofia', 30: 'America/Anchorage', 31: 'America/Los_Angeles',
+    32: 'America/Denver', 33: 'America/Chicago', 34: 'America/New_York',
+    35: 'Pacific/Auckland', 36: 'Pacific/Honolulu', 37: 'Australia/Brisbane',
+    38: 'Australia/Sydney', 39: 'Australia/Perth', 40: 'Australia/Darwin', 41: 'Australia/Adelaide',
+  };
+  return ZONES[v] ?? null;
+}
+
 /** lcosLXStatusHardwareInfo group (13.1.47). */
 export const HW = {
   base: `${LCOS_BASE}.1.47`,

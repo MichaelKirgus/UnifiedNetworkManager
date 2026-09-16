@@ -23,10 +23,11 @@ import {
   resolveHttpsPort,
   resolveHttpPort,
   resolveSshPort,
+  warnOnce,
   CertificateRow,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
-import { LcosOptions, getLcosInventory, walkLcosCounters } from './lcosClient';
+import { LcosOptions, getLcosInventory, readLcosClock, walkLcosCounters } from './lcosClient';
 import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 import { DEVICE_MODELS } from './deviceModels';
 
@@ -315,6 +316,15 @@ app.post('/monitoring', async (req, res) => {
       logger.warn(`Partial LCOS-LX data from ${host}: ${inventory.error}`, { deviceId, context: { host } });
     }
 
+    // Device clock (Time page): ONE cheap snmpGet of four scalars, fresh on EVERY
+    // poll — the TTL-cached snapshot must NOT feed drift math (a 15-minute-old wall
+    // clock would surface as fake drift). The device's own UTC-epoch scalar is the
+    // ground truth for the absolute instant; see readLcosClock().
+    const clock = await readLcosClock(host, creds, opts);
+    if (!clock) {
+      warnOnce('lancom-lx-plugin', host, 'deviceTime: no usable clock from device — time OIDs missing or SNMP read failed');
+    }
+
     // Fast path: counter-only walks every cycle for fresh rates + event deltas.
     const fast = await walkLcosCounters(host, creds, opts);
 
@@ -330,6 +340,17 @@ app.post('/monitoring', async (req, res) => {
       metrics['system.memoryUsedPct'] = Math.max(0, Math.min(100, usedPct));
     } else {
       metrics['system.memoryUsedPct'] = null;
+    }
+    // system.deviceTime — the Time page's contract (see @unm/plugin-sdk deviceTime.ts).
+    // epochMs is pre-computed from the device's own UTC-epoch scalar, so drift is
+    // exact; localIso/timezone/offset are for human display only.
+    if (clock) {
+      metrics['system.deviceTime'] = {
+        localIso: clock.localIso,
+        timezone: clock.timezone ?? null,
+        utcOffsetMinutes: clock.utcOffsetMinutes ?? null,
+        epochMs: clock.epochMs,
+      };
     }
     metrics['system.bootcount'] = sys.bootcount;
     // User-selected hardware model / firmware (from the device form) — shown in
