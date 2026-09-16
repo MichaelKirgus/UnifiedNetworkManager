@@ -168,10 +168,12 @@ export function resolvePath(input: string | null | undefined, root?: string | nu
     abs = base === '/' ? '/' + segments.join('/') : `${base}/${segments.join('/')}`;
   }
 
-  // When a root is configured, the result must stay inside it.
+  // When a root is configured, the result must stay inside it. A bare "/" root
+  // contains every absolute path (the `r + '/'` prefix check would be "//" and
+  // match nothing — that bug broke full-tree browsing for any plugin).
   if (root) {
     const r = normalizeSegment(root);
-    if (abs !== r && !abs.startsWith(r + '/')) {
+    if (r !== '/' && abs !== r && !abs.startsWith(r + '/')) {
       throw new SftpPathError(`Path escapes the allowed root ${r}: ${raw}`);
     }
   }
@@ -400,16 +402,20 @@ export class SftpSession {
     const sftp = await this.ensure(creds);
     if (parents) {
       // Walk the path segments from root down, creating each missing level.
+      // STAT-FIRST: OpenSSH SFTP answers EEXIST with a generic "Failure" status
+      // (no message to match), so error-text sniffing is unreliable — check
+      // whether the directory already exists before attempting to create it.
       const parts = abs.split('/').filter(Boolean);
       let cur = '';
       for (const part of parts) {
         cur += '/' + part;
         try {
-          await this.withTimeout<void>(`mkdir ${cur}`, (cb) => sftp.mkdir(cur, cb as any));
+          await this.withTimeout<import('ssh2').Stats>(`stat ${cur}`, (cb) => sftp.stat(cur, cb as any));
+          continue; // already exists — descend into it
         } catch (e) {
-          // EEXIST is fine — the directory already exists. Anything else propagates.
-          if (!(e instanceof SshError) || !/exist/i.test(e.message)) throw e;
+          if (!(e instanceof SshError) || !/no such file|not found/i.test(e.message)) throw e;
         }
+        await this.withTimeout<void>(`mkdir ${cur}`, (cb) => sftp.mkdir(cur, cb as any));
       }
     } else {
       await this.withTimeout<void>(`mkdir ${abs}`, (cb) => sftp.mkdir(abs, cb as any));

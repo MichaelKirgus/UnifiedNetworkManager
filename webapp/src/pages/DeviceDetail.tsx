@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import clsx from 'clsx';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { Copy, Power, Plus, RefreshCw, Settings, Settings2, Star, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
+import { Copy, FolderOpen, Power, Plus, RefreshCw, Settings, Settings2, Star, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { ConsoleDialog } from '../components/ConsoleDialog';
+import { FileBrowserDialog } from '../components/FileBrowserDialog';
 import { StatusBadge } from '../components/StatusBadge';
 import { MetricView } from '../components/MetricView';
 import { OptionForm } from '../components/OptionForm';
@@ -175,6 +176,24 @@ export default function DeviceDetail() {
   /** True while the host-shell console dialog is open. */
   const [consoleOpen, setConsoleOpen] = useState(false);
 
+  // --- Filesystem browser (capability 'filesystem') ---------------------------
+  // The Files button only renders when an assigned plugin advertises the
+  // 'filesystem' capability — GENERIC: any future storage plugin serving POST
+  // /filesystem gets it for free. Opens the device's full tree at '/' (the
+  // Storage page offers per-filesystem browsing with scoped roots).
+  const filesystemAssignment = useMemo(
+    () =>
+      assignments.find((a) => {
+        if (a.pluginCapabilities?.includes('filesystem')) return true;
+        const p = (pluginsQuery.data ?? []).find((x) => x.id === a.pluginId);
+        return p?.capabilities?.includes('filesystem') ?? false;
+      }) ?? null,
+    [assignments, pluginsQuery.data],
+  );
+  const hasFilesystem = filesystemAssignment !== null;
+  /** True while the root file-browser dialog is open. */
+  const [filesOpen, setFilesOpen] = useState(false);
+
   // Static descriptors (from /discover) as a fallback for plugins that have
   // not reported live descriptors yet. Needs plugins:read (API-gated).
   const [fallbackDescriptors, setFallbackDescriptors] = useState<Record<string, MetricDescriptor[]>>({});
@@ -333,6 +352,16 @@ export default function DeviceDetail() {
               >
                 <TerminalIcon className="h-4 w-4" />
                 Shell
+              </button>
+            )}
+            {hasFilesystem && (
+              <button
+                onClick={() => setFilesOpen(true)}
+                title="Browse the device's filesystem over SFTP — uses the bound SSH credential"
+                className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background"
+              >
+                <FolderOpen className="h-4 w-4" />
+                Files
               </button>
             )}
             <button
@@ -881,6 +910,18 @@ export default function DeviceDetail() {
           title={`Shell — ${device.name}`}
           subtitle={`${device.managementAddress ?? ''}${consoleAssignment.pluginName ? ` · via ${consoleAssignment.pluginName}` : ''}`}
           onClose={() => setConsoleOpen(false)}
+        />
+      )}
+
+      {/* --- Filesystem browser (root tree, capability 'filesystem') -------- */}
+      {filesOpen && device && filesystemAssignment && (
+        <FileBrowserDialog
+          deviceId={device.id}
+          pluginId={filesystemAssignment.pluginId}
+          context={{ kind: 'root' }}
+          title={`Files — ${device.name}`}
+          subtitle={`${device.managementAddress ?? ''}${filesystemAssignment.pluginName ? ` · via ${filesystemAssignment.pluginName}` : ''}`}
+          onClose={() => setFilesOpen(false)}
         />
       )}
     </Layout>

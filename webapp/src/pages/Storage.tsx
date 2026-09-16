@@ -664,11 +664,12 @@ export default function Storage() {
     ];
 
     // Browse the contents over SFTP — only when the plugin advertises the
-    // 'filesystem' capability AND this row is a ZFS filesystem with a directory tree
-    // (a pool or dataset; zvols are block devices). The mountpoint is resolved by the
-    // PLUGIN at browse time (pool.dataset.query covers pools too), so we don't gate on
-    // the row's own mountpoint field — pool rows carry null there.
-    const browsable = hasFilesystemCap(row.pluginId) && (pool || dsLike);
+    // 'filesystem' capability AND this row is a filesystem with a directory tree:
+    //   - ZFS pool/dataset: the PLUGIN resolves the live mountpoint at browse time
+    //     (pool.dataset.query covers pools too) → context { kind:'dataset', name }.
+    //   - Any other mounted filesystem (ext4/xfs/… from df): the row's own
+    //     mountpoint IS the SFTP root → context { kind:'mount', mountpoint }.
+    const browsable = hasFilesystemCap(row.pluginId) && ((pool || dsLike) || isMounted(row));
 
     return (
       <div className="flex items-center gap-0.5">
@@ -1127,12 +1128,16 @@ export default function Storage() {
         {snapshotTarget && <SnapshotDialog row={snapshotTarget} onClose={() => setSnapshotTarget(null)} />}
         {quotaTarget && <QuotaDialog row={quotaTarget} onClose={() => setQuotaTarget(null)} />}
 
-        {/* Filesystem browser — browse a dataset's contents over SFTP (capability 'filesystem'). */}
+        {/* Filesystem browser — browse a filesystem's contents over SFTP (capability 'filesystem'). */}
         {browseTarget && (
           <FileBrowserDialog
             deviceId={browseTarget.deviceId}
             pluginId={browseTarget.pluginId}
-            context={{ kind: 'dataset', name: browseTarget.name }}
+            context={
+              isDatasetLike(browseTarget) || isRealPool(browseTarget)
+                ? { kind: 'dataset', name: browseTarget.name }
+                : { kind: 'mount', mountpoint: browseTarget.mountpoint ?? '/' }
+            }
             title={`Browse ${browseTarget.name}`}
             subtitle={`${browseTarget.deviceName ?? browseTarget.managementAddress ?? ''}${browseTarget.mountpoint ? ` · ${browseTarget.mountpoint}` : ''}`}
             onClose={() => setBrowseTarget(null)}
