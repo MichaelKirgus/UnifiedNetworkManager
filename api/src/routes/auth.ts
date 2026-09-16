@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Request, Response as ExpressResponse, Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { eq } from 'drizzle-orm';
 import { db, pool } from '../db';
@@ -111,6 +111,195 @@ router.get('/auth/me', requireAuth, async (req, res) => {
     effectivePermissions: req.user?.permissions ?? [],
     deviceAccessUnrestricted,
   });
+});
+
+/**
+ * Returns the caller's session expiry + warning lead time. The expiry is
+ * computed SERVER-SIDE from the JWT's issued-at plus the user's EFFECTIVE
+ * session TTL (global setting capped by any per-user `sessionTimeoutSeconds`
+ * override) — so it matches exactly what requireAuth enforces, and a shorter
+ * global timeout set after login is reflected here too. The webapp renders
+ * this as a top-bar countdown chip and an amber warning banner once the
+ * remaining time drops below `warnSeconds`.
+ */
+router.get('/auth/session', requireAuth, async (req, res) => {
+  const payload = req.user!;
+  const iat = typeof payload.iat === 'number' ? payload.iat : null;
+  if (iat === null) {
+    res.status(401).json({ error: 'Session has no issued-at claim', code: 'session_expired' });
+    return;
+  }
+
+  const globalTtl = Number(await getEffectiveSettingValue('sessionTimeoutSeconds')) || 3600;
+  let ttlSeconds = globalTtl;
+  try {
+    const policy = await resolveCredentialPolicy(payload.sub);
+    ttlSeconds = effectiveSessionTtl(globalTtl, policy);
+  } catch {
+    // Policy lookup hiccup — fall back to the global TTL (requireAuth does the same).
+  }
+
+  const warnSeconds = Number(await getEffectiveSettingValue('sessionWarnSeconds')) || 0;
+
+  // Whether the "Extend" button may be offered at all: the policy kill switch
+  // AND an enrolled second factor (extension always requires re-proving one).
+  let extensionAllowed = false;
+  try {
+    const policy = await resolveCredentialPolicy(payload.sub);
+    if (policy.allowSessionExtension !== false) extensionAllowed = await hasEnrolledSecondFactor(payload.sub);
+  } catch {
+    /* keep false — the extend endpoints re-check everything anyway */
+  }
+
+  res.status(200).json({
+    expiresAt: Math.floor(iat * 1000 + ttlSeconds * 1000),
+    ttlSeconds,
+    warnSeconds,
+    extensionAllowed,
+  });
+});
+
+// --- Session extension (2FA-gated) ------------------------------------------
+// Extending a session mints a fresh JWT for the same identity. It is NEVER
+// allowed without re-proving a second factor — an unauthenticated refresh would
+// let anyone holding a stolen token keep minting new ones forever. The flow
+// mirrors /auth/revalidate/*: start a challenge, complete it with TOTP or a
+// passkey, and only then mint the extended token (amr carries the verified
+// second factor). Two hard gates apply BEFORE any of that:
+//   1. The user's effective credential policy `allowSessionExtension` must be
+//      true — an admin can deny extension entirely (security hardening), in
+//      which case sessions simply end at their expiry.
+//   2. The user must have a second factor enrolled (TOTP secret or ≥1 passkey)
+//      that satisfies the policy's `requiredMethods` — a password-only account
+//      can never extend, even if extension is allowed.
+
+/** True when the caller has an enrolled second factor satisfying their policy's requiredMethods. */
+async function hasEnrolledSecondFactor(userId: string): Promise<boolean> {
+  const row = await db.query.users.findFirst({ where: eq(schema.users.id, userId) });
+  if (!row) return false;
+  const policy = await resolveCredentialPolicy(userId);
+  if (policy.requiredMethods.length === 0) return true; // no 2FA required — any enrolled factor counts
+  const hasTotp = Boolean(row.totpSecret);
+  let passkeyCount = 0;
+  try {
+    const r = await pool.query(`SELECT COUNT(*)::int AS n FROM webauthn_credentials WHERE "userId" = $1`, [userId]);
+    passkeyCount = Number(r.rows[0]?.n ?? 0);
+  } catch {
+    /* table missing pre-migration — treat as zero */
+  }
+  return (
+    (policy.requiredMethods.includes('totp') && hasTotp) ||
+    (policy.requiredMethods.includes('webauthn') && passkeyCount > 0)
+  );
+}
+
+/** Shared gate for the extension endpoints: policy kill switch + enrolled factor. */
+async function assertExtensionAllowed(userId: string, res: ExpressResponse): Promise<boolean> {
+  const policy = await resolveCredentialPolicy(userId);
+  if (policy.allowSessionExtension === false) {
+    res.status(403).json({ error: 'Session extension is disabled for this account by its credential policy', code: 'extension_disabled' });
+    return false;
+  }
+  if (!(await hasEnrolledSecondFactor(userId))) {
+    res.status(403).json({ error: 'Extending a session requires an enrolled second factor (TOTP or passkey)', code: 'no_2fa_enrolled' });
+    return false;
+  }
+  return true;
+}
+
+// POST /auth/session/extend/challenge — start a session-extension revalidation.
+router.post('/auth/session/extend/challenge', requireAuth, async (req, res) => {
+  const userId = req.user?.sub ?? '';
+  if ((req.user?.amr ?? []).includes('token')) {
+    res.status(403).json({ error: 'API tokens cannot be extended' });
+    return;
+  }
+  try {
+    if (!(await assertExtensionAllowed(userId, res))) return;
+    const result = await revalidateChallenge(userId);
+    let supportsPasskey = false;
+    try {
+      const provider = await resolveActiveProvider();
+      if (provider.id === BASIC_AUTH_PLUGIN_UUID) supportsPasskey = (await countPasskeys(userId)) > 0;
+    } catch {
+      // Provider resolution failed — just report no passkey support.
+    }
+    res.status(200).json({ challengeToken: result.challengeToken, twoFactorRequired: true, supportsPasskey, userId });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Unable to start session extension' });
+  }
+});
+
+// POST /auth/session/extend/totp — complete the extension with a TOTP code.
+router.post('/auth/session/extend/totp', requireAuth, async (req, res) => {
+  const userId = req.user?.sub ?? '';
+  if ((req.user?.amr ?? []).includes('token')) {
+    res.status(403).json({ error: 'API tokens cannot be extended' });
+    return;
+  }
+  try {
+    if (!(await assertExtensionAllowed(userId, res))) return;
+    const identity = await verify2fa(typeof req.body?.challengeToken === 'string' ? req.body.challengeToken : '', typeof req.body?.totpCode === 'string' ? req.body.totpCode : '');
+    // The revalidation only mints a token when the second factor actually
+    // verified (amr carries totp/webauthn, never bare pwd) — enforce that here.
+    if (!(identity.amr ?? []).some((a) => a === 'totp' || a === 'webauthn')) {
+      res.status(403).json({ error: 'Session extension requires a verified second factor', code: 'no_2fa_enrolled' });
+      return;
+    }
+    const globalTtlSeconds = Number(await getEffectiveSettingValue('sessionTimeoutSeconds')) || 3600;
+    const tokenTtlSeconds = effectiveSessionTtl(globalTtlSeconds, await resolveCredentialPolicy(userId));
+    res.status(200).json({ accessToken: signToken({ sub: identity.userId, username: identity.username, roles: identity.roles, permissions: identity.permissions, amr: identity.amr }, tokenTtlSeconds), expiresIn: tokenTtlSeconds });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Session extension failed' });
+  }
+});
+
+// GET /auth/session/extend/webauthn/options — passkey assertion options for a pending extension challenge.
+router.get('/auth/session/extend/webauthn/options', requireAuth, async (req, res) => {
+  const userId = req.user?.sub ?? '';
+  if ((req.user?.amr ?? []).includes('token')) {
+    res.status(403).json({ error: 'API tokens cannot be extended' });
+    return;
+  }
+  try {
+    if (!(await assertExtensionAllowed(userId, res))) return;
+    const challengeToken = typeof req.query.challengeToken === 'string' ? req.query.challengeToken : '';
+    const queryUserId = typeof req.query.userId === 'string' ? req.query.userId : '';
+    if (!queryUserId || queryUserId !== userId) {
+      res.status(403).json({ error: 'Can only fetch passkey options for your own account' });
+      return;
+    }
+    const result = await webauthnAssertionOptions(challengeToken);
+    res.status(200).json(result);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Unable to fetch passkey options' });
+  }
+});
+
+// POST /auth/session/extend/webauthn/verify — complete the extension with a passkey assertion.
+router.post('/auth/session/extend/webauthn/verify', requireAuth, async (req, res) => {
+  const userId = req.user?.sub ?? '';
+  if ((req.user?.amr ?? []).includes('token')) {
+    res.status(403).json({ error: 'API tokens cannot be extended' });
+    return;
+  }
+  try {
+    if (!(await assertExtensionAllowed(userId, res))) return;
+    const identity = await verifyWebauthn(typeof req.body?.challengeToken === 'string' ? req.body.challengeToken : '', req.body?.response ?? {}, typeof req.body?.nonce === 'string' ? req.body.nonce : '');
+    if (!(identity.amr ?? []).some((a) => a === 'totp' || a === 'webauthn')) {
+      res.status(403).json({ error: 'Session extension requires a verified second factor', code: 'no_2fa_enrolled' });
+      return;
+    }
+    const globalTtlSeconds = Number(await getEffectiveSettingValue('sessionTimeoutSeconds')) || 3600;
+    const tokenTtlSeconds = effectiveSessionTtl(globalTtlSeconds, await resolveCredentialPolicy(userId));
+    res.status(200).json({ accessToken: signToken({ sub: identity.userId, username: identity.username, roles: identity.roles, permissions: identity.permissions, amr: identity.amr }, tokenTtlSeconds), expiresIn: tokenTtlSeconds });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Passkey session extension failed' });
+  }
 });
 
 /** Coerce an unknown value into a clean string[] (drops non-strings, dedupes). */

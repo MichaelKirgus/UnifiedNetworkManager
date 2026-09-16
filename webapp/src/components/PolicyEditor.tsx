@@ -73,6 +73,8 @@ export function PolicyEditor({
   const [draftGate, setDraftGate] = useState<Set<string>>(new Set(value.gateAmrs));
   // Numeric drafts use '' for "unset/inherit" and a string of the number otherwise.
   const [draftNums, setDraftNums] = useState<Record<NumField, string>>(emptyNums());
+  // Session-extension kill switch (true by default — pre-migration rows allow it).
+  const [draftAllowExtension, setDraftAllowExtension] = useState(true);
 
   function emptyNums(): Record<NumField, string> {
     return { minPasswordLength: '', passwordMaxAgeDays: '', inactiveDisableAfterDays: '', sessionTimeoutSeconds: '' };
@@ -81,6 +83,12 @@ export function PolicyEditor({
   // Seed the numeric drafts from the right source: in per-user mode an existing
   // override row is authoritative (its nulls mean "inherit"); without one we
   // start from the effective (= global) values so editing shows real numbers.
+  /** The source row for the extension flag: per-user override when present, else the effective policy. */
+  function seedAllowExtension(): boolean {
+    const src = (mode === 'perUser' && override) || value;
+    return src.allowSessionExtension !== false; // undefined/true = allowed
+  }
+
   function seedNums(): Record<NumField, string> {
     const src = mode === 'perUser' && override ? override : value;
     return {
@@ -97,6 +105,7 @@ export function PolicyEditor({
     setDraftRequired(new Set(value.requiredMethods));
     setDraftGate(new Set(value.gateAmrs));
     setDraftNums(seedNums());
+    setDraftAllowExtension(seedAllowExtension());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value, override]);
 
@@ -128,6 +137,7 @@ export function PolicyEditor({
       passwordMaxAgeDays: nums.passwordMaxAgeDays,
       inactiveDisableAfterDays: nums.inactiveDisableAfterDays,
       sessionTimeoutSeconds: nums.sessionTimeoutSeconds,
+      allowSessionExtension: draftAllowExtension,
     };
   }
 
@@ -135,7 +145,8 @@ export function PolicyEditor({
   const dirty =
     [...draftRequired].sort().join(',') !== value.requiredMethods.slice().sort().join(',') ||
     [...draftGate].sort().join(',') !== value.gateAmrs.slice().sort().join(',') ||
-    NUM_FIELDS.some((f) => (next[f.key] ?? null) !== (value[f.key] ?? null));
+    NUM_FIELDS.some((f) => (next[f.key] ?? null) !== (value[f.key] ?? null)) ||
+    draftAllowExtension !== (value.allowSessionExtension !== false);
 
   return (
     <div className="space-y-4">
@@ -212,6 +223,24 @@ export function PolicyEditor({
             </label>
           ))}
         </div>
+      </fieldset>
+
+      <fieldset>
+        <legend className="mb-1.5 text-sm font-semibold text-secondary">Session extension</legend>
+        <p className="mb-2 text-xs text-faint">
+          When allowed, a signed-in user can extend their own session from the top bar — but only by re-proving an
+          enrolled second factor (TOTP or passkey); users without one never see the option. Turn this off to harden
+          security: sessions then always end at their timeout and require a full sign-in.
+        </p>
+        <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-secondary">
+          <input
+            type="checkbox"
+            checked={draftAllowExtension}
+            onChange={() => setDraftAllowExtension((v) => !v)}
+            className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-500"
+          />
+          Allow users to extend their session (2FA revalidation required)
+        </label>
       </fieldset>
 
       <button

@@ -36,6 +36,7 @@ function policyColumns(body: Record<string, unknown>): Record<string, unknown> {
   for (const key of ['minPasswordLength', 'passwordMaxAgeDays', 'inactiveDisableAfterDays', 'sessionTimeoutSeconds'] as const) {
     if (body[key] !== undefined) cols[key] = body[key]; // number or null (null clears the rule)
   }
+  if (body.allowSessionExtension !== undefined) cols.allowSessionExtension = body.allowSessionExtension; // boolean
   return cols;
 }
 

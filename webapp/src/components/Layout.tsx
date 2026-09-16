@@ -1,10 +1,12 @@
-import { ReactNode, useEffect } from 'react';
-import { EyeOff } from 'lucide-react';
+import { ReactNode, useEffect, useState } from 'react';
+import { EyeOff, Hourglass } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { NotificationCenter } from './NotificationCenter';
 import { PlansCenter } from './PlansCenter';
 import { ThemeToggle } from './ThemeToggle';
 import { ExecutionModeToggle } from './ExecutionModeToggle';
+import { ExtendSessionDialog } from './ExtendSessionDialog';
+import { SessionChip, formatRemaining, useSessionState } from './SessionTimer';
 import { useExecutionMode } from '../executionMode';
 
 /** Pages whose actions flow through the plan workflow (create + execute).
@@ -34,6 +36,10 @@ export interface LayoutProps {
  */
 export function Layout({ children, title, actions }: LayoutProps) {
   const { mode, setApplicable } = useExecutionMode();
+  const session = useSessionState();
+  // The "Extend" button opens a dialog that re-proves a second factor (TOTP or
+  // passkey) before the server will mint an extended token.
+  const [extendOpen, setExtendOpen] = useState(false);
 
   // The Read-Only/Plan/Execute toggle only applies on pages whose actions flow
   // through the plan workflow — everywhere else it renders disabled.
@@ -54,12 +60,30 @@ export function Layout({ children, title, actions }: LayoutProps) {
           )}
           <div className="ml-auto flex shrink-0 items-center gap-2">
             {actions}
+            <SessionChip expiresAt={session.expiresAt} remainingMs={session.remainingMs} warning={session.warning} />
             <ThemeToggle />
             <ExecutionModeToggle />
             <PlansCenter />
             <NotificationCenter />
           </div>
         </header>
+        {session.warning && (
+          <div className="flex shrink-0 items-center gap-2 border-b border-warning-border bg-warning px-6 py-1.5 text-xs font-medium text-warning-fg">
+            <Hourglass className="h-3.5 w-3.5 shrink-0" />
+            Your session will expire in {formatRemaining(session.remainingMs ?? 0)} — you will be signed out automatically when it ends.
+            {session.extensionAllowed ? (
+              <button
+                type="button"
+                onClick={() => setExtendOpen(true)}
+                className="ml-auto rounded-md border border-warning-border bg-card px-2 py-0.5 text-xs font-semibold text-warning-fg transition-colors hover:bg-background"
+              >
+                Extend session
+              </button>
+            ) : (
+              <span className="ml-auto text-[11px] opacity-80">Extension is not available for your account.</span>
+            )}
+          </div>
+        )}
         {readOnlyBanner && (
           <div className="flex shrink-0 items-center gap-2 border-b border-warning-border bg-warning px-6 py-1.5 text-xs font-medium text-warning-fg">
             <EyeOff className="h-3.5 w-3.5 shrink-0" />
@@ -68,6 +92,9 @@ export function Layout({ children, title, actions }: LayoutProps) {
         )}
         <main className="min-h-0 flex-1 overflow-y-auto px-6 py-6">{children}</main>
       </div>
+      {extendOpen && (
+        <ExtendSessionDialog onClose={() => setExtendOpen(false)} onSuccess={async () => { await session.refresh(); setExtendOpen(false); }} />
+      )}
     </div>
   );
 }

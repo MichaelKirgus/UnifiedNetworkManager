@@ -953,6 +953,9 @@ export async function initDb(): Promise<void> {
   await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "passwordMaxAgeDays" INTEGER`);
   await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "inactiveDisableAfterDays" INTEGER`);
   await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "sessionTimeoutSeconds" INTEGER`);
+  // NULL = allowed (pre-migration rows keep the default behavior); only an
+  // explicit FALSE denies session extension.
+  await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "allowSessionExtension" BOOLEAN`);
 
   // Device-level access control (see deviceAccess.ts): JSON scope rules on
   // users + roles. '{}' = unrestricted, so existing deployments keep full

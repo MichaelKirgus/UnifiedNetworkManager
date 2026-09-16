@@ -203,6 +203,18 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'How long a signed-in session (JWT) stays valid before the user must authenticate again. Applies to new logins; existing sessions keep their original expiry.',
   },
   {
+    key: 'sessionWarnSeconds',
+    label: 'Session warning lead time',
+    type: 'integer',
+    category: 'Security',
+    unit: 's',
+    min: 0,
+    max: 3_600,
+    default: 120,
+    help:
+      'How long BEFORE a session expires the web UI starts warning the user (amber banner with an "Extend" button). Set to 0 to disable the warning — the session then ends silently at its expiry. The countdown chip in the top bar is always shown.',
+  },
+  {
     key: 'consoleTicketTtlMs',
     label: 'Console ticket lifetime',
     type: 'integer',

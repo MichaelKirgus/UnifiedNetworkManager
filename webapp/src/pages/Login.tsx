@@ -43,10 +43,14 @@ export default function Login() {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
-  // A disabled account bounced here by the client's auto-logout (401 user_disabled).
+  // Bounced here by the client's auto-logout: either a disabled account (401
+  // user_disabled) or a session that reached its timeout while the UI was open.
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('reason') === 'disabled') {
+    const reason = new URLSearchParams(window.location.search).get('reason');
+    if (reason === 'disabled') {
       setError('Your account has been disabled. Contact an administrator to be re-enabled.');
+    } else if (reason === 'expired') {
+      setError('Your session expired — please sign in again.');
     }
   }, []);
 

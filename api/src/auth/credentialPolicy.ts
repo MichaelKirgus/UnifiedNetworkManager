@@ -20,6 +20,10 @@ import * as schema from '../db/schema';
  *      null = off).
  *   4. `sessionTimeoutSeconds` — an optional per-user CAP on the global session
  *      timeout, so one account can be forced to expire sooner than everyone else.
+ *   5. `allowSessionExtension` — whether a signed-in user may extend their own
+ *      session (the web UI "Extend" button). Extension always requires re-proving
+ *      a second factor; this flag is the admin's kill switch for security
+ *      hardening (false = sessions can never be extended, they end at expiry).
  *
  * Resolution: a per-user row (unique on userId) OVERRIDES the GLOBAL row
  * (`userId IS NULL`) FIELD BY FIELD — each rule is resolved independently and an
@@ -46,6 +50,7 @@ export const DEFAULT_CREDENTIAL_POLICY: CredentialPolicy = {
   passwordMaxAgeDays: null,
   inactiveDisableAfterDays: null,
   sessionTimeoutSeconds: null,
+  allowSessionExtension: true,
 };
 
 export interface CredentialPolicy {
@@ -61,6 +66,8 @@ export interface CredentialPolicy {
   inactiveDisableAfterDays: number | null;
   /** Per-user cap on session lifetime in seconds — sessions expire at min(global, this) (null = inherit global). */
   sessionTimeoutSeconds: number | null;
+  /** Whether the user may extend their own session via a 2FA revalidation. False = hardening kill switch. */
+  allowSessionExtension: boolean;
 }
 
 interface PolicyRow extends CredentialPolicy {
@@ -104,6 +111,7 @@ function toPolicy(row: typeof schema.credentialPolicies.$inferSelect): PolicyRow
     passwordMaxAgeDays: parseNullableInt(row.passwordMaxAgeDays),
     inactiveDisableAfterDays: parseNullableInt(row.inactiveDisableAfterDays),
     sessionTimeoutSeconds: parseNullableInt(row.sessionTimeoutSeconds),
+    allowSessionExtension: row.allowSessionExtension !== false, // NULL/missing = allowed (pre-migration rows)
     updatedAt: row.updatedAt,
   };
 }
@@ -141,6 +149,9 @@ export function mergePolicy(global: CredentialPolicy, user: PolicyRow | null): C
     passwordMaxAgeDays: user.passwordMaxAgeDays ?? global.passwordMaxAgeDays,
     inactiveDisableAfterDays: user.inactiveDisableAfterDays ?? global.inactiveDisableAfterDays,
     sessionTimeoutSeconds: user.sessionTimeoutSeconds ?? global.sessionTimeoutSeconds,
+    // Boolean field — the per-user row is authoritative whenever it exists
+    // (false is a meaningful "deny", so there is no null/inherit state).
+    allowSessionExtension: user.allowSessionExtension,
   };
 }
 
@@ -220,6 +231,10 @@ export function validatePolicyBody(body: unknown): string | null {
     if (typeof value !== 'number' || !Number.isFinite(value)) return `${key} must be a number or null`;
   }
 
+  if (obj.allowSessionExtension !== undefined && typeof obj.allowSessionExtension !== 'boolean') {
+    return 'allowSessionExtension must be a boolean';
+  }
+
   for (const key of ['minPasswordLength', 'passwordMaxAgeDays', 'inactiveDisableAfterDays'] as const) {
     const value = obj[key];
     if (typeof value === 'number' && value < 1) return `${key} must be at least 1`;
@@ -245,5 +260,6 @@ export function serializePolicy(row: PolicyRow): CredentialPolicy & { userId: st
     passwordMaxAgeDays: row.passwordMaxAgeDays,
     inactiveDisableAfterDays: row.inactiveDisableAfterDays,
     sessionTimeoutSeconds: row.sessionTimeoutSeconds,
+    allowSessionExtension: row.allowSessionExtension !== false,
   };
 }

@@ -151,6 +151,16 @@ function ReadOnlyPolicy({ policy }: { policy: CredentialPolicy }) {
           ))}
         </dd>
       </div>
+      <div>
+        <dt className="text-xs font-medium uppercase tracking-wide text-faint">Session extension</dt>
+        <dd className="mt-1">
+          {policy.allowSessionExtension !== false ? (
+            <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-secondary">allowed (2FA revalidation required)</span>
+          ) : (
+            <span className="rounded-full bg-danger px-2 py-0.5 text-xs font-medium text-danger-fg">disabled — sessions end at timeout</span>
+          )}
+        </dd>
+      </div>
     </dl>
   );
 }
@@ -174,6 +184,12 @@ function ReadOnlyPolicyInline({ policy }: { policy: CredentialPolicy }) {
           {m === 'totp' ? 'TOTP' : m === 'webauthn' ? 'Passkey' : m}
         </span>
       ))}
+      <span className="ml-2 text-faint">extend:</span>
+      {policy.allowSessionExtension !== false ? (
+        <span className="rounded-full bg-muted px-2 py-0.5 font-medium text-secondary">allowed</span>
+      ) : (
+        <span className="rounded-full bg-danger px-2 py-0.5 font-medium text-danger-fg">disabled</span>
+      )}
     </span>
   );
 }

@@ -352,6 +352,157 @@ paths:
         '401':
           description: Authentication required
 
+  /auth/session:
+    get:
+      tags: [Authentication]
+      summary: Get the caller's session expiry + warning lead time
+      description: >-
+        Returns when the CALLER's interactive session expires, computed
+        server-side from the JWT issued-at plus the effective session TTL
+        (global `sessionTimeoutSeconds` capped by any per-user override) — so
+        it matches exactly what the auth middleware enforces. The webapp uses
+        this for its top-bar countdown chip and the amber "session ending
+        soon" banner, which appears once the remaining time drops below
+        `warnSeconds` (the global `sessionWarnSeconds` setting; 0 disables the
+        warning).
+      responses:
+        '200':
+          description: Session expiry info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  expiresAt:
+                    type: integer
+                    format: int64
+                    description: "Unix epoch MILLISECONDS at which the session expires"
+                  ttlSeconds:
+                    type: integer
+                    description: "Effective TTL applied to this session (global capped by per-user override)"
+                  warnSeconds:
+                    type: integer
+                    description: "Warning lead time in seconds (0 = warning disabled)"
+                  extensionAllowed:
+                    type: boolean
+                    description: >-
+                      Whether the caller may extend their session at all —
+                      true only when the credential policy allows it AND a
+                      second factor is enrolled. The webapp hides the "Extend"
+                      button otherwise.
+        '401':
+          description: Authentication required
+
+  /auth/session/extend/challenge:
+    post:
+      tags: [Authentication]
+      summary: Start a session-extension revalidation (2FA challenge)
+      description: >-
+        Issues a second-factor challenge for the CALLER so their session can be
+        extended. Extension is NEVER allowed without re-proving a second factor
+        — an unauthenticated refresh would let anyone holding a stolen token
+        keep minting new ones forever. Rejected with 403 when the caller's
+        credential policy denies extension (`allowSessionExtension: false`,
+        code `extension_disabled`) or no enrolled second factor satisfies the
+        policy (code `no_2fa_enrolled`). API tokens are rejected outright.
+      responses:
+        '200':
+          description: Pending challenge
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  challengeToken: { type: string }
+                  twoFactorRequired: { type: boolean }
+                  supportsPasskey: { type: boolean }
+                  userId: { type: string }
+        '401':
+          description: Authentication required
+        '403':
+          description: Extension disabled by policy or no second factor enrolled
+
+  /auth/session/extend/totp:
+    post:
+      tags: [Authentication]
+      summary: Extend the session with a TOTP code
+      description: >-
+        Completes a pending extension challenge with an authenticator-app code.
+        Only mints the fresh JWT (current effective TTL, amr carries `totp`)
+        when the second factor actually verified. Same 403 gates as the
+        challenge endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                challengeToken: { type: string }
+                totpCode: { type: string }
+      responses:
+        '200':
+          description: Fresh access token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  expiresIn: { type: integer, description: "Lifetime of the new token in seconds" }
+        '401':
+          description: Authentication required or invalid/expired challenge
+        '403':
+          description: Extension disabled by policy or no verified second factor
+
+  /auth/session/extend/webauthn/options:
+    get:
+      tags: [Authentication]
+      summary: Passkey assertion options for a pending extension challenge
+      parameters:
+        - { name: challengeToken, in: query, required: true, schema: { type: string } }
+        - { name: userId, in: query, required: true, schema: { type: string }, description: "Must equal the caller's own user id" }
+      responses:
+        '200':
+          description: WebAuthn assertion options + nonce
+        '401':
+          description: Authentication required
+        '403':
+          description: Extension disabled by policy, or userId is not the caller
+
+  /auth/session/extend/webauthn/verify:
+    post:
+      tags: [Authentication]
+      summary: Extend the session with a passkey assertion
+      description: >-
+        Completes a pending extension challenge with a WebAuthn assertion.
+        Only mints the fresh JWT (amr carries `webauthn`) when the assertion is
+        valid. Same 403 gates as the challenge endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                challengeToken: { type: string }
+                response: { type: object, additionalProperties: true }
+                nonce: { type: string }
+      responses:
+        '200':
+          description: Fresh access token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  expiresIn: { type: integer, description: "Lifetime of the new token in seconds" }
+        '401':
+          description: Authentication required or invalid/expired challenge
+        '403':
+          description: Extension disabled by policy or no verified second factor
+
   /auth/me/preferences:
     get:
       tags: [Authentication]
@@ -4994,6 +5145,8 @@ components:
         inactiveDisableAfterDays: { type: [integer, 'null'], minimum: 1 }
         # Per-user cap on session lifetime (seconds); sessions expire at min(global, this); null = inherit global.
         sessionTimeoutSeconds: { type: [integer, 'null'], minimum: 300 }
+        # Whether the user may extend their own session via a 2FA revalidation; false = hardening kill switch.
+        allowSessionExtension: { type: boolean, default: true }
 
     CredentialPolicyUpdateRequest:
       type: object
@@ -5011,6 +5164,8 @@ components:
         passwordMaxAgeDays: { type: [integer, 'null'], minimum: 1 }
         inactiveDisableAfterDays: { type: [integer, 'null'], minimum: 1 }
         sessionTimeoutSeconds: { type: [integer, 'null'], minimum: 300 }
+        # Omitted = unchanged; false denies session extension for this policy.
+        allowSessionExtension: { type: boolean }
 
     CredentialPolicyWithSource:
       type: object

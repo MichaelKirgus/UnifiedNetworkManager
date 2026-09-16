@@ -142,6 +142,18 @@ export interface RevalidateChallenge {
   userId: string;
 }
 
+/** GET /auth/session response — server-computed session expiry + warning lead time. */
+export interface SessionInfo {
+  /** Unix epoch MILLISECONDS at which the current session expires (server-side, per-user-capped). */
+  expiresAt: number;
+  /** Effective TTL applied to this session in seconds. */
+  ttlSeconds: number;
+  /** Warning lead time in seconds (0 = warning disabled). */
+  warnSeconds: number;
+  /** True when the caller may extend their session at all (policy allows it AND a second factor is enrolled). */
+  extensionAllowed: boolean;
+}
+
 /** Stores a freshly minted access token (login or in-session revalidation). */
 export function setAccessToken(token: string): void {
   localStorage.setItem('accessToken', token);
@@ -1243,6 +1255,8 @@ export interface CredentialPolicy {
   inactiveDisableAfterDays: number | null;
   /** Per-user cap on session lifetime in seconds — sessions expire at min(global, this) (null = inherit global). */
   sessionTimeoutSeconds: number | null;
+  /** Whether the user may extend their own session via a 2FA revalidation. False = hardening kill switch. */
+  allowSessionExtension?: boolean;
 }
 
 export interface PolicyWithSource {
@@ -1832,6 +1846,18 @@ export const api = {
     apiFetch<VerifyResponse>('/auth/webauthn/verify', { method: 'POST', body: JSON.stringify(body) }),
   /** The caller's own profile (no users:read needed). */
   me: () => apiFetch<User & { effectivePermissions: string[] }>('/auth/me'),
+  /** Server-computed session expiry + warning lead time (top-bar countdown chip). */
+  sessionInfo: () => apiFetch<SessionInfo>('/auth/session'),
+  // Session extension — ALWAYS requires re-proving a second factor (TOTP or
+  // passkey) against a fresh challenge; the server also enforces the policy's
+  // allowSessionExtension kill switch and an enrolled-factor requirement.
+  sessionExtendChallenge: () => apiFetch<RevalidateChallenge>('/auth/session/extend/challenge', { method: 'POST' }),
+  verifySessionExtendTotp: (body: { challengeToken: string; totpCode: string }) =>
+    apiFetch<VerifyResponse>('/auth/session/extend/totp', { method: 'POST', body: JSON.stringify(body) }),
+  sessionExtendWebauthnOptions: (challengeToken: string, userId: string) =>
+    apiFetch<WebauthnAssertionOptions>(`/auth/session/extend/webauthn/options?challengeToken=${encodeURIComponent(challengeToken)}&userId=${encodeURIComponent(userId)}`),
+  verifySessionExtendWebauthn: (body: { challengeToken: string; response: unknown; nonce: string }) =>
+    apiFetch<VerifyResponse>('/auth/session/extend/webauthn/verify', { method: 'POST', body: JSON.stringify(body) }),
   /** Rotate the caller's own password (forced-change flow after an expired login). */
   changeOwnPassword: (body: { currentPassword: string; newPassword: string }) =>
     apiFetch<User>('/auth/me/password', { method: 'POST', body: JSON.stringify(body) }),

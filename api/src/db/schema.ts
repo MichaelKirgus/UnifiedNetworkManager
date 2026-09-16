@@ -1393,6 +1393,9 @@ export const webauthnCredentials = pgTable(
 //   sessionTimeoutSeconds: optional per-user cap on the global session timeout
 //     — a user's sessions expire at min(global, this) so an admin can force a
 //     shorter lifetime for one account. NULL = inherit the global setting.
+//   allowSessionExtension: whether the user may extend their own session via a
+//     2FA revalidation (the web UI "Extend" button). FALSE = hardening kill
+//     switch — sessions can never be extended and end at their expiry.
 export const credentialPolicies = pgTable('credential_policies', {
   id: text('id').primaryKey(),
   // NULL = the global default policy; otherwise the user id it applies to.
@@ -1403,6 +1406,7 @@ export const credentialPolicies = pgTable('credential_policies', {
   passwordMaxAgeDays: integer('passwordMaxAgeDays'),
   inactiveDisableAfterDays: integer('inactiveDisableAfterDays'),
   sessionTimeoutSeconds: integer('sessionTimeoutSeconds'),
+  allowSessionExtension: boolean('allowSessionExtension'),
   updatedAt: text('updatedAt').notNull(),
 });
 
