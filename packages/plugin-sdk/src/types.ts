@@ -62,6 +62,12 @@ export const CAPABILITIES = [
   // container). The API brokers the WebSocket verbatim — credentials travel only
   // over the authenticated API→plugin hop, never to the browser.
   'sshConsole',
+  // Gathers available updates for its devices (firmware, OS packages via package
+  // manager, Docker images/apps) and emits them as `metrics['updates']` = UpdateRow[]
+  // during inventory collection (see updates.ts). The webapp's Updates page renders
+  // the cross-device table from this; applying an update is always a plan — each row
+  // may carry applyActionId/applyInput pointing at THIS plugin's action catalog.
+  'updates',
   'secretsProvider',
   'identityProvider',
   // Reserved for future log-forwarder plugins (syslog daemon, OpenSearch, ...).

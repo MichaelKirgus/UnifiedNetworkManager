@@ -39,8 +39,10 @@ import {
   parseProbeTarget,
   CertificateRow,
   buildDeviceTimeInfo,
+  isUpdateAvailable,
   type SshCredentials,
   type SshTerminalSession,
+  type UpdateRow,
 } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } from './client/truenasClient';
 import {
@@ -150,9 +152,15 @@ const identity = resolvePluginIdentity({
   // SSH scraping. No ssh slot is required — every device we can authenticate to
   // exposes these, so even API-key-only devices get session data. SMB/NFS share
   // rows now carry a live `sessionCount` too.
-  version: '0.12.0',
+  // 0.13.0 — Updates page support (capability 'updates'): /monitoring emits an
+  // `updates[]` metric during inventory polls — one firmware row from the
+  // appliance's OWN update feed (`update.available_versions`, best-effort) plus
+  // one row per app with upgrade_available and per image with update_available.
+  // New actions: system.firmware.update (dangerous, `update.run` job) and
+  // images.update (write, `app.image.pull` job).
+  version: '0.13.0',
   vendors: ['truenas'],
-  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole'],
+  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates'],
 });
 
 /**
@@ -1331,6 +1339,131 @@ function buildImageRows(appImages: Record<string, unknown>[]): ImageRow[] {
 }
 
 // ---------------------------------------------------------------------------
+// Updates-page rows: the generic `updates[]` metric (capability 'updates').
+// Three sources, all appliance-side (no external feeds needed):
+//   1. firmware — the appliance's OWN update feed (`update.available_versions`,
+//      already fetched in the inventory batch). The box knows its configured
+//      train/profile and reports the newest matching release with manifest +
+//      release notes; we compare it against system.info's version.
+//   2. apps     — app.query rows with upgrade_available (or image_updates_
+//      available) = true → one row per app, applied via `containers.upgrade`.
+//   3. images   — app.image.query entries with update_available = true → one
+//      row per image ref, re-pulled via the new `images.update` action.
+// Only AVAILABLE rows are emitted (the API drops available=false anyway); an
+// empty array is a valid "checked, nothing new" answer and wipes stale rows.
+// ---------------------------------------------------------------------------
+
+/** One firmware candidate as reported by `update.available_versions`. */
+interface TruenasUpdateCandidate {
+  version: string;
+  train?: string | null;
+  profile?: string | null;
+  filesizeBytes?: number | null;
+  releaseNotesUrl?: string | null;
+}
+
+/** Parses the raw `update.available_versions` result into candidates. The live
+ * shape (verified on TrueNAS 26 BETA) is an array of {train, version:{version,
+ * manifest{...}, release_notes_url}} — but older releases may answer a single
+ * object or a differently-shaped list; anything unparseable yields []. */
+function parseUpdateCandidates(raw: unknown): TruenasUpdateCandidate[] {
+  const entries = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? [raw] : [];
+  const out: TruenasUpdateCandidate[] = [];
+  for (const e of entries as Record<string, unknown>[]) {
+    if (!e || typeof e !== 'object') continue;
+    // Modern shape nests under `version`; tolerate a flat shape too.
+    const v = (e['version'] && typeof e['version'] === 'object' ? e['version'] : e) as Record<string, unknown>;
+    const version = pickString(v, ['version']);
+    if (!version) continue;
+    const manifest = (v['manifest'] ?? {}) as Record<string, unknown>;
+    out.push({
+      version,
+      train: pickString(e, ['train']) ?? pickString(manifest, ['train']),
+      profile: pickString(manifest, ['profile']),
+      filesizeBytes: pickNumber(manifest, ['filesize']),
+      releaseNotesUrl: pickString(v, ['release_notes_url']),
+    });
+  }
+  return out;
+}
+
+/** Builds the `updates[]` metric rows for one poll. */
+function buildUpdateRows(input: {
+  version?: string | null;
+  updateAvail: unknown;
+  apps: Record<string, unknown>[];
+  appImages: Record<string, unknown>[];
+}): UpdateRow[] {
+  const rows: UpdateRow[] = [];
+
+  // --- firmware -------------------------------------------------------------
+  // Older releases prefix the version with "SCALE "/"CORE " — strip it so the
+  // comparison (and the displayed row) is against bare release numbers.
+  const currentVersion = input.version ? input.version.replace(/^(scale|core)\s+/i, '').trim() : null;
+  if (currentVersion) {
+    for (const cand of parseUpdateCandidates(input.updateAvail)) {
+      if (!isUpdateAvailable(currentVersion, cand.version)) continue;
+      rows.push({
+        name: 'os',
+        kind: 'firmware',
+        currentVersion,
+        latestVersion: cand.version,
+        available: true,
+        rebootRequired: true, // update.run installs a new boot environment + reboots
+        sizeBytes: cand.filesizeBytes ?? null,
+        applyActionId: 'system.firmware.update',
+        applyInput: { version: cand.version },
+        extra: {
+          ...(cand.train ? { train: cand.train } : {}),
+          ...(cand.profile ? { profile: cand.profile } : {}),
+          ...(cand.releaseNotesUrl ? { releaseNotesUrl: cand.releaseNotesUrl } : {}),
+        },
+      });
+    }
+  }
+
+  // --- apps (k8s workloads) ---------------------------------------------------
+  for (const a of input.apps) {
+    if (!a || typeof a !== 'object') continue;
+    const upgradable = a['upgrade_available'] === true || a['image_updates_available'] === true;
+    if (!upgradable) continue;
+    const name = pickString(a, ['name', 'id']);
+    if (!name) continue;
+    rows.push({
+      name,
+      kind: 'app',
+      currentVersion: pickString(a, ['human_version', 'version']),
+      latestVersion: null, // the appliance reports availability, not a target version
+      available: true,
+      rebootRequired: false,
+      applyActionId: 'containers.upgrade',
+      applyInput: { names: [name] },
+    });
+  }
+
+  // --- docker images ----------------------------------------------------------
+  for (const img of input.appImages) {
+    if (!img || typeof img !== 'object') continue;
+    if (img['update_available'] !== true) continue;
+    const tagsRaw = Array.isArray(img['repo_tags']) ? (img['repo_tags'] as unknown[]) : [];
+    const realTags = tagsRaw.filter((t): t is string => typeof t === 'string' && t.length > 0 && t !== NONE_TAG);
+    if (realTags.length === 0) continue; // dangling images have no pullable ref
+    rows.push({
+      name: realTags[0],
+      kind: 'docker-image',
+      currentVersion: null,
+      latestVersion: null,
+      available: true,
+      rebootRequired: false,
+      applyActionId: 'images.update',
+      applyInput: { images: [realTags[0]] },
+    });
+  }
+
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
 // VM inventory (VMs page): the generic `vms[]` metric. Source is vm.query —
 // TrueNAS SCALE's view of its libvirt guests (one entry per VM with devices[],
 // status.state, vcpus, memory in MiB). Same upsert + delete-on-absent
@@ -1545,7 +1678,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // before error handling. The last three are best-effort extras (networks
   // inventory + static routes + board serial/model) — their failure does NOT
   // count toward health.
-  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes, vmsRes] = await Promise.allSettled([
+  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes, vmsRes, updateAvailRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('alert.list', [], creds),
@@ -1582,6 +1715,13 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     // row per libvirt guest with devices[] (NIC MACs!) + status.state. Skipped
     // entirely when the `collectVms` option is off — no VM RPC traffic at all.
     collectVms ? client.call<Record<string, unknown>[]>('vm.query', [], creds) : Promise.resolve(undefined),
+    // Updates-page extra (best-effort — never count toward health). The
+    // appliance's OWN update feed: the newest release matching its configured
+    // update profile (train/profile from `update.config`), with manifest +
+    // release notes. ~2 s on a live box; skipped on metrics-only polls like
+    // every other inventory RPC. Missing method (older releases) or failure →
+    // no firmware row for this poll, nothing else affected.
+    collectInventory ? client.call<unknown>('update.available_versions', [], creds) : Promise.resolve(undefined),
   ]);
 
   // Shares-page live sessions (best-effort — never count toward health). The
@@ -2085,6 +2225,23 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     metrics['images'] = [];
   } else if (collectInventory && appImagesRes.status === 'fulfilled' && Array.isArray(appImagesRes.value)) {
     metrics['images'] = buildImageRows(appImagesRes.value as Record<string, unknown>[]);
+  }
+
+  // --- Updates page: `updates[]` metric --------------------------------------
+  // One row per genuinely-available update (firmware / app / image). Emitted
+  // ONLY on inventory-due polls AND only when every enabled source succeeded
+  // this poll — a transient RPC failure omits the key entirely so stale rows
+  // are never wiped by a bad cycle (same contract as containers/images above).
+  // Present-but-empty is authoritative: an applied update vanishes next poll.
+  const updatesReady = collectInventory &&
+    (collectApps ? appsRes.status === 'fulfilled' && appImagesRes.status === 'fulfilled' : true);
+  if (updatesReady) {
+    metrics['updates'] = buildUpdateRows({
+      version: pickString(metrics, ['system.version']),
+      updateAvail: updateAvailRes.status === 'fulfilled' ? updateAvailRes.value : null,
+      apps: collectApps && appsRes.status === 'fulfilled' && Array.isArray(appsRes.value) ? (appsRes.value as Record<string, unknown>[]) : [],
+      appImages: collectApps && appImagesRes.status === 'fulfilled' && Array.isArray(appImagesRes.value) ? (appImagesRes.value as Record<string, unknown>[]) : [],
+    });
   }
 
   // --- vm.query: VMs inventory ---------------------------------------------

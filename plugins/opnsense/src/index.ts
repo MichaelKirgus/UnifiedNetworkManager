@@ -23,6 +23,7 @@ import {
   parseLooseDeviceDatetime,
   tzAbbrToOffsetMinutes,
   warnOnce,
+  catalogFirmwareRow,
   type DeviceTimeInfo,
 } from '@unm/plugin-sdk';
 import {
@@ -39,7 +40,7 @@ import {
   getNdpTable,
   OpnsenseTransport,
 } from './opnsenseClient';
-import { DEVICE_MODELS } from './deviceModels';
+import { DEVICE_MODELS, RELEASES } from './deviceModels';
 import { createClient, OpnsenseCredentials, OpnsensePorts, resolveBase } from './client/http';
 import { resolveEdition } from './client/editions';
 import { detectDnsBackend, DnsBackend } from './client/dns';
@@ -70,7 +71,11 @@ export const PLUGIN_NAME = 'OPNsense Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
-  version: '0.2.0',
+  // 0.3.0 — Updates page support (capability 'updates'): /monitoring emits a
+  // firmware `updates[]` row comparing the live version against the static
+  // release catalog (available-without-apply — OPNsense OS updates go through
+  // the web UI, there is no safe programmatic update API).
+  version: '0.3.0',
   vendors: ['opnsense'],
   // 'planning' advertises the /plan endpoint (multi-device intents) so the API
   // can offer bulk rollout + tunnel provisioning flows in the webapp.
@@ -78,7 +83,7 @@ const identity = resolvePluginIdentity({
   // per-device Config page (interfaces with live status + system power actions).
   // 'ssh' = optional SSH data path for ZFS pool/dataset inventory (the API has
   // no ZFS listing) — only used when an `ssh` credential slot is bound.
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState', 'ssh'],
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState', 'ssh', 'updates'],
 });
 
 /**
@@ -1358,6 +1363,16 @@ app.post('/monitoring', async (req, res) => {
     // informational only; shown as text cards in the device detail view.
     if (selectedModel) metrics['system.model'] = selectedModel;
     if (selectedFirmware) metrics['system.firmwareVersion'] = selectedFirmware;
+
+    // Updates page: firmware row from the live version vs the static release
+    // catalog. OPNsense has no safe programmatic OS-update API (updates go
+    // through the web UI / pkg.opnsense.org), so the row is available-without-
+    // apply — it shows on the Updates page but carries no Update button.
+    const liveVersion = pickString(metrics, ['version']);
+    if (liveVersion) {
+      const fwRow = catalogFirmwareRow(liveVersion, RELEASES);
+      if (fwRow) metrics['updates'] = [fwRow];
+    }
 
     // Health: prefer the appliance's own status code (0=critical, 1=warning,
     // 2=ok); fall back to "did we collect anything at all".

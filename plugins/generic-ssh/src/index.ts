@@ -71,7 +71,9 @@ const identity = resolvePluginIdentity({
   // configuration: POST /config — one action step (registry dispatch); Config page
   //                actions + config jobs. planning: POST /plan — multi-device intents
   //                (WireGuard tunnel) fanned into ordered steps with auto-snapshots.
-  capabilities: ['monitoring', 'inventory', 'ssh', 'filesystem', 'probe', 'sshConsole', 'configuration', 'planning'],
+  // updates: emits metrics['updates'] (upgradable OS packages via the host's
+  //          package manager) for the cross-device Updates page; applying is a plan.
+  capabilities: ['monitoring', 'inventory', 'ssh', 'filesystem', 'probe', 'sshConsole', 'configuration', 'planning', 'updates'],
 });
 
 /**

@@ -387,6 +387,45 @@ export interface TunnelRow {
   collectedAt: string;
 }
 
+/** One available update on one device, as reported by a plugin's `updates` metric. */
+export interface UpdateRow {
+  deviceId: string;
+  pluginId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  /** Display name of the reporting plugin instance (e.g. "Generic SSH Plugin (Linux)"). */
+  pluginName?: string | null;
+  kind: 'firmware' | 'os-package' | 'docker-image' | 'app';
+  /** Stable identity within (device, kind): "os" for firmware, a package name, an app/image name. */
+  name: string;
+  currentVersion?: string | null;
+  latestVersion?: string | null;
+  rebootRequired?: boolean | null;
+  sizeBytes?: number | null;
+  /** Catalog action id (of the reporting plugin) that applies this row; null = no apply path. */
+  applyActionId?: string | null;
+  /** Prefilled input for applyActionId. */
+  applyInput?: Record<string, unknown>;
+  extra?: Record<string, unknown>;
+  collectedAt: string;
+}
+
+/** The "UNM itself" card on the Updates page (stack self-update info). */
+export interface StackUpdateInfo {
+  apiVersion: string;
+  plugins: { name: string; version: string }[];
+  feedConfigured: boolean;
+  latestApiVersion?: string | null;
+  available: boolean;
+  notesUrl?: string | null;
+}
+
+export interface UpdatesResponse {
+  rows: UpdateRow[];
+  stack: StackUpdateInfo;
+}
+
 /** The X.509 leaf certificate of one endpoint (ssh rows carry synthetic fields). */
 export interface CertificateInfo {
   commonName: string;
@@ -707,7 +746,7 @@ export interface NotificationPrefs {
 }
 
 /** Which nav items can carry a badge count (mirrors the API's /counts keys). */
-export type NavCountKey = 'notifications' | 'configJobs' | 'plans' | 'certificates';
+export type NavCountKey = 'notifications' | 'configJobs' | 'plans' | 'certificates' | 'updates';
 
 /** Per-user navigation preferences (order + hidden pages), additive over defaults. */
 export interface NavPreferences {
@@ -2144,6 +2183,15 @@ export const api = {
     if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<VmsOverview>(`/vms${suffix}`);
+  },
+  /** Cross-device update center — available updates + stack self-update info. */
+  updates: (params?: { deviceId?: string; siteId?: string; kind?: 'firmware' | 'os-package' | 'docker-image' | 'app' }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.kind) qs.set('kind', params.kind);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<UpdatesResponse>(`/updates${suffix}`);
   },
   /** Physical + logical topology graph for the Topology page. */
   topology: (params?: { siteId?: string; includeHosts?: boolean }) => {

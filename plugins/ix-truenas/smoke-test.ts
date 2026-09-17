@@ -161,6 +161,51 @@ wss.on('connection', (ws: WebSocket) => {
         return reply({ disk: 'da2', hostname: 'mock-truenas' });
       case 'system.dmidecode_info':
         return reply({ 'baseboard-product-name': 'To Be Filled By O.E.M.', 'system-serial-number': 'TN-SERIAL-001' });
+      // --- Updates-page methods (capability 'updates') ------------------------
+      case 'app.query':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // One app WITH an update available + one without. Minimal rows — the
+        // containers inventory must tolerate them (no active_workloads).
+        return reply([
+          { name: 'zabbix', state: 'RUNNING', human_version: '7.0.1', upgrade_available: true },
+          { name: 'chrony', state: 'RUNNING', human_version: '4.6', upgrade_available: false },
+        ]);
+      case 'docker.network.query':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        return reply([]);
+      case 'app.image.query':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // One image flagged update_available (upstream tag moved), one clean.
+        return reply([
+          { id: 'abc123def456', repo_tags: ['zabbix/zabbix-agent2:alpine-7.0'], size: 5_000_000, created: '2026-08-01T00:00:00Z', update_available: true },
+          { id: 'fff999aaa000', repo_tags: ['chrony/chrony:4.6'], size: 3_000_000, created: '2026-07-01T00:00:00Z', update_available: false },
+        ]);
+      case 'update.available_versions':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // Live shape (TrueNAS 26): array of {train, version:{version, manifest{...}, release_notes_url}}.
+        return reply([
+          {
+            train: 'TrueNAS-SCALE',
+            version: {
+              version: '25.10.1',
+              manifest: { filename: 'TrueNAS-25.10.1.update', version: '25.10.1', filesize: 2_230_534_144, profile: 'GENERAL', train: 'TrueNAS-SCALE' },
+              release_notes_url: 'https://www.truenas.com/docs/scale/25.10/gettingstarted/scalereleasenotes/',
+            },
+          },
+        ]);
+      case 'update.run':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        return reply(77); // job id — the appliance will reboot into the new BE
+      case 'app.image.pull':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        return reply(88); // job id
+      case 'core.get_jobs':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // Both jobs already settled — waitForJob returns immediately.
+        return reply([
+          { id: 77, state: 'SUCCESS', error: null },
+          { id: 88, state: 'SUCCESS', error: null },
+        ]);
       case 'system.reboot':
         if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
         return reply(42); // job id — the appliance will go down shortly
@@ -246,8 +291,9 @@ async function main(): Promise<void> {
   const caps = (disc.capabilities ?? []) as string[];
   check('capabilities include configuration+planning+deviceState', ['configuration', 'planning', 'deviceState'].every((c) => caps.includes(c)), caps);
   const actions = (disc.actions ?? []) as { id: string; riskLevel: string }[];
-  check('action catalog has all expected actions', ['containers.stop','containers.start','containers.restart','containers.upgrade','containers.delete','images.delete','compose.config.read','containers.update','alerts.dismiss','alerts.undismiss','shares.smb.create','shares.smb.update','shares.smb.delete','shares.nfs.create','shares.nfs.update','shares.nfs.delete','shares.iscsi.create','shares.iscsi.delete','shares.nvmeof.create','shares.nvmeof.delete'].every((id) => actions.some((a) => a.id === id)), `count=${actions.length}`);
-  check('dangerous destructive/power actions marked', actions.filter((a) => a.riskLevel === 'dangerous').map((a) => a.id).sort().join(',') === ['containers.delete','images.delete','system.reboot','system.shutdown','vms.delete','storage.delete','shares.smb.delete','shares.nfs.delete','shares.iscsi.delete','shares.nvmeof.delete'].sort().join(','));
+  check('action catalog has all expected actions', ['containers.stop','containers.start','containers.restart','containers.upgrade','containers.delete','images.delete','images.update','compose.config.read','containers.update','alerts.dismiss','alerts.undismiss','system.firmware.update','shares.smb.create','shares.smb.update','shares.smb.delete','shares.nfs.create','shares.nfs.update','shares.nfs.delete','shares.iscsi.create','shares.iscsi.delete','shares.nvmeof.create','shares.nvmeof.delete'].every((id) => actions.some((a) => a.id === id)), `count=${actions.length}`);
+  check('dangerous destructive/power actions marked', actions.filter((a) => a.riskLevel === 'dangerous').map((a) => a.id).sort().join(',') === ['containers.delete','images.delete','system.reboot','system.shutdown','system.firmware.update','vms.delete','storage.delete','shares.smb.delete','shares.nfs.delete','shares.iscsi.delete','shares.nvmeof.delete'].sort().join(','));
+  check('updates capability advertised', caps.includes('updates'), caps);
 
   // --- /monitoring ---------------------------------------------------------------------
   const mon = (await post('/monitoring', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds })) as Response;
@@ -266,6 +312,19 @@ async function main(): Promise<void> {
   const ports = (m['ports'] ?? []) as Record<string, unknown>[];
   check('ports[] inventory emitted with live state + MAC', ports.length === 2 && ports.some((p) => p.name === 'NET_MANAGEMENT' && p.status === 'up' && (p.extra as Record<string, unknown>)?.mac === 'aa:bb:cc:dd:ee:01'), ports);
   check('ports[] carries vlanId for VLAN interfaces', ports.some((p) => p.name === 'LAN' && p.vlanId === 50), ports);
+
+  // --- Updates page (capability 'updates'): updates[] metric -----------------
+  const updateRows = (m['updates'] ?? []) as Record<string, unknown>[];
+  check('updates[] emitted: firmware + app + image rows', updateRows.length === 3, updateRows);
+  const fwRow = updateRows.find((r) => r.kind === 'firmware');
+  // system.info reports "SCALE 25.04.2" — the row must carry the BARE version.
+  check('firmware row: SCALE prefix stripped + versions compared', !!fwRow && fwRow.name === 'os' && fwRow.currentVersion === '25.04.2' && fwRow.latestVersion === '25.10.1' && fwRow.available === true && fwRow.rebootRequired === true, fwRow);
+  check('firmware row: apply points at system.firmware.update with target version', !!fwRow && fwRow.applyActionId === 'system.firmware.update' && (fwRow.applyInput as Record<string, unknown>)?.version === '25.10.1', fwRow?.applyInput);
+  check('firmware row: manifest extras carried (train/profile/size/release notes)', !!fwRow && (fwRow.extra as Record<string, unknown>)?.train === 'TrueNAS-SCALE' && (fwRow.extra as Record<string, unknown>)?.profile === 'GENERAL' && fwRow.sizeBytes === 2_230_534_144 && typeof (fwRow.extra as Record<string, unknown>)?.releaseNotesUrl === 'string', fwRow);
+  const appUpd = updateRows.find((r) => r.kind === 'app');
+  check('app row: only the upgradable app is listed', !!appUpd && appUpd.name === 'zabbix' && appUpd.currentVersion === '7.0.1' && appUpd.applyActionId === 'containers.upgrade' && JSON.stringify(appUpd.applyInput) === JSON.stringify({ names: ['zabbix'] }), appUpd);
+  const imgUpd = updateRows.find((r) => r.kind === 'docker-image');
+  check('image row: only the stale image is listed', !!imgUpd && imgUpd.name === 'zabbix/zabbix-agent2:alpine-7.0' && imgUpd.applyActionId === 'images.update' && JSON.stringify(imgUpd.applyInput) === JSON.stringify({ images: ['zabbix/zabbix-agent2:alpine-7.0'] }), imgUpd);
 
   // --- Storage inventory (Storage page): filesystems[] + disks[] --------------
   const fsRows = (m['filesystems'] ?? []) as Record<string, unknown>[];
@@ -350,6 +409,23 @@ async function main(): Promise<void> {
   const cfgRebootJson = (await cfgReboot.json()) as { success?: boolean; result?: Record<string, unknown> };
   console.log('\n== /config system.reboot ==');
   check('success true with job id', cfgReboot.status === 200 && cfgRebootJson.success === true && ((cfgRebootJson.result?.details as Record<string, unknown>)?.jobId === 42), cfgRebootJson);
+
+  // --- /config (system.firmware.update → job id) ----------------------------------------
+  const cfgFw = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'system.firmware.update', input: { version: '25.10.1' } });
+  const cfgFwJson = (await cfgFw.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config system.firmware.update ==');
+  check('success true with job id', cfgFw.status === 200 && cfgFwJson.success === true && ((cfgFwJson.result?.details as Record<string, unknown>)?.jobId === 77), cfgFwJson);
+
+  // --- /config (system.firmware.update idempotency: already on target) -------------------
+  const cfgFwNoop = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'system.firmware.update', input: { version: '25.04.1' } });
+  const cfgFwNoopJson = (await cfgFwNoop.json()) as { success?: boolean; result?: Record<string, unknown> };
+  check('already-on-target is a verified no-op (SCALE prefix normalized)', cfgFwNoop.status === 200 && cfgFwNoopJson.success === true && (cfgFwNoopJson.result?.details as Record<string, unknown>)?.applied !== true && /nothing to do/i.test(String((cfgFwNoopJson.result?.details as Record<string, unknown>)?.note)), cfgFwNoopJson);
+
+  // --- /config (images.update → pull job + verification) ---------------------------------
+  const cfgImg = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'images.update', input: { images: ['zabbix/zabbix-agent2:alpine-7.0'] } });
+  const cfgImgJson = (await cfgImg.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config images.update ==');
+  check('success true with pulled=1', cfgImg.status === 200 && cfgImgJson.success === true && ((cfgImgJson.result?.details as Record<string, unknown>)?.pulled === 1), cfgImgJson);
 
   // --- /config (validation + unknown action) -------------------------------------------
   const badInput = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'system.reboot', input: {} });

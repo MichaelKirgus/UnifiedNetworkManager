@@ -38,8 +38,9 @@ export interface OpnsenseDeviceModel {
 }
 
 // OPNsense release lines (year.month) currently published on the official
-// package mirror https://pkg.opnsense.org/releases/.
-const RELEASES = [
+// package mirror https://pkg.opnsense.org/releases/. Exported so /monitoring
+// can compare a device's live version against it for the Updates page.
+export const RELEASES = [
   '22.1',
   '22.7',
   '23.1',

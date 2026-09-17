@@ -46,6 +46,10 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'time:read': 'View the Time page (device clocks, timezones and clock drift across devices)',
   'containers:read': 'View the Containers page (Apps/container workloads across devices)',
   'vms:read': 'View the VMs page (virtual machines and their NICs across devices)',
+  // Cross-device update center — firmware, OS packages (package manager over SSH)
+  // and Docker images/apps available for update. Applying an update is a plan
+  // (configs:apply + 2FA); this read permission only gates viewing the page.
+  'updates:read': 'View the Updates page (available firmware/package/image updates across devices)',
   'topology:read': 'View the Topology page (physical + logical network graph)',
   'sites:read': 'View sites',
   'config-jobs:read': 'View configuration jobs',

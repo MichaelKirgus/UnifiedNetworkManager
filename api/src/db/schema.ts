@@ -1240,6 +1240,47 @@ export const vms = pgTable(
   }
 );
 
+// One row per available update as reported by a plugin's `updates` metric
+// (capability 'updates'). Powers the cross-device Updates page. Same upsert +
+// delete-on-absent lifecycle as containers: an update that is no longer
+// reported (applied, or the package manager found nothing) must vanish on the
+// next inventory poll, not linger until the 24h sweep. `name` is part of the PK
+// — one row per (device, plugin, kind, name): "os" for firmware, a package
+// name for os-package rows, an app/image name otherwise. Rows with available=
+// false are dropped at ingest time; only genuinely available updates persist.
+export const deviceUpdates = pgTable(
+  'device_updates',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // firmware | os-package | docker-image | app (plugins may emit custom kinds).
+    kind: text('kind').notNull().default('firmware'),
+    // Stable identity within (device, plugin, kind): "os", package name, ...
+    name: text('name').notNull(),
+    currentVersion: text('currentVersion'),
+    latestVersion: text('latestVersion'),
+    rebootRequired: boolean('rebootRequired'),
+    sizeBytes: doublePrecision('sizeBytes'),
+    // Catalog action id (of THIS plugin) that applies this row — the webapp's
+    // Update button fires it through the plan workflow. NULL = no apply path.
+    applyActionId: text('applyActionId'),
+    // Prefilled input for applyActionId (JSON object).
+    applyInput: text('applyInput').notNull().default('{}'),
+    // Plugin-specific details (JSON object) stored verbatim.
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDeviceUpdates: primaryKey({
+        name: 'device_updates_pkey',
+        columns: [table.deviceId, table.pluginId, table.kind, table.name],
+      }),
+      idxDeviceUpdatesDevice: index('idx_device_updates_device').on(table.deviceId),
+    };
+  }
+);
+
 // Execution plans produced by a plugin's /plan endpoint (e.g. an OPNsense
 // WireGuard tunnel spanning two firewalls). The API persists the plan and its
 // steps, fulfils the plan's provisionRequests via the secrets provider at

@@ -19,6 +19,7 @@ import { internalRouter } from './routes/internal';
 import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import plansRouter from './routes/plans';
 import networksRouter from './routes/networks';
+import updatesRouter from './routes/updates';
 import topologyRouter from './routes/topology';
 import logsRouter from './routes/logs';
 import notificationsRouter from './routes/notifications';
@@ -124,6 +125,8 @@ async function main(): Promise<void> {
   api.use(configJobsRouter);
   // Cross-device inventory views (/networks, /hosts) — self-defining paths.
   api.use(networksRouter);
+  // Cross-device update center (/updates: device updates + stack self-update card).
+  api.use(updatesRouter);
   // Physical + logical topology graph for the Topology page (self-defining path).
   api.use(topologyRouter);
   // Plugin log entries (global view + per-device section in DeviceDetail).

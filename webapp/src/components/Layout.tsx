@@ -11,7 +11,7 @@ import { useExecutionMode } from '../executionMode';
 
 /** Pages whose actions flow through the plan workflow (create + execute).
  *  On every other page the top-bar Read-Only/Plan/Execute toggle renders disabled. */
-const PLAN_ACTION_PATHS = ['/storage', '/shares', '/containers', '/vms'];
+const PLAN_ACTION_PATHS = ['/storage', '/shares', '/containers', '/vms', '/updates'];
 
 function isPlanActionPath(pathname: string): boolean {
   if (PLAN_ACTION_PATHS.some((p) => pathname === p || pathname.startsWith(p + '/'))) return true;

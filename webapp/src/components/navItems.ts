@@ -29,6 +29,7 @@ import {
   Users as UsersIcon,
   Wifi as WifiIcon,
   Clock,
+  ArrowUpCircle,
 } from 'lucide-react';
 import { can } from '../auth/permissions';
 import type { NavCountKey } from '../api/client';
@@ -80,6 +81,9 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/time', label: 'Time', icon: Clock, requiresPermission: 'time:read' },
   // Cross-device virtual machines (TrueNAS SCALE VMs today; generic key for future hypervisor plugins).
   { to: '/vms', label: 'VMs', icon: Monitor, requiresPermission: 'vms:read' },
+  // Cross-device update center — firmware/packages/images available across devices,
+  // plus the "UNM itself" self-update card. Badge = count of available updates.
+  { to: '/updates', label: 'Updates', icon: ArrowUpCircle, requiresPermission: 'updates:read', countKey: 'updates' },
   // Physical + logical network graph (inferred cables + per-VLAN segments).
   { to: '/topology', label: 'Topology', icon: GitGraph, requiresPermission: 'topology:read' },
   // Layer registry — the topology view's horizontal bands (open to all users).
@@ -117,6 +121,7 @@ export const BADGE_COLORS: Record<NavCountKey, string> = {
   configJobs: 'bg-amber-500',
   plans: 'bg-blue-500',
   certificates: 'bg-red-500',
+  updates: 'bg-emerald-500',
 };
 
 /**

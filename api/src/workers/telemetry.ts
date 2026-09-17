@@ -51,7 +51,7 @@ const INVENTORY_METRIC_KEYS = [
   'networks', 'arp', 'ndp', 'hosts', 'dhcpLeases', 'wlanClients', 'macTable', 'dockerHosts', 'vmHosts',
   'tunnels', 'routes', 'firewallRules', 'certificates',
   'wifiNetworks', 'wifiAirtime', 'wifiRadios', 'wifiNeighbors',
-  'ports', 'filesystems', 'disks', 'containers', 'images', 'vms',
+  'ports', 'filesystems', 'disks', 'containers', 'images', 'vms', 'updates',
 ] as const;
 
 /** True when a snapshot carries at least one inventory array (any length). */
@@ -1733,6 +1733,83 @@ async function ingestInventory(
           ));
       }
     }
+
+    // --- Device updates (Updates page) --------------------------------------
+    // Generic key — any plugin advertising capability 'updates' may emit it:
+    //   updates[] { name, kind, currentVersion?, latestVersion?, available,
+    //               rebootRequired?, sizeBytes?, applyActionId?, applyInput?, extra? }
+    // Same CONFIG-object lifecycle as containers: upsert-per-poll + delete-on-
+    // absent (an applied update must vanish on the next poll), present-but-nothing
+    // available = authoritative wipe. Only rows with available=true persist — a
+    // plugin that reports "checked, nothing new" emits an empty array and its
+    // stale rows are wiped.
+    const rawUpdates = Array.isArray(metrics['updates']) ? (metrics['updates'] as unknown[]) : null;
+    if (rawUpdates !== null) {
+      const values: {
+        deviceId: string; pluginId: string; kind: string; name: string;
+        currentVersion: string | null; latestVersion: string | null;
+        rebootRequired: boolean | null; sizeBytes: number | null;
+        applyActionId: string | null; applyInput: string; extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawUpdates) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        // Only genuinely-available updates persist.
+        if (r['available'] !== true) continue;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        if (!name) continue; // name is part of the conflict key
+        const kind = typeof r['kind'] === 'string' && (r['kind'] as string).trim() !== '' ? (r['kind'] as string).trim() : 'firmware';
+        values.push({
+          deviceId,
+          pluginId,
+          kind,
+          name,
+          currentVersion: typeof r['currentVersion'] === 'string' && (r['currentVersion'] as string) !== '' ? (r['currentVersion'] as string) : null,
+          latestVersion: typeof r['latestVersion'] === 'string' && (r['latestVersion'] as string) !== '' ? (r['latestVersion'] as string) : null,
+          rebootRequired: typeof r['rebootRequired'] === 'boolean' ? (r['rebootRequired'] as boolean) : null,
+          sizeBytes: numOrNull(r['sizeBytes']),
+          applyActionId: typeof r['applyActionId'] === 'string' && (r['applyActionId'] as string).trim() !== '' ? (r['applyActionId'] as string).trim() : null,
+          applyInput: (() => {
+            const ai = r['applyInput'];
+            if (!ai || typeof ai !== 'object' || Array.isArray(ai)) return '{}';
+            try { return JSON.stringify(ai); } catch { return '{}'; }
+          })(),
+          extra: extraOf(r),
+          collectedAt,
+        });
+      }
+      if (values.length > 0) {
+        const byKey = new Map<string, typeof values[number]>();
+        for (const v of values) byKey.set(`${v.kind}|${v.name}`, v);
+        await db.insert(schema.deviceUpdates).values(Array.from(byKey.values())).onConflictDoUpdate({
+          target: [schema.deviceUpdates.deviceId, schema.deviceUpdates.pluginId, schema.deviceUpdates.kind, schema.deviceUpdates.name],
+          set: {
+            currentVersion: sql`excluded."currentVersion"`,
+            latestVersion: sql`excluded."latestVersion"`,
+            rebootRequired: sql`excluded."rebootRequired"`,
+            sizeBytes: sql`excluded."sizeBytes"`,
+            applyActionId: sql`excluded."applyActionId"`,
+            applyInput: sql`excluded."applyInput"`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+        const seenKeys = new Set(values.map((v) => `${v.kind}|${v.name}`));
+        await db.delete(schema.deviceUpdates)
+          .where(and(
+            eq(schema.deviceUpdates.deviceId, deviceId),
+            eq(schema.deviceUpdates.pluginId, pluginId),
+            notInArray(sql`"kind" || '|' || name`, Array.from(seenKeys))
+          ));
+      } else {
+        // Present-but-nothing-available is the authoritative wipe — same contract as containers.
+        await db.delete(schema.deviceUpdates)
+          .where(and(
+            eq(schema.deviceUpdates.deviceId, deviceId),
+            eq(schema.deviceUpdates.pluginId, pluginId)
+          ));
+      }
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(
@@ -1788,6 +1865,7 @@ async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
   await db.delete(schema.containers).where(lt(schema.containers.collectedAt, cutoff));
   await db.delete(schema.dockerImages).where(lt(schema.dockerImages.collectedAt, cutoff));
   await db.delete(schema.vms).where(lt(schema.vms.collectedAt, cutoff));
+  await db.delete(schema.deviceUpdates).where(lt(schema.deviceUpdates.collectedAt, cutoff));
 }
 
 /**

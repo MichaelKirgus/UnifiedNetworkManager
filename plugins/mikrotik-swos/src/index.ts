@@ -20,6 +20,7 @@ import {
   StateRequestBody,
   CertificateRow,
   resolveUserPass,
+  catalogFirmwareRow,
 } from '@unm/plugin-sdk';
 import { SwosClient, SwosAuthError } from './swosClient';
 import { createPlatform } from './platform';
@@ -29,6 +30,10 @@ import { DEVICE_MODELS } from './deviceModels';
 import { getAction, listCatalog } from './actions/registry';
 import { ActionContext, ActionResult, validateInput } from './actions/types';
 import { PlanRequest, PlanningError, buildPlan } from './plan';
+
+/** Every firmware line known across the SwOS catalog (SwOS + SwOS Lite) — the
+ * Updates page compares the live detected version against these lines. */
+const KNOWN_SWOS_LINES = Array.from(new Set(DEVICE_MODELS.flatMap((m) => m.firmwareVersions ?? [])));
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000005';
 export const PLUGIN_NAME = 'MikroTik SwOS Plugin';
@@ -47,11 +52,14 @@ const identity = resolvePluginIdentity({
   // plus the full action catalog from the reference project's proven write set
   // (port config, PoE, LAG, per-port VLANs, VLAN table, SNMP, system identity/
   // management access, backup download). SwOS only — RouterOS gets its own plugin.
-  version: '0.1.0',
+  // 0.2.0 — Updates page support (capability 'updates'): firmware `updates[]`
+  // row from the live detected version vs the static catalog (available-
+  // without-apply — SwOS updates go through the web UI / package server).
+  version: '0.2.0',
   vendors: ['mikrotik'],
   // 'deviceState' advertises POST /state — the dynamic document behind the
   // per-device Config page (ports with live state + PoE/LAG/VLAN actions).
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState'],
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState', 'updates'],
 });
 
 /**
@@ -267,6 +275,16 @@ app.post('/monitoring', async (req, res) => {
 
     const metrics = buildMetrics(s, selectedModel, selectedFirmware);
     if (health !== 'ok') metrics['system.error'] = warnings.join('; ');
+
+    // Updates page: firmware row from the live detected version vs the static
+    // catalog. SwOS has no safe programmatic OS-update API (updates go through
+    // the web UI / package server), so the row is available-without-apply —
+    // it shows on the Updates page but carries no Update button.
+    const liveVersion = s.firmwareVersion ?? null;
+    if (liveVersion) {
+      const fwRow = catalogFirmwareRow(liveVersion, KNOWN_SWOS_LINES);
+      if (fwRow) metrics['updates'] = [fwRow];
+    }
 
     // --- Certificates (normalized for the cross-device Certificates page) ----
     // SwOS Lite is HTTP-only — there is no management HTTPS cert to read unless

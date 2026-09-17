@@ -24,12 +24,18 @@ import {
   resolveHttpPort,
   resolveSshPort,
   warnOnce,
+  catalogFirmwareRow,
   CertificateRow,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 import { LcosOptions, getLcosInventory, readLcosClock, walkLcosCounters } from './lcosClient';
 import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 import { DEVICE_MODELS } from './deviceModels';
+
+/** Every firmware line known across the LCOS-LX catalog — the Updates page
+ * compares a device's live swVersion against this set (always in sync with
+ * /discover). */
+const KNOWN_LX_LINES = Array.from(new Set(DEVICE_MODELS.flatMap((m) => m.firmwareVersions ?? [])));
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000004';
 export const PLUGIN_NAME = 'LANCOM LX-Series Plugin';
@@ -47,11 +53,15 @@ const identity = resolvePluginIdentity({
   // per-client stations, LAN ports) + inventory propagation for the Networks/
   // Hosts pages. Read-only by design — the vendor MIB exposes no writable
   // objects; actions require a separate transport (future phase).
-  version: '0.1.0',
+  // 0.2.0 — Updates page support (capability 'updates'): firmware `updates[]`
+  // row from the live swVersion vs the static LCOS-LX release catalog
+  // (available-without-apply — LANCOM MIBs are read-only, OS updates go through
+  // the web UI).
+  version: '0.2.0',
   vendors: ['lancom'],
   // monitoring + inventory over the LCOS-LX MIB, plus an interactive SSH console
   // ('sshConsole') — LX access points expose a CLI shell over SSH (port 22).
-  capabilities: ['monitoring', 'inventory', 'sshConsole'],
+  capabilities: ['monitoring', 'inventory', 'sshConsole', 'updates'],
 });
 
 /**
@@ -332,6 +342,13 @@ app.post('/monitoring', async (req, res) => {
     const sys = snapshot.system;
     metrics['system.name'] = sys.name || null;
     metrics['system.swVersion'] = sys.swVersion || null;
+    // Updates page: firmware row from the live swVersion (e.g. "7.14.0036RU1 /
+    // 30.07.2026") vs the newest known LCOS-LX line — major.minor comparison,
+    // so build suffixes + dates never matter. Available-without-apply.
+    if (sys.swVersion) {
+      const fwRow = catalogFirmwareRow(sys.swVersion, KNOWN_LX_LINES);
+      if (fwRow) metrics['updates'] = [fwRow];
+    }
     metrics['system.serialNumber'] = sys.serialNumber || null;
     metrics['system.uptime'] = sys.uptimeSeconds; // seconds — format:'duration' renders "1d 2h …"
     metrics['system.cpuLoad'] = sys.cpuLoadPct;

@@ -17,7 +17,7 @@ const router = Router();
  */
 interface CountSpec {
   /** Response key + the permission required to see it. */
-  key: 'notifications' | 'configJobs' | 'plans' | 'certificates';
+  key: 'notifications' | 'configJobs' | 'plans' | 'certificates' | 'updates';
   permission: string;
   compute: (req: Request, userId: string) => Promise<number>;
 }
@@ -100,6 +100,21 @@ const COUNTS: CountSpec[] = [
               : undefined
           )
         );
+      return row?.n ?? 0;
+    },
+  },
+  {
+    // Available updates across the caller's devices. Only rows with available=
+    // true are ever persisted in device_updates, so a plain count is the badge.
+    key: 'updates',
+    permission: 'updates:read',
+    compute: async (req) => {
+      const allowed = await allowedDeviceIds(req);
+      if (allowed !== null && allowed.size === 0) return 0;
+      const [row] = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(schema.deviceUpdates)
+        .where(allowed !== null ? inArray(schema.deviceUpdates.deviceId, [...allowed]) : undefined);
       return row?.n ?? 0;
     },
   },

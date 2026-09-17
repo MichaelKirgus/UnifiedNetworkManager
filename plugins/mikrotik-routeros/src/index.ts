@@ -21,10 +21,16 @@ import {
   resolveHttpPort,
   resolveSshPort,
   resolveUserPass,
+  catalogFirmwareRow,
 } from '@unm/plugin-sdk';
 import { RouterOsAuthError } from './routerosClient';
 import { DEFAULT_OPTIONS, MonitoringResult, RouterOsOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
 import { DEVICE_MODELS } from './deviceModels';
+
+/** Every firmware line known across the RouterOS catalog — the Updates page
+ * compares a device's live version against this set (always in sync with
+ * /discover). */
+const KNOWN_ROS_LINES = Array.from(new Set(DEVICE_MODELS.flatMap((m) => m.firmwareVersions ?? [])));
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-00000000000a';
 export const PLUGIN_NAME = 'MikroTik RouterOS Plugin';
@@ -44,11 +50,15 @@ const identity = resolvePluginIdentity({
   // route inventory propagation. Configuration + planning capabilities are
   // planned for a later release (the action-catalog/planner file layout is the
   // same as mikrotik-swos).
-  version: '0.1.0',
+  // 0.2.0 — Updates page support (capability 'updates'): firmware `updates[]`
+  // row from the live RouterOS version vs the static release catalog
+  // (available-without-apply — RouterOS OS updates go through the web UI /
+  // package server, there is no safe programmatic update API).
+  version: '0.2.0',
   vendors: ['mikrotik'],
   // monitoring + inventory over the REST API, plus an interactive SSH console
   // ('sshConsole') — RouterOS exposes a full CLI shell over SSH (port 22).
-  capabilities: ['monitoring', 'inventory', 'sshConsole'],
+  capabilities: ['monitoring', 'inventory', 'sshConsole', 'updates'],
 });
 
 /**
@@ -317,6 +327,13 @@ app.post('/monitoring', async (req, res) => {
     }
 
     const metrics = buildMetrics(s, selectedModel, selectedFirmware);
+    // Updates page: firmware row from the live RouterOS version (e.g. "7.14")
+    // vs the newest known release line — major.minor comparison. Available-
+    // without-apply (no safe programmatic OS-update API).
+    if (s.version) {
+      const fwRow = catalogFirmwareRow(s.version, KNOWN_ROS_LINES);
+      if (fwRow) metrics['updates'] = [fwRow];
+    }
     // Certificates (management HTTPS cert + SSH host key) — emitted when present;
     // an empty array is authoritative for this device+plugin at ingest.
     if (result.certificates.length > 0) {

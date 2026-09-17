@@ -268,6 +268,20 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     help:
       'How often the API polls configured plugin endpoints for discovery (the mDNS/DNS-SD fallback). A new or restarted plugin appears within one interval.',
   },
+
+  // Stack self-update feed (Updates page "UNM itself" card). Empty = disabled —
+  // the card then shows current versions without a latest-version comparison.
+  {
+    key: 'updateFeedUrl',
+    label: 'Update feed URL',
+    type: 'string',
+    category: 'Updates',
+    default: '',
+    envVar: 'UNM_UPDATE_FEED_URL',
+    maxLength: 2048,
+    help:
+      'Optional HTTPS URL of a JSON release manifest for UNM itself (e.g. a GitHub releases asset). Expected shape: {"latestVersion":"1.2.3","notesUrl":"https://…"}. When set, the Updates page compares it against the running API version and shows an "update available" state; when empty, only current versions are shown.',
+  },
 ];
 
 const BY_KEY: Record<string, SettingDescriptor> = Object.fromEntries(

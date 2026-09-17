@@ -28,6 +28,7 @@ import ContainerLogsPage from './pages/ContainerLogsPage';
 import ConsolePage from './pages/ConsolePage';
 import FileBrowserPage from './pages/FileBrowserPage';
 import Vms from './pages/Vms';
+import Updates from './pages/Updates';
 import Topology from './pages/Topology';
 import Users from './pages/Users';
 import Roles from './pages/Roles';
@@ -62,6 +63,8 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   // Cross-device clock overview — each device's local time + drift vs UNM.
   { path: '/time', permission: 'time:read' },
   { path: '/vms', permission: 'vms:read' },
+  // Cross-device update center (firmware/packages/images) + stack self-update card.
+  { path: '/updates', permission: 'updates:read' },
   { path: '/topology', permission: 'topology:read' },
   // Layers is open to every authenticated user (no read permission).
   { path: '/layers' },
@@ -143,6 +146,8 @@ export default function App() {
       <Route path="/container-logs/:deviceId" element={<Page permission="containers:read"><ContainerLogsPage /></Page>} />
       {/* Cross-device virtual machines (TrueNAS SCALE VMs today; generic key for future hypervisor plugins). */}
       <Route path="/vms" element={<Page permission="vms:read"><Vms /></Page>} />
+      {/* Cross-device update center — available updates + stack self-update card. */}
+      <Route path="/updates" element={<Page permission="updates:read"><Updates /></Page>} />
       {/* Physical + logical network graph (inferred cables, per-VLAN segments). */}
       <Route path="/topology" element={<Page permission="topology:read"><Topology /></Page>} />
       {/* Network layer registry — open to every authenticated user. */}

@@ -26,6 +26,7 @@ import {
   buildDeviceTimeInfo,
   parseLooseDeviceDatetime,
   warnOnce,
+  catalogFirmwareRow,
   CertificateRow,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
@@ -42,6 +43,10 @@ import { getAction, listCatalog, listModules } from './actions/registry';
 import { ActionContext, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest } from './plan';
 
+/** Every firmware line known across the LCOS catalog — the Updates page compares
+ * a device's live swVersion against this set (always in sync with /discover). */
+const KNOWN_LCOS_LINES = Array.from(new Set(DEVICE_MODELS.flatMap((m) => m.firmwareVersions ?? [])));
+
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000006';
 export const PLUGIN_NAME = 'LANCOM LCOS Plugin';
 
@@ -57,12 +62,15 @@ const identity = resolvePluginIdentity({
   // 0.1.0 — initial release: unified LCOS-MIB monitoring (system, LAN/WAN throughput,
   // VPN, temperature) + inventory propagation for the Networks/Hosts pages, plus
   // config/planning over SNMP SET and web-UI config backup via a credential slot.
-  version: '0.1.0',
+  // 0.2.0 — Updates page support (capability 'updates'): firmware `updates[]` row
+  // from the live swVersion vs the static LCOS release catalog (available-without-
+  // apply — LANCOM MIBs are read-only, OS updates go through the web UI).
+  version: '0.2.0',
   vendors: ['lancom'],
   // All four capabilities: monitoring (SNMP walks), inventory (networks/hosts),
   // configuration (SNMP SET actions) + planning (multi-device fan-out). Plus an
   // interactive SSH console ('sshConsole') — LCOS exposes a full CLI over SSH.
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'sshConsole'],
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'sshConsole', 'updates'],
 });
 
 /**
@@ -359,6 +367,13 @@ app.post('/monitoring', async (req, res) => {
     const sys = snapshot.system;
     metrics['system.name'] = sys.name || null;
     metrics['system.swVersion'] = sys.swVersion || null;
+    // Updates page: firmware row from the live swVersion (e.g. "10.94.0327RU4 /
+    // 16.07.2026") vs the newest known LCOS line — major.minor comparison, so
+    // build suffixes + dates never matter. Available-without-apply.
+    if (sys.swVersion) {
+      const fwRow = catalogFirmwareRow(sys.swVersion, KNOWN_LCOS_LINES);
+      if (fwRow) metrics['updates'] = [fwRow];
+    }
     metrics['system.modelNumber'] = sys.modelNumber || null;
     metrics['system.serialNumber'] = sys.serialNumber || null;
     metrics['system.cpuType'] = sys.cpuType || null;

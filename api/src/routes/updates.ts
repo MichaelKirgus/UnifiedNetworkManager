@@ -1,0 +1,145 @@
+/**
+ * GET /updates — cross-device update center (Updates page).
+ *
+ * One endpoint, two payloads:
+ *   rows[]  — available updates from the `device_updates` table (populated by
+ *             the telemetry worker from each plugin's `updates` metric; plugins
+ *             opt in via capability 'updates'). Joined with device + plugin names.
+ *   stack   — "UNM itself" card: running API version, discovered plugin versions,
+ *             and a feed-based latest-version check when updateFeedUrl is set.
+ *
+ * Query params: deviceId (exact), siteId (filter by device's site), kind
+ * ('firmware'|'os-package'|'docker-image'|'app'). Device-level access control
+ * applies exactly like the other inventory views — scoped callers get 200 []
+ * for out-of-scope devices, never a leak.
+ */
+
+import { Router, Response } from 'express';
+import { and, asc, eq, inArray } from 'drizzle-orm';
+import { db } from '../db';
+import * as schema from '../db/schema';
+import { requireAuth, requirePermission } from '../auth/middleware';
+import { allowedDeviceIds } from '../deviceAccess';
+import { getStackUpdateInfo } from '../stackUpdates';
+
+const router = Router();
+
+interface DeviceView {
+  id: string;
+  name: string;
+  managementAddress: string;
+  siteName: string | null;
+}
+
+async function loadDeviceViews(deviceIds: string[]): Promise<Map<string, DeviceView>> {
+  const map = new Map<string, DeviceView>();
+  if (deviceIds.length === 0) return map;
+  const devices = await db.query.devices.findMany({ where: inArray(schema.devices.id, deviceIds) });
+  const siteIds = Array.from(new Set(devices.map((d) => d.siteId).filter((s): s is string => !!s)));
+  const sites = siteIds.length > 0 ? await db.query.sites.findMany({ where: inArray(schema.sites.id, siteIds) }) : [];
+  const siteNameById = new Map(sites.map((s) => [s.id, s.name] as const));
+  for (const d of devices) {
+    map.set(d.id, {
+      id: d.id,
+      name: d.name,
+      managementAddress: d.managementAddress,
+      siteName: d.siteId ? (siteNameById.get(d.siteId) ?? null) : null,
+    });
+  }
+  return map;
+}
+
+async function loadPluginNames(pluginIds: string[]): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  if (pluginIds.length === 0) return map;
+  const plugins = await db.query.plugins.findMany({ where: inArray(schema.plugins.id, pluginIds) });
+  for (const p of plugins) map.set(p.id, p.name);
+  return map;
+}
+
+function safeParseJson<T>(raw: string): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return {} as T;
+  }
+}
+
+router.get('/updates', requireAuth, requirePermission('updates:read'), async (req, res: Response) => {
+  try {
+    const { deviceId, siteId, kind } = req.query as Record<string, string | undefined>;
+
+    if (kind && !['firmware', 'os-package', 'docker-image', 'app'].includes(kind)) {
+      res.status(400).json({ error: '"kind" must be one of: firmware, os-package, docker-image, app' });
+      return;
+    }
+
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json({ rows: [], stack: await getStackUpdateInfo() });
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json({ rows: [], stack: await getStackUpdateInfo() });
+      return;
+    }
+
+    let where;
+    const kindClause = kind ? eq(schema.deviceUpdates.kind, kind) : undefined;
+    if (deviceId && siteId) {
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) {
+        res.status(200).json({ rows: [], stack: await getStackUpdateInfo() });
+        return;
+      }
+      where = kindClause ? and(eq(schema.deviceUpdates.deviceId, deviceId), kindClause) : eq(schema.deviceUpdates.deviceId, deviceId);
+    } else if (deviceId) {
+      where = kindClause ? and(eq(schema.deviceUpdates.deviceId, deviceId), kindClause) : eq(schema.deviceUpdates.deviceId, deviceId);
+    } else if (siteId) {
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
+      if (deviceIds.length === 0) {
+        res.status(200).json({ rows: [], stack: await getStackUpdateInfo() });
+        return;
+      }
+      const deviceClause = inArray(schema.deviceUpdates.deviceId, deviceIds);
+      where = kindClause ? and(deviceClause, kindClause) : deviceClause;
+    } else if (kindClause) {
+      where = allowed !== null ? and(kindClause, inArray(schema.deviceUpdates.deviceId, [...allowed])) : kindClause;
+    } else if (allowed !== null) {
+      where = inArray(schema.deviceUpdates.deviceId, [...allowed]);
+    }
+
+    const rows = await db.query.deviceUpdates.findMany({
+      ...(where ? { where } : {}),
+      orderBy: [asc(schema.deviceUpdates.deviceId), asc(schema.deviceUpdates.kind), asc(schema.deviceUpdates.name)],
+    });
+
+    const [deviceViews, pluginNames] = await Promise.all([
+      loadDeviceViews(Array.from(new Set(rows.map((r) => r.deviceId)))),
+      loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId)))),
+    ]);
+
+    res.status(200).json({
+      rows: rows.map((r) => {
+        const device = deviceViews.get(r.deviceId);
+        return {
+          ...r,
+          applyInput: safeParseJson<Record<string, unknown>>(r.applyInput),
+          extra: safeParseJson<Record<string, unknown>>(r.extra),
+          deviceName: device?.name ?? null,
+          managementAddress: device?.managementAddress ?? null,
+          siteName: device?.siteName ?? null,
+          pluginName: pluginNames.get(r.pluginId) ?? null,
+        };
+      }),
+      stack: await getStackUpdateInfo(),
+    });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+export default router;

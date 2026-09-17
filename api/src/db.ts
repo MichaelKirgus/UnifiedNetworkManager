@@ -787,6 +787,29 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_vms_device ON vms ("deviceId")`);
 
+  // Device updates inventory table (Updates page) — one row per available update,
+  // upserted per poll from the plugin's `updates` metric (capability 'updates').
+  // Same lifecycle as containers (upsert + delete-on-absent + 24h sweep). Only
+  // rows with available=true are persisted; see schema.deviceUpdates.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_updates (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'firmware',
+      name TEXT NOT NULL,
+      "currentVersion" TEXT,
+      "latestVersion" TEXT,
+      "rebootRequired" BOOLEAN,
+      "sizeBytes" DOUBLE PRECISION,
+      "applyActionId" TEXT,
+      "applyInput" TEXT NOT NULL DEFAULT '{}',
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", kind, name)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_updates_device ON device_updates ("deviceId")`);
+
   // Plugin log entries (see schema.pluginLogs). Pushed by plugins in batches
   // via POST /plugin/logs; swept by the retention worker after LOG_RETENTION_DAYS.
   await pool.query(`

@@ -22,6 +22,7 @@ tags:
   - name: Sites
   - name: Layers
   - name: Inventory
+  - name: Updates
   - name: Logs
   - name: Notifications
   - name: Users
@@ -3146,6 +3147,52 @@ paths:
         '401':
           description: Authentication required
 
+  /updates:
+    get:
+      tags: [Updates]
+      summary: Cross-device update center (device updates + stack self-update)
+      description: >-
+        Two payloads in one response. `rows` is the cross-device view of the
+        normalized `device_updates` inventory table, populated by the telemetry
+        worker from each plugin's /monitoring `updates[]` metric — plugins opt
+        in via capability 'updates' (firmware, OS packages over SSH package
+        managers, Docker images/apps). Only genuinely available updates are
+        persisted; an applied update vanishes on the next inventory poll. Each
+        row may carry applyActionId/applyInput pointing at the reporting
+        plugin's action catalog — applying is always a plan (configs:apply +
+        2FA), never a direct call. `stack` is the "UNM itself" card: running API
+        version, discovered plugin versions, and a feed-based latest-version
+        check when the updateFeedUrl system setting is configured.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: kind
+          required: false
+          schema:
+            type: string
+            enum: [firmware, os-package, docker-image, app]
+          description: Filter by update kind
+      responses:
+        '200':
+          description: Update rows + stack self-update info (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdatesResponse'
+        '400':
+          description: Invalid kind filter value
+        '401':
+          description: Authentication required
+
   /certificates:
     get:
       tags: [Inventory]
@@ -5997,6 +6044,71 @@ components:
           additionalProperties: true
           description: "Plugin-specific details (JSON) — same contract as ContainerRow.extra"
         collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this image" }
+
+    UpdateRow:
+      type: object
+      required: [deviceId, pluginId, kind, name, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this update is for" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this update" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        kind:
+          type: string
+          enum: [firmware, os-package, docker-image, app]
+          description: "Update kind (plugins may emit custom kinds)"
+        name: { type: string, description: "Stable identity within (device, kind): 'os' for firmware, a package name, an app or image name" }
+        currentVersion: { type: [string, 'null'] }
+        latestVersion: { type: [string, 'null'] }
+        rebootRequired: { type: [boolean, 'null'], description: "True when applying this update requires a device reboot" }
+        sizeBytes: { type: [number, 'null'] }
+        applyActionId:
+          type: [string, 'null']
+          description: >-
+            Catalog action id (of the reporting plugin) that applies this row —
+            the webapp's Update button fires it through the plan workflow.
+            Null = no safe apply path; the row shows as available without a button.
+        applyInput:
+          type: object
+          additionalProperties: true
+          description: "Prefilled input for applyActionId"
+        extra:
+          type: object
+          additionalProperties: true
+          description: "Plugin-specific details (JSON) — e.g. the package manager id for os-package rows"
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this update" }
+
+    StackUpdateInfo:
+      type: object
+      required: [apiVersion, plugins, feedConfigured]
+      properties:
+        apiVersion: { type: string, description: "Running API version (UNM_VERSION env or package.json)" }
+        plugins:
+          type: array
+          items:
+            type: object
+            required: [name, version]
+            properties:
+              name: { type: string }
+              version: { type: string }
+          description: "Discovered plugin instances + their versions"
+        feedConfigured: { type: boolean, description: "True when the updateFeedUrl system setting is set" }
+        latestApiVersion: { type: [string, 'null'], description: "Latest version from the configured release feed (null = no feed / fetch failed)" }
+        available: { type: boolean, description: "True when the feed reports a newer version than the running one" }
+        notesUrl: { type: [string, 'null'], description: "Release notes URL from the manifest, if present" }
+
+    UpdatesResponse:
+      type: object
+      required: [rows, stack]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/UpdateRow'
+        stack:
+          $ref: '#/components/schemas/StackUpdateInfo'
 
     ContainersOverview:
       type: object

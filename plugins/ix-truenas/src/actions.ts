@@ -12,7 +12,7 @@
  * "initiated").
  */
 
-import { ActionDescriptor, ActionResult, createRegistry, dynamicSshHostVerifier, pickNumber, pickString, pollUntil, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { ActionDescriptor, ActionResult, compareVersions, createRegistry, dynamicSshHostVerifier, pickNumber, pickString, pollUntil, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
 import { normalizeVmDevice, sshPool } from './enrich';
 
@@ -187,6 +187,62 @@ const systemShutdownAction: ActionDescriptor<TruenasActionContext> = {
     } catch (e) {
       if (e instanceof TruenasRpcError && /timed out|closed|unresponsive/i.test(e.message)) {
         return { success: true, applied: true, details: { note: 'Shutdown initiated — connection lost as expected while the appliance went down.' } };
+      }
+      throw e;
+    }
+  },
+};
+
+/**
+ * Firmware update (TrueNAS `update.run` job — FULL_ADMIN). Downloads the target
+ * release (if not already cached) and applies it as a NEW boot environment; the
+ * appliance reboots into it at the end of the job. The WebSocket drops when the
+ * box goes down — same "initiated" convention as system.reboot: a job id or a
+ * transport error after dispatch both mean success. Post-apply verification is
+ * impossible from this side (the connection dies with the old OS), so `verified`
+ * stays undefined and the plan reports it unverified-by-design; the next
+ * inventory poll re-reads system.info + update.available_versions, and once the
+ * box is back on the new version the Updates-page row disappears.
+ */
+const systemFirmwareUpdateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'system.firmware.update',
+  label: 'Update firmware (OS)',
+  description:
+    "Downloads and applies a TrueNAS OS update via `update.run` (FULL_ADMIN job). The appliance reboots into the new boot environment when done — expect downtime. Omit version to use the newest release matching the box's configured update profile.",
+  module: 'System',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 3_600_000, // multi-GB downloads + install can exceed an hour on slow links
+  inputSchema: {
+    version: { type: 'string', required: false, minLength: 2, description: 'Target release (e.g. "25.10.1"); omit for the newest matching the configured update profile' },
+    train: { type: 'string', required: false, minLength: 2, description: "Update train override (e.g. \"TrueNAS-26-BETA\"); omit to keep the box's configured profile" },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const version = str(input, 'version');
+    const train = str(input, 'train');
+
+    // Idempotency guard — already on the requested release (or newer) → no-op.
+    // Older releases prefix system.info's version with "SCALE "/"CORE ".
+    let current: string | undefined;
+    try {
+      const si = await ctx.client.call<Record<string, unknown>>('system.info', [], ctx.creds);
+      current = pickString(si, ['version'])?.replace(/^(scale|core)\s+/i, '').trim();
+    } catch { /* best-effort guard — update.run will reject a no-op anyway */ }
+    if (current && version && compareVersions(current, version) >= 0) {
+      return { success: true, applied: false, verified: true, details: { note: `Already on ${version} (or newer) — nothing to do.`, currentVersion: current } };
+    }
+
+    const options: Record<string, unknown> = {};
+    if (train) options['train'] = train;
+    if (version) options['version'] = version;
+
+    try {
+      const result = await ctx.client.call<unknown>('update.run', [options], ctx.creds);
+      return { success: true, applied: true, details: describeJobResult(result) };
+    } catch (e) {
+      // The socket dies when the appliance reboots into the new boot environment — EXPECTED.
+      if (e instanceof TruenasRpcError && /timed out|closed|unresponsive/i.test(e.message)) {
+        return { success: true, applied: true, details: { note: 'Update initiated — connection lost as expected while the appliance rebooted.' } };
       }
       throw e;
     }
@@ -1964,6 +2020,88 @@ const imagesDeleteAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+/**
+ * Re-pull docker images (TrueNAS `app.image.pull` job — one per image ref).
+ * Used by the Updates page for local images whose upstream tag moved (the
+ * appliance flags them via app.image.query's update_available). Pulling is a
+ * no-op when the digest already matches, so re-running is safe. Verification:
+ * after all pulls settle, re-query app.image.query — an image that still shows
+ * update_available=true did not actually change.
+ */
+const imagesUpdateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'images.update',
+  label: 'Pull updated image(s)',
+  description:
+    'Re-pulls the selected docker images from their registries (app.image.pull, one job per image). Safe to re-run — a pull is a no-op when the local digest already matches upstream.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 900_000, // large image pulls dominate — give the plan executor a 15-min budget
+  inputSchema: {
+    images: { type: 'array', required: true, items: { type: 'string', minLength: 2 }, description: 'Image references to pull (registry/repository:tag)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const refs = strArray(input, 'images');
+    if (refs.length === 0) return { success: false, details: { error: 'No image references provided' } };
+
+    // Known images up front — a ref that is not in the local store at all is
+    // reported as missing instead of failing the whole step.
+    const rows = await callWithRetry<Record<string, unknown>[]>(ctx, 'app.image.query', []);
+    const knownRefs = new Set<string>();
+    for (const r of rows ?? []) {
+      for (const t of Array.isArray(r['repo_tags']) ? (r['repo_tags'] as unknown[]) : []) {
+        if (typeof t === 'string' && t.length > 0) knownRefs.add(t);
+      }
+    }
+
+    let pulled = 0;
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const ref of refs) {
+      if (!knownRefs.has(ref)) {
+        missing.push(ref); // not in the local store — nothing to update
+        continue;
+      }
+      try {
+        // app.image.pull is a JOB method — it returns the job id immediately.
+        const r = await ctx.client.call<unknown>('app.image.pull', [{ image: ref }], ctx.creds);
+        let jobId: number | undefined;
+        if (typeof r === 'number') jobId = r;
+        else if (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number') jobId = (r as Record<string, unknown>)['id'] as number;
+        if (jobId !== undefined) {
+          const wait = await waitForJob(ctx, jobId, 840_000);
+          if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') {
+            errors[ref] = wait.error ?? `Pull job ended in state ${wait.state}`;
+            continue;
+          }
+        }
+        pulled++;
+      } catch (e) {
+        errors[ref] = e instanceof Error ? e.message : String(e);
+      }
+    }
+
+    // Verify: re-query the image store — a successfully pulled image must no
+    // longer be flagged update_available.
+    let verified: boolean | undefined;
+    if (Object.keys(errors).length === 0 && pulled > 0) {
+      try {
+        const after = await callWithRetry<Record<string, unknown>[]>(ctx, 'app.image.query', []);
+        const stillStale = new Set<string>();
+        for (const r of after ?? []) {
+          if (r['update_available'] !== true) continue;
+          for (const t of Array.isArray(r['repo_tags']) ? (r['repo_tags'] as unknown[]) : []) {
+            if (typeof t === 'string') stillStale.add(t);
+          }
+        }
+        verified = refs.every((ref) => !stillStale.has(ref));
+      } catch { /* verification is best-effort — the pulls themselves succeeded */ }
+    }
+
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { pulled, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
 /** Quote a YAML scalar when it could be misread (leading indicator chars,
  * trailing space, colon-space, or looking like a number/bool/null). */
 function yamlScalar(v: string): string {
@@ -2377,12 +2515,14 @@ function pickVersionEntry(versions: Record<string, unknown>, wanted?: string): {
   if (keys.length === 0) return null;
   if (wanted && versions[wanted]) return { key: wanted, entry: versions[wanted] as Record<string, unknown> };
   // "latest" or no preference → the highest version-ish key.
-  const sorted = [...keys].sort((a, b) => compareVersions(b, a));
+  const sorted = [...keys].sort((a, b) => looseCompareVersions(b, a));
   return { key: sorted[0], entry: versions[sorted[0]] as Record<string, unknown> };
 }
 
-/** Loose version comparator (handles "1.2.3" and "26.04.3.2.1_1.5.28" style). */
-function compareVersions(a: string, b: string): number {
+/** Loose version comparator (handles "1.2.3" and "26.04.3.2.1_1.5.28" style).
+ * Local to this file — the SDK's `compareVersions` (imported above) is a
+ * different, stricter contract used for OS-release comparisons. */
+function looseCompareVersions(a: string, b: string): number {
   const pa = a.split(/[._-]/).map((x) => parseInt(x, 10)).filter((n) => !Number.isNaN(n));
   const pb = b.split(/[._-]/).map((x) => parseInt(x, 10)).filter((n) => !Number.isNaN(n));
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
@@ -2646,6 +2786,7 @@ export const registry = createRegistry<TruenasActionContext>([
   systemTimezoneReadAction,
   systemTimezoneSetAction,
   systemShutdownAction,
+  systemFirmwareUpdateAction,
   alertsDismissAction,
   alertsUndismissAction,
   containersStopAction,
@@ -2680,6 +2821,7 @@ export const registry = createRegistry<TruenasActionContext>([
   nvmeofSubsystemCreateAction,
   nvmeofSubsystemDeleteAction,
   imagesDeleteAction,
+  imagesUpdateAction,
   composeConfigReadAction,
   containersLogsReadAction,
   containersUpdateAction,

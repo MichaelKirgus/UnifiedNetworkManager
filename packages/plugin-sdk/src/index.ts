@@ -43,7 +43,11 @@ export { createSelfMetrics } from './selfMetrics';
 export type { PluginSelfMetrics, SelfMetricsOptions, SelfMetricsLoggerLike } from './selfMetrics';
 // Device clock / timezone contract for the Time page (see deviceTime.ts).
 export { parseDeviceTimeToEpochMs, buildDeviceTimeInfo, ianaZoneToOffsetMinutes, parseLooseDeviceDatetime, tzAbbrToOffsetMinutes, TZ_ABBR_OFFSET_MINUTES } from './deviceTime';
-export type { DeviceTimeInfo, LooseDeviceDatetime } from './deviceTime';// SSH access for plugins (shared transport + credential resolution). See ssh.ts.
+export type { DeviceTimeInfo, LooseDeviceDatetime } from './deviceTime';
+// Update gathering (capability 'updates'): row contract + version comparison +
+// SSH package-manager adapters. See updates.ts.
+export { compareVersions, isUpdateAvailable, firmwareRow, extractMajorMinor, latestCatalogLine, catalogFirmwareRow, PACKAGE_MANAGER_ADAPTERS, detectPackageManager, readOsReleaseIds, listUpgradablePackages, runPackageUpgrade } from './updates';
+export type { UpdateKind, UpdateRow, UpdateExecBackend, UpgradablePackage, PmAdapter, SshUpdatesOptions, PackageUpgradeResult } from './updates';// SSH access for plugins (shared transport + credential resolution). See ssh.ts.
 export { SshClient, createSshPool, resolveSshCredentials, normalizeFingerprint, fingerprintMatches, computeFingerprint, normalizePrivateKey } from './ssh';
 export type { SshCredentials, SshClientOptions, ExecResult, SshPool, SshPoolOptions, SshFingerprint } from './ssh';
 export { SshError, SshAuthError, SshHostKeyError, SshTimeoutError } from './ssh';

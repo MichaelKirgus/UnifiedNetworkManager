@@ -14,8 +14,8 @@
  * stored rows, while a present-but-empty array is authoritative.
  */
 
-import { INVENTORY_INTERVAL_MS, buildDeviceTimeInfo } from '@unm/plugin-sdk';
-import type { MetricDescriptor } from '@unm/plugin-sdk';
+import { INVENTORY_INTERVAL_MS, buildDeviceTimeInfo, listUpgradablePackages } from '@unm/plugin-sdk';
+import type { MetricDescriptor, UpdateRow } from '@unm/plugin-sdk';
 import { SshBackend } from './client/sshClient';
 import type {
   BoardInfo,
@@ -76,6 +76,38 @@ export async function getInventory(hostKey: string, backend: SshBackend): Promis
     inventoryInFlight.set(hostKey, pending);
   }
   return pending;
+}
+
+// --- Update checks (Updates page) ---------------------------------------------
+// Independent of the 15-min inventory cache on purpose: a forced refresh
+// ("Check now") re-runs /monitoring with collectInventory=true even when the
+// inventory snapshot is still fresh, so updates get their own shorter TTL to
+// stay reasonably current without hammering `apt list --upgradable` every poll.
+const UPDATES_TTL_MS = 5 * 60_000;
+const updatesCache = new Map<string, { at: number; rows: UpdateRow[] }>();
+
+/**
+ * One row per upgradable OS package (kind 'os-package'), each carrying the
+ * `packages.update` apply action. Resolves [] when nothing is upgradable —
+ * that empty array IS authoritative (the API wipes stale rows). THROWS when
+ * the box is unreachable so the caller omits the key entirely (no wipe on a
+ * transient outage).
+ */
+export async function getUpdates(hostKey: string, backend: SshBackend): Promise<UpdateRow[]> {
+  const hit = updatesCache.get(hostKey);
+  if (hit && Date.now() - hit.at < UPDATES_TTL_MS) return hit.rows;
+
+  // Liveness gate — a dead box must not be reported as "no updates".
+  const ping = await backend.exec('true', 10_000);
+  if (!ping || ping.code !== 0) {
+    throw new Error(`Update check failed: SSH exec "true" returned code ${ping?.code ?? 'null'}`);
+  }
+
+  // listUpgradablePackages never throws (unknown PM / parse issues → []), so a
+  // result here is authoritative for this host.
+  const rows = await listUpgradablePackages(backend, { applyActionId: 'packages.update', perPackageApply: true });
+  updatesCache.set(hostKey, { at: Date.now(), rows });
+  return rows;
 }
 
 // --- Module-level baselines (survive per-request backend instances) -----------
@@ -526,6 +558,14 @@ export async function collectMonitoring(
       } else {
         metrics['networks'] = [];
         metrics['ports'] = [];
+      }
+      // Updates (Updates page): independent 5-min TTL so a forced refresh
+      // re-checks even when the inventory snapshot above came from cache.
+      // Failure → omit the key entirely (absent = no wipe, per ingestion contract).
+      try {
+        metrics['updates'] = await getUpdates(hostKey, backend);
+      } catch {
+        /* unreachable or transient — keep previously stored rows */
       }
       metrics['arp'] = inventory.arp;
       if (inventory.ndp.length > 0) metrics['ndp'] = inventory.ndp;

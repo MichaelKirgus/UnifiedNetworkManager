@@ -22,6 +22,7 @@ import {
   resolveHttpPort,
   resolveSshPort,
   buildDeviceTimeInfo,
+  catalogFirmwareRow,
   CertificateRow,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
@@ -43,6 +44,12 @@ function lancomDateToIso(raw: string): string | null {
 import { SxOptions, getSxInventory, walkSxCounters } from './sxClient';
 import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 import { DEVICE_MODELS } from './deviceModels';
+
+/** Every firmware line known across the LCOS-SX catalog — the Updates page
+ * compares a device's live swVersion against this set (always in sync with
+ * /discover). */
+const KNOWN_SX_LINES = Array.from(new Set(DEVICE_MODELS.flatMap((m) => m.firmwareVersions ?? [])));
+
 import { getAction, listCatalog, listModules } from './actions/registry';
 import { ActionContext, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest } from './plan';
@@ -64,12 +71,16 @@ const identity = resolvePluginIdentity({
   // ports + throughput, PoE, LAG/LACP) for BOTH firmware lines (unified 4.x tree
   // and legacy GS-2310 3.x tree, auto-detected), network/host inventory
   // propagation, plus config/planning actions over SNMP SET.
-  version: '0.1.0',
+  // 0.2.0 — Updates page support (capability 'updates'): firmware `updates[]`
+  // row from the live swVersion vs the static LCOS-SX release catalog
+  // (available-without-apply — LANCOM MIBs are read-only, OS updates go through
+  // the web UI).
+  version: '0.2.0',
   vendors: ['lancom'],
   // All four capabilities + deviceState (dynamic Config-page state document):
   // monitoring (SNMP walks), inventory (networks/hosts/ports), configuration
   // (SNMP SET actions) + planning (multi-device fan-out).
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState'],
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState', 'updates'],
 });
 
 /**
@@ -294,6 +305,13 @@ app.post('/monitoring', async (req, res) => {
     metrics['system.name'] = sys.name || null;
     metrics['system.modelNumber'] = sys.model || null;
     metrics['system.swVersion'] = sys.firmwareVersion || null;
+    // Updates page: firmware row from the live swVersion (e.g. "v3.34.0326" or
+    // "4.30.xxxx") vs the newest known LCOS-SX line — major.minor comparison,
+    // so the leading "v" + build suffix never matter. Available-without-apply.
+    if (sys.firmwareVersion) {
+      const fwRow = catalogFirmwareRow(sys.firmwareVersion, KNOWN_SX_LINES);
+      if (fwRow) metrics['updates'] = [fwRow];
+    }
     metrics['system.serialNumber'] = sys.serialNumber || null;
     metrics['system.hostMac'] = sys.hostMac || null;
     metrics['system.uptime'] = sys.uptimeText || null; // DisplayString as reported
