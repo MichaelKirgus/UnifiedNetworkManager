@@ -1,33 +1,193 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, X } from 'lucide-react';
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { GripVertical, Plus, Star, X } from 'lucide-react';
+import clsx from 'clsx';
+import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
+import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { allowedSecretTypes, api, CredentialSlotDescriptor, DevicePluginAssignmentInput, Plugin, Secret } from '../api/client';
 
 interface RowState {
+  /** Stable key for drag & drop (unique per row, independent of the plugin pick). */
+  id: string;
   pluginId: string;
   secretId: string;
   /** Bound extra credential slots (slot name → secrets.id). */
   slotSecrets: Record<string, string>;
-  isPrimary: boolean;
 }
 
-const emptyRow = (): RowState => ({ pluginId: '', secretId: '', slotSecrets: {}, isPrimary: false });
+const emptyRow = (): RowState => ({ id: crypto.randomUUID(), pluginId: '', secretId: '', slotSecrets: {} });
+
+/** One draggable assignment row: grip handle + position badge (1 = primary) +
+ * plugin/credential pickers. The whole card is the sortable element; only the
+ * grip carries the drag listeners so the selects stay fully clickable. */
+function SortablePluginRow({
+  row,
+  position,
+  isPrimary,
+  removable,
+  availablePlugins,
+  pluginMeta,
+  secretsOfType,
+  secretsOfSlot,
+  onUpdate,
+  onSlotSecret,
+  onRemove,
+}: {
+  row: RowState;
+  /** 1-based display position (position 1 is the primary plugin). */
+  position: number;
+  isPrimary: boolean;
+  removable: boolean;
+  availablePlugins: Plugin[];
+  pluginMeta: Record<string, { requiredType: string | null; slots: CredentialSlotDescriptor[] }>;
+  secretsOfType: (type: string) => Secret[];
+  secretsOfSlot: (slot: CredentialSlotDescriptor) => Secret[];
+  onUpdate: (patch: Partial<RowState>) => void;
+  onSlotSecret: (slotName: string, secretId: string) => void;
+  onRemove: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: row.id });
+  const meta = row.pluginId ? pluginMeta[row.pluginId] : undefined;
+  const required = meta?.requiredType ?? null;
+  const slots = meta?.slots ?? [];
+
+  return (
+    <li
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={clsx(
+        'rounded-md border bg-background p-3',
+        isPrimary ? 'border-primary/50' : 'border-border',
+        isDragging && 'z-10 opacity-70 shadow-lg'
+      )}
+    >
+      <div className="flex items-start gap-2">
+        {/* Grip handle — the only part that starts a drag (touch-none keeps it
+            usable on touch devices). */}
+        <button
+          type="button"
+          aria-label={`Reorder plugin ${position}`}
+          title="Drag to reorder — position 1 is primary"
+          className="mt-0.5 cursor-grab touch-none rounded p-1 text-faint hover:bg-muted hover:text-secondary active:cursor-grabbing"
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical className="h-4 w-4" />
+        </button>
+
+        {/* Position badge — position 1 doubles as the primary indicator. */}
+        <span
+          title={isPrimary ? 'Primary plugin (position 1)' : `Fallback position ${position}`}
+          className={clsx(
+            'mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold',
+            isPrimary ? 'bg-primary text-white' : 'bg-muted text-secondary'
+          )}
+        >
+          {isPrimary ? <Star className="h-3.5 w-3.5" /> : position}
+        </span>
+
+        {/* Plugin + primary credentials share one aligned row; the remove
+            control sits right-aligned on the same line. */}
+        <div className="grid min-w-0 flex-1 grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_auto]">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-secondary">Plugin</label>
+            <select
+              required
+              className="w-full rounded-md border border-border bg-card px-2 py-1.5 text-sm"
+              value={row.pluginId}
+              onChange={(e) => onUpdate({ pluginId: e.target.value, secretId: '', slotSecrets: {} })}
+            >
+              <option value="" disabled>
+                Select a plugin
+              </option>
+              {availablePlugins.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.version})
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-secondary">
+              Credentials{required ? ` (${required})` : ''}
+            </label>
+            <select
+              className="w-full rounded-md border border-border bg-card px-2 py-1.5 text-sm"
+              value={row.secretId}
+              onChange={(e) => onUpdate({ secretId: e.target.value })}
+            >
+              <option value="">No credentials</option>
+              {secretsOfType(required ?? '').map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label || s.id} [{s.type}]
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center justify-end self-end pb-1">
+            {removable && (
+              <button
+                type="button"
+                aria-label={`Remove plugin row ${position}`}
+                title="Remove this plugin"
+                onClick={onRemove}
+                className="rounded-md p-1.5 text-faint hover:bg-danger hover:text-danger-fg"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Extra credential slots — each gets its own full-width, evenly
+          aligned cell in a 2-column grid (no more ragged spans). */}
+      {slots.length > 0 && (
+        <div className="mt-2 grid grid-cols-1 gap-2 pl-8 sm:grid-cols-2">
+          {slots.map((slot) => (
+            <div key={slot.name}>
+              <label
+                className="mb-1 block text-xs font-medium text-secondary"
+                title={slot.description}
+              >
+                {slot.description || `Credential slot "${slot.name}"`} ({allowedSecretTypes(slot).join(' | ')})
+                {!slot.required && <span className="ml-1 font-normal text-faint">optional</span>}
+              </label>
+              <select
+                className="w-full rounded-md border border-border bg-card px-2 py-1.5 text-sm"
+                value={row.slotSecrets[slot.name] ?? ''}
+                onChange={(e) => onSlotSecret(slot.name, e.target.value)}
+              >
+                <option value="">Not set</option>
+                {secretsOfSlot(slot).map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.label || s.id} [{s.type}]
+                  </option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
+      )}
+    </li>
+  );
+}
+
+/** Imperative handle so a parent with ONE central Save button can trigger the
+ * builder's own (validating) submission programmatically. */
+export interface PluginAssignmentBuilderHandle {
+  submit: () => void;
+}
 
 /**
- * Multi-plugin assignment builder. Each row binds one plugin to a device with
- * its own credential source (filtered by the plugin's required secret type)
- * and an optional primary flag — exactly one row may be primary, but ONLY if
- * the user explicitly marks it; adding plugins never auto-promotes them.
+ * Multi-plugin assignment builder with drag & drop ordering. Each row binds one
+ * plugin to a device with its own credential source (filtered by the plugin's
+ * required secret type). The FIRST row is the primary plugin — drag rows via
+ * their grip handle to reorder (position 0 = primary, later positions are the
+ * fallback sequence for future failover logic). Adding plugins appends to the
+ * end and never steals primary.
  */
-export function PluginAssignmentBuilder({
-  plugins,
-  secrets,
-  initial = [],
-  excludedPluginIds = [],
-  onSubmit,
-  submitLabel = 'Save',
-  busy = false,
-  onRowsChange,
-}: {
+export const PluginAssignmentBuilder = forwardRef<PluginAssignmentBuilderHandle, {
   plugins: Plugin[];
   secrets: Secret[];
   /** Existing assignments to prefill (e.g. when adding more to a device). */
@@ -41,14 +201,27 @@ export function PluginAssignmentBuilder({
    * Lets the parent derive vendor-specific form fields (e.g. model catalogs)
    * from exactly the plugins assigned to this device. */
   onRowsChange?: (pluginIds: string[]) => void;
-}) {
+  /** Reports whether any row holds a selection that differs from `initial` —
+   * lets a parent with one central Save button know when assignments changed. */
+  onDirtyChange?: (dirty: boolean) => void;
+  /** Hide the built-in submit button so the parent can own ONE central save
+   * for the whole form (device create/edit). Defaults to true (own button). */
+  showSubmitButton?: boolean;
+  /** When adding plugins to a device that ALREADY has assignments, new rows are
+   * appended after the existing ones and never steal primary. Set this in the
+   * "Add plugin" modal; leave it off for create/edit forms where row 1 = primary. */
+  appendMode?: boolean;
+}>(({ plugins, secrets, initial = [], excludedPluginIds = [], onSubmit, submitLabel = 'Save', busy = false, onRowsChange, onDirtyChange, showSubmitButton = true, appendMode = false }, ref) => {
+  // Secret-provider plugins serve the Secrets page, not devices — they must
+  // never appear in this picker (they have no device-facing capabilities).
   const availablePlugins = useMemo(
-    () => plugins.filter((p) => !excludedPluginIds.includes(p.id)),
+    () => plugins.filter((p) => !excludedPluginIds.includes(p.id) && !(p.capabilities ?? []).includes('secretsProvider')),
     [plugins, excludedPluginIds]
   );
   const [rows, setRows] = useState<RowState[]>(() =>
     initial.length > 0
       ? initial.map((a) => ({
+          id: crypto.randomUUID(),
           pluginId: a.pluginId,
           secretId: a.secretId ?? '',
           slotSecrets: Object.fromEntries(
@@ -56,7 +229,6 @@ export function PluginAssignmentBuilder({
               (entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1] !== ''
             )
           ),
-          isPrimary: a.isPrimary === true,
         }))
       : [emptyRow()]
   );
@@ -97,14 +269,14 @@ export function PluginAssignmentBuilder({
     return secrets.filter((s) => types.includes(s.type));
   }
 
-  function updateRow(index: number, patch: Partial<RowState>) {
-    setRows((rs) => rs.map((r, i) => (i === index ? { ...r, ...patch } : r)));
+  function updateRow(id: string, patch: Partial<RowState>) {
+    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   }
 
-  function updateSlotSecret(index: number, slotName: string, secretId: string) {
+  function updateSlotSecret(id: string, slotName: string, secretId: string) {
     setRows((rs) =>
-      rs.map((r, i) => {
-        if (i !== index) return r;
+      rs.map((r) => {
+        if (r.id !== id) return r;
         const next = { ...r.slotSecrets };
         if (secretId) next[slotName] = secretId;
         else delete next[slotName];
@@ -113,9 +285,17 @@ export function PluginAssignmentBuilder({
     );
   }
 
-  /** Exactly one primary: picking a row demotes the others. */
-  function makePrimary(index: number) {
-    setRows((rs) => rs.map((r, i) => ({ ...r, isPrimary: i === index ? true : false })));
+  // Drag & drop reordering (same @dnd-kit pattern as the nav customizer). The
+  // first row is always primary — dragging a row to the top promotes it.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor)
+  );
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setRows((rs) => arrayMove(rs, rs.findIndex((r) => r.id === String(active.id)), rs.findIndex((r) => r.id === String(over.id))));
   }
 
   const usedPluginIds = useMemo(
@@ -133,116 +313,70 @@ export function PluginAssignmentBuilder({
     onRowsChangeRef.current?.(Array.from(new Set(rows.map((r) => r.pluginId).filter(Boolean))));
   }, [rows]);
 
-  function handleSubmit(e: FormEvent) {
-    e.preventDefault();
+  // Dirty tracking: compare the current rows against `initial` so a parent
+  // with one central Save button can tell when assignments were touched.
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  onDirtyChangeRef.current = onDirtyChange;
+  useEffect(() => {
+    // Key-sorted JSON so slot-map key order never causes false "dirty" states.
+    const stableJson = (obj: Record<string, unknown>) =>
+      JSON.stringify(Object.keys(obj).sort().reduce<Record<string, unknown>>((acc, k) => ({ ...acc, [k]: obj[k] }), {}));
+    // Order matters now (position 0 = primary), so compare sequences directly.
+    const rowKey = (pluginId: string, secretId: string | null, slots: Record<string, string>) =>
+      `${pluginId}|${secretId ?? ''}|${stableJson(slots)}`;
+    const current = rows
+      .filter((r) => r.pluginId)
+      .map((r) => rowKey(r.pluginId, r.secretId || null, Object.keys(r.slotSecrets).length > 0 ? r.slotSecrets : {}));
+    const base = initial.map((a) => rowKey(a.pluginId, a.secretId ?? null, (a.extraCredentials ?? {}) as Record<string, string>));
+    onDirtyChangeRef.current?.(current.length !== base.length || current.some((k, i) => k !== base[i]));
+  }, [rows, initial]);
+
+  function submit() {
     const valid = rows.filter((r) => r.pluginId);
     if (valid.length === 0) return;
-    // Primary is only set when the user explicitly marked a row — adding
-    // plugins must never silently steal primary from an existing one.
+    // The FIRST row is the primary plugin — position encodes priority/fallback.
+    // In appendMode (adding to a device that already has plugins) every row is
+    // appended after the existing ones and never steals primary.
     onSubmit(
-      valid.map((r) => ({
+      valid.map((r, i) => ({
         pluginId: r.pluginId,
         secretId: r.secretId || null,
-        isPrimary: r.isPrimary,
+        isPrimary: !appendMode && i === 0,
         extraCredentials:
           Object.keys(r.slotSecrets).length > 0 ? { ...r.slotSecrets } : undefined,
       }))
     );
   }
 
+  // Expose submit() so a parent's single central Save button can trigger the
+  // builder's validating submission without its own <button type="submit">.
+  // No dep array on purpose — always wrap the FRESH closures (rows + onSubmit).
+  useImperativeHandle(ref, () => ({ submit }));
+
   return (
-    <form onSubmit={handleSubmit} noValidate>
-      <div className="space-y-3">
-      {rows.map((row, index) => {
-        const meta = row.pluginId ? pluginMeta[row.pluginId] : undefined;
-        const required = meta?.requiredType ?? null;
-        const slots = meta?.slots ?? [];
-        return (
-          <div key={index} className="grid grid-cols-1 gap-2 rounded-md border border-border bg-background p-3 sm:grid-cols-[1fr_1fr_auto_auto]">
-            <div>
-              <label className="mb-1 block text-xs font-medium text-secondary">Plugin</label>
-              <select
-                required
-                className="w-full rounded-md border border-border bg-card px-2 py-1.5 text-sm"
-                value={row.pluginId}
-                onChange={(e) => updateRow(index, { pluginId: e.target.value, secretId: '', slotSecrets: {} })}
-              >
-                <option value="" disabled>
-                  Select a plugin
-                </option>
-                {availablePlugins.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.version})
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-secondary">
-                Credentials{required ? ` (${required})` : ''}
-              </label>
-              <select
-                className="w-full rounded-md border border-border bg-card px-2 py-1.5 text-sm"
-                value={row.secretId}
-                onChange={(e) => updateRow(index, { secretId: e.target.value })}
-              >
-                <option value="">No credentials</option>
-                {secretsOfType(required ?? '').map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.label || s.id} [{s.type}]
-                  </option>
-                ))}
-              </select>
-            </div>
-            {slots.map((slot) => (
-              <div key={slot.name} className="sm:col-span-2">
-                <label
-                  className="mb-1 block text-xs font-medium text-secondary"
-                  title={slot.description}
-                >
-                  {slot.description || `Credential slot "${slot.name}"`} ({allowedSecretTypes(slot).join(' | ')})
-                  {!slot.required && <span className="ml-1 font-normal text-faint">optional</span>}
-                </label>
-                <select
-                  className="w-full rounded-md border border-border bg-card px-2 py-1.5 text-sm"
-                  value={row.slotSecrets[slot.name] ?? ''}
-                  onChange={(e) => updateSlotSecret(index, slot.name, e.target.value)}
-                >
-                  <option value="">Not set</option>
-                  {secretsOfSlot(slot).map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.label || s.id} [{s.type}]
-                    </option>
-                  ))}
-                </select>
-              </div>
-            ))}
-            <label className="flex items-center gap-1.5 self-end pb-1 text-sm text-secondary">
-              <input
-                type="radio"
-                name="primary-plugin"
-                checked={row.isPrimary}
-                onChange={() => makePrimary(index)}
-                className="h-4 w-4 border-border text-foreground focus:ring-slate-400"
+    <form onSubmit={(e) => { e.preventDefault(); submit(); }} noValidate>
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+        <SortableContext items={rows.map((r) => r.id)} strategy={verticalListSortingStrategy}>
+          <ul className="space-y-2">
+            {rows.map((row, index) => (
+              <SortablePluginRow
+                key={row.id}
+                row={row}
+                position={index + 1}
+                isPrimary={index === 0 && !appendMode}
+                removable={rows.length > 1}
+                availablePlugins={availablePlugins}
+                pluginMeta={pluginMeta}
+                secretsOfType={secretsOfType}
+                secretsOfSlot={secretsOfSlot}
+                onUpdate={(patch) => updateRow(row.id, patch)}
+                onSlotSecret={(slotName, secretId) => updateSlotSecret(row.id, slotName, secretId)}
+                onRemove={() => setRows((rs) => rs.filter((r) => r.id !== row.id))}
               />
-              Primary
-            </label>
-            <div className="self-end pb-1">
-              {rows.length > 1 && (
-                <button
-                  type="button"
-                  aria-label={`Remove plugin row ${index + 1}`}
-                  title="Remove this plugin"
-                  onClick={() => setRows((rs) => rs.filter((_, i) => i !== index))}
-                  className="rounded-md p-1.5 text-faint hover:bg-danger hover:text-danger-fg"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              )}
-            </div>
-          </div>
-        );
-      })}
+            ))}
+          </ul>
+        </SortableContext>
+      </DndContext>
 
       <div className="flex items-center justify-between">
         <button
@@ -254,15 +388,16 @@ export function PluginAssignmentBuilder({
           <Plus className="h-4 w-4" />
           Add plugin
         </button>
-        <button
-          type="submit"
-          disabled={busy}
-          className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
-        >
-          {busy ? 'Saving…' : submitLabel}
-        </button>
-      </div>
+        {showSubmitButton && (
+          <button
+            type="submit"
+            disabled={busy}
+            className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
+          >
+            {busy ? 'Saving…' : submitLabel}
+          </button>
+        )}
       </div>
     </form>
   );
-}
+});

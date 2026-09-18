@@ -23,6 +23,7 @@ import {
   addAssignment,
   listAssignmentViews,
   removeAssignment,
+  reorderAssignments,
   setPrimary,
   updateAssignment,
 } from '../devicePlugins';
@@ -921,6 +922,26 @@ router.delete('/devices/:deviceId/plugins/:pluginId', requireAuth, requirePermis
   try {
     await removeAssignment(deviceId, pluginId);
     res.status(204).send();
+  } catch (err) {
+    if (sendAssignmentError(res, err)) return;
+    throw err;
+  }
+});
+
+// PUT /devices/:deviceId/plugins/order - reorder a device's plugin list.
+// Body: { "order": ["pluginId", ...] } — the full desired sequence. The first
+// id becomes primary (the row at order 0); ids not listed keep their relative
+// position after the listed ones. Drives the webapp's drag & drop reordering.
+router.put('/devices/:deviceId/plugins/order', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
+  const { deviceId } = req.params;
+  const order = (req.body ?? {}).order;
+  if (!Array.isArray(order) || !order.every((x) => typeof x === 'string')) {
+    res.status(400).json({ error: '"order" must be an array of plugin id strings' });
+    return;
+  }
+  try {
+    const assignments = await reorderAssignments(deviceId, order);
+    res.status(200).json({ deviceId, plugins: assignments });
   } catch (err) {
     if (sendAssignmentError(res, err)) return;
     throw err;

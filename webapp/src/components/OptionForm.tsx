@@ -1,8 +1,17 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, forwardRef, useEffect, useMemo, useImperativeHandle, useState } from 'react';
 import clsx from 'clsx';
 import { RotateCcw, Save } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { api, ApiError, PluginOptionDescriptor, StringOption, IntegerOption } from '../api/client';
+
+/** Imperative handle so a parent with ONE central Save button can trigger this
+ * form's validating save (or reset) programmatically. */
+export interface OptionFormHandle {
+  /** Validates + persists the current values; resolves true on success. */
+  save: () => Promise<boolean>;
+  /** Resets to inherited/global defaults (no confirm — parent owns UX). */
+  reset: () => Promise<void>;
+}
 
 interface OptionFormProps {
   pluginId: string;
@@ -19,6 +28,14 @@ interface OptionFormProps {
    * for submission; this component only manages field state + validation.
    */
   compact?: boolean;
+  /**
+   * Hides the Save/Reset footer even in (non-compact) mode, so a parent can
+   * own a single central submit button for several nested forms at once.
+   * Implies `compact` rendering semantics (no <form> wrapper).
+   */
+  hideFooter?: boolean;
+  /** Reports whether the form's values differ from the loaded effective values. */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 /** Mirrors the API's validateOptionValue for instant client-side feedback. */
@@ -56,8 +73,14 @@ function validateLocal(descriptor: PluginOptionDescriptor, value: unknown): stri
   }
 }
 
-export function OptionForm({ pluginId, deviceId, onSaved, compact = false }: OptionFormProps) {
+export const OptionForm = forwardRef<OptionFormHandle, OptionFormProps>(function OptionForm(
+  { pluginId, deviceId, onSaved, compact = false, hideFooter = false, onDirtyChange },
+  ref
+) {
   const scoped = Boolean(deviceId);
+  // `hideFooter` reuses the compact (div-based) rendering so it can be nested
+  // inside a parent form — only the footer buttons are additionally hidden.
+  const bare = compact || hideFooter;
   const optionsQuery = useQuery({
     queryKey: scoped ? ['device-plugin-options', deviceId, pluginId] : ['plugin-options', pluginId],
     queryFn: () => (scoped ? api.devicePluginOptions(deviceId!, pluginId) : api.pluginOptions(pluginId)),
@@ -75,6 +98,20 @@ export function OptionForm({ pluginId, deviceId, onSaved, compact = false }: Opt
       setFieldErrors({});
     }
   }, [optionsQuery.data]);
+
+  // Dirty tracking: compare current field values against the loaded effective
+  // values so a parent can badge collapsed sections that hold unsaved edits.
+  const dirty = useMemo(() => {
+    if (!optionsQuery.data) return false;
+    const base = optionsQuery.data.effectiveValues ?? {};
+    for (const opt of optionsQuery.data.options ?? []) {
+      if (JSON.stringify(values[opt.key] ?? null) !== JSON.stringify(base[opt.key] ?? null)) return true;
+    }
+    return false;
+  }, [values, optionsQuery.data]);
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const options = useMemo(() => optionsQuery.data?.options ?? [], [optionsQuery.data]);
 
@@ -109,12 +146,13 @@ export function OptionForm({ pluginId, deviceId, onSaved, compact = false }: Opt
     return payload;
   }
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
+  /** Validates + persists current values. Returns true on success, false when
+   * validation failed (field errors are surfaced in place). */
+  async function saveCore(): Promise<boolean> {
     const errors = validateAll();
     if (Object.keys(errors).length > 0) {
       setFieldErrors(errors);
-      return;
+      return false;
     }
     setSaving(true);
     try {
@@ -125,6 +163,7 @@ export function OptionForm({ pluginId, deviceId, onSaved, compact = false }: Opt
       }
       setSavedAt(Date.now());
       onSaved?.();
+      return true;
     } catch (err) {
       if (err instanceof ApiError && err.fieldErrors) {
         setFieldErrors(err.fieldErrors);
@@ -132,16 +171,14 @@ export function OptionForm({ pluginId, deviceId, onSaved, compact = false }: Opt
         // Surface a generic failure without clobbering per-field state.
         setFieldErrors({ __form__: (err as Error).message });
       }
+      return false;
     } finally {
       setSaving(false);
     }
   }
 
-  async function handleReset() {
-    const message = scoped
-      ? 'Reset this device\'s overrides? The options will fall back to the global settings (or their defaults).'
-      : 'Reset all settings for this plugin to their defaults?';
-    if (!window.confirm(message)) return;
+  /** Resets to inherited/global defaults and reloads the effective values. */
+  async function resetCore(): Promise<void> {
     setSaving(true);
     try {
       const view = scoped
@@ -158,6 +195,24 @@ export function OptionForm({ pluginId, deviceId, onSaved, compact = false }: Opt
     }
   }
 
+  // Expose save/reset so a parent's single central Save button can drive this
+  // form without its own footer buttons. No dep array on purpose — the handle
+  // must always wrap the FRESH closures (values/options change every render).
+  useImperativeHandle(ref, () => ({ save: saveCore, reset: resetCore }));
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    await saveCore();
+  }
+
+  async function handleReset() {
+    const message = scoped
+      ? 'Reset this device\'s overrides? The options will fall back to the global settings (or their defaults).'
+      : 'Reset all settings for this plugin to their defaults?';
+    if (!window.confirm(message)) return;
+    await resetCore();
+  }
+
   if (optionsQuery.isLoading) {
     return <p className="px-1 py-2 text-sm text-muted-foreground">Loading options…</p>;
   }
@@ -167,9 +222,9 @@ export function OptionForm({ pluginId, deviceId, onSaved, compact = false }: Opt
 
   const formError = fieldErrors.__form__;
 
-  // Compact mode: render as a div (no form wrapper, no footer) so it can be
-  // safely nested inside another form. Parent handles submission.
-  if (compact) {
+  // Compact / footer-less mode: render as a div (no form wrapper, no footer)
+  // so it can be safely nested inside another form. Parent handles submission.
+  if (bare) {
     return (
       <div>
         {options.length === 0 ? (
@@ -213,6 +268,9 @@ export function OptionForm({ pluginId, deviceId, onSaved, compact = false }: Opt
               );
             })}
           </div>
+        )}
+        {formError && (
+          <div className="mx-1 mt-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{formError}</div>
         )}
       </div>
     );
@@ -322,4 +380,4 @@ export function OptionForm({ pluginId, deviceId, onSaved, compact = false }: Opt
       )}
     </form>
   );
-}
+});

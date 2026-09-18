@@ -1059,6 +1059,56 @@ paths:
         '404':
           description: Device not found or plugin is not assigned to it
 
+  /devices/{deviceId}/plugins/order:
+    put:
+      tags: [Devices]
+      summary: Reorder a device's plugin list (drag & drop)
+      description: >-
+        Rewrites the order of a device's plugin assignments. The request body
+        carries the FULL desired sequence as an array of plugin ids; the first
+        id becomes primary (the row at position 0), all others are demoted and
+        shifted down. Ids not listed keep their relative position after the
+        listed ones, so a partial list is safe. Drives the webapp's drag & drop
+        reordering in the device create/edit form.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order]
+              properties:
+                order:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Reordered assignments (in the new order)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deviceId, plugins]
+                properties:
+                  deviceId: { type: string }
+                  plugins:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DevicePluginAssignment'
+        '400':
+          description: Malformed order array
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing devices:write permission
+        '404':
+          description: Device not found
+
   /devices/{deviceId}/plugins/{pluginId}/options:
     get:
       tags: [Devices]
@@ -4790,7 +4840,7 @@ components:
     # One row of the device ↔ plugin join table (a device can have several).
     DevicePluginAssignment:
       type: object
-      required: [id, deviceId, pluginId, isPrimary]
+      required: [id, deviceId, pluginId, isPrimary, order]
       properties:
         id: { type: string }
         deviceId: { type: string }
@@ -4800,7 +4850,8 @@ components:
           type: object
           additionalProperties: { type: string }
           description: "Bound extra credential slots: slot name → secrets.id"
-        isPrimary: { type: boolean, description: "Exactly one primary per device; default target for config jobs" }
+        isPrimary: { type: boolean, description: "True for the row at position 0 — the device's primary plugin (default target for config jobs)" }
+        order: { type: integer, minimum: 0, description: "Position within the device's ordered plugin list (0-based); also the fallback/failover sequence" }
         createdAt: { type: string, format: date-time }
         # Enriched fields returned by the list endpoints:
         pluginName: { type: string }

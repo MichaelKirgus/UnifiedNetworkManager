@@ -213,6 +213,8 @@ export interface DevicePluginAssignment {
   /** Bound extra credential slots: slot name → secrets.id. */
   extraCredentials?: Record<string, string>;
   isPrimary: boolean;
+  /** Position within the device's ordered plugin list (0-based); row 0 = primary. */
+  order?: number;
   createdAt: string;
   // Enriched fields returned by the list endpoints:
   pluginName?: string;
@@ -1929,6 +1931,9 @@ export const api = {
   /** Update an existing assignment's credentials, slot bindings and/or primary flag. */
   updateDevicePlugin: (deviceId: string, pluginId: string, body: { secretId?: string | null; isPrimary?: boolean; extraCredentials?: Record<string, string | null> }) =>
     apiFetch<DevicePluginAssignment>(`/devices/${deviceId}/plugins/${pluginId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  /** Reorder a device's plugin list (drag & drop). The first id becomes primary. */
+  reorderDevicePlugins: (deviceId: string, order: string[]) =>
+    apiFetch<{ deviceId: string; plugins: DevicePluginAssignment[] }>(`/devices/${deviceId}/plugins/order`, { method: 'PUT', body: JSON.stringify({ order }) }),
   // Device IP addresses (primary = managementAddress; secondaries managed here).
   deviceIps: (deviceId: string) =>
     apiFetch<{ deviceId: string; ips: DeviceAddress[] }>(`/devices/${deviceId}/ips`),

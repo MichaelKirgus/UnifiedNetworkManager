@@ -43,6 +43,8 @@ export interface DevicePluginAssignment {
   /** Bound extra credential slots: slot name → secrets.id. */
   extraCredentials: ExtraCredentials;
   isPrimary: boolean;
+  /** Position within the device's ordered plugin list (0-based, dense). The row at order 0 is primary. */
+  order: number;
   createdAt: string;
 }
 
@@ -103,8 +105,56 @@ function toAssignment(row: typeof schema.devicePlugins.$inferSelect): DevicePlug
     secretId: row.secretId,
     extraCredentials: parseExtraCredentials(row.extraCredentials),
     isPrimary: row.isPrimary,
+    order: row.order,
     createdAt: row.createdAt,
   };
+}
+
+/** All sibling rows for a device in their stored (dense) order. */
+async function orderedSiblings(deviceId: string) {
+  return db.query.devicePlugins.findMany({
+    where: (rows) => eq(rows.deviceId, deviceId),
+    orderBy: [asc(schema.devicePlugins.order), asc(schema.devicePlugins.createdAt)],
+  });
+}
+
+/**
+ * Rewrites the dense `order` values for a device so that the given plugin ids
+ * occupy positions 0..n-1 in exactly this sequence (unknown/missing ids are
+ * ignored). The row at position 0 becomes primary; all others are demoted.
+ */
+export async function reorderAssignments(deviceId: string, orderedPluginIds: string[]): Promise<DevicePluginAssignment[]> {
+  await assertDevice(deviceId);
+  const siblings = await orderedSiblings(deviceId);
+  if (siblings.length === 0) return [];
+
+  // Desired sequence: requested ids first (in order), then any not mentioned.
+  const byId = new Map(siblings.map((s) => [s.pluginId, s]));
+  const seen = new Set<string>();
+  const sequence: string[] = [];
+  for (const pid of orderedPluginIds) {
+    if (!byId.has(pid) || seen.has(pid)) continue;
+    seen.add(pid);
+    sequence.push(pid);
+  }
+  for (const s of siblings) {
+    if (!seen.has(s.pluginId)) sequence.push(s.pluginId);
+  }
+
+  const newPrimary = byId.get(sequence[0])!;
+  await db.transaction(async (tx) => {
+    for (let i = 0; i < sequence.length; i += 1) {
+      const row = byId.get(sequence[i])!;
+      const isPrimary = i === 0;
+      if (row.order !== i || row.isPrimary !== isPrimary) {
+        await tx.update(schema.devicePlugins)
+          .set({ order: i, isPrimary })
+          .where(eq(schema.devicePlugins.id, row.id));
+      }
+    }
+  });
+
+  return (await orderedSiblings(deviceId)).map(toAssignment);
 }
 
 /**
@@ -154,13 +204,10 @@ async function validateExtraCredentials(
   return out;
 }
 
-/** All assignments for a device (oldest first). */
+/** All assignments for a device in their stored order (primary first). */
 export async function listAssignments(deviceId: string): Promise<DevicePluginAssignment[]> {
   await assertDevice(deviceId);
-  const rows = await db.query.devicePlugins.findMany({
-    where: (rows) => eq(rows.deviceId, deviceId),
-    orderBy: [asc(schema.devicePlugins.createdAt)],
-  });
+  const rows = await orderedSiblings(deviceId);
   return rows.map(toAssignment);
 }
 
@@ -268,32 +315,32 @@ export async function addAssignment(input: {
   const existing = await findAssignment(deviceId, pluginId);
   if (existing) throw new AssignmentError(409, 'Plugin is already assigned to this device');
 
-  const siblings = await db.query.devicePlugins.findMany({
-    where: (rows) => eq(rows.deviceId, deviceId),
-  });
+  const siblings = await orderedSiblings(deviceId);
+  const now = new Date().toISOString();
+  const extraJson = Object.keys(extraCredentials).length > 0 ? JSON.stringify(extraCredentials) : null;
 
-  // Exactly-one-primary invariant: adding a primary demotes the old one.
-  if (input.isPrimary === true) {
-    for (const s of siblings) {
-      if (s.isPrimary) {
-        await db.update(schema.devicePlugins)
-          .set({ isPrimary: false })
+  // Placement: an explicit primary lands at position 0 (shifting the rest down,
+  // which also demotes the old primary); anything else appends to the end. The
+  // very first assignment on a device is always primary.
+  if (input.isPrimary === true && siblings.length > 0) {
+    await db.transaction(async (tx) => {
+      for (const s of siblings) {
+        await tx.update(schema.devicePlugins)
+          .set({ order: s.order + 1, isPrimary: false })
           .where(eq(schema.devicePlugins.id, s.id));
       }
-    }
+      await tx.insert(schema.devicePlugins).values({
+        id: uuidv4(), deviceId, pluginId, secretId, extraCredentials: extraJson,
+        isPrimary: true, order: 0, createdAt: now,
+      });
+    });
+  } else {
+    const isFirst = siblings.length === 0;
+    await db.insert(schema.devicePlugins).values({
+      id: uuidv4(), deviceId, pluginId, secretId, extraCredentials: extraJson,
+      isPrimary: isFirst, order: siblings.length, createdAt: now,
+    });
   }
-
-  const now = new Date().toISOString();
-  await db.insert(schema.devicePlugins).values({
-    id: uuidv4(),
-    deviceId,
-    pluginId,
-    secretId,
-    extraCredentials:
-      Object.keys(extraCredentials).length > 0 ? JSON.stringify(extraCredentials) : null,
-    isPrimary: input.isPrimary === true || siblings.length === 0,
-    createdAt: now,
-  });
 
   return toAssignment((await findAssignment(deviceId, pluginId))!);
 }
@@ -310,43 +357,45 @@ export async function removeAssignment(deviceId: string, pluginId: string): Prom
 
   await db.delete(schema.devicePlugins).where(eq(schema.devicePlugins.id, assignment.id));
 
-  if (assignment.isPrimary) {
-    const remaining = await db.query.devicePlugins.findMany({
-      where: (rows) => eq(rows.deviceId, deviceId),
-      orderBy: [asc(schema.devicePlugins.createdAt)],
-    });
-    if (remaining.length > 0 && !remaining.some((r) => r.isPrimary)) {
-      await db.update(schema.devicePlugins)
-        .set({ isPrimary: true })
-        .where(eq(schema.devicePlugins.id, remaining[0].id));
+  // Re-densify the remaining rows (0..n-1) and make sure position 0 is primary.
+  const remaining = await orderedSiblings(deviceId);
+  if (remaining.length > 0) {
+    for (let i = 0; i < remaining.length; i += 1) {
+      const row = remaining[i];
+      const isPrimary = i === 0;
+      if (row.order !== i || row.isPrimary !== isPrimary) {
+        await db.update(schema.devicePlugins)
+          .set({ order: i, isPrimary })
+          .where(eq(schema.devicePlugins.id, row.id));
+      }
     }
   }
 }
 
 /**
- * Promotes the given assignment to primary (demoting any current one).
- * No-op when it already is — safe to call idempotently.
+ * Promotes the given assignment to primary by moving it to position 0 (the row
+ * at order 0 is always primary). No-op when it already leads — idempotent.
  */
 export async function setPrimary(deviceId: string, pluginId: string): Promise<DevicePluginAssignment> {
   await assertDevice(deviceId);
   const assignment = await findAssignment(deviceId, pluginId);
   if (!assignment) throw new AssignmentError(404, 'Plugin is not assigned to this device');
 
-  if (!assignment.isPrimary) {
-    // Demote the current primary (if any), then promote this one.
-    const siblings = await db.query.devicePlugins.findMany({
-      where: (rows) => eq(rows.deviceId, deviceId),
-    });
-    for (const s of siblings) {
-      if (s.isPrimary) {
-        await db.update(schema.devicePlugins)
-          .set({ isPrimary: false })
+  if (assignment.order !== 0 || !assignment.isPrimary) {
+    // Move the row to the front and shift everything else down by one.
+    const siblings = await orderedSiblings(deviceId);
+    await db.transaction(async (tx) => {
+      for (const s of siblings) {
+        if (s.id === assignment.id) continue;
+        const nextOrder = s.order >= assignment.order ? s.order + 1 : s.order;
+        await tx.update(schema.devicePlugins)
+          .set({ order: nextOrder, isPrimary: false })
           .where(eq(schema.devicePlugins.id, s.id));
       }
-    }
-    await db.update(schema.devicePlugins)
-      .set({ isPrimary: true })
-      .where(eq(schema.devicePlugins.id, assignment.id));
+      await tx.update(schema.devicePlugins)
+        .set({ order: 0, isPrimary: true })
+        .where(eq(schema.devicePlugins.id, assignment.id));
+    });
   }
 
   return toAssignment((await findAssignment(deviceId, pluginId))!);
@@ -383,18 +432,19 @@ export async function updateAssignment(
     }
   }
 
-  // Promote to primary (demoting the current one) when requested.
-  if (input.isPrimary === true && !assignment.isPrimary) {
-    const siblings = await db.query.devicePlugins.findMany({
-      where: (rows) => eq(rows.deviceId, deviceId),
-    });
-    for (const s of siblings) {
-      if (s.isPrimary) {
-        await db.update(schema.devicePlugins)
-          .set({ isPrimary: false })
+  // Promote to primary (demoting the current one) when requested — moves the
+  // row to position 0 and shifts everything else down by one.
+  if (input.isPrimary === true && assignment.order !== 0) {
+    const siblings = await orderedSiblings(deviceId);
+    await db.transaction(async (tx) => {
+      for (const s of siblings) {
+        if (s.id === assignment.id) continue;
+        const nextOrder = s.order >= assignment.order ? s.order + 1 : s.order;
+        await tx.update(schema.devicePlugins)
+          .set({ order: nextOrder, isPrimary: false })
           .where(eq(schema.devicePlugins.id, s.id));
       }
-    }
+    });
   }
 
   // Extra credential slots: validated against the plugin's declared slots.

@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Copy, Eye, Pencil, Plus, Power, RefreshCw, Settings2, Tag, Trash2, X } from 'lucide-react';
+import { ChevronDown, Copy, Eye, Pencil, Plus, Power, RefreshCw, Save, Settings2, Tag, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ChipInput } from '../components/ChipInput';
@@ -68,6 +68,25 @@ export default function Devices() {
   // Plugin ids currently selected in the assignment builder (reported via
   // onRowsChange) — drives which model catalogs are offered for the vendor.
   const [selectedPluginIds, setSelectedPluginIds] = useState<string[]>([]);
+
+  // One central Save button owns submission for the whole form: it triggers
+  // the plugin-assignment builder's validating submit() via this ref and
+  // persists per-plugin override edits through the OptionForm refs below.
+  const builderRef = useRef<import('../components/PluginAssignmentBuilder').PluginAssignmentBuilderHandle>(null);
+  const optionRefs = useRef(new Map<string, import('../components/OptionForm').OptionFormHandle>());
+  const [optionDirty, setOptionDirty] = useState<Record<string, boolean>>({});
+  // Per-plugin override sections are collapsed by default (5+ assigned plugins
+  // would otherwise overload the form). Expanded ids live in this set.
+  const [expandedOptions, setExpandedOptions] = useState<Set<string>>(new Set());
+
+  function toggleOptionSection(pluginId: string) {
+    setExpandedOptions((s) => {
+      const next = new Set(s);
+      if (next.has(pluginId)) next.delete(pluginId);
+      else next.add(pluginId);
+      return next;
+    });
+  }
 
   // Secondary IPs (creation list or existing secondaries in edit mode).
   const [additionalIps, setAdditionalIps] = useState<string[]>([]);
@@ -264,31 +283,47 @@ export default function Devices() {
       for (const ip of toAdd) await api.addDeviceIp(editingId!, ip);
       for (const row of toRemove) await api.removeDeviceIp(editingId!, row.id);
 
-      // Diff plugin assignments: add new, remove deleted, update changed.
+      // Diff plugin assignments: add new, remove deleted, update changed. The
+      // builder reports rows in their drag & drop order — position 0 is the
+      // primary plugin (the rest are the fallback sequence).
       if (assignments) {
         const desiredIds = new Set(assignments.map((a) => a.pluginId));
         const removed = initialAssignments.filter((a) => !desiredIds.has(a.pluginId));
-        for (const r of removed) await api.removeDevicePlugin(editingId!, r.pluginId);
 
-        // Add plugins that weren't assigned before.
+        // `now` mirrors the server's dense order as we mutate it, so at the end
+        // we can tell whether one reorder call is still needed.
+        let now: string[] = initialAssignments.map((a) => a.pluginId);
+        for (const r of removed) {
+          await api.removeDevicePlugin(editingId!, r.pluginId);
+          now = now.filter((id) => id !== r.pluginId); // server re-densifies the rest
+        }
+
         const existingById = new Map(initialAssignments.map((a) => [a.pluginId, a]));
         for (const a of assignments) {
           const prev = existingById.get(a.pluginId);
           if (!prev) {
+            // New plugin: isPrimary=true lands it at position 0 (shifting the
+            // rest down), otherwise it appends to the end.
             await api.addDevicePlugin(editingId!, a);
+            now = a.isPrimary ? [a.pluginId, ...now] : [...now, a.pluginId];
           } else {
-            // Already assigned — persist credential / slot / primary changes.
+            // Already assigned — persist credential / slot changes only (the
+            // primary flag is derived from position and fixed by the reorder).
             const secretChanged = (a.secretId ?? null) !== (prev.secretId ?? null);
-            const primaryChanged = a.isPrimary !== prev.isPrimary;
             const slotsChanged = JSON.stringify(a.extraCredentials ?? {}) !== JSON.stringify(prev.extraCredentials ?? {});
-            if (secretChanged || primaryChanged || slotsChanged) {
+            if (secretChanged || slotsChanged) {
               await api.updateDevicePlugin(editingId!, a.pluginId, {
                 ...(secretChanged ? { secretId: a.secretId ?? null } : {}),
-                ...(primaryChanged ? { isPrimary: a.isPrimary } : {}),
                 ...(slotsChanged ? { extraCredentials: a.extraCredentials ?? {} } : {}),
               });
             }
           }
+        }
+
+        // One reorder call when the drag & drop sequence differs from what's stored.
+        const desired = assignments.map((a) => a.pluginId);
+        if (desired.join('\u0000') !== now.join('\u0000')) {
+          await api.reorderDevicePlugins(editingId!, desired);
         }
       }
     },
@@ -309,6 +344,8 @@ export default function Devices() {
     setNewIpInput('');
     setIpError(null);
     setFormError(null);
+    setExpandedOptions(new Set());
+    setOptionDirty({});
   }
 
   function handleSubmit(assignments: DevicePluginAssignmentInput[]) {
@@ -877,11 +914,15 @@ export default function Devices() {
             <label className="mb-1 block text-sm font-medium text-secondary">
               Plugins (each with its own credentials — the first becomes primary)
             </label>
+            {/* No built-in submit button here — the single central Save bar at
+                the bottom of this form owns submission for everything above. */}
             <PluginAssignmentBuilder
+              ref={builderRef}
               plugins={pluginsQuery.data ?? []}
               secrets={secretsQuery.data ?? []}
               initial={editingId ? initialAssignments.map((a) => ({ pluginId: a.pluginId, secretId: a.secretId ?? null, isPrimary: a.isPrimary, extraCredentials: a.extraCredentials })) : undefined}
               onRowsChange={setSelectedPluginIds}
+              showSubmitButton={false}
               onSubmit={(assignments) => {
                 if (!identity.name.trim() || !identity.vendor || !identity.managementAddress.trim()) {
                   setFormError('Please fill in name, vendor and primary IP before saving.');
@@ -893,23 +934,98 @@ export default function Devices() {
                 }
                 handleSubmit(assignments);
               }}
-              submitLabel={editingId ? 'Save Changes' : 'Create Device'}
-              busy={createDevice.isPending || updateDevice.isPending}
             />
           </div>
 
-          {/* Per-plugin parameters — editable in edit mode only */}
+          {/* Per-plugin parameters — editable in edit mode only. Collapsed by
+              default so several assigned plugins don't overload the form; a
+              "modified" dot marks sections holding unsaved override edits. The
+              OptionForm stays MOUNTED (hidden) while collapsed so its state is
+              preserved and the central Save can still flush pending edits. */}
           {editingId && initialAssignments.length > 0 && (
-            <div className="col-span-full space-y-4">
+            <div className="col-span-full space-y-2">
               <h3 className="text-xs font-semibold uppercase tracking-wide text-faint">Plugin settings (per-device overrides)</h3>
-              {initialAssignments.map((a) => (
-                <div key={a.pluginId} className="rounded-md border border-border bg-card p-3">
-                  <p className="mb-2 text-sm font-medium text-secondary">{a.pluginName ?? a.pluginId}</p>
-                  <OptionForm pluginId={a.pluginId} deviceId={editingId!} onSaved={() => queryClient.invalidateQueries({ queryKey: ['devices'] })} />
-                </div>
-              ))}
+              {initialAssignments.map((a) => {
+                const expanded = expandedOptions.has(a.pluginId);
+                return (
+                  <div key={a.pluginId} className="rounded-md border border-border bg-card">
+                    <div className="flex w-full items-center gap-2 px-3 py-2">
+                      <button
+                        type="button"
+                        onClick={() => toggleOptionSection(a.pluginId)}
+                        aria-expanded={expanded}
+                        title={expanded ? 'Collapse' : 'Expand'}
+                        className="flex flex-1 items-center gap-2 text-left hover:bg-muted/50 rounded-md px-1 py-0.5 -mx-1"
+                      >
+                        <ChevronDown className={`h-4 w-4 shrink-0 text-faint transition-transform ${expanded ? '' : '-rotate-90'}`} />
+                        <span className="text-sm font-medium text-secondary">{a.pluginName ?? a.pluginId}</span>
+                        {optionDirty[a.pluginId] && (
+                          <span
+                            title="Unsaved changes in this section"
+                            className="h-2 w-2 shrink-0 rounded-full bg-amber-400"
+                          />
+                        )}
+                      </button>
+                      {expanded && (
+                        <button
+                          type="button"
+                          onClick={() => optionRefs.current.get(a.pluginId)?.reset()}
+                          className="shrink-0 text-xs font-medium text-faint hover:text-secondary"
+                        >
+                          Reset to inherited
+                        </button>
+                      )}
+                    </div>
+                    <div className={expanded ? 'border-t border-border px-3 pb-1 pt-2' : 'hidden'}>
+                      <OptionForm
+                        ref={(h) => { if (h) optionRefs.current.set(a.pluginId, h); else optionRefs.current.delete(a.pluginId); }}
+                        pluginId={a.pluginId}
+                        deviceId={editingId!}
+                        hideFooter
+                        onDirtyChange={(d) => setOptionDirty((m) => ({ ...m, [a.pluginId]: d }))}
+                        onSaved={() => queryClient.invalidateQueries({ queryKey: ['devices'] })}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
+
+          {/* ONE central save bar for the whole form (identity + IPs + plugins
+              + per-plugin overrides) — no other Save buttons on this page. */}
+          <div className="col-span-full flex items-center justify-end gap-2 border-t border-border pt-3">
+            <button
+              type="button"
+              onClick={resetForm}
+              disabled={createDevice.isPending || updateDevice.isPending}
+              className="rounded-md border border-border px-4 py-2 text-sm font-medium text-secondary hover:bg-background disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                // Flush per-plugin override edits first (only sections that are
+                // actually dirty — unmodified ones keep inheriting globally).
+                const dirtyIds = Object.keys(optionDirty).filter((id) => optionDirty[id]);
+                for (const id of dirtyIds) {
+                  const ok = await optionRefs.current.get(id)?.save();
+                  if (!ok) {
+                    // Validation failed — expand the section so errors are visible.
+                    setExpandedOptions(new Set([id]));
+                    return;
+                  }
+                }
+                builderRef.current?.submit();
+              }}
+              disabled={createDevice.isPending || updateDevice.isPending}
+              className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
+            >
+              <Save className="h-4 w-4" />
+              {createDevice.isPending || updateDevice.isPending ? 'Saving…' : editingId ? 'Save Changes' : 'Create Device'}
+            </button>
+          </div>
         </div>
       )}
 

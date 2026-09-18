@@ -809,6 +809,7 @@ export default function DeviceDetail() {
                 onSubmit={(inputs) => addAssignments.mutate(inputs)}
                 submitLabel="Add"
                 busy={addAssignments.isPending}
+                appendMode
               />
             </div>
           </div>

@@ -143,6 +143,10 @@ export const devicePlugins = pgTable(
     // assignment carry several distinct credentials (e.g. SNMP + web UI).
     extraCredentials: text('extraCredentials'),
     isPrimary: boolean('isPrimary').notNull().default(false),
+    // Position of this plugin within its device's ordered list (0-based, dense).
+    // The FIRST row is the primary plugin — drag & drop in the webapp rewrites
+    // these values. Also defines the fallback order for future failover logic.
+    order: integer('order').notNull().default(0),
     createdAt: text('createdAt').notNull(),
   },
   (table) => {
