@@ -23,6 +23,7 @@ setup:
 	  (cd plugins/docker && npm install) & \
 	  (cd plugins/openwrt && npm install) & \
 	  (cd plugins/generic-ssh && npm install) & \
+	  (cd plugins/generic-http && npm install) & \
 	  (cd mcp && npm install) & \
 	  wait )
 	@echo "Dependencies installed successfully."
@@ -43,7 +44,7 @@ build:
 	@echo "Building @unm/lancom-shared..."
 	cd packages/lancom-shared && npm run build
 	@echo "Refreshing file:-linked copies in dependent plugins + api..."
-	for p in icmp generic-snmp lancom-lx lancom-sx lancom-lcos opnsense mikrotik-swos fbox ix-truenas mikrotik-routeros docker openwrt generic-ssh basic-auth secrets-provider; do \
+	for p in icmp generic-snmp lancom-lx lancom-sx lancom-lcos opnsense mikrotik-swos fbox ix-truenas mikrotik-routeros docker openwrt generic-ssh generic-http basic-auth secrets-provider; do \
 	  rm -rf plugins/$$p/node_modules/@unm/plugin-sdk; \
 	  cp -r packages/plugin-sdk plugins/$$p/node_modules/@unm/plugin-sdk; \
 	done
@@ -74,6 +75,7 @@ build:
 	  (cd plugins/docker && npm run build) & \
 	  (cd plugins/openwrt && npm run build) & \
 	  (cd plugins/generic-ssh && npm run build) & \
+	  (cd plugins/generic-http && npm run build) & \
 	  (cd mcp && npm run build) & \
 	  wait )
 	@echo "Build complete."

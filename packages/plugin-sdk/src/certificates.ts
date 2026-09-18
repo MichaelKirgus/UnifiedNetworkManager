@@ -421,7 +421,14 @@ export function validateChain(leaf: RawCertificate, chain: RawCertificate[], pro
       // Find the chain member whose subject matches this cert's issuer DN.
       issuerCert = chain.find((c) => c !== cert && normalizeDn(c.subject) === normalizeDn(cert.issuer)) ?? null;
       if (!issuerCert) {
-        reasons.push(`issuer of "${cert.commonName}" not present in the served chain (incomplete/untrusted)`);
+        // The captured chain only ever carries Node's one-issuer-hop view: for a
+        // normal CA-issued endpoint (leaf + intermediate) the ROOT is simply not
+        // present — that is the trust-anchor boundary, NOT an invalid chain. Only
+        // flag it when a NON-terminal cert's issuer is missing (a genuinely
+        // broken/incomplete served chain).
+        if (i < chain.length - 1) {
+          reasons.push(`issuer of "${cert.commonName}" not present in the served chain (incomplete/untrusted)`);
+        }
         continue;
       }
     }
