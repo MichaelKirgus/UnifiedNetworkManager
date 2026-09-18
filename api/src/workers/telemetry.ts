@@ -223,11 +223,17 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
 
 /**
  * Normalizes the device clock from one monitoring snapshot into the dedicated
- * `device_times` table (Time page). Only plugins that CAN read a wall clock emit
- * the `system.deviceTime` key, so this upserts exactly once per poll for those —
- * and never for ICMP/SNMP-only assignments. The row is keyed by (deviceId, pluginId)
- * and refreshed in place; drift is computed at READ time against `collectedAt`, not
- * here. Best-effort: a malformed blob must not break the telemetry cycle.
+ * `device_times` table (Time page). Two independent blobs may be present:
+ *   - `system.deviceTime` — the device's OWN system wall clock (OPNsense,
+ *     TrueNAS, RouterOS, …) → localIso/timezone/utcOffsetMinutes/epochMs.
+ *   - `system.ntpServed`  — the instant the device SERVES over its NTP/SNTP
+ *     service (generic-ntp plugin) → ntpTimeUtc/ntpEpochMs/ntpStratum/…
+ * The row is keyed by (deviceId, pluginId), so each plugin writes its own row:
+ * a box watched by BOTH an OS-capable and the NTP plugin gets one row per
+ * source, and the /device-time route merges the newest of each kind. Only
+ * plugins that CAN read one of these emit the key — ICMP/SNMP-only assignments
+ * touch nothing. Drift is computed at READ time against `collectedAt`, not here.
+ * Best-effort: a malformed blob must not break the telemetry cycle.
  */
 async function ingestDeviceTime(
   deviceId: string,
@@ -237,19 +243,46 @@ async function ingestDeviceTime(
 ): Promise<void> {
   try {
     const dt = metrics['system.deviceTime'];
-    if (!dt || typeof dt !== 'object') return; // no clock key → nothing to store
-    const r = dt as Record<string, unknown>;
-    const localIso = typeof r['localIso'] === 'string' && (r['localIso'] as string).trim() !== '' ? (r['localIso'] as string) : null;
-    if (!localIso) return; // a clock blob without a wall-clock value is useless
+    const ntp = metrics['system.ntpServed'];
+    const hasClock = !!dt && typeof dt === 'object';
+    const hasNtp = !!ntp && typeof ntp === 'object';
+    if (!hasClock && !hasNtp) return; // no clock keys → nothing to store
 
-    const timezone = typeof r['timezone'] === 'string' && (r['timezone'] as string).trim() !== '' ? (r['timezone'] as string) : null;
-    const utcOffsetMinutes = typeof r['utcOffsetMinutes'] === 'number' && Number.isFinite(r['utcOffsetMinutes']) ? Math.round(r['utcOffsetMinutes'] as number) : null;
-    // Resolve the absolute instant ONCE at ingest (the reading is immutable):
-    // prefer the plugin's pre-computed epochMs, else derive it from localIso +
-    // zone/offset via the SDK helper. Null = unresolvable → the page shows the
-    // local time with drift "not computable" instead of a fake value.
-    const precomputed = typeof r['epochMs'] === 'number' && Number.isFinite(r['epochMs']) ? Math.round(r['epochMs'] as number) : null;
-    const epochMs = precomputed ?? parseDeviceTimeToEpochMs({ localIso, timezone, utcOffsetMinutes });
+    // --- System wall-clock fields (absent blob → nulls, never clobbered by NTP).
+    let localIso: string | null = null;
+    let timezone: string | null = null;
+    let utcOffsetMinutes: number | null = null;
+    let epochMs: number | null = null;
+    if (hasClock) {
+      const r = dt as Record<string, unknown>;
+      localIso = typeof r['localIso'] === 'string' && (r['localIso'] as string).trim() !== '' ? (r['localIso'] as string) : null;
+      timezone = typeof r['timezone'] === 'string' && (r['timezone'] as string).trim() !== '' ? (r['timezone'] as string) : null;
+      utcOffsetMinutes = typeof r['utcOffsetMinutes'] === 'number' && Number.isFinite(r['utcOffsetMinutes']) ? Math.round(r['utcOffsetMinutes'] as number) : null;
+      // Resolve the absolute instant ONCE at ingest (the reading is immutable):
+      // prefer the plugin's pre-computed epochMs, else derive it from localIso +
+      // zone/offset via the SDK helper. Null = unresolvable → the page shows the
+      // local time with drift "not computable" instead of a fake value.
+      const precomputed = typeof r['epochMs'] === 'number' && Number.isFinite(r['epochMs']) ? Math.round(r['epochMs'] as number) : null;
+      // Derive from localIso + zone/offset only when a wall clock is present —
+      // an NTP-only blob has no localIso and must not be force-parsed.
+      epochMs = precomputed ?? (localIso !== null ? parseDeviceTimeToEpochMs({ localIso, timezone, utcOffsetMinutes }) : null);
+    }
+
+    // --- NTP-served fields (the time the device transmits to its clients).
+    let ntpTimeUtc: string | null = null;
+    let ntpEpochMs: number | null = null;
+    let ntpStratum: number | null = null;
+    let ntpReferenceId: string | null = null;
+    if (hasNtp) {
+      const r = ntp as Record<string, unknown>;
+      ntpTimeUtc = typeof r['timeUtc'] === 'string' && (r['timeUtc'] as string).trim() !== '' ? (r['timeUtc'] as string) : null;
+      // Prefer the plugin's pre-computed epoch; fall back to parsing timeUtc.
+      const precomputedNtp = typeof r['epochMs'] === 'number' && Number.isFinite(r['epochMs']) ? Math.round(r['epochMs'] as number) : null;
+      ntpEpochMs = precomputedNtp ?? (ntpTimeUtc !== null && !Number.isNaN(Date.parse(ntpTimeUtc)) ? Date.parse(ntpTimeUtc) : null);
+      if (!hasClock && ntpEpochMs === null && ntpTimeUtc === null) return; // useless blob
+      ntpStratum = typeof r['stratum'] === 'number' && Number.isFinite(r['stratum']) ? Math.round(r['stratum'] as number) : null;
+      ntpReferenceId = typeof r['referenceId'] === 'string' && (r['referenceId'] as string).trim() !== '' ? (r['referenceId'] as string) : null;
+    }
 
     await db.insert(schema.deviceTimes).values({
       deviceId,
@@ -259,6 +292,10 @@ async function ingestDeviceTime(
       utcOffsetMinutes,
       epochMs,
       collectedAt,
+      ntpTimeUtc,
+      ntpEpochMs,
+      ntpStratum,
+      ntpReferenceId,
     }).onConflictDoUpdate({
       target: [schema.deviceTimes.deviceId, schema.deviceTimes.pluginId],
       set: {
@@ -267,6 +304,10 @@ async function ingestDeviceTime(
         utcOffsetMinutes: sql`excluded."utcOffsetMinutes"`,
         epochMs: sql`excluded."epochMs"`,
         collectedAt: sql`excluded."collectedAt"`,
+        ntpTimeUtc: sql`excluded."ntpTimeUtc"`,
+        ntpEpochMs: sql`excluded."ntpEpochMs"`,
+        ntpStratum: sql`excluded."ntpStratum"`,
+        ntpReferenceId: sql`excluded."ntpReferenceId"`,
       },
     });
   } catch (err) {

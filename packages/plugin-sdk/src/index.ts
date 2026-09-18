@@ -44,6 +44,10 @@ export type { PluginSelfMetrics, SelfMetricsOptions, SelfMetricsLoggerLike } fro
 // Device clock / timezone contract for the Time page (see deviceTime.ts).
 export { parseDeviceTimeToEpochMs, buildDeviceTimeInfo, ianaZoneToOffsetMinutes, parseLooseDeviceDatetime, tzAbbrToOffsetMinutes, TZ_ABBR_OFFSET_MINUTES } from './deviceTime';
 export type { DeviceTimeInfo, LooseDeviceDatetime } from './deviceTime';
+// NTP/SNTP client (RFC 1305/4330) — query a device's time service for the
+// instant it serves. See ntp.ts.
+export { queryNtp } from './ntp';
+export type { NtpQueryResult } from './ntp';
 // Update gathering (capability 'updates'): row contract + version comparison +
 // SSH package-manager adapters. See updates.ts.
 export { compareVersions, isUpdateAvailable, firmwareRow, extractMajorMinor, latestCatalogLine, catalogFirmwareRow, PACKAGE_MANAGER_ADAPTERS, detectPackageManager, readOsReleaseIds, listUpgradablePackages, runPackageUpgrade } from './updates';

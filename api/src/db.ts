@@ -337,6 +337,17 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_device_times_device ON device_times ("deviceId")`);
 
+  // NTP-served time (Time page) — the instant a device SERVES over its NTP/SNTP
+  // service, as reported by the generic-ntp plugin's `system.ntpServed` metric.
+  // Kept on the SAME row as the system clock so one read yields both: a box can
+  // serve accurate NTP while its own wall clock is off (or vice versa). The
+  // columns are NULL for every non-NTP assignment — only ntp-capable plugins
+  // ever write them, exactly like the system-clock columns.
+  await pool.query(`ALTER TABLE device_times ADD COLUMN IF NOT EXISTS "ntpTimeUtc" TEXT`);
+  await pool.query(`ALTER TABLE device_times ADD COLUMN IF NOT EXISTS "ntpEpochMs" BIGINT`);
+  await pool.query(`ALTER TABLE device_times ADD COLUMN IF NOT EXISTS "ntpStratum" INTEGER`);
+  await pool.query(`ALTER TABLE device_times ADD COLUMN IF NOT EXISTS "ntpReferenceId" TEXT`);
+
   // Normalized inventory tables (Networks + Hosts pages). Populated by the
   // telemetry worker from plugin /monitoring metrics — see workers/telemetry.ts.
   await pool.query(`

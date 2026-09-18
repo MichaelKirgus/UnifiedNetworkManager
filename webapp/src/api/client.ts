@@ -1193,6 +1193,27 @@ export interface DeviceTimeRow {
   unmNowMs: number;
   /** deviceEpochMs − unmNowMs — positive = device ahead, negative = behind. */
   driftMs?: number | null;
+
+  // --- NTP-served time (generic-ntp plugin) ----------------------------------
+  // The instant the device SERVES over its NTP/SNTP service — distinct from its
+  // own system clock above (a box can serve accurate NTP while its wall clock is
+  // off, or vice versa). All null when no NTP-capable plugin has reported.
+  /** True when an NTP-served reading exists for this device. */
+  ntpAvailable?: boolean;
+  /** Plugin that produced the latest NTP-served reading (live-probe target). */
+  ntpPluginId?: string | null;
+  /** ISO timestamp of the underlying NTP telemetry row. */
+  ntpCollectedAt?: string | null;
+  /** UTC wall clock served by the device's NTP service (ISO-8601 "…Z"). */
+  ntpTimeUtc?: string | null;
+  /** Absolute instant served over NTP, epoch ms (null = not resolvable). */
+  ntpEpochMs?: number | null;
+  /** Stratum of the source (1 = reference clock … 15 = unsynchronized). */
+  ntpStratum?: number | null;
+  /** Reference ID (dotted IPv4 for stratum ≤ 1, else a 4-char tag like "GOOG"). */
+  ntpReferenceId?: string | null;
+  /** ntpEpochMs − reading instant — positive = serves ahead of UNM. */
+  ntpDriftMs?: number | null;
 }
 
 /** Response of GET /device-time — every device with its clock + drift vs UNM. */

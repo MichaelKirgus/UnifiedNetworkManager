@@ -3592,14 +3592,19 @@ paths:
       tags: [Inventory]
       summary: Cross-device clock overview (Time page)
       description: >-
-        For every device, reads the LATEST telemetry row's `system.deviceTime`
-        metric (emitted by plugins that can read a wall clock — OPNsense, TrueNAS,
-        RouterOS, OpenWrt, LANCOM SX/LCOS) and computes drift against UNM's own
-        clock. Drift is timezone-aware: devices keep their OWN zone; the API only
-        normalizes to an absolute instant (epoch ms) for comparison, never forcing
-        UTC. `available` is false when the plugin can't read a clock or the reading
-        has no resolvable instant — those devices still appear so the page shows
-        which boxes are covered. Gated on `time:read`.
+        For every device, reads its latest clock readings from the dedicated
+        `device_times` table and computes drift against UNM's own clock. Two
+        independent kinds of time are merged per device: (1) the SYSTEM wall
+        clock (`system.deviceTime`, emitted by plugins that can read a wall clock
+        — OPNsense, TrueNAS, RouterOS, OpenWrt, LANCOM SX/LCOS) → localIso/
+        timezone/driftMs; and (2) the NTP-SERVED time (`system.ntpServed`, emitted
+        by the generic-ntp plugin) → ntpTimeUtc/ntpStratum/ntpReferenceId/
+        ntpDriftMs — the instant the device transmits to its clients, which can
+        differ from its own system clock. Drift is timezone-aware: devices keep
+        their OWN zone; the API only normalizes to an absolute instant (epoch ms)
+        for comparison, never forcing UTC. `available` / `ntpAvailable` are false
+        when no reading of that kind exists — those devices still appear so the
+        page shows which boxes are covered. Gated on `time:read`.
       parameters:
         - in: query
           name: deviceId
@@ -6191,7 +6196,15 @@ components:
         utcOffsetMinutes: { type: [integer, 'null'], description: "Fixed UTC offset in minutes baked into the reading (when no IANA zone)" }
         deviceEpochMs: { type: [integer, 'null'], description: "Absolute instant of the device clock, epoch ms" }
         unmNowMs: { type: integer, description: "UNM's own clock at response time, epoch ms" }
-        driftMs: { type: [integer, 'null'], description: "deviceEpochMs − unmNowMs — positive = device ahead, negative = behind" }
+        driftMs: { type: [integer, 'null'], description: "deviceEpochMs − reading instant — positive = device ahead, negative = behind" }
+        ntpAvailable: { type: boolean, description: "True when the device serves a time over its NTP/SNTP service (generic-ntp plugin)" }
+        ntpPluginId: { type: [string, 'null'], description: "Plugin that produced the latest NTP-served reading (lets the page target a live probe)" }
+        ntpCollectedAt: { type: [string, 'null'], format: date-time, description: "ISO timestamp of the underlying NTP telemetry row" }
+        ntpTimeUtc: { type: [string, 'null'], description: "UTC wall clock served by the device's NTP service (ISO-8601 …Z) — distinct from its own system clock" }
+        ntpEpochMs: { type: [integer, 'null'], description: "Absolute instant served over NTP, epoch ms" }
+        ntpStratum: { type: [integer, 'null'], description: "NTP stratum of the source (1 = reference clock … 15 = unsynchronized)" }
+        ntpReferenceId: { type: [string, 'null'], description: "NTP reference ID (dotted IPv4 for stratum ≤ 1, else a 4-char tag like GOOG)" }
+        ntpDriftMs: { type: [integer, 'null'], description: "ntpEpochMs − reading instant — positive = served time ahead of UNM" }
 
     DeviceTimeOverview:
       type: object

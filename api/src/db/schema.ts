@@ -446,6 +446,13 @@ export const deviceTimes = pgTable(
     // Absolute instant pre-computed by the plugin, epoch ms (null = derive at read).
     epochMs: bigint('epochMs', { mode: 'number' }),
     collectedAt: text('collectedAt').notNull(),
+    // NTP-served time (generic-ntp plugin's `system.ntpServed` metric) — the
+    // instant the device SERVES over its NTP service, distinct from its own
+    // system clock. NULL for every non-NTP assignment.
+    ntpTimeUtc: text('ntpTimeUtc'),
+    ntpEpochMs: bigint('ntpEpochMs', { mode: 'number' }),
+    ntpStratum: integer('ntpStratum'),
+    ntpReferenceId: text('ntpReferenceId'),
   },
   (table) => {
     return {

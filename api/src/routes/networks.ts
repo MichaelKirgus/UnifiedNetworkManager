@@ -1534,56 +1534,99 @@ router.get('/device-time', requireAuth, requirePermission('time:read'), async (_
     if (allowed !== null) devices = devices.filter((d) => allowed.has(d.id));
     if (devices.length === 0) { res.status(200).json({ unmNowMs: Date.now(), devices: [] }); return; }
 
-    // Newest clock row per device — DISTINCT ON over the small dedicated table
-    // (one row per device+plugin, upserted every poll): a single indexed read.
-    const { rows: latestRows } = await pool.query(
-      `SELECT DISTINCT ON ("deviceId") "deviceId", "pluginId", "localIso", "timezone", "utcOffsetMinutes", "epochMs", "collectedAt"
+    // All clock rows for these devices — the table is small (one row per
+    // device+plugin, upserted every poll), so a plain indexed read suffices. A
+    // device watched by SEVERAL plugins has one row PER plugin: an OS-capable
+    // plugin fills the system-clock columns, the generic-ntp plugin fills the
+    // NTP-served columns. We merge per device — newest system-clock reading +
+    // newest NTP-served reading — so both kinds of data survive on one page row.
+    const { rows: allRows } = await pool.query(
+      `SELECT "deviceId", "pluginId", "localIso", "timezone", "utcOffsetMinutes", "epochMs",
+              "ntpTimeUtc", "ntpEpochMs", "ntpStratum", "ntpReferenceId", "collectedAt"
          FROM device_times
-        WHERE "deviceId" = ANY($1)
-        ORDER BY "deviceId", "collectedAt" DESC`,
+        WHERE "deviceId" = ANY($1)`,
       [devices.map((d) => d.id)],
     );
-    const latestByDevice = new Map<string, {
+
+    interface ClockRow {
       pluginId: string; localIso: string | null; timezone: string | null;
       utcOffsetMinutes: number | null; epochMs: number | null; collectedAt: string;
-    }>();
-    for (const r of latestRows as Array<{ deviceId: string; pluginId: string; localIso: string | null; timezone: string | null; utcOffsetMinutes: number | null; epochMs: string | number | null; collectedAt: string }>) {
-      // pg returns BIGINT as a STRING — coerce to a JS number (epoch ms ~1.7e12,
+      ntpTimeUtc: string | null; ntpEpochMs: number | null; ntpStratum: number | null;
+      ntpReferenceId: string | null;
+    }
+    const rowsByDevice = new Map<string, ClockRow[]>();
+    for (const r of allRows as Array<Record<string, unknown>>) {
+      // pg returns BIGINT as a STRING — coerce to JS numbers (epoch ms ~1.7e12,
       // well within safe-integer range) so the JSON contract stays `type: integer`.
-      const epochMs = r.epochMs === null || r.epochMs === undefined ? null : Number(r.epochMs);
-      latestByDevice.set(r.deviceId, {
-        pluginId: r.pluginId, localIso: r.localIso, timezone: r.timezone,
-        utcOffsetMinutes: r.utcOffsetMinutes, epochMs: Number.isFinite(epochMs as number) ? (epochMs as number) : null, collectedAt: r.collectedAt,
-      });
+      const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+      const row: ClockRow = {
+        pluginId: String(r['pluginId']),
+        localIso: (r['localIso'] as string) ?? null,
+        timezone: (r['timezone'] as string) ?? null,
+        utcOffsetMinutes: num(r['utcOffsetMinutes']),
+        epochMs: (() => { const n = num(r['epochMs']); return n !== null && Number.isFinite(n) ? n : null; })(),
+        collectedAt: String(r['collectedAt']),
+        ntpTimeUtc: (r['ntpTimeUtc'] as string) ?? null,
+        ntpEpochMs: (() => { const n = num(r['ntpEpochMs']); return n !== null && Number.isFinite(n) ? n : null; })(),
+        ntpStratum: num(r['ntpStratum']),
+        ntpReferenceId: (r['ntpReferenceId'] as string) ?? null,
+      };
+      const key = String(r['deviceId']);
+      const list = rowsByDevice.get(key);
+      if (list) list.push(row); else rowsByDevice.set(key, [row]);
     }
 
     const unmNowMs = Date.now();
     const out: Array<Record<string, unknown>> = [];
     for (const d of devices) {
-      const t = latestByDevice.get(d.id);
-      // epochMs was resolved ONCE at ingest (immutable reading). Drift is measured
-      // against the READING's own timestamp — not Date.now() — so a stale reading
-      // yields its true offset instead of baking staleness into every value.
-      const deviceEpochMs = t?.epochMs ?? null;
-      const readingInstantMs = t ? Date.parse(t.collectedAt) : NaN;
-      const driftMs = deviceEpochMs !== null && Number.isFinite(readingInstantMs) ? deviceEpochMs - readingInstantMs : null;
+      const rows = rowsByDevice.get(d.id) ?? [];
+      // Newest row carrying a SYSTEM clock reading (localIso or resolvable epoch).
+      let sys: ClockRow | null = null;
+      for (const r of rows) {
+        if ((r.localIso !== null || r.epochMs !== null) && (!sys || r.collectedAt > sys.collectedAt)) sys = r;
+      }
+      // Newest row carrying an NTP-SERVED reading.
+      let ntp: ClockRow | null = null;
+      for (const r of rows) {
+        if ((r.ntpEpochMs !== null || r.ntpTimeUtc !== null) && (!ntp || r.collectedAt > ntp.collectedAt)) ntp = r;
+      }
+
+      // System-clock drift: measured against the READING's own timestamp — not
+      // Date.now() — so a stale reading yields its true offset instead of baking
+      // staleness into every value. Same rule for the NTP-served instant.
+      const deviceEpochMs = sys?.epochMs ?? null;
+      const sysReadingInstantMs = sys ? Date.parse(sys.collectedAt) : NaN;
+      const driftMs = deviceEpochMs !== null && Number.isFinite(sysReadingInstantMs) ? deviceEpochMs - sysReadingInstantMs : null;
+
+      const ntpEpochMs = ntp?.ntpEpochMs ?? null;
+      const ntpReadingInstantMs = ntp ? Date.parse(ntp.collectedAt) : NaN;
+      const ntpDriftMs = ntpEpochMs !== null && Number.isFinite(ntpReadingInstantMs) ? ntpEpochMs - ntpReadingInstantMs : null;
 
       out.push({
         deviceId: d.id,
         name: d.name,
         managementAddress: d.managementAddress,
         siteId: d.siteId,
-        // Plugin that produced the latest clock reading — lets the page target a
-        // live probe at exactly that plugin (a device may have several assignments).
-        pluginId: t?.pluginId ?? null,
-        collectedAt: t?.collectedAt ?? null,
+        // Plugin that produced the latest SYSTEM-clock reading — lets the page
+        // target a live probe at exactly that plugin (a device may have several).
+        pluginId: sys?.pluginId ?? null,
+        collectedAt: sys?.collectedAt ?? ntp?.collectedAt ?? null,
         available: deviceEpochMs !== null,
-        localIso: t?.localIso ?? null,
-        timezone: t?.timezone ?? null,
-        utcOffsetMinutes: t?.utcOffsetMinutes ?? null,
+        localIso: sys?.localIso ?? null,
+        timezone: sys?.timezone ?? null,
+        utcOffsetMinutes: sys?.utcOffsetMinutes ?? null,
         deviceEpochMs,
         unmNowMs,
         driftMs,
+        // NTP-served time — the instant this device transmits to its clients.
+        ntpAvailable: ntp !== null && (ntpEpochMs !== null || ntp.ntpTimeUtc !== null),
+        ntpPluginId: ntp?.pluginId ?? null,
+        ntpCollectedAt: ntp?.collectedAt ?? null,
+        ntpTimeUtc: ntp?.ntpTimeUtc ?? null,
+        ntpEpochMs,
+        ntpStratum: ntp?.ntpStratum ?? null,
+        ntpReferenceId: ntp?.ntpReferenceId ?? null,
+        ntpDriftMs,
       });
     }
 

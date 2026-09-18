@@ -14,8 +14,18 @@ interface ProbeDeviceTime {
   epochMs?: number | null;
 }
 
+/** The `system.ntpServed` blob the generic-ntp plugin emits (telemetry or live probe). */
+interface ProbeNtpServed {
+  timeUtc?: string;
+  epochMs?: number | null;
+  stratum?: number | null;
+  referenceId?: string | null;
+}
+
 /** One device as rendered on this page — telemetry baseline merged with the
- * freshest live probe (when its plugin supports the 'deviceTime' probe key). */
+ * freshest live probe (when its plugin supports the 'deviceTime' / 'ntpServed'
+ * probe keys). Carries BOTH clocks: the device's own system time AND the time it
+ * serves over NTP (they can differ). */
 interface TimeRowView {
   deviceId: string;
   name: string;
@@ -32,6 +42,26 @@ interface TimeRowView {
   /** True when the freshest reading came from a live probe (< 15 s old). */
   live: boolean;
   collectedAt: string | null;
+
+  // --- NTP-served time (distinct from the device's own clock) -----------------
+  /** UTC wall clock served by the device's NTP service (ISO "…Z"). */
+  ntpTimeUtc: string | null;
+  /** Stratum of the source (1 = reference clock … 15 = unsynchronized). */
+  ntpStratum: number | null;
+  /** Reference ID (dotted IPv4 for stratum ≤ 1, else a tag like "GOOG"). */
+  ntpReferenceId: string | null;
+  /** Stable offset of the SERVED instant vs UNM — same semantics as driftMs. */
+  ntpDriftMs: number | null;
+  /** True when the freshest NTP reading came from a live probe (< 15 s old). */
+  ntpLive: boolean;
+}
+
+/** One short-cycle probe target: which plugin + which key to poll every few seconds. */
+interface ProbeTarget {
+  deviceId: string;
+  pluginId: string;
+  /** 'deviceTime' (system clock) or 'ntpServed' (NTP-served time). */
+  kind: 'deviceTime' | 'ntpServed';
 }
 
 /** Drift magnitude → color class (green = NTP-tight, amber = off by < 1 min, red beyond). */
@@ -136,23 +166,30 @@ export default function Time() {
     [pluginsQuery.data],
   );
 
+  // One target per (device, plugin, clock-kind): the system clock via its
+  // `pluginId` + 'deviceTime' key, and the NTP-served time via its `ntpPluginId`
+  // + 'ntpServed' key. A device watched by both an OS-capable AND the NTP plugin
+  // gets TWO targets — each kind refreshes independently every few seconds.
   const probeTargets = useMemo(() => {
     const seen = new Set<string>();
-    const out: { deviceId: string; pluginId: string }[] = [];
+    const out: ProbeTarget[] = [];
     for (const r of timeQuery.data?.devices ?? []) {
-      if (!r.pluginId || !probePluginIds.has(r.pluginId)) continue;
-      const k = `${r.deviceId}|${r.pluginId}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      out.push({ deviceId: r.deviceId, pluginId: r.pluginId });
+      if (r.pluginId && probePluginIds.has(r.pluginId)) {
+        const k = `${r.deviceId}|${r.pluginId}|deviceTime`;
+        if (!seen.has(k)) { seen.add(k); out.push({ deviceId: r.deviceId, pluginId: r.pluginId, kind: 'deviceTime' }); }
+      }
+      if (r.ntpPluginId && probePluginIds.has(r.ntpPluginId)) {
+        const k = `${r.deviceId}|${r.ntpPluginId}|ntpServed`;
+        if (!seen.has(k)) { seen.add(k); out.push({ deviceId: r.deviceId, pluginId: r.ntpPluginId, kind: 'ntpServed' }); }
+      }
     }
     return out;
   }, [timeQuery.data, probePluginIds]);
 
   const probeResults = useQueries({
     queries: probeTargets.map((t) => ({
-      queryKey: ['device-probe', t.deviceId, 'deviceTime'],
-      queryFn: () => api.deviceProbe(t.deviceId, ['deviceTime'], t.pluginId),
+      queryKey: ['device-probe', t.deviceId, t.kind],
+      queryFn: () => api.deviceProbe(t.deviceId, [t.kind === 'ntpServed' ? 'ntpServed' : 'deviceTime'], t.pluginId),
       refetchInterval: 5_000,
       // Short-cycle live data — a failed poll is retried by the NEXT interval tick;
       // React Query's default retry storm only floods devices whose probe can't work.
@@ -163,33 +200,59 @@ export default function Time() {
   });
 
   // deviceId → freshest live reading (only when < 15 s old), with the probe's
-  // own collectedAt so drift can be measured against that instant.
-  const liveByDevice = useMemo(() => {
-    const m = new Map<string, { dt: ProbeDeviceTime; atMs: number }>();
+  // own collectedAt so drift can be measured against that instant. One map per
+  // clock kind — they come from different plugins/rows and must not mix.
+  const [liveClockByDevice, liveNtpByDevice] = useMemo(() => {
+    const clocks = new Map<string, { dt: ProbeDeviceTime; atMs: number }>();
+    const ntps = new Map<string, { ntp: ProbeNtpServed; atMs: number }>();
     probeTargets.forEach((t, i) => {
       const res = probeResults[i];
       if (!res?.data) return;
-      const dt = res.data.probe.metrics['system.deviceTime'];
-      if (dt && typeof dt === 'object' && typeof (dt as ProbeDeviceTime).localIso === 'string') {
-        const atMs = Date.parse(res.data.probe.collectedAt);
-        if (!Number.isNaN(atMs) && Date.now() - atMs < 15_000) m.set(t.deviceId, { dt: dt as ProbeDeviceTime, atMs });
+      const atMs = Date.parse(res.data.probe.collectedAt);
+      if (Number.isNaN(atMs) || Date.now() - atMs >= 15_000) return;
+      if (t.kind === 'deviceTime') {
+        const dt = res.data.probe.metrics['system.deviceTime'];
+        if (dt && typeof dt === 'object' && typeof (dt as ProbeDeviceTime).localIso === 'string') {
+          clocks.set(t.deviceId, { dt: dt as ProbeDeviceTime, atMs });
+        }
+      } else {
+        const ntp = res.data.probe.metrics['system.ntpServed'];
+        if (ntp && typeof ntp === 'object' && typeof (ntp as ProbeNtpServed).timeUtc === 'string') {
+          ntps.set(t.deviceId, { ntp: ntp as ProbeNtpServed, atMs });
+        }
       }
     });
-    return m;
+    return [clocks, ntps] as const;
   }, [probeTargets, probeResults]);
 
   // Merge telemetry baseline + live probes into render rows. Drift is the STABLE
   // clock offset: for a live probe we measure deviceEpoch − probeInstant here;
   // otherwise we use the API's pre-computed value (deviceEpoch − readingInstant).
+  // The NTP-served columns follow the same pattern from their own baseline/probe.
   const rows: TimeRowView[] = useMemo(() => {
     const out: TimeRowView[] = [];
     for (const r of timeQuery.data?.devices ?? []) {
-      const live = liveByDevice.get(r.deviceId);
+      const live = liveClockByDevice.get(r.deviceId);
       let driftMs: number | null = typeof r.driftMs === 'number' && Number.isFinite(r.driftMs) ? r.driftMs : null;
       if (live) {
         const epochMs = typeof live.dt.epochMs === 'number' && Number.isFinite(live.dt.epochMs) ? live.dt.epochMs : null;
         driftMs = epochMs !== null ? epochMs - live.atMs : null;
       }
+
+      // NTP-served: telemetry baseline, overridden by a fresh live probe.
+      const liveNtp = liveNtpByDevice.get(r.deviceId);
+      let ntpTimeUtc: string | null = r.ntpAvailable ? (r.ntpTimeUtc ?? null) : null;
+      let ntpStratum: number | null = r.ntpAvailable ? (r.ntpStratum ?? null) : null;
+      let ntpReferenceId: string | null = r.ntpAvailable ? (r.ntpReferenceId ?? null) : null;
+      let ntpDriftMs: number | null = typeof r.ntpDriftMs === 'number' && Number.isFinite(r.ntpDriftMs) ? r.ntpDriftMs : null;
+      if (liveNtp) {
+        ntpTimeUtc = liveNtp.ntp.timeUtc ?? ntpTimeUtc;
+        ntpStratum = typeof liveNtp.ntp.stratum === 'number' ? liveNtp.ntp.stratum : ntpStratum;
+        ntpReferenceId = liveNtp.ntp.referenceId ?? ntpReferenceId;
+        const epochMs = typeof liveNtp.ntp.epochMs === 'number' && Number.isFinite(liveNtp.ntp.epochMs) ? liveNtp.ntp.epochMs : null;
+        if (epochMs !== null) ntpDriftMs = epochMs - liveNtp.atMs;
+      }
+
       out.push({
         deviceId: r.deviceId,
         name: r.name,
@@ -200,15 +263,40 @@ export default function Time() {
         driftMs,
         live: !!live,
         collectedAt: r.collectedAt ?? null,
+        ntpTimeUtc,
+        ntpStratum,
+        ntpReferenceId,
+        ntpDriftMs,
+        ntpLive: !!liveNtp,
       });
     }
     return out;
-  }, [timeQuery.data, liveByDevice]);
+  }, [timeQuery.data, liveClockByDevice, liveNtpByDevice]);
 
   const driftOf = (deviceId: string): number | null => {
     const row = rows.find((r) => r.deviceId === deviceId);
     return row?.driftMs ?? null;
   };
+
+  const ntpDriftOf = (deviceId: string): number | null => {
+    const row = rows.find((r) => r.deviceId === deviceId);
+    return row?.ntpDriftMs ?? null;
+  };
+
+  /** "HH:MM:SS" of a UTC ISO instant ("…Z") — the served time, shown as-is. */
+  function ntpWallClock(iso: string | null): string {
+    if (!iso) return '—';
+    const t = iso.slice(11, 19);
+    return /^\d{2}:\d{2}(:\d{2})?$/.test(t) ? t : '—';
+  }
+
+  /** Stratum → short label: 1 "ref clock", 2–6 numeric, 0/15 "unsync". */
+  function stratumLabel(s: number | null): string {
+    if (s === null || s === undefined) return '—';
+    if (s === 0 || s === 15) return `S${s} unsync`;
+    if (s === 1) return 'S1 ref clock';
+    return `S${s}`;
+  }
 
   // Span-chart geometry: half-range in ms + per-row position.
   const span = useMemo(() => {
@@ -320,6 +408,62 @@ export default function Time() {
         );
       },
     },
+    // --- NTP-served time: the instant this device transmits to its clients.
+    // Kept SEPARATE from "Local time" on purpose — a box can serve accurate NTP
+    // while its own wall clock is off (or vice versa). Hidden by default so the
+    // page stays compact for fleets without NTP servers; toggle via column menu.
+    {
+      header: 'NTP served (UTC)',
+      key: 'ntpTimeUtc',
+      width: 150,
+      hiddenByDefault: true,
+      exportValue: (row) => row.ntpTimeUtc ?? '',
+      render: (row) => {
+        if (!row.ntpTimeUtc) return <span className="text-faint">—</span>;
+        return (
+          <div className="flex items-center gap-2" title={`Served over NTP — ${row.ntpReferenceId ?? 'unknown reference'}`}>
+            <span className="font-mono text-sm tabular-nums">{ntpWallClock(row.ntpTimeUtc)}</span>
+            {row.ntpLive && (
+              <span title="Live probe (< 15 s old)" className="h-1.5 w-1.5 shrink-0 rounded-full bg-success-fg" />
+            )}
+          </div>
+        );
+      },
+    },
+    {
+      header: 'NTP stratum',
+      key: 'ntpStratum',
+      width: 120,
+      hiddenByDefault: true,
+      exportValue: (row) => row.ntpReferenceId ?? '',
+      render: (row) => {
+        if (!row.ntpTimeUtc) return <span className="text-faint">—</span>;
+        const ref = row.ntpReferenceId;
+        return (
+          <div className="flex flex-col" title={ref ? `Reference ID: ${ref}` : undefined}>
+            <span className="font-mono text-xs tabular-nums">{stratumLabel(row.ntpStratum)}</span>
+            {ref && <span className="truncate font-mono text-[10px] text-faint">{ref}</span>}
+          </div>
+        );
+      },
+    },
+    {
+      header: 'NTP drift vs UNM',
+      key: 'ntpDrift',
+      width: 130,
+      hiddenByDefault: true,
+      sortAccessor: (row) => ntpDriftOf(row.deviceId) ?? Number.MAX_SAFE_INTEGER,
+      exportValue: (row) => fmtDrift(ntpDriftOf(row.deviceId)),
+      render: (row) => {
+        const d = ntpDriftOf(row.deviceId);
+        if (!row.ntpTimeUtc || d === null) return <span className="text-faint">—</span>;
+        return (
+          <span className={clsx('font-mono text-sm tabular-nums', driftTextClass(d))} title={d >= 0 ? 'Served time is ahead of UNM' : 'Served time is behind UNM'}>
+            {fmtDrift(d)}
+          </span>
+        );
+      },
+    },
     {
       header: 'Source / age',
       key: 'collectedAt',
@@ -337,6 +481,8 @@ export default function Time() {
   const availableCount = rows.filter((r) => r.localIso !== null).length;
   const ahead = rows.filter((r) => (r.driftMs ?? 1) > 0).length;
   const behind = rows.filter((r) => (r.driftMs ?? 1) < 0).length;
+  // NTP-served coverage — how many devices transmit a time over their NTP service.
+  const ntpCount = rows.filter((r) => r.ntpTimeUtc !== null).length;
 
   // Span-chart tick marks: −half, −half/2, 0, +half/2, +half.
   const ticks = [-span.halfMs, -span.halfMs / 2, 0, span.halfMs / 2, span.halfMs];
@@ -362,6 +508,11 @@ export default function Time() {
             <span>{availableCount} of {rows.length} devices reporting</span>
             <span className="text-success-fg">{ahead} ahead</span>
             <span className="text-danger-fg">{behind} behind</span>
+            {ntpCount > 0 && (
+              <span title="Devices serving time over their NTP/SNTP service" className="rounded bg-muted px-1.5 py-0.5">
+                {ntpCount} serve NTP
+              </span>
+            )}
           </span>
         </div>
 
