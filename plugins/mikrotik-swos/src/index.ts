@@ -55,7 +55,12 @@ const identity = resolvePluginIdentity({
   // 0.2.0 — Updates page support (capability 'updates'): firmware `updates[]`
   // row from the live detected version vs the static catalog (available-
   // without-apply — SwOS updates go through the web UI / package server).
-  version: '0.2.0',
+  // 0.3.0 — File-based maintenance actions (protocol verified against the
+  // switch's own web UI): firmware.update (POST /pboot → multipart /upgrade
+  // field "blob" → /reboot), swos.config.restore (multipart POST /backup.swb
+  // field "file" → /reboot) and system.reboot. Files ride along as base64 in
+  // the plan-step input; a future Files page will manage them.
+  version: '0.3.0',
   vendors: ['mikrotik'],
   // 'deviceState' advertises POST /state — the dynamic document behind the
   // per-device Config page (ports with live state + PoE/LAG/VLAN actions).
@@ -282,7 +287,11 @@ app.post('/monitoring', async (req, res) => {
     // it shows on the Updates page but carries no Update button.
     const liveVersion = s.firmwareVersion ?? null;
     if (liveVersion) {
-      const fwRow = catalogFirmwareRow(liveVersion, KNOWN_SWOS_LINES);
+      // Release notes: the official SwOS changelog lists every version of the
+      // target line (e.g. 3.20 → /changelog/3_20).
+      const fwRow = catalogFirmwareRow(liveVersion, KNOWN_SWOS_LINES, {
+        releaseNotesUrl: (target) => `https://wiki.mikrotik.com/wiki/Changelog/${String(target).replace(/\./g, '_')}`,
+      });
       if (fwRow) metrics['updates'] = [fwRow];
     }
 

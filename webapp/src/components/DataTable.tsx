@@ -37,8 +37,10 @@ export interface DataTableColumn<T> {
   /** Whether a per-column filter input is offered for this column. Defaults to true. */
   filterable?: boolean;
   /** Explicit value used by CSV/JSON export (and quick search). Falls back to sortAccessor, then row[key]. */
-  exportValue?: (row: T) => string | number | null | undefined;
-  /** Exclude this column from CSV/JSON exports (e.g. Actions columns). */
+  exportValue?: (row: T) => string | number | null | undefined;  /** Custom text used ONLY for quick-search / column-filter matching. Lets a
+   * parent row be found by data that lives in its children (e.g. a device row
+   * matched by one of its package names). Falls back to exportValue/sortAccessor/row[key]. */
+  searchText?: (row: T) => string;  /** Exclude this column from CSV/JSON exports (e.g. Actions columns). */
   excludeFromExport?: boolean;
   /** Hidden on first render — useful for secondary/diagnostic data that is
    * available but not worth the default screen space. Users can still enable it
@@ -174,6 +176,7 @@ function cellValue<T>(col: DataTableColumn<T>, row: T): unknown {
 
 /** Human-readable text of a cell for search matching. */
 function searchText<T>(col: DataTableColumn<T>, row: T): string {
+  if (col.searchText) return col.searchText(row);
   const v = cellValue(col, row);
   if (v === null || v === undefined) return '';
   if (typeof v === 'string') return v;

@@ -14,6 +14,7 @@
 import { createRegistry, pollUntil } from '@unm/plugin-sdk';
 import { buildPostArray, buildPostData, encodeHexString, encodeIpLe, encodePortMask } from '../swosClient';
 import { getField, hasField } from '../platform';
+import { decodeFilePayload, FIRMWARE_MAX_BYTES, rebootSwitch, restoreConfig, runFirmwareUpgrade } from '../firmware';
 import { ActionContext, ActionDescriptor } from './types';
 
 // --- Post-apply state verification -------------------------------------------------------
@@ -598,6 +599,80 @@ const systemManagementAction: ActionDescriptor = {
   },
 };
 
+// --- Firmware / config-file actions -------------------------------------------------------
+// All three take the file as base64 in the step input (a future Files page will
+// manage firmware/backup files; until then they ride along in the plan-step
+// input — SwOS images are ~70–150 KB, .swb backups a few hundred KB at most).
+
+const firmwareUpdateAction: ActionDescriptor = {
+  id: 'firmware.update',
+  label: 'Install firmware from file (.bin)',
+  description:
+    'DANGEROUS — flashes the switch with the given SwOS/SwOS Lite firmware image and reboots it. Runs the switch\'s own upgrade sequence (POST /pboot → multipart POST /upgrade, field "blob" → POST /reboot). The file is passed as base64 in `fileBase64` (a future Files page will manage images; until then download the .bin from MikroTik and paste it here). The switch is unreachable while it flashes — verification is impossible by design.',
+  module: 'System',
+  riskLevel: 'dangerous',
+  deviceCount: 1,
+  timeoutMs: 300_000,
+  inputSchema: {
+    fileBase64: { type: 'string', required: true, description: 'Firmware image (.bin), base64-encoded' },
+    fileName: { type: 'string', pattern: '^\\S{1,255}$', description: 'File name for the upload (e.g. swos-css326-2.19.bin)' },
+  },
+  async execute(ctx, input) {
+    const image = decodeFilePayload(String(input.fileBase64), FIRMWARE_MAX_BYTES);
+    const fileName = String(input.fileName ?? '').trim() || 'firmware.bin';
+    await runFirmwareUpgrade(ctx.client, image, fileName);
+    return {
+      success: true,
+      applied: true,
+      // The switch reboots into the new firmware — it is unreachable while it
+      // flashes, so there is nothing to re-read. Unverified-by-design (same
+      // convention as TrueNAS system.reboot).
+      details: { fileName, sizeBytes: image.length, note: 'Firmware uploaded and reboot initiated — the switch will be back on the new firmware shortly.' },
+    };
+  },
+};
+
+const configRestoreAction: ActionDescriptor = {
+  id: 'swos.config.restore',
+  label: 'Restore configuration from backup (.swb)',
+  description:
+    'DANGEROUS — replaces the switch\'s ENTIRE running configuration with the given .swb backup file and reboots it (the switch\'s own "Restore Backup" behavior). Pair with swos.backup.download as a rollback point. The file is passed as base64 in `fileBase64`. The switch is unreachable while it reboots — verification is impossible by design.',
+  module: 'System',
+  riskLevel: 'dangerous',
+  deviceCount: 1,
+  timeoutMs: 300_000,
+  inputSchema: {
+    fileBase64: { type: 'string', required: true, description: 'Configuration backup (.swb), base64-encoded' },
+    fileName: { type: 'string', pattern: '^\\S{1,255}$', description: 'File name for the upload (e.g. <identity>_2.19.swb)' },
+  },
+  async execute(ctx, input) {
+    const backup = decodeFilePayload(String(input.fileBase64), FIRMWARE_MAX_BYTES);
+    const fileName = String(input.fileName ?? '').trim() || 'backup.swb';
+    await restoreConfig(ctx.client, backup, fileName);
+    return {
+      success: true,
+      applied: true,
+      details: { fileName, sizeBytes: backup.length, note: 'Backup restored and reboot initiated — the switch will be back with the restored configuration shortly.' },
+    };
+  },
+};
+
+const systemRebootAction: ActionDescriptor = {
+  id: 'system.reboot',
+  label: 'Reboot the switch',
+  description:
+    'DANGEROUS — reboots the switch (POST /reboot, the UI\'s own "Reboot" button). All traffic through the switch is interrupted until it comes back. The connection drops as the device goes down — a transport error after dispatch means the reboot was accepted.',
+  module: 'System',
+  riskLevel: 'dangerous',
+  deviceCount: 1,
+  timeoutMs: 60_000,
+  inputSchema: {},
+  async execute(ctx) {
+    await rebootSwitch(ctx.client);
+    return { success: true, applied: true, details: { note: 'Reboot initiated — the switch will be back shortly.' } };
+  },
+};
+
 // --- Registry ---------------------------------------------------------------------------
 
 const ALL_ACTIONS: ActionDescriptor[] = [
@@ -611,6 +686,9 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   snmpConfigAction,
   systemIdentityAction,
   systemManagementAction,
+  firmwareUpdateAction,
+  configRestoreAction,
+  systemRebootAction,
 ];
 
 // One registry serves /discover, /plan and /config — the byId map + listers come

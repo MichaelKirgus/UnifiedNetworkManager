@@ -47,6 +47,8 @@ export interface ActionContext {
   platform: SwosPlatform;
   host: string;
   deviceId?: string;
+  /** Effective plugin settings (global or per-device) — e.g. firmwareChannel. */
+  settings?: Record<string, unknown>;
 }
 
 /** A fully-described action — the SDK descriptor bound to SwOS's executor context. */

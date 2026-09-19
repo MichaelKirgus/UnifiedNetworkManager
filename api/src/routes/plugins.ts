@@ -4,7 +4,7 @@ import { desc, eq } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
-import { getRequiredSecretType } from '../secretsProvider';
+import { getRequiredSecretTypes } from '../secretsProvider';
 import { dispatchPluginAction } from '../utils/pluginDispatch';
 import { resolvePluginEndpoint } from '../utils/pluginEndpoint';
 import type { DeviceModelEntry } from '../types/deviceModels';
@@ -139,16 +139,23 @@ router.get('/plugins', requireAuth, requirePermission('plugins:read'), async (_r
   res.status(200).json(result.map(serializePlugin));
 });
 
-// GET /plugins/:id/required-secret-type - The secret type a device plugin
-// expects for its device credentials (read from the plugin's /discover), plus
+// GET /plugins/:id/required-secret-type - The secret type(s) a device plugin
+// expects for its PRIMARY credentials (read from the plugin's /discover), plus
 // any additional named credential slots it declares (drives per-slot pickers).
+// `requiredSecretTypes` carries the full list when a plugin accepts several
+// types (e.g. usernamePassword OR sshKeyPair); `requiredSecretType` stays for
+// older consumers.
 router.get('/plugins/:id/required-secret-type', requireAuth, requirePermission('plugins:read'), async (req, res) => {
   const { id } = req.params;
-  const [requiredSecretType, row] = await Promise.all([
-    getRequiredSecretType(id),
-    db.query.plugins.findFirst({ where: (plugins, { eq }) => eq(plugins.id, id) }),
+  const [secretTypes, row] = await Promise.all([
+    getRequiredSecretTypes(id),
+    db.query.plugins.findFirst({ where: eq(schema.plugins.id, id) }),
   ]);
-  res.status(200).json({ requiredSecretType, credentialSlots: parseCredentialSlots(row?.credentialSlots) });
+  res.status(200).json({
+    requiredSecretType: secretTypes.requiredSecretType,
+    requiredSecretTypes: secretTypes.requiredSecretTypes,
+    credentialSlots: parseCredentialSlots(row?.credentialSlots),
+  });
 });
 
 // GET /plugins/:id/metrics - The metric descriptors a plugin declared in its

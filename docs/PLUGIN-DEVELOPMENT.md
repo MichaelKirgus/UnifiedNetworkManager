@@ -95,6 +95,7 @@ for you from `resolvePluginIdentity`. Optional extras:
 | Field | Meaning |
 | --- | --- |
 | `requiredSecretType` | Secret type expected for device credentials (`'usernamePassword'`, `'snmp'`, `'apiKey'`, …). `null` = no credentials. Re-fetched live by the API, never persisted. |
+| `requiredSecretTypes: string[]` | Multiple acceptable PRIMARY secret types (e.g. `['usernamePassword', 'sshKeyPair']`). Wins over `requiredSecretType`; declare BOTH when using it so older consumers keep working. The webapp's credential picker offers every listed type. |
 | `metrics: MetricDescriptor[]` | Static descriptors (drives webapp visualization + the settings form's metric list). |
 | `options: PluginOptionDescriptor[]` | Settings the user can change; values come back via `x-unm-settings`. Discriminated union on `type`: `string` (`pattern`, `minLength`, `maxLength`), `integer` (`min`,`max`), `boolean`. Always include a `default`. |
 | `actions: CatalogEntry[]` | The action catalog (from `createRegistry().listCatalog()`). Only when implementing `/config`. |

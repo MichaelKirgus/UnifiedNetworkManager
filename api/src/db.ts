@@ -818,6 +818,9 @@ export async function initDb(): Promise<void> {
       "collectedAt" TEXT NOT NULL,
       PRIMARY KEY ("deviceId", "pluginId", kind, name)
     )`);
+  // Branch column added after the table's initial release — idempotent ALTER
+  // so existing deployments pick it up without a migration.
+  await pool.query(`ALTER TABLE device_updates ADD COLUMN IF NOT EXISTS "branch" TEXT`);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_device_updates_device ON device_updates ("deviceId")`);
 

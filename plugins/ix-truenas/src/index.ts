@@ -158,7 +158,26 @@ const identity = resolvePluginIdentity({
   // one row per app with upgrade_available and per image with update_available.
   // New actions: system.firmware.update (dangerous, `update.run` job) and
   // images.update (write, `app.image.pull` job).
-  version: '0.13.0',
+  // 0.14.0 — Configuration backup/restore (the Web UI's "Manage Configuration"
+  // feature as plan actions): config.backup.download (read — `config.save` job +
+  // single-use token + HTTP /_download fetch, returns the file base64 in details),
+  // config.restore (dangerous — multipart POST /_upload running `config.upload`,
+  // then system.reboot so the restored config takes effect) and config.reset
+  // (dangerous — factory reset via `config.reset` job). The client gained a plain-HTTP
+  // file transport (downloadJobFile/uploadFile) alongside the JSON-RPC socket.
+  // Every plan with a mutating step now gets a best-effort config.backup.download
+  // rollback step prepended per device (finalizePlan rollbackStep).
+  // 0.15.0 — Update-branch + manual firmware update (the Web UI's System →
+  // Update page as plan actions): update.profile.read (read `update.config` +
+  // the license-gated choice list from `update.profile_choices`) and
+  // update.profile.set (write, `update.update {profile}` — DEVELOPER /
+  // EARLY_ADOPTER / GENERAL / MISSION_CRITICAL), plus system.firmware.update-file
+  // (dangerous — manual update from a file: `path` on the box via `update.manual`
+  // or base64 content uploaded via /_upload running `update.file`, with automatic
+  // one-shot [EAGAIN] resume like the Web UI's confirm dialog). The firmware row
+  // of the Updates page now carries the configured profile as its `branch` (new
+  // Branch column), and the Config-page System item shows it + the branch actions.
+  version: '0.15.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates'],
 });
@@ -367,6 +386,27 @@ function getClient(
 function errMsg(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+/**
+ * One JSON-RPC call with a single retry on TRANSIENT transport failures — the
+ * per-call timeout AND "session unresponsive" (the appliance's shared WebSocket
+ * drops under load, e.g. right after bulk app actions or while a pool is
+ * degraded). Bulk reads (app.query / app.image.query) exceed the default 5 s
+ * budget on busy boxes with hundreds of apps/images; without this retry one
+ * slow cycle silently omits containers[]/images[] — and by contract the whole
+ * updates[] key too. The retry gets a dedicated 15 s round-trip budget (same as
+ * callWithRetry in actions.ts); non-transient errors (auth, method errors) are
+ * surfaced immediately. Worst case adds ~20 s to one batch member — inside the
+ * API's 30 s /monitoring budget since the rest of the batch runs in parallel.
+ */
+async function inventoryCall<T>(client: TruenasClient, creds: TruenasCredentials, method: string, params: unknown[]): Promise<T> {
+  try {
+    return await client.call<T>(method, params, creds);
+  } catch (e) {
+    if (!(e instanceof TruenasRpcError) || !/timed out|unresponsive/i.test(e.message)) throw e;
+    return await client.call<T>(method, params, creds, 15_000);
+  }
 }
 
 /**
@@ -1360,6 +1400,9 @@ interface TruenasUpdateCandidate {
   profile?: string | null;
   filesizeBytes?: number | null;
   releaseNotesUrl?: string | null;
+  /** Release-notes TEXT from the appliance's own feed (its web UI shows this
+   * too) — propagated to the Updates page when present. */
+  releaseNotes?: string | null;
 }
 
 /** Parses the raw `update.available_versions` result into candidates. The live
@@ -1382,6 +1425,9 @@ function parseUpdateCandidates(raw: unknown): TruenasUpdateCandidate[] {
       profile: pickString(manifest, ['profile']),
       filesizeBytes: pickNumber(manifest, ['filesize']),
       releaseNotesUrl: pickString(v, ['release_notes_url']),
+      // Notes text rides in the manifest on some releases; tolerate both flat
+      // and nested placement. Absent → null (the URL still shows).
+      releaseNotes: pickString(v, ['release_notes']) ?? pickString(manifest, ['release_notes']),
     });
   }
   return out;
@@ -1391,6 +1437,9 @@ function parseUpdateCandidates(raw: unknown): TruenasUpdateCandidate[] {
 function buildUpdateRows(input: {
   version?: string | null;
   updateAvail: unknown;
+  /** The appliance's configured update profile (update.config) — the firmware
+   * row's `branch` for the Updates page Branch column. */
+  branch?: string | null;
   apps: Record<string, unknown>[];
   appImages: Record<string, unknown>[];
 }): UpdateRow[] {
@@ -1411,12 +1460,14 @@ function buildUpdateRows(input: {
         available: true,
         rebootRequired: true, // update.run installs a new boot environment + reboots
         sizeBytes: cand.filesizeBytes ?? null,
+        releaseNotesUrl: cand.releaseNotesUrl ?? null,
+        releaseNotes: cand.releaseNotes ? cand.releaseNotes.slice(0, 16_384) : null,
+        branch: input.branch ?? null,
         applyActionId: 'system.firmware.update',
         applyInput: { version: cand.version },
         extra: {
           ...(cand.train ? { train: cand.train } : {}),
           ...(cand.profile ? { profile: cand.profile } : {}),
-          ...(cand.releaseNotesUrl ? { releaseNotesUrl: cand.releaseNotesUrl } : {}),
         },
       });
     }
@@ -1678,7 +1729,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // before error handling. The last three are best-effort extras (networks
   // inventory + static routes + board serial/model) — their failure does NOT
   // count toward health.
-  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes, vmsRes, updateAvailRes] = await Promise.allSettled([
+  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes, vmsRes, updateAvailRes, updateConfigRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('alert.list', [], creds),
@@ -1708,9 +1759,12 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     // below (sequential, after this batch).
     // Skipped entirely when the `collectApps` option is off — no container RPC
     // traffic to the appliance at all.
-    collectApps ? client.call<Record<string, unknown>[]>('app.query', [], creds) : Promise.resolve(undefined),
+    // app.query + app.image.query are the BULK reads (hundreds of apps/images
+    // on big boxes) — they get a transient-failure retry with a 15 s budget so
+    // one slow cycle doesn't drop containers[]/images[] (and updates[]) again.
+    collectApps ? inventoryCall<Record<string, unknown>[]>(client, creds, 'app.query', []) : Promise.resolve(undefined),
     collectApps ? client.call<Record<string, unknown>[]>('docker.network.query', [], creds) : Promise.resolve(undefined),
-    collectApps ? client.call<Record<string, unknown>[]>('app.image.query', [], creds) : Promise.resolve(undefined),
+    collectApps ? inventoryCall<Record<string, unknown>[]>(client, creds, 'app.image.query', []) : Promise.resolve(undefined),
     // VMs-page extra (best-effort — never count toward health). vm.query = one
     // row per libvirt guest with devices[] (NIC MACs!) + status.state. Skipped
     // entirely when the `collectVms` option is off — no VM RPC traffic at all.
@@ -1722,6 +1776,9 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     // every other inventory RPC. Missing method (older releases) or failure →
     // no firmware row for this poll, nothing else affected.
     collectInventory ? client.call<unknown>('update.available_versions', [], creds) : Promise.resolve(undefined),
+    // The configured update profile/branch — stamped onto the firmware row's
+    // `branch` (Updates page Branch column). Same best-effort contract.
+    collectInventory ? client.call<Record<string, unknown>>('update.config', [], creds) : Promise.resolve(undefined),
   ]);
 
   // Shares-page live sessions (best-effort — never count toward health). The
@@ -2239,6 +2296,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     metrics['updates'] = buildUpdateRows({
       version: pickString(metrics, ['system.version']),
       updateAvail: updateAvailRes.status === 'fulfilled' ? updateAvailRes.value : null,
+      branch: updateConfigRes.status === 'fulfilled' && updateConfigRes.value ? (pickString(updateConfigRes.value, ['profile']) ?? null) : null,
       apps: collectApps && appsRes.status === 'fulfilled' && Array.isArray(appsRes.value) ? (appsRes.value as Record<string, unknown>[]) : [],
       appImages: collectApps && appImagesRes.status === 'fulfilled' && Array.isArray(appImagesRes.value) ? (appImagesRes.value as Record<string, unknown>[]) : [],
     });
@@ -2567,16 +2625,20 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   await assertPinned(req, host, transport, ports);
 
   const client = getClient(host, transport, timeoutMs, ports);
-  const [sysInfoRes, poolsRes, ifacesRes] = await Promise.allSettled([
+  const [sysInfoRes, poolsRes, ifacesRes, updateConfigRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('interface.query', [], creds),
+    // The configured update branch/profile — shown on the System item and
+    // switchable via the update.profile.set action (best-effort like the rest).
+    client.call<Record<string, unknown>>('update.config', [], creds),
   ]);
 
   return buildTruenasState({
     sysInfo: sysInfoRes.status === 'fulfilled' ? sysInfoRes.value : undefined,
     pools: poolsRes.status === 'fulfilled' && Array.isArray(poolsRes.value) ? poolsRes.value : [],
     ifaces: ifacesRes.status === 'fulfilled' && Array.isArray(ifacesRes.value) ? ifacesRes.value : [],
+    updateConfig: updateConfigRes.status === 'fulfilled' ? updateConfigRes.value : undefined,
   });
 }, 'ix-truenas-plugin'));
 

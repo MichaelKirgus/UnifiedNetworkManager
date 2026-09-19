@@ -249,6 +249,396 @@ const systemFirmwareUpdateAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Configuration backup / restore — TrueNAS's own "Manage Configuration" feature
+// (System → Advanced in the Web UI), exposed as plan actions so UNM can take a
+// rollback point before risky changes and restore from one later. The file does
+// NOT travel over JSON-RPC: it goes through middlewared's HTTP FileApplication
+// endpoints on the same port as /api/current (verified against truenas/middleware
+// source — apps/file_app.py + api/v26_0_0/config.py):
+//   backup  = `config.save` job → mint single-use token for that job → GET
+//             /_download/{jobId}?auth_token=… → raw bytes
+//   restore = multipart POST /_upload — part 1 MUST be field "data" carrying
+//             {"method":"config.upload","params":[]}, part 2 MUST be file field
+//             "file" → {job_id}. Replaces the ENTIRE configuration database.
+// The Web UI reboots after a successful upload (it navigates to the restart
+// page) — we do the same via system.reboot so the restored config takes effect.
+
+/** Decodes a base64 file payload from plan input (same contract as the SwOS plugin's file actions). */
+function decodeFilePayload(input: Record<string, unknown>, maxBytes = 512 * 1024 * 1024): { data: Buffer; fileName: string } | { error: string } {
+  const b64 = input['fileBase64'];
+  if (typeof b64 !== 'string' || b64.length === 0) return { error: 'fileBase64 is required — the file content as base64' };
+  let data: Buffer;
+  try {
+    data = Buffer.from(b64, 'base64');
+  } catch (e) {
+    return { error: `Invalid base64 in fileBase64: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (data.length === 0) return { error: 'fileBase64 decoded to an empty file' };
+  if (data.length > maxBytes) return { error: `File is ${(data.length / 1024 / 1024).toFixed(1)} MB — exceeds the ${maxBytes / 1024 / 1024} MB limit` };
+  const fileName = typeof input['fileName'] === 'string' && (input['fileName'] as string).length > 0 ? (input['fileName'] as string) : 'config-backup';
+  return { data, fileName };
+}
+
+const configBackupDownloadAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'config.backup.download',
+  label: 'Download configuration backup',
+  description:
+    "Creates a full configuration backup on the appliance (TrueNAS `config.save` job — the same file the Web UI's System → Advanced → Manage Configuration downloads) and returns it base64-encoded in details. Read-only on the device; use as a rollback point before risky changes or to clone a config.",
+  module: 'System',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000, // config.save is an appliance job — large configs can take a while
+  inputSchema: {
+    secretseed: { type: 'boolean', required: false, default: false, description: "Include the system's secret seed in the backup" },
+    pool_keys: { type: 'boolean', required: false, default: false, description: 'Include ZFS pool encryption keys (needed to restore encrypted pools on another box)' },
+    root_authorized_keys: { type: 'boolean', required: false, default: false, description: "Include root's SSH authorized_keys in the backup" },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const options: Record<string, unknown> = {};
+    for (const k of ['secretseed', 'pool_keys', 'root_authorized_keys'] as const) {
+      if (input[k] === true) options[k] = true; // defaults are false — only send explicit trues
+    }
+
+    // 1. Start the config.save job over JSON-RPC.
+    let jobId: number | null = null;
+    try {
+      const r = await ctx.client.call<unknown>('config.save', [options], ctx.creds);
+      if (typeof r === 'number') jobId = r;
+      else if (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number') jobId = (r as Record<string, unknown>)['id'] as number;
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+    if (jobId === null) return { success: false, details: { error: 'config.save did not return a job id' } };
+
+    // 2. Wait for the job to settle — the download pipe only streams once it has output.
+    const wait = await waitForJob(ctx, jobId, 180_000);
+    if (wait.state === 'RUNNING') return { success: false, details: { jobId, error: `config.save job still running after ${Math.round(180_000 / 1000)}s` } };
+    if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') return { success: false, details: { jobId, error: wait.error ?? `Job ended in state ${wait.state}` } };
+
+    // 3. Mint a single-use download token bound to the job and fetch the file over HTTP.
+    let authToken: string;
+    try {
+      const t = await ctx.client.call<unknown>('auth.generate_token', [null, { job: jobId, filename: 'config-backup' }], ctx.creds);
+      if (typeof t !== 'string' || t.length === 0) throw new Error('auth.generate_token returned no token');
+      authToken = t;
+    } catch (e) {
+      return { success: false, details: { jobId, error: `Could not mint download token: ${e instanceof Error ? e.message : String(e)}` } };
+    }
+
+    let data: Buffer;
+    try {
+      data = await ctx.client.downloadJobFile(jobId, authToken);
+    } catch (e) {
+      return { success: false, details: { jobId, error: e instanceof Error ? e.message : String(e) } };
+    }
+    if (data.length === 0) return { success: false, details: { jobId, error: 'Appliance returned an empty backup file' } };
+
+    return {
+      success: true,
+      verified: true,
+      details: {
+        sizeBytes: data.length,
+        // Base64 so the binary survives JSON transport; the plan executor stores it in step results.
+        backupBase64: data.toString('base64'),
+        fileName: 'truenas-config-backup',
+        options,
+      },
+    };
+  },
+};
+
+const configRestoreAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'config.restore',
+  label: 'Restore configuration from backup file',
+  description:
+    "DANGEROUS — replaces the appliance's ENTIRE configuration database with the given backup file (TrueNAS `config.upload` via the /_upload multipart endpoint, exactly what the Web UI's Manage Configuration → Upload does). The box reboots into the restored configuration afterwards. Pair with config.backup.download as a rollback point. The file is passed as base64 in `fileBase64`. The appliance is unreachable while it reboots — verification is impossible by design.",
+  module: 'System',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000, // upload + config swap; the box then reboots on its own
+  inputSchema: {
+    fileBase64: { type: 'string', required: true, minLength: 8, description: 'The configuration backup file (as produced by config.backup.download or the Web UI) as base64' },
+    fileName: { type: 'string', required: false, maxLength: 200, description: 'Original file name (informational only)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const payload = decodeFilePayload(input);
+    if ('error' in payload) return { success: false, details: { error: payload.error } };
+
+    let jobId: number | null = null;
+    try {
+      // Primary path: HTTP Basic auth (username/password credentials). On
+      // OTP-enabled appliances the appliance rejects Basic — fall back to a
+      // minted single-use token in that case.
+      const r = await ctx.client.uploadFile(ctx.creds, 'config.upload', payload.data, payload.fileName);
+      if (typeof r['job_id'] === 'number') jobId = r['job_id'];
+    } catch (e) {
+      const basicRejected = ctx.creds.kind === 'password' && e instanceof TruenasRpcError && /HTTP 401|unauthorized/i.test(e.message);
+      if (!basicRejected) throw e;
+      let authToken: string;
+      try {
+        const t = await ctx.client.call<unknown>('auth.generate_token', [null, {}], ctx.creds);
+        if (typeof t !== 'string' || t.length === 0) throw new Error('no token');
+        authToken = t;
+      } catch (te) {
+        return { success: false, details: { error: `Basic auth rejected (${e instanceof Error ? e.message : String(e)}) and no fallback token could be minted: ${te instanceof Error ? te.message : String(te)}` } };
+      }
+      const r = await ctx.client.uploadFile(ctx.creds, 'config.upload', payload.data, payload.fileName, authToken);
+      if (typeof r['job_id'] === 'number') jobId = r['job_id'];
+    }
+    if (jobId === null) return { success: false, details: { error: 'config.upload did not return a job id' } };
+
+    // The upload job streams the file into config.upload's input pipe — wait for it to settle.
+    const wait = await waitForJob(ctx, jobId, 180_000);
+    if (wait.state === 'RUNNING') {
+      return { success: true, applied: true, details: { jobId, note: 'Restore job still in progress on the appliance — it will reboot into the restored configuration.' } };
+    }
+    if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') {
+      return { success: false, details: { jobId, error: wait.error ?? `Job ended in state ${wait.state}` } };
+    }
+
+    // The Web UI reboots after a successful upload — do the same so the restored
+    // configuration actually takes effect. Transport errors here are EXPECTED (the box goes down).
+    try {
+      await ctx.client.call<unknown>('system.reboot', ['Configuration restore from Unified Network Manager', {}], ctx.creds);
+    } catch (e) {
+      if (!(e instanceof TruenasRpcError && /timed out|closed|unresponsive/i.test(e.message))) throw e;
+    }
+
+    return {
+      success: true,
+      applied: true,
+      details: { jobId, fileName: payload.fileName, note: 'Configuration restored — the appliance is rebooting into it. Unreachable while down; verification is impossible by design.' },
+    };
+  },
+};
+
+const configResetAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'config.reset',
+  label: 'Factory-reset configuration',
+  description:
+    "DANGEROUS — resets the appliance's configuration to factory defaults (TrueNAS `config.reset` job) and reboots it. All settings, shares, users and app definitions are LOST; ZFS pool data is untouched but pools may need re-importing. Take a config.backup.download first if you want a rollback point.",
+  module: 'System',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    reboot: { type: 'boolean', required: false, default: true, description: 'Reboot after the reset (TrueNAS default)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const reboot = input['reboot'] !== false; // default true — matches TrueNAS's own default
+    try {
+      const result = await ctx.client.call<unknown>('config.reset', [{ reboot }], ctx.creds);
+      return { success: true, applied: true, details: describeJobResult(result) };
+    } catch (e) {
+      // The socket dies when the appliance reboots — EXPECTED.
+      if (e instanceof TruenasRpcError && /timed out|closed|unresponsive/i.test(e.message)) {
+        return { success: true, applied: true, details: { note: 'Reset initiated — connection lost as expected while the appliance rebooted.' } };
+      }
+      throw e;
+    }
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Update branch + firmware update from file — TrueNAS's "System → Update" page
+// as plan actions (verified against truenas/middleware plugins/update_/ and the
+// Web UI's manual-update-form.component.ts):
+//   branch  = the appliance's configured UPDATE PROFILE: `update.config` reads
+//             it, `update.update {profile}` changes it. Profiles are an ordered
+//             enum (profile_.py UpdateProfiles) DEVELOPER < EARLY_ADOPTER <
+//             GENERAL < MISSION_CRITICAL; which ones a box OFFERS is
+//             license/entitlement-gated → the live choice list comes from
+//             `update.profile_choices`. Changing it needs no reboot — it only
+//             changes which releases future updates target.
+//   file    = manual update: either `path` at an .update file already on the box
+//             (`update.manual {path}` job) or base64 content uploaded via /_upload
+//             running `update.file [{destination?}]` (same FileApplication endpoint
+//             as config.upload; destination = pool mountpoint, null → :temp:).
+// Both can fail with the appliance's RESUMABLE [EAGAIN] warning ("an upgrade can
+// be performed with a warning and that warning is accepted") — the Web UI shows
+// a confirm dialog and re-runs with {resume:true}; we accept it automatically.
+
+/** TrueNAS update profiles, weakest → strongest (profile_.py UpdateProfiles). */
+const UPDATE_PROFILES = ['DEVELOPER', 'EARLY_ADOPTER', 'GENERAL', 'MISSION_CRITICAL'] as const;
+
+/** Extracts a job id from an RPC result that may be a bare number or {id}. */
+function jobIdOf(result: unknown): number | null {
+  if (typeof result === 'number') return result;
+  if (result && typeof result === 'object' && typeof (result as Record<string, unknown>)['id'] === 'number') {
+    return (result as Record<string, unknown>)['id'] as number;
+  }
+  return null;
+}
+
+/**
+ * Starts an update job and waits for it to settle. When the job fails with the
+ * appliance's resumable [EAGAIN] warning ("an upgrade can be performed with a
+ * warning"), accepts it by re-running `resumeMethod` with `resumeParams` —
+ * exactly what the Web UI's confirm-and-continue dialog does (one resume only).
+ */
+async function runUpdateJobWithResume(
+  ctx: TruenasActionContext,
+  start: () => Promise<number | null>,
+  resumeMethod: string,
+  resumeParams: unknown[],
+  budgetMs: number,
+): Promise<{ jobId: number; state: string; error?: string }> {
+  let jobId = await start();
+  if (jobId === null) throw new Error('update job did not return a job id');
+  let wait = await waitForJob(ctx, jobId, budgetMs);
+  const resumable = (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') && /\[EAGAIN\]/.test(wait.error ?? '');
+  if (resumable) {
+    const r = await ctx.client.call<unknown>(resumeMethod, resumeParams, ctx.creds);
+    const jobId2 = jobIdOf(r);
+    if (jobId2 !== null) {
+      jobId = jobId2;
+      wait = await waitForJob(ctx, jobId, budgetMs);
+    }
+  }
+  return { jobId, state: wait.state, ...(wait.error ? { error: wait.error } : {}) };
+}
+
+const updateProfileReadAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'update.profile.read',
+  label: 'Read update branch (profile)',
+  description:
+    "Fetches the appliance's configured update profile/branch (`update.config`) plus the profiles it currently offers (`update.profile_choices` — availability is license-gated). Read-only.",
+  module: 'System',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  async execute(ctx: TruenasActionContext): Promise<ActionResult> {
+    const [cfgRes, choicesRes] = await Promise.allSettled([
+      ctx.client.call<Record<string, unknown>>('update.config', [], ctx.creds),
+      ctx.client.call<Record<string, Record<string, unknown>>>('update.profile_choices', [], ctx.creds),
+    ]);
+    if (cfgRes.status !== 'fulfilled') {
+      return { success: false, details: { error: cfgRes.reason instanceof Error ? cfgRes.reason.message : String(cfgRes.reason) } };
+    }
+    const profile = pickString(cfgRes.value, ['profile']);
+    const autocheck = typeof cfgRes.value['autocheck'] === 'boolean' ? (cfgRes.value['autocheck'] as boolean) : null;
+    let choices: Record<string, unknown>[] | undefined;
+    if (choicesRes.status === 'fulfilled' && choicesRes.value && typeof choicesRes.value === 'object') {
+      choices = Object.entries(choicesRes.value).map(([name, c]) => ({ name, ...(c as Record<string, unknown>) }));
+    }
+    return { success: true, details: { profile, autocheck, choices } };
+  },
+};
+
+const updateProfileSetAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'update.profile.set',
+  label: 'Change update branch (profile)',
+  description:
+    "Changes the appliance's configured update profile/branch via `update.update` — the same control as System → Update in the Web UI. Profiles are ordered DEVELOPER < EARLY_ADOPTER < GENERAL < MISSION_CRITICAL; only profiles the box currently offers are accepted (availability is license-gated — check update.profile.read first). No reboot: it changes which releases future updates target.",
+  module: 'System',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 30_000,
+  inputSchema: {
+    profile: { type: 'string', required: true, enum: [...UPDATE_PROFILES], description: "Target update branch (the box's current choice list comes from update.profile.read)" },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const raw = str(input, 'profile');
+    if (!raw) return { success: false, details: { error: 'profile is required' } };
+    const profile = UPDATE_PROFILES.find((p) => p.toLowerCase() === raw.toLowerCase());
+    if (!profile) return { success: false, details: { error: `Unknown profile "${raw}" — expected one of ${UPDATE_PROFILES.join(', ')}` } };
+    try {
+      // update.update takes a PARTIAL object — only the fields we change.
+      const updated = await ctx.client.call<Record<string, unknown>>('update.update', [{ profile }], ctx.creds);
+      return { success: true, applied: true, details: { profile: pickString(updated, ['profile']) ?? profile, note: 'Update branch changed — future updates now target this track. No reboot required.' } };
+    } catch (e) {
+      // The appliance rejects profiles it does not offer ("Invalid profile." /
+      // "This profile is unavailable.") — surface verbatim with a hint.
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e), hint: 'Check update.profile.read for the branches this box currently offers (availability is license-gated).' } };
+    }
+  },
+};
+
+const firmwareUpdateFileAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'system.firmware.update-file',
+  label: 'Update firmware from file',
+  description:
+    "DANGEROUS — installs a TrueNAS update from an explicit FILE instead of the appliance's update feed (the Web UI's System → Update manual-update flow). Either point `path` at an .update file already on the box (`update.manual {path}` job) or pass the content as base64 in `fileBase64` — it is uploaded via /_upload running `update.file`, staged in `destination` (a pool mountpoint like /mnt/tank; omit for :temp:). The appliance reboots into the new boot environment when done. A resumable [EAGAIN] warning is accepted automatically (one resume), mirroring the Web UI's confirm dialog.",
+  module: 'System',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 7_200_000, // multi-GB update files + install can exceed an hour on slow links
+  inputSchema: {
+    path: { type: 'string', required: false, minLength: 2, description: "Absolute path of an .update file ALREADY on the appliance (e.g. /mnt/tank/TrueNAS-25.10.1.update); omit when passing fileBase64" },
+    destination: { type: 'string', required: false, maxLength: 200, description: "Pool mountpoint to stage the uploaded file in (e.g. /mnt/tank); omit for :temp: — only used with fileBase64" },
+    fileBase64: { type: 'string', required: false, minLength: 8, description: "The .update file content as base64 (uploaded via the appliance's /_upload endpoint)" },
+    fileName: { type: 'string', required: false, maxLength: 200, description: "Original file name (e.g. TrueNAS-25.10.1.update) — used for the upload; defaults to update-file" },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const path = str(input, 'path');
+    const b64 = typeof input['fileBase64'] === 'string' && (input['fileBase64'] as string).length > 0 ? (input['fileBase64'] as string) : undefined;
+    if (!path && !b64) return { success: false, details: { error: 'Either path (a file already on the appliance) or fileBase64 (uploaded content) is required' } };
+
+    // Idempotency guard — already at/above the target version named in the file
+    // ("TrueNAS-25.10.1.update" → 25.10.1). Best-effort only.
+    let current: string | undefined;
+    try {
+      const si = await ctx.client.call<Record<string, unknown>>('system.info', [], ctx.creds);
+      current = pickString(si, ['version'])?.replace(/^(scale|core)\s+/i, '').trim();
+    } catch { /* best-effort guard */ }
+    if (current) {
+      const name = str(input, 'fileName') ?? path?.split('/').pop() ?? '';
+      const m = name.match(/(\d+\.\d+(?:\.\d+)?)/);
+      if (m && compareVersions(current, m[1]) >= 0) {
+        return { success: true, applied: false, verified: true, details: { note: `Already on ${current} — the file targets ${m[1]} (or older), nothing to do.` } };
+      }
+    }
+
+    try {
+      if (path) {
+        // File already lives on the appliance → update.manual job.
+        const r = await runUpdateJobWithResume(ctx, async () => jobIdOf(await ctx.client.call<unknown>('update.manual', [{ path }])), 'update.manual', [{ path, resume: true }], 3_600_000);
+        if (r.state === 'RUNNING') return { success: true, applied: true, details: { jobId: r.jobId, note: 'Update job still in progress on the appliance — it will reboot into the new boot environment.' } };
+        if (r.state !== 'SUCCESS' && r.state !== 'FINISHED') return { success: false, details: { jobId: r.jobId, error: r.error ?? `Job ended in state ${r.state}` } };
+        return { success: true, applied: true, details: describeJobResult(r.jobId) };
+      }
+
+      // Content passed as base64 → upload via /_upload running update.file.
+      const payload = decodeFilePayload(input);
+      if ('error' in payload) return { success: false, details: { error: payload.error } };
+      const destination = str(input, 'destination');
+      const fileParams = [{ ...(destination ? { destination } : {}) }];
+      const startUpload = async (): Promise<number | null> => {
+        try {
+          const r = await ctx.client.uploadFile(ctx.creds, 'update.file', payload.data, payload.fileName || 'update-file', undefined, fileParams);
+          return typeof r['job_id'] === 'number' ? (r['job_id'] as number) : null;
+        } catch (e) {
+          const basicRejected = ctx.creds.kind === 'password' && e instanceof TruenasRpcError && /HTTP 401|unauthorized/i.test(e.message);
+          if (!basicRejected) throw e;
+          // OTP-enabled appliance rejects Basic → mint a single-use token and retry.
+          let authToken: string;
+          try {
+            const t = await ctx.client.call<unknown>('auth.generate_token', [null, {}], ctx.creds);
+            if (typeof t !== 'string' || t.length === 0) throw new Error('no token');
+            authToken = t;
+          } catch (te) {
+            throw new TruenasRpcError(`Basic auth rejected (${e instanceof Error ? e.message : String(e)}) and no fallback token could be minted: ${te instanceof Error ? te.message : String(te)}`);
+          }
+          const r = await ctx.client.uploadFile(ctx.creds, 'update.file', payload.data, payload.fileName || 'update-file', authToken, fileParams);
+          return typeof r['job_id'] === 'number' ? (r['job_id'] as number) : null;
+        }
+      };
+
+      const r = await runUpdateJobWithResume(ctx, startUpload, 'update.file', [{ resume: true }], 3_600_000);
+      if (r.state === 'RUNNING') return { success: true, applied: true, details: { jobId: r.jobId, note: 'Update job still in progress on the appliance — it will reboot into the new boot environment.' } };
+      if (r.state !== 'SUCCESS' && r.state !== 'FINISHED') return { success: false, details: { jobId: r.jobId, error: r.error ?? `Job ended in state ${r.state}` } };
+      return { success: true, applied: true, details: { jobId: r.jobId, fileName: payload.fileName, note: 'Update installed — the appliance is rebooting into the new boot environment. Unreachable while down; verification is impossible by design.' } };
+    } catch (e) {
+      // The socket dies when the appliance reboots into the new BE — EXPECTED.
+      if (e instanceof TruenasRpcError && /timed out|closed|unresponsive/i.test(e.message)) {
+        return { success: true, applied: true, details: { note: 'Update initiated — connection lost as expected while the appliance rebooted.' } };
+      }
+      throw e;
+    }
+  },
+};
+
 /**
  * Dismiss active alerts on the appliance (TrueNAS `alert.dismiss` RPC). The API
  * calls this when a user closes TrueNAS alert notifications in UNM so the
@@ -2787,6 +3177,12 @@ export const registry = createRegistry<TruenasActionContext>([
   systemTimezoneSetAction,
   systemShutdownAction,
   systemFirmwareUpdateAction,
+  configBackupDownloadAction,
+  configRestoreAction,
+  configResetAction,
+  updateProfileReadAction,
+  updateProfileSetAction,
+  firmwareUpdateFileAction,
   alertsDismissAction,
   alertsUndismissAction,
   containersStopAction,

@@ -7,8 +7,12 @@
  *   - GET  /discover    → capabilities include configuration+planning+deviceState; catalog present
  *   - POST /monitoring  → system/pools/networks/ports metrics collected from the mock
  *   - POST /state       → Pools + Interfaces + System sections with power actions
- *   - POST /config      → read action executes; system.reboot returns a job id; unknown → success:false
- *   - POST /plan        → single-device fan-out yields one step per device
+ *   - POST /config      → read action executes; system.reboot returns a job id;
+ *                         config.backup.download fetches the mock file over HTTP
+ *                         (/_download + token); config.restore posts multipart to
+ *                         /_upload and reboots; unknown → success:false
+ *   - POST /plan        → single-device fan-out yields one step per device, with a
+ *                         best-effort config.backup.download rollback prepended
  */
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -26,9 +30,81 @@ function check(label: string, cond: boolean, extra?: unknown): void {
   }
 }
 
-// --- Mock TrueNAS appliance (WebSocket JSON-RPC at /api/current) ----------------------
+// --- Mock TrueNAS appliance (WebSocket JSON-RPC at /api/current + HTTP file endpoints) -
 
-const httpServer = http.createServer((_req, res) => {
+/** The "configuration backup" bytes the mock's config.save job produces. */
+const MOCK_BACKUP_BYTES = Buffer.from('MOCK-TRUE-NAS-CONFIG-BACKUP-DATA-v1');
+
+/** Jobs started by config.save (eligible for /_download). */
+const downloadableJobs = new Set<number>();/** The mock's configured update profile — mutated by the update.update RPC. */
+let mockUpdateProfile = 'GENERAL';
+/** True once the mock saw an update.manual call with resume:true (EAGAIN path). */
+let manualResumeCalled = false;/** Captured /_upload requests — asserted after the restore action runs. */
+interface CapturedUpload { auth: string; method?: string; params?: unknown[]; fileName?: string; data: Buffer }
+const capturedUploads: CapturedUpload[] = [];
+
+/** Minimal multipart/form-data parser (boundary-delimited parts → fields + files). */
+function parseMultipart(body: Buffer, contentType: string): { fields: Record<string, string>; files: { name: string; filename?: string; data: Buffer }[] } {
+  const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType ?? '');
+  const boundary = `--${(m?.[1] ?? m?.[2] ?? '').trim()}`;
+  const fields: Record<string, string> = {};
+  const files: { name: string; filename?: string; data: Buffer }[] = [];
+  for (const raw of body.toString('binary').split(boundary)) {
+    if (!raw || raw.startsWith('--')) continue;
+    const sepIdx = raw.indexOf('\r\n\r\n');
+    if (sepIdx < 0) continue;
+    const headers = raw.slice(0, sepIdx);
+    let content = Buffer.from(raw.slice(sepIdx + 4), 'binary');
+    if (content.length >= 2 && content[content.length - 1] === 0x0a && content[content.length - 2] === 0x0d) {
+      content = content.subarray(0, content.length - 2); // strip trailing CRLF before next boundary
+    }
+    const nameM = /name="([^"]*)"/i.exec(headers);
+    const fileM = /filename="([^"]*)"/i.exec(headers);
+    if (fileM) files.push({ name: nameM?.[1] ?? '', filename: fileM[1], data: content });
+    else fields[nameM?.[1] ?? ''] = content.toString('utf8');
+  }
+  return { fields, files };
+}
+
+const httpServer = http.createServer((req, res) => {
+  const url = req.url ?? '';
+  // GET /_download/{jobId}?auth_token=… — single-use token must be bound to the job.
+  const dlM = /^\/_download\/(\d+)$/.exec(url.split('?')[0]);
+  if (req.method === 'GET' && dlM) {
+    const jobId = Number(dlM[1]);
+    const qs = new URLSearchParams(url.split('?')[1] ?? '');
+    const token = qs.get('auth_token') ?? '';
+    if (!downloadableJobs.has(jobId)) { res.writeHead(404); return res.end('unknown job'); }
+    if (token !== `mock-token-${jobId}`) { res.writeHead(401); return res.end('bad or expired token'); }
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': 'attachment; filename="config-backup"' });
+    return res.end(MOCK_BACKUP_BYTES);
+  }
+  // POST /_upload — multipart: part 1 MUST be field "data" (JSON method/params),
+  // part 2 MUST be file field "file". Auth = Basic (password creds) or Token.
+  if (req.method === 'POST' && url.split('?')[0] === '/_upload') {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks);
+      const auth = req.headers['authorization'] ?? '';
+      if (!auth.startsWith('Basic ') && !auth.startsWith('Token ')) { res.writeHead(401, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'unauthorized' })); }
+      const { fields, files } = parseMultipart(body, String(req.headers['content-type'] ?? ''));
+      let method: string | undefined;
+      let params: unknown[] | undefined;
+      try {
+        const data = JSON.parse(fields['data'] ?? '{}') as { method?: string; params?: unknown[] };
+        method = data.method;
+        params = data.params;
+      } catch { /* malformed data part */ }
+      capturedUploads.push({ auth, method, params, fileName: files[0]?.filename, data: files[0]?.data ?? Buffer.alloc(0) });
+      if (files.length !== 1 || files[0].name !== 'file') { res.writeHead(422, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: `bad upload shape method=${method} files=${files.length}` })); }
+      // config.upload → job 91; update.file (manual firmware from uploaded file) → job 94.
+      const jobId = method === 'update.file' ? 94 : 91;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ job_id: jobId }));
+    });
+    return;
+  }
   res.writeHead(404);
   res.end();
 });
@@ -201,10 +277,20 @@ wss.on('connection', (ws: WebSocket) => {
         return reply(88); // job id
       case 'core.get_jobs':
         if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
-        // Both jobs already settled — waitForJob returns immediately.
+        // All jobs already settled — waitForJob returns immediately. 90 = config.save,
+        // 91 = config.upload (from /_upload), 92 = config.reset, 93 = update.manual
+        // FIRST attempt (FAILED with the resumable [EAGAIN] warning), 94 = update.file
+        // (from /_upload), 95/96 = resume re-runs.
         return reply([
           { id: 77, state: 'SUCCESS', error: null },
           { id: 88, state: 'SUCCESS', error: null },
+          { id: 90, state: 'SUCCESS', error: null },
+          { id: 91, state: 'SUCCESS', error: null },
+          { id: 92, state: 'SUCCESS', error: null },
+          { id: 93, state: 'FAILED', error: '[EAGAIN] an upgrade can be performed with a warning and that warning is accepted.' },
+          { id: 94, state: 'SUCCESS', error: null },
+          { id: 95, state: 'SUCCESS', error: null },
+          { id: 96, state: 'SUCCESS', error: null },
         ]);
       case 'system.reboot':
         if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
@@ -212,6 +298,52 @@ wss.on('connection', (ws: WebSocket) => {
       case 'system.shutdown':
         if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
         return reply(43);
+      // --- Configuration backup/restore (config.save job + token → /_download; config.reset) ---
+      case 'config.save':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        downloadableJobs.add(90); // job settles immediately (see core.get_jobs below)
+        return reply(90); // job id — file fetchable via /_download/90?auth_token=…
+      case 'config.reset':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        return reply(92); // job id — the appliance will reboot into factory defaults
+      case 'auth.generate_token':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        const attrs = (msg.params?.[1] ?? {}) as Record<string, unknown>;
+        // A job-bound token is only valid for THAT job's /_download.
+        if (typeof attrs['job'] === 'number') downloadableJobs.add(attrs['job']);
+        return reply(`mock-token-${attrs['job'] ?? 'generic'}`);
+      // --- Update branch + manual firmware update ---------------------------------
+      case 'update.config':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        return reply({ id: 1, autocheck: true, profile: mockUpdateProfile });
+      case 'update.profile_choices':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // Availability is license-gated on real boxes — the mock offers all four.
+        return reply({
+          DEVELOPER: { name: 'Developer', description: 'dev builds', available: true },
+          EARLY_ADOPTER: { name: 'Early Adopter', description: 'pre-release', available: true },
+          GENERAL: { name: 'General', description: 'stable (Default)', available: true },
+          MISSION_CRITICAL: { name: 'Mission Critical', description: '24x7 HA track', available: false },
+        });
+      case 'update.update':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        const upd = (msg.params?.[0] ?? {}) as Record<string, unknown>;
+        if (typeof upd['profile'] === 'string') mockUpdateProfile = upd['profile'];
+        return reply({ id: 1, autocheck: true, profile: mockUpdateProfile });
+      case 'update.manual':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // First attempt FAILS with the appliance's resumable [EAGAIN] warning;
+        // the resume:true re-run (job 95) succeeds — mirrors the Web UI flow.
+        const mParams = (msg.params?.[0] ?? {}) as Record<string, unknown>;
+        if (mParams['resume'] === true) { manualResumeCalled = true; return reply(95); }
+        return reply(93);
+      case 'update.file':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // Only reachable via the /_upload multipart path (job 94); a direct RPC
+        // call with resume:true is what the EAGAIN retry would use.
+        const fParams = (msg.params?.[0] ?? {}) as Record<string, unknown>;
+        if (fParams['resume'] === true) return reply(96);
+        return reply(94);
       // --- Shares-page methods (SMB/NFS exports + live client sessions) -------
       case 'sharing.smb.query':
         if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
@@ -291,8 +423,10 @@ async function main(): Promise<void> {
   const caps = (disc.capabilities ?? []) as string[];
   check('capabilities include configuration+planning+deviceState', ['configuration', 'planning', 'deviceState'].every((c) => caps.includes(c)), caps);
   const actions = (disc.actions ?? []) as { id: string; riskLevel: string }[];
-  check('action catalog has all expected actions', ['containers.stop','containers.start','containers.restart','containers.upgrade','containers.delete','images.delete','images.update','compose.config.read','containers.update','alerts.dismiss','alerts.undismiss','system.firmware.update','shares.smb.create','shares.smb.update','shares.smb.delete','shares.nfs.create','shares.nfs.update','shares.nfs.delete','shares.iscsi.create','shares.iscsi.delete','shares.nvmeof.create','shares.nvmeof.delete'].every((id) => actions.some((a) => a.id === id)), `count=${actions.length}`);
-  check('dangerous destructive/power actions marked', actions.filter((a) => a.riskLevel === 'dangerous').map((a) => a.id).sort().join(',') === ['containers.delete','images.delete','system.reboot','system.shutdown','system.firmware.update','vms.delete','storage.delete','shares.smb.delete','shares.nfs.delete','shares.iscsi.delete','shares.nvmeof.delete'].sort().join(','));
+  check('action catalog has all expected actions', ['containers.stop','containers.start','containers.restart','containers.upgrade','containers.delete','images.delete','images.update','compose.config.read','containers.update','alerts.dismiss','alerts.undismiss','system.firmware.update','system.firmware.update-file','config.backup.download','config.restore','config.reset','update.profile.read','update.profile.set','shares.smb.create','shares.smb.update','shares.smb.delete','shares.nfs.create','shares.nfs.update','shares.nfs.delete','shares.iscsi.create','shares.iscsi.delete','shares.nvmeof.create','shares.nvmeof.delete'].every((id) => actions.some((a) => a.id === id)), `count=${actions.length}`);
+  check('dangerous destructive/power actions marked', actions.filter((a) => a.riskLevel === 'dangerous').map((a) => a.id).sort().join(',') === ['containers.delete','images.delete','system.reboot','system.shutdown','system.firmware.update','system.firmware.update-file','vms.delete','storage.delete','shares.smb.delete','shares.nfs.delete','shares.iscsi.delete','shares.nvmeof.delete','config.restore','config.reset'].sort().join(','));
+  check('config.backup.download is a READ action (non-destructive)', actions.find((a) => a.id === 'config.backup.download')?.riskLevel === 'read', actions.find((a) => a.id === 'config.backup.download'));
+  check('update.profile.read is read / update.profile.set is write', actions.find((a) => a.id === 'update.profile.read')?.riskLevel === 'read' && actions.find((a) => a.id === 'update.profile.set')?.riskLevel === 'write');
   check('updates capability advertised', caps.includes('updates'), caps);
 
   // --- /monitoring ---------------------------------------------------------------------
@@ -320,7 +454,8 @@ async function main(): Promise<void> {
   // system.info reports "SCALE 25.04.2" — the row must carry the BARE version.
   check('firmware row: SCALE prefix stripped + versions compared', !!fwRow && fwRow.name === 'os' && fwRow.currentVersion === '25.04.2' && fwRow.latestVersion === '25.10.1' && fwRow.available === true && fwRow.rebootRequired === true, fwRow);
   check('firmware row: apply points at system.firmware.update with target version', !!fwRow && fwRow.applyActionId === 'system.firmware.update' && (fwRow.applyInput as Record<string, unknown>)?.version === '25.10.1', fwRow?.applyInput);
-  check('firmware row: manifest extras carried (train/profile/size/release notes)', !!fwRow && (fwRow.extra as Record<string, unknown>)?.train === 'TrueNAS-SCALE' && (fwRow.extra as Record<string, unknown>)?.profile === 'GENERAL' && fwRow.sizeBytes === 2_230_534_144 && typeof (fwRow.extra as Record<string, unknown>)?.releaseNotesUrl === 'string', fwRow);
+  check('firmware row: branch carries the configured update profile', !!fwRow && fwRow.branch === 'GENERAL', fwRow);
+  check('firmware row: manifest extras carried (train/profile/size/release notes)', !!fwRow && (fwRow.extra as Record<string, unknown>)?.train === 'TrueNAS-SCALE' && (fwRow.extra as Record<string, unknown>)?.profile === 'GENERAL' && fwRow.sizeBytes === 2_230_534_144 && typeof fwRow.releaseNotesUrl === 'string', fwRow);
   const appUpd = updateRows.find((r) => r.kind === 'app');
   check('app row: only the upgradable app is listed', !!appUpd && appUpd.name === 'zabbix' && appUpd.currentVersion === '7.0.1' && appUpd.applyActionId === 'containers.upgrade' && JSON.stringify(appUpd.applyInput) === JSON.stringify({ names: ['zabbix'] }), appUpd);
   const imgUpd = updateRows.find((r) => r.kind === 'docker-image');
@@ -396,7 +531,8 @@ async function main(): Promise<void> {
     ifLayoutKeys
   );
   const sysSection = (stateJson.sections ?? []).find((s) => s.id === 'system');
-  check('system item advertises reboot + shutdown', !!sysSection?.items?.[0]?.actions && ['system.reboot', 'system.shutdown'].every((id) => sysSection.items![0].actions!.some((a) => a.actionId === id)), sysSection?.items?.[0]?.actions);
+  check('system item advertises backup + restore + branch actions + power', !!sysSection?.items?.[0]?.actions && ['config.backup.download', 'config.restore', 'update.profile.read', 'update.profile.set', 'system.firmware.update-file', 'system.reboot', 'system.shutdown'].every((id) => sysSection.items![0].actions!.some((a) => a.actionId === id)), sysSection?.items?.[0]?.actions);
+  check('system item shows the configured update branch', (sysSection?.items?.[0]?.fields as Record<string, unknown>)?.Branch === 'GENERAL', sysSection?.items?.[0]?.fields);
 
   // --- /config (read action) -----------------------------------------------------------
   const cfgRead = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'pools.read', input: {} });
@@ -427,6 +563,76 @@ async function main(): Promise<void> {
   console.log('\n== /config images.update ==');
   check('success true with pulled=1', cfgImg.status === 200 && cfgImgJson.success === true && ((cfgImgJson.result?.details as Record<string, unknown>)?.pulled === 1), cfgImgJson);
 
+  // --- /config (config.backup.download → job + token + HTTP file fetch) ------------------
+  const cfgBackup = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'config.backup.download', input: {} });
+  const cfgBackupJson = (await cfgBackup.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config config.backup.download ==');
+  check('success true with backup bytes base64-encoded', cfgBackup.status === 200 && cfgBackupJson.success === true && ((cfgBackupJson.result?.details as Record<string, unknown>)?.backupBase64 ?? '').toString() === MOCK_BACKUP_BYTES.toString('base64'), { size: (cfgBackupJson.result?.details as Record<string, unknown>)?.sizeBytes });
+  check('backup details carry size + file name', ((cfgBackupJson.result?.details as Record<string, unknown>)?.sizeBytes) === MOCK_BACKUP_BYTES.length && ((cfgBackupJson.result?.details as Record<string, unknown>)?.fileName) === 'truenas-config-backup', cfgBackupJson.result?.details);
+
+  // --- /config (config.restore → multipart /_upload + reboot) ----------------------------
+  const restoreB64 = MOCK_BACKUP_BYTES.toString('base64');
+  const cfgRestore = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'config.restore', input: { fileBase64: restoreB64, fileName: 'backup-2026.db' } });
+  const cfgRestoreJson = (await cfgRestore.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config config.restore ==');
+  check('success true with upload job id', cfgRestore.status === 200 && cfgRestoreJson.success === true && ((cfgRestoreJson.result?.details as Record<string, unknown>)?.jobId) === 91, cfgRestoreJson);
+  const up = capturedUploads[0];
+  check('/_upload received multipart with data part FIRST (method config.upload)', !!up && up.method === 'config.upload' && JSON.stringify(up.params ?? []) === '[]', { method: up?.method });
+  check('/_upload file part carries exact bytes + original name', !!up && up.fileName === 'backup-2026.db' && up.data.equals(MOCK_BACKUP_BYTES), { fileName: up?.fileName, len: up?.data.length });
+  check('/_upload authenticated with HTTP Basic (username/password creds)', !!up && up.auth.startsWith('Basic ') && Buffer.from(up.auth.slice(6), 'base64').toString() === 'root:truenas', up?.auth);
+
+  // --- /config (config.restore missing file → schema validation) --------------------------
+  const cfgRestoreBad = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'config.restore', input: {} });
+  const cfgRestoreBadJson = (await cfgRestoreBad.json()) as { success?: boolean; result?: Record<string, unknown> };
+  check('restore without fileBase64 rejected by schema validation', cfgRestoreBad.status === 200 && cfgRestoreBadJson.success === false && /fileBase64/.test(String(cfgRestoreBadJson.result?.error)), cfgRestoreBadJson);
+
+  // --- /config (config.reset → job id) ----------------------------------------------------
+  const cfgReset = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'config.reset', input: {} });
+  const cfgResetJson = (await cfgReset.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config config.reset ==');
+  check('success true with job id', cfgReset.status === 200 && cfgResetJson.success === true && ((cfgResetJson.result?.details as Record<string, unknown>)?.jobId) === 92, cfgResetJson);
+
+  // --- /config (update.profile.read → profile + choices) -------------------------------
+  const cfgProfileRead = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'update.profile.read', input: {} });
+  const cfgProfileReadJson = (await cfgProfileRead.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config update.profile.read ==');
+  check('success true with profile + choice list', cfgProfileRead.status === 200 && cfgProfileReadJson.success === true && ((cfgProfileReadJson.result?.details as Record<string, unknown>)?.profile) === 'GENERAL' && Array.isArray((cfgProfileReadJson.result?.details as Record<string, unknown>)?.choices), cfgProfileReadJson);
+
+  // --- /config (update.profile.set → branch change, verified by re-read) ----------------
+  const cfgProfileSet = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'update.profile.set', input: { profile: 'EARLY_ADOPTER' } });
+  const cfgProfileSetJson = (await cfgProfileSet.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config update.profile.set ==');
+  check('success true with new profile', cfgProfileSet.status === 200 && cfgProfileSetJson.success === true && ((cfgProfileSetJson.result?.details as Record<string, unknown>)?.profile) === 'EARLY_ADOPTER', cfgProfileSetJson);
+  const cfgProfileRead2 = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'update.profile.read', input: {} });
+  const cfgProfileRead2Json = (await cfgProfileRead2.json()) as { success?: boolean; result?: Record<string, unknown> };
+  check('re-read confirms the branch change persisted on the appliance', ((cfgProfileRead2Json.result?.details as Record<string, unknown>)?.profile) === 'EARLY_ADOPTER', cfgProfileRead2Json);
+  const cfgProfileBad = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'update.profile.set', input: { profile: 'NIGHTLY' } });
+  const cfgProfileBadJson = (await cfgProfileBad.json()) as { success?: boolean; result?: Record<string, unknown> };
+  // The SDK's enum validation rejects it before execute() runs — the error
+  // lists the valid profiles, which is the hint we want surfaced.
+  check('unknown profile rejected with a hint', cfgProfileBad.status === 200 && cfgProfileBadJson.success === false && /must be one of/.test(String(cfgProfileBadJson.result?.error)) && /DEVELOPER/.test(String(cfgProfileBadJson.result?.error)), cfgProfileBadJson);
+
+  // --- /config (system.firmware.update-file via path → [EAGAIN] resume) -----------------
+  const cfgFwFile = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'system.firmware.update-file', input: { path: '/mnt/tank/TrueNAS-25.10.1.update' } });
+  const cfgFwFileJson = (await cfgFwFile.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config system.firmware.update-file (path) ==');
+  check('success true — [EAGAIN] warning accepted via resume re-run', cfgFwFile.status === 200 && cfgFwFileJson.success === true && ((cfgFwFileJson.result?.details as Record<string, unknown>)?.jobId) === 95, cfgFwFileJson);
+  check('resume:true was actually issued to update.manual', manualResumeCalled === true);
+
+  // --- /config (system.firmware.update-file via base64 → /_upload update.file) -----------
+  const updateB64 = Buffer.from('MOCK-UPDATE-FILE-BYTES').toString('base64');
+  const cfgFwUpload = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'system.firmware.update-file', input: { fileBase64: updateB64, fileName: 'TrueNAS-25.10.1.update', destination: '/mnt/tank' } });
+  const cfgFwUploadJson = (await cfgFwUpload.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config system.firmware.update-file (upload) ==');
+  check('success true with upload job id', cfgFwUpload.status === 200 && cfgFwUploadJson.success === true && ((cfgFwUploadJson.result?.details as Record<string, unknown>)?.jobId) === 94, cfgFwUploadJson);
+  const fwUp = capturedUploads.find((u) => u.method === 'update.file');
+  check('/_upload ran update.file with destination param + exact bytes', !!fwUp && JSON.stringify(fwUp.params ?? []) === '[{"destination":"/mnt/tank"}]' && fwUp.fileName === 'TrueNAS-25.10.1.update' && fwUp.data.equals(Buffer.from('MOCK-UPDATE-FILE-BYTES')), { params: fwUp?.params, fileName: fwUp?.fileName });
+  const cfgFwNoInput = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'system.firmware.update-file', input: {} });
+  const cfgFwNoInputJson = (await cfgFwNoInput.json()) as { success?: boolean; result?: Record<string, unknown> };
+  // Both inputs are optional in the schema, so this reaches execute() and
+  // fails with details.error (not a top-level validation error).
+  check('update-file without path or fileBase64 rejected', cfgFwNoInput.status === 200 && cfgFwNoInputJson.success === false && /path|fileBase64/.test(JSON.stringify(cfgFwNoInputJson.result ?? {})), cfgFwNoInputJson);
+
   // --- /config (validation + unknown action) -------------------------------------------
   const badInput = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'system.reboot', input: {} });
   const badInputJson = (await badInput.json()) as { success?: boolean; result?: Record<string, unknown> };
@@ -445,12 +651,17 @@ async function main(): Promise<void> {
       { deviceId: 'devB', managementAddress: ADDR, credentials: creds },
     ],
   });
-  const planJson = (await planRes.json()) as { plan?: { provisionRequests: unknown[]; steps: { stepIndex: number; deviceId: string; actionId: string; input: Record<string, unknown> }[] } };
+  const planJson = (await planRes.json()) as { plan?: { provisionRequests: unknown[]; steps: { stepIndex: number; deviceId: string; actionId: string; input: Record<string, unknown>; bestEffort?: boolean }[] } };
   console.log('\n== /plan system.reboot ==');
   check('HTTP 200', planRes.status === 200);
   const plan = planJson.plan!;
   check('no provision requests (TrueNAS needs no secrets)', Array.isArray(plan.provisionRequests) && plan.provisionRequests.length === 0);
-  check('fan-out yields one step per device', plan.steps.length === 2 && plan.steps.every((s) => s.actionId === 'system.reboot' && s.input.reason === 'smoke test reboot'), plan.steps);
+  // Dirty plans get a best-effort config backup prepended per device (rollback point).
+  check('plan has 2 rollback backups + 2 reboot steps', plan.steps.length === 4, plan.steps.map((s) => `${s.stepIndex}:${s.deviceId}:${s.actionId}`));
+  const reboots = plan.steps.filter((s) => s.actionId === 'system.reboot');
+  check('fan-out yields one reboot step per device', reboots.length === 2 && reboots.every((s) => s.input.reason === 'smoke test reboot'), reboots);
+  const backups = plan.steps.filter((s) => s.actionId === 'config.backup.download');
+  check('rollback steps are best-effort config backups (one per device)', backups.length === 2 && backups.every((s) => s.bestEffort === true), backups);
 
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);

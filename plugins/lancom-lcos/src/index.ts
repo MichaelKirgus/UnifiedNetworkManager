@@ -371,7 +371,11 @@ app.post('/monitoring', async (req, res) => {
     // 16.07.2026") vs the newest known LCOS line — major.minor comparison, so
     // build suffixes + dates never matter. Available-without-apply.
     if (sys.swVersion) {
-      const fwRow = catalogFirmwareRow(sys.swVersion, KNOWN_LCOS_LINES);
+      // Release notes: LANCOM's FTP release-notes folder for the target line
+      // (RN_LCOS-<line>-*.pdf).
+      const fwRow = catalogFirmwareRow(sys.swVersion, KNOWN_LCOS_LINES, {
+        releaseNotesUrl: (target) => `https://ftp.lancom.de/Documentation/Release-Notes/LCOS/${String(target).replace(/\./g, '')}/`,
+      });
       if (fwRow) metrics['updates'] = [fwRow];
     }
     metrics['system.modelNumber'] = sys.modelNumber || null;

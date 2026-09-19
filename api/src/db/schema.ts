@@ -1272,6 +1272,14 @@ export const deviceUpdates = pgTable(
     latestVersion: text('latestVersion'),
     rebootRequired: boolean('rebootRequired'),
     sizeBytes: doublePrecision('sizeBytes'),
+    // Vendor release-notes URL for this update (changelog page, docs anchor).
+    releaseNotesUrl: text('releaseNotesUrl'),
+    // Release-notes TEXT propagated from the device's own update feed
+    // (e.g. TrueNAS `update.available_versions`) — rendered inline in the UI.
+    releaseNotes: text('releaseNotes'),
+    // The device's current update branch/channel (TrueNAS profile, distro line,
+    // vendor firmware track) — shown in the Updates page Branch column.
+    branch: text('branch'),
     // Catalog action id (of THIS plugin) that applies this row — the webapp's
     // Update button fires it through the plan workflow. NULL = no apply path.
     applyActionId: text('applyActionId'),

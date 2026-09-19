@@ -169,6 +169,14 @@ export class SwosAuthError extends Error {
   }
 }
 
+/** One part of a multipart/form-data upload (firmware .bin files). */
+export interface SwosMultipartPart {
+  name: string;
+  filename: string;
+  contentType: string;
+  data: Buffer;
+}
+
 interface DigestChallenge {
   realm: string;
   nonce: string;
@@ -293,6 +301,27 @@ export class SwosClient {
     return res.body.toString('utf8').trim();
   }
 
+  /**
+   * POSTs a multipart/form-data body (Digest-authenticated like every other
+   * request). Used for firmware uploads — the switch's own web UI posts the
+   * .bin file to /upgrade as field "blob" (verified from the live engine.js:
+   * `n=new FormData; n.append("blob", t); s.open("POST","/upgrade")`).
+   */
+  async postMultipart(endpoint: string, parts: SwosMultipartPart[]): Promise<string> {
+    const boundary = `----unm${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
+    const chunks: Buffer[] = [];
+    for (const p of parts) {
+      chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${p.name}"; filename="${p.filename}"\r\nContent-Type: ${p.contentType}\r\n\r\n`));
+      chunks.push(p.data);
+      chunks.push(Buffer.from('\r\n'));
+    }
+    chunks.push(Buffer.from(`--${boundary}--\r\n`));
+    const body = Buffer.concat(chunks);
+    const res = await this.rawRequest('POST', `/${endpoint}`, body, `multipart/form-data; boundary=${boundary}`);
+    if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status} from multipart POST ${endpoint}`);
+    return res.body.toString('utf8').trim();
+  }
+
   // --- internals -----------------------------------------------------------------
 
   /**
@@ -304,7 +333,7 @@ export class SwosClient {
    * node:http → 200, via fetch → 401). `Connection: close` forces one socket per
    * request; only the minimal header set is sent.
    */
-  private httpRequest(method: 'GET' | 'POST', path: string, headers: Record<string, string>, body?: string): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
+  private httpRequest(method: 'GET' | 'POST', path: string, headers: Record<string, string>, body?: string | Buffer): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
     return new Promise((resolve, reject) => {
       let u: URL;
       try {
@@ -316,7 +345,8 @@ export class SwosClient {
       const lib = u.protocol === 'https:' ? https : http;
       const reqHeaders: Record<string, string> = { ...headers };
       if (body !== undefined) {
-        reqHeaders['Content-Length'] = String(Buffer.byteLength(body, 'utf8'));
+        // Buffer.byteLength handles both strings (utf8) and Buffers.
+        reqHeaders['Content-Length'] = String(Buffer.byteLength(body));
       }
       reqHeaders.Connection = 'close';
 
@@ -352,21 +382,23 @@ export class SwosClient {
   private rawRequest(
     method: 'GET' | 'POST',
     path: string,
-    body?: string
+    body?: string | Buffer,
+    contentType?: string
   ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
-    return this.enqueue(() => this.rawRequestOnce(method, path, body));
+    return this.enqueue(() => this.rawRequestOnce(method, path, body, contentType));
   }
 
   private async rawRequestOnce(
     method: 'GET' | 'POST',
     path: string,
-    body?: string
+    body?: string | Buffer,
+    contentType = 'text/plain'
   ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
     let challenge: DigestChallenge | null = null;
     let attempts = 0;
     for (;;) {
       const headers: Record<string, string> = {};
-      if (body !== undefined) headers['Content-Type'] = 'text/plain';
+      if (body !== undefined) headers['Content-Type'] = contentType;
       if (challenge) {
         headers.Authorization = this.buildDigestHeader(method, path, challenge, body ?? '');
       }
@@ -392,7 +424,7 @@ export class SwosClient {
     }
   }
 
-  private buildDigestHeader(method: string, path: string, c: DigestChallenge, body: string): string {
+  private buildDigestHeader(method: string, path: string, c: DigestChallenge, body: string | Buffer): string {
     const ha1 = md5(`${this.username}:${c.realm}:${this.password}`);
     const ha2 = md5(`${method}:${path}`);
 
@@ -405,7 +437,8 @@ export class SwosClient {
       const nc = '00000001';
       const cnonce = md5(`${Date.now()}:${Math.random()}`).slice(0, 16);
       if (qop === 'auth-int') {
-        response = md5(`${ha1}:${c.nonce}:${nc}:${cnonce}:auth-int:${md5(`${ha2}:${md5(body)}`)}`);
+        // auth-int hashes the body — Buffers are hashed directly.
+        response = md5(`${ha1}:${c.nonce}:${nc}:${cnonce}:auth-int:${md5(`${ha2}:${createHash('md5').update(body).digest('hex')}`)}`);
       } else {
         response = md5(`${ha1}:${c.nonce}:${nc}:${cnonce}:${qop}:${ha2}`);
       }

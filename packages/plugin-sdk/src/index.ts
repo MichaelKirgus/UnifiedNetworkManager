@@ -50,10 +50,10 @@ export { queryNtp } from './ntp';
 export type { NtpQueryResult } from './ntp';
 // Update gathering (capability 'updates'): row contract + version comparison +
 // SSH package-manager adapters. See updates.ts.
-export { compareVersions, isUpdateAvailable, firmwareRow, extractMajorMinor, latestCatalogLine, catalogFirmwareRow, PACKAGE_MANAGER_ADAPTERS, detectPackageManager, readOsReleaseIds, listUpgradablePackages, runPackageUpgrade } from './updates';
-export type { UpdateKind, UpdateRow, UpdateExecBackend, UpgradablePackage, PmAdapter, SshUpdatesOptions, PackageUpgradeResult } from './updates';// SSH access for plugins (shared transport + credential resolution). See ssh.ts.
-export { SshClient, createSshPool, resolveSshCredentials, normalizeFingerprint, fingerprintMatches, computeFingerprint, normalizePrivateKey } from './ssh';
-export type { SshCredentials, SshClientOptions, ExecResult, SshPool, SshPoolOptions, SshFingerprint } from './ssh';
+export { compareVersions, isUpdateAvailable, firmwareRow, extractMajorMinor, latestCatalogLine, catalogFirmwareRow, PACKAGE_MANAGER_ADAPTERS, detectPackageManager, readOsReleaseIds, listUpgradablePackages, runPackageUpgrade, runPackageUpgradeList, packageRequiresReboot, buildDetachedUpgradeScript, buildUpgradeStatusScript, parseDetachedUpgradeStatus, UPGRADE_DONE_MARKER, DETACHED_ALREADY_RUNNING_EXIT } from './updates';
+export type { UpdateKind, UpdateRow, UpdateExecBackend, UpgradablePackage, PmAdapter, SshUpdatesOptions, PackageUpgradeResult, DetachedUpgradeStatus } from './updates';// SSH access for plugins (shared transport + credential resolution). See ssh.ts.
+export { SshClient, createSshPool, resolveSshCredentials, resolveSlotFields, resolveRootSlotCredentials, wrapSudo, probePrivilege, shQuote, normalizeFingerprint, fingerprintMatches, computeFingerprint, normalizePrivateKey } from './ssh';
+export type { SshCredentials, SshClientOptions, ExecResult, SshPool, SshPoolOptions, SshFingerprint, SudoExecBackend, PrivilegeMode, PrivilegeProbe } from './ssh';
 export { SshError, SshAuthError, SshHostKeyError, SshTimeoutError } from './ssh';
 // SFTP file-system access for plugins (shared transport + path safety). See sftp.ts.
 export { SftpSession, createSftpPool, resolvePath, SftpPathError } from './sftp';

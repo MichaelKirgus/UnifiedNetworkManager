@@ -1,3 +1,5 @@
+import http from 'http';
+import https from 'https';
 import WebSocket, { RawData } from 'ws';
 import { toWsUrl, withPort } from '@unm/plugin-sdk';
 
@@ -444,6 +446,122 @@ export class TruenasClient {
       return [d.errname, d.reason].filter(Boolean).join(': ') || err.message || `JSON-RPC error ${err.code}`;
     }
     return err.message || `JSON-RPC error ${err.code}`;
+  }
+
+  // ------------------------------------------------------- HTTP file endpoints
+
+  /**
+   * The appliance's plain-HTTP base for the FILE endpoints (`/_download`,
+   * `/_upload`) — same host/port/scheme resolution as the WebSocket URL, but
+   * http(s) instead of ws(s). These endpoints are served by middlewared's
+   * FileApplication on the SAME port as /api/current.
+   */
+  private httpBase(): string {
+    const m = this.wsUrl.match(/^ws(s?):\/\/(.+)$/);
+    if (!m) throw new TruenasRpcError('client has no usable base URL');
+    // The WS URL carries the /api/current path — strip it: the file endpoints
+    // live at the appliance ROOT (/_download, /_upload), same port.
+    return `${m[1] === 'wss' ? 'https' : 'http'}://${m[2].replace(/\/api\/current\/?$/, '')}`;
+  }
+
+  /**
+   * Downloads a file produced by a job (e.g. `config.save`) over the appliance's
+   * HTTP endpoint: GET /_download/{jobId}?auth_token=… — the token is a
+   * single-use download credential minted via `core.download`/`auth.generate_token`.
+   * Returns the raw bytes; non-2xx (401 bad/expired token, 404 unknown job,
+   * 410 expired pipe, 422 job failed) throws with the status + body excerpt.
+   */
+  async downloadJobFile(jobId: number, authToken: string): Promise<Buffer> {
+    const url = `${this.httpBase()}/_download/${jobId}?auth_token=${encodeURIComponent(authToken)}`;
+    return new Promise((resolve, reject) => {
+      const lib = url.startsWith('https') ? https : http;
+      const req = lib.get(url, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new TruenasRpcError(`TrueNAS file download failed with HTTP ${res.statusCode}: ${buf.toString('utf8').slice(0, 300)}`));
+            return;
+          }
+          resolve(buf);
+        });
+      });
+      req.on('error', (e: Error) => reject(new TruenasRpcError(`TrueNAS file download failed: ${e.message}`)));
+      req.setTimeout(Math.max(5_000, this.timeoutMs), () => {
+        req.destroy(new TruenasRpcError(`TrueNAS file download timed out after ${Math.max(5_000, this.timeoutMs)} ms`));
+      });
+    });
+  }
+
+  /**
+   * Uploads a file to the appliance's `/_upload` endpoint (multipart/form-data).
+   * TrueNAS runs the named JOB method with the file streamed into its input pipe —
+   * this is how `config.upload` receives the configuration backup. The multipart
+   * layout is mandated by middlewared's FileApplication: part 1 MUST be a field
+   * named `data` carrying `{"method": …, "params": []}`, part 2 MUST be a file
+   * field named `file`. Auth mirrors the appliance's own HTTP auth: Basic for
+   * username/password credentials (unavailable when OTP is enabled — pass
+   * `authToken` instead), Bearer for API keys. Returns the parsed JSON body
+   * (`{job_id}` on success).
+   */
+  async uploadFile(
+    creds: TruenasCredentials,
+    method: string,
+    fileData: Buffer,
+    fileName: string,
+    authToken?: string,
+    params: unknown[] = []
+  ): Promise<Record<string, unknown>> {
+    const boundary = `----unm${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
+    const dataPart = JSON.stringify({ method, params });
+    const head = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="data"\r\n\r\n` +
+        `${dataPart}\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\n` +
+        'Content-Type: application/octet-stream\r\n\r\n'
+    );
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const body = Buffer.concat([head, fileData, tail]);
+
+    let authHeader: string;
+    if (authToken) {
+      authHeader = `Token ${authToken}`;
+    } else if (creds.kind === 'apiKey') {
+      authHeader = `Bearer ${creds.apiKey ?? ''}`;
+    } else {
+      authHeader = `Basic ${Buffer.from(`${creds.username ?? ''}:${creds.password ?? ''}`).toString('base64')}`;
+    }
+
+    const url = `${this.httpBase()}/_upload`;
+    return new Promise((resolve, reject) => {
+      const lib = url.startsWith('https') ? https : http;
+      const req = lib.request(
+        url,
+        { method: 'POST', headers: { Authorization: authHeader, 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length } },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => {
+            const buf = Buffer.concat(chunks);
+            if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+              reject(new TruenasRpcError(`TrueNAS file upload failed with HTTP ${res.statusCode}: ${buf.toString('utf8').slice(0, 300)}`));
+              return;
+            }
+            try {
+              resolve(JSON.parse(buf.toString('utf8')) as Record<string, unknown>);
+            } catch {
+              reject(new TruenasRpcError(`TrueNAS file upload returned non-JSON response: ${buf.toString('utf8').slice(0, 300)}`));
+            }
+          });
+        }
+      );
+      req.on('error', (e: Error) => reject(new TruenasRpcError(`TrueNAS file upload failed: ${e.message}`)));
+      req.setTimeout(Math.max(5_000, this.timeoutMs), () => {
+        req.destroy(new TruenasRpcError(`TrueNAS file upload timed out after ${Math.max(5_000, this.timeoutMs)} ms`));
+      });
+      req.end(body);
+    });
   }
 }
 

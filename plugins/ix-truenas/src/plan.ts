@@ -31,6 +31,11 @@ export async function buildPlan(req: PlanRequest): Promise<Plan> {
   // Single-device fan-out — one step per device, same input.
   const rawSteps = devices.map((d) => ({ deviceId: d.deviceId, actionId, input: { ...(inputs ?? {}) } }));
 
-  // No rollback mechanism in v1 (no snapshot/backup action yet) — omit it.
-  return finalizePlan(actionId, devices, [], rawSteps, isDirtyStep);
+  // Rollback point: every plan that mutates the appliance gets a best-effort
+  // configuration backup (config.backup.download — read-only on the device)
+  // prepended per dirty device. A failed backup never blocks the plan; the
+  // step result carries the base64 file for later config.restore.
+  return finalizePlan(actionId, devices, [], rawSteps, isDirtyStep, {
+    rollbackStep: () => ({ actionId: 'config.backup.download', input: {} }),
+  });
 }

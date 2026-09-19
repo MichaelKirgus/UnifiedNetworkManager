@@ -405,6 +405,12 @@ export interface UpdateRow {
   latestVersion?: string | null;
   rebootRequired?: boolean | null;
   sizeBytes?: number | null;
+  /** Vendor release-notes URL for this update (changelog page / docs anchor). */
+  releaseNotesUrl?: string | null;
+  /** Release-notes text propagated from the device's own update feed. */
+  releaseNotes?: string | null;
+  /** The device's current update branch/channel (TrueNAS profile, distro line, vendor track). */
+  branch?: string | null;
   /** Catalog action id (of the reporting plugin) that applies this row; null = no apply path. */
   applyActionId?: string | null;
   /** Prefilled input for applyActionId. */
@@ -2358,9 +2364,12 @@ export const api = {
   deleteRole: (name: string) => apiFetch<void>(`/roles/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   /** Primary secret type + any additional named credential slots the plugin declares. */
   requiredSecretType: (pluginId: string) =>
-    apiFetch<{ requiredSecretType: string | null; credentialSlots?: CredentialSlotDescriptor[] | null }>(
-      `/plugins/${pluginId}/required-secret-type`
-    ),
+    apiFetch<{
+      requiredSecretType: string | null;
+      /** All acceptable PRIMARY secret types (empty = any / undeclared). */
+      requiredSecretTypes?: string[];
+      credentialSlots?: CredentialSlotDescriptor[] | null;
+    }>(`/plugins/${pluginId}/required-secret-type`),
   pluginMetrics: (pluginId: string) =>
     apiFetch<PluginMetrics>(`/plugins/${pluginId}/metrics`),
   // Plugin options & settings (descriptor-driven, API-validated).

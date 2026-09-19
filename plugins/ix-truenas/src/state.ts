@@ -5,9 +5,10 @@
  *                  state (read-only in v1; pool management is a later release).
  *   - Interfaces — one item per network interface with link state, MAC, IP
  *                  aliases and VLAN tag.
- *   - System     — hostname/version/model/uptime summary + the DANGEROUS power
- *                  actions (system.reboot / system.shutdown) which always flow
- *                  through the plan workflow.
+ *   - System     — hostname/version/model/uptime summary + configuration
+ *                  backup/restore (config.backup.download / config.restore) and
+ *                  the DANGEROUS power actions (system.reboot / system.shutdown),
+ *                  which always flow through the plan workflow.
  */
 
 import { DeviceStateResponse, StateItem, StateSection } from '@unm/plugin-sdk';
@@ -138,8 +139,10 @@ export function buildTruenasState(args: {
   sysInfo?: Record<string, unknown>;
   pools?: Record<string, unknown>[];
   ifaces?: Record<string, unknown>[];
+  /** `update.config` result — the configured update branch/profile (best-effort). */
+  updateConfig?: Record<string, unknown>;
 }): DeviceStateResponse {
-  const { sysInfo, pools = [], ifaces = [] } = args;
+  const { sysInfo, pools = [], ifaces = [], updateConfig } = args;
 
   // --- System ------------------------------------------------------------------
   const hostname = pickString(sysInfo ?? {}, ['hostname']);
@@ -162,6 +165,10 @@ export function buildTruenasState(args: {
   }
   const mem = formatBytes(memTotal);
   if (mem) fields.Memory = mem;
+  // The configured update branch/profile (update.config) — the same value the
+  // Updates page shows in its Branch column; switchable via update.profile.set.
+  const profile = pickString(updateConfig ?? {}, ['profile']);
+  if (profile) fields.Branch = profile;
 
   // Interfaces render as a virtual switch face — one band in item order
   // (name-based keys like 'em0'/'bridge0' keep their full label).
@@ -188,7 +195,7 @@ export function buildTruenasState(args: {
       {
         id: 'system',
         label: 'System',
-        description: 'Appliance summary + power actions (dangerous — executed via the plan workflow).',
+        description: 'Appliance summary + configuration backup/restore and power actions (dangerous — executed via the plan workflow).',
         items: [
           {
             key: 'system',
@@ -196,7 +203,15 @@ export function buildTruenasState(args: {
             subtitle: version ? `TrueNAS ${version}` : null,
             status: 'ok',
             fields,
-            actions: [{ actionId: 'system.reboot' }, { actionId: 'system.shutdown' }],
+            actions: [
+              { actionId: 'config.backup.download' },
+              { actionId: 'config.restore' },
+              { actionId: 'update.profile.read' },
+              { actionId: 'update.profile.set' },
+              { actionId: 'system.firmware.update-file' },
+              { actionId: 'system.reboot' },
+              { actionId: 'system.shutdown' },
+            ],
           },
         ],
       },

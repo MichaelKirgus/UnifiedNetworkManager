@@ -36,6 +36,20 @@ export interface UpdateRow {
   available: boolean;
   rebootRequired?: boolean;
   sizeBytes?: number | null;
+  /** URL where the admin can read the release notes for this update (vendor
+   * changelog page, appliance docs anchor, ...). Shown as a link on the Updates page. */
+  releaseNotesUrl?: string | null;
+  /** Release-notes TEXT propagated directly from the device's own update feed
+   * (e.g. TrueNAS `update.available_versions` carries per-release notes that its
+   * web UI also shows). Rendered inline on the Updates page when present; keep
+   * it short — plugins should truncate to a few KB at most. */
+  releaseNotes?: string | null;
+  /** The device's CURRENT update branch / channel (e.g. TrueNAS update profile
+   * "GENERAL", distro codename, vendor firmware line). Shown in the Updates
+   * page's Branch column so an admin can see WHICH track a row belongs to —
+   * useful when a box sits on a beta/early-adopter branch and its "new version"
+   * is not what a stable-track peer would get. Generic: any plugin may fill it. */
+  branch?: string | null;
   /** Catalog action id that applies this row (must exist in THIS plugin's catalog). */
   applyActionId?: string;
   /** Prefilled input for that action. */
@@ -106,7 +120,18 @@ export function isUpdateAvailable(current?: string | null, latest?: string | nul
 export function firmwareRow(
   currentVersion?: string | null,
   latestVersion?: string | null,
-  extra?: { rebootRequired?: boolean; applyActionId?: string; applyInput?: Record<string, unknown>; note?: string },
+  extra?: {
+    rebootRequired?: boolean;
+    applyActionId?: string;
+    applyInput?: Record<string, unknown>;
+    note?: string;
+    /** Vendor release-notes URL for the target version (shown as a link). */
+    releaseNotesUrl?: string | null;
+    /** Release-notes text from the device's own update feed (rendered inline). */
+    releaseNotes?: string | null;
+    /** The device's current update branch/channel (Updates page Branch column). */
+    branch?: string | null;
+  },
 ): UpdateRow {
   return {
     name: 'os',
@@ -115,6 +140,9 @@ export function firmwareRow(
     latestVersion: latestVersion ?? null,
     available: isUpdateAvailable(currentVersion, latestVersion),
     rebootRequired: extra?.rebootRequired ?? true,
+    releaseNotesUrl: extra?.releaseNotesUrl ?? null,
+    releaseNotes: extra?.releaseNotes ?? null,
+    branch: extra?.branch ?? null,
     applyActionId: extra?.applyActionId,
     applyInput: extra?.applyInput,
     ...(extra?.note ? { extra: { note: extra.note } } : {}),
@@ -165,15 +193,32 @@ export function latestCatalogLine(liveVersion: string, lines: readonly string[])
  * strings would misfire on vendor prefixes ("OPNsense 26.4-amd64", "v3.34.0326")
  * whose leading non-numeric token sorts above any digit in compareVersions.
  */
+/**
+ * Release-notes URL for a static-catalog firmware row. Either a fixed string,
+ * or a builder that receives the SELECTED target line ("major.minor") so the
+ * link points at the NEW version's notes, not the live one.
+ */
+export type FirmwareReleaseNotesUrl = string | null | ((targetLine: string) => string);
+
 export function catalogFirmwareRow(
   liveVersion: string | null | undefined,
   lines: readonly string[],
-  extra?: { rebootRequired?: boolean; note?: string },
+  extra?: {
+    rebootRequired?: boolean;
+    note?: string;
+    /** Vendor release-notes URL for the target version (shown as a link). */
+    releaseNotesUrl?: FirmwareReleaseNotesUrl;
+    /** Release-notes text from the device's own update feed (rendered inline). */
+    releaseNotes?: string | null;
+    /** The device's current update branch/channel (Updates page Branch column). */
+    branch?: string | null;
+  },
 ): UpdateRow | null {
   if (!liveVersion) return null;
   const latest = latestCatalogLine(liveVersion, lines);
   if (!latest) return null;
-  const row = firmwareRow(liveVersion, latest, extra);
+  const notesUrl = typeof extra?.releaseNotesUrl === 'function' ? extra.releaseNotesUrl(latest) : (extra?.releaseNotesUrl ?? null);
+  const row = firmwareRow(liveVersion, latest, { ...extra, releaseNotesUrl: notesUrl });
   row.available = true; // major.minor comparison already proved live < latest
   return row;
 }
@@ -182,9 +227,10 @@ export function catalogFirmwareRow(
 // SSH package-manager adapters (apt / dnf / yum / pacman / apk)
 // ---------------------------------------------------------------------------
 
-/** Minimal exec surface — generic-ssh's pooled SshBackend satisfies this directly. */
+/** Minimal exec surface — generic-ssh's pooled SshBackend satisfies this directly.
+ *  `timeoutMs` is optional so backends without a timeout concept keep working. */
 export interface UpdateExecBackend {
-  exec(command: string): Promise<{ code: number; stdout: string; stderr?: string }>;
+  exec(command: string, timeoutMs?: number): Promise<{ code: number; stdout: string; stderr?: string }>;
 }
 
 /** One upgradable package as reported by a package manager. */
@@ -192,6 +238,16 @@ export interface UpgradablePackage {
   name: string;
   currentVersion: string | null;
   latestVersion: string;
+  /** True when the admin explicitly held this package (e.g. `apt-mark hold`) —
+   *  bulk upgrades will NEVER install it, so it stays "upgradable" forever and
+   *  must not count against post-upgrade verification. */
+  held?: boolean;
+  /** apt: deferred by Ubuntu's phased rollout ("deferred due to phasing") — the
+   *  host is not in this version's cohort yet; `upgrade` skips it on purpose. */
+  phased?: boolean;
+  /** apt: dependency-kept-back (e.g. a held dependency) — `upgrade` cannot
+   *  install it without also upgrading something else that is blocked. */
+  keptBack?: boolean;
 }
 
 /** A package-manager adapter: knows how to detect itself, list upgrades and apply them. */
@@ -205,6 +261,25 @@ export interface PmAdapter {
   listUpgradable(backend: UpdateExecBackend): Promise<UpgradablePackage[]>;
   /** Shell command(s) that upgrade ONE package, or ALL when pkg is omitted. */
   upgrade(pkg?: string): string[];
+  /** Shell command(s) that upgrade EXACTLY the given packages in one invocation
+   *  (one lock acquisition). Optional — managers without a clean multi-form fall
+   *  back to per-package runs. Used by "update only these" bulk actions. */
+  upgradeMany?(pkgs: string[]): string[];
+  /** Shell command(s) for a DISTRO-LEVEL upgrade that may add/remove packages to
+   *  resolve dependencies (apt `dist-upgrade`). Null when the manager has no
+   *  meaningful distinction from a plain full `upgrade` (dnf/yum/pacman/apk's
+   *  bulk update already resolves deps). */
+  distUpgrade?(): string[] | null;
+}
+
+/**
+ * Heuristic: does upgrading this package require a reboot to take effect?
+ * Kernel images/modules/headers, firmware and initramfs are the classic cases —
+ * everything else (userspace libraries, daemons) restarts in place. Used to set
+ * UpdateRow.rebootRequired so "update without reboot" bulk actions can skip them.
+ */
+export function packageRequiresReboot(name: string): boolean {
+  return /(^|[\/-])(linux-(image|modules|headers|firmware)|kernel|initramfs)/i.test(name);
 }
 
 async function commandExists(backend: UpdateExecBackend, cmd: string): Promise<boolean> {
@@ -248,18 +323,67 @@ export const PACKAGE_MANAGER_ADAPTERS: PmAdapter[] = [
     distros: APT_DISTROS,
     detect: (b) => commandExists(b, 'apt-get'),
     listUpgradable: async (b) => {
-      // "pkg/release 1.2.3 amd64 [upgradable from: 1.0.0]"
-      const r = await b.exec('DEBIAN_FRONTEND=noninteractive apt list --upgradable 2>/dev/null || true');
+      // One round-trip: held list + upgradable table + a dry-run simulation.
+      // The sim tells us which of those apt will SKIP on purpose — phased-rollout
+      // deferrals and kept-back packages stay "upgradable" forever, so callers
+      // must be able to tell them apart from genuinely installable updates.
+      const r = await b.exec(
+        [
+          'echo UNM_HELD_BEGIN; apt-mark showhold 2>/dev/null || true; echo UNM_HELD_END',
+          'DEBIAN_FRONTEND=noninteractive apt list --upgradable 2>/dev/null || true',
+          'echo UNM_SIM_BEGIN; DEBIAN_FRONTEND=noninteractive apt-get -s upgrade 2>&1 | grep -A30 -E "deferred due to phasing|kept back" || true; echo UNM_SIM_END',
+        ].join('; ')
+      );
+      const held = new Set<string>();
+      const phased = new Set<string>();
+      const keptBack = new Set<string>();
+      let section: 'held' | 'phased' | 'keptBack' | null = null;
       const out: UpgradablePackage[] = [];
       for (const line of r.stdout.split('\n')) {
+        if (line === 'UNM_HELD_BEGIN') { section = 'held'; continue; }
+        if (line === 'UNM_HELD_END') { section = null; continue; }
+        if (line === 'UNM_SIM_BEGIN') { section = null; continue; }
+        if (line === 'UNM_SIM_END') { section = null; continue; }
+        if (section === 'held') { const t = line.trim(); if (t) held.add(t); continue; }
+        // Simulation sections: header line, then indented space-separated names.
+        if (/deferred due to phasing/i.test(line)) { section = 'phased'; continue; }
+        if (/kept back/i.test(line)) { section = 'keptBack'; continue; }
+        const t = line.trim();
+        if (section === 'phased' || section === 'keptBack') {
+          // Any other header/summary line ends the package list.
+          if (!t || /^The following|^\d+ upgraded/i.test(t)) { section = null; continue; }
+          for (const tok of t.split(/\s+/)) (section === 'phased' ? phased : keptBack).add(tok);
+          continue;
+        }
+        // "pkg/release 1.2.3 amd64 [upgradable from: 1.0.0]"
         const m = line.match(/^([^\s/]+)\/[^\s]+\s+([\w.:+~-]+)\s+\S+\s+\[upgradable from:\s*([\w.:+~-]+)\]/);
         if (m && !line.startsWith('Listing...')) out.push({ name: m[1], currentVersion: m[3], latestVersion: m[2] });
       }
+      for (const p of out) {
+        if (held.has(p.name)) p.held = true;
+        if (phased.has(p.name)) p.phased = true;
+        if (keptBack.has(p.name)) p.keptBack = true;
+      }
       return out;
     },
+    // Dpkg::Lock::Timeout makes apt WAIT for the dpkg frontend lock (up to 5 min)
+    // instead of failing fast when unattended-upgrades or a cron job holds it —
+    // the #1 cause of spurious "Could not get lock" failures on live servers.
     upgrade: (pkg) => [
       'export DEBIAN_FRONTEND=noninteractive',
-      pkg ? `apt-get install --only-upgrade -y ${pkg}` : 'apt-get upgrade -y',
+      pkg ? `apt-get -o Dpkg::Lock::Timeout=300 install --only-upgrade -y ${pkg}` : 'apt-get -o Dpkg::Lock::Timeout=300 upgrade -y',
+    ],
+    // One invocation for an explicit package list — a single lock acquisition,
+    // so "update only these N packages" is atomic and fast.
+    upgradeMany: (pkgs) => [
+      'export DEBIAN_FRONTEND=noninteractive',
+      `apt-get -o Dpkg::Lock::Timeout=300 install --only-upgrade -y ${pkgs.join(' ')}`,
+    ],
+    // dist-upgrade resolves dependencies by ADDING/REMOVING packages — the real
+    // "upgrade the whole OS" command (plain `upgrade` keeps the current set).
+    distUpgrade: () => [
+      'export DEBIAN_FRONTEND=noninteractive',
+      'apt-get -o Dpkg::Lock::Timeout=300 dist-upgrade -y',
     ],
   },
   {
@@ -277,6 +401,7 @@ export const PACKAGE_MANAGER_ADAPTERS: PmAdapter[] = [
       return out;
     },
     upgrade: (pkg) => [pkg ? `dnf -y upgrade ${pkg}` : 'dnf -y upgrade'],
+    upgradeMany: (pkgs) => [`dnf -y upgrade ${pkgs.join(' ')}`],
   },
   {
     id: 'yum',
@@ -295,6 +420,7 @@ export const PACKAGE_MANAGER_ADAPTERS: PmAdapter[] = [
       return out;
     },
     upgrade: (pkg) => [pkg ? `yum -y update ${pkg}` : 'yum -y update'],
+    upgradeMany: (pkgs) => [`yum -y update ${pkgs.join(' ')}`],
   },
   {
     id: 'pacman',
@@ -363,21 +489,117 @@ export interface PackageUpgradeResult {
   pm: string | null;
 }
 
+/** Default exec budget for an upgrade run — full OS upgrades on slow boxes can
+ *  take many minutes. Callers with a tighter dispatch window should pass their own.
+ *  (The old implicit default was the SSH backend's 15s exec timeout, which killed
+ *  every real upgrade mid-flight.) */
+export const DEFAULT_UPGRADE_TIMEOUT_MS = 9 * 60_000;
+
 /**
  * Apply a package upgrade over SSH: detect the manager, run its upgrade command
- * for one package (or all), and report success. Long-running — callers should
- * give it a generous timeout. Never throws; failures come back as ok:false.
+ * for one package (or all), and report success. Long-running — `timeoutMs` must
+ * cover the whole run (default 9 min; pass a larger budget under a generous
+ * dispatch timeout). Never throws; failures come back as ok:false.
  */
-export async function runPackageUpgrade(backend: UpdateExecBackend, pkg?: string): Promise<PackageUpgradeResult> {
+export async function runPackageUpgrade(
+  backend: UpdateExecBackend,
+  pkg?: string,
+  timeoutMs = DEFAULT_UPGRADE_TIMEOUT_MS,
+): Promise<PackageUpgradeResult> {
   const adapter = await detectPackageManager(backend);
   if (!adapter) return { ok: false, stdout: '', stderr: 'No known package manager detected on this host', pm: null };
   const script = ['set -e', ...adapter.upgrade(pkg)].join('\n');
   try {
-    const r = await backend.exec(script);
+    const r = await backend.exec(script, timeoutMs);
     return { ok: r.code === 0, stdout: r.stdout, stderr: r.stderr ?? '', pm: adapter.id };
   } catch (err) {
     return { ok: false, stdout: '', stderr: (err as Error).message, pm: adapter.id };
   }
+}
+
+/**
+ * Upgrade an EXPLICIT list of packages in one shot. Prefers the manager's
+ * multi-form (`upgradeMany` — a single lock acquisition) and falls back to
+ * per-package runs when it is unavailable. Used by "update only these" bulk
+ * actions (e.g. everything that does not need a reboot). Never throws.
+ */
+export async function runPackageUpgradeList(
+  backend: UpdateExecBackend,
+  pkgs: string[],
+  timeoutMs = DEFAULT_UPGRADE_TIMEOUT_MS,
+): Promise<PackageUpgradeResult> {
+  const adapter = await detectPackageManager(backend);
+  if (!adapter) return { ok: false, stdout: '', stderr: 'No known package manager detected on this host', pm: null };
+  if (pkgs.length === 0) return { ok: true, stdout: '', stderr: '', pm: adapter.id };
+
+  const cmds = adapter.upgradeMany ? adapter.upgradeMany(pkgs) : pkgs.map((p) => adapter.upgrade(p)).flat();
+  // Per-package fallback needs `set -e` so a failure stops the run; the multi-form
+  // already carries its own flags, but set -e is harmless there too.
+  const script = ['set -e', ...cmds].join('\n');
+  try {
+    const r = await backend.exec(script, timeoutMs);
+    return { ok: r.code === 0, stdout: r.stdout, stderr: r.stderr ?? '', pm: adapter.id };
+  } catch (err) {
+    return { ok: false, stdout: '', stderr: (err as Error).message, pm: adapter.id };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Detached long-running upgrades (dist-upgrade can take minutes to HOURS — we
+// must NOT hold an SSH session open for that duration; a pooled or dedicated
+// connection would block every other exec on the host and risk idle drops).
+// Instead: launch via nohup so the exec returns in ~1 s, then poll a status probe.
+// ---------------------------------------------------------------------------
+
+/** Marker appended to the log when a detached upgrade finishes cleanly. */
+export const UPGRADE_DONE_MARKER = 'UNM_UPGRADE_DONE';
+/** Exit code returned by the launcher when an upgrade is already running. */
+export const DETACHED_ALREADY_RUNNING_EXIT = 97;
+
+/**
+ * Builds a standalone shell script that launches `cmdLines` DETACHED via nohup:
+ * output → logFile, PID → pidFile, stdin from /dev/null. The exec returns almost
+ * immediately even though the upgrade may run for hours. A concurrent launch (a
+ * live PID in pidFile) is refused with exit 97 instead of double-running.
+ * Safe to pass through ElevatedBackend (sudo quoting is handled by wrapSudo).
+ */
+export function buildDetachedUpgradeScript(cmdLines: string[], logFile: string, pidFile: string): string {
+  const body = cmdLines.join('\n').replace(/'/g, "'\\''"); // single-quote-safe for the inner sh -c
+  return [
+    `if [ -f ${pidFile} ] && kill -0 "$(cat ${pidFile})" 2>/dev/null; then echo already-running; exit ${DETACHED_ALREADY_RUNNING_EXIT}; fi`,
+    `rm -f ${logFile}`,
+    `nohup sh -c 'set -e; ${body}; echo ${UPGRADE_DONE_MARKER}' > ${logFile} 2>&1 < /dev/null &`,
+    `echo $! > ${pidFile}`,
+    `echo launched $(cat ${pidFile})`,
+  ].join('\n');
+}
+
+/** Builds the shell script that reports a previously-launched detached upgrade's state. */
+export function buildUpgradeStatusScript(logFile: string, pidFile: string): string {
+  return [
+    `if [ -f ${pidFile} ] && kill -0 "$(cat ${pidFile})" 2>/dev/null; then echo UNM_STATE=running; else`,
+    `  if grep -q ${UPGRADE_DONE_MARKER} ${logFile} 2>/dev/null; then echo UNM_STATE=done; else echo UNM_STATE=failed; fi`,
+    'fi',
+    'echo UNM_TAIL_BEGIN',
+    `tail -n 15 ${logFile} 2>/dev/null || true`,
+    'echo UNM_TAIL_END',
+  ].join('\n');
+}
+
+/** Parsed state of a detached upgrade. */
+export interface DetachedUpgradeStatus {
+  /** running / done (clean finish) / failed (died without the DONE marker) / unknown (never launched). */
+  state: 'running' | 'done' | 'failed' | 'unknown';
+  /** Last lines of the log (empty when there is none yet). */
+  tail: string;
+}
+
+/** Parses the output of buildUpgradeStatusScript into a structured status. */
+export function parseDetachedUpgradeStatus(stdout: string): DetachedUpgradeStatus {
+  const stateMatch = /UNM_STATE=(running|done|failed)/.exec(stdout);
+  const state = (stateMatch?.[1] as DetachedUpgradeStatus['state']) ?? 'unknown';
+  const tailMatch = /UNM_TAIL_BEGIN\n([\s\S]*?)\n?UNM_TAIL_END/.exec(stdout);
+  return { state, tail: (tailMatch?.[1] ?? '').trim() };
 }
 
 /**
@@ -401,9 +623,11 @@ export async function listUpgradablePackages(backend: UpdateExecBackend, opts?: 
     currentVersion: p.currentVersion ?? null,
     latestVersion: p.latestVersion,
     available: true,
-    rebootRequired: false,
+    // Kernel/firmware/initramfs packages need a reboot to take effect; userspace
+    // updates restart in place. Drives the "update without reboot" bulk action.
+    rebootRequired: packageRequiresReboot(p.name),
     ...(opts?.applyActionId ? { applyActionId: opts.applyActionId } : {}),
     ...(opts?.applyActionId && opts.perPackageApply !== false ? { applyInput: { package: p.name } } : {}),
-    extra: { pm: adapter.id },
+    extra: { pm: adapter.id, ...(p.held ? { held: true } : {}), ...(p.phased ? { phased: true } : {}), ...(p.keptBack ? { keptBack: true } : {}) },
   }));
 }

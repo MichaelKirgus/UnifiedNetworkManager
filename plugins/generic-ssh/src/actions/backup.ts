@@ -83,10 +83,12 @@ export const SNAPSHOT_ACTIONS: ActionDescriptor[] = [
       if (!/unm-backups\/unm-[^\s]+\.tar\.gz$/.test(file) || file.includes('..')) {
         return failResult(`Invalid snapshot path — expected <home>/unm-backups/unm-<timestamp>.tar.gz.`);
       }
-      // Root check FIRST — a non-root restore would half-write /etc and leave the box broken.
+      // Root check FIRST — a non-root restore would half-write /etc and leave the box
+      // broken. The backend escalates automatically (sudo or bound root slot), so this
+      // probe doubles as "is elevation actually available on this host?".
       const who = await ctx.backend.exec('id -u').catch(() => null);
       if (!who || (who.stdout ?? '').trim() !== '0') {
-        return failResult('Restore requires root SSH access (the bound credential is not uid 0).');
+        return failResult('Restore requires root access — the bound credential is not uid 0 and no passwordless sudo / root slot is available.');
       }
       const r = await runCommands(ctx.backend, [
         `[ -s ${shq(file)} ] || { echo "snapshot file missing"; exit 1; }`,

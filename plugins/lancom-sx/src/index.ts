@@ -309,7 +309,11 @@ app.post('/monitoring', async (req, res) => {
     // "4.30.xxxx") vs the newest known LCOS-SX line — major.minor comparison,
     // so the leading "v" + build suffix never matter. Available-without-apply.
     if (sys.firmwareVersion) {
-      const fwRow = catalogFirmwareRow(sys.firmwareVersion, KNOWN_SX_LINES);
+      // Release notes: LANCOM's FTP release-notes folder for the target line
+      // (RN_LCOS-SX-<line>-*.pdf).
+      const fwRow = catalogFirmwareRow(sys.firmwareVersion, KNOWN_SX_LINES, {
+        releaseNotesUrl: (target) => `https://ftp.lancom.de/Documentation/Release-Notes/LCOS%20SX/${String(target).replace(/\./g, '')}/`,
+      });
       if (fwRow) metrics['updates'] = [fwRow];
     }
     metrics['system.serialNumber'] = sys.serialNumber || null;

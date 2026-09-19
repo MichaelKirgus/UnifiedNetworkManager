@@ -39,8 +39,8 @@ function SortablePluginRow({
   isPrimary: boolean;
   removable: boolean;
   availablePlugins: Plugin[];
-  pluginMeta: Record<string, { requiredType: string | null; slots: CredentialSlotDescriptor[] }>;
-  secretsOfType: (type: string) => Secret[];
+  pluginMeta: Record<string, { requiredTypes: string[]; slots: CredentialSlotDescriptor[] }>;
+  secretsOfType: (types: string[]) => Secret[];
   secretsOfSlot: (slot: CredentialSlotDescriptor) => Secret[];
   onUpdate: (patch: Partial<RowState>) => void;
   onSlotSecret: (slotName: string, secretId: string) => void;
@@ -48,7 +48,10 @@ function SortablePluginRow({
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: row.id });
   const meta = row.pluginId ? pluginMeta[row.pluginId] : undefined;
-  const required = meta?.requiredType ?? null;
+  // Multi-type primary support: a plugin may accept several secret types for
+  // its main credential (e.g. usernamePassword OR sshKeyPair). Empty list =
+  // undeclared → the picker offers every secret type.
+  const requiredTypes = meta?.requiredTypes ?? [];
   const slots = meta?.slots ?? [];
 
   return (
@@ -109,7 +112,7 @@ function SortablePluginRow({
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium text-secondary">
-              Credentials{required ? ` (${required})` : ''}
+              Credentials{requiredTypes.length > 0 ? ` (${requiredTypes.join(' | ')})` : ''}
             </label>
             <select
               className="w-full rounded-md border border-border bg-card px-2 py-1.5 text-sm"
@@ -117,7 +120,7 @@ function SortablePluginRow({
               onChange={(e) => onUpdate({ secretId: e.target.value })}
             >
               <option value="">No credentials</option>
-              {secretsOfType(required ?? '').map((s) => (
+              {secretsOfType(requiredTypes).map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.label || s.id} [{s.type}]
                 </option>
@@ -233,9 +236,9 @@ export const PluginAssignmentBuilder = forwardRef<PluginAssignmentBuilderHandle,
       : [emptyRow()]
   );
 
-  // Required secret type + declared credential slots per chosen plugin (drive
+  // Required secret types + declared credential slots per chosen plugin (drive
   // the credentials dropdown and any per-slot pickers).
-  const [pluginMeta, setPluginMeta] = useState<Record<string, { requiredType: string | null; slots: CredentialSlotDescriptor[] }>>({});
+  const [pluginMeta, setPluginMeta] = useState<Record<string, { requiredTypes: string[]; slots: CredentialSlotDescriptor[] }>>({});
   useEffect(() => {
     const ids = Array.from(new Set(rows.map((r) => r.pluginId).filter(Boolean)));
     let cancelled = false;
@@ -243,9 +246,16 @@ export const PluginAssignmentBuilder = forwardRef<PluginAssignmentBuilderHandle,
       ids.map(async (id) => {
         try {
           const res = await api.requiredSecretType(id);
-          return [id, { requiredType: res.requiredSecretType, slots: res.credentialSlots ?? [] }] as const;
+          // Multi-type list wins; fall back to the legacy single type.
+          const types =
+            Array.isArray(res.requiredSecretTypes) && res.requiredSecretTypes.length > 0
+              ? res.requiredSecretTypes
+              : res.requiredSecretType
+                ? [res.requiredSecretType]
+                : [];
+          return [id, { requiredTypes: types, slots: res.credentialSlots ?? [] }] as const;
         } catch {
-          return [id, { requiredType: null, slots: [] }] as const;
+          return [id, { requiredTypes: [], slots: [] }] as const;
         }
       })
     ).then((entries) => {
@@ -256,10 +266,10 @@ export const PluginAssignmentBuilder = forwardRef<PluginAssignmentBuilderHandle,
     };
   }, [rows]);
 
-  /** Secrets compatible with a given secret type ('' = any). */
-  function secretsOfType(type: string): Secret[] {
-    if (!type) return secrets;
-    return secrets.filter((s) => s.type === type);
+  /** Secrets compatible with ANY of the given secret types (empty list = any). */
+  function secretsOfType(types: string[]): Secret[] {
+    if (types.length === 0) return secrets;
+    return secrets.filter((s) => types.includes(s.type));
   }
 
   /** Secrets compatible with ANY of the slot's allowed types. */

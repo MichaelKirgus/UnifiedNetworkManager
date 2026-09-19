@@ -7,20 +7,24 @@
  * three (the API never interprets payloads).
  *
  * Generic-SSH-specific: SSH IS the transport for this plugin (there is no
- * second read path), so every action executes over the pooled SshBackend. All
- * commands are plain POSIX / iproute2 / systemd — best-effort across distros,
- * with sysvinit fallbacks where a box has no systemd.
+ * second read path), so every action executes over the pooled, privilege-aware
+ * CommandRunner (plain SshBackend semantics + automatic sudo / root-slot
+ * escalation — see client/privilege.ts). All commands are plain POSIX /
+ * iproute2 / systemd — best-effort across distros, with sysvinit fallbacks
+ * where a box has no systemd.
  */
 
 import type { ActionDescriptor as SdkActionDescriptor, ActionResult, StepCredentials } from '@unm/plugin-sdk';
-import type { SshBackend } from '../client/sshClient';
+import type { CommandRunner } from '../client/privilege';
 
 export type { ActionResult };
 
 /** Everything an action executor needs to run against one device. */
 export interface ActionContext {
-  /** The SSH data path (always present — it is the only transport here). */
-  backend: SshBackend;
+  /** The SSH data path (always present — it is the only transport here).
+   *  Privilege-aware: commands transparently escalate via sudo or a bound root
+   *  slot when the login user is not root (see client/privilege.ts). */
+  backend: CommandRunner;
   host: string;
   deviceId?: string | null;
   /** Assignment credentials + provisioned plan material namespaced by secretRef. */
@@ -34,7 +38,7 @@ export interface ActionDescriptor extends SdkActionDescriptor<ActionContext> {}
 
 /** Runs a batch of shell commands in ONE exec; `set -e` stops at the first failure. */
 export async function runCommands(
-  backend: SshBackend,
+  backend: CommandRunner,
   cmds: string[],
   timeoutMs = 20_000,
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
@@ -43,9 +47,11 @@ export async function runCommands(
   return { ok: r.code === 0, stdout: r.stdout, stderr: r.stderr };
 }
 
-/** Standard success result with details. */
-export function okResult(details?: Record<string, unknown>): ActionResult {
-  return { success: true, applied: true, verified: false, ...(details ? { details } : {}) };
+/** Standard success result with details. Pass `verified` when the action
+ *  re-read device state and CONFIRMED the change (the plan executor reads this
+ *  top-level flag — a false here marks the whole plan 'unverified'). */
+export function okResult(details?: Record<string, unknown>, verified = false): ActionResult {
+  return { success: true, applied: true, verified, ...(details ? { details } : {}) };
 }
 
 /** Standard failure result. */

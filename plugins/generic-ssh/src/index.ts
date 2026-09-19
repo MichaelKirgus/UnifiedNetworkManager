@@ -38,10 +38,12 @@ import {
   resolveSshCredentials,
   buildDeviceTimeInfo,
   createSftpPool,
+  warnOnce,
 } from '@unm/plugin-sdk';
 import type { ProbeRequestBody, StateRequestBody } from '@unm/plugin-sdk';
 
 import { SshBackend, closeSshPools, resolveGenericSshCredentials } from './client/sshClient';
+import { createElevatedBackend } from './client/privilege';
 import { collectLive, collectMonitoring, getInventory } from './monitoring';
 import { buildPlan, listCatalogWithIntents, PlanningError } from './plan';
 import type { PlanRequest } from './plan';
@@ -101,6 +103,15 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     description:
       'Ship structured log entries (poll failures) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
   },
+  {
+    key: 'sudoUser',
+    label: 'Sudo target user',
+    type: 'string' as const,
+    default: '',
+    maxLength: 64,
+    description:
+      "Optional username to elevate to via sudo (empty = the default, usually root). Only used when the logged-in user is not already root and has passwordless sudo — or when a dedicated root credential slot is bound.",
+  },
 ];
 
 // Structured logs shipped to the API — emission is gated per call by the
@@ -125,11 +136,11 @@ const consoleUpgrade = makeConsoleUpgrade({
   onOpen: async (hello) => {
     const host = hostFromAddress(hello.managementAddress);
     if (!host) throw new Error('Missing management address');
-    // The bound ssh slot wins; the primary username/password is a valid fallback
-    // here because it IS an SSH credential by definition of this plugin.
+    // The primary credential IS an SSH login by definition of this plugin
+    // (username/password or key pair) — one login feeds everything here.
     const creds = resolveSshCredentials(hello.credentials as Record<string, unknown> | undefined);
     if (!creds) {
-      throw new Error('No SSH credential available — bind a usernamePassword or sshKeyPair secret to the assignment (or its "ssh" slot).');
+      throw new Error('No SSH credential available — bind a usernamePassword or sshKeyPair secret to the assignment.');
     }
     // Configured SSH port (plugin option `sshPort`, default 22) — delivered by
     // the API in the console hello frame so a per-device override is honored.
@@ -155,19 +166,22 @@ const server = createPluginServer({
   // Static icon assets, advertised in /discover and fetched by the API's icon proxy.
   iconsDir: path.join(__dirname, '../../icons'),
   discovery: {
-    // Primary credential = a username/password login or an SSH key pair — this
-    // plugin has no other transport at all.
+    // Primary credential = a username/password login OR an SSH key pair — this
+    // plugin has no other transport at all. `requiredSecretTypes` drives the
+    // webapp's multi-type picker; `requiredSecretType` stays for older consumers.
     requiredSecretType: 'usernamePassword',
-    // Optional dedicated SSH slot — used when the primary secret is NOT an SSH
-    // credential but shell access still should work. The slot always wins over
-    // the primary when both are present.
+    requiredSecretTypes: ['usernamePassword', 'sshKeyPair'],
+    // Optional dedicated ROOT slot — a second SSH login that has root access on
+    // the host. Used ONLY when the primary user cannot elevate via passwordless
+    // sudo (or is not root itself): privileged commands then run on a direct
+    // session as this user, no sudo involved.
     credentialSlots: [
       {
-        name: 'ssh',
+        name: 'root',
         secretTypes: ['usernamePassword', 'sshKeyPair'],
         required: false,
         description:
-          "Optional dedicated SSH access for metrics collection, filesystem browsing and the interactive web console. When unbound, the primary username/password credential is used.",
+          "Optional second SSH login with ROOT access on the host. Used only when the primary user is not root and has no passwordless sudo — privileged commands (package updates, routes, snapshots) then run directly as this user.",
       },
     ],
     // Metric descriptors are generated DYNAMICALLY from each /monitoring poll —
@@ -190,11 +204,26 @@ function targetOf(managementAddress: string, settings: Record<string, unknown>):
   return { host: hostFromAddress(managementAddress), port: sshPortOf(settings) };
 }
 
-/** Resolves the SSH backend for one request (undefined = no usable credential). */
-function backendFor(host: string, port: number, credentials: Record<string, unknown>): SshBackend | undefined {
+/** Reads the optional sudo target user from effective settings ('' = default). */
+function sudoUserOf(settings?: Record<string, unknown>): string | undefined {
+  const v = typeof settings?.sudoUser === 'string' ? (settings.sudoUser as string).trim() : '';
+  return v !== '' ? v : undefined;
+}
+
+/** Resolves the SSH backend for one request (undefined = no usable credential).
+ *  Privilege-aware: a bound `root` slot, an already-root login or passwordless
+ *  sudo is detected once per host and cached — see client/privilege.ts. */
+async function backendFor(host: string, port: number, credentials: Record<string, unknown>, settings?: Record<string, unknown>) {
   const creds = resolveGenericSshCredentials(credentials);
   if (!creds) return undefined;
-  return new SshBackend(host, port, creds);
+  try {
+    return await createElevatedBackend(host, port, credentials, sudoUserOf(settings));
+  } catch (err) {
+    // No usable credential shape — degrade to the plain user-level backend so
+    // at least the reads that work without root keep working.
+    warnOnce('generic-ssh', `privilege:${host}`, `Privilege probe failed for ${host}: ${(err as Error).message} — falling back to user-level exec`);
+    return new SshBackend(host, port, creds);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -215,8 +244,8 @@ app.post('/monitoring', async (req, res) => {
   const settings = readSettings(req, PLUGIN_OPTIONS);
   logger.setEnabled(settings.logToApi === true);
 
-  // Decrypted assignment fields incl. bound slots (slots.ssh when the user bound
-  // a dedicated SSH credential).
+  // Decrypted assignment fields: primary at top level + bound slots under
+  // `slots` (the optional `root` slot when the user bound a second login).
   const credentials = (body.credentials && typeof body.credentials === 'object' ? body.credentials : {}) as Record<string, unknown>;
 
   // Window-based scheduling: the API sends collectInventory=false on metrics-only
@@ -228,7 +257,7 @@ app.post('/monitoring', async (req, res) => {
     const { host, port } = targetOf(managementAddress, settings);
     if (!host) throw new Error(`Unparseable management address "${managementAddress}"`);
 
-    const backend = backendFor(host, port, credentials);
+    const backend = await backendFor(host, port, credentials, settings);
     if (!backend) {
       // No SSH credential bound — nothing to collect. The device stays visible
       // with a critical health so the user notices the missing assignment.
@@ -294,7 +323,7 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   const { host, port } = targetOf(body.managementAddress, settings);
   if (!host) throw new Error(`Unparseable management address "${body.managementAddress}"`);
 
-  const backend = backendFor(host, port, body.credentials as Record<string, unknown>);
+  const backend = await backendFor(host, port, body.credentials as Record<string, unknown>, settings);
   if (!backend) throw new Error('No SSH credential bound — probe unavailable');
 
   const keys = Array.isArray(body.keys) && body.keys.length > 0 ? body.keys : ['systemStats'];
@@ -355,8 +384,9 @@ app.post(
     const host = hostFromAddress(body.managementAddress);
     if (!host) throw new Error('Missing managementAddress');
 
-    // The bound ssh slot wins; the primary username/password is a valid fallback
-    // here because it IS an SSH credential by definition of this plugin.
+    // The primary credential IS an SSH login by definition of this plugin —
+    // SFTP browses the tree as that user (no elevation: file access stays
+    // scoped to what the login user can see).
     const sshCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined);
     if (!sshCreds) throw new Error('No SSH credential bound — filesystem browsing unavailable');
 
@@ -479,7 +509,7 @@ app.post('/config', async (req, res) => {
   try {
     const host = hostFromAddress(managementAddress);
     if (!host) throw new Error(`Unparseable management address "${managementAddress}"`);
-    const backend = backendFor(host, sshPortOf(settings), creds);
+    const backend = await backendFor(host, sshPortOf(settings), creds, settings);
     if (!backend) {
       res.status(200).json({ success: false, result: { error: 'No SSH credential bound — configuration actions unavailable.' } });
       return;
@@ -561,7 +591,7 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
 
   const host = hostFromAddress(body.managementAddress);
   if (!host) throw new Error(`Unparseable management address "${body.managementAddress}"`);
-  const backend = backendFor(host, sshPortOf(settings), creds);
+  const backend = await backendFor(host, sshPortOf(settings), creds, settings);
   if (!backend) throw new Error('No SSH credential bound — device state unavailable.');
 
   return buildGenericSshState(backend);

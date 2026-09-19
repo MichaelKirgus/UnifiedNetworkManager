@@ -2417,9 +2417,11 @@ paths:
   /plugins/{id}/required-secret-type:
     get:
       tags: [Plugins]
-      summary: Get the secret type a device plugin requires
+      summary: Get the secret types a device plugin requires
       description: >-
-        Reads the `requiredSecretType` and any additional named credential
+        Reads the `requiredSecretType` (legacy single type),
+        `requiredSecretTypes` (all acceptable PRIMARY secret types, e.g.
+        usernamePassword OR sshKeyPair) and any additional named credential
         slots (`credentialSlots`) from the plugin's /discover endpoint. Use
         this to filter which secrets are applicable to devices managed by this
         plugin and to render per-slot credential pickers.
@@ -2430,7 +2432,7 @@ paths:
           schema: { type: string }
       responses:
         '200':
-          description: Required secret type
+          description: Required secret types
           content:
             application/json:
               schema:
@@ -2439,6 +2441,11 @@ paths:
                   requiredSecretType:
                     type: string
                     nullable: true
+                    description: "Legacy single type (first of requiredSecretTypes)"
+                  requiredSecretTypes:
+                    type: array
+                    items: { type: string }
+                    description: "All acceptable PRIMARY secret types (empty = undeclared/any)"
                   credentialSlots:
                     type: array
                     items:
@@ -6120,6 +6127,25 @@ components:
         latestVersion: { type: [string, 'null'] }
         rebootRequired: { type: [boolean, 'null'], description: "True when applying this update requires a device reboot" }
         sizeBytes: { type: [number, 'null'] }
+        releaseNotesUrl:
+          type: [string, 'null']
+          description: >-
+            Vendor release-notes URL for this update (changelog page or docs
+            anchor) — shown as a link on the Updates page. Null when the plugin
+            has no notes source for this row.
+        releaseNotes:
+          type: [string, 'null']
+          description: >-
+            Release-notes TEXT propagated directly from the device's own update
+            feed (e.g. TrueNAS `update.available_versions`, which its web UI also
+            shows). Rendered inline on the Updates page; capped at 16 KB at ingest.
+        branch:
+          type: [string, 'null']
+          description: >-
+            The device's current update branch/channel (TrueNAS update profile
+            like GENERAL/EARLY_ADOPTER, distro line, vendor firmware track) —
+            shown in the Updates page Branch column. Null when the reporting
+            plugin does not expose a branch concept for this row.
         applyActionId:
           type: [string, 'null']
           description: >-

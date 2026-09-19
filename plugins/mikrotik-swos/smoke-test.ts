@@ -37,7 +37,37 @@ interface CapturedPost {
   contentType?: string;
 }
 
-function makeSwosMock(port: number, platform: 'lite' | 'swos'): http.Server & { captured: CapturedPost[] } {
+/** One parsed multipart part (firmware/backup uploads). */
+interface MultipartCapture {
+  endpoint: string;
+  name: string;
+  filename?: string;
+  data: Buffer;
+}
+
+/** Minimal multipart/form-data parser for the mock switch (boundary-delimited parts). */
+function parseMultipart(raw: Buffer, boundary: string): { name: string; filename?: string; data: Buffer }[] {
+  const out: { name: string; filename?: string; data: Buffer }[] = [];
+  const delim = Buffer.from(`--${boundary}`);
+  let idx = raw.indexOf(delim);
+  while (idx !== -1) {
+    const next = raw.indexOf(delim, idx + delim.length);
+    if (next === -1) break;
+    let part = raw.subarray(idx + delim.length, next);
+    if (part[0] === 0x0d && part[1] === 0x0a) part = part.subarray(2); // leading CRLF
+    if (part.length >= 2 && part[part.length - 2] === 0x0d && part[part.length - 1] === 0x0a) part = part.subarray(0, part.length - 2); // trailing CRLF
+    const headerEnd = part.indexOf('\r\n\r\n');
+    if (headerEnd !== -1) {
+      const headers = part.subarray(0, headerEnd).toString('utf8');
+      const data = part.subarray(headerEnd + 4);
+      out.push({ name: /name="([^"]*)"/.exec(headers)?.[1] ?? '', filename: /filename="([^"]*)"/.exec(headers)?.[1], data });
+    }
+    idx = next;
+  }
+  return out;
+}
+
+function makeSwosMock(port: number, platform: 'lite' | 'swos'): http.Server & { captured: CapturedPost[]; multipart: MultipartCapture[] } {
   // --- mutable device state ---------------------------------------------------------
   const state =
     platform === 'lite'
@@ -169,6 +199,8 @@ function makeSwosMock(port: number, platform: 'lite' | 'swos'): http.Server & { 
         };
 
   const captured: CapturedPost[] = [];
+  const multipart: MultipartCapture[] = [];
+  let rebootCount = 0;
   let nonceCounter = 0;
 
   // --- wire serialization (mirrors the switch's own format) --------------------------
@@ -203,7 +235,11 @@ function makeSwosMock(port: number, platform: 'lite' | 'swos'): http.Server & { 
   const server = http.createServer((req, res) => {
     const url = (req.url ?? '/').split('?')[0];
     let body = '';
-    req.on('data', (c) => (body += c));
+    const rawChunks: Buffer[] = []; // binary-safe copy (multipart uploads carry arbitrary bytes)
+    req.on('data', (c) => {
+      body += c;
+      rawChunks.push(c);
+    });
     req.on('end', () => {
       // --- unauthenticated debug endpoint: inspect applied state -------------------
       if (url === '/__state') {
@@ -298,6 +334,27 @@ function makeSwosMock(port: number, platform: 'lite' | 'swos'): http.Server & { 
 
       if (req.method === 'POST') {
         captured.push({ endpoint: url, body, contentType: req.headers['content-type'] });
+
+        // --- firmware / backup / reboot endpoints (the switch's own web-UI protocol) ---
+        const ct = String(req.headers['content-type'] ?? '');
+        if (url === '/pboot') {
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          return res.end(''); // the UI only checks HTTP 200
+        }
+        if (url === '/reboot') {
+          rebootCount++;
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          return res.end('');
+        }
+        if ((url === '/upgrade' || url === '/backup.swb') && ct.startsWith('multipart/form-data')) {
+          const boundary = /boundary=([^;]+)/.exec(ct)?.[1] ?? '';
+          for (const part of parseMultipart(Buffer.concat(rawChunks), boundary)) {
+            multipart.push({ endpoint: url, name: part.name, filename: part.filename, data: part.data });
+          }
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          return res.end(''); // 200 = accepted (the UI treats anything else as failure)
+        }
+
         // Apply the posted fields to state (the switch applies + persists immediately).
         try {
           const parsed = JSON.parse(
@@ -324,9 +381,11 @@ function makeSwosMock(port: number, platform: 'lite' | 'swos'): http.Server & { 
       res.writeHead(405);
       return res.end();
     });
-  }) as http.Server & { captured: CapturedPost[] };
+  }) as http.Server & { captured: CapturedPost[]; multipart: MultipartCapture[]; rebootCount(): number };
 
   server.captured = captured;
+  server.multipart = multipart;
+  server.rebootCount = () => rebootCount;
   return server;
 }
 
@@ -374,8 +433,12 @@ async function main(): Promise<void> {
   check('requiredSecretType usernamePassword', disc.requiredSecretType === 'usernamePassword');
   check('capabilities include planning+configuration', ['monitoring', 'configuration', 'inventory', 'planning'].every((c) => (disc.capabilities as string[]).includes(c)), disc.capabilities);
   const actions = (disc.actions ?? []) as { id: string; riskLevel: string }[];
-  check('action catalog has all 10 actions', actions.length === 10, `count=${actions.length}`);
-  check('dangerous actions marked', actions.filter((a) => a.riskLevel === 'dangerous').map((a) => a.id).sort().join(',') === 'system.management.set,vlans.table.set');
+  check('action catalog has all 13 actions', actions.length === 13, `count=${actions.length}`);
+  check(
+    'dangerous actions marked',
+    actions.filter((a) => a.riskLevel === 'dangerous').map((a) => a.id).sort().join(',') ===
+      'firmware.update,swos.config.restore,system.management.set,system.reboot,vlans.table.set'
+  );
   const opts = (disc.options ?? []) as { key: string }[];
   check('options advertised', ['cacheTtlSeconds', 'requestTimeoutMs'].every((k) => opts.some((o) => o.key === k)));
   check('iconUrl set', disc.iconUrl === '/icons/swos.svg');
@@ -593,6 +656,66 @@ async function main(): Promise<void> {
   console.log('\n== /config swos.backup.download ==');
   check('success true with base64 payload', bakRes.status === 200 && bakJson.success === true && typeof bakJson.result?.details?.backupBase64 === 'string' && (bakJson.result.details.backupBase64 as string).length > 100, { size: bakJson.result?.details?.sizeBytes });
 
+  // --- /config (firmware.update — pboot → multipart /upgrade "blob" → reboot) ------------------------------
+  const fwImage = Buffer.from('FAKE-SWOS-IMAGE'.repeat(50)); // ~650 B, well under the cap
+  const fwRes = await fetch(`${BASE}/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: 'devA', managementAddress: `localhost:${LITE_PORT}`, credentials: creds, actionId: 'firmware.update', input: { fileBase64: fwImage.toString('base64'), fileName: 'swos-css610-2.20.bin' } }),
+  });
+  const fwJson = (await fwRes.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config firmware.update ==');
+  check('success true', fwRes.status === 200 && fwJson.success === true, fwJson);
+  const pbootPost = lite.captured.find((c) => c.endpoint === '/pboot');
+  check('POSTed to /pboot with body "*"', !!pbootPost && pbootPost.body === '*', pbootPost?.body);
+  const upgradePart = (lite.multipart ?? []).find((m) => m.endpoint === '/upgrade' && m.name === 'blob');
+  check('multipart POST /upgrade with field "blob" + filename', !!upgradePart && upgradePart.filename === 'swos-css610-2.20.bin', lite.multipart);
+  if (upgradePart) {
+    const ct = lite.captured.find((c) => c.endpoint === '/upgrade')?.contentType ?? '';
+    check('content-type is multipart/form-data with boundary', /^multipart\/form-data; boundary=/.test(ct), ct);
+    check('uploaded bytes match the image exactly', upgradePart.data.equals(fwImage));
+  }
+  check('reboot issued after upgrade', (lite.rebootCount?.() ?? 0) === 1, lite.rebootCount?.());
+
+  // --- /config (swos.config.restore — multipart POST /backup.swb field "file" → reboot) ----------------------
+  const swb = Buffer.from(`SWB-RESTORE-${Date.now()}`.repeat(20));
+  const restoreRes = await fetch(`${BASE}/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: 'devA', managementAddress: `localhost:${LITE_PORT}`, credentials: creds, actionId: 'swos.config.restore', input: { fileBase64: swb.toString('base64'), fileName: 'CSS610-Office_2.20.swb' } }),
+  });
+  const restoreJson = (await restoreRes.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config swos.config.restore ==');
+  check('success true', restoreRes.status === 200 && restoreJson.success === true, restoreJson);
+  const restorePart = (lite.multipart ?? []).find((m) => m.endpoint === '/backup.swb' && m.name === 'file');
+  check('multipart POST /backup.swb with field "file" + filename', !!restorePart && restorePart.filename === 'CSS610-Office_2.20.swb', lite.multipart);
+  if (restorePart) {
+    check('restored bytes match the backup exactly', restorePart.data.equals(swb));
+  }
+  check('reboot issued after restore', (lite.rebootCount?.() ?? 0) === 2, lite.rebootCount?.());
+
+  // --- /config (system.reboot — plain POST /reboot "*") -------------------------------------------------------------
+  const rebootRes = await fetch(`${BASE}/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: 'devA', managementAddress: `localhost:${LITE_PORT}`, credentials: creds, actionId: 'system.reboot', input: {} }),
+  });
+  const rebootJson = (await rebootRes.json()) as { success?: boolean };
+  console.log('\n== /config system.reboot ==');
+  check('success true', rebootRes.status === 200 && rebootJson.success === true, rebootJson);
+  const rebootPost = lite.captured.find((c) => c.endpoint === '/reboot' && c.body === '*');
+  check('POSTed to /reboot with body "*"', !!rebootPost, lite.captured.map((c) => `${c.endpoint}:${c.body}`));
+  check('total reboots = 3 (upgrade + restore + explicit)', (lite.rebootCount?.() ?? 0) === 3, lite.rebootCount?.());
+
+  // --- /config (file actions — validation: missing/empty file payload) -------------------------------------------
+  const noFile = await fetch(`${BASE}/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ managementAddress: `localhost:${LITE_PORT}`, credentials: creds, actionId: 'firmware.update', input: {} }),
+  });
+  const noFileJson = (await noFile.json()) as { success?: boolean; result?: Record<string, unknown> };
+  check('missing fileBase64 rejected by schema validation', noFile.status === 200 && noFileJson.success === false && /fileBase64/.test(String(noFileJson.result?.error)), noFileJson);
+
   // --- /config (validation + unknown action) ---------------------------------------------------------------------------
   const badInput = await fetch(`${BASE}/config`, {
     method: 'POST',
@@ -647,7 +770,11 @@ async function main(): Promise<void> {
   const p3 = portsSection?.items?.find((i) => i.key === '3');
   check('port 3 shows PoE draw + per-port VLAN PVID', /1\.3 W/.test(String(p3?.fields?.['PoE draw'])) && p3?.fields?.PVID === 10, p3);
   const sysSection = (stateJson.sections ?? []).find((s) => s.id === 'system');
-  check('system item advertises info + backup actions', !!sysSection?.items?.[0]?.actions && ['swos.system.info', 'swos.backup.download'].every((id) => sysSection.items![0].actions!.some((a) => a.actionId === id)), sysSection?.items?.[0]?.actions);
+  check(
+    'system item advertises info + backup + firmware/restore/reboot actions',
+    !!sysSection?.items?.[0]?.actions && ['swos.system.info', 'swos.backup.download', 'firmware.update', 'swos.config.restore', 'system.reboot'].every((id) => sysSection.items![0].actions!.some((a) => a.actionId === id)),
+    sysSection?.items?.[0]?.actions
+  );
 
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);

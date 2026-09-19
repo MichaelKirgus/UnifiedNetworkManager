@@ -30,6 +30,11 @@ import {
 export interface DiscoveryExtras {
   /** Secret type this plugin expects for device credentials (null = none). Re-fetched live by the API — never persisted. */
   requiredSecretType?: string | null;
+  /** Multiple acceptable secret types for the PRIMARY credential (e.g. a plugin
+   *  that accepts both usernamePassword and sshKeyPair logins). Wins over
+   *  `requiredSecretType` when present; older consumers fall back to the single
+   *  type, so declare BOTH whenever you use this field. */
+  requiredSecretTypes?: string[];
   metrics?: MetricDescriptor[];
   options?: PluginOptionDescriptor[];
   actions?: CatalogEntry[];
@@ -80,6 +85,7 @@ export function buildDiscoverPayload(identity: PluginIdentity, extras?: Discover
     endpoint: identity.endpoint,
     authType: identity.authType,
     ...(e.requiredSecretType !== undefined ? { requiredSecretType: e.requiredSecretType } : {}),
+    ...(Array.isArray(e.requiredSecretTypes) && e.requiredSecretTypes.length > 0 ? { requiredSecretTypes: e.requiredSecretTypes } : {}),
     ...(e.metrics !== undefined ? { metrics: e.metrics } : {}),
     ...(e.options !== undefined ? { options: e.options } : {}),
     ...(e.actions !== undefined ? { actions: e.actions } : {}),

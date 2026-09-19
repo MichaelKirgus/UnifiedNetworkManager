@@ -7,7 +7,7 @@
  */
 
 import type { DeviceStateResponse, StateSection } from '@unm/plugin-sdk';
-import type { SshBackend } from './client/sshClient';
+import type { CommandRunner } from './client/privilege';
 import { GenericSshCollector } from './monitoring';
 
 function formatDuration(totalSeconds: number): string {
@@ -20,7 +20,7 @@ function formatDuration(totalSeconds: number): string {
 }
 
 /** Builds the Config-page state document from one fresh collection pass. */
-export async function buildGenericSshState(backend: SshBackend): Promise<DeviceStateResponse> {
+export async function buildGenericSshState(backend: CommandRunner): Promise<DeviceStateResponse> {
   const collector = new GenericSshCollector(backend);
   const [board, networks, neighborsRes, routes] = await Promise.all([
     collector.boardInfo().catch(() => null),

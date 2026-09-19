@@ -23,8 +23,8 @@ import {
   parseLooseDeviceDatetime,
   tzAbbrToOffsetMinutes,
   warnOnce,
-  catalogFirmwareRow,
   type DeviceTimeInfo,
+  type UpdateRow,
 } from '@unm/plugin-sdk';
 import {
   getSystemStatus,
@@ -42,6 +42,7 @@ import {
 } from './opnsenseClient';
 import { DEVICE_MODELS, RELEASES } from './deviceModels';
 import { createClient, OpnsenseCredentials, OpnsensePorts, resolveBase } from './client/http';
+import * as firmware from './client/firmware';
 import { resolveEdition } from './client/editions';
 import { detectDnsBackend, DnsBackend } from './client/dns';
 import { detectDhcpBackend, DhcpBackend, searchKeaLeases, searchDnsmasqLeases } from './client/dhcp';
@@ -1325,6 +1326,75 @@ async function collectMetrics(
   return { metrics, interfaces };
 }
 
+// --- Updates page: live firmware status --------------------------------------
+// Reads the appliance's CACHED update check (fast GET — no synchronous probe)
+// and turns it into UpdateRows:
+//   - one 'firmware' row for the OS itself. Minor point releases apply via
+//     `firmware.update`; a pending MAJOR release line applies via
+//     `firmware.upgrade` (the appliance reboots into the new line).
+//   - one 'os-package' row per other pending package — all of them are applied
+//     by the SAME minor update job, so every row points at `firmware.update`
+//     with an EMPTY input (one plan step = one job start; the webapp merges a
+//     device's kind-groups into single steps).
+// Returns [] when nothing is pending — that empty array IS authoritative (the
+// API wipes stale rows). THROWS on transport failure so the caller omits the
+// key entirely (no wipe on a transient outage).
+async function getFirmwareUpdateRows(host: string, client: import('axios').AxiosInstance): Promise<UpdateRow[]> {
+  const res = await firmware.getFirmwareStatus(client);
+  if (!res.ok || !res.data) throw new Error(`firmware status failed (HTTP ${res.status})`);
+  const st = firmware.parseFirmwareStatus(res.data);
+  if (!st.checked) return [];
+
+  const rows: UpdateRow[] = [];
+  const osPkg = st.packages.find((p) => p.name === (st.productId ?? '') || /opnsense-(business|community)$/.test(p.name));
+  const pkgRows = st.packages.filter((p) => p !== osPkg);
+
+  // Firmware row: major line wins (it subsumes the minor update — upgrading to
+  // a new series installs everything), otherwise the minor point release.
+  if (st.majorSets.length > 0) {
+    rows.push({
+      name: 'os',
+      kind: 'firmware',
+      currentVersion: st.productVersion ?? null,
+      latestVersion: st.nextSeries ? `${st.nextSeries} (new release line)` : null,
+      available: true,
+      rebootRequired: true, // major upgrades always boot a new environment
+      applyActionId: 'firmware.upgrade',
+      applyInput: {},
+      extra: { downloadSize: st.downloadSize ?? undefined },
+    });
+  } else if (osPkg) {
+    rows.push({
+      name: 'os',
+      kind: 'firmware',
+      currentVersion: osPkg.currentVersion ?? st.productVersion ?? null,
+      latestVersion: osPkg.newVersion ?? null,
+      available: true,
+      rebootRequired: st.needsReboot,
+      applyActionId: 'firmware.update',
+      applyInput: {},
+      extra: { downloadSize: st.downloadSize ?? undefined },
+    });
+  }
+
+  // Package rows — each applied by the same minor update job (empty input).
+  for (const p of pkgRows) {
+    if (!p.newVersion) continue;
+    rows.push({
+      name: p.name,
+      kind: 'os-package',
+      currentVersion: p.currentVersion ?? null,
+      latestVersion: p.newVersion,
+      available: true,
+      rebootRequired: false,
+      applyActionId: 'firmware.update',
+      applyInput: {},
+    });
+  }
+
+  return rows;
+}
+
 app.post('/monitoring', async (req, res) => {
   const body = req.body ?? {};
   const { deviceId, apiKey, apiSecret, managementAddress } = body;
@@ -1364,14 +1434,18 @@ app.post('/monitoring', async (req, res) => {
     if (selectedModel) metrics['system.model'] = selectedModel;
     if (selectedFirmware) metrics['system.firmwareVersion'] = selectedFirmware;
 
-    // Updates page: firmware row from the live version vs the static release
-    // catalog. OPNsense has no safe programmatic OS-update API (updates go
-    // through the web UI / pkg.opnsense.org), so the row is available-without-
-    // apply — it shows on the Updates page but carries no Update button.
-    const liveVersion = pickString(metrics, ['version']);
-    if (liveVersion) {
-      const fwRow = catalogFirmwareRow(liveVersion, RELEASES);
-      if (fwRow) metrics['updates'] = [fwRow];
+    // Updates page — LIVE firmware status from the appliance's own update
+    // engine (System → Updates in its web UI): a fast GET of the cached check
+    // result. Emits one firmware row (minor `firmware.update` / major
+    // `firmware.upgrade`) plus one os-package row per pending package — all
+    // applied through the appliance's own update jobs, so the Updates page can
+    // trigger them with a single action.
+    try {
+      const fwClient = createClient(managementAddress, { apiKey, apiSecret }, transport, ports);
+      metrics['updates'] = await getFirmwareUpdateRows(managementAddress, fwClient);
+    } catch (e) {
+      // No key on failure — the API keeps the previous rows (no wipe).
+      console.error(`[opnsense-plugin] firmware updates failed for ${managementAddress}: ${(e as Error)?.message ?? e}`);
     }
 
     // Health: prefer the appliance's own status code (0=critical, 1=warning,

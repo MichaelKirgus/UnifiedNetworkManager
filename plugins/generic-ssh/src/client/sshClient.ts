@@ -57,7 +57,10 @@ export class SshBackend {
       hostKeyVerifier: dynamicSshHostVerifier(this.host, this.port),
       timeoutMs,
     });
-    return client.exec(command, this.creds);
+    // The budget MUST ride on the exec call itself: a pooled session created by
+    // an earlier short-budget caller (e.g. the 10 s inventory ping) would
+    // otherwise silently cap long-running commands at its creation-time value.
+    return client.exec(command, this.creds, timeoutMs);
   }
 
   /**

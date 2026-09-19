@@ -151,6 +151,11 @@ export function buildSwosState(snapshot: SwosSnapshot): DeviceStateResponse {
     actions: [
       { actionId: 'swos.system.info' },
       { actionId: 'swos.backup.download' },
+      // File-based maintenance (files ride along as base64 in the step input —
+      // a future Files page will manage them): firmware flash, config restore, reboot.
+      { actionId: 'firmware.update' },
+      { actionId: 'swos.config.restore' },
+      { actionId: 'system.reboot' },
     ],
   };
 

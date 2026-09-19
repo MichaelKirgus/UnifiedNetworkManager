@@ -444,27 +444,44 @@ export async function updateSecret(
   });
 }
 
+/** The secret types a device plugin accepts for its PRIMARY credential. */
+export interface RequiredSecretTypes {
+  /** Legacy single type (first of `types`) — kept so older consumers keep working. */
+  requiredSecretType: string | null;
+  /** All acceptable primary secret types (e.g. ['usernamePassword', 'sshKeyPair']).
+   *  Empty when the plugin declares none or is unreachable. */
+  requiredSecretTypes: string[];
+}
+
 /**
- * Reads the secret type a device plugin requires (from its `/discover`
- * `requiredSecretType`), if declared. Returns `null` when undeclared or the
- * plugin is unreachable.
+ * Reads the secret type(s) a device plugin requires for its PRIMARY credential
+ * (from its `/discover` `requiredSecretType` / `requiredSecretTypes`). Returns
+ * empty when undeclared or the plugin is unreachable.
  */
-export async function getRequiredSecretType(pluginId: string): Promise<string | null> {
+export async function getRequiredSecretTypes(pluginId: string): Promise<RequiredSecretTypes> {
   const row = await db.query.plugins.findFirst({
     where: (plugins, { eq }) => eq(plugins.id, pluginId),
   });
-  if (!row) return null;
+  if (!row) return { requiredSecretType: null, requiredSecretTypes: [] };
   const provider = toRecord(row);
   try {
     const base = provider.endpoint.replace(/\/+$/, '');
     const apiKey = process.env.PLUGIN_API_KEY;
     const headers = apiKey ? { 'x-plugin-api-key': apiKey } : undefined;
-    const res = await axios.get<{ requiredSecretType?: string }>(`${base}/discover`, {
+    const res = await axios.get<{ requiredSecretType?: string; requiredSecretTypes?: string[] }>(`${base}/discover`, {
       timeout: PROVIDER_TIMEOUT_MS,
       headers,
     });
-    return res.data.requiredSecretType ?? null;
+    const types: string[] = [];
+    if (Array.isArray(res.data.requiredSecretTypes)) {
+      for (const t of res.data.requiredSecretTypes) {
+        if (typeof t === 'string' && t.trim() !== '' && !types.includes(t.trim())) types.push(t.trim());
+      }
+    }
+    const single = typeof res.data.requiredSecretType === 'string' ? res.data.requiredSecretType.trim() : '';
+    if (single && !types.includes(single)) types.unshift(single);
+    return { requiredSecretType: types[0] ?? null, requiredSecretTypes: types };
   } catch {
-    return null;
+    return { requiredSecretType: null, requiredSecretTypes: [] };
   }
 }

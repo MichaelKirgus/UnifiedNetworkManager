@@ -11,7 +11,7 @@
  *   - peer.add    → no-op when the remote PublicKey is already present, else appends.
  */
 
-import type { SshBackend } from '../client/sshClient';
+import type { CommandRunner } from '../client/privilege';
 import type { ActionDescriptor } from './types';
 import { okResult, failResult, runCommands, shq, keyMaterial, isSafeName } from './types';
 
@@ -23,8 +23,9 @@ function firstHostIp(subnet: string): string | null {
   return m ? `${m[1]}.1` : null;
 }
 
-/** Ensures wireguard-tools is present (best-effort install on common distros). */
-async function ensureWg(backend: SshBackend): Promise<{ ok: boolean; error?: string }> {
+/** Ensures wireguard-tools is present (best-effort install on common distros).
+ *  The install itself runs elevated — the backend escalates automatically. */
+async function ensureWg(backend: CommandRunner): Promise<{ ok: boolean; error?: string }> {
   const have = await backend.exec('command -v wg >/dev/null 2>&1 && echo yes || echo no').catch(() => null);
   if (have?.stdout.trim() === 'yes') return { ok: true };
   // Best-effort install — a box without package access gets a clear error instead.

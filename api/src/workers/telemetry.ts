@@ -1790,6 +1790,8 @@ async function ingestInventory(
         deviceId: string; pluginId: string; kind: string; name: string;
         currentVersion: string | null; latestVersion: string | null;
         rebootRequired: boolean | null; sizeBytes: number | null;
+        releaseNotesUrl: string | null; releaseNotes: string | null;
+        branch: string | null;
         applyActionId: string | null; applyInput: string; extra: string; collectedAt: string;
       }[] = [];
       for (const raw of rawUpdates) {
@@ -1809,6 +1811,10 @@ async function ingestInventory(
           latestVersion: typeof r['latestVersion'] === 'string' && (r['latestVersion'] as string) !== '' ? (r['latestVersion'] as string) : null,
           rebootRequired: typeof r['rebootRequired'] === 'boolean' ? (r['rebootRequired'] as boolean) : null,
           sizeBytes: numOrNull(r['sizeBytes']),
+          releaseNotesUrl: typeof r['releaseNotesUrl'] === 'string' && (r['releaseNotesUrl'] as string).trim() !== '' ? (r['releaseNotesUrl'] as string).trim() : null,
+          // Cap notes text at 16 KB — a runaway feed must not bloat the table.
+          releaseNotes: typeof r['releaseNotes'] === 'string' && (r['releaseNotes'] as string).trim() !== '' ? (r['releaseNotes'] as string).slice(0, 16_384) : null,
+          branch: typeof r['branch'] === 'string' && (r['branch'] as string).trim() !== '' ? (r['branch'] as string).trim().slice(0, 128) : null,
           applyActionId: typeof r['applyActionId'] === 'string' && (r['applyActionId'] as string).trim() !== '' ? (r['applyActionId'] as string).trim() : null,
           applyInput: (() => {
             const ai = r['applyInput'];
@@ -1829,6 +1835,9 @@ async function ingestInventory(
             latestVersion: sql`excluded."latestVersion"`,
             rebootRequired: sql`excluded."rebootRequired"`,
             sizeBytes: sql`excluded."sizeBytes"`,
+            releaseNotesUrl: sql`excluded."releaseNotesUrl"`,
+            releaseNotes: sql`excluded."releaseNotes"`,
+            branch: sql`excluded."branch"`,
             applyActionId: sql`excluded."applyActionId"`,
             applyInput: sql`excluded."applyInput"`,
             extra: sql`excluded.extra`,

@@ -16,7 +16,7 @@
 
 import { INVENTORY_INTERVAL_MS, buildDeviceTimeInfo, listUpgradablePackages } from '@unm/plugin-sdk';
 import type { MetricDescriptor, UpdateRow } from '@unm/plugin-sdk';
-import { SshBackend } from './client/sshClient';
+import type { CommandRunner } from './client/privilege';
 import type {
   BoardInfo,
   DiskRow,
@@ -46,7 +46,7 @@ const INVENTORY_FAILURE_BACKOFF_MS = 60_000;
  * treat null as "no inventory data this poll" and emit NO inventory keys at
  * all (absent key = no wipe of stored rows, per the ingestion contract).
  */
-export async function getInventory(hostKey: string, backend: SshBackend): Promise<InventorySnapshot | null> {
+export async function getInventory(hostKey: string, backend: CommandRunner): Promise<InventorySnapshot | null> {
   const hit = inventoryCache.get(hostKey);
   if (hit && Date.now() - hit.at < INVENTORY_INTERVAL_MS) return hit.snapshot;
 
@@ -92,8 +92,12 @@ const updatesCache = new Map<string, { at: number; rows: UpdateRow[] }>();
  * that empty array IS authoritative (the API wipes stale rows). THROWS when
  * the box is unreachable so the caller omits the key entirely (no wipe on a
  * transient outage).
+ *
+ * Runs through the privilege-aware backend: `apt list --upgradable` and friends
+ * need root on most distros, so a non-root login user without sudo simply gets
+ * no rows instead of permission errors — exactly like before this feature.
  */
-export async function getUpdates(hostKey: string, backend: SshBackend): Promise<UpdateRow[]> {
+export async function getUpdates(hostKey: string, backend: CommandRunner): Promise<UpdateRow[]> {
   const hit = updatesCache.get(hostKey);
   if (hit && Date.now() - hit.at < UPDATES_TTL_MS) return hit.rows;
 
@@ -125,8 +129,9 @@ export interface LiveMetrics {
   metrics: Record<string, unknown>;
 }
 
-/** Collects the fast per-poll metrics (CPU/load/memory/swap/traffic/clock). */
-export async function collectLive(backend: SshBackend): Promise<LiveMetrics> {
+/** Collects the fast per-poll metrics (CPU/load/memory/swap/traffic/clock).
+ *  All reads are user-level (/proc, /sys) — no privilege needed. */
+export async function collectLive(backend: CommandRunner): Promise<LiveMetrics> {
   const metrics: Record<string, unknown> = {};
 
   // ONE combined round-trip for all live reads — cheap on low-end boxes.
@@ -265,11 +270,11 @@ function computeRates(host: string, counters: Record<string, { rx: number; tx: n
 }
 
 // ---------------------------------------------------------------------------
-// Inventory collection (15-min cadence) — one SshBackend per host
+// Inventory collection (15-min cadence) — one CommandRunner per host
 // ---------------------------------------------------------------------------
 
 export class GenericSshCollector {
-  constructor(private readonly backend: SshBackend) {}
+  constructor(private readonly backend: CommandRunner) {}
 
   /** System identity: hostname, OS release, uptime. */
   async boardInfo(): Promise<BoardInfo | null> {
@@ -532,11 +537,16 @@ export interface MonitoringResult {
 /** Assembles the complete monitoring response for one poll. */
 export async function collectMonitoring(
   hostKey: string,
-  backend: SshBackend,
+  backend: CommandRunner,
   opts: { collectInventory: boolean }
 ): Promise<MonitoringResult> {
   const live = await collectLive(backend);
   const metrics: Record<string, unknown> = { ...live.metrics };
+
+  // How this host is actually addressed — 'root', 'sudo' or a bound root slot.
+  // Lets the user see at a glance whether privilege escalation is active (and
+  // that package/route/snapshot actions will run elevated).
+  if (backend.describePrivilege) metrics['system.privilege'] = backend.describePrivilege();
 
   if (opts.collectInventory) {
     // null = collection failed or in backoff → emit NO inventory keys at all.
@@ -631,6 +641,9 @@ export function descriptorsFromMetrics(metrics: Record<string, unknown>): Metric
   }
   for (const [key, label] of [['load.1m', 'Load 1m'], ['load.5m', 'Load 5m'], ['load.15m', 'Load 15m']] as const) {
     if (typeof metrics[key] === 'number') push({ key, label, type: 'number', visualization: 'text', group: 'System' });
+  }
+  if (typeof metrics['system.privilege'] === 'string') {
+    push({ key: 'system.privilege', label: 'Execution mode', type: 'string', visualization: 'text', group: 'System' });
   }
   if (metrics['system.hostname'] !== undefined) {
     push({ key: 'system.hostname', label: 'Hostname', type: 'string', visualization: 'text', group: 'Inventory', intervalMs: INVENTORY_INTERVAL_MS });

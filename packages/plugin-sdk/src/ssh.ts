@@ -148,6 +148,85 @@ export function resolveSshCredentials(
   return resolveFromFields(src);
 }
 
+/** Resolves the fields of ONE named credential slot from a StepCredentials body. */
+export function resolveSlotFields(creds: Record<string, unknown> | null | undefined, name: string): Record<string, string> | undefined {
+  if (!creds || typeof creds !== 'object') return undefined;
+  const slots = (creds['slots'] ?? {}) as Record<string, unknown>;
+  const slot = slots[name];
+  return slot && typeof slot === 'object' ? (slot as Record<string, string>) : undefined;
+}
+
+/** Resolves the dedicated `root` credential slot (a second SSH login with root
+ *  access) into SshCredentials — undefined when the slot is unbound or carries
+ *  no usable fields. Plugins use it for privilege escalation: they log in as the
+ *  primary user and run elevated commands through this account via sudo. */
+export function resolveRootSlotCredentials(creds?: Record<string, unknown> | null): SshCredentials | undefined {
+  const fields = resolveSlotFields(creds, 'root');
+  return fields ? resolveFromFields(fields) : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Privilege escalation (sudo) — for plugins whose login user is not root but
+// may be able to elevate. See wrapSudo / probePrivilege below.
+// ---------------------------------------------------------------------------
+
+/** A command runner that can execute with or without privilege elevation. */
+export interface SudoExecBackend {
+  /** Run a plain command as the logged-in user. */
+  exec(command: string, timeoutMs?: number): Promise<ExecResult>;
+}
+
+/** How a host should be addressed for commands that need root. */
+export type PrivilegeMode = 'root' | 'sudo';
+
+/** Result of probePrivilege — one probe per (host, mode) is cached by the caller. */
+export interface PrivilegeProbe {
+  /** The effective mode: 'root' when no elevation is needed/possible, else 'sudo'. */
+  mode: PrivilegeMode;
+  /** True when a root-level command actually ran successfully under this mode. */
+  verified: boolean;
+}
+
+/** Shell-quotes a value for safe embedding in a sudo command line (single quotes). */
+export function shQuote(v: string): string {
+  return `'${v.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Wraps a shell script so it runs with root privileges when `mode` is 'sudo':
+ * the whole script is passed to `sh -c` under sudo (optionally as another user).
+ * In 'root' mode the script is returned unchanged. The script body must be a
+ * single-quoted-safe string — callers build it from validated inputs only.
+ */
+export function wrapSudo(script: string, mode: PrivilegeMode, sudoUser?: string): string {
+  if (mode !== 'sudo') return script;
+  const user = sudoUser && sudoUser.trim() !== '' ? shQuote(sudoUser.trim()) : '';
+  // `sh -c <script>` under sudo — the script runs in a fresh shell as root, so
+  // relative paths / env assumptions of the login user do not leak in.
+  return `sudo ${user} sh -c ${shQuote(script)}`;
+}
+
+/**
+ * Probes whether a host needs (and supports) privilege elevation for one
+ * logged-in user:
+ *   - already uid 0            → { mode: 'root', verified: true }
+ *   - `sudo -n true` succeeds  → { mode: 'sudo', verified: true }
+ *   - otherwise                → { mode: 'sudo', verified: false } (best effort —
+ *     root-only sections will fail with a clear error, user-level reads still work)
+ * Never throws; transport failures resolve to the unverified sudo fallback.
+ */
+export async function probePrivilege(backend: SudoExecBackend): Promise<PrivilegeProbe> {
+  try {
+    const uid = await backend.exec('id -u', 10_000);
+    if (uid && uid.code === 0 && uid.stdout.trim() === '0') return { mode: 'root', verified: true };
+  } catch { /* fall through to the sudo probe */ }
+  try {
+    const r = await backend.exec('sudo -n true', 10_000);
+    if (r && r.code === 0) return { mode: 'sudo', verified: true };
+  } catch { /* no passwordless sudo — or transport failure */ }
+  return { mode: 'sudo', verified: false };
+}
+
 // ---------------------------------------------------------------------------
 // Host-key fingerprints
 // ---------------------------------------------------------------------------
@@ -349,10 +428,13 @@ export class SshClient {
     return this.ownerClosed;
   }
 
-  private connect(creds: SshCredentials): Promise<void> {
+  private connect(creds: SshCredentials, timeoutMs?: number): Promise<void> {
     if (this.conn) return Promise.resolve(); // already ESTABLISHED — RE-USE, no re-auth
     if (this.connectPromise) return this.connectPromise; // handshake in flight — share it
     const o = this.opts;
+    // A per-call budget may exceed the client's default (e.g. a long upgrade on
+    // a pooled session created by a short ping) — honor it for THIS handshake.
+    const connectTimeoutMs = timeoutMs ?? o.timeoutMs;
     const pinned = normalizeFingerprint(o.hostKeyFingerprint);
 
     // Host-key verification. ssh2's hostVerifier receives the RAW SSH wire-format
@@ -387,7 +469,7 @@ export class SshClient {
       host: o.host,
       port: o.port,
       username: creds.username,
-      readyTimeout: Math.max(3000, o.timeoutMs),
+      readyTimeout: Math.max(3000, connectTimeoutMs),
       // Keep the session alive across idle poll gaps so NAT/firewalls don't
       // drop it and force a re-auth on the next cycle.
       keepaliveInterval: 30_000,
@@ -416,8 +498,8 @@ export class SshClient {
         reject(e);
       };
       const timer = setTimeout(() => {
-        fail(new SshTimeoutError(`SSH connect to ${o.host}:${o.port} timed out after ${o.timeoutMs} ms`));
-      }, Math.max(3000, o.timeoutMs));
+        fail(new SshTimeoutError(`SSH connect to ${o.host}:${o.port} timed out after ${connectTimeoutMs} ms`));
+      }, Math.max(3000, connectTimeoutMs));
 
       // Only mark the client ESTABLISHED once 'ready' fires. Setting this.conn at
       // creation time (the old behavior) let a concurrent caller see a non-null
@@ -495,12 +577,15 @@ export class SshClient {
    * Runs one remote command and resolves with its exit code + output. The first
    * call establishes the connection (with the given credentials); subsequent
    * calls RE-USE the live session — no re-auth per poll cycle. After a drop,
-   * the next call reconnects transparently.
+   * the next call reconnects transparently. `timeoutMs` overrides this client's
+   * default budget for THIS command only — essential for pooled clients whose
+   * connection was created by a short-lived caller (e.g. an inventory ping with
+   * a 10 s budget) and later reused for long-running work like package upgrades.
    */
-  async exec(command: string, creds: SshCredentials): Promise<ExecResult> {
+  async exec(command: string, creds: SshCredentials, timeoutMs?: number): Promise<ExecResult> {
     if (this.ownerClosed) throw new SshError(`SSH client for ${this.opts.host} is closed`);
     try {
-      return await this.execOnce(command, creds);
+      return await this.execOnce(command, creds, timeoutMs);
     } catch (e) {
       // A pooled socket can be dead even though we believe it's connected — the
       // appliance or a middlebox drops idle SSH sessions between poll cycles — and
@@ -511,26 +596,28 @@ export class SshClient {
       if (!isTransportError(e)) throw e;
       this.teardown(); // drop whatever state we have so the retry connects fresh
       await new Promise((r) => setTimeout(r, 1_000));
-      return await this.execOnce(command, creds);
+      return await this.execOnce(command, creds, timeoutMs);
     }
   }
 
   /** One exec attempt on a (re)established session. Transport failures here are
    *  caught by exec() for a single retry; auth/host-key errors propagate as-is. */
-  private async execOnce(command: string, creds: SshCredentials): Promise<ExecResult> {
+  private async execOnce(command: string, creds: SshCredentials, timeoutMs?: number): Promise<ExecResult> {
     if (this.ownerClosed) throw new SshError(`SSH client for ${this.opts.host} is closed`);
-    await this.connect(creds);
+    await this.connect(creds, timeoutMs);
     const conn = this.conn;
     if (!conn) throw new SshError(`SSH connect to ${this.opts.host}:${this.opts.port} failed`);
 
+    // Per-call budget wins over the client default (see exec() docs).
+    const effectiveTimeoutMs = Math.max(3000, timeoutMs ?? this.opts.timeoutMs);
     return new Promise<ExecResult>((resolve, reject) => {
       let settled = false;
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
         this.teardown(); // a hung exec poisons the session — drop it so we reconnect next time
-        reject(new SshTimeoutError(`SSH exec on ${this.opts.host} timed out after ${this.opts.timeoutMs} ms`));
-      }, Math.max(3000, this.opts.timeoutMs));
+        reject(new SshTimeoutError(`SSH exec on ${this.opts.host} timed out after ${effectiveTimeoutMs} ms`));
+      }, effectiveTimeoutMs);
 
       conn.exec(command, (err: Error | undefined, stream?: import('ssh2').ClientChannel) => {
         if (err || !stream) {

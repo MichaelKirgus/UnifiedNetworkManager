@@ -331,7 +331,11 @@ app.post('/monitoring', async (req, res) => {
     // vs the newest known release line — major.minor comparison. Available-
     // without-apply (no safe programmatic OS-update API).
     if (s.version) {
-      const fwRow = catalogFirmwareRow(s.version, KNOWN_ROS_LINES);
+      // Release notes: the official RouterOS changelog lists every version of
+      // the target line (e.g. 7.14 → /changelog/7_14).
+      const fwRow = catalogFirmwareRow(s.version, KNOWN_ROS_LINES, {
+        releaseNotesUrl: (target) => `https://wiki.mikrotik.com/wiki/Changelog/${String(target).replace(/\./g, '_')}`,
+      });
       if (fwRow) metrics['updates'] = [fwRow];
     }
     // Certificates (management HTTPS cert + SSH host key) — emitted when present;

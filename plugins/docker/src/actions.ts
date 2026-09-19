@@ -524,8 +524,10 @@ const containersDeployComposeAction: ActionDescriptor<DockerActionContext> = {
     const host = sshHostOf(ctx.opts.host);
     try {
       // Long budget — image pulls dominate; the pool keeps the session warm after.
+      // The budget MUST ride on the exec call itself: a pooled session created by
+      // an earlier short-budget caller would otherwise cap this at its creation-time value.
       const client = await sshPool.get(host, 22, creds, { timeoutMs: 570_000 });
-      const r = await client.exec(script, creds);
+      const r = await client.exec(script, creds, 570_000);
       if (r.code !== 0) {
         return { success: false, details: { error: `docker compose up failed (exit ${r.code}): ${(r.stderr || r.stdout).slice(-800)}` } };
       }
