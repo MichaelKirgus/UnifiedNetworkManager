@@ -142,7 +142,7 @@ export function PasskeyManager({ userId, username }: { userId: string; username:
       ) : (
         <div className="flex flex-wrap items-center gap-2">
           <input
-            className="w-48 rounded-md border border-border px-3 py-1.5 text-sm focus:border-slate-500 focus:outline-none"
+            className="w-48 rounded-md border border-border px-3 py-1.5 text-sm focus:border-focus-ring focus:outline-none"
             placeholder="Label (e.g. MacBook)"
             value={label}
             onChange={(e) => setLabel(e.target.value)}

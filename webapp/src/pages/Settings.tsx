@@ -86,7 +86,7 @@ function SettingEditor({
           step={setting.unit === 'ms' ? 1000 : setting.unit === 's' ? 60 : 1}
           disabled={saving || invalid}
           onChange={(e) => setDraft(e.target.value)}
-          className="w-40 rounded-md border border-border bg-card px-3 py-1.5 text-sm focus:border-slate-500 focus:outline-none disabled:bg-background"
+          className="w-40 rounded-md border border-border bg-card px-3 py-1.5 text-sm focus:border-focus-ring focus:outline-none disabled:bg-background"
         />
       ) : (
         <input
@@ -94,7 +94,7 @@ function SettingEditor({
           value={draft}
           disabled={saving || invalid}
           onChange={(e) => setDraft(e.target.value)}
-          className="w-64 rounded-md border border-border bg-card px-3 py-1.5 text-sm focus:border-slate-500 focus:outline-none disabled:bg-background"
+          className="w-64 rounded-md border border-border bg-card px-3 py-1.5 text-sm focus:border-focus-ring focus:outline-none disabled:bg-background"
         />
       )}
       {setting.unit && <span className="text-xs text-faint">{setting.unit}</span>}

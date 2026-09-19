@@ -14,10 +14,10 @@ import { can } from '../auth/permissions';
 // ---------------------------------------------------------------------------
 
 const KIND_STYLES: Record<string, string> = {
-  firmware: 'bg-indigo-100 text-indigo-700',
-  'os-package': 'bg-sky-100 text-sky-700',
-  'docker-image': 'bg-teal-100 text-teal-700',
-  app: 'bg-violet-100 text-violet-700',
+  firmware: 'bg-accent-indigo text-accent-indigo-fg',
+  'os-package': 'bg-accent-sky text-accent-sky-fg',
+  'docker-image': 'bg-accent-teal text-accent-teal-fg',
+  app: 'bg-accent-violet text-accent-violet-fg',
 };
 
 function KindBadge({ kind }: { kind: string }) {
@@ -559,7 +559,7 @@ export default function Updates() {
    * header. Children are leaves: no recursive expansion on this page. */
   function UpdateChildRow({ child, ctx }: { child: UpdateNode; ctx: ExpandChildContext }) {
     return (
-      <tr className="bg-sky-50/40 dark:bg-muted/70">
+      <tr className="bg-accent-sky/40 dark:bg-muted/70">
         <td className="px-1 py-2 align-middle">
           <span className="inline-block h-6 w-6" />
         </td>
@@ -747,7 +747,7 @@ export default function Updates() {
 
         {/* Release-notes text viewer — device-provided notes (e.g. TrueNAS feed). */}
         {notesView && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6" onClick={() => setNotesView(null)}>
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay/40 p-6" onClick={() => setNotesView(null)}>
             <div
               className="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-lg border border-border bg-card shadow-xl"
               onClick={(e) => e.stopPropagation()}

@@ -182,7 +182,7 @@ export default function Layers() {
                       <span
                         className={clsx(
                           'rounded px-1.5 py-0.5 text-[10px] font-medium',
-                          l.isBuiltin ? 'bg-muted text-secondary' : 'bg-indigo-50 text-indigo-700'
+                          l.isBuiltin ? 'bg-muted text-secondary' : 'bg-accent-indigo/60 text-accent-indigo-fg'
                         )}
                       >
                         {l.isBuiltin ? 'built-in' : 'custom'}

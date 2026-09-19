@@ -12,13 +12,13 @@ function SourceBadges({ sources }: { sources: HostRow['sources'] }) {
     s === 'dhcp'
       ? 'bg-success text-success-fg'
       : s === 'ndp'
-        ? 'bg-purple-100 text-purple-700'
+        ? 'bg-accent-purple text-accent-purple-fg'
         : s === 'wlan'
           ? 'bg-warning text-warning-fg'
           : s === 'self'
             ? 'bg-muted text-secondary'
             : s === 'vm'
-              ? 'bg-indigo-100 text-indigo-700'
+              ? 'bg-accent-indigo text-accent-indigo-fg'
               : 'bg-info text-info-fg';
   return (
     <span className="flex flex-wrap gap-1">

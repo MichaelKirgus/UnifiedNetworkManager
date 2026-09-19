@@ -129,7 +129,7 @@ export default function Workers() {
         ) : row.isLeader ? (
           <div>
             <span className="inline-flex items-center gap-1 rounded bg-success px-2 py-0.5 text-xs font-semibold text-success-fg">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> leader
+              <span className="h-1.5 w-1.5 rounded-full bg-status-ok" /> leader
             </span>
             {row.becameLeaderAt && (
               <div className="mt-0.5 text-[11px] text-faint">since {formatTime(row.becameLeaderAt)}</div>
@@ -278,7 +278,7 @@ export default function Workers() {
                 disabled={!canWrite || saveMutation.isPending}
                 value={Math.round(effectiveInterval / 1000)}
                 onChange={(e) => setIntervalMs(Number(e.target.value) * 1000)}
-                className="mt-1 w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none disabled:bg-background"
+                className="mt-1 w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none disabled:bg-background"
               />
               <span className="mt-1 block text-xs text-faint">
                 Every device is polled at least once within this window — deadlines are staggered, so polls spread out instead of bursting. Takes effect immediately — no restart.
@@ -294,7 +294,7 @@ export default function Workers() {
                 disabled={!canWrite || saveMutation.isPending}
                 value={Math.round(effectiveInventoryWindow / 1000)}
                 onChange={(e) => setInventoryWindowMs(Number(e.target.value) * 1000)}
-                className="mt-1 w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none disabled:bg-background"
+                className="mt-1 w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none disabled:bg-background"
               />
               <span className="mt-1 block text-xs text-faint">
                 How often the slow/static collection (networks, routes, WiFi clients, storage…) runs. Metrics-only polls in between are cheap.
@@ -310,7 +310,7 @@ export default function Workers() {
                 disabled={!canWrite || saveMutation.isPending}
                 value={effectiveConcurrency}
                 onChange={(e) => setConcurrency(Number(e.target.value))}
-                className="mt-1 w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none disabled:bg-background"
+                className="mt-1 w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none disabled:bg-background"
               />
               <span className="mt-1 block text-xs text-faint">
                 Global in-flight /monitoring budget across all devices. Keeps the burst flat regardless of fleet size; raise for fast fleets.
@@ -326,7 +326,7 @@ export default function Workers() {
                 disabled={!canWrite || saveMutation.isPending}
                 value={effectiveJitter}
                 onChange={(e) => setJitterPercent(Number(e.target.value))}
-                className="mt-1 w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none disabled:bg-background"
+                className="mt-1 w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none disabled:bg-background"
               />
               <span className="mt-1 block text-xs text-faint">
                 Random spread (±%) applied to each rescheduled deadline so devices don't re-align into synchronized bursts.
@@ -379,7 +379,7 @@ export default function Workers() {
                 </div>
                 <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
                   <div
-                    className={`h-full rounded-full ${connPct > 85 ? 'bg-red-500' : connPct > 60 ? 'bg-amber-400' : 'bg-emerald-500'}`}
+                    className={`h-full rounded-full ${connPct > 85 ? 'bg-status-critical' : connPct > 60 ? 'bg-status-warn' : 'bg-status-ok'}`}
                     style={{ width: `${Math.max(2, connPct)}%` }}
                   />
                 </div>

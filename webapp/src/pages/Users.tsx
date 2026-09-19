@@ -254,7 +254,7 @@ export default function Users() {
           {row.disabled ? (
             <span className="inline-flex items-center rounded-full bg-danger px-2 py-0.5 text-xs font-medium text-danger-fg">disabled</span>
           ) : (
-            <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">active</span>
+            <span className="inline-flex items-center rounded-full bg-success px-2 py-0.5 text-xs font-medium text-success-fg">active</span>
           )}
           {isServiceOnly(row) && (
             <span
@@ -283,7 +283,7 @@ export default function Users() {
       sortable: false as const,
       render: (row) =>
         row.twoFactorEnabled ? (
-          <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">enabled</span>
+          <span className="inline-flex items-center rounded-full bg-success px-2 py-0.5 text-xs font-medium text-success-fg">enabled</span>
         ) : (
           <span className="text-faint">—</span>
         ),
@@ -326,7 +326,7 @@ export default function Users() {
                     type="button"
                     aria-label={row.disabled ? `Enable ${row.username}` : `Disable ${row.username}`}
                     title={row.disabled ? 'Re-enable account' : 'Disable account (blocks login + ends sessions)'}
-                    className={`rounded-md p-1.5 hover:bg-muted ${row.disabled ? 'text-green-700' : 'text-secondary hover:text-foreground'}`}
+                    className={`rounded-md p-1.5 hover:bg-muted ${row.disabled ? 'text-success-fg' : 'text-secondary hover:text-foreground'}`}
                     onClick={() => {
                       if (!window.confirm(row.disabled ? `Re-enable "${row.username}"?` : `Disable "${row.username}"? They will be signed out and blocked from logging in.`)) return;
                       toggleStatus.mutate({ id: row.id, disabled: !row.disabled });
@@ -394,7 +394,7 @@ export default function Users() {
             <div>
               <label className="mb-1 block text-sm font-medium text-secondary">Username *</label>
               <input
-                className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                 value={createUsername}
                 onChange={(e) => setCreateUsername(e.target.value)}
                 required
@@ -404,7 +404,7 @@ export default function Users() {
               <label className="mb-1 block text-sm font-medium text-secondary">Initial password * (min 8 chars)</label>
               <input
                 type="password"
-                className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                 value={createPassword}
                 onChange={(e) => setCreatePassword(e.target.value)}
                 required
@@ -491,7 +491,7 @@ export default function Users() {
                   <label className="mb-1 block text-sm font-medium text-secondary">Current password *</label>
                   <input
                     type="password"
-                    className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                    className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                     value={currentPassword}
                     onChange={(e) => setCurrentPassword(e.target.value)}
                     required
@@ -502,7 +502,7 @@ export default function Users() {
                 <label className="mb-1 block text-sm font-medium text-secondary">New password * (min 8 chars)</label>
                 <input
                   type="password"
-                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   required
@@ -522,8 +522,8 @@ export default function Users() {
               <h3 className="text-sm font-semibold text-secondary">Two-factor authentication</h3>
               {credsUser.twoFactorEnabled ? (
                 <>
-                  <p className="flex items-center gap-2 text-sm text-green-700">
-                    <span className="inline-flex h-2 w-2 rounded-full bg-green-500" /> 2FA is enabled for this user.
+                  <p className="flex items-center gap-2 text-sm text-success-fg">
+                    <span className="inline-flex h-2 w-2 rounded-full bg-status-ok" /> 2FA is enabled for this user.
                   </p>
                   <div className="flex flex-wrap gap-2">
                     <button
@@ -665,7 +665,7 @@ export default function Users() {
                 {(() => {
                   const eff = effectivePermissions(editingUser);
                   return !eff.has('auth:interactive-login') ? (
-                    <p className="mt-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-xs text-amber-900">
+                    <p className="mt-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
                       This account is <strong>service-only</strong>: it cannot sign in to the web UI. Grant{' '}
                       <code className="rounded bg-card px-1">auth:interactive-login</code> (directly or via a role) to restore
                       interactive login.

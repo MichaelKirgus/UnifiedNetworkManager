@@ -159,7 +159,7 @@ export function CredentialPicker({
                 <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold text-secondary">current default</span>
               )}
               {!c.own && (
-                <span title="Provided by an administrator" className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-semibold text-indigo-800">
+                <span title="Provided by an administrator" className="rounded-full bg-accent-indigo px-2 py-0.5 text-[10px] font-semibold text-accent-indigo-fg">
                   shared
                 </span>
               )}

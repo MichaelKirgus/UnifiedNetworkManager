@@ -73,12 +73,12 @@ function driftTextClass(ms: number): string {
   return 'text-danger-fg';
 }
 
-/** Drift magnitude → bar/dot color (hex, for the span chart). */
+/** Drift magnitude → bar/dot color (token, for the span chart). */
 function driftBarColor(ms: number): string {
   const abs = Math.abs(ms);
-  if (abs < 1_000) return '#10b981'; // emerald-500
-  if (abs < 60_000) return '#f59e0b'; // amber-500
-  return '#ef4444'; // red-500
+  if (abs < 1_000) return 'rgb(var(--status-ok))';
+  if (abs < 60_000) return 'rgb(var(--status-warn))';
+  return 'rgb(var(--status-critical))';
 }
 
 /** Signed human drift: "+23 ms", "−1.25 s", "+4m 07s", "−1d 3h". */
@@ -550,9 +550,9 @@ export default function Time() {
               className="group relative -my-1 h-3 shrink-0 cursor-row-resize"
               title="Drag to resize — or collapse the drift view for full table height"
             >
-              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-muted transition-colors group-hover:bg-indigo-400" />
+              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-muted transition-colors group-hover:bg-accent-hover" />
               <div className="absolute left-1/2 top-1/2 flex h-3 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center">
-                <span className="h-1 w-6 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400" />
+                <span className="h-1 w-6 rounded-full bg-status-neutral transition-colors group-hover:bg-accent-hover" />
               </div>
             </div>
           )}
@@ -580,9 +580,9 @@ export default function Time() {
                 <div className="flex min-h-0 flex-1 flex-col border-t border-border p-4">
                   {/* Legend: color scale + direction hint. */}
                   <div className="mb-3 flex shrink-0 items-center gap-4 text-[11px] text-secondary">
-                    <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ background: '#10b981' }} /> &lt; 1 s</span>
-                    <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ background: '#f59e0b' }} /> &lt; 1 min</span>
-                    <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ background: '#ef4444' }} /> ≥ 1 min</span>
+                    <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-status-ok" /> &lt; 1 s</span>
+                    <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-status-warn" /> &lt; 1 min</span>
+                    <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-status-critical" /> ≥ 1 min</span>
                     <span className="ml-auto text-faint">← behind UNM · center = UNM clock · ahead of UNM →</span>
                   </div>
 

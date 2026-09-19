@@ -145,7 +145,7 @@ function ReadOnlyPolicy({ policy }: { policy: CredentialPolicy }) {
         <dt className="text-xs font-medium uppercase tracking-wide text-faint">Satisfies privileged-action gate</dt>
         <dd className="mt-1 flex flex-wrap gap-1">
           {policy.gateAmrs.map((m) => (
-            <span key={m} className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">
+            <span key={m} className="rounded-full bg-success px-2 py-0.5 text-xs font-medium text-success-fg">
               {m === 'totp' ? 'TOTP sessions' : m === 'webauthn' ? 'Passkey sessions' : m}
             </span>
           ))}
@@ -180,7 +180,7 @@ function ReadOnlyPolicyInline({ policy }: { policy: CredentialPolicy }) {
       )}
       <span className="ml-2 text-faint">gate:</span>
       {policy.gateAmrs.map((m) => (
-        <span key={m} className="rounded-full bg-green-100 px-2 py-0.5 font-medium text-green-700">
+        <span key={m} className="rounded-full bg-success px-2 py-0.5 font-medium text-success-fg">
           {m === 'totp' ? 'TOTP' : m === 'webauthn' ? 'Passkey' : m}
         </span>
       ))}

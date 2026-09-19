@@ -9,9 +9,9 @@ import { api, FirewallRuleRow } from '../api/client';
 /** Small colored pill for the rule kind (filter vs. NAT kinds). */
 const TYPE_STYLES: Record<FirewallRuleRow['ruleType'], string> = {
   filter: 'bg-muted text-secondary',
-  dnat: 'bg-indigo-100 text-indigo-700',
-  snat: 'bg-teal-100 text-teal-700',
-  'one-to-one': 'bg-purple-100 text-purple-700',
+  dnat: 'bg-accent-indigo text-accent-indigo-fg',
+  snat: 'bg-accent-teal text-accent-teal-fg',
+  'one-to-one': 'bg-accent-purple text-accent-purple-fg',
   npt: 'bg-warning text-warning-fg',
 };
 
@@ -46,7 +46,7 @@ function orDash(v?: string | null): string {
 /** IP-family pill — v4 blue, v6 violet, both slate. */
 const IP_STYLES: Record<string, string> = {
   v4: 'bg-info text-info-fg',
-  v6: 'bg-violet-100 text-violet-700',
+  v6: 'bg-accent-violet text-accent-violet-fg',
   both: 'bg-muted text-secondary',
 };
 

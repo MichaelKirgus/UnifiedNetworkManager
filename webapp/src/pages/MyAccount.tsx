@@ -130,7 +130,7 @@ export default function MyAccount() {
                     <label className="mb-1 block text-sm font-medium text-secondary">Current password *</label>
                     <input
                       type="password"
-                      className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                      className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                       value={currentPassword}
                       onChange={(e) => setCurrentPassword(e.target.value)}
                       required
@@ -140,7 +140,7 @@ export default function MyAccount() {
                     <label className="mb-1 block text-sm font-medium text-secondary">New password * (min 8 chars)</label>
                     <input
                       type="password"
-                      className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                      className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
                       required
@@ -160,7 +160,7 @@ export default function MyAccount() {
                   <h3 className="text-sm font-semibold text-secondary">Authenticator app (TOTP)</h3>
                   {me.totpEnabled ? (
                     <>
-                      <p className="flex items-center gap-2 text-sm text-green-700">
+                      <p className="flex items-center gap-2 text-sm text-success-fg">
                         <ShieldCheck className="h-4 w-4" /> TOTP is enrolled on your account.
                       </p>
                       <div className="flex flex-wrap gap-2">

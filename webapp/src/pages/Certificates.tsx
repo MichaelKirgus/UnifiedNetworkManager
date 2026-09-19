@@ -126,8 +126,8 @@ function MismatchDetail({ row }: { row: CertificateRow }) {
 
 /** Small colored pill for the endpoint kind. */
 const TYPE_STYLES: Record<CertificateRow['type'], string> = {
-  https: 'bg-teal-100 text-teal-700',
-  ssh: 'bg-indigo-100 text-indigo-700',
+  https: 'bg-accent-teal text-accent-teal-fg',
+  ssh: 'bg-accent-indigo text-accent-indigo-fg',
 };
 
 function TypeBadge({ type }: { type: CertificateRow['type'] }) {

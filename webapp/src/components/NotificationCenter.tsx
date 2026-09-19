@@ -20,8 +20,8 @@ const SEVERITY_ICON: Record<NotificationSeverity, typeof Info> = {
 };
 
 const SEVERITY_COLOR: Record<NotificationSeverity, string> = {
-  info: 'text-blue-500',
-  warning: 'text-amber-500',
+  info: 'text-status-info',
+  warning: 'text-status-warn',
   critical: 'text-danger-fg',
 };
 
@@ -103,7 +103,7 @@ export function NotificationCenter() {
       >
         <Bell className="h-5 w-5" />
         {count > 0 && (
-          <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold leading-none text-white">
+          <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-status-critical px-1 text-[10px] font-bold leading-none text-white">
             {count > 99 ? '99+' : count}
           </span>
         )}
@@ -198,7 +198,7 @@ export function NotificationCenter() {
                       title="Resolve (condition fixed)"
                       aria-label="Resolve notification"
                       onClick={() => resolveMut.mutate(n.id)}
-                      className="rounded p-1 text-faint hover:bg-muted hover:text-emerald-600"
+                      className="rounded p-1 text-faint hover:bg-muted hover:text-success-fg"
                     >
                       <X className="h-3.5 w-3.5" />
                     </button>

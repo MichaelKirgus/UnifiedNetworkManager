@@ -46,7 +46,8 @@ function MiniGauge({ metric }: { metric: SummaryMetric }) {
   const max = metric.max ?? Math.max(niceCeil(num), min + 1);
   const clamped = Math.max(min, Math.min(max, num));
   const pct = max > min ? ((clamped - min) / (max - min)) * 100 : 0;
-  const color = metric.color ?? '#3b82f6';
+  // Default gauge hue — centralized status token (blue).
+  const color = metric.color ?? 'rgb(var(--status-info))';
   return (
     <div className="flex min-w-[90px] flex-col gap-1">
       <div className="flex items-baseline justify-between">

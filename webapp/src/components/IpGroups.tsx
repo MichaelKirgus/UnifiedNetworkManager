@@ -17,7 +17,7 @@ import { ipScopeGroup, IpScopeGroup } from '../utils/address';
 
 const GROUP_STYLES: Record<IpScopeGroup, string> = {
   private: 'bg-info text-info-fg',
-  public: 'bg-teal-100 text-teal-800',
+  public: 'bg-accent-teal text-accent-teal-fg',
   'link-local': 'bg-warning text-warning-fg',
 };
 
@@ -82,7 +82,7 @@ export function IpGroupChips({ ips }: { ips: string[] }) {
   }
   for (const ip of ungrouped) {
     chips.push(
-      <span key={ip} className={`whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-xs ${ip.includes(':') ? 'bg-purple-50 text-purple-700' : 'bg-muted text-secondary'}`}>
+      <span key={ip} className={`whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-xs ${ip.includes(':') ? 'bg-accent-violet/60 text-accent-violet-fg' : 'bg-muted text-secondary'}`}>
         {ip}
       </span>
     );

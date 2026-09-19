@@ -499,7 +499,7 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
               <select
                 value={deviceIdx}
                 onChange={(e) => setDeviceIdx(Number(e.target.value))}
-                className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm focus:border-slate-400"
+                className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm focus:border-focus-ring"
               >
                 {candidates.map((c, i) => (
                   <option key={`${c.deviceId}|${c.pluginId}`} value={i}>
@@ -536,7 +536,7 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
                   <select
                     value={cloneAppKey ?? ''}
                     onChange={(e) => setCloneAppKey(e.target.value || null)}
-                    className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm focus:border-slate-400"
+                    className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm focus:border-focus-ring"
                   >
                     <option value="">— pick an app on this device —</option>
                     {deviceApps.map((a) => (
@@ -596,7 +596,7 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
               value={name}
               onChange={(e) => setName(slugify(e.target.value))}
               placeholder="lowercase-slug (enforced by the backend)"
-              className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-sm focus:border-slate-400"
+              className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-sm focus:border-focus-ring"
             />
           </label>
 
@@ -609,7 +609,7 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
                     value={train}
                     onChange={(e) => setTrain(e.target.value)}
                     aria-label="Catalog train"
-                    className="rounded-md border border-border bg-background px-2 py-1.5 text-xs focus:border-slate-400"
+                    className="rounded-md border border-border bg-background px-2 py-1.5 text-xs focus:border-focus-ring"
                   >
                     {trains.map((t) => <option key={t} value={t}>{t}</option>)}
                   </select>
@@ -621,14 +621,14 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     placeholder="Search templates by name, description or tag…"
-                    className="w-full rounded-md border border-border bg-background py-1.5 pl-7 pr-2 text-sm focus:border-slate-400"
+                    className="w-full rounded-md border border-border bg-background py-1.5 pl-7 pr-2 text-sm focus:border-focus-ring"
                   />
                 </div>
                 <select
                   value={sortMode}
                   onChange={(e) => setSortMode(e.target.value as CatalogSort)}
                   aria-label="Sort templates"
-                  className="rounded-md border border-border bg-background px-2 py-1.5 text-xs focus:border-slate-400"
+                  className="rounded-md border border-border bg-background px-2 py-1.5 text-xs focus:border-focus-ring"
                 >
                   <option value="recommended">Recommended</option>
                   <option value="name">Name A–Z</option>
@@ -741,7 +741,7 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
                 rows={12}
                 spellCheck={false}
                 placeholder={'services:\n  my-service:\n    image: nginx:latest\n    ports:\n      - "8080:80"'}
-                className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-xs focus:border-slate-400"
+                className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-xs focus:border-focus-ring"
               />
             </label>
           ) : (
@@ -754,7 +754,7 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
                   value={imageRef}
                   onChange={(e) => setImageRef(e.target.value)}
                   placeholder="nginx:latest  ·  ghcr.io/org/app:v1.2.3"
-                  className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-sm focus:border-slate-400"
+                  className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-sm focus:border-focus-ring"
                 />
               </label>
 
@@ -772,13 +772,13 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
                     <div key={i} className="flex items-center gap-2">
                       <input type="number" min={1} max={65535} value={String(p.hostPort)} placeholder="host"
                         onChange={(e) => setPorts((prev) => prev.map((x, j) => (j === i ? { ...x, hostPort: e.target.value === '' ? '' : Number(e.target.value) } : x)))}
-                        className="w-24 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs focus:border-slate-400" />
+                        className="w-24 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs focus:border-focus-ring" />
                       <span className="text-faint">→</span>
                       <input type="number" min={1} max={65535} value={String(p.containerPort)} placeholder="container"
                         onChange={(e) => setPorts((prev) => prev.map((x, j) => (j === i ? { ...x, containerPort: e.target.value === '' ? '' : Number(e.target.value) } : x)))}
-                        className="w-24 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs focus:border-slate-400" />
+                        className="w-24 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs focus:border-focus-ring" />
                       <select value={p.protocol} onChange={(e) => setPorts((prev) => prev.map((x, j) => (j === i ? { ...x, protocol: e.target.value as 'tcp' | 'udp' } : x)))}
-                        className="rounded-md border border-border bg-background px-1.5 py-1 text-xs focus:border-slate-400">
+                        className="rounded-md border border-border bg-background px-1.5 py-1 text-xs focus:border-focus-ring">
                         <option value="tcp">tcp</option>
                         <option value="udp">udp</option>
                       </select>
@@ -802,13 +802,13 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
                     <div key={i} className="flex items-center gap-2">
                       <input type="text" value={v.source} placeholder="/host/path or volname"
                         onChange={(e) => setVolumes((prev) => prev.map((x, j) => (j === i ? { ...x, source: e.target.value } : x)))}
-                        className="w-40 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs focus:border-slate-400" />
+                        className="w-40 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs focus:border-focus-ring" />
                       <span className="text-faint">→</span>
                       <input type="text" value={v.target} placeholder="/container/path (default: same)"
                         onChange={(e) => setVolumes((prev) => prev.map((x, j) => (j === i ? { ...x, target: e.target.value } : x)))}
-                        className="flex-1 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs focus:border-slate-400" />
+                        className="flex-1 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs focus:border-focus-ring" />
                       <select value={v.mode} onChange={(e) => setVolumes((prev) => prev.map((x, j) => (j === i ? { ...x, mode: e.target.value as 'ro' | 'rw' } : x)))}
-                        className="rounded-md border border-border bg-background px-1.5 py-1 text-xs focus:border-slate-400">
+                        className="rounded-md border border-border bg-background px-1.5 py-1 text-xs focus:border-focus-ring">
                         <option value="rw">rw</option>
                         <option value="ro">ro</option>
                       </select>
@@ -832,10 +832,10 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
                     <div key={i} className="flex items-center gap-2">
                       <input type="text" value={e.key} placeholder="KEY"
                         onChange={(ev) => setEnvs((prev) => prev.map((x, j) => (j === i ? { ...x, key: ev.target.value } : x)))}
-                        className="w-40 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs focus:border-slate-400" />
+                        className="w-40 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs focus:border-focus-ring" />
                       <input type="text" value={e.value} placeholder="value"
                         onChange={(ev) => setEnvs((prev) => prev.map((x, j) => (j === i ? { ...x, value: ev.target.value } : x)))}
-                        className="flex-1 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs focus:border-slate-400" />
+                        className="flex-1 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs focus:border-focus-ring" />
                       <button type="button" aria-label="Remove variable" onClick={() => setEnvs((prev) => prev.filter((_, j) => j !== i))} className="rounded px-1.5 py-0.5 text-xs text-faint hover:bg-danger hover:text-danger-fg">✕</button>
                     </div>
                   ))}
@@ -850,7 +850,7 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
                   value={network}
                   onChange={(e) => setNetwork(e.target.value)}
                   placeholder="default (bridge) — or a custom docker network name"
-                  className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-sm focus:border-slate-400"
+                  className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-sm focus:border-focus-ring"
                 />
               </label>
 
@@ -965,7 +965,7 @@ function ConfigForm({
             value={formSearch}
             onChange={(e) => onFormSearch(e.target.value)}
             placeholder={`Find a setting… (${layout.reduce((n, s) => n + s.fields.length, 0)} fields)`}
-            className="w-full rounded-md border border-border bg-background py-1 pl-6 pr-2 text-xs focus:border-slate-400"
+            className="w-full rounded-md border border-border bg-background py-1 pl-6 pr-2 text-xs focus:border-focus-ring"
           />
         </div>
       )}

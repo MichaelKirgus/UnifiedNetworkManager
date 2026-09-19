@@ -165,7 +165,7 @@ export function PolicyEditor({
                 onChange={() => {
                   toggle(draftRequired, m, false, setDraftRequired);
                 }}
-                className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-500"
+                className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring"
               />
               {m === 'totp' ? 'Authenticator app (TOTP)' : 'Passkey (WebAuthn)'}
             </label>
@@ -188,7 +188,7 @@ export function PolicyEditor({
                 onChange={() => {
                   toggle(draftGate, m, true, setDraftGate);
                 }}
-                className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-500"
+                className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring"
               />
               {m === 'totp' ? 'TOTP sessions' : 'Passkey sessions'}
             </label>
@@ -217,7 +217,7 @@ export function PolicyEditor({
                 placeholder={mode === 'perUser' ? 'inherit global' : f.key === 'minPasswordLength' ? 'default 8' : 'off'}
                 value={draftNums[f.key]}
                 onChange={(e) => setNum(f.key, e.target.value)}
-                className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:border-slate-500 focus:outline-none"
+                className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:border-focus-ring focus:outline-none"
               />
               <span className="mt-1 block text-[11px] leading-snug text-faint">{f.hint(mode)}</span>
             </label>
@@ -237,7 +237,7 @@ export function PolicyEditor({
             type="checkbox"
             checked={draftAllowExtension}
             onChange={() => setDraftAllowExtension((v) => !v)}
-            className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-500"
+            className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring"
           />
           Allow users to extend their session (2FA revalidation required)
         </label>

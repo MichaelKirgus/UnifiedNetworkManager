@@ -49,7 +49,8 @@ function Gauge({ descriptor, value }: { descriptor: MetricDescriptor; value?: un
   const max = descriptor.max ?? Math.max(niceCeil(num), min + 1);
   const clamped = Math.max(min, Math.min(max, num));
   const pct = max > min ? ((clamped - min) / (max - min)) * 100 : 0;
-  const color = descriptor.color ?? '#3b82f6';
+  // Default gauge hue — centralized status token (blue).
+  const color = descriptor.color ?? 'rgb(var(--status-info))';
 
   return (
     <div className="rounded-md border border-border bg-card p-4 shadow-sm">
@@ -95,7 +96,8 @@ function Plot({
   const width = 300;
   const height = 80;
   const step = points.length > 1 ? width / (points.length - 1) : width;
-  const color = descriptor.color ?? '#3b82f6';
+  // Default plot hue — centralized status token (blue).
+  const color = descriptor.color ?? 'rgb(var(--status-info))';
 
   const path = points
     .map((p, i) => {

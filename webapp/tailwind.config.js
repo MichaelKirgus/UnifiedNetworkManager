@@ -45,6 +45,70 @@ export default {
           fg: 'rgb(var(--info-fg) / <alpha-value>)',
           border: 'rgb(var(--info-border) / <alpha-value>)',
         },
+        // Categorical accent hues (badge triples). Each hue is a self-contained
+        // fill/fg/border set defined per theme in src/index.css.
+        'accent-indigo': {
+          DEFAULT: 'rgb(var(--accent-indigo) / <alpha-value>)',
+          fg: 'rgb(var(--accent-indigo-fg) / <alpha-value>)',
+          border: 'rgb(var(--accent-indigo-border) / <alpha-value>)',
+        },
+        'accent-violet': {
+          DEFAULT: 'rgb(var(--accent-violet) / <alpha-value>)',
+          fg: 'rgb(var(--accent-violet-fg) / <alpha-value>)',
+          border: 'rgb(var(--accent-violet-border) / <alpha-value>)',
+        },
+        'accent-purple': {
+          DEFAULT: 'rgb(var(--accent-purple) / <alpha-value>)',
+          fg: 'rgb(var(--accent-purple-fg) / <alpha-value>)',
+          border: 'rgb(var(--accent-purple-border) / <alpha-value>)',
+        },
+        'accent-teal': {
+          DEFAULT: 'rgb(var(--accent-teal) / <alpha-value>)',
+          fg: 'rgb(var(--accent-teal-fg) / <alpha-value>)',
+          border: 'rgb(var(--accent-teal-border) / <alpha-value>)',
+        },
+        'accent-sky': {
+          DEFAULT: 'rgb(var(--accent-sky) / <alpha-value>)',
+          fg: 'rgb(var(--accent-sky-fg) / <alpha-value>)',
+          border: 'rgb(var(--accent-sky-border) / <alpha-value>)',
+        },
+        'accent-cyan': {
+          DEFAULT: 'rgb(var(--accent-cyan) / <alpha-value>)',
+          fg: 'rgb(var(--accent-cyan-fg) / <alpha-value>)',
+          border: 'rgb(var(--accent-cyan-border) / <alpha-value>)',
+        },
+        // Solid status hues (dots, LEDs, progress bars).
+        'status-ok': 'rgb(var(--status-ok) / <alpha-value>)',
+        'status-warn': 'rgb(var(--status-warn) / <alpha-value>)',
+        'status-critical': 'rgb(var(--status-critical) / <alpha-value>)',
+        'status-info': 'rgb(var(--status-info) / <alpha-value>)',
+        'status-neutral': 'rgb(var(--status-neutral) / <alpha-value>)',
+        // Solid action hues (filled buttons with white text).
+        'danger-solid': {
+          DEFAULT: 'rgb(var(--danger-solid) / <alpha-value>)',
+          hover: 'rgb(var(--danger-solid-hover) / <alpha-value>)',
+        },
+        'success-solid': {
+          DEFAULT: 'rgb(var(--success-solid) / <alpha-value>)',
+          hover: 'rgb(var(--success-solid-hover) / <alpha-value>)',
+        },
+        // Interactive accents (focus rings, hover highlights, selected states).
+        'focus-ring': 'rgb(var(--focus-ring) / <alpha-value>)',
+        'accent-hover': 'rgb(var(--accent-hover) / <alpha-value>)',
+        'accent-solid': 'rgb(var(--accent-solid) / <alpha-value>)',
+        // Text on solid primary surfaces (code blocks).
+        'code-fg': 'rgb(var(--code-fg) / <alpha-value>)',
+        // Modal/backdrop overlay.
+        overlay: 'rgb(var(--overlay) / <alpha-value>)',
+        // Console surface + topology canvas palette (fixed dark values, see index.css).
+        'console-bg': 'rgb(var(--console-bg) / <alpha-value>)',
+        'topo-segment': 'rgb(var(--topo-segment) / <alpha-value>)',
+        'topo-host': 'rgb(var(--topo-host) / <alpha-value>)',
+        'topo-remote': 'rgb(var(--topo-remote) / <alpha-value>)',
+        'topo-unassigned': 'rgb(var(--topo-unassigned) / <alpha-value>)',
+        'topo-node': 'rgb(var(--topo-node) / <alpha-value>)',
+        'topo-cable': 'rgb(var(--topo-cable) / <alpha-value>)',
+        'topo-tunnel': 'rgb(var(--topo-tunnel) / <alpha-value>)',
       },
     },
   },

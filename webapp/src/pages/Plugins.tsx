@@ -52,7 +52,8 @@ function Sparkline({ values, width = 120, height = 28 }: { values: number[]; wid
     .join(' ');
   return (
     <svg width={width} height={height} className="block" aria-hidden="true">
-      <polyline points={points} fill="none" stroke="#6366f1" strokeWidth="1.5" strokeLinejoin="round" />
+      {/* Sparkline hue — centralized accent token (indigo). */}
+      <polyline points={points} fill="none" stroke="rgb(var(--accent-solid))" strokeWidth="1.5" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -146,7 +147,7 @@ export default function Plugins() {
       sortAccessor: (row) => (row.lastSeenAt ? new Date(row.lastSeenAt).getTime() : null),
       render: (row) =>
         isOnline(row) ? (
-          <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">
+          <span className="inline-flex items-center rounded-full bg-success px-2 py-0.5 text-xs font-medium text-success-fg">
             online
           </span>
         ) : (

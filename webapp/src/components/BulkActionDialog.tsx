@@ -250,7 +250,7 @@ export function BulkActionDialog({ deviceId, pluginId, entry, items, onClose }: 
                   title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
                   className={clsx(
                     'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40',
-                    dangerous && !isPlanMode ? 'bg-red-600 hover:bg-red-700' : 'bg-primary hover:bg-primary-hover'
+                    dangerous && !isPlanMode ? 'bg-danger-solid hover:bg-danger-solid-hover' : 'bg-primary hover:bg-primary-hover'
                   )}
                 >
                   {dangerous && !isPlanMode && !pending ? (
@@ -291,7 +291,7 @@ export function BulkActionDialog({ deviceId, pluginId, entry, items, onClose }: 
                   title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
                   className={clsx(
                     'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40',
-                    dangerous && !isPlanMode ? 'bg-red-600 hover:bg-red-700' : 'bg-primary hover:bg-primary-hover'
+                    dangerous && !isPlanMode ? 'bg-danger-solid hover:bg-danger-solid-hover' : 'bg-primary hover:bg-primary-hover'
                   )}
                 >
                   {dangerous && !isPlanMode && !pending ? (

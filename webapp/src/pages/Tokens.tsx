@@ -161,7 +161,7 @@ export default function Tokens() {
       width: 260,
       render: (row) =>
         row.inheritsAllPermissions || row.permissions.length === 0 ? (
-          <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700">all effective</span>
+          <span className="rounded-full bg-accent-indigo/60 px-2 py-0.5 text-xs font-medium text-accent-indigo-fg">all effective</span>
         ) : (
           <div className="flex flex-wrap gap-1">
             {row.permissions.map((p) => (
@@ -229,7 +229,7 @@ export default function Tokens() {
 
       {createdToken && (
         <div className="mb-6 rounded-md border border-warning-border bg-warning p-4">
-          <h2 className="text-sm font-semibold text-amber-900">
+          <h2 className="text-sm font-semibold text-warning-fg">
             Token created{createdToken.owner ? createdToken.owner : ''}{createdToken.label ? `: ${createdToken.label}` : ''} — copy it now, it is shown only once.
           </h2>
           <div className="mt-2 flex items-center gap-2">
@@ -238,9 +238,9 @@ export default function Tokens() {
             </code>
             <button
               onClick={copyRaw}
-              className="flex items-center gap-1.5 rounded-md border border-warning-border bg-card px-3 py-2 text-sm font-medium text-amber-900 hover:bg-warning"
+              className="flex items-center gap-1.5 rounded-md border border-warning-border bg-card px-3 py-2 text-sm font-medium text-warning-fg hover:bg-warning"
             >
-              {copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
+              {copied ? <Check className="h-4 w-4 text-success-fg" /> : <Copy className="h-4 w-4" />}
               {copied ? 'Copied' : 'Copy'}
             </button>
           </div>
@@ -316,7 +316,7 @@ export default function Tokens() {
                       type="checkbox"
                       checked={selectedPerms.has(p.id)}
                       onChange={() => togglePerm(p.id)}
-                      className="mt-0.5 h-4 w-4 border-border text-foreground focus:ring-slate-400"
+                      className="mt-0.5 h-4 w-4 border-border text-foreground focus:ring-focus-ring"
                     />
                     <span>
                       {p.id}

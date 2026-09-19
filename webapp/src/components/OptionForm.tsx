@@ -246,7 +246,7 @@ export const OptionForm = forwardRef<OptionFormHandle, OptionFormProps>(function
                     <div className="flex items-center gap-2">
                       <input id={`opt-${opt.key}`} type="checkbox" checked={values[opt.key] === true}
                         onChange={(e) => setValue(opt.key, e.target.checked)}
-                        className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-400" />
+                        className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring" />
                       <span className="text-sm text-muted-foreground">{values[opt.key] === true ? 'Enabled' : 'Disabled'}</span>
                     </div>
                   ) : opt.type === 'integer' ? (
@@ -254,13 +254,13 @@ export const OptionForm = forwardRef<OptionFormHandle, OptionFormProps>(function
                       value={values[opt.key] === null || values[opt.key] === undefined ? '' : String(values[opt.key])}
                       placeholder={opt.default !== undefined ? `default: ${String(opt.default)}` : 'optional'}
                       onChange={(e) => { const raw = e.target.value; setValue(opt.key, raw === '' ? null : Number(raw)); }}
-                      className={clsx('w-full rounded-md border px-3 py-2 text-sm', error ? 'border-red-400' : 'border-border')} />
+                      className={clsx('w-full rounded-md border px-3 py-2 text-sm', error ? 'border-danger-border' : 'border-border')} />
                   ) : (
                     <input id={`opt-${opt.key}`} type="text"
                       value={(values[opt.key] as string | undefined) ?? ''}
                       placeholder={opt.default !== undefined ? `default: ${String(opt.default)}` : 'optional'}
                       onChange={(e) => setValue(opt.key, e.target.value)}
-                      className={clsx('w-full rounded-md border px-3 py-2 text-sm', error ? 'border-red-400' : 'border-border')} />
+                      className={clsx('w-full rounded-md border px-3 py-2 text-sm', error ? 'border-danger-border' : 'border-border')} />
                   )}
                   {opt.description && <p className="mt-1 text-xs text-muted-foreground">{opt.description}</p>}
                   {error && <p className="mt-1 text-xs text-danger-fg">{error}</p>}
@@ -307,7 +307,7 @@ export const OptionForm = forwardRef<OptionFormHandle, OptionFormProps>(function
                       type="checkbox"
                       checked={values[opt.key] === true}
                       onChange={(e) => setValue(opt.key, e.target.checked)}
-                      className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-400"
+                      className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring"
                     />
                     <span className="text-sm text-muted-foreground">{values[opt.key] === true ? 'Enabled' : 'Disabled'}</span>
                   </div>
@@ -325,7 +325,7 @@ export const OptionForm = forwardRef<OptionFormHandle, OptionFormProps>(function
                     }}
                     className={clsx(
                       'w-full rounded-md border px-3 py-2 text-sm',
-                      error ? 'border-red-400' : 'border-border'
+                      error ? 'border-danger-border' : 'border-border'
                     )}
                   />
                 ) : (
@@ -337,7 +337,7 @@ export const OptionForm = forwardRef<OptionFormHandle, OptionFormProps>(function
                     onChange={(e) => setValue(opt.key, e.target.value)}
                     className={clsx(
                       'w-full rounded-md border px-3 py-2 text-sm',
-                      error ? 'border-red-400' : 'border-border'
+                      error ? 'border-danger-border' : 'border-border'
                     )}
                   />
                 )}
@@ -354,7 +354,7 @@ export const OptionForm = forwardRef<OptionFormHandle, OptionFormProps>(function
         <div className="mx-1 mt-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{formError}</div>
       )}
       {savedAt && !formError && options.length > 0 && (
-        <p className="mx-1 mt-3 text-xs font-medium text-green-600">Saved.</p>
+        <p className="mx-1 mt-3 text-xs font-medium text-success-fg">Saved.</p>
       )}
 
       {options.length > 0 && (

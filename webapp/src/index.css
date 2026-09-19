@@ -44,6 +44,73 @@
   --info: 219 234 254;       /* blue-100                 */
   --info-fg: 30 64 175;      /* blue-800                 */
   --info-border: 147 197 253; /* blue-300                */
+
+  /* Categorical accent hues — badge triples (fill / text / border). Each hue is a
+   * self-contained triple so badges stay readable in every theme. Light values are
+   * the classic *-100/*-700 pairs previously hard-coded in components. */
+  --accent-indigo: 224 231 255;    /* indigo-100           */
+  --accent-indigo-fg: 67 56 202;   /* indigo-700           */
+  --accent-indigo-border: 199 210 254; /* indigo-200       */
+
+  --accent-violet: 237 233 254;    /* violet-100           */
+  --accent-violet-fg: 124 58 237;  /* violet-700           */
+  --accent-violet-border: 221 214 254; /* violet-200       */
+
+  --accent-purple: 243 232 255;    /* purple-100           */
+  --accent-purple-fg: 147 51 234;  /* purple-700           */
+  --accent-purple-border: 233 213 255; /* purple-200       */
+
+  --accent-teal: 204 251 241;      /* teal-100             */
+  --accent-teal-fg: 15 118 110;    /* teal-700             */
+  --accent-teal-border: 153 246 228; /* teal-200           */
+
+  --accent-sky: 224 242 254;       /* sky-100              */
+  --accent-sky-fg: 7 89 133;       /* sky-800              */
+  --accent-sky-border: 186 230 253; /* sky-200             */
+
+  --accent-cyan: 207 250 254;      /* cyan-100             */
+  --accent-cyan-fg: 21 94 117;     /* cyan-800             */
+  --accent-cyan-border: 165 243 252; /* cyan-200           */
+
+  /* Solid status hues — dots, LEDs, progress bars (theme-independent). */
+  --status-ok: 16 185 129;         /* emerald-500          */
+  --status-warn: 245 158 11;       /* amber-500            */
+  --status-critical: 239 68 68;    /* red-500              */
+  --status-info: 59 130 246;       /* blue-500             */
+  --status-neutral: 203 213 225;   /* slate-300 (no data)  */
+
+  /* Solid action hues — filled buttons with white text. */
+  --danger-solid: 220 38 38;       /* red-600              */
+  --danger-solid-hover: 185 28 28; /* red-700              */
+  --success-solid: 5 150 105;      /* emerald-600          */
+  --success-solid-hover: 4 120 87; /* emerald-700          */
+
+  /* Interactive accents — focus rings, hover highlights, selected states. */
+  --focus-ring: 148 163 184;       /* slate-400            */
+  --accent-hover: 129 140 248;     /* indigo-400           */
+  --accent-solid: 99 102 241;      /* indigo-500 (selected)*/
+
+  /* Text on solid primary surfaces (code blocks, etc.). */
+  --code-fg: 241 245 249;          /* slate-100            */
+
+  /* Modal/backdrop overlay. */
+  --overlay: 0 0 0;                /* black                */
+
+  /* Console (terminal) surface — intentionally theme-independent. */
+  --console-bg: 13 17 23;          /* #0d1117              */
+  --console-fg: 216 222 233;       /* #d8dee9             */
+  --console-cursor: 90 169 230;    /* #5aa9e6             */
+  --console-selection: 38 79 120;  /* #264f78             */
+
+  /* Topology canvas palette — fixed dark-slate values (the graph renders on a
+   * dark canvas in every theme). */
+  --topo-segment: 99 102 241;      /* indigo-500           */
+  --topo-host: 203 213 225;        /* slate-300            */
+  --topo-remote: 165 180 252;      /* indigo-300           */
+  --topo-unassigned: 148 163 184;  /* slate-400            */
+  --topo-node: 51 65 85;           /* slate-700            */
+  --topo-cable: 148 163 184;       /* slate-400 (inferred) */
+  --topo-tunnel: 100 116 139;      /* slate-500            */
 }
 
 /* Dark styles — `.dark` enables dark mode; the paired style class selects the
@@ -84,7 +151,38 @@
   --info: 21 45 77;            /* rgba(0,127,212,.2) on card      */
   --info-fg: 55 148 255;       /* #3794ff                         */
   --info-border: 36 74 115;    /* rgba(0,127,212,.45)             */
-}
+  /* Accent hues — dark variants (translucent fills on the #252526 card). */
+  --accent-indigo: 49 50 79;        /* rgba(99,102,241,.2) on card   */
+  --accent-indigo-fg: 165 180 252;  /* indigo-300                    */
+  --accent-indigo-border: 62 63 119;/* rgba(99,102,241,.4)           */
+
+  --accent-violet: 57 48 80;        /* rgba(139,92,246,.2) on card   */
+  --accent-violet-fg: 196 181 253;  /* violet-300                    */
+  --accent-violet-border: 78 59 121;/* rgba(139,92,246,.4)           */
+
+  --accent-purple: 63 47 80;        /* rgba(168,85,247,.2) on card   */
+  --accent-purple-fg: 216 180 254;  /* purple-300                    */
+  --accent-purple-border: 89 56 122;/* rgba(168,85,247,.4)           */
+
+  --accent-teal: 34 66 64;          /* rgba(20,184,166,.2) on card   */
+  --accent-teal-fg: 94 234 212;     /* teal-300                      */
+  --accent-teal-border: 30 96 89;   /* rgba(20,184,166,.4)           */
+
+  --accent-sky: 32 63 77;           /* rgba(14,165,233,.2) on card   */
+  --accent-sky-fg: 125 211 252;     /* sky-300                       */
+  --accent-sky-border: 28 88 116;   /* rgba(14,165,233,.4)           */
+
+  --accent-cyan: 31 66 73;          /* rgba(6,182,212,.2) on card    */
+  --accent-cyan-fg: 103 232 249;    /* cyan-300                      */
+  --accent-cyan-border: 25 95 108;  /* rgba(6,182,212,.4)            */
+
+  --danger-solid: 209 52 52;        /* muted red (white text ok)     */
+  --danger-solid-hover: 178 44 44;
+  --success-solid: 30 140 60;       /* muted green (white text ok)   */
+  --success-solid-hover: 24 120 50;
+
+  --focus-ring: 139 139 139;        /* #8b8b8b                       */
+  --accent-hover: 122 162 247;      /* indigo-400                    */}
 
 /* Slate — the original dark palette (slate-950 canvas). */
 .theme-slate {
@@ -115,6 +213,31 @@
   --info: 23 37 84;          /* blue-950                 */
   --info-fg: 147 197 253;    /* blue-300                 */
   --info-border: 30 64 175;  /* blue-800                 */
+
+  /* Accent hues — dark variants (slate-tinted *-950 fills, *-300 text). */
+  --accent-indigo: 30 27 75;      /* indigo-950             */
+  --accent-indigo-fg: 165 180 252;/* indigo-300             */
+  --accent-indigo-border: 55 48 163; /* indigo-800          */
+
+  --accent-violet: 46 16 101;     /* violet-950             */
+  --accent-violet-fg: 196 181 253;/* violet-300             */
+  --accent-violet-border: 91 33 182; /* violet-800          */
+
+  --accent-purple: 59 7 100;      /* purple-950             */
+  --accent-purple-fg: 216 180 254;/* purple-300             */
+  --accent-purple-border: 107 33 168; /* purple-800         */
+
+  --accent-teal: 4 47 46;         /* teal-950               */
+  --accent-teal-fg: 94 234 212;   /* teal-300               */
+  --accent-teal-border: 17 94 89; /* teal-800               */
+
+  --accent-sky: 8 47 73;          /* sky-950                */
+  --accent-sky-fg: 125 211 252;   /* sky-300                */
+  --accent-sky-border: 7 89 133;  /* sky-800                */
+
+  --accent-cyan: 8 51 68;         /* cyan-950               */
+  --accent-cyan-fg: 103 232 249;  /* cyan-300               */
+  --accent-cyan-border: 21 94 117;/* cyan-800               */
 }
 
 body {

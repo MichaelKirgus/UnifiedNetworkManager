@@ -19,7 +19,7 @@ const STATE_STYLES: Record<string, string> = {
   RUNNING: 'bg-success text-success-fg border-success-border',
   STOPPED: 'bg-muted text-secondary border-border',
   SUSPENDED: 'bg-warning text-warning-fg border-warning-border',
-  PAUSED: 'bg-sky-100 text-sky-800 border-sky-300',
+  PAUSED: 'bg-accent-sky text-accent-sky-fg border-accent-sky-border',
   ERROR: 'bg-danger text-danger-fg border-danger-border',
 };
 
@@ -169,7 +169,7 @@ function nodeCell(key: string, node: VmNode, depth: number, actions?: DeviceActi
 
 function ChildRow({ node, ctx, actions }: { node: VmNode; ctx: ExpandChildContext; actions?: DeviceActionContext }) {
   return (
-    <tr className="bg-indigo-50/40 dark:bg-muted/70">
+    <tr className="bg-accent-indigo/40 dark:bg-muted/70">
       <td className="px-1 py-2 align-middle">
         <span className="inline-block h-6 w-6" />
       </td>
@@ -860,7 +860,7 @@ export default function Vms() {
         {!vmsQuery.isLoading && !vmsQuery.isError && (
           <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-border bg-card px-4 py-2 text-xs">
             <span className="flex items-center gap-2 text-secondary">
-              <Monitor size={13} className="text-indigo-500" />
+              <Monitor size={13} className="text-accent-solid" />
               {tree.roots.length} VM{tree.roots.length === 1 ? '' : 's'} · {running} running
             </span>
             {totalVcpus > 0 && (

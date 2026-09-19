@@ -63,7 +63,7 @@ export function TimePreferencesCard() {
               const v = e.target.value;
               setPrefs({ timezone: v === 'browser' ? null : v });
             }}
-            className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+            className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
           >
             <option value="browser">Browser default ({Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'})</option>
             {zones.map((z) => (

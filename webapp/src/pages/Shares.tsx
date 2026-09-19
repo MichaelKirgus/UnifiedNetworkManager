@@ -17,10 +17,10 @@ import { api, ApiError, ShareRow, ShareSessionRow } from '../api/client';
 
 /** Share protocol → badge style. */
 const TYPE_STYLES: Record<string, string> = {
-  smb: 'bg-indigo-100 text-indigo-700',
-  nfs: 'bg-teal-100 text-teal-700',
-  iscsi: 'bg-purple-100 text-purple-700',
-  nvmeof: 'bg-sky-100 text-sky-700',
+  smb: 'bg-accent-indigo text-accent-indigo-fg',
+  nfs: 'bg-accent-teal text-accent-teal-fg',
+  iscsi: 'bg-accent-purple text-accent-purple-fg',
+  nvmeof: 'bg-accent-sky text-accent-sky-fg',
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -745,13 +745,13 @@ export default function Shares() {
         {!sharesQuery.isLoading && !sharesQuery.isError && (
           <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-border bg-card px-4 py-2 text-xs">
             <span className="flex items-center gap-2 text-secondary">
-              <FolderTree size={13} className="text-indigo-500" />
+              <FolderTree size={13} className="text-accent-solid" />
               {allShares.length} share{allShares.length === 1 ? '' : 's'}
               {' · '}
               {countByType('smb')} SMB · {countByType('nfs')} NFS · {countByType('iscsi')} iSCSI · {countByType('nvmeof')} NVMe-oF
             </span>
             <span className="flex items-center gap-2 text-secondary">
-              <Users size={13} className="text-teal-500" />
+              <Users size={13} className="text-accent-teal-fg" />
               {activeSessions} active client session{activeSessions === 1 ? '' : 's'}
             </span>
           </div>
@@ -808,9 +808,9 @@ export default function Shares() {
               className="group relative -my-1 h-3 shrink-0 cursor-row-resize"
               title="Drag to resize — or collapse the sessions panel for full shares height"
             >
-              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-muted transition-colors group-hover:bg-indigo-400" />
+              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-muted transition-colors group-hover:bg-accent-hover" />
               <div className="absolute left-1/2 top-1/2 flex h-3 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center">
-                <span className="h-1 w-6 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400" />
+                <span className="h-1 w-6 rounded-full bg-status-neutral transition-colors group-hover:bg-accent-hover" />
               </div>
             </div>
           )}
@@ -828,7 +828,7 @@ export default function Shares() {
                   <Users size={16} className="text-muted-foreground" />
                   Active client sessions
                   {activeSessions > 0 && (
-                    <span className="rounded-full bg-teal-100 px-1.5 py-0.5 text-xs font-medium text-teal-700">{activeSessions}</span>
+                    <span className="rounded-full bg-accent-teal px-1.5 py-0.5 text-xs font-medium text-accent-teal-fg">{activeSessions}</span>
                   )}
                 </span>
                 {sessionsOpen ? <ChevronDown size={18} className="text-faint" /> : <ChevronUp size={18} className="text-faint" />}

@@ -92,11 +92,13 @@ export function useConsoleSession(
       cursorBlink: true,
       fontSize: 13,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+      // Terminal surface — centralized in index.css (--console-*), fixed dark
+      // across themes (terminals are always dark).
       theme: {
-        background: '#0d1117',
-        foreground: '#d8dee9',
-        cursor: '#5aa9e6',
-        selectionBackground: '#264f78',
+        background: 'rgb(var(--console-bg))',
+        foreground: 'rgb(var(--console-fg))',
+        cursor: 'rgb(var(--console-cursor))',
+        selectionBackground: 'rgb(var(--console-selection))',
       },
     });
     const fit = new FitAddon();
@@ -307,7 +309,7 @@ export function ConsoleDialog({ deviceId, pluginId, context, title, subtitle, on
       )}
 
       {/* Terminal host — xterm.js renders here; the dark theme is fixed (terminals are dark). */}
-      <div className="min-h-0 flex-1 bg-[#0d1117] p-2">
+      <div className="min-h-0 flex-1 bg-console-bg p-2">
         <div ref={hostRef} className="h-full w-full" />
       </div>
 
@@ -340,9 +342,9 @@ export function ConsoleStatusPill({ status, exitCode }: { status: ConsoleStatus;
     <span
       className={clsx(
         'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold',
-        status === 'connected' && 'bg-green-100 text-green-800 dark:bg-green-950/60 dark:text-green-300',
+        status === 'connected' && 'bg-success text-success-fg border-success-border',
         status === 'connecting' && 'bg-muted text-secondary',
-        status === 'closed' && (exitCode !== null ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300' : 'bg-danger text-white'),
+        status === 'closed' && (exitCode !== null ? 'bg-warning text-warning-fg border-warning-border' : 'bg-danger text-white'),
       )}
     >
       {status === 'connecting' && <Loader2 size={12} className="animate-spin" />}

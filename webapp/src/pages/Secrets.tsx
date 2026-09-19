@@ -209,12 +209,12 @@ export default function Secrets() {
   function TypeChip({ type }: { type: string }) {
     const label = typeLabelFor(type) ?? type;
     const tone = generatableTypes.has(type)
-      ? 'bg-indigo-100 text-indigo-800'
+      ? 'bg-accent-indigo text-accent-indigo-fg'
       : 'bg-muted text-secondary';
     return (
       <span
         title={label === type ? undefined : `Type id: ${type}`}
-        className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${tone} ${generatableTypes.has(type) ? 'border-indigo-300' : 'border-border'}`}
+        className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${tone} ${generatableTypes.has(type) ? 'border-accent-indigo-border' : 'border-border'}`}
       >
         {label}
       </span>
@@ -566,7 +566,7 @@ export default function Secrets() {
       {generatedInfo && (
         <div className="mb-4 rounded-md border border-success-border bg-success p-3">
           <div className="flex items-start justify-between gap-3">
-            <p className="text-sm font-medium text-emerald-900">
+            <p className="text-sm font-medium text-success-fg">
               Secret “{generatedInfo.label}” created — the provider generated this public material. Copy it to the device
               (e.g. append to <code className="rounded bg-success px-1">~/.ssh/authorized_keys</code>).
             </p>
@@ -607,12 +607,12 @@ export default function Secrets() {
                 s.interactiveLoginAllowed || s.fileAccessAllowed ? (
                   <div className="flex flex-wrap items-center gap-1">
                     {s.interactiveLoginAllowed && (
-                      <span title="May be used for interactive SSH console logins" className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800">
+                      <span title="May be used for interactive SSH console logins" className="rounded-full bg-accent-sky px-2 py-0.5 text-[10px] font-semibold text-accent-sky-fg">
                         SSH console
                       </span>
                     )}
                     {s.fileAccessAllowed && (
-                      <span title="May be used for SFTP file-access sessions" className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
+                      <span title="May be used for SFTP file-access sessions" className="rounded-full bg-success px-2 py-0.5 text-[10px] font-semibold text-success-fg">
                         File access
                       </span>
                     )}

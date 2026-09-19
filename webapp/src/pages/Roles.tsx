@@ -193,7 +193,7 @@ export default function Roles() {
               <div>
                 <label className="mb-1 block text-sm font-medium text-secondary">Name *</label>
                 <input
-                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                   value={role.name}
                   onChange={(e) => setRole({ ...role, name: e.target.value })}
                   disabled={Boolean(editingName)}
@@ -203,7 +203,7 @@ export default function Roles() {
               <div>
                 <label className="mb-1 block text-sm font-medium text-secondary">Description</label>
                 <input
-                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                   value={role.description}
                   onChange={(e) => setRole({ ...role, description: e.target.value })}
                 />

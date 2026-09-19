@@ -206,7 +206,8 @@ export function TrunkEdge({ id, sourceX, sourceY, targetX, targetY, data }: Edge
               id={id}
               path={line}
               style={{
-                stroke: kind === 'tunnel' ? '#64748b' : '#94a3b8',
+                // Topology canvas palette — centralized in index.css (--topo-*).
+                stroke: kind === 'tunnel' ? 'rgb(var(--topo-tunnel))' : 'rgb(var(--topo-cable))',
                 strokeWidth: kind === 'cable' ? 2.5 : 1,
                 strokeDasharray: kind === 'tunnel' ? '6 4' : undefined,
               }}
@@ -256,11 +257,11 @@ function EdgeChip({ cx, cy, full }: { cx: number; cy: number; full: string }) {
       onMouseLeave={() => setHover(false)}
     >
       {hover ? (
-        <div className="max-w-[300px] whitespace-nowrap rounded border border-slate-400 bg-card/95 px-1.5 py-0.5 text-[9px] leading-tight text-secondary shadow-sm">
+        <div className="max-w-[300px] whitespace-nowrap rounded border border-border bg-card/95 px-1.5 py-0.5 text-[9px] leading-tight text-secondary shadow-sm">
           {full}
         </div>
       ) : (
-        <span className="block h-1.5 w-1.5 rounded-full bg-slate-300" />
+        <span className="block h-1.5 w-1.5 rounded-full bg-status-neutral" />
       )}
     </div>
   );

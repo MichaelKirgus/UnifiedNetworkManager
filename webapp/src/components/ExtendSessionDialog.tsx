@@ -148,7 +148,7 @@ export function ExtendSessionDialog({ onClose, onSuccess }: ExtendSessionDialogP
                 </label>
                 <input
                   id="extend-totp"
-                  className="w-full rounded-md border border-border px-3 py-2 text-sm tracking-widest focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm tracking-widest focus:border-focus-ring focus:outline-none"
                   value={totpCode}
                   onChange={(e) => setTotpCode(e.target.value)}
                   maxLength={6}

@@ -410,7 +410,7 @@ function PlanPayloadRow({ plan, ctx }: { plan: Plan; ctx: ExpandChildContext }) 
             <div className="space-y-3 py-1">
               <div>
                 <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-faint">Intent inputs</p>
-                <pre className="max-h-48 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-slate-100">
+                <pre className="max-h-48 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
                   {Object.keys(plan.intentInputs ?? {}).length > 0
                     ? JSON.stringify(plan.intentInputs, null, 2)
                     : '{}'}
@@ -430,7 +430,7 @@ function PlanPayloadRow({ plan, ctx }: { plan: Plan; ctx: ExpandChildContext }) 
                         <span className="ml-2 text-faint">{deviceName(s.deviceId)} ({pluginName(plan.pluginId)})</span>
                         <StatusBadge status={s.status} />
                       </summary>
-                      <pre className="mt-1.5 max-h-40 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-slate-100">
+                      <pre className="mt-1.5 max-h-40 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
                         {JSON.stringify(s.input ?? {}, null, 2)}
                       </pre>
                     </details>
@@ -609,7 +609,7 @@ function CreatePlan({ onDone, onCancel }: { onDone: () => void; onCancel: () => 
                       onChange={(e) =>
                         setSelectedDeviceIds((prev) => (e.target.checked ? [...prev, d.id] : prev.filter((x) => x !== d.id)))
                       }
-                      className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-400"
+                      className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring"
                     />
                     <span className="flex-1 truncate">{d.name}</span>
                     <span className="font-mono text-xs text-faint">{d.managementAddress}</span>

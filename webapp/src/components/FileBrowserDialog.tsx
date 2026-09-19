@@ -310,7 +310,7 @@ export function FileBrowser({ deviceId, pluginId, context, initialPath }: FileBr
                         title={entry.isDirectory ? `Open ${entry.name}` : `View / edit ${entry.name}`}
                         className="flex items-center gap-2 text-left font-medium text-foreground hover:underline"
                       >
-                        {entry.isDirectory ? <Folder size={15} className="shrink-0 text-sky-600 dark:text-sky-400" /> : <FileText size={15} className="shrink-0 text-muted-foreground" />}
+                        {entry.isDirectory ? <Folder size={15} className="shrink-0 text-accent-sky-fg" /> : <FileText size={15} className="shrink-0 text-muted-foreground" />}
                         <span className="truncate">{entry.name}</span>
                       </button>
                     </td>

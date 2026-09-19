@@ -17,10 +17,10 @@ function utilColor(pct: number | null): string {
 
 /** Bar fill for airtime utilization (green → amber → red). */
 function utilBarColor(pct: number | null): string {
-  if (pct === null) return '#cbd5e1'; // slate-300 — no data
-  if (pct < 30) return '#10b981'; // emerald-500
-  if (pct < 70) return '#f59e0b'; // amber-500
-  return '#ef4444'; // red-500
+  if (pct === null) return 'rgb(var(--status-neutral))'; // no data
+  if (pct < 30) return 'rgb(var(--status-ok))';
+  if (pct < 70) return 'rgb(var(--status-warn))';
+  return 'rgb(var(--status-critical))';
 }
 
 /** Pick a tick step so the axis shows at most ~14 labels. */
@@ -136,7 +136,7 @@ function BandPanel({
         ))}
         {/* Noise floor line (annotation — dBm is not on the % axis). */}
         {view.noiseFloorDbm !== null && view.noiseFloorDbm !== undefined && !empty && (
-          <div className="absolute left-0 right-0 border-t border-dashed border-amber-400/70" style={{ bottom: 21 }}>
+          <div className="absolute left-0 right-0 border-t border-dashed border-status-warn/70" style={{ bottom: 21 }}>
             <span className="absolute -top-3.5 right-0 text-[9px] font-mono text-warning-fg">noise {Math.round(view.noiseFloorDbm)} dBm</span>
           </div>
         )}
@@ -170,7 +170,7 @@ function NeighborList({ neighbors }: { neighbors: WifiNeighborRef[] }) {
             const dbm = n.signalDbm ?? null;
             // Map -90…-30 dBm onto a 4–100% bar width.
             const pct = dbm === null ? 0 : Math.max(4, Math.min(100, ((dbm + 90) / 60) * 100));
-            const color = dbm === null ? 'bg-muted' : dbm >= -55 ? 'bg-emerald-500' : dbm >= -70 ? 'bg-amber-500' : 'bg-red-400';
+            const color = dbm === null ? 'bg-muted' : dbm >= -55 ? 'bg-status-ok' : dbm >= -70 ? 'bg-status-warn' : 'bg-status-critical';
             return (
               <li key={`${n.deviceId}-${n.bssid}`} className="flex items-center gap-2 py-1.5" title={`BSSID ${n.bssid}${n.siteName ? ` · site ${n.siteName}` : ''} — seen by ${n.deviceName ?? n.managementAddress ?? 'unknown device'}`}>
                 <div className="h-1.5 w-16 shrink-0 overflow-hidden rounded bg-muted">
@@ -312,7 +312,7 @@ export default function Wifi() {
       width: 150,
       render: (row) =>
         row.security.length > 0 ? (
-          <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-xs font-medium text-indigo-700">{row.security.join(' · ')}</span>
+          <span className="rounded bg-accent-indigo/60 px-1.5 py-0.5 text-xs font-medium text-accent-indigo-fg">{row.security.join(' · ')}</span>
         ) : (
           <span className="text-faint">—</span>
         ),
@@ -415,9 +415,9 @@ export default function Wifi() {
               className="group relative -my-1 h-3 shrink-0 cursor-row-resize"
               title="Drag to resize — or collapse the spectrum view for full table height"
             >
-              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-muted transition-colors group-hover:bg-indigo-400" />
+              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-muted transition-colors group-hover:bg-accent-hover" />
               <div className="absolute left-1/2 top-1/2 flex h-3 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center">
-                <span className="h-1 w-6 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400" />
+                <span className="h-1 w-6 rounded-full bg-status-neutral transition-colors group-hover:bg-accent-hover" />
               </div>
             </div>
           )}
@@ -507,9 +507,9 @@ export default function Wifi() {
                     className="group relative -mx-1.5 my-0 w-3 shrink-0 cursor-col-resize"
                     title="Drag to resize — or collapse a column above for full width"
                   >
-                    <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-muted transition-colors group-hover:bg-indigo-400" />
+                    <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-muted transition-colors group-hover:bg-accent-hover" />
                     <div className="absolute inset-y-0 left-1/2 flex w-3 -translate-x-1/2 items-center justify-center">
-                      <span className="h-8 w-1 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400" />
+                      <span className="h-8 w-1 rounded-full bg-status-neutral transition-colors group-hover:bg-accent-hover" />
                     </div>
                   </div>
                 )}

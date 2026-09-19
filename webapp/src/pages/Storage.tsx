@@ -18,11 +18,11 @@ import { api, ApiError, StorageDiskRow, StorageFilesystemRow } from '../api/clie
 
 /** Filesystem type → badge style + label. */
 const FS_TYPE_STYLES: Record<string, string> = {
-  'zfs-pool': 'bg-indigo-100 text-indigo-700',
-  'zfs-dataset': 'bg-sky-100 text-sky-700',
-  'zfs-zvol': 'bg-teal-100 text-teal-700',
+  'zfs-pool': 'bg-accent-indigo text-accent-indigo-fg',
+  'zfs-dataset': 'bg-accent-sky text-accent-sky-fg',
+  'zfs-zvol': 'bg-accent-teal text-accent-teal-fg',
   ext4: 'bg-success text-success-fg',
-  squashfs: 'bg-violet-100 text-violet-700',
+  squashfs: 'bg-accent-violet text-accent-violet-fg',
   usb: 'bg-warning text-warning-fg',
 };
 
@@ -38,7 +38,7 @@ function FsTypeBadge({ type }: { type: string }) {
 const ROTATION_STYLES: Record<string, string> = {
   hdd: 'bg-muted text-secondary',
   ssd: 'bg-info text-info-fg',
-  flash: 'bg-purple-100 text-purple-700',
+  flash: 'bg-accent-purple text-accent-purple-fg',
 };
 
 function RotationBadge({ rate }: { rate: string }) {
@@ -66,10 +66,11 @@ function usageColor(pct: number | null): string {
 }
 
 function usageBarColor(pct: number | null): string {
-  if (pct === null) return '#cbd5e1'; // slate-300 — no data
-  if (pct < 70) return '#10b981'; // emerald-500
-  if (pct < 90) return '#f59e0b'; // amber-500
-  return '#ef4444'; // red-500
+  // Tokens are raw RGB triples — wrap in rgb() for inline styles.
+  if (pct === null) return 'rgb(var(--status-neutral))'; // no data
+  if (pct < 70) return 'rgb(var(--status-ok))';
+  if (pct < 90) return 'rgb(var(--status-warn))';
+  return 'rgb(var(--status-critical))';
 }
 
 function UsageCell({ row }: { row: StorageFilesystemRow }) {
@@ -851,7 +852,7 @@ export default function Storage() {
    * chevron, and deeper levels indent in the name cell. */
   function DatasetChildRow({ child, ctx }: { child: StorageFilesystemRow; ctx: ExpandChildContext }) {
     return (
-      <tr className="bg-sky-50/40 dark:bg-muted/70">
+      <tr className="bg-accent-sky/40 dark:bg-muted/70">
         <td className="px-1 py-2 align-middle">
           {ctx.hasChildren ? (
             <button
@@ -930,7 +931,7 @@ export default function Storage() {
       width: 140,
       render: (row) => (
         row.poolName ? (
-          <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-xs font-medium text-indigo-700">{row.poolName}</span>
+          <span className="rounded bg-accent-indigo/60 px-1.5 py-0.5 text-xs font-medium text-accent-indigo-fg">{row.poolName}</span>
         ) : (
           <span className="text-faint">—</span>
         )
@@ -1016,7 +1017,7 @@ export default function Storage() {
           <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-border bg-card px-4 py-2 text-xs">
             {totalSize > 0 ? (
               <span className="flex items-center gap-2 font-mono">
-                <Database size={13} className="text-indigo-500" />
+                <Database size={13} className="text-accent-solid" />
                 <span>{formatBytes(totalUsed)} used of {formatBytes(totalSize)}</span>
                 <span className={usageColor(usagePct({ sizeBytes: totalSize, usedBytes: totalUsed }))}>
                   ({Math.round((totalUsed / totalSize) * 100)}%)
@@ -1026,7 +1027,7 @@ export default function Storage() {
               <span className="text-faint">No capacity data reported yet</span>
             )}
             <span className="flex items-center gap-2 text-secondary">
-              <Database size={13} className="text-indigo-500" />
+              <Database size={13} className="text-accent-solid" />
               {poolCount} pool{poolCount === 1 ? '' : 's'} · {datasetCount} dataset{datasetCount === 1 ? '' : 's'} ·{' '}
               {allFilesystems.length - poolCount - datasetCount} other filesystem{allFilesystems.length - poolCount - datasetCount === 1 ? '' : 's'}
             </span>
@@ -1083,9 +1084,9 @@ export default function Storage() {
               className="group relative -my-1 h-3 shrink-0 cursor-row-resize"
               title="Drag to resize — or collapse the disk table for full filesystem height"
             >
-              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-muted transition-colors group-hover:bg-indigo-400" />
+              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-muted transition-colors group-hover:bg-accent-hover" />
               <div className="absolute left-1/2 top-1/2 flex h-3 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center">
-                <span className="h-1 w-6 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400" />
+                <span className="h-1 w-6 rounded-full bg-status-neutral transition-colors group-hover:bg-accent-hover" />
               </div>
             </div>
           )}

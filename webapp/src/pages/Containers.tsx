@@ -284,7 +284,7 @@ function YamlEditorDialog({ app, onClose }: { app: ContainerRow; onClose: () => 
                 value={yaml}
                 onChange={(e) => setYaml(e.target.value)}
                 spellCheck={false}
-                className="h-[46vh] w-full resize-y rounded-md border border-border bg-background p-3 font-mono text-xs leading-relaxed focus:border-slate-500 focus:outline-none"
+                className="h-[46vh] w-full resize-y rounded-md border border-border bg-background p-3 font-mono text-xs leading-relaxed focus:border-focus-ring focus:outline-none"
               />
               <div className="mt-3 flex items-center justify-end gap-2">
                 <button type="button" onClick={onClose} disabled={saving} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background disabled:opacity-40">
@@ -370,7 +370,7 @@ const STATE_STYLES: Record<string, string> = {
   CREATED: 'bg-muted text-secondary border-border dark:text-foreground/85',
   RESTARTING: 'bg-warning text-warning-fg border-warning-border',
   REMOVING: 'bg-warning text-warning-fg border-warning-border',
-  PAUSED: 'bg-sky-100 text-sky-800 border-sky-300 dark:bg-sky-950/40 dark:text-sky-300 dark:border-sky-900/70',
+  PAUSED: 'bg-accent-sky text-accent-sky-fg border-accent-sky-border',
   DEAD: 'bg-danger text-danger-fg border-danger-border',
 };
 
@@ -595,7 +595,7 @@ function buildApp(row: ContainerRow, liveStats?: Record<string, LiveContainerSta
 function NetworkChip({ net }: { net: ContainerNetwork }) {
   const tip = [net.name, net.driver ? `driver: ${net.driver}` : '', ...(net.subnets ?? [])].filter(Boolean).join(' · ');
   return (
-    <span title={tip} className="inline-flex items-center rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-sky-800 dark:border-sky-900/70 dark:bg-sky-950/40 dark:text-sky-300">
+    <span title={tip} className="inline-flex items-center rounded border border-accent-sky-border bg-accent-sky px-1.5 py-0.5 font-mono text-[11px] leading-4 text-accent-sky-fg">
       {net.name}
     </span>
   );
@@ -605,7 +605,7 @@ function NetworkChip({ net }: { net: ContainerNetwork }) {
 function IpChip({ ip }: { ip: string }) {
   const isV6 = ip.includes(':');
   return (
-    <span className={clsx('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[11px] leading-4', isV6 ? 'border-violet-200 bg-violet-50 text-violet-800 dark:border-violet-900/70 dark:bg-violet-950/40 dark:text-violet-300' : 'border-info-border bg-info text-info-fg')}>
+    <span className={clsx('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[11px] leading-4', isV6 ? 'border-accent-violet-border bg-accent-violet text-accent-violet-fg' : 'border-info-border bg-info text-info-fg')}>
       {ip}
     </span>
   );
@@ -671,7 +671,7 @@ function VersionCell({ row }: { row: ContainerRow }) {
   return (
     <span className="inline-flex items-center gap-1.5 font-mono text-xs text-secondary" title={row.upgradeAvailable ? 'Update available' : undefined}>
       {v}
-      {row.upgradeAvailable && <span className="h-2 w-2 rounded-full bg-amber-400" title="Update available" />}
+      {row.upgradeAvailable && <span className="h-2 w-2 rounded-full bg-status-warn" title="Update available" />}
     </span>
   );
 }
@@ -837,7 +837,7 @@ function nodeCell(key: string, node: TreeNode, depth: number, actions?: ChildAct
       const parts: ReactNode[] = [];
       if (node.ip) {
         parts.push(
-          <span key="ip" className={clsx('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[11px] leading-4', node.ip.includes(':') ? 'border-violet-200 bg-violet-50 text-violet-800 dark:border-violet-900/70 dark:bg-violet-950/40 dark:text-violet-300' : 'border-info-border bg-info text-info-fg')} title="IP">
+          <span key="ip" className={clsx('inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[11px] leading-4', node.ip.includes(':') ? 'border-accent-violet-border bg-accent-violet text-accent-violet-fg' : 'border-info-border bg-info text-info-fg')} title="IP">
             {node.ip}
           </span>
         );
@@ -881,11 +881,11 @@ function nodeCell(key: string, node: TreeNode, depth: number, actions?: ChildAct
  * container that has volume mounts gets its own chevron for recursive expand. */
 function ChildRow({ node, ctx, actions }: { node: TreeNode; ctx: ExpandChildContext; actions?: ChildActionContext }) {
   const { formatDateTime } = useTimeFormat();
-  // Theme-aware fills — in dark mode a near-white bg-sky-50/40 over the dark
+  // Theme-aware fills — in dark mode a near-white bg-accent-sky/40 over the
   // card blends into a mid-gray band that kills text contrast, so children use
   // muted-panel shades instead (container rows lighter than volume leaves).
   return (
-    <tr className={node.kind === 'volume' ? 'bg-background/60 dark:bg-muted/40' : 'bg-sky-50/40 dark:bg-muted/70'}>
+    <tr className={node.kind === 'volume' ? 'bg-background/60 dark:bg-muted/40' : 'bg-accent-sky/40 dark:bg-muted/70'}>
       <td className="px-1 py-2 align-middle">
         {ctx.hasChildren ? (
           <button
@@ -1765,7 +1765,7 @@ export default function Containers() {
             {tag && tag !== 'latest' ? (
               <span className="inline-flex shrink-0 items-center rounded border border-border bg-background px-1.5 py-0.5 font-mono text-[11px] leading-4 text-secondary">{tag}</span>
             ) : (
-              tag === 'latest' && <span className="inline-flex shrink-0 items-center rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-sky-700 dark:border-sky-900/70 dark:bg-sky-950/40 dark:text-sky-300">latest</span>
+              tag === 'latest' && <span className="inline-flex shrink-0 items-center rounded border border-accent-sky-border bg-accent-sky px-1.5 py-0.5 font-mono text-[11px] leading-4 text-accent-sky-fg">latest</span>
             )}
           </span>
         );
@@ -1860,7 +1860,7 @@ export default function Containers() {
         {!containersQuery.isLoading && !containersQuery.isError && (
           <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-border bg-card px-4 py-2 text-xs">
             <span className="flex items-center gap-2 text-secondary">
-              <Container size={13} className="text-indigo-500" />
+              <Container size={13} className="text-accent-solid" />
               {tree.roots.length} app{tree.roots.length === 1 ? '' : 's'} · {containerTotal} container{containerTotal === 1 ? '' : 's'}
             </span>
             <span className="flex items-center gap-2 text-secondary">
@@ -1876,7 +1876,7 @@ export default function Containers() {
               <button
                 type="button"
                 onClick={() => setCreateOpen(true)}
-                className="ml-auto inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90"
+                className="ml-auto inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover"
               >
                 <Plus size={14} /> Create app
               </button>
@@ -1946,9 +1946,9 @@ export default function Containers() {
               className="group relative -my-1 h-3 shrink-0 cursor-row-resize"
               title="Drag to resize — or collapse the image panel for full container height"
             >
-              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-muted transition-colors group-hover:bg-indigo-400" />
+              <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-muted transition-colors group-hover:bg-accent-hover" />
               <div className="absolute left-1/2 top-1/2 flex h-3 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center">
-                <span className="h-1 w-6 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400" />
+                <span className="h-1 w-6 rounded-full bg-status-neutral transition-colors group-hover:bg-accent-hover" />
               </div>
             </div>
           )}

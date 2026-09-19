@@ -23,19 +23,19 @@ function ledClass(status?: string | null): string {
     case 'ok':
     case 'enabled':
     case 'active':
-      return 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.7)]';
+      return 'bg-status-ok shadow-[0_0_6px_rgb(var(--status-ok)/0.7)]';
     case 'down':
     case 'offline':
     case 'critical':
-      return 'bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.55)]';
+      return 'bg-status-critical shadow-[0_0_6px_rgb(var(--status-critical)/0.55)]';
     case 'degraded':
     case 'warning':
-      return 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.6)]';
+      return 'bg-status-warn shadow-[0_0_6px_rgb(var(--status-warn)/0.6)]';
     case 'disabled':
     case 'inactive':
-      return 'bg-slate-300';
+      return 'bg-status-neutral';
     default:
-      return 'bg-slate-400'; // unknown / no link info
+      return 'bg-faint'; // unknown / no link info
   }
 }
 
@@ -174,7 +174,7 @@ function PortCell({ item, selected, onToggle, selectable }: { item: StateItem; s
       className={clsx(
         'relative flex h-[54px] w-[62px] shrink-0 flex-col items-center justify-center gap-1 rounded-md border transition-colors',
         selectable && selected
-          ? 'border-indigo-400 bg-indigo-50 ring-1 ring-indigo-300'
+          ? 'border-accent-hover bg-accent-indigo/60 ring-1 ring-accent-indigo-border'
           : 'border-border bg-card',
         selectable && !selected && 'hover:border-border hover:bg-background'
       )}
@@ -183,7 +183,7 @@ function PortCell({ item, selected, onToggle, selectable }: { item: StateItem; s
         <span
           className={clsx(
             'absolute right-1 top-1 flex h-3.5 w-3.5 items-center justify-center rounded-sm border',
-            selected ? 'border-indigo-500 bg-indigo-500 text-white' : 'border-border bg-card'
+            selected ? 'border-accent-solid bg-accent-solid text-white' : 'border-border bg-card'
           )}
         >
           {selected && <Check className="h-2.5 w-2.5" />}

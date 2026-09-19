@@ -42,7 +42,7 @@ export default function ConsolePage() {
   };
 
   return (
-    <div className="flex h-screen flex-col bg-[#0d1117]">
+    <div className="flex h-screen flex-col bg-console-bg">
       {/* Header */}
       <header className="flex items-center justify-between gap-3 border-b border-border bg-card px-4 py-2.5">
         <div className="flex min-w-0 items-center gap-2.5">

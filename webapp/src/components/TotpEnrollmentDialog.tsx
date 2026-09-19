@@ -58,7 +58,7 @@ export function TotpEnrollmentDialog({ username, enrollment, onClose }: Props) {
             onClick={copySecret}
             className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-2 text-sm font-medium text-secondary hover:bg-muted"
           >
-            {copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
+            {copied ? <Check className="h-4 w-4 text-success-fg" /> : <Copy className="h-4 w-4" />}
             {copied ? 'Copied' : 'Copy'}
           </button>
         </div>

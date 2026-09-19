@@ -141,7 +141,7 @@ export default function Logs() {
                 {expanded.has(row.id) ? 'Hide details' : `Details (${Object.keys(row.context).length})`}
               </button>
               {expanded.has(row.id) && (
-                <pre className="max-h-48 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-slate-100">
+                <pre className="max-h-48 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
                   {JSON.stringify(row.context, null, 2)}
                 </pre>
               )}

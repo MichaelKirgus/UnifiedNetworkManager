@@ -335,8 +335,8 @@ function SwitchSection({
     <>
       <VirtualSwitch items={items} layout={section.layout} selectedKeys={validSelected} onToggleKey={toggleKey} selectable={selectable} />
       {canApply && validSelected.size > 0 && (
-        <div className="flex flex-wrap items-center gap-2 border-t border-border bg-indigo-50/60 px-4 py-2.5">
-          <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-800">
+        <div className="flex flex-wrap items-center gap-2 border-t border-border bg-accent-indigo/60 px-4 py-2.5">
+          <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-accent-indigo-fg">
             <CheckSquare className="h-3.5 w-3.5" />
             {validSelected.size} port{validSelected.size === 1 ? '' : 's'} selected
           </span>

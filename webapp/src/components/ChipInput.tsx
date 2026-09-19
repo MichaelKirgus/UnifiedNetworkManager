@@ -56,14 +56,14 @@ export function ChipInput({ values, onChange, suggestions = [], placeholder = 'T
               type="button"
               onClick={() => addValue(s)}
               title={`Add "${s}"`}
-              className="rounded-full border border-dashed border-border px-2 py-0.5 text-xs text-muted-foreground hover:border-slate-400 hover:bg-background hover:text-secondary"
+              className="rounded-full border border-dashed border-border px-2 py-0.5 text-xs text-muted-foreground hover:border-focus-ring hover:bg-background hover:text-secondary"
             >
               + {s}
             </button>
           ))}
         </div>
       )}
-      <div className="flex min-h-[38px] w-full flex-wrap items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 focus-within:border-slate-400">
+      <div className="flex min-h-[38px] w-full flex-wrap items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 focus-within:border-focus-ring">
         {values.map((v) => (
           <span key={v} className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-secondary">
             {v}

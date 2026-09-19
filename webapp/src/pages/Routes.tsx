@@ -10,9 +10,9 @@ import { useTimeFormat } from '../utils/time';
 /** Small colored pill for the route protocol. */
 const PROTOCOL_STYLES: Record<RouteRow['protocol'], string> = {
   static: 'bg-muted text-secondary',
-  connected: 'bg-cyan-100 text-cyan-800',
-  ospf: 'bg-indigo-100 text-indigo-700',
-  bgp: 'bg-purple-100 text-purple-700',
+  connected: 'bg-accent-cyan text-accent-cyan-fg',
+  ospf: 'bg-accent-indigo text-accent-indigo-fg',
+  bgp: 'bg-accent-purple text-accent-purple-fg',
   rip: 'bg-warning text-warning-fg',
   other: 'bg-muted text-secondary',
 };
@@ -60,7 +60,7 @@ export default function Routes() {
           <div className="flex flex-col gap-0.5">
             <span className="font-mono text-xs">{orDash(row.gateway)}</span>
             {gwStatus && gwStatus !== 'unknown' && (
-              <span className={`text-[11px] ${gwStatus === 'online' ? 'text-emerald-600' : 'text-danger-fg'}`}>
+              <span className={`text-[11px] ${gwStatus === 'online' ? 'text-success-fg' : 'text-danger-fg'}`}>
                 gateway {gwStatus}
                 {latency !== null ? ` · ${Math.round(latency)} ms` : ''}
               </span>

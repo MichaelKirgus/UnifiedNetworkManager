@@ -12,8 +12,8 @@ export function RemoteNode({ data }: { data: TopoNode & { kind: 'remote' } }) {
           implicit anchor and loop around the card. */}
       <SideHandles />
       <Handle type="target" position={Position.Top} className="!h-1.5 !w-1.5 !border-border !bg-card" />
-      <div className="flex w-40 flex-col items-start rounded-md border border-dashed border-indigo-300 bg-indigo-50 px-2 py-1">
-        <span className="truncate text-[10px] font-medium text-indigo-700" title={data.label}>
+      <div className="flex w-40 flex-col items-start rounded-md border border-dashed border-accent-indigo-border bg-accent-indigo/60 px-2 py-1">
+        <span className="truncate text-[10px] font-medium text-accent-indigo-fg" title={data.label}>
           {data.label}
         </span>
       </div>

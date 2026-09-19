@@ -390,7 +390,7 @@ export default function DeviceDetail() {
               disabled={toggleEnabled.isPending}
               className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${
                 device.enabled === false
-                  ? 'border-green-200 text-green-700 hover:bg-green-50'
+                  ? 'border-success-border text-success-fg hover:bg-success/40'
                   : 'border-border text-secondary hover:bg-background'
               }`}
             >
@@ -499,12 +499,12 @@ export default function DeviceDetail() {
                   </td>
                   <td className="py-2 pr-3">
                     {a.pluginOnline ? (
-                      <span className="inline-flex items-center gap-1.5 text-green-600">
-                        <span className="h-2 w-2 rounded-full bg-green-500" /> online
+                      <span className="inline-flex items-center gap-1.5 text-success-fg">
+                        <span className="h-2 w-2 rounded-full bg-status-ok" /> online
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1.5 text-faint">
-                        <span className="h-2 w-2 rounded-full bg-slate-300" /> offline
+                        <span className="h-2 w-2 rounded-full bg-status-neutral" /> offline
                       </span>
                     )}
                   </td>
@@ -518,7 +518,7 @@ export default function DeviceDetail() {
                             title={`${slot.description ?? `Credential slot "${slot.name}"`} (${slot.secretTypes?.length ? slot.secretTypes.join(' | ') : slot.secretType})`}
                             className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
                               slot.secretId
-                                ? 'bg-indigo-50 text-indigo-700'
+                                ? 'bg-accent-indigo/60 text-accent-indigo-fg'
                                 : 'bg-muted text-faint'
                             }`}
                           >
@@ -766,7 +766,7 @@ export default function DeviceDetail() {
                             {entry.context && Object.keys(entry.context).length > 0 && (
                               <details className="text-xs">
                                 <summary className="cursor-pointer font-medium text-info-fg hover:underline">Details</summary>
-                                <pre className="mt-1 max-h-48 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-slate-100">
+                                <pre className="mt-1 max-h-48 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
                                   {JSON.stringify(entry.context, null, 2)}
                                 </pre>
                               </details>
@@ -851,7 +851,7 @@ export default function DeviceDetail() {
                 <label className="mb-1 block text-sm font-medium text-secondary">IP address</label>
                 <input
                   autoFocus
-                  className={`w-full rounded-md border px-3 py-2 text-sm ${ipError ? 'border-red-400' : 'border-border'}`}
+                  className={`w-full rounded-md border px-3 py-2 text-sm ${ipError ? 'border-danger-border' : 'border-border'}`}
                   value={newIpInput}
                   onChange={(e) => { setNewIpInput(e.target.value); setIpError(null); }}
                   placeholder="10.0.0.2 or 2001:db8::1"

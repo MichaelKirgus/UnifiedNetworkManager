@@ -116,12 +116,13 @@ export const NAV_ITEMS: NavItem[] = [
 export const MY_ACCOUNT_ITEM: NavItem = { to: '/my-account', label: 'My Account', icon: UserRound };
 
 /** Distinct badge color per count key (matches the top-bar bell/plans accents). */
+// Solid status hues — centralized in index.css (--status-*).
 export const BADGE_COLORS: Record<NavCountKey, string> = {
-  notifications: 'bg-red-500',
-  configJobs: 'bg-amber-500',
-  plans: 'bg-blue-500',
-  certificates: 'bg-red-500',
-  updates: 'bg-emerald-500',
+  notifications: 'bg-status-critical',
+  configJobs: 'bg-status-warn',
+  plans: 'bg-status-info',
+  certificates: 'bg-status-critical',
+  updates: 'bg-status-ok',
 };
 
 /**

@@ -11,7 +11,7 @@ function VersionBadge({ version }: { version?: string | null }) {
   if (!version) return <span className="text-faint">—</span>;
   const cls =
     version === 'v6'
-      ? 'bg-purple-100 text-purple-700'
+      ? 'bg-accent-purple text-accent-purple-fg'
       : 'bg-info text-info-fg';
   return (
     <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${cls}`}>

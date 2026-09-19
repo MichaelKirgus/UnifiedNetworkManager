@@ -27,7 +27,7 @@ function resolutionTooltip(resolution: FirewallAddressResolution): string {
 function Chip({ label, tone }: { label: string; tone: 'v4' | 'v6' | 'host' | 'alias' }) {
   const styles: Record<string, string> = {
     v4: 'bg-info text-info-fg',
-    v6: 'bg-violet-100 text-violet-700',
+    v6: 'bg-accent-violet text-accent-violet-fg',
     host: 'bg-success text-success-fg',
     alias: 'bg-warning text-warning-fg',
   };

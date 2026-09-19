@@ -259,7 +259,7 @@ export default function Login() {
                 <label className="mb-1 block text-sm font-medium text-secondary">New password * (min 8 chars)</label>
                 <input
                   type="password"
-                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   autoComplete="new-password"
@@ -269,7 +269,7 @@ export default function Login() {
                 <label className="mb-1 block text-sm font-medium text-secondary">Confirm new password *</label>
                 <input
                   type="password"
-                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   autoComplete="new-password"
@@ -289,7 +289,7 @@ export default function Login() {
               <div>
                 <label className="mb-1 block text-sm font-medium text-secondary">Username</label>
                 <input
-                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   autoComplete="username"
@@ -299,7 +299,7 @@ export default function Login() {
                 <label className="mb-1 block text-sm font-medium text-secondary">Password</label>
                 <input
                   type="password"
-                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   autoComplete="current-password"
@@ -321,7 +321,7 @@ export default function Login() {
                   Two-factor authentication code
                 </label>
                 <input
-                  className="w-full rounded-md border border-border px-3 py-2 text-sm tracking-widest focus:border-slate-500 focus:outline-none"
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm tracking-widest focus:border-focus-ring focus:outline-none"
                   value={totpCode}
                   maxLength={6}
                   onChange={(e) => setTotpCode(e.target.value)}

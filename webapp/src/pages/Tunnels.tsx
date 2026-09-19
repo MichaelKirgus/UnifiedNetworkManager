@@ -9,9 +9,9 @@ import { useTimeFormat } from '../utils/time';
 
 /** Small colored pill for the tunnel technology. */
 const TYPE_STYLES: Record<TunnelRow['type'], string> = {
-  wireguard: 'bg-indigo-100 text-indigo-700',
-  openvpn: 'bg-teal-100 text-teal-700',
-  ipsec: 'bg-purple-100 text-purple-700',
+  wireguard: 'bg-accent-indigo text-accent-indigo-fg',
+  openvpn: 'bg-accent-teal text-accent-teal-fg',
+  ipsec: 'bg-accent-purple text-accent-purple-fg',
   pppoe: 'bg-warning text-warning-fg',
   gre: 'bg-muted text-secondary',
 };

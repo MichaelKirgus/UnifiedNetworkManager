@@ -29,14 +29,14 @@ const SEVERITY_STYLES: Record<NotificationSeverity, string> = {
 
 const SOURCE_STYLES: Record<NotificationSource, string> = {
   system: 'bg-muted text-secondary',
-  device: 'bg-indigo-100 text-indigo-700',
-  plugin: 'bg-purple-100 text-purple-700',
+  device: 'bg-accent-indigo text-accent-indigo-fg',
+  plugin: 'bg-accent-purple text-accent-purple-fg',
 };
 
 const STATUS_STYLES: Record<Notification['status'], string> = {
   open: 'bg-success text-success-fg',
   acknowledged: 'bg-muted text-secondary',
-  resolved: 'bg-teal-100 text-teal-700',
+  resolved: 'bg-accent-teal text-accent-teal-fg',
   closed: 'bg-muted text-faint',
 };
 
@@ -217,7 +217,7 @@ export default function Notifications() {
                 title="Resolve (condition fixed)"
                 aria-label="Resolve notification"
                 onClick={() => resolveMut.mutate(n.id)}
-                className="rounded p-1.5 text-faint hover:bg-success hover:text-emerald-600"
+                className="rounded p-1.5 text-faint hover:bg-success hover:text-success-fg"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -248,7 +248,7 @@ export default function Notifications() {
             className={clsx(
               'flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium',
               showSettings
-                ? 'border-slate-800 bg-primary text-white'
+                ? 'border-border bg-primary text-white'
                 : 'border-border bg-card text-secondary hover:bg-muted'
             )}
           >
@@ -407,7 +407,7 @@ function VisibilitySettings({ onDone }: { onDone: () => void }) {
             Reset
           </button>
         )}
-        {saveMut.isSuccess && !draft && <span className="text-xs text-emerald-600">Saved.</span>}
+        {saveMut.isSuccess && !draft && <span className="text-xs text-success-fg">Saved.</span>}
       </div>
     </div>
   );

@@ -459,7 +459,7 @@ export default function Devices() {
         return (
           <div className="flex flex-wrap gap-1">
             {tags.map((t) => (
-              <span key={t} className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700">
+              <span key={t} className="inline-flex items-center gap-1 rounded-full bg-accent-indigo/60 px-2 py-0.5 text-xs font-medium text-accent-indigo-fg">
                 <Tag className="h-3 w-3" />
                 {t}
               </span>
@@ -810,7 +810,7 @@ export default function Devices() {
               required
               className={`w-full rounded-md border px-3 py-2 text-sm ${
                 identity.managementAddress.trim() && !isValidAddress(identity.managementAddress)
-                  ? 'border-red-400'
+                  ? 'border-danger-border'
                   : 'border-border'
               }`}
               value={identity.managementAddress}
@@ -876,7 +876,7 @@ export default function Devices() {
             <label className="mb-1 block text-sm font-medium text-secondary">Additional IPs (optional)</label>
             <div className="flex gap-2">
               <input
-                className={`w-full rounded-md border px-3 py-2 text-sm ${ipError ? 'border-red-400' : 'border-border'}`}
+                className={`w-full rounded-md border px-3 py-2 text-sm ${ipError ? 'border-danger-border' : 'border-border'}`}
                 value={newIpInput}
                 onChange={(e) => { setNewIpInput(e.target.value); setIpError(null); }}
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSecondaryIp(); } }}
@@ -962,7 +962,7 @@ export default function Devices() {
                         {optionDirty[a.pluginId] && (
                           <span
                             title="Unsaved changes in this section"
-                            className="h-2 w-2 shrink-0 rounded-full bg-amber-400"
+                            className="h-2 w-2 shrink-0 rounded-full bg-status-warn"
                           />
                         )}
                       </button>

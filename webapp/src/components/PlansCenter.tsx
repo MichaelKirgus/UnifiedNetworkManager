@@ -99,7 +99,7 @@ export function PlansCenter() {
       >
         <ListChecks className="h-5 w-5" />
         {activeCount > 0 && (
-          <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-blue-500 px-1 text-[10px] font-bold leading-none text-white">
+          <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-status-info px-1 text-[10px] font-bold leading-none text-white">
             {activeCount > 99 ? '99+' : activeCount}
           </span>
         )}

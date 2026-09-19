@@ -134,7 +134,7 @@ export default function PlanDetail() {
         <div className="flex items-center gap-2">
           {canApply && editable && (
             <button onClick={() => executeMutation.mutate()} disabled={executeMutation.isPending || steps.length === 0}
-              className="flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50">
+              className="flex items-center gap-1.5 rounded-md bg-success-solid px-3 py-1.5 text-sm font-semibold text-white hover:bg-success-solid-hover disabled:opacity-50">
               <Play className="h-4 w-4" /> Execute
             </button>
           )}
@@ -261,7 +261,7 @@ export default function PlanDetail() {
       {/* Payload — the raw intent inputs behind every execution of this plan. */}
       <section className="mb-5 rounded-md border border-border bg-card p-4 shadow-sm">
         <h2 className="mb-2 text-sm font-semibold text-foreground">Payload — intent inputs</h2>
-        <pre className="max-h-64 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-slate-100">
+        <pre className="max-h-64 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
           {Object.keys(plan.intentInputs ?? {}).length > 0 ? JSON.stringify(plan.intentInputs, null, 2) : '{}'}
         </pre>
       </section>
@@ -443,7 +443,7 @@ function StepRow({ step, position, total, editable, deviceName, actionLabel, onM
           <details open={Boolean(step.result)}>
             <summary className="cursor-pointer text-faint hover:text-secondary">Result</summary>
             {step.result ? (
-              <pre className="mt-1 max-h-64 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-slate-100">
+              <pre className="mt-1 max-h-64 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
                 {JSON.stringify(step.result, null, 2)}
               </pre>
             ) : (
@@ -522,7 +522,7 @@ function StepEditor({ step, planId, onSaved, onClose }: {
                   <label key={ps.ref} className="flex items-center gap-2 text-sm text-secondary">
                     <input type="checkbox" checked={secretRefs.includes(ps.ref)}
                       onChange={(e) => setSecretRefs((prev) => e.target.checked ? [...prev, ps.ref] : prev.filter((r) => r !== ps.ref))}
-                      className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-400" />
+                      className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring" />
                     <span>{ps.label ?? ps.ref}</span>
                     <span className="font-mono text-xs text-faint">({ps.type})</span>
                   </label>
@@ -539,7 +539,7 @@ function StepEditor({ step, planId, onSaved, onClose }: {
                   <label key={s.id} className="flex items-center gap-2 text-sm text-secondary">
                     <input type="checkbox" checked={dependsOn.includes(s.stepIndex)}
                       onChange={(e) => setDependsOn((prev) => e.target.checked ? [...prev, s.stepIndex] : prev.filter((d) => d !== s.stepIndex))}
-                      className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-400" />
+                      className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring" />
                     <span>Step #{s.stepIndex}</span>
                   </label>
                 ))}
@@ -549,7 +549,7 @@ function StepEditor({ step, planId, onSaved, onClose }: {
 
           <label className="flex items-center gap-2 text-sm text-secondary">
             <input type="checkbox" checked={bestEffort} onChange={(e) => setBestEffort(e.target.checked)}
-              className="h-4 w-4 rounded border-border text-foreground focus:ring-slate-400" />
+              className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring" />
             Best effort (failure does not abort the plan)
           </label>
 

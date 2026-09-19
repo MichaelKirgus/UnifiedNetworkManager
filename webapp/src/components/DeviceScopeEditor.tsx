@@ -52,7 +52,7 @@ function ScopePicker({
         <select
           value=""
           onChange={(e) => { if (e.target.value) onToggle(e.target.value); }}
-          className="mt-2 w-full rounded-md border border-border bg-card px-3 py-1.5 text-sm focus:border-slate-500 focus:outline-none"
+          className="mt-2 w-full rounded-md border border-border bg-card px-3 py-1.5 text-sm focus:border-focus-ring focus:outline-none"
         >
           <option value="">+ Add {label.toLowerCase()}…</option>
           {remaining.map(([id, label]) => (

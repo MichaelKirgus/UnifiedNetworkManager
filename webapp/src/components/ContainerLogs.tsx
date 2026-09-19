@@ -55,7 +55,7 @@ export function ContainerLogsView({ app }: { app: ContainerRow }) {
           id="logs-tail"
           value={tail}
           onChange={(e) => setTail(Number(e.target.value))}
-          className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground focus:border-slate-500 focus:outline-none"
+          className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground focus:border-focus-ring focus:outline-none"
         >
           {[100, 300, 500, 1000].map((n) => <option key={n} value={n}>{n}</option>)}
         </select>

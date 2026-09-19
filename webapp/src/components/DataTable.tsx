@@ -521,7 +521,7 @@ export function DataTable<T>({
             onChange={(e) => setSearchText_(e.target.value)}
             placeholder={searchPlaceholder}
             aria-label="Quick search rows"
-            className="w-full rounded-md border border-border py-1 pl-7 pr-2 text-xs text-secondary focus:border-slate-400 focus:outline-none"
+            className="w-full rounded-md border border-border py-1 pl-7 pr-2 text-xs text-secondary focus:border-focus-ring focus:outline-none"
           />
         </div>
 
@@ -533,7 +533,7 @@ export function DataTable<T>({
           className={clsx(
             'flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium',
             showFilters || activeFilterCols.length > 0
-              ? 'border-slate-400 bg-muted text-foreground'
+              ? 'border-focus-ring bg-muted text-foreground'
               : 'border-border text-secondary hover:bg-background'
           )}
         >
@@ -628,7 +628,7 @@ export function DataTable<T>({
                 >
                   <input
                     type="checkbox"
-                    className="h-3.5 w-3.5 rounded border-border text-foreground focus:ring-slate-400"
+                    className="h-3.5 w-3.5 rounded border-border text-foreground focus:ring-focus-ring"
                     checked={!hidden}
                     disabled={isLastVisible}
                     onChange={() => toggleColumn(col.key)}
@@ -740,7 +740,7 @@ export function DataTable<T>({
                       aria-label="Select all visible rows"
                       checked={allSelected}
                       onChange={toggleSelectAll}
-                      className="h-3.5 w-3.5 rounded border-border text-foreground focus:ring-slate-400"
+                      className="h-3.5 w-3.5 rounded border-border text-foreground focus:ring-focus-ring"
                     />
                   </th>
                 )}
@@ -774,7 +774,7 @@ export function DataTable<T>({
                       aria-orientation="vertical"
                       title="Drag to resize column"
                       onMouseDown={(e) => startResize(e, col.key)}
-                      className="absolute -right-1 top-0 h-full w-2 cursor-col-resize rounded hover:bg-slate-300/70 active:bg-slate-400"
+                      className="absolute -right-1 top-0 h-full w-2 cursor-col-resize rounded hover:bg-status-neutral/70 active:bg-faint"
                     />
                   </th>
                 );
@@ -796,7 +796,7 @@ export function DataTable<T>({
                           onChange={(e) => setColFilters((f) => ({ ...f, [col.key]: e.target.value }))}
                           placeholder={`Filter ${col.header.toLowerCase()}`}
                           aria-label={`Filter by ${col.header}`}
-                          className="w-full rounded border border-border px-1.5 py-0.5 text-xs text-secondary focus:border-slate-400 focus:outline-none"
+                          className="w-full rounded border border-border px-1.5 py-0.5 text-xs text-secondary focus:border-focus-ring focus:outline-none"
                         />
                       ) : (
                         <span />
@@ -853,7 +853,7 @@ export function DataTable<T>({
                           aria-label={`Select row ${key}`}
                           checked={selectedKeys.has(key)}
                           onChange={() => toggleRow(key)}
-                          className="h-3.5 w-3.5 rounded border-border text-foreground focus:ring-slate-400"
+                          className="h-3.5 w-3.5 rounded border-border text-foreground focus:ring-focus-ring"
                         />
                       </td>
                     )}

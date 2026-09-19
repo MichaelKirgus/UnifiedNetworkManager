@@ -325,7 +325,8 @@ function layoutPhysical(nodes: TopoNode[], layers: NetworkLayer[]): FlowNode[] {
     color: l.color,
   }));
   for (const id of byLayer.keys()) {
-    if (!layerById.has(id)) orderedLayers.push({ id, name: 'Unassigned', color: '#94a3b8' });
+    // Topology canvas palette — centralized in index.css (--topo-*).
+    if (!layerById.has(id)) orderedLayers.push({ id, name: 'Unassigned', color: 'rgb(var(--topo-unassigned))' });
   }
 
   const out: FlowNode[] = [];
@@ -335,7 +336,7 @@ function layoutPhysical(nodes: TopoNode[], layers: NetworkLayer[]): FlowNode[] {
   // dashed tunnel edges have something to attach to.
   const remotes = nodes.filter((n): n is TopoNode & { kind: 'remote' } => n.kind === 'remote');
   if (remotes.length > 0) {
-    out.push({ id: '__band-remote', type: 'band', position: { x: 0, y }, data: { label: 'Remote peers', color: '#64748b' } });
+    out.push({ id: '__band-remote', type: 'band', position: { x: 0, y }, data: { label: 'Remote peers', color: 'rgb(var(--topo-tunnel))' } });
     for (let i = 0; i < remotes.length; i++) {
       const col = i % COLS;
       const row = Math.floor(i / COLS);
@@ -599,10 +600,10 @@ export default function Topology() {
                   </span>
                 ))}
                 <span className="flex items-center gap-1">
-                  <span className="inline-block h-0.5 w-4 bg-slate-400" /> cable (inferred)
+                  <span className="inline-block h-0.5 w-4 bg-topo-cable" /> cable (inferred)
                 </span>
                 <span className="flex items-center gap-1">
-                  <span className="inline-block h-0.5 w-4 border-t-2 border-dashed border-slate-500" /> tunnel
+                  <span className="inline-block h-0.5 w-4 border-t-2 border-dashed border-topo-tunnel" /> tunnel
                 </span>
               </>
             ) : (
@@ -638,16 +639,17 @@ export default function Topology() {
               <MiniMap
                 pannable
                 zoomable
+                // Topology canvas palette — centralized in index.css (--topo-*).
                 nodeColor={(n) =>
                   n.type === 'segment'
-                    ? '#6366f1'
+                    ? 'rgb(var(--topo-segment))'
                     : n.type === 'host'
-                      ? '#cbd5e1'
+                      ? 'rgb(var(--topo-host))'
                       : n.type === 'remote'
-                        ? '#a5b4fc'
+                        ? 'rgb(var(--topo-remote))'
                         : n.type === 'band'
-                          ? ((n.data as { color?: string }).color ?? '#94a3b8')
-                          : '#334155'
+                          ? ((n.data as { color?: string }).color ?? 'rgb(var(--topo-unassigned))')
+                          : 'rgb(var(--topo-node))'
                 }
               />
             </ReactFlow>
