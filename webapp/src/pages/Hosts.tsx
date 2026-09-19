@@ -4,6 +4,7 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { IpGroupChips } from '../components/IpGroups';
 import { api, HostRow } from '../api/client';
+import { useTimeFormat } from '../utils/time';
 
 /** Color-coded pill for one discovery source; a merged host shows all of its sources. */
 function SourceBadges({ sources }: { sources: HostRow['sources'] }) {
@@ -31,6 +32,7 @@ function SourceBadges({ sources }: { sources: HostRow['sources'] }) {
 }
 
 export default function Hosts() {
+  const { formatDateTime } = useTimeFormat();
   // Rows are upserted by the API's telemetry worker (30s poll) — refresh at
   // the same cadence so the view tracks live neighbor/lease tables.
   const hostsQuery = useQuery({
@@ -97,14 +99,14 @@ export default function Hosts() {
       key: 'expiry',
       width: 180,
       sortAccessor: (row) => (row.expiry ? new Date(row.expiry).getTime() : null),
-      render: (row) => (row.expiry ? new Date(row.expiry).toLocaleString() : <span className="text-faint">—</span>),
+      render: (row) => (row.expiry ? formatDateTime(row.expiry) : <span className="text-faint">—</span>),
     },
     {
       header: 'Last seen',
       key: 'lastSeenAt',
       width: 180,
       sortAccessor: (row) => new Date(row.lastSeenAt).getTime(),
-      render: (row) => new Date(row.lastSeenAt).toLocaleString(),
+      render: (row) => formatDateTime(row.lastSeenAt),
     },
   ];
 

@@ -14,6 +14,7 @@ import { PluginAssignmentBuilder } from '../components/PluginAssignmentBuilder';
 import { api, DeviceAddress, LogEntry, DevicePluginAssignmentInput, MetricDescriptor, Plugin } from '../api/client';
 import { can } from '../auth/permissions';
 import { isValidAddress, addressError } from '../utils/address';
+import { useTimeFormat } from '../utils/time';
 
 /** Resolves the current value for a metric descriptor from a metrics map. */
 function resolveValue(descriptor: MetricDescriptor, metrics: Record<string, unknown>): unknown {
@@ -21,6 +22,7 @@ function resolveValue(descriptor: MetricDescriptor, metrics: Record<string, unkn
 }
 
 export default function DeviceDetail() {
+  const { formatDateTime } = useTimeFormat();
   const { deviceId } = useParams<{ deviceId: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -692,7 +694,7 @@ export default function DeviceDetail() {
             )}
 
             {snapshot.collectedAt && (
-              <p className="text-xs text-faint">Last collected: {new Date(snapshot.collectedAt).toLocaleString()}</p>
+              <p className="text-xs text-faint">Last collected: {formatDateTime(snapshot.collectedAt)}</p>
             )}
           </section>
         );
@@ -740,7 +742,7 @@ export default function DeviceDetail() {
                     {logsQuery.data.map((entry) => (
                       <tr key={entry.id} className="border-b border-border last:border-0">
                         <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-muted-foreground">
-                          {new Date(entry.timestamp).toLocaleString()}
+                          {formatDateTime(entry.timestamp)}
                         </td>
                         <td className="px-3 py-2">
                           <span

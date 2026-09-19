@@ -2,6 +2,7 @@ import { FormEvent, useMemo, useState } from 'react';
 import clsx from 'clsx';
 import { CalendarClock, X } from 'lucide-react';
 import { api, ApiError, Plan } from '../api/client';
+import { useTimeFormat } from '../utils/time';
 
 /**
  * Reusable "schedule this plan" dialog — used by the Plans list (single + bulk)
@@ -52,6 +53,10 @@ export interface ScheduleDialogProps {
 }
 
 export function ScheduleDialog({ plan, plans = [], onClose, onSaved }: ScheduleDialogProps) {
+  const { formatDateTime, zone } = useTimeFormat();
+  const browserZoneName = useMemo(() => {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; }
+  }, []);
   const targets = useMemo(() => (plan ? [plan] : plans), [plan, plans]);
   // Exactly one target renders in single-plan mode (title + intent line).
   const isBulk = targets.length > 1;
@@ -199,7 +204,11 @@ export function ScheduleDialog({ plan, plans = [], onClose, onSaved }: ScheduleD
 
           {validDue && (
             <p className="mt-1.5 text-xs text-faint">
-              Due: {new Date(dueMs as number).toLocaleString()} {describeDue() ? `(${describeDue()})` : ''} — local time
+              Due: {formatDateTime(dueMs as number)} {describeDue() ? `(${describeDue()})` : ''}
+              {/* The native datetime picker always works in the browser's zone; flag it when
+                  the user's display timezone differs so the shown wall time isn't mistaken for
+                  what the picker shows. */}
+              {zone === browserZoneName ? ' — local time' : ` — ${zone} (picker uses your browser's clock)`}
             </p>
           )}
         </div>

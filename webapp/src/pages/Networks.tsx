@@ -4,6 +4,7 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { IpGroupChips } from '../components/IpGroups';
 import { api, NetworkRow } from '../api/client';
+import { useTimeFormat } from '../utils/time';
 
 /** Small colored pill for the address family. */
 function VersionBadge({ version }: { version?: string | null }) {
@@ -20,6 +21,7 @@ function VersionBadge({ version }: { version?: string | null }) {
 }
 
 export default function Networks() {
+  const { formatDateTime } = useTimeFormat();
   // The API polls plugins every 30s and upserts these rows — refresh at the
   // same cadence so the view tracks live inventory.
   const networksQuery = useQuery({
@@ -106,7 +108,7 @@ export default function Networks() {
       key: 'collectedAt',
       width: 180,
       sortAccessor: (row) => new Date(row.collectedAt).getTime(),
-      render: (row) => new Date(row.collectedAt).toLocaleString(),
+      render: (row) => formatDateTime(row.collectedAt),
     },
   ];
 

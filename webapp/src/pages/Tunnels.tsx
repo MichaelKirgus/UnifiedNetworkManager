@@ -5,6 +5,7 @@ import { DeviceChip } from '../components/DeviceChip';
 import { StatusBadge } from '../components/StatusBadge';
 import { formatBytes, formatDuration } from '../components/formatMetric';
 import { api, TunnelRow } from '../api/client';
+import { useTimeFormat } from '../utils/time';
 
 /** Small colored pill for the tunnel technology. */
 const TYPE_STYLES: Record<TunnelRow['type'], string> = {
@@ -29,6 +30,7 @@ function orDash(v?: string | null): string {
 }
 
 export default function Tunnels() {
+  const { formatDateTime } = useTimeFormat();
   // The API polls plugins every 30s and upserts these rows — refresh at the
   // same cadence so the view tracks live inventory (rates update per poll).
   const tunnelsQuery = useQuery({
@@ -148,7 +150,7 @@ export default function Tunnels() {
       key: 'collectedAt',
       width: 180,
       sortAccessor: (row) => new Date(row.collectedAt).getTime(),
-      render: (row) => new Date(row.collectedAt).toLocaleString(),
+      render: (row) => formatDateTime(row.collectedAt),
     },
   ];
 

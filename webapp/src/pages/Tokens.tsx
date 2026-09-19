@@ -4,6 +4,7 @@ import { api, ApiToken, PermissionCatalog, User } from '../api/client';
 import { can, getUsername } from '../auth/permissions';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { Layout } from '../components/Layout';
+import { useTimeFormat } from '../utils/time';
 
 /**
  * API tokens — long-lived bearer credentials for agents/scripts (MCP server).
@@ -12,6 +13,7 @@ import { Layout } from '../components/Layout';
  * any of them. The raw token value is shown exactly once at creation.
  */
 export default function Tokens() {
+  const { formatDateTime } = useTimeFormat();
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [catalog, setCatalog] = useState<PermissionCatalog | null>(null);
   const [loading, setLoading] = useState(true);
@@ -175,13 +177,13 @@ export default function Tokens() {
       header: 'Expires',
       key: 'expiresAt',
       width: 160,
-      render: (row) => (row.expiresAt ? new Date(row.expiresAt).toLocaleString() : <span className="text-faint">never</span>),
+      render: (row) => (row.expiresAt ? formatDateTime(row.expiresAt) : <span className="text-faint">never</span>),
     },
     {
       header: 'Last used',
       key: 'lastUsedAt',
       width: 160,
-      render: (row) => (row.lastUsedAt ? new Date(row.lastUsedAt).toLocaleString() : <span className="text-faint">—</span>),
+      render: (row) => (row.lastUsedAt ? formatDateTime(row.lastUsedAt) : <span className="text-faint">—</span>),
     },
     {
       header: 'Actions',

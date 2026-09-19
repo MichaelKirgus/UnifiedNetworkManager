@@ -4,6 +4,7 @@ import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { api, LogEntry } from '../api/client';
+import { useTimeFormat } from '../utils/time';
 
 /** Small colored pill for the log level. */
 const LEVEL_STYLES: Record<LogEntry['level'], string> = {
@@ -44,6 +45,7 @@ const RANGE_MS: Record<Exclude<TimeRange, 'all'>, number> = {
  * carry critical details, so the nav item is hidden without the permission.
  */
 export default function Logs() {
+  const { formatDateTime } = useTimeFormat();
   const [level, setLevel] = useState('');
   const [pluginId, setPluginId] = useState('');
   const [deviceId, setDeviceId] = useState('');
@@ -91,7 +93,7 @@ export default function Logs() {
       key: 'timestamp',
       width: 180,
       sortAccessor: (row) => new Date(row.timestamp).getTime(),
-      render: (row) => <span className="font-mono text-xs">{new Date(row.timestamp).toLocaleString()}</span>,
+      render: (row) => <span className="font-mono text-xs">{formatDateTime(row.timestamp)}</span>,
     },
     {
       header: 'Level',

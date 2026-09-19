@@ -5,20 +5,13 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { api, CertificateHistoryRow, CertificateRow } from '../api/client';
 import { can } from '../auth/permissions';
+import { useTimeFormat } from '../utils/time';
 
 /** Short fingerprint for inline display ("SHA256:abc…xyz"). */
 function shortFp(fp?: string | null): string {
   if (!fp) return '—';
   const body = fp.replace(/^SHA256:/i, '');
   return body.length > 16 ? `${body.slice(0, 8)}…${body.slice(-6)}` : body;
-}
-
-/** Formats an ISO timestamp as a short local date-time. */
-function fmtStamp(iso?: string | null): string {
-  if (!iso) return '—';
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return iso;
-  return new Date(t).toLocaleString();
 }
 
 /**
@@ -28,6 +21,7 @@ function fmtStamp(iso?: string | null): string {
  */
 function MismatchDetail({ row }: { row: CertificateRow }) {
   const queryClient = useQueryClient();
+  const { formatDateTime } = useTimeFormat();
 
   const historyQuery = useQuery({
     queryKey: ['certificateHistory', row.deviceId, row.name],
@@ -117,8 +111,8 @@ function MismatchDetail({ row }: { row: CertificateRow }) {
                       )}
                     </td>
                     <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[11px]">{h.keyAlgorithm || '—'}{h.keySizeBits ? ` ${h.keySizeBits}` : ''}</td>
-                    <td className="whitespace-nowrap px-2 py-1.5 text-secondary">{fmtStamp(h.firstSeenAt)}</td>
-                    <td className="whitespace-nowrap px-2 py-1.5 text-secondary">{fmtStamp(h.lastSeenAt)}</td>
+                    <td className="whitespace-nowrap px-2 py-1.5 text-secondary">{formatDateTime(h.firstSeenAt)}</td>
+                    <td className="whitespace-nowrap px-2 py-1.5 text-secondary">{formatDateTime(h.lastSeenAt)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -149,20 +143,13 @@ function orDash(v?: string | null): string {
   return v && v.trim() !== '' ? v : '—';
 }
 
-/** Formats an ISO date as a short local date ("2026-12-31"). */
-function fmtDate(iso?: string | null): string {
-  if (!iso) return '—';
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return iso;
-  return new Date(t).toLocaleDateString();
-}
-
 /**
  * Expiry cell for the LEAF cert. Red when expired, amber within `warnDays`,
  * green otherwise. Also flags an EXPIRED ISSUER (chainDaysToExpiry < 0) even
  * when the leaf itself is still valid — that's a real break in the chain.
  */
 function ExpiryCell({ row, warnDays = 30 }: { row: CertificateRow; warnDays?: number }) {
+  const { formatDate } = useTimeFormat();
   if (row.type === 'ssh') return <span className="text-faint">n/a</span>;
 
   const leaf = row.daysToExpiry;
@@ -174,7 +161,7 @@ function ExpiryCell({ row, warnDays = 30 }: { row: CertificateRow; warnDays?: nu
       <div className="flex flex-col gap-0.5">
         <span className="text-xs font-medium text-danger-fg">issuer expired {-chain}d ago</span>
         {leaf !== null && leaf !== undefined && (
-          <span className="font-mono text-[11px] text-secondary">leaf: {fmtDate(row.notAfter)}</span>
+          <span className="font-mono text-[11px] text-secondary">leaf: {formatDate(row.notAfter)}</span>
         )}
       </div>
     );
@@ -186,7 +173,7 @@ function ExpiryCell({ row, warnDays = 30 }: { row: CertificateRow; warnDays?: nu
   return (
     <div className="flex flex-col gap-0.5">
       <span className={`font-mono text-xs font-medium ${cls}`}>{label}</span>
-      <span className="text-[11px] text-secondary">{fmtDate(row.notAfter)}</span>
+      <span className="text-[11px] text-secondary">{formatDate(row.notAfter)}</span>
     </div>
   );
 }
@@ -257,6 +244,7 @@ function SummaryStrip({ rows }: { rows: CertificateRow[] }) {
 }
 
 export default function Certificates() {
+  const { formatDateTime } = useTimeFormat();
   // The API polls plugins on the inventory window and upserts these rows — refresh
   // at a relaxed cadence (certificates change rarely).
   const certsQuery = useQuery({
@@ -364,7 +352,7 @@ export default function Certificates() {
       key: 'collectedAt',
       width: 170,
       sortAccessor: (row) => new Date(row.collectedAt).getTime(),
-      render: (row) => <span className="text-xs text-secondary">{new Date(row.collectedAt).toLocaleString()}</span>,
+      render: (row) => <span className="text-xs text-secondary">{formatDateTime(row.collectedAt)}</span>,
     },
   ];
 

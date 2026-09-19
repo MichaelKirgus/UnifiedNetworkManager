@@ -6,6 +6,7 @@ import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { api, Notification, NotificationSeverity, NotificationSource } from '../api/client';
 import { can } from '../auth/permissions';
+import { useTimeFormat } from '../utils/time';
 
 /**
  * Full notification center — every row (all statuses) with filters: status,
@@ -50,16 +51,17 @@ const STATUSES: Array<{ value: string; label: string }> = [
   { value: 'open,acknowledged,resolved,closed', label: 'All' },
 ];
 
-function timeAgo(iso: string): string {
+/** Relative age ("42s ago", "3m ago") with an absolute fallback for old entries. */
+function timeAgo(iso: string, fmtDate: (v: string) => string, fmtTime: (v: string) => string): string {
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
   if (s < 60) return `${Math.floor(s)}s ago`;
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  const d = new Date(iso);
-  return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  return `${fmtDate(iso)} ${fmtTime(iso)}`;
 }
 
 export default function Notifications() {
+  const { formatDate, formatTime } = useTimeFormat();
   const [status, setStatus] = useState('');
   const [severity, setSeverity] = useState('');
   const [source, setSource] = useState('');
@@ -177,7 +179,7 @@ export default function Notifications() {
       header: 'Seen',
       key: 'lastSeenAt',
       width: 130,
-      render: (n) => <span className="text-xs text-muted-foreground">{timeAgo(n.lastSeenAt)}</span>,
+      render: (n) => <span className="text-xs text-muted-foreground">{timeAgo(n.lastSeenAt, formatDate, formatTime)}</span>,
       sortAccessor: (n) => n.lastSeenAt,
     },
     {

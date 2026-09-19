@@ -312,7 +312,7 @@ function asStringArray(value: unknown): string[] {
   return [...seen];
 }
 
-/** The caller's own UI preferences (nav order + hidden pages). No extra permission. */
+/** The caller's own UI preferences (nav order + hidden pages + date/time display). No extra permission. */
 router.get('/auth/me/preferences', requireAuth, async (req, res) => {
   const row = await db.query.userPreferences.findFirst({ where: eq(schema.userPreferences.userId, req.user!.sub) });
   let navOrder: string[] = [];
@@ -321,8 +321,31 @@ router.get('/auth/me/preferences', requireAuth, async (req, res) => {
     try { navOrder = asStringArray(JSON.parse(row.navOrder)); } catch { /* keep [] */ }
     try { hiddenPages = asStringArray(JSON.parse(row.hiddenPages)); } catch { /* keep [] */ }
   }
-  res.status(200).json({ navOrder, hiddenPages });
+  res.status(200).json({
+    navOrder,
+    hiddenPages,
+    // NULL/absent timezone = follow the browser's local zone.
+    timezone: row?.timezone ?? null,
+    dateFormat: row?.dateFormat && DATE_FORMAT_PRESETS.has(row.dateFormat) ? row.dateFormat : 'locale',
+    showTzSuffix: Boolean(row?.showTzSuffix),
+  });
 });
+
+/** Date/time format presets accepted by PUT /auth/me/preferences. */
+const DATE_FORMAT_PRESETS = new Set(['locale', 'iso', 'us', 'eu']);
+
+/** Validate a timezone value: null/'browser' = follow the browser; anything else must be a real IANA zone (or "UTC"). */
+function normalizeTimezone(raw: unknown): { value?: string | null; error?: string } {
+  if (raw === null || raw === undefined || raw === '' || raw === 'browser') return { value: null };
+  if (typeof raw !== 'string' || raw.length > 64) return { error: '"timezone" must be a string IANA timezone identifier, "browser", or null' };
+  try {
+    // Intl throws RangeError for unknown zone names — the canonical validation.
+    new Intl.DateTimeFormat('en-US', { timeZone: raw });
+    return { value: raw };
+  } catch {
+    return { error: `Unknown timezone "${raw}"` };
+  }
+}
 
 /** Persist the caller's own UI preferences (upsert; missing row created on first save). */
 router.put('/auth/me/preferences', requireAuth, async (req, res) => {
@@ -341,11 +364,34 @@ router.put('/auth/me/preferences', requireAuth, async (req, res) => {
   } else {
     hiddenPages = asStringArray(body.hiddenPages);
   }
+
+  // Date/time display preferences — same omit-to-keep semantics.
+  let timezone: string | null;
+  if (body.timezone === undefined) {
+    timezone = existing?.timezone ?? null;
+  } else {
+    const tz = normalizeTimezone(body.timezone);
+    if (tz.error) { res.status(400).json({ error: tz.error }); return; }
+    timezone = tz.value ?? null;
+  }
+  let dateFormat: string;
+  if (body.dateFormat === undefined) {
+    dateFormat = existing?.dateFormat && DATE_FORMAT_PRESETS.has(existing.dateFormat) ? existing.dateFormat : 'locale';
+  } else {
+    dateFormat = typeof body.dateFormat === 'string' && DATE_FORMAT_PRESETS.has(body.dateFormat) ? body.dateFormat : 'locale';
+  }
+  let showTzSuffix: boolean;
+  if (body.showTzSuffix === undefined) {
+    showTzSuffix = Boolean(existing?.showTzSuffix);
+  } else {
+    showTzSuffix = Boolean(body.showTzSuffix);
+  }
+
   const now = new Date().toISOString();
   await db.insert(schema.userPreferences)
-    .values({ userId: req.user!.sub, navOrder: JSON.stringify(navOrder), hiddenPages: JSON.stringify(hiddenPages), updatedAt: now })
-    .onConflictDoUpdate({ target: [schema.userPreferences.userId], set: { navOrder: JSON.stringify(navOrder), hiddenPages: JSON.stringify(hiddenPages), updatedAt: now } });
-  res.status(200).json({ navOrder, hiddenPages });
+    .values({ userId: req.user!.sub, navOrder: JSON.stringify(navOrder), hiddenPages: JSON.stringify(hiddenPages), timezone, dateFormat, showTzSuffix, updatedAt: now })
+    .onConflictDoUpdate({ target: [schema.userPreferences.userId], set: { navOrder: JSON.stringify(navOrder), hiddenPages: JSON.stringify(hiddenPages), timezone, dateFormat, showTzSuffix, updatedAt: now } });
+  res.status(200).json({ navOrder, hiddenPages, timezone, dateFormat, showTzSuffix });
 });
 
 /**

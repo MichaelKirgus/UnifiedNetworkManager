@@ -957,6 +957,11 @@ export async function initDb(): Promise<void> {
       "hiddenPages" TEXT NOT NULL DEFAULT '[]',
       "updatedAt" TEXT NOT NULL
     )`);
+  // Date/time display preferences (added after the initial release).
+  // timezone NULL = follow the browser; dateFormat defaults to locale-aware.
+  await pool.query(`ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS "timezone" TEXT`);
+  await pool.query(`ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS "dateFormat" TEXT NOT NULL DEFAULT 'locale'`);
+  await pool.query(`ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS "showTzSuffix" BOOLEAN NOT NULL DEFAULT FALSE`);
 
   // Interactive-session usage flags on secrets (SSH console / SFTP). Added after
   // the initial release — existing rows default to FALSE (opt-in per secret), so

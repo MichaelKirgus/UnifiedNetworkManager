@@ -9,6 +9,7 @@ import { formatBytes, formatDuration } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
 import { READONLY_MESSAGE, runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, VmDevice, VmNic, VmRow } from '../api/client';
+import { useTimeFormat } from '../utils/time';
 
 // ---------------------------------------------------------------------------
 // State badge (case-tolerant — live probe states are lowercase libvirt strings)
@@ -44,12 +45,13 @@ function normalizeVmState(s: string): string {
 // ---------------------------------------------------------------------------
 
 function UptimeCell({ row }: { row: VmRow }) {
+  const { formatDateTime } = useTimeFormat();
   if (row.state !== 'RUNNING' || !row.startedAt) return <span className="text-faint">—</span>;
   const since = new Date(row.startedAt).getTime();
   if (Number.isNaN(since)) return <span className="text-faint">—</span>;
   const secs = Math.max(0, (Date.now() - since) / 1000);
   return (
-    <span className="font-mono text-xs text-secondary" title={`Running since ${new Date(row.startedAt).toLocaleString()}`}>
+    <span className="font-mono text-xs text-secondary" title={`Running since ${formatDateTime(row.startedAt)}`}>
       {formatDuration(secs)}
     </span>
   );
@@ -425,6 +427,7 @@ function NicAttachDialog({ target, onClose }: { target: NicAttachTarget; onClose
 // ---------------------------------------------------------------------------
 
 export default function Vms() {
+  const { formatDateTime } = useTimeFormat();
   // Global Execute/Plan mode — decides whether page actions run immediately or
   // are saved as (unexecuted) plans for later execution/scheduling.
   const { mode } = useExecutionMode();
@@ -749,7 +752,7 @@ export default function Vms() {
       key: 'collectedAt',
       width: 170,
       sortAccessor: (node) => new Date(node.row?.collectedAt ?? '').getTime(),
-      render: (node) => (node.row ? <span className="text-xs text-secondary">{new Date(node.row.collectedAt).toLocaleString()}</span> : null),
+      render: (node) => (node.row ? <span className="text-xs text-secondary">{formatDateTime(node.row.collectedAt)}</span> : null),
     },
     {
       // One-click per-row actions. Availability is GENERIC — a button only

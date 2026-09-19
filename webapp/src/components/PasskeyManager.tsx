@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { KeyRound, Loader2, Plus, Trash2 } from 'lucide-react';
 import { api } from '../api/client';
 import { toCreationOptions } from '../utils/webauthn';
+import { useTimeFormat } from '../utils/time';
 
 /**
  * Manages the passkeys (WebAuthn credentials) of one user — multiple allowed,
@@ -14,6 +15,7 @@ import { toCreationOptions } from '../utils/webauthn';
  */
 export function PasskeyManager({ userId, username }: { userId: string; username: string }) {
   const queryClient = useQueryClient();
+  const { formatDate } = useTimeFormat();
 
   const passkeysQuery = useQuery({
     queryKey: ['passkeys', userId],
@@ -91,7 +93,7 @@ export function PasskeyManager({ userId, username }: { userId: string; username:
                 </p>
                 <p className="text-xs text-faint">
                   {(pk.transports ?? []).join(', ') || 'unknown transport'} · added{' '}
-                  {new Date(pk.createdAt).toLocaleDateString()}
+                  {formatDate(pk.createdAt)}
                 </p>
               </div>
               <button

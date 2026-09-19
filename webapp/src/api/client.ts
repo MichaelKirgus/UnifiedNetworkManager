@@ -762,6 +762,13 @@ export interface NavPreferences {
   navOrder: string[];
   /** Nav path strings the user has hidden from the sidebar. */
   hiddenPages: string[];
+  // --- Date/time display preferences (see utils/time.tsx) ---------------------
+  /** IANA timezone id for rendering timestamps; null/absent = follow the browser's local zone. */
+  timezone?: string | null;
+  /** Format preset: 'locale' (default), 'iso', 'us', 'eu'. */
+  dateFormat?: string;
+  /** Append a short timezone label in parentheses after rendered timestamps. */
+  showTzSuffix?: boolean;
 }
 
 /** Aggregated nav-badge counts (keys present only when the caller may read that page). */

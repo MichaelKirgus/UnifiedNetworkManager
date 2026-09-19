@@ -26,11 +26,15 @@ import { ReauthDialog } from '../components/ReauthDialog';
 import { ScheduleDialog } from '../components/ScheduleDialog';
 import { api, ApiError, CatalogEntry, Device, PlanDetail as PlanDetailType, PlanStep } from '../api/client';
 import { can } from '../auth/permissions';
+import { useTimeFormat } from '../utils/time';
 
 /** Statuses from which a plan can be (re-)scheduled — saved, already scheduled, or finished. */
 const SCHEDULABLE_STATUSES = ['draft', 'ready', 'scheduled', 'succeeded', 'unverified', 'failed', 'cancelled', 'skipped'];
 
 export default function PlanDetail() {
+  const { formatDateTime, zone } = useTimeFormat();
+  /** '—' when absent — the central formatter already renders null/invalid as '—'. */
+  const fmtTime = (iso?: string | null) => formatDateTime(iso);
   const { id = '' } = useParams();
   // Viewing needs plans:read (route guard); every mutation below needs configs:apply.
   const canApply = can('configs:apply');
@@ -195,7 +199,7 @@ export default function PlanDetail() {
         <div className="mb-4 flex items-start gap-2 rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-sm">
           <CalendarClock className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
           <span>
-            Scheduled to run at <strong>{fmtTime(plan.scheduledAt)}</strong> (local time).
+            Scheduled to run at <strong>{fmtTime(plan.scheduledAt)}</strong> ({zone}).
             {plan.schedulePolicy === 'skip'
               ? ' If UNM or the plugin is down when it is due, the plan will be marked “skipped”.'
               : ' If UNM or the plugin is down when it is due, it will retry as soon as possible (with backoff).'}
@@ -331,10 +335,6 @@ function Meta({ label, value, muted }: { label: string; value: React.ReactNode; 
       </p>
     </div>
   );
-}
-
-function fmtTime(iso?: string | null): string {
-  return iso ? new Date(iso).toLocaleString() : '—';
 }
 
 // --- Provisioned secret card --------------------------------------------------

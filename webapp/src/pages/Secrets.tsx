@@ -4,11 +4,13 @@ import { api, Secret, SecretProvider, SecretType } from '../api/client';
 import { DataTable } from '../components/DataTable';
 import { Layout } from '../components/Layout';
 import { can, getUsername } from '../auth/permissions';
+import { useTimeFormat } from '../utils/time';
 
 /** Secret types that can authenticate an interactive SSH/SFTP session. */
 const SESSION_CAPABLE_TYPES = new Set(['usernamePassword', 'sshKeyPair']);
 
 export default function Secrets() {
+  const { formatDateTime } = useTimeFormat();
   // The page needs secrets:read (route guard); create/delete need their own perms.
   // `secrets:self-write` opens the personal-secret area (own secrets only).
   const canWrite = can('secrets:write');
@@ -623,8 +625,8 @@ export default function Secrets() {
             // Diagnostic detail — available via the Columns picker but not worth
             // default screen space.
             { header: 'ID', key: 'id', width: 240, hiddenByDefault: true, render: (s: Secret) => s.id },
-            { header: 'Created At', key: 'createdAt', sortAccessor: (s: Secret) => new Date(s.createdAt).getTime(), render: (s: Secret) => new Date(s.createdAt).toLocaleString() },
-            { header: 'Expires At', key: 'expiresAt', width: 180, sortAccessor: (s: Secret) => (s.expiresAt ? new Date(s.expiresAt).getTime() : null), render: (s: Secret) => (s.expiresAt ? new Date(s.expiresAt).toLocaleString() : 'Never') },
+            { header: 'Created At', key: 'createdAt', sortAccessor: (s: Secret) => new Date(s.createdAt).getTime(), render: (s: Secret) => formatDateTime(s.createdAt) },
+            { header: 'Expires At', key: 'expiresAt', width: 180, sortAccessor: (s: Secret) => (s.expiresAt ? new Date(s.expiresAt).getTime() : null), render: (s: Secret) => (s.expiresAt ? formatDateTime(s.expiresAt) : 'Never') },
             { 
               header: 'Actions', 
               key: 'actions',

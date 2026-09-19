@@ -11,6 +11,7 @@ import { ReauthDialog } from '../components/ReauthDialog';
 import { ScheduleDialog } from '../components/ScheduleDialog';
 import { api, ApiError, CatalogEntry, Device, Plan } from '../api/client';
 import { can } from '../auth/permissions';
+import { useTimeFormat } from '../utils/time';
 
 /** True when the user lacks a 2FA-completed session (server returns this on execute/create). */
 function isTwoFactorError(err: unknown): boolean {
@@ -27,15 +28,13 @@ export default function Plans() {
   return <PlansList onCreate={can('configs:apply') ? () => setMode('create') : undefined} />;
 }
 
-/** Formats an ISO timestamp for the timing columns; '—' when absent. */
-function fmtTime(iso?: string | null): string {
-  return iso ? new Date(iso).toLocaleString() : '—';
-}
-
 /** Id prefix marking a plan's synthetic payload child row (see PlansList expandable). */
 const PAYLOAD_CHILD_PREFIX = '__payload__:';
 
 function PlansList({ onCreate }: { onCreate?: () => void }) {
+  const { formatDateTime } = useTimeFormat();
+  // '—' when absent — the central formatter already renders null/invalid as '—'.
+  const fmtTime = (iso?: string | null) => formatDateTime(iso);
   const plansQuery = useQuery({ queryKey: ['plans'], queryFn: api.plans, refetchInterval: 10_000 });
   // Plugin names for the table — only fetched when allowed (API gates on plugins:read).
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, enabled: can('plugins:read') });

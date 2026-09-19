@@ -6,6 +6,7 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
 import { api, ConfigJob, Device } from '../api/client';
 import { can } from '../auth/permissions';
+import { useTimeFormat } from '../utils/time';
 
 const ACTIONS = [
   { value: 'applyConfig', label: 'Apply configuration' },
@@ -14,6 +15,7 @@ const ACTIONS = [
 ] as const;
 
 export default function ConfigJobs() {
+  const { formatDateTime } = useTimeFormat();
   // Submitting a job needs configs:apply (+2FA server-side); the page itself
   // only requires config-jobs:read.
   const canApply = can('configs:apply');
@@ -86,14 +88,14 @@ export default function ConfigJobs() {
       header: 'Created',
       key: 'createdAt',
       sortAccessor: (row) => new Date(row.createdAt).getTime(),
-      render: (row) => new Date(row.createdAt).toLocaleString(),
+      render: (row) => formatDateTime(row.createdAt),
     },
     {
       header: 'Finished',
       key: 'finishedAt',
       width: 180,
       sortAccessor: (row) => (row.finishedAt ? new Date(row.finishedAt).getTime() : null),
-      render: (row) => (row.finishedAt ? new Date(row.finishedAt).toLocaleString() : '—'),
+      render: (row) => (row.finishedAt ? formatDateTime(row.finishedAt) : '—'),
     },
   ];
 

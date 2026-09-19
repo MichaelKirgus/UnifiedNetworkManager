@@ -5,6 +5,7 @@ import { ChevronDown, ChevronUp, Clock } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, type DataTableColumn } from '../components/DataTable';
 import { api, DeviceTimeRow } from '../api/client';
+import { useTimeFormat } from '../utils/time';
 
 /** The `system.deviceTime` blob a plugin emits (telemetry or live probe). */
 interface ProbeDeviceTime {
@@ -140,6 +141,10 @@ function niceHalfRange(maxAbsMs: number): number {
 }
 
 export default function Time() {
+  // The UNM reference clock in the header follows the user's display zone.
+  // Device clocks below intentionally stay in THEIR OWN zones — that is what
+  // drift comparison is about (a device showing a different wall time IS the point).
+  const { formatTime, formatDate } = useTimeFormat();
   // Telemetry baseline: the API reads each device's latest `system.deviceTime`
   // metric and pre-computes drift. Poll at the telemetry cadence (30 s).
   const timeQuery = useQuery({
@@ -502,8 +507,8 @@ export default function Time() {
             <Clock size={16} className="text-muted-foreground" />
             UNM clock
           </span>
-          <span className="font-mono text-lg tabular-nums text-foreground">{new Date(nowMs).toLocaleTimeString()}</span>
-          <span className="font-mono text-[11px] text-faint">{new Date(nowMs).toLocaleDateString()}</span>
+          <span className="font-mono text-lg tabular-nums text-foreground">{formatTime(nowMs)}</span>
+          <span className="font-mono text-[11px] text-faint">{formatDate(nowMs)}</span>
           <span className="ml-auto flex items-center gap-3 text-xs text-secondary">
             <span>{availableCount} of {rows.length} devices reporting</span>
             <span className="text-success-fg">{ahead} ahead</span>

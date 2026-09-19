@@ -5,6 +5,7 @@ import { DeviceChip } from '../components/DeviceChip';
 import { StatusBadge } from '../components/StatusBadge';
 import { IpGroupChips } from '../components/IpGroups';
 import { api, RouteRow } from '../api/client';
+import { useTimeFormat } from '../utils/time';
 
 /** Small colored pill for the route protocol. */
 const PROTOCOL_STYLES: Record<RouteRow['protocol'], string> = {
@@ -30,6 +31,7 @@ function orDash(v?: string | null): string {
 }
 
 export default function Routes() {
+  const { formatDateTime } = useTimeFormat();
   // The API polls plugins every 30s and upserts these rows — refresh at the
   // same cadence so the view tracks live inventory.
   const routesQuery = useQuery({
@@ -121,7 +123,7 @@ export default function Routes() {
       key: 'collectedAt',
       width: 180,
       sortAccessor: (row) => new Date(row.collectedAt).getTime(),
-      render: (row) => new Date(row.collectedAt).toLocaleString(),
+      render: (row) => formatDateTime(row.collectedAt),
     },
   ];
 

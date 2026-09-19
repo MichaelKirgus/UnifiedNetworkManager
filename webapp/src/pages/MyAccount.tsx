@@ -4,6 +4,7 @@ import { ShieldCheck, ShieldOff } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { TotpEnrollmentDialog } from '../components/TotpEnrollmentDialog';
 import { PasskeyManager } from '../components/PasskeyManager';
+import { TimePreferencesCard } from '../components/TimePreferencesCard';
 import { api, TotpEnrollment } from '../api/client';
 import { can } from '../auth/permissions';
 
@@ -102,6 +103,9 @@ export default function MyAccount() {
               </div>
             </dl>
           </div>
+
+          {/* Date & time display preferences — visible to every user */}
+          <TimePreferencesCard />
 
           {/* Credential self-service */}
           {canSelfCreds ? (

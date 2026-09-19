@@ -1553,6 +1553,14 @@ export const userPreferences = pgTable(
     navOrder: text('navOrder').notNull().default('[]'),
     // JSON array of nav path strings the user has hidden from the sidebar.
     hiddenPages: text('hiddenPages').notNull().default('[]'),
+    // Timezone for date/time display. 'browser' (or NULL) = use the browser's
+    // local timezone; otherwise an IANA identifier like "Europe/Berlin" or "UTC".
+    timezone: text('timezone'),
+    // Date/time format preset: 'locale' (default, locale-aware), 'iso', 'us', 'eu'.
+    dateFormat: text('dateFormat').notNull().default('locale'),
+    // When true, append a short timezone label in parentheses after each
+    // rendered timestamp, e.g. "19.09.2026 20:55 (CEST)".
+    showTzSuffix: boolean('showTzSuffix').notNull().default(false),
     updatedAt: text('updatedAt').notNull(),
   }
 );

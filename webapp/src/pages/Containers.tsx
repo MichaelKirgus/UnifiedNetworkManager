@@ -14,6 +14,7 @@ import { formatBytes, formatDuration } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
 import { READONLY_MESSAGE, runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, CatalogEntry, ContainerNetwork, ContainerRow, ContainerServiceDetail, DockerImageRow } from '../api/client';
+import { useTimeFormat } from '../utils/time';
 
 /** One container's live stat snapshot from a probe (key 'containerStats'). */
 interface LiveContainerStat {
@@ -342,6 +343,7 @@ function LogsDialog({ app, onClose }: { app: ContainerRow; onClose: () => void }
  * observed it via SSH (`docker inspect`), otherwise UNM-tracked from state
  * transitions (a lower bound that resets after restarts). */
 function UptimeCell({ row }: { row: ContainerRow }) {
+  const { formatDateTime } = useTimeFormat();
   if (row.state !== 'RUNNING' || !row.startedAt) return <span className="text-faint">—</span>;
   const since = new Date(row.startedAt).getTime();
   if (Number.isNaN(since)) return <span className="text-faint">—</span>;
@@ -349,7 +351,7 @@ function UptimeCell({ row }: { row: ContainerRow }) {
   return (
     <span
       className="font-mono text-xs text-secondary"
-      title={`Running since ${new Date(row.startedAt).toLocaleString()}`}
+      title={`Running since ${formatDateTime(row.startedAt)}`}
     >
       {formatDuration(secs)}
     </span>
@@ -769,7 +771,7 @@ function ContainerNodeActions({ node, ctx }: { node: TreeNode; ctx: ChildActionC
  * indented (the hierarchy cue); every other cell aligns normally under its
  * header, exactly like a regular data row. Container rows fill most columns;
  * volume leaves only use the name column (indented one step deeper). */
-function nodeCell(key: string, node: TreeNode, depth: number, actions?: ChildActionContext): ReactNode {
+function nodeCell(key: string, node: TreeNode, depth: number, actions?: ChildActionContext, fmtDateTime?: (v: string) => string): ReactNode {
   switch (key) {
     case 'name': {
       if (node.kind === 'container') {
@@ -849,7 +851,7 @@ function nodeCell(key: string, node: TreeNode, depth: number, actions?: ChildAct
       const since = new Date(node.startedAt).getTime();
       if (Number.isNaN(since)) return null;
       const secs = Math.max(0, (Date.now() - since) / 1000);
-      return <span className="font-mono text-xs text-foreground" title={`Running since ${new Date(node.startedAt).toLocaleString()}`}>{formatDuration(secs)}</span>;
+      return <span className="font-mono text-xs text-foreground" title={`Running since ${fmtDateTime ? fmtDateTime(node.startedAt) : node.startedAt}`}>{formatDuration(secs)}</span>;
     }
     case 'cpu':
       if (node.kind !== 'container') return null;
@@ -878,6 +880,7 @@ function nodeCell(key: string, node: TreeNode, depth: number, actions?: ChildAct
  * per visible column (ctx.columns), so it stays aligned with the header. A
  * container that has volume mounts gets its own chevron for recursive expand. */
 function ChildRow({ node, ctx, actions }: { node: TreeNode; ctx: ExpandChildContext; actions?: ChildActionContext }) {
+  const { formatDateTime } = useTimeFormat();
   // Theme-aware fills — in dark mode a near-white bg-sky-50/40 over the dark
   // card blends into a mid-gray band that kills text contrast, so children use
   // muted-panel shades instead (container rows lighter than volume leaves).
@@ -904,7 +907,7 @@ function ChildRow({ node, ctx, actions }: { node: TreeNode; ctx: ExpandChildCont
       {ctx.selectable && <td className="px-3 py-2" />}
       {ctx.columns.map((col) => (
         <td key={col.key} className="overflow-hidden px-4 py-2 text-secondary">
-          {nodeCell(col.key, node, ctx.depth, actions)}
+          {nodeCell(col.key, node, ctx.depth, actions, formatDateTime)}
         </td>
       ))}
     </tr>
@@ -912,6 +915,7 @@ function ChildRow({ node, ctx, actions }: { node: TreeNode; ctx: ExpandChildCont
 }
 
 export default function Containers() {
+  const { formatDateTime } = useTimeFormat();
   // Global Execute/Plan mode — decides whether page actions run immediately or
   // are saved as (unexecuted) plans for later execution/scheduling.
   const { mode } = useExecutionMode();
@@ -1673,7 +1677,7 @@ export default function Containers() {
       key: 'collectedAt',
       width: 170,
       sortAccessor: (node) => new Date(node.row?.collectedAt ?? '').getTime(),
-      render: (node) => (node.row ? new Date(node.row.collectedAt).toLocaleString() : null),
+      render: (node) => (node.row ? formatDateTime(node.row.collectedAt) : null),
     },
     {
       // One-click per-row actions. Availability is GENERIC — a button only
@@ -1805,7 +1809,7 @@ export default function Containers() {
       key: 'createdAt',
       width: 170,
       sortAccessor: (row) => new Date(row.createdAt ?? '').getTime(),
-      render: (row) => (row.createdAt ? <span className="text-xs text-secondary">{new Date(row.createdAt).toLocaleString()}</span> : <span className="text-faint">—</span>),
+      render: (row) => (row.createdAt ? <span className="text-xs text-secondary">{formatDateTime(row.createdAt)}</span> : <span className="text-faint">—</span>),
     },
     {
       header: 'Status',

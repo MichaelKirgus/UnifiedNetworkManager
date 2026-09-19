@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { api, PostgresTableStat, SystemEvent, WorkerRuntime } from '../api/client';
+import { useTimeFormat } from '../utils/time';
 import { can } from '../auth/permissions';
 import { Activity, Cpu, Database, Gauge, Save, ServerCog, TimerReset } from 'lucide-react';
 
@@ -62,6 +63,7 @@ function Stat({ label, value, sub }: { label: string; value: ReactNode; sub?: st
  * + concurrency — live effect on the next beat, no restart).
  */
 export default function Workers() {
+  const { formatTime } = useTimeFormat();
   const queryClient = useQueryClient();
 
   // Status auto-refreshes every 10 s so leadership changes + beat stats stay current.
@@ -130,7 +132,7 @@ export default function Workers() {
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> leader
             </span>
             {row.becameLeaderAt && (
-              <div className="mt-0.5 text-[11px] text-faint">since {new Date(row.becameLeaderAt).toLocaleTimeString()}</div>
+              <div className="mt-0.5 text-[11px] text-faint">since {formatTime(row.becameLeaderAt)}</div>
             )}
           </div>
         ) : (
@@ -407,7 +409,7 @@ export default function Workers() {
                   <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium uppercase ${EVENT_STYLES[event.type] ?? 'bg-muted text-secondary'}`}>
                     {event.type}
                   </span>
-                  <span className="shrink-0 font-mono text-xs text-faint">{new Date(event.at).toLocaleTimeString()}</span>
+                  <span className="shrink-0 font-mono text-xs text-faint">{formatTime(event.at)}</span>
                   <span className="truncate text-secondary" title={event.message}>{event.message}</span>
                 </li>
               ))}

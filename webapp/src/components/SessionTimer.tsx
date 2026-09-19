@@ -3,6 +3,7 @@ import clsx from 'clsx';
 import { Clock3 } from 'lucide-react';
 import { api, ApiError, setAccessToken } from '../api/client';
 import { clearPermissions, clearUsername } from '../auth/permissions';
+import { useTimeFormat } from '../utils/time';
 
 /** Formats a millisecond duration compactly ("1h 04m", "58m 12s", "42 s"). */
 export function formatRemaining(ms: number): string {
@@ -99,8 +100,9 @@ export function SessionChip({
   remainingMs: number | null;
   warning: boolean;
 }) {
+  const { formatTime } = useTimeFormat();
   if (expiresAt === null || remainingMs === null) return null;
-  const at = new Date(expiresAt).toLocaleTimeString();
+  const at = formatTime(expiresAt);
   return (
     <span
       title={`Session expires in ${formatRemaining(remainingMs)} (at ${at})`}

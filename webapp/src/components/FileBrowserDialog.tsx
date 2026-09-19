@@ -18,6 +18,7 @@ import { api, ApiError, type FilesystemEntry, type SessionCredentialCandidate } 
 import { CredentialPicker } from './CredentialPicker';
 import { formatBytes } from './formatMetric';
 import { ResizableDialog } from './ResizableDialog';
+import { useTimeFormat } from '../utils/time';
 
 /**
  * A generic, root-scoped file manager dialog driven by the API's filesystem broker
@@ -65,13 +66,6 @@ function fileToB64(file: File): Promise<string> {
   });
 }
 
-function formatTime(ms: number | null): string {
-  if (ms === null || Number.isNaN(ms)) return '—';
-  const d = new Date(ms);
-  if (Number.isNaN(d.getTime())) return '—';
-  return d.toLocaleString();
-}
-
 /** Props of the core file-manager body (shared by dialog + full-window page). */
 export interface FileBrowserProps {
   deviceId: string;
@@ -98,6 +92,7 @@ interface FileCredentialPrompt {
 }
 
 export function FileBrowser({ deviceId, pluginId, context, initialPath }: FileBrowserProps) {
+  const { formatDateTime } = useTimeFormat();
   const [dir, setDir] = useState<string>(initialPath ?? '');
   const [entries, setEntries] = useState<FilesystemEntry[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -322,7 +317,7 @@ export function FileBrowser({ deviceId, pluginId, context, initialPath }: FileBr
                     <td className="px-3 py-2 text-right font-mono text-xs text-secondary">
                       {entry.isDirectory ? '—' : formatBytes(entry.sizeBytes ?? 0)}
                     </td>
-                    <td className="px-3 py-2 font-mono text-xs text-secondary">{formatTime(entry.mtimeMs)}</td>
+                    <td className="px-3 py-2 font-mono text-xs text-secondary">{entry.mtimeMs != null ? formatDateTime(entry.mtimeMs) : '—'}</td>
                     <td className="px-3 py-2">
                       <div className="flex items-center justify-end gap-0.5">
                         {!entry.isDirectory && (
