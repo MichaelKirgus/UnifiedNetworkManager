@@ -453,6 +453,37 @@ export interface DocumentedHostImportResult {
   errors: { index: number; error: string }[];
 }
 
+/** Options for copying the live host inventory into the documented hosts. */
+export interface DocumentedHostInventoryImportOptions {
+  /** Skip live hosts without a usable hostname (default true). */
+  skipWithoutHostname?: boolean;
+  /** Skip live hosts whose addresses match no known logical network (default false). */
+  skipUnknownNetworks?: boolean;
+  /** Only import hosts observed within this many hours (0 = all, default 24). */
+  maxAgeHours?: number;
+  /** Preview only — compute the plan without writing anything (default true). */
+  dryRun?: boolean;
+}
+
+/** One planned change for a single live host. */
+export interface DocumentedHostInventoryPlanEntry {
+  mac: string;
+  hostname: string | null;
+  ips: number;
+  action: 'create' | 'update' | 'skip';
+  reason?: string;
+}
+
+/** Result of the inventory import (dry-run plan or applied summary). */
+export interface DocumentedHostInventoryImportResult {
+  dryRun: boolean;
+  totalLiveHosts: number;
+  planned: DocumentedHostInventoryPlanEntry[];
+  created: number;
+  updated: number;
+  skipped: number;
+}
+
 /** One configured tunnel from the cross-device inventory view. Unlike networks/hosts,
  * rows are NOT merged across devices — a tunnel row is one logical tunnel on one device. */
 export interface TunnelRow {
@@ -2254,6 +2285,10 @@ export const api = {
     apiFetch<void>(`/documented-hosts/${id}`, { method: 'DELETE' }),
   importDocumentedHosts: (body: { hosts: DocumentedHostRequest[]; matchBy?: 'dns' | 'mac'; updateExisting?: boolean }) =>
     apiFetch<DocumentedHostImportResult>('/documented-hosts/import', { method: 'POST', body: JSON.stringify(body) }),
+  /** Copy the live host inventory into the documented hosts (additive merge).
+   *  dryRun defaults to true — returns a per-host plan without writing. */
+  importDocumentedHostsFromInventory: (body: DocumentedHostInventoryImportOptions = {}) =>
+    apiFetch<DocumentedHostInventoryImportResult>('/documented-hosts/import-from-inventory', { method: 'POST', body: JSON.stringify(body) }),
   tunnels: (params?: { deviceId?: string; siteId?: string; type?: 'wireguard' | 'openvpn' | 'ipsec' | 'pppoe' | 'gre' }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);

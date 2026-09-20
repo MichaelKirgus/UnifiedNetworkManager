@@ -5,7 +5,7 @@ import { isIP } from 'node:net';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
-import { mergeNetworkRows } from './networks';
+import { mergeHostRows, mergeNetworkRows } from './networks';
 
 const router = Router();
 
@@ -754,6 +754,433 @@ router.post('/documented-hosts/import', requireAuth, requirePermission('document
     }
 
     res.status(200).json({ created, updated, skipped, errors });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Import from live inventory — copies the observed hosts (GET /hosts data)
+// into the documented-hosts table. The merge is ADDITIVE and never loses user
+// data: existing DNS names, friendly name, description, site/layer placement
+// are preserved; new addresses/MACs/network references from the observation
+// are added to the host's address list (matched hosts by MAC or observed IP).
+// ---------------------------------------------------------------------------
+
+/** Options for the inventory import. */
+interface InventoryImportOptions {
+  /** Skip live hosts without a usable hostname (no DNS name can be derived). Default true. */
+  skipWithoutHostname?: boolean;
+  /** Skip live hosts whose addresses match no known logical network. Default false. */
+  skipUnknownNetworks?: boolean;
+  /** Only import hosts observed within this many hours (0 = all, default 24 — the sweep window). */
+  maxAgeHours?: number;
+  /** Preview only — compute what would change without writing anything. Default true. */
+  dryRun?: boolean;
+}
+
+/** One planned change for a single live host. */
+interface InventoryImportPlanEntry {
+  mac: string;
+  hostname: string | null;
+  ips: number;
+  /** 'create' = new documented host, 'update' = merge into an existing one, 'skip' = unchanged/filtered out. */
+  action: 'create' | 'update' | 'skip';
+  reason?: string;
+}
+
+/** Result of the inventory import (dry-run or applied). */
+interface InventoryImportResult {
+  dryRun: boolean;
+  totalLiveHosts: number;
+  planned: InventoryImportPlanEntry[];
+  created: number;
+  updated: number;
+  skipped: number;
+}
+
+/** Normalizes an observed hostname into a documentable DNS name. */
+function hostnameToDnsName(hostname: string | null): string {
+  if (!hostname) return '';
+  let v = hostname.trim().toLowerCase();
+  // Strip zone suffixes ("host%eth0") and trailing dots.
+  const pct = v.indexOf('%');
+  if (pct >= 0) v = v.slice(0, pct);
+  if (v.endsWith('.')) v = v.slice(0, -1);
+  return normalizeDnsName(v);
+}
+
+/** True for addresses that are not documentable host addresses. */
+function isNonDocumentableAddress(addr: string): boolean {
+  const a = addr.trim().toLowerCase();
+  if (a.includes('%')) return true; // zone-suffixed link-local
+  if (!isIpLiteral(a)) return false;
+  // Link-locals are per-interface, not documentable inventory addresses.
+  if (a.startsWith('169.254.')) return true;
+  if (a === '::' || a === '0.0.0.0') return true;
+  if (a.startsWith('fe80:')) return true;
+  return false;
+}
+
+/**
+ * Builds the import plan from the live inventory + current documented hosts.
+ * Pure function of its inputs — shared by dry-run and apply so both agree.
+ */
+async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<InventoryImportResult> {
+  const [hostRows, networkRows, existing] = await Promise.all([
+    db.query.hosts.findMany(),
+    db.query.networks.findMany(),
+    loadHostsWithIps(),
+  ]);
+
+  // Merged logical networks — every real subnet + VLAN id per group.
+  const mergedNetworks = mergeNetworkRows(networkRows);
+  const subnets: { cidr: string; vlanId: number | null }[] = [];
+  for (const n of mergedNetworks) {
+    for (const s of n.subnets ?? []) subnets.push({ cidr: s, vlanId: n.vlanId });
+  }
+
+  /** Most specific known subnet containing the address (+ its VLAN); null when unknown. */
+  const netFor = (addr: string): { cidr: string; vlanId: number | null } | null => {
+    let best: { cidr: string; vlanId: number | null } | null = null;
+    let bestPrefix = -1;
+    for (const s of subnets) {
+      const i = s.cidr.indexOf('/');
+      if (i < 0) continue;
+      const prefix = Number(s.cidr.slice(i + 1));
+      // Family must match the address.
+      if (s.cidr.includes(':') !== addr.includes(':')) continue;
+      try {
+        const netPart = s.cidr.slice(0, i);
+        const mask = prefix === 0 ? 0n : (~0n << BigInt(128 - prefix)) & ((1n << 128n) - 1n);
+        // Compare via node:net-free BigInt expansion for v6; simple octet math for v4.
+        if (!addr.includes(':')) {
+          const a = addr.split('.').map(Number).reduce((acc, o) => (acc << 8) | o, 0) >>> 0;
+          const n = netPart.split('.').map(Number).reduce((acc, o) => (acc << 8) | o, 0) >>> 0;
+          const m4 = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+          if ((a & m4) !== (n & m4)) continue;
+        } else {
+          // v6: expand both to BigInt and mask.
+          const expand = (v: string): bigint => {
+            let s = v.replace(/%[a-zA-Z0-9._-]+$/, '');
+            if (!s.includes('::')) s += '::';
+            const [l, r] = s.split('::');
+            const lg = l === '' ? [] : l.split(':').map((x) => parseInt(x, 16));
+            const rg = r === '' ? [] : r.split(':').map((x) => parseInt(x, 16));
+            const mid = Array(8 - lg.length - rg.length).fill(0);
+            return [...lg, ...mid, ...rg].reduce((acc, g) => (acc << 16n) | BigInt(g), 0n);
+          };
+          if ((expand(addr) & mask) !== (expand(netPart) & mask)) continue;
+        }
+      } catch {
+        continue; // malformed subnet — ignore
+      }
+      if (prefix > bestPrefix) {
+        best = s;
+        bestPrefix = prefix;
+      }
+    }
+    return best;
+  };
+
+  const maxAgeHours = Number.isFinite(opts.maxAgeHours as number) && (opts.maxAgeHours as number) > 0 ? (opts.maxAgeHours as number) : 24;
+  const cutoff = new Date(Date.now() - maxAgeHours * 3600_000).toISOString();
+
+  // Index existing documented hosts by MAC and by address.
+  const docByMac = new Map<string, HostWithIps>();
+  const docByAddr = new Map<string, HostWithIps[]>();
+  for (const h of existing) {
+    for (const ip of h.ips) {
+      const list = docByAddr.get(ip.address.toLowerCase());
+      if (list) list.push(h);
+      else docByAddr.set(ip.address.toLowerCase(), [h]);
+    }
+    for (const ip of h.ips) {
+      if (ip.mac && !docByMac.has(macKey(ip.mac))) docByMac.set(macKey(ip.mac), h);
+    }
+  }
+
+  const live = mergeHostRows(hostRows).filter((h) => h.lastSeenAt >= cutoff);
+  const planned: InventoryImportPlanEntry[] = [];
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (const h of live) {
+    // Documentable addresses only.
+    const addrs = h.ips.filter((a) => !isNonDocumentableAddress(a));
+    if (addrs.length === 0) {
+      planned.push({ mac: h.mac, hostname: h.hostname, ips: 0, action: 'skip', reason: 'no documentable address' });
+      skipped++;
+      continue;
+    }
+
+    let dnsName = hostnameToDnsName(h.hostname);
+    if (!dnsName) {
+      if (opts.skipWithoutHostname !== false) {
+        planned.push({ mac: h.mac, hostname: null, ips: addrs.length, action: 'skip', reason: 'no hostname' });
+        skipped++;
+        continue;
+      }
+      // No usable hostname — fall back to the MAC as the DNS name (still valid RFC 1123).
+      dnsName = h.mac.replace(/:/g, '');
+    }
+
+    const nets = addrs.map((a) => netFor(a));
+    if (opts.skipUnknownNetworks === true && !nets.some((n) => n !== null)) {
+      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: 'no known network' });
+      skipped++;
+      continue;
+    }
+
+    // Match an existing documented host — by MAC first (the stable identity),
+    // then by any shared address.
+    let target = docByMac.get(macKey(h.mac)) ?? null;
+    if (!target) {
+      for (const a of addrs) {
+        const cands = docByAddr.get(a.toLowerCase());
+        if (cands && cands.length > 0) {
+          target = cands[0];
+          break;
+        }
+      }
+    }
+
+    // Would the merge actually change anything?
+    let wouldChange = false;
+    if (!target) {
+      wouldChange = true;
+    } else {
+      const existingAddrs = new Set(target.ips.map((i) => i.address.toLowerCase()));
+      for (const a of addrs) if (!existingAddrs.has(a.toLowerCase())) wouldChange = true;
+      // A missing MAC or network reference on an already-documented address also counts.
+      for (const ip of target.ips) {
+        const net = nets.find((n, i2) => n !== null && addrs[i2].toLowerCase() === ip.address.toLowerCase());
+        if (!ip.mac || !ip.networkLabel) wouldChange = true;
+        else if (net && ip.vlanId == null && net.vlanId != null) wouldChange = true;
+      }
+      const names = safeParseStringArray(target.host.dnsNames);
+      if (dnsName && !names.includes(dnsName)) wouldChange = true;
+    }
+
+    if (!wouldChange) {
+      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: 'already fully documented' });
+      skipped++;
+      continue;
+    }
+
+    if (target) updated++;
+    else created++;
+    planned.push({ mac: h.mac, hostname: h.hostname ?? dnsName, ips: addrs.length, action: target ? 'update' : 'create' });
+  }
+
+  return { dryRun: true, totalLiveHosts: live.length, planned, created, updated, skipped };
+}
+
+/** Applies the plan — writes only what buildInventoryImportPlan() computed. */
+async function applyInventoryImport(opts: InventoryImportOptions): Promise<InventoryImportResult> {
+  const [hostRows, networkRows, existing] = await Promise.all([
+    db.query.hosts.findMany(),
+    db.query.networks.findMany(),
+    loadHostsWithIps(),
+  ]);
+
+  const mergedNetworks = mergeNetworkRows(networkRows);
+  const subnets: { cidr: string; vlanId: number | null }[] = [];
+  for (const n of mergedNetworks) {
+    for (const s of n.subnets ?? []) subnets.push({ cidr: s, vlanId: n.vlanId });
+  }
+  const netFor = (addr: string): { cidr: string; vlanId: number | null } | null => {
+    let best: { cidr: string; vlanId: number | null } | null = null;
+    let bestPrefix = -1;
+    for (const s of subnets) {
+      const i = s.cidr.indexOf('/');
+      if (i < 0) continue;
+      const prefix = Number(s.cidr.slice(i + 1));
+      if (s.cidr.includes(':') !== addr.includes(':')) continue;
+      try {
+        const netPart = s.cidr.slice(0, i);
+        if (!addr.includes(':')) {
+          const a = addr.split('.').map(Number).reduce((acc, o) => (acc << 8) | o, 0) >>> 0;
+          const n = netPart.split('.').map(Number).reduce((acc, o) => (acc << 8) | o, 0) >>> 0;
+          const m4 = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+          if ((a & m4) !== (n & m4)) continue;
+        } else {
+          const mask = prefix === 0 ? 0n : (~0n << BigInt(128 - prefix)) & ((1n << 128n) - 1n);
+          const expand = (v: string): bigint => {
+            let s = v.replace(/%[a-zA-Z0-9._-]+$/, '');
+            if (!s.includes('::')) s += '::';
+            const [l, r] = s.split('::');
+            const lg = l === '' ? [] : l.split(':').map((x) => parseInt(x, 16));
+            const rg = r === '' ? [] : r.split(':').map((x) => parseInt(x, 16));
+            const mid = Array(8 - lg.length - rg.length).fill(0);
+            return [...lg, ...mid, ...rg].reduce((acc, g) => (acc << 16n) | BigInt(g), 0n);
+          };
+          if ((expand(addr) & mask) !== (expand(netPart) & mask)) continue;
+        }
+      } catch {
+        continue;
+      }
+      if (prefix > bestPrefix) {
+        best = s;
+        bestPrefix = prefix;
+      }
+    }
+    return best;
+  };
+
+  const maxAgeHours = Number.isFinite(opts.maxAgeHours as number) && (opts.maxAgeHours as number) > 0 ? (opts.maxAgeHours as number) : 24;
+  const cutoff = new Date(Date.now() - maxAgeHours * 3600_000).toISOString();
+
+  const docByMac = new Map<string, HostWithIps>();
+  const docByAddr = new Map<string, HostWithIps[]>();
+  for (const h of existing) {
+    for (const ip of h.ips) {
+      const list = docByAddr.get(ip.address.toLowerCase());
+      if (list) list.push(h);
+      else docByAddr.set(ip.address.toLowerCase(), [h]);
+    }
+    for (const ip of h.ips) {
+      if (ip.mac && !docByMac.has(macKey(ip.mac))) docByMac.set(macKey(ip.mac), h);
+    }
+  }
+
+  const live = mergeHostRows(hostRows).filter((h) => h.lastSeenAt >= cutoff);
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+  const now = new Date().toISOString();
+
+  for (const h of live) {
+    const addrs = h.ips.filter((a) => !isNonDocumentableAddress(a));
+    if (addrs.length === 0) {
+      skipped++;
+      continue;
+    }
+    let dnsName = hostnameToDnsName(h.hostname);
+    if (!dnsName) {
+      if (opts.skipWithoutHostname !== false) {
+        skipped++;
+        continue;
+      }
+      // MAC as fallback DNS name — valid RFC 1123, keeps the host documentable.
+      dnsName = h.mac.replace(/:/g, '');
+    }
+
+    const nets = addrs.map((a) => netFor(a));
+    if (opts.skipUnknownNetworks === true && !nets.some((n) => n !== null)) {
+      skipped++;
+      continue;
+    }
+
+    let target = docByMac.get(macKey(h.mac)) ?? null;
+    if (!target) {
+      for (const a of addrs) {
+        const cands = docByAddr.get(a.toLowerCase());
+        if (cands && cands.length > 0) {
+          target = cands[0];
+          break;
+        }
+      }
+    }
+
+    // --- Merge: ADDITIVE — never drop user data -----------------------------
+    const mergedIps: { address: string; mac: string | null; networkLabel: string | null; vlanId: number | null }[] = [];
+    if (target) {
+      for (const ip of target.ips) mergedIps.push({ address: ip.address, mac: ip.mac ?? null, networkLabel: ip.networkLabel ?? null, vlanId: ip.vlanId ?? null });
+    }
+    let changed = false;
+    addrs.forEach((a, i2) => {
+      const net = nets[i2];
+      const existingAddr = mergedIps.find((x) => x.address.toLowerCase() === a.toLowerCase());
+      if (!existingAddr) {
+        mergedIps.push({ address: a, mac: h.mac, networkLabel: net?.cidr ?? null, vlanId: net?.vlanId ?? null });
+        changed = true;
+      } else {
+        // Fill gaps only — user values always win.
+        if (!existingAddr.mac) { existingAddr.mac = h.mac; changed = true; }
+        if (!existingAddr.networkLabel && net) { existingAddr.networkLabel = net.cidr; changed = true; }
+        if (existingAddr.vlanId == null && net?.vlanId != null) { existingAddr.vlanId = net.vlanId; changed = true; }
+      }
+    });
+
+    const names = target ? safeParseStringArray(target.host.dnsNames) : [];
+    if (!names.includes(dnsName)) {
+      names.push(dnsName);
+      changed = true;
+    }
+
+    // Friendly name: keep the user's, else derive from the hostname.
+    let friendlyName = target?.host.friendlyName ?? null;
+    if (!friendlyName && h.hostname) {
+      const base = h.hostname.trim().split('.')[0];
+      if (base) {
+        friendlyName = base;
+        changed = true;
+      }
+    }
+
+    if (!changed) {
+      skipped++;
+      continue;
+    }
+
+    if (target) {
+      await db.update(schema.documentedHosts)
+        .set({ dnsNames: JSON.stringify(names), friendlyName, updatedAt: now })
+        .where(eq(schema.documentedHosts.id, target.host.id));
+      // Replace the address list with the MERGED one (existing rows kept + new ones added).
+      await db.delete(schema.documentedHostIps).where(eq(schema.documentedHostIps.hostId, target.host.id));
+      if (mergedIps.length > 0) {
+        await db.insert(schema.documentedHostIps).values(
+          mergedIps.map((ip) => ({ id: uuidv4(), hostId: target!.host.id, address: ip.address, mac: ip.mac, networkLabel: ip.networkLabel, vlanId: ip.vlanId, createdAt: now }))
+        );
+      }
+      updated++;
+    } else {
+      const id = uuidv4();
+      await db.insert(schema.documentedHosts).values({
+        id,
+        dnsNames: JSON.stringify(names),
+        friendlyName,
+        description: null,
+        siteId: null,
+        layerId: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      if (mergedIps.length > 0) {
+        await db.insert(schema.documentedHostIps).values(
+          mergedIps.map((ip) => ({ id: uuidv4(), hostId: id, address: ip.address, mac: ip.mac, networkLabel: ip.networkLabel, vlanId: ip.vlanId, createdAt: now }))
+        );
+      }
+      created++;
+    }
+  }
+
+  return { dryRun: false, totalLiveHosts: live.length, planned: [], created, updated, skipped };
+}
+
+// POST /documented-hosts/import-from-inventory — copy the LIVE host inventory
+// into the documented hosts (additive merge; dry-run by default).
+router.post('/documented-hosts/import-from-inventory', requireAuth, requirePermission('documented-hosts:write'), async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const opts: InventoryImportOptions = {
+      skipWithoutHostname: body.skipWithoutHostname !== false,
+      skipUnknownNetworks: body.skipUnknownNetworks === true,
+      maxAgeHours: typeof body.maxAgeHours === 'number' ? body.maxAgeHours : 24,
+      dryRun: body.dryRun !== false, // preview first — explicit opt-in to write
+    };
+
+    if (opts.dryRun) {
+      const result = await buildInventoryImportPlan(opts);
+      res.status(200).json(result);
+      return;
+    }
+    const result = await applyInventoryImport(opts);
+    res.status(200).json(result);
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

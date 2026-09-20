@@ -3329,6 +3329,38 @@ paths:
         '403':
           description: Missing documented-hosts:write permission
 
+  /documented-hosts/import-from-inventory:
+    post:
+      tags: [Inventory]
+      summary: Import the live host inventory into the documented hosts
+      description: >-
+        Requires permission `documented-hosts:write`. Copies the observed
+        hosts (the same data as GET /hosts) into the user-maintained
+        documented-hosts table. The merge is ADDITIVE and never loses user
+        data: existing DNS names, friendly name, description, site/layer
+        placement are preserved; new addresses/MACs/network references from
+        the observation are added to the host's address list (hosts match by
+        MAC first, then by shared address). `dryRun` defaults to true — it
+        returns a per-host plan (create/update/skip + reason) without writing
+        anything; pass `dryRun: false` to apply.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentedHostInventoryImportRequest'
+      responses:
+        '200':
+          description: Import plan (dry run) or applied summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentedHostInventoryImportResult'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-hosts:write permission
+
   /topology:
     get:
       tags: [Inventory]
@@ -5949,6 +5981,48 @@ components:
             properties:
               index: { type: integer, description: "0-based position in the submitted batch" }
               error: { type: string }
+
+    DocumentedHostInventoryImportRequest:
+      type: object
+      properties:
+        skipWithoutHostname:
+          type: boolean
+          default: true
+          description: "Skip live hosts without a usable hostname (no DNS name can be derived; MAC is used as fallback when disabled)"
+        skipUnknownNetworks:
+          type: boolean
+          default: false
+          description: "Skip live hosts whose addresses match no known logical network"
+        maxAgeHours:
+          type: number
+          minimum: 0
+          default: 24
+          description: "Only import hosts observed within this many hours (0 = all)"
+        dryRun:
+          type: boolean
+          default: true
+          description: "Preview only — compute the plan without writing anything"
+
+    DocumentedHostInventoryImportResult:
+      type: object
+      required: [dryRun, totalLiveHosts, planned, created, updated, skipped]
+      properties:
+        dryRun: { type: boolean }
+        totalLiveHosts: { type: integer, description: "Live hosts considered (within the age window)" }
+        planned:
+          type: array
+          items:
+            type: object
+            required: [mac, hostname, ips, action]
+            properties:
+              mac: { type: string }
+              hostname: { type: [string, 'null'] }
+              ips: { type: integer, description: "Documentable addresses of this host" }
+              action: { type: string, enum: [create, update, skip] }
+              reason: { type: string, description: "Why the host is skipped (action=skip only)" }
+        created: { type: integer }
+        updated: { type: integer }
+        skipped: { type: integer }
 
     NetworkLayer:
       type: object

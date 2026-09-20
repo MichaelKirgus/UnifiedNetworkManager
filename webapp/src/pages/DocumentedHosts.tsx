@@ -1,6 +1,6 @@
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { CircleCheck, CircleX, Dices, NotebookPen, Pencil, Plus, Trash2, TriangleAlert, Upload, X } from 'lucide-react';
+import { CircleCheck, CircleX, DatabaseZap, Dices, NotebookPen, Pencil, Plus, Trash2, TriangleAlert, Upload, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { IpCidrInput } from '../components/IpCidrInput';
@@ -921,6 +921,211 @@ function ImportModal({ sites, layers, onClose, onDone }: ImportModalProps) {
 }
 
 // ---------------------------------------------------------------------------
+// Import-from-inventory modal — copies the LIVE host inventory into the
+// documented hosts (additive merge, dry-run preview first)
+// ---------------------------------------------------------------------------
+
+interface InventoryImportModalProps {
+  onClose: () => void;
+  onDone: () => void;
+}
+
+function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
+  const [skipWithoutHostname, setSkipWithoutHostname] = useState(true);
+  const [skipUnknownNetworks, setSkipUnknownNetworks] = useState(false);
+  const [maxAgeHours, setMaxAgeHours] = useState(24);
+  // Phase: 'options' → pick filters; 'plan' → dry-run preview; 'done' → applied.
+  const [phase, setPhase] = useState<'options' | 'plan' | 'done'>('options');
+  const [plan, setPlan] = useState<import('../api/client').DocumentedHostInventoryImportResult | null>(null);
+  const [applied, setApplied] = useState<import('../api/client').DocumentedHostInventoryImportResult | null>(null);
+
+  const previewMutation = useMutation({
+    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, maxAgeHours, dryRun: true }),
+    onSuccess: (res) => {
+      setPlan(res);
+      setPhase('plan');
+    },
+  });
+  const applyMutation = useMutation({
+    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, maxAgeHours, dryRun: false }),
+    onSuccess: (res) => {
+      setApplied(res);
+      setPhase('done');
+      onDone();
+    },
+  });
+
+  // Re-run the preview whenever the filters change while in plan phase.
+  useEffect(() => {
+    if (phase === 'plan') previewMutation.mutate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [skipWithoutHostname, skipUnknownNetworks, maxAgeHours]);
+
+  const plannedCreates = plan?.planned.filter((p) => p.action === 'create').length ?? 0;
+  const plannedUpdates = plan?.planned.filter((p) => p.action === 'update').length ?? 0;
+  const plannedSkips = plan?.planned.filter((p) => p.action === 'skip').length ?? 0;
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-primary/40 p-4 sm:items-center" onClick={onClose}>
+      <div className="w-full max-w-3xl rounded-md border border-border bg-card p-5 shadow-lg" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-base font-semibold text-foreground">Import from live inventory</h2>
+          <button type="button" aria-label="Close import dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Phase 1 — options */}
+        {phase === 'options' && (
+          <>
+            <p className="mb-3 text-sm text-secondary">
+              Copies every host currently observed in the inventory into the documented hosts. Existing entries are
+              MERGED, never overwritten: their DNS names, friendly name, description and placement stay untouched —
+              only new addresses, MACs and network references from the observation are added. Nothing is deleted.
+            </p>
+
+            <div className="mb-4 flex flex-col gap-2 text-sm">
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="Hosts without an observed hostname get no DNS name — skip them, or document them under their MAC address.">
+                <span className="text-secondary">Skip hosts without a hostname</span>
+                <input type="checkbox" checked={skipWithoutHostname} onChange={(e) => setSkipWithoutHostname(e.target.checked)} />
+              </label>
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="Only import hosts whose addresses fall into a known logical network (from the Networks inventory).">
+                <span className="text-secondary">Skip hosts without a known network</span>
+                <input type="checkbox" checked={skipUnknownNetworks} onChange={(e) => setSkipUnknownNetworks(e.target.checked)} />
+              </label>
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="Only consider hosts observed within this window (the inventory is swept after 24 h).">
+                <span className="text-secondary">Observed within</span>
+                <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={maxAgeHours} onChange={(e) => setMaxAgeHours(Number(e.target.value))}>
+                  <option value={0}>all time (no age limit)</option>
+                  <option value={6}>last 6 hours</option>
+                  <option value={24}>last 24 hours</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-border pt-3">
+              <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={previewMutation.isPending}
+                onClick={() => previewMutation.mutate()}
+                className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+              >
+                <DatabaseZap className="h-4 w-4" /> Preview what would change
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* Phase 2 — dry-run plan */}
+        {phase === 'plan' && plan && (
+          <>
+            <p className="mb-3 text-sm text-secondary">
+              {plan.totalLiveHosts} live host(s) considered. The merge is additive — existing documented data is preserved, only missing information is added.
+            </p>
+
+            <div className="mb-4 flex flex-wrap gap-2 text-sm">
+              <span className="rounded bg-success px-2 py-1 font-medium text-success-fg">{plannedCreates} to create</span>
+              <span className="rounded bg-info px-2 py-1 font-medium text-info-fg">{plannedUpdates} to update (merge)</span>
+              {plannedSkips > 0 && <span className="rounded bg-muted px-2 py-1 font-medium text-secondary">{plannedSkips} skipped</span>}
+            </div>
+
+            {/* Filters stay adjustable — the preview re-runs automatically */}
+            <div className="mb-4 flex flex-wrap items-center gap-5 text-sm">
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={skipWithoutHostname} onChange={(e) => setSkipWithoutHostname(e.target.checked)} />
+                Skip without hostname
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={skipUnknownNetworks} onChange={(e) => setSkipUnknownNetworks(e.target.checked)} />
+                Skip unknown networks
+              </label>
+              <label className="flex items-center gap-2">
+                Observed within
+                <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={maxAgeHours} onChange={(e) => setMaxAgeHours(Number(e.target.value))}>
+                  <option value={0}>all time</option>
+                  <option value={6}>last 6 hours</option>
+                  <option value={24}>last 24 hours</option>
+                </select>
+              </label>
+            </div>
+
+            {previewMutation.isPending && <p className="mb-3 text-sm text-faint">Recomputing preview…</p>}
+
+            <div className="mb-4 max-h-72 overflow-y-auto rounded-md border border-border">
+              <table className="w-full text-left text-xs">
+                <thead className="sticky top-0 bg-muted">
+                  <tr>
+                    <th className="px-2 py-1.5 font-medium">MAC</th>
+                    <th className="px-2 py-1.5 font-medium">Hostname</th>
+                    <th className="px-2 py-1.5 font-medium">IPs</th>
+                    <th className="px-2 py-1.5 font-medium">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {plan.planned.slice(0, 300).map((p) => (
+                    <tr key={p.mac} className="border-t border-border">
+                      <td className="px-2 py-1 font-mono">{p.mac}</td>
+                      <td className="max-w-[220px] truncate px-2 py-1 font-mono" title={p.hostname ?? undefined}>
+                        {p.hostname ?? <span className="text-faint">—</span>}
+                      </td>
+                      <td className="px-2 py-1">{p.ips}</td>
+                      <td className="px-2 py-1">
+                        {p.action === 'create' && <span className="rounded bg-success px-1.5 py-0.5 text-[10px] font-semibold text-success-fg">create</span>}
+                        {p.action === 'update' && <span className="rounded bg-info px-1.5 py-0.5 text-[10px] font-semibold text-info-fg">merge</span>}
+                        {p.action === 'skip' && (
+                          <span title={p.reason} className="text-faint">skip{p.reason ? ` — ${p.reason}` : ''}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {plan.planned.length > 300 && <p className="mb-2 text-xs text-faint">…and {plan.planned.length - 300} more rows</p>}
+
+            <div className="flex justify-end gap-2 border-t border-border pt-3">
+              <button type="button" onClick={() => setPhase('options')} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">
+                Back to options
+              </button>
+              <button
+                type="button"
+                disabled={applyMutation.isPending || plannedCreates + plannedUpdates === 0}
+                onClick={() => applyMutation.mutate()}
+                className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+              >
+                <DatabaseZap className="h-4 w-4" /> Import {plannedCreates + plannedUpdates} host(s)
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* Phase 3 — applied */}
+        {phase === 'done' && applied && (
+          <>
+            <div className="mb-4 flex flex-wrap gap-2 text-sm">
+              <span className="rounded bg-success px-2 py-1 font-medium text-success-fg">{applied.created} created</span>
+              <span className="rounded bg-info px-2 py-1 font-medium text-info-fg">{applied.updated} updated (merged)</span>
+              {applied.skipped > 0 && <span className="rounded bg-muted px-2 py-1 font-medium text-secondary">{applied.skipped} skipped</span>}
+            </div>
+            <p className="mb-4 text-sm text-secondary">
+              Existing documented hosts were merged additively — no user data was overwritten or deleted.
+            </p>
+            <div className="flex justify-end gap-2 border-t border-border pt-3">
+              <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">
+                Close
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
@@ -932,6 +1137,7 @@ export default function DocumentedHosts() {
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<DocumentedHost | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [inventoryImportOpen, setInventoryImportOpen] = useState(false);
 
   // Documented hosts + the reference data the form needs. The live host rows
   // power MAC auto-fill in the form and keep "discovered" fresh (30 s cadence).
@@ -1144,6 +1350,9 @@ export default function DocumentedHosts() {
       actions={
         canWrite && (
           <>
+            <button type="button" onClick={() => setInventoryImportOpen(true)} title="Copy the live host inventory into the documented hosts (additive merge)" className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted">
+              <DatabaseZap className="h-4 w-4" /> Import from Inventory
+            </button>
             <button type="button" onClick={() => setImportOpen(true)} className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted">
               <Upload className="h-4 w-4" /> Import CSV
             </button>
@@ -1212,6 +1421,13 @@ export default function DocumentedHosts() {
           sites={sitesQuery.data ?? []}
           layers={layersQuery.data ?? []}
           onClose={() => setImportOpen(false)}
+          onDone={() => queryClient.invalidateQueries({ queryKey: ['documentedHosts'] })}
+        />
+      )}
+
+      {inventoryImportOpen && (
+        <InventoryImportModal
+          onClose={() => setInventoryImportOpen(false)}
           onDone={() => queryClient.invalidateQueries({ queryKey: ['documentedHosts'] })}
         />
       )}
