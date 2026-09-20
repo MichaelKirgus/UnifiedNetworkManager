@@ -44,6 +44,9 @@ function validateLocal(descriptor: PluginOptionDescriptor, value: unknown): stri
     case 'string': {
       if (typeof value !== 'string') return 'Required';
       const s = descriptor as StringOption;
+      if (Array.isArray(s.enumOptions) && s.enumOptions.length > 0 && !s.enumOptions.includes(value)) {
+        return `Must be one of: ${s.enumOptions.join(', ')}`;
+      }
       if (s.minLength !== undefined && value.length < s.minLength) return `At least ${s.minLength} characters`;
       if (s.maxLength !== undefined && value.length > s.maxLength) return `At most ${s.maxLength} characters`;
       if (s.pattern) {
@@ -71,6 +74,57 @@ function validateLocal(descriptor: PluginOptionDescriptor, value: unknown): stri
     default:
       return null;
   }
+}
+
+/** Renders the input for one option descriptor — shared by the bare (div) and
+ * form layouts. String options with a closed `enumOptions` list render as a
+ * combobox (select); everything else keeps its plain input. */
+function OptionControl({ opt, value, error, onChange }: {
+  opt: PluginOptionDescriptor;
+  value: unknown;
+  error?: string;
+  onChange: (value: unknown) => void;
+}) {
+  const id = `opt-${opt.key}`;
+  if (opt.type === 'boolean') {
+    return (
+      <div className="flex items-center gap-2">
+        <input id={id} type="checkbox" checked={value === true}
+          onChange={(e) => onChange(e.target.checked)}
+          className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring" />
+        <span className="text-sm text-muted-foreground">{value === true ? 'Enabled' : 'Disabled'}</span>
+      </div>
+    );
+  }
+  if (opt.type === 'integer') {
+    return (
+      <input id={id} type="number" step={1} inputMode="numeric"
+        value={value === null || value === undefined ? '' : String(value)}
+        placeholder={opt.default !== undefined ? `default: ${String(opt.default)}` : 'optional'}
+        onChange={(e) => { const raw = e.target.value; onChange(raw === '' ? null : Number(raw)); }}
+        className={clsx('w-full rounded-md border px-3 py-2 text-sm', error ? 'border-danger-border' : 'border-border')} />
+    );
+  }
+  // String option: combobox when the descriptor declares a closed value set.
+  const s = opt as StringOption;
+  if (Array.isArray(s.enumOptions) && s.enumOptions.length > 0) {
+    return (
+      <select id={id} value={(value as string | undefined) ?? ''}
+        onChange={(e) => onChange(e.target.value)}
+        className={clsx('w-full rounded-md border px-3 py-2 text-sm', error ? 'border-danger-border' : 'border-border')}>
+        {s.enumOptions.map((v) => (
+          <option key={v} value={v}>{v}</option>
+        ))}
+      </select>
+    );
+  }
+  return (
+    <input id={id} type="text"
+      value={(value as string | undefined) ?? ''}
+      placeholder={opt.default !== undefined ? `default: ${String(opt.default)}` : 'optional'}
+      onChange={(e) => onChange(e.target.value)}
+      className={clsx('w-full rounded-md border px-3 py-2 text-sm', error ? 'border-danger-border' : 'border-border')} />
+  );
 }
 
 export const OptionForm = forwardRef<OptionFormHandle, OptionFormProps>(function OptionForm(
@@ -242,26 +296,7 @@ export const OptionForm = forwardRef<OptionFormHandle, OptionFormProps>(function
                         className="text-xs font-normal text-faint hover:text-secondary hover:underline">More info ↗</a>
                     )}
                   </label>
-                  {opt.type === 'boolean' ? (
-                    <div className="flex items-center gap-2">
-                      <input id={`opt-${opt.key}`} type="checkbox" checked={values[opt.key] === true}
-                        onChange={(e) => setValue(opt.key, e.target.checked)}
-                        className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring" />
-                      <span className="text-sm text-muted-foreground">{values[opt.key] === true ? 'Enabled' : 'Disabled'}</span>
-                    </div>
-                  ) : opt.type === 'integer' ? (
-                    <input id={`opt-${opt.key}`} type="number" step={1} inputMode="numeric"
-                      value={values[opt.key] === null || values[opt.key] === undefined ? '' : String(values[opt.key])}
-                      placeholder={opt.default !== undefined ? `default: ${String(opt.default)}` : 'optional'}
-                      onChange={(e) => { const raw = e.target.value; setValue(opt.key, raw === '' ? null : Number(raw)); }}
-                      className={clsx('w-full rounded-md border px-3 py-2 text-sm', error ? 'border-danger-border' : 'border-border')} />
-                  ) : (
-                    <input id={`opt-${opt.key}`} type="text"
-                      value={(values[opt.key] as string | undefined) ?? ''}
-                      placeholder={opt.default !== undefined ? `default: ${String(opt.default)}` : 'optional'}
-                      onChange={(e) => setValue(opt.key, e.target.value)}
-                      className={clsx('w-full rounded-md border px-3 py-2 text-sm', error ? 'border-danger-border' : 'border-border')} />
-                  )}
+                  <OptionControl opt={opt} value={values[opt.key]} error={error} onChange={(v) => setValue(opt.key, v)} />
                   {opt.description && <p className="mt-1 text-xs text-muted-foreground">{opt.description}</p>}
                   {error && <p className="mt-1 text-xs text-danger-fg">{error}</p>}
                 </div>
@@ -300,47 +335,7 @@ export const OptionForm = forwardRef<OptionFormHandle, OptionFormProps>(function
                   )}
                 </label>
 
-                {opt.type === 'boolean' ? (
-                  <div className="flex items-center gap-2">
-                    <input
-                      id={`opt-${opt.key}`}
-                      type="checkbox"
-                      checked={values[opt.key] === true}
-                      onChange={(e) => setValue(opt.key, e.target.checked)}
-                      className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring"
-                    />
-                    <span className="text-sm text-muted-foreground">{values[opt.key] === true ? 'Enabled' : 'Disabled'}</span>
-                  </div>
-                ) : opt.type === 'integer' ? (
-                  <input
-                    id={`opt-${opt.key}`}
-                    type="number"
-                    step={1}
-                    inputMode="numeric"
-                    value={values[opt.key] === null || values[opt.key] === undefined ? '' : String(values[opt.key])}
-                    placeholder={opt.default !== undefined ? `default: ${String(opt.default)}` : 'optional'}
-                    onChange={(e) => {
-                      const raw = e.target.value;
-                      setValue(opt.key, raw === '' ? null : Number(raw));
-                    }}
-                    className={clsx(
-                      'w-full rounded-md border px-3 py-2 text-sm',
-                      error ? 'border-danger-border' : 'border-border'
-                    )}
-                  />
-                ) : (
-                  <input
-                    id={`opt-${opt.key}`}
-                    type="text"
-                    value={(values[opt.key] as string | undefined) ?? ''}
-                    placeholder={opt.default !== undefined ? `default: ${String(opt.default)}` : 'optional'}
-                    onChange={(e) => setValue(opt.key, e.target.value)}
-                    className={clsx(
-                      'w-full rounded-md border px-3 py-2 text-sm',
-                      error ? 'border-danger-border' : 'border-border'
-                    )}
-                  />
-                )}
+                <OptionControl opt={opt} value={values[opt.key]} error={error} onChange={(v) => setValue(opt.key, v)} />
 
                 {opt.description && <p className="mt-1 text-xs text-muted-foreground">{opt.description}</p>}
                 {error && <p className="mt-1 text-xs text-danger-fg">{error}</p>}

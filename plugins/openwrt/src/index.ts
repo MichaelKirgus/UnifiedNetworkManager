@@ -98,7 +98,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     label: 'Transport mode',
     type: 'string' as const,
     default: 'auto',
-    pattern: '^(auto|luci|ssh)$',
+    enumOptions: ['auto', 'luci', 'ssh'],
     description:
       "How to reach the appliance. auto = use LuCI (ubus-over-HTTP) for structured reads when reachable and SSH for everything else (default). luci = HTTP only — read-only, config writes are rejected. ssh = shell only.",
   },

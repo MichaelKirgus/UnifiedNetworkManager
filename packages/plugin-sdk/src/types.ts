@@ -197,6 +197,13 @@ export interface PluginOptionBase {
 
 export interface StringOption extends PluginOptionBase {
   type: 'string';
+  /**
+   * Closed set of allowed values — the webapp renders a combobox (select)
+   * instead of a free-text input, and the API rejects any value outside this
+   * list. Use for mode/transport/method toggles; keep `pattern` only for
+   * genuinely open-ended strings with format constraints.
+   */
+  enumOptions?: string[];
   pattern?: string;
   minLength?: number;
   maxLength?: number;

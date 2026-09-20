@@ -197,7 +197,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     label: 'Transport',
     type: 'string' as const,
     default: 'auto',
-    pattern: '^(auto|http|https)$',
+    enumOptions: ['auto', 'http', 'https'],
     description:
       'How to reach the appliance. auto = HTTPS with self-signed certificates accepted (default — TrueNAS ships a self-signed cert out of the box). https = force TLS. http = plaintext HTTP.',
   },

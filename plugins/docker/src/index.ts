@@ -80,7 +80,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     label: 'Transport',
     type: 'string' as const,
     default: 'auto',
-    pattern: '^(auto|tcp|tls|socket)$',
+    enumOptions: ['auto', 'tcp', 'tls', 'socket'],
     description:
       "How to reach the Docker daemon. auto = try plain TCP (port below), then TLS 2376 when a dockerTls secret is bound. tcp = unauthenticated TCP (trusted networks only). tls = client-cert TLS on port 2376 (bind a 'Docker TLS Client Certificates' secret to the device). socket = unix socket of the daemon running on THIS host (mount /var/run/docker.sock into the plugin container).",
   },

@@ -52,16 +52,16 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     label: 'Query method',
     type: 'string' as const,
     default: 'webui',
-    pattern: '^(webui|tr064)$',
+    enumOptions: ['webui', 'tr064'],
     description:
-      "How the plugin queries the device. 'webui' (default) uses the management web interface with a session login; 'tr064' uses the TR-064/UPnP SOAP control channel — stateless per request, no login rate-limit penalty, but fewer metrics.",
+      "How the plugin queries the device. 'webui' (default) uses the management web interface with a session login; 'tr064' uses the TR-064/UPnP SOAP control channel — stateless per request, no login rate-limit penalty, but fewer metrics. Note: TR-064 only answers from the router's own local network (LAN), so boxes managed via their WAN address must stay on 'webui'.",
   },
   {
     key: 'transport',
     label: 'Transport',
     type: 'string' as const,
     default: 'auto',
-    pattern: '^(auto|http|https)$',
+    enumOptions: ['auto', 'http', 'https'],
     description:
       "How to reach the box's web UI. 'auto' (default) tries https first — these routers serve self-signed TLS by default — and falls back to plain http only on network-level failures.",
   },
@@ -109,8 +109,9 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     type: 'integer' as const,
     default: DEFAULT_OPTIONS.requestTimeoutMs,
     min: 500,
-    max: 9_000,
-    description: "Timeout for a single web-UI request. Kept well under the API's 10 s poll budget (login + one parallel batch).",
+    max: 15_000,
+    description:
+      "Timeout for a single web-UI request. The data pages run in parallel, so this only bounds slow branches — raise it when polls degrade to 'warning' with per-page timeouts (e.g. boxes reached through extra routing hops). Must stay under the API's 30 s poll budget.",
   },
   {
     key: 'logToApi',
@@ -184,7 +185,7 @@ function resolveOptions(
   return {
     apiMode: typeof settings.apiMode === 'string' && settings.apiMode === 'tr064' ? 'tr064' : 'webui',
     transport: (t === 'http' || t === 'https' ? t : 'auto') as FBoxTransport,
-    requestTimeoutMs: clampInt(settings.requestTimeoutMs, 500, 9_000, DEFAULT_OPTIONS.requestTimeoutMs),
+    requestTimeoutMs: clampInt(settings.requestTimeoutMs, 500, 15_000, DEFAULT_OPTIONS.requestTimeoutMs),
     httpsPort: resolveHttpsPort(settings.httpsPort) !== 443 ? resolveHttpsPort(settings.httpsPort) : undefined,
     httpPort: resolveHttpPort(settings.httpPort) !== 80 ? resolveHttpPort(settings.httpPort) : undefined,
     sshPort: resolveSshPort(settings.sshPort) !== 22 ? resolveSshPort(settings.sshPort) : undefined,

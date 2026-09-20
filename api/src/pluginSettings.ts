@@ -64,6 +64,9 @@ export function validateOptionValue(
     case 'string': {
       if (typeof value !== 'string') return 'Must be a string';
       const s = descriptor as StringOption;
+      if (Array.isArray(s.enumOptions) && s.enumOptions.length > 0 && !s.enumOptions.includes(value)) {
+        return `Must be one of: ${s.enumOptions.join(', ')}`;
+      }
       if (s.minLength !== undefined && value.length < s.minLength) {
         return `Must be at least ${s.minLength} characters`;
       }

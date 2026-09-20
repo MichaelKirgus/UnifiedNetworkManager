@@ -115,7 +115,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     label: 'Web-UI transport',
     type: 'string' as const,
     default: 'auto',
-    pattern: '^(auto|http|https)$',
+    enumOptions: ['auto', 'http', 'https'],
     description:
       "How to reach the router's web UI for backup/restore. auto = HTTPS with self-signed certificates accepted, falling back to HTTP (default). https = force TLS. http = plaintext.",
   },

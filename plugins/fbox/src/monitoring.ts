@@ -55,7 +55,10 @@ export interface FBoxOptions {
 export const DEFAULT_OPTIONS: FBoxOptions = {
   apiMode: 'webui',
   transport: 'auto',
-  requestTimeoutMs: 3000,
+  // 6 s per page — the data pages run in parallel, so this only bounds slow
+  // branches. Boxes reached through extra routing hops (e.g. behind a firewall
+  // appliance) regularly need more than 3 s for the heavier pages.
+  requestTimeoutMs: 6000,
 };
 
 /** Everything one poll knows about the box (nulls = endpoint absent/failed). */

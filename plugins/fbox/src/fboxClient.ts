@@ -382,6 +382,10 @@ export class FBoxClient {
         try {
           await this.doLogin();
           clearAuthFailures(this.host); // success — reset the failure streak
+          // v4 marker: a REAL login event. If these appear every poll beat the
+          // session is churning; if they are rare, the box-side block has an
+          // external cause (another client / pre-existing penalty).
+          console.error(`[fbox-backoff v4] ${this.host}: LOGIN OK mode=${this.mode} sid=${(this.sid ?? '').slice(0, 6)}…`);
         } catch (err) {
           // Only AUTH failures count toward the backoff — a network blip or
           // timeout must not burn the box' rate-limit budget.

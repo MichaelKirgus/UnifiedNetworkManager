@@ -94,7 +94,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     label: 'Transport scheme',
     type: 'string' as const,
     default: 'auto',
-    pattern: '^(auto|https|http)$',
+    enumOptions: ['auto', 'https', 'http'],
     description:
       "How the plugin reaches the router's REST API. auto = try HTTPS first and fall back to HTTP when TLS fails (default); https/http force a single scheme. An explicit http:// or https:// prefix in the device management address always wins.",
   },

@@ -224,7 +224,7 @@ export async function getTr064Snapshot(host: string, creds: FBoxCredentials, opt
   ]);
   if (di.error) {
     throw new Error(
-      `TR-064 not usable on ${bareHost}: ${di.error} — check that the device is on and TR-064 is enabled, or switch the Query method option to webui.`
+      `TR-064 not usable on ${bareHost}: ${di.error} — note that TR-064 only answers from the router's own local network (LAN); if UNM reaches this box via its WAN address, use the webui query method. Otherwise check that TR-064 is enabled in the device settings.`
     );
   }
 

@@ -1589,6 +1589,8 @@ export interface PluginOptionBase {
 
 export interface StringOption extends PluginOptionBase {
   type: 'string';
+  /** Closed set of allowed values — rendered as a combobox (select). */
+  enumOptions?: string[];
   pattern?: string;
   minLength?: number;
   maxLength?: number;

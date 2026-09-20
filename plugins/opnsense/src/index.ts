@@ -871,7 +871,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     label: 'Transport',
     type: 'string' as const,
     default: 'auto',
-    pattern: '^(auto|http|https)$',
+    enumOptions: ['auto', 'http', 'https'],
     description:
       'How to reach the appliance. auto = HTTPS with self-signed certificates accepted (default, matches historical behavior). https = force TLS. http = plaintext HTTP for appliances without a certificate.',
   },
@@ -909,7 +909,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     label: 'Edition override',
     type: 'string' as const,
     default: 'auto',
-    pattern: '^(auto|ce|be)$',
+    enumOptions: ['auto', 'ce', 'be'],
     description:
       'Force the detected OPNsense edition. auto = probe /api/opncentral/sync/listClasses (200 = Business Edition, else Community). Use ce/be when probing is blocked by ACLs.',
   },
@@ -918,7 +918,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     label: 'DNS backend override',
     type: 'string' as const,
     default: 'auto',
-    pattern: '^(auto|dnsmasq|unbound)$',
+    enumOptions: ['auto', 'dnsmasq', 'unbound'],
     description:
       'Force the DNS backend. auto = probe (Unbound on newer installs, dnsmasq on older). Affects which host-record endpoints /config uses.',
   },
@@ -927,7 +927,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     label: 'DHCP backend override',
     type: 'string' as const,
     default: 'auto',
-    pattern: '^(auto|dnsmasq|kea)$',
+    enumOptions: ['auto', 'dnsmasq', 'kea'],
     description:
       'Force the DHCP backend. auto = probe (Kea on newer installs, dnsmasq on older). Affects which static-mapping endpoints /config uses.',
   },
