@@ -373,6 +373,86 @@ export interface HostRow {
   devices: HostDeviceMember[];
 }
 
+// --- Documented hosts (user-maintained host documentation) -------------------
+
+/** One documented IP address of a documented host, enriched with live discovery data. */
+export interface DocumentedHostIp {
+  id: string;
+  /** Bare IPv4/IPv6 literal. */
+  address: string;
+  version: 'v4' | 'v6';
+  /** The DOCUMENTED (expected) MAC in colon form; null = unknown. */
+  mac: string | null;
+  /** Known-network reference or free-form label for an unknown network. */
+  networkLabel: string | null;
+  /** VLAN id the address lives in; null = unknown. */
+  vlanId: number | null;
+  /** Resolved display name of the referenced network. */
+  networkName: string | null;
+  /** True when the label refers to a known logical network (vs free-form). */
+  networkKnown: boolean;
+  /** True when this address was observed in the live inventory recently. */
+  discovered: boolean;
+  /** MAC currently observed for this address; null = not observed. */
+  observedMac: string | null;
+  /** Documented MAC is set AND differs from what is currently observed here. */
+  macMismatch: boolean;
+}
+
+/** One documented host (user-maintained inventory) with live discovery info. */
+export interface DocumentedHost {
+  id: string;
+  /** DNS names / FQDNs (lowercase); the FIRST entry is the primary name. */
+  dnsNames: string[];
+  friendlyName: string | null;
+  description: string | null;
+  siteId: string | null;
+  siteName: string | null;
+  layerId: string | null;
+  layerName: string | null;
+  ips: DocumentedHostIp[];
+  /** True when any documented MAC or IP was observed in the live inventory. */
+  discovered: boolean;
+  /** Most recent observation matching this host; null = never seen. */
+  lastSeenAt: string | null;
+  /** Hostname reported by the best-matching live row (DHCP preferred). */
+  observedHostname: string | null;
+  /** Any documented MAC differs from what is currently observed for its address. */
+  macMismatch: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One IP entry of a documented-host create/update payload. */
+export interface DocumentedHostIpRequest {
+  address: string;
+  /** Documented MAC (any common format); null/empty = unknown. */
+  mac?: string | null;
+  /** Known-network reference or free-form label for an unknown network. */
+  networkLabel?: string | null;
+  /** VLAN id the address lives in; null/omitted = unknown. */
+  vlanId?: number | null;
+}
+
+/** Create/update payload for a documented host. */
+export interface DocumentedHostRequest {
+  dnsNames: string[];
+  friendlyName?: string | null;
+  description?: string | null;
+  siteId?: string | null;
+  layerId?: string | null;
+  ips: DocumentedHostIpRequest[];
+}
+
+/** Result of a bulk documented-host import. */
+export interface DocumentedHostImportResult {
+  created: number;
+  updated: number;
+  /** Matched rows left untouched (updateExisting=false). */
+  skipped: number;
+  errors: { index: number; error: string }[];
+}
+
 /** One configured tunnel from the cross-device inventory view. Unlike networks/hosts,
  * rows are NOT merged across devices — a tunnel row is one logical tunnel on one device. */
 export interface TunnelRow {
@@ -2159,6 +2239,21 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<HostRow[]>(`/hosts${suffix}`);
   },
+  // Documented hosts — the user-maintained host documentation page.
+  documentedHosts: (params?: { siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<DocumentedHost[]>(`/documented-hosts${suffix}`);
+  },
+  createDocumentedHost: (body: DocumentedHostRequest) =>
+    apiFetch<DocumentedHost>('/documented-hosts', { method: 'POST', body: JSON.stringify(body) }),
+  updateDocumentedHost: (id: string, body: Partial<DocumentedHostRequest>) =>
+    apiFetch<DocumentedHost>(`/documented-hosts/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteDocumentedHost: (id: string) =>
+    apiFetch<void>(`/documented-hosts/${id}`, { method: 'DELETE' }),
+  importDocumentedHosts: (body: { hosts: DocumentedHostRequest[]; matchBy?: 'dns' | 'mac'; updateExisting?: boolean }) =>
+    apiFetch<DocumentedHostImportResult>('/documented-hosts/import', { method: 'POST', body: JSON.stringify(body) }),
   tunnels: (params?: { deviceId?: string; siteId?: string; type?: 'wireguard' | 'openvpn' | 'ipsec' | 'pppoe' | 'gre' }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);

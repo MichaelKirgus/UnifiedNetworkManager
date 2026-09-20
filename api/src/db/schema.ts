@@ -1570,6 +1570,67 @@ export const userPreferences = pgTable(
   }
 );
 
+// ---------------------------------------------------------------------------
+// Documented hosts — a USER-MAINTAINED inventory (the "Hosts documentation"
+// page). Unlike the normalized `hosts` table (live ARP/NDP/DHCP observations,
+// swept after 24h), these rows are permanent records: one or more DNS names,
+// an optional friendly name + description, an optional site/layer placement,
+// and one or more IP addresses each with an optional MAC and network label.
+// The API cross-references the live `hosts` table at read time to mark a
+// documented host as "discovered" (a matching MAC or IP was observed recently)
+// — later used for change detection such as MAC changes on known hosts.
+export const documentedHosts = pgTable(
+  'documented_hosts',
+  {
+    id: text('id').primaryKey(),
+    // JSON string array of DNS names / FQDNs (validated RFC1123, lowercase).
+    // The FIRST entry is the primary name — display label + import match key.
+    dnsNames: text('dnsNames').notNull().default('[]'),
+    friendlyName: text('friendlyName'),
+    description: text('description'),
+    // Optional placement (NULL = unassigned) — same registries as devices.
+    siteId: text('siteId'),
+    layerId: text('layerId'),
+    createdAt: text('createdAt').notNull(),
+    updatedAt: text('updatedAt').notNull(),
+  },
+  (table) => {
+    return {
+      idxDocumentedHostsSite: index('idx_documented_hosts_site').on(table.siteId),
+      idxDocumentedHostsLayer: index('idx_documented_hosts_layer').on(table.layerId),
+    };
+  }
+);
+
+// One documented IP address of a documented host. `mac` is the DOCUMENTED (expected)
+// MAC — auto-filled from live observations in the webapp but user-overridable; it
+// is what future change-detection compares against. `networkLabel` references a
+// known network by its canonical identity (subnet CIDR / "VLAN <id>" / interface
+// name, see mergeNetworkRows) or holds a free-form label for networks not yet in
+// the inventory — resolved to display data at read time.
+export const documentedHostIps = pgTable(
+  'documented_host_ips',
+  {
+    id: text('id').primaryKey(),
+    hostId: text('hostId').notNull(),
+    // Bare IPv4/IPv6 literal (validated; DNS names live on the parent row).
+    address: text('address').notNull(),
+    // Documented MAC ("aa:bb:cc:dd:ee:ff", lowercase); NULL = unknown.
+    mac: text('mac'),
+    networkLabel: text('networkLabel'),
+    // VLAN id the address lives in (auto-filled from the inventory when known).
+    vlanId: integer('vlanId'),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => {
+    return {
+      uqDocumentedHostIps: uniqueIndex('uq_documented_host_ips').on(table.hostId, table.address),
+      idxDocumentedHostIpsMac: index('idx_documented_host_ips_mac').on(table.mac),
+      idxDocumentedHostIpsAddress: index('idx_documented_host_ips_address').on(table.address),
+    };
+  }
+);
+
 // Add index for config_jobs
 // Note: Drizzle's index definition inside the table definition is 
 // usually the best way to handle this. I'll add it to configJobs.

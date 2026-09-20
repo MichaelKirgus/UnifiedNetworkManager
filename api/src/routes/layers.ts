@@ -192,6 +192,17 @@ router.delete('/layers/:id', requireAuth, requirePermission('layers:write'), asy
     return;
   }
 
+  // Documented hosts may also be placed on this layer — refuse while any do,
+  // so no documented host is left pointing at a deleted layer.
+  const { rows: docRows } = await pool.query('SELECT COUNT(*)::int AS n FROM documented_hosts WHERE "layerId" = $1', [existing.id]);
+  const docCount = Number(docRows[0]?.n ?? 0);
+  if (docCount > 0) {
+    res.status(409).json({
+      error: `Cannot delete layer "${existing.name}": ${docCount} documented host(s) are placed on it. Unassign the layer from those hosts first.`,
+    });
+    return;
+  }
+
   await db.delete(schema.networkLayers).where(eq(schema.networkLayers.id, existing.id));
   res.status(204).send();
 });

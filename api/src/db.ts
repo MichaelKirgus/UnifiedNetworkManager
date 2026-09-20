@@ -390,6 +390,42 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_hosts_ip ON hosts (ip)`);
 
+  // Documented hosts — USER-MAINTAINED inventory (the "Hosts documentation"
+  // page). Permanent records, unlike the live `hosts` table: DNS names +
+  // friendly name/description + optional site/layer + per-address MAC/network.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS documented_hosts (
+      id TEXT PRIMARY KEY,
+      "dnsNames" TEXT NOT NULL DEFAULT '[]',
+      "friendlyName" TEXT,
+      description TEXT,
+      "siteId" TEXT,
+      "layerId" TEXT,
+      "createdAt" TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_documented_hosts_site ON documented_hosts ("siteId")`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_documented_hosts_layer ON documented_hosts ("layerId")`);
+
+  // One row per documented IP address of a documented host. `mac` is the
+  // DOCUMENTED (expected) MAC — auto-filled from live observations but
+  // user-overridable; future change-detection compares against it.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS documented_host_ips (
+      id TEXT PRIMARY KEY,
+      "hostId" TEXT NOT NULL,
+      address TEXT NOT NULL,
+      mac TEXT,
+      "networkLabel" TEXT,
+      "vlanId" INTEGER,
+      "createdAt" TEXT NOT NULL,
+      UNIQUE ("hostId", address)
+    )`);
+  // vlanId was added after the table existed — idempotent upgrade for old DBs.
+  await pool.query(`ALTER TABLE documented_host_ips ADD COLUMN IF NOT EXISTS "vlanId" INTEGER`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_documented_host_ips_mac ON documented_host_ips (mac)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_documented_host_ips_address ON documented_host_ips (address)`);
+
   // Tunnels inventory table (Tunnels page) — same lifecycle as networks/hosts.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS tunnels (

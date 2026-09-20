@@ -228,6 +228,17 @@ router.delete('/sites/:id', requireAuth, requirePermission('sites:write'), async
     return;
   }
 
+  // Documented hosts may also be placed at this site — refuse while any do,
+  // so no documented host is ever left pointing at a deleted site.
+  const { rows: docRows } = await pool.query('SELECT COUNT(*)::int AS n FROM documented_hosts WHERE "siteId" = $1', [existing.id]);
+  const docCount = Number(docRows[0]?.n ?? 0);
+  if (docCount > 0) {
+    res.status(409).json({
+      error: `Cannot delete site "${existing.name}": ${docCount} documented host(s) are placed at it. Unassign the site from those hosts first.`,
+    });
+    return;
+  }
+
   await db.delete(schema.sites).where(eq(schema.sites.id, existing.id));
   res.status(204).send();
 });

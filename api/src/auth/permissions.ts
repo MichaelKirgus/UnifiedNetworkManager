@@ -27,6 +27,10 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'devices:all': 'Access every device regardless of device-scope rules',
   'networks:read': 'View the Networks inventory page (logical networks across devices)',
   'hosts:read': 'View the Hosts inventory page (ARP/NDP/DHCP/WLAN clients)',
+  // User-maintained host documentation (DNS names, IPs, expected MACs) — a
+  // permanent inventory distinct from the live ARP/NDP observations above.
+  'documented-hosts:read': 'View documented hosts (the user-maintained host inventory)',
+  'documented-hosts:write': 'Create, update and delete documented hosts (incl. CSV import)',
   'tunnels:read': 'View the Tunnels page (configured + live tunnel state)',
   'routes:read': 'View the Routes page (static and dynamic routes across devices)',
   'firewall:read': 'View the Firewall page (filter + NAT rules across devices)',

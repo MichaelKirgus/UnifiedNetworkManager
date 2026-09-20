@@ -24,6 +24,7 @@ import {
   ShieldHalf,
   ShieldCheck,
   FileKey2,
+  NotebookPen,
   Settings2,
   UserRound,
   Users as UsersIcon,
@@ -55,6 +56,9 @@ export const NAV_ITEMS: NavItem[] = [
   // Cross-device inventory views (populated by the telemetry worker).
   { to: '/networks', label: 'Networks', icon: Network, requiresPermission: 'networks:read' },
   { to: '/hosts', label: 'Hosts', icon: Laptop, requiresPermission: 'hosts:read' },
+  // User-maintained host documentation — permanent inventory records with
+  // live "discovered" matching (distinct from the live ARP/NDP Hosts page).
+  { to: '/documented-hosts', label: 'Documented Hosts', icon: NotebookPen, requiresPermission: 'documented-hosts:read' },
   // Cable stands in for a tunnel link (lucide's `Tunnel` icon is not in the installed version).
   { to: '/tunnels', label: 'Tunnels', icon: Cable, requiresPermission: 'tunnels:read' },
   // Firewall rules across devices (filter + NAT kinds) — ShieldHalf reads as a

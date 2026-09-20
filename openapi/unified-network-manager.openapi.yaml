@@ -3171,6 +3171,164 @@ paths:
         '401':
           description: Authentication required
 
+  /documented-hosts:
+    get:
+      tags: [Inventory]
+      summary: List all documented hosts (user-maintained inventory)
+      description: >-
+        The user-maintained host documentation — permanent records of what
+        SHOULD exist on the network (DNS names, friendly name/description,
+        site/layer placement, per-address documented MAC + network). Distinct
+        from /hosts (live ARP/NDP/DHCP observations): every row is cross-
+        referenced against the live inventory at read time and marked
+        `discovered` when a matching MAC or IP was observed recently. A
+        documented MAC that differs from what is currently observed for its
+        address is flagged as `macMismatch`.
+      parameters:
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to hosts placed at a site
+      responses:
+        '200':
+          description: Documented host rows (with live discovery info)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DocumentedHost'
+        '401':
+          description: Authentication required
+    post:
+      tags: [Inventory]
+      summary: Create a documented host
+      description: Requires permission `documented-hosts:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentedHostRequest'
+      responses:
+        '201':
+          description: Created host (with live discovery info)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentedHost'
+        '400':
+          description: Invalid payload (bad DNS name / IP / MAC, unknown site or layer, empty names or ips)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-hosts:write permission
+
+  /documented-hosts/{id}:
+    patch:
+      tags: [Inventory]
+      summary: Update a documented host
+      description: >-
+        Requires permission `documented-hosts:write`. Partial update — only the
+        provided fields change; when `ips` is present it REPLACES the full
+        address list. The merged result must be a complete valid host (at least
+        one DNS name and one IP).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentedHostUpdateRequest'
+      responses:
+        '200':
+          description: Updated host (with live discovery info)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentedHost'
+        '400':
+          description: Invalid payload or merged result incomplete
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-hosts:write permission
+        '404':
+          description: Documented host not found
+    delete:
+      tags: [Inventory]
+      summary: Delete a documented host (and its addresses)
+      description: Requires permission `documented-hosts:write`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Documented host deleted
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-hosts:write permission
+        '404':
+          description: Documented host not found
+
+  /documented-hosts/import:
+    post:
+      tags: [Inventory]
+      summary: Bulk-import documented hosts (CSV import backend)
+      description: >-
+        Requires permission `documented-hosts:write`. The webapp parses the CSV
+        client-side with a flexible header mapping and sends already-structured
+        rows; this endpoint only validates + upserts. Rows are validated
+        independently — one bad row never aborts the batch (per-row errors come
+        back in `errors`). Matching against existing hosts is by DNS name
+        (`matchBy: dns`, default) or documented MAC (`matchBy: mac`); matched
+        rows are updated in place when `updateExisting` is true, otherwise
+        skipped. At most 5000 rows per batch.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hosts]
+              properties:
+                hosts:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items:
+                    $ref: '#/components/schemas/DocumentedHostRequest'
+                matchBy:
+                  type: string
+                  enum: [dns, mac]
+                  default: dns
+                  description: "How to match rows against existing hosts"
+                updateExisting:
+                  type: boolean
+                  default: true
+                  description: "Update matched hosts in place (false = skip them)"
+      responses:
+        '200':
+          description: Import summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentedHostImportResult'
+        '400':
+          description: Empty batch or more than 5000 rows
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-hosts:write permission
+
   /topology:
     get:
       tags: [Inventory]
@@ -5633,6 +5791,164 @@ components:
                 type: array
                 items: { type: string }
                 description: "Interface(s) on the observing device where the host was seen (e.g. [lan], [wlan0])"
+
+    DocumentedHostIp:
+      type: object
+      description: >-
+        One documented IP address of a documented host, enriched with live
+        discovery data at read time.
+      required: [id, address, version, discovered]
+      properties:
+        id: { type: string }
+        address: { type: string, description: "Bare IPv4/IPv6 literal" }
+        version:
+          type: string
+          enum: [v4, v6]
+        mac:
+          type: [string, 'null']
+          description: "The DOCUMENTED (expected) MAC in colon form; null = unknown. Auto-filled from live observations in the webapp but user-overridable."
+        networkLabel:
+          type: [string, 'null']
+          description: >-
+            Reference to a known network — either the canonical key of a merged
+            logical network (subnet CIDR / "VLAN <id>" / interface name) or a
+            free-form label for networks not in the inventory yet.
+        vlanId:
+          type: [integer, 'null']
+          description: "VLAN id the address lives in; null = unknown. Auto-filled from the inventory when known."
+        networkName:
+          type: [string, 'null']
+          description: "Resolved display name of the referenced network"
+        networkKnown:
+          type: boolean
+          description: "True when the label refers to a known logical network (vs free-form)"
+        discovered:
+          type: boolean
+          description: "True when this address was observed in the live inventory recently"
+        observedMac:
+          type: [string, 'null']
+          description: "MAC currently observed for this address; null = not observed"
+        macMismatch:
+          type: boolean
+          description: "Documented MAC is set AND differs from what is currently observed here"
+
+    DocumentedHost:
+      type: object
+      description: >-
+        One documented host (user-maintained inventory) with live discovery
+        info. `discovered` = a matching documented MAC or IP was seen in the
+        live ARP/NDP/DHCP/WLAN inventory recently; `macMismatch` = any
+        documented MAC differs from what is currently observed for its address.
+      required: [id, dnsNames, ips, discovered, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        dnsNames:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: "DNS names / FQDNs (lowercase); the FIRST entry is the primary name"
+        friendlyName: { type: [string, 'null'], description: "Optional human-friendly label" }
+        description: { type: [string, 'null'] }
+        siteId: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'], description: "Display name of the placed-at site" }
+        layerId: { type: [string, 'null'] }
+        layerName: { type: [string, 'null'], description: "Display name of the topology layer" }
+        ips:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/DocumentedHostIp'
+        discovered:
+          type: boolean
+          description: "True when any documented MAC or IP was observed in the live inventory"
+        lastSeenAt:
+          type: [string, 'null']
+          format: date-time
+          description: "Most recent observation matching this host; null = never seen"
+        observedHostname:
+          type: [string, 'null']
+          description: "Hostname reported by the best-matching live row (DHCP preferred)"
+        macMismatch:
+          type: boolean
+          description: "Any documented MAC differs from what is currently observed for its address"
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    DocumentedHostIpRequest:
+      type: object
+      required: [address]
+      properties:
+        address: { type: string, description: "Bare IPv4/IPv6 literal (no scheme)" }
+        mac:
+          type: [string, 'null']
+          description: "Documented MAC (any common format; normalized to colon form); null = unknown"
+        networkLabel:
+          type: [string, 'null']
+          description: "Known-network reference or free-form label for an unknown network"
+        vlanId:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 4095
+          description: "VLAN id the address lives in; null = unknown"
+
+    DocumentedHostRequest:
+      type: object
+      required: [dnsNames, ips]
+      properties:
+        dnsNames:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: "DNS names / FQDNs (validated RFC 1123); first entry = primary name"
+        friendlyName: { type: [string, 'null'] }
+        description: { type: [string, 'null'] }
+        siteId: { type: [string, 'null'], description: "Site this host is placed at; must exist when set" }
+        layerId: { type: [string, 'null'], description: "Topology layer this host sits on; must exist when set" }
+        ips:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/DocumentedHostIpRequest'
+
+    DocumentedHostUpdateRequest:
+      type: object
+      description: >-
+        Partial update of a documented host — every property is optional; only
+        the provided fields change. When `ips` is present it REPLACES the full
+        address list. The merged result must be a complete valid host (at least
+        one DNS name and one IP), enforced server-side.
+      properties:
+        dnsNames:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: "Replaces the full DNS-name list"
+        friendlyName: { type: [string, 'null'] }
+        description: { type: [string, 'null'] }
+        siteId: { type: [string, 'null'], description: "Site this host is placed at; must exist when set" }
+        layerId: { type: [string, 'null'], description: "Topology layer this host sits on; must exist when set" }
+        ips:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/DocumentedHostIpRequest'
+          description: "Replaces the full address list"
+
+    DocumentedHostImportResult:
+      type: object
+      required: [created, updated, skipped, errors]
+      properties:
+        created: { type: integer }
+        updated: { type: integer }
+        skipped: { type: integer, description: "Matched rows left untouched (updateExisting=false)" }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [index, error]
+            properties:
+              index: { type: integer, description: "0-based position in the submitted batch" }
+              error: { type: string }
 
     NetworkLayer:
       type: object

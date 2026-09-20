@@ -15,7 +15,7 @@ const LABEL = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/;
 const MAX_HOSTNAME_LENGTH = 253;
 
 /** True when `value` is an IPv4 or IPv6 literal (structural check). */
-function isIpLiteral(value: string): boolean {
+export function isIpLiteral(value: string): boolean {
   if (IPV4.test(value)) return true;
   // IPv6: hex groups separated by colons, at most one '::' compression, and
   // an optional trailing %zone id (link-local) which we strip before checking.
