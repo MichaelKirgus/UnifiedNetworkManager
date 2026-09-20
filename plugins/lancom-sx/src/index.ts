@@ -11,6 +11,8 @@ import {
   hostFromAddress,
   INVENTORY_INTERVAL_MS,
   modelFirmwareDescriptors,
+  quickActionHandler,
+  buildWebUiUrl,
   readSettings,
   resolvePluginIdentity,
   stateHandler,
@@ -24,6 +26,7 @@ import {
   buildDeviceTimeInfo,
   catalogFirmwareRow,
   CertificateRow,
+  type QuickAction,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 
@@ -80,7 +83,7 @@ const identity = resolvePluginIdentity({
   // All four capabilities + deviceState (dynamic Config-page state document):
   // monitoring (SNMP walks), inventory (networks/hosts/ports), configuration
   // (SNMP SET actions) + planning (multi-device fan-out).
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState', 'updates'],
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState', 'updates', 'quickActions'],
 });
 
 /**
@@ -162,6 +165,18 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
       "TCP port of the switch's SSH daemon. Used for the host-key inventory probe when the management address carries no explicit port.",
   },];
 
+/** Quick actions propagated to the Devices page "Device Actions" column. */
+const QUICK_ACTIONS: QuickAction[] = [
+  {
+    id: 'webui',
+    label: 'Web UI',
+    description: "Open the switch's management web interface in a new tab",
+    iconPath: '/icons/lancom-sx.svg',
+    kind: 'url',
+    url: {},
+  },
+];
+
 // Pre-wired app: cors + json (32mb for base64 config payloads) + /healthz +
 // /discover (+ static icons, mDNS on listen) come from @unm/plugin-sdk — this
 // file only registers its own routes.
@@ -180,11 +195,23 @@ const server = createPluginServer({
     // serves /discover, /plan and /config — see src/actions/registry.ts.
     actions: listCatalog(),
     modules: listModules(),
+    // Quick action for the Devices page "Device Actions" column — the web-UI URL
+    // is resolved by THIS plugin (port = the configured httpsPort option).
+    quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/lancom-sx.svg',
     deviceModels: DEVICE_MODELS,
   },
 });
 const app = server.app;
+
+// POST /quick-action — resolve a kind:'url' quick action into the management web-UI
+// URL. The plugin owns all URL knowledge; no credentials are transmitted.
+app.post('/quick-action', quickActionHandler(async (body, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  const qa = QUICK_ACTIONS.find((q) => q.id === body.actionId && q.kind === 'url');
+  if (!qa) throw new Error(`Unknown url quick action: ${body.actionId}`);
+  return { url: buildWebUiUrl(body.managementAddress, { webUiPort: resolveHttpsPort(settings.httpsPort), scheme: 'https' }, qa.url?.path) };
+}, 'lancom-sx-plugin'));
 
 // Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
 // Emission is gated per call by the `logToApi` option via setEnabled() — it

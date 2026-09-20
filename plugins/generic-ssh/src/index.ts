@@ -39,6 +39,7 @@ import {
   buildDeviceTimeInfo,
   createSftpPool,
   warnOnce,
+  type QuickAction,
 } from '@unm/plugin-sdk';
 import type { ProbeRequestBody, StateRequestBody } from '@unm/plugin-sdk';
 
@@ -156,6 +157,27 @@ const consoleUpgrade = makeConsoleUpgrade({
   },
 });
 
+/** Quick actions propagated to the Devices page "Device Actions" column. This
+ * plugin is SSH-only (no web UI), so it offers shell + files shortcuts that reuse
+ * the existing console + filesystem dialogs — no /quick-action route needed.
+ */
+const QUICK_ACTIONS: QuickAction[] = [
+  {
+    id: 'shell',
+    label: 'Shell',
+    description: 'Interactive SSH shell on the host (uses the bound or primary credential)',
+    iconPath: '/icons/generic-ssh.svg',
+    kind: 'shell',
+  },
+  {
+    id: 'files',
+    label: 'Files',
+    description: "Browse the device's filesystem over SFTP (uses the bound or primary credential)",
+    iconPath: '/icons/generic-ssh.svg',
+    kind: 'files',
+  },
+];
+
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
@@ -192,6 +214,9 @@ const server = createPluginServer({
     // persists it and validates plan steps against it.
     actions: listCatalogWithIntents(),
     options: PLUGIN_OPTIONS,
+    // Quick actions for the Devices page "Device Actions" column — shell/files
+    // reuse the existing console + filesystem dialogs (capability-gated).
+    quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/generic-ssh.svg',
   },
 });

@@ -172,6 +172,8 @@ export async function initDb(): Promise<void> {
   // slot descriptors are cached on the plugin row; bound secrets live per
   // assignment as JSON { slotName: secretId } on device_plugins.extraCredentials.
   await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "credentialSlots" TEXT`);
+  // Quick actions for the Devices page (see schema.plugins.quickActions).
+  await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "quickActions" TEXT`);
   await pool.query(
     `ALTER TABLE device_plugins ADD COLUMN IF NOT EXISTS "extraCredentials" TEXT`
   );

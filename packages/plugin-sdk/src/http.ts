@@ -117,6 +117,62 @@ export function toWsUrl(httpBase: string): string {
   return b; // no scheme — caller decides
 }
 
+/** Options for {@link buildWebUiUrl}. */
+export interface WebUiUrlOptions {
+  /** The plugin's configured web-UI port (from its `webUiPort` option). Applied when the address carries no explicit port. */
+  webUiPort?: number;
+  /** Scheme to use for bare addresses. Defaults to 'https' — appliance web UIs are TLS by default. */
+  scheme?: 'http' | 'https';
+}
+
+/**
+ * Builds the browser-openable management web-UI URL for a device from its
+ * management address + the plugin's configured web-UI port. This is the single
+ * home for that knowledge so every plugin resolves URLs identically:
+ *   - An explicit `http(s)://` scheme in the address ALWAYS wins (scheme AND any
+ *     port already in it are kept verbatim).
+ *   - A bare address with an explicit port (`host:8443`, `[::1]:8443`) keeps that
+ *     port; the scheme comes from `opts.scheme` (default https).
+ *   - A bare address without a port gets `opts.webUiPort` appended when it differs
+ *     from the scheme default (so the common 443/80 cases stay clean).
+ * An optional path is appended with exactly one separating slash. Empty input → ''.
+ */
+export function buildWebUiUrl(address: string, opts: WebUiUrlOptions = {}, path?: string): string {
+  const raw = String(address ?? '').trim().replace(/\/+$/, '');
+  if (!raw) return '';
+
+  let base: string;
+  if (/^https?:\/\//i.test(raw)) {
+    // Explicit scheme wins verbatim — including any port already in the address.
+    base = raw;
+  } else {
+    const scheme = opts.scheme ?? 'https';
+    const v6 = raw.match(/^\[([^\]]+)\](?::(\d+))?$/);
+    let host: string;
+    let explicitPort: number | null = null;
+    if (v6) {
+      host = `[${v6[1]}]`; // brackets are part of a valid URL authority
+      if (v6[2]) explicitPort = Number(v6[2]);
+    } else {
+      const idx = raw.lastIndexOf(':');
+      if (idx > 0 && /^\d+$/.test(raw.slice(idx + 1))) {
+        host = raw.slice(0, idx);
+        explicitPort = Number(raw.slice(idx + 1));
+      } else {
+        host = raw;
+      }
+    }
+    if (!host || !Number.isFinite(explicitPort as number) || (explicitPort as number) < 1 || (explicitPort as number) > 65535) {
+      explicitPort = null;
+    }
+    base = explicitPort !== null ? `${scheme}://${host}:${Math.floor(explicitPort)}` : withPort(`${scheme}://${host}`, opts.webUiPort, scheme === 'https' ? 443 : 80);
+  }
+
+  const p = String(path ?? '').trim();
+  if (!p) return base;
+  return `${base}${p.startsWith('/') ? '' : '/'}${p}`;
+}
+
 let insecureAgent: https.Agent | null = null;
 
 /**

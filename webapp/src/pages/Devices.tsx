@@ -8,6 +8,7 @@ import { ChipInput } from '../components/ChipInput';
 import { StatusBadge } from '../components/StatusBadge';
 import { MetricCell } from '../components/MetricCell';
 import { DeviceIcon } from '../components/DeviceIcon';
+import { DeviceActionsCell } from '../components/DeviceActionsCell';
 import { PluginAssignmentBuilder } from '../components/PluginAssignmentBuilder';
 import { api, Device, DeviceCreateRequest, DeviceModelEntry, DevicePluginAssignmentInput, DevicePluginAssignment, DeviceRefreshResult, Plugin } from '../api/client';
 import { OptionForm } from '../components/OptionForm';
@@ -581,7 +582,19 @@ export default function Devices() {
       },
     },
     {
-      header: 'Actions',
+      // Quick actions propagated by the assigned plugins (web UI, shell, files,
+      // risk-gated catalog actions). Hidden on first render — enable via the
+      // Columns picker; the plugin list drives what each row offers.
+      header: 'Device Actions',
+      key: 'deviceActions',
+      excludeFromExport: true,
+      width: 150,
+      sortable: false,
+      hiddenByDefault: true,
+      render: (row) => <DeviceActionsCell device={row} />,
+    },
+    {
+      header: 'Management Actions',
       key: 'actions',
       excludeFromExport: true,
       width: 210,

@@ -11,6 +11,8 @@ import {
   hostFromAddress,
   INVENTORY_INTERVAL_MS,
   makeConsoleUpgrade,
+  quickActionHandler,
+  buildWebUiUrl,
   modelFirmwareDescriptors,
   readSettings,
   resolvePluginIdentity,
@@ -28,6 +30,7 @@ import {
   warnOnce,
   catalogFirmwareRow,
   CertificateRow,
+  type QuickAction,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 
@@ -70,7 +73,7 @@ const identity = resolvePluginIdentity({
   // All four capabilities: monitoring (SNMP walks), inventory (networks/hosts),
   // configuration (SNMP SET actions) + planning (multi-device fan-out). Plus an
   // interactive SSH console ('sshConsole') — LCOS exposes a full CLI over SSH.
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'sshConsole', 'updates'],
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'sshConsole', 'updates', 'quickActions'],
 });
 
 /**
@@ -210,6 +213,25 @@ const consoleUpgrade = makeConsoleUpgrade({
   },
 });
 
+/** Quick actions propagated to the Devices page "Device Actions" column. */
+const QUICK_ACTIONS: QuickAction[] = [
+  {
+    id: 'webui',
+    label: 'Web UI',
+    description: "Open the router's management web interface in a new tab",
+    iconPath: '/icons/lancom-lcos.svg',
+    kind: 'url',
+    url: {},
+  },
+  {
+    id: 'shell',
+    label: 'Shell',
+    description: 'Interactive LCOS CLI shell over SSH (requires a bound SSH credential)',
+    iconPath: '/icons/lancom-lcos.svg',
+    kind: 'shell',
+  },
+];
+
 // Pre-wired app: cors + json (32mb — plan-step inputs can carry a substituted
 // ${steps[N].result.details.backupBase64} token) + /healthz + /discover (+ static
 // icons, mDNS on listen) come from @unm/plugin-sdk — this file only registers
@@ -244,11 +266,29 @@ const server = createPluginServer({
     // serves /discover, /plan and /config — see src/actions/registry.ts.
     actions: listCatalog(),
     modules: listModules(),
+    // Quick actions for the Devices page "Device Actions" column. The web-UI URL
+    // is resolved by THIS plugin (scheme follows webTransport, port = httpsPort);
+    // shell reuses the existing console dialog.
+    quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/lancom-lcos.svg',
     deviceModels: DEVICE_MODELS,
   },
 });
 const app = server.app;
+
+// POST /quick-action — resolve a kind:'url' quick action into the management web-UI
+// URL. The plugin owns all URL knowledge; no credentials are transmitted.
+app.post('/quick-action', quickActionHandler(async (body, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  const qa = QUICK_ACTIONS.find((q) => q.id === body.actionId && q.kind === 'url');
+  if (!qa) throw new Error(`Unknown url quick action: ${body.actionId}`);
+  return {
+    url: buildWebUiUrl(body.managementAddress, {
+      webUiPort: resolveHttpsPort(settings.httpsPort),
+      scheme: typeof settings.webTransport === 'string' && settings.webTransport === 'http' ? 'http' : 'https',
+    }, qa.url?.path),
+  };
+}, 'lancom-lcos-plugin'));
 
 // Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
 // Emission is gated per call by the `logToApi` option via setEnabled() — it

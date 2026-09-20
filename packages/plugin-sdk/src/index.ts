@@ -8,7 +8,7 @@
 export * from './types';
 export { resolvePluginIdentity, DEFAULT_PLUGIN_PORT } from './identity';
 export type { PluginIdentity, PluginIdentityInput } from './identity';
-export { createPluginServer, buildDiscoverPayload, requirePluginKey, stateHandler, probeHandler, filesystemHandler } from './server';
+export { createPluginServer, buildDiscoverPayload, requirePluginKey, stateHandler, probeHandler, filesystemHandler, quickActionHandler } from './server';
 export type { PluginServerOptions, PluginServer, DiscoveryExtras } from './server';
 // Interactive SSH console (capability 'sshConsole'): PTY sessions + pool (terminal.ts)
 // and the WebSocket bridge helper plugins pass to createPluginServer (consoleWs.ts).
@@ -19,8 +19,8 @@ export type { ConsoleEndpointOptions, ConsoleUpgradeHandler } from './consoleWs'
 export { readSettings, readGlobalSettings, clampInt, hostFromAddress, pickString, pickNumber, pickBool, normalizeMac, resolveUserPass } from './settings';
 export type { UserPassCreds, ResolveUserPassResult } from './settings';
 // Outbound device-HTTP shared layer (endpoint resolution + TLS/error primitives). See http.ts.
-export { withPort, resolveEndpointCandidates, toWsUrl, insecureHttpsAgent, isNetworkLevelError, basicAuthHeader } from './http';
-export type { DeviceApiResult, EndpointTransport, EndpointPorts, EndpointOptions } from './http';
+export { withPort, resolveEndpointCandidates, toWsUrl, buildWebUiUrl, insecureHttpsAgent, isNetworkLevelError, basicAuthHeader } from './http';
+export type { DeviceApiResult, EndpointTransport, EndpointPorts, EndpointOptions, WebUiUrlOptions } from './http';
 export { suggestPortLayout, portNumberFromKey } from './portLayout';
 export { INVENTORY_INTERVAL_MS, errorDescriptor, modelFirmwareDescriptors, gaugeMetric, textMetric, tableMetric } from './metrics';
 export { validateInput, isValidInput, createRegistry } from './actions';

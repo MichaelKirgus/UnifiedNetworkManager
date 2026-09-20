@@ -203,6 +203,23 @@ export interface BoundCredentialSlot extends CredentialSlotDescriptor {
   secretLabel?: string | null;
 }
 
+/** One quick action a plugin propagates for its devices (Devices page "Device Actions" column). */
+export interface QuickAction {
+  /** Stable id within the plugin's quick-action list (e.g. 'webui', 'shell'). */
+  id: string;
+  label: string;
+  description?: string;
+  /** Optional icon path served from the plugin's /icons dir via the API icon proxy; generic per-kind glyph when absent. */
+  iconPath?: string;
+  kind: 'url' | 'shell' | 'files' | 'action';
+  /** kind 'url': path the plugin appends to the resolved base URL. */
+  url?: { path?: string };
+  /** kind 'action': id of a single-device entry in this plugin's action catalog. */
+  actionId?: string;
+  /** Pre-filled input values merged under the action schema defaults (kind 'action'). */
+  prefill?: Record<string, unknown>;
+}
+
 /** One row of the device ↔ plugin join table (a device can have several). */
 export interface DevicePluginAssignment {
   id: string;
@@ -222,6 +239,8 @@ export interface DevicePluginAssignment {
   pluginEndpoint?: string;
   /** The assigned plugin's advertised capabilities (e.g. 'deviceState'). */
   pluginCapabilities?: string[];
+  /** The assigned plugin's quick actions for the Devices page "Device Actions" column. */
+  pluginQuickActions?: QuickAction[];
   pluginOnline?: boolean;
   secretLabel?: string | null;
   /** The plugin's declared slots with their bound secrets resolved. */
@@ -2405,6 +2424,12 @@ export const api = {
   getPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}`),
   deletePlan: (id: string) => apiFetch<void>(`/plans/${id}`, { method: 'DELETE' }),
   executePlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/execute`, { method: 'POST' }),
+  /** Resolve a kind:'url' quick action into the device's management web-UI URL. */
+  resolveQuickAction: (deviceId: string, actionId: string, pluginId?: string) =>
+    apiFetch<{ deviceId: string; url: string }>(`/devices/${deviceId}/quick-action`, {
+      method: 'POST',
+      body: JSON.stringify({ actionId, ...(pluginId ? { pluginId } : {}) }),
+    }),
   /** Duplicate this plan (same payload + provisioned secrets) and execute the copy. */
   retryPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/retry`, { method: 'POST' }),
   /** (Re-)schedule a saved or finished plan for later execution. Relative (`inMinutes`) or absolute (`at`). */

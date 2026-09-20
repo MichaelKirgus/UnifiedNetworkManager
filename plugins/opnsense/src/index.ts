@@ -16,6 +16,8 @@ import {
   collectDeviceCertificates,
   parseProbeTarget,
   createPinningGuard,
+  quickActionHandler,
+  buildWebUiUrl,
   resolveHttpsPort,
   resolveHttpPort,
   resolveSshPort,
@@ -25,6 +27,7 @@ import {
   warnOnce,
   type DeviceTimeInfo,
   type UpdateRow,
+  type QuickAction,
 } from '@unm/plugin-sdk';
 import {
   getSystemStatus,
@@ -84,7 +87,7 @@ const identity = resolvePluginIdentity({
   // per-device Config page (interfaces with live status + system power actions).
   // 'ssh' = optional SSH data path for ZFS pool/dataset inventory (the API has
   // no ZFS listing) — only used when an `ssh` credential slot is bound.
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState', 'ssh', 'updates'],
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState', 'ssh', 'updates', 'quickActions'],
 });
 
 /**
@@ -937,6 +940,18 @@ const logger = createPluginLogger(identity);
 
 
 
+/** Quick actions propagated to the Devices page "Device Actions" column. */
+const QUICK_ACTIONS: QuickAction[] = [
+  {
+    id: 'webui',
+    label: 'Web UI',
+    description: "Open the appliance's management web interface in a new tab",
+    iconPath: '/icons/opnsense.svg',
+    kind: 'url',
+    url: {},
+  },
+];
+
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
@@ -970,6 +985,11 @@ const server = createPluginServer({
     // The full action catalog (single-device actions + multi-device intents).
     actions: listCatalog(),
     modules: listModules(),
+    // Quick actions for the Devices page "Device Actions" column. The web-UI
+    // URL is resolved by THIS plugin from its own knowledge — scheme follows the
+    // transport option, port = the configured httpsPort (the management UI port),
+    // path = root. No credentials are involved in opening a browser tab.
+    quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/opnsense.svg',
     deviceModels: DEVICE_MODELS,
   },
@@ -1024,6 +1044,22 @@ async function resolveRuntimeContext(
 }
 
 // pickNumber / pickString (multi-key field readers) come from @unm/plugin-sdk.
+
+// POST /quick-action — resolve a kind:'url' quick action into the management web-UI
+// URL. The plugin owns all URL knowledge: scheme follows the transport option,
+// port = the configured httpsPort (the management UI port), path = root. No
+// credentials are transmitted — opening a browser tab is credential-free.
+app.post('/quick-action', quickActionHandler(async (body, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  const qa = QUICK_ACTIONS.find((q) => q.id === body.actionId && q.kind === 'url');
+  if (!qa) throw new Error(`Unknown url quick action: ${body.actionId}`);
+  return {
+    url: buildWebUiUrl(body.managementAddress, {
+      webUiPort: resolveHttpsPort(settings.httpsPort),
+      scheme: transportOf(settings) === 'http' ? 'http' : 'https',
+    }, qa.url?.path),
+  };
+}, 'opnsense-plugin'));
 
 /**
  * Collects a rich set of metrics from the OPNsense appliance: CPU load,

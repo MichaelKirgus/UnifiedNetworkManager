@@ -277,6 +277,11 @@ export const plugins = pgTable('plugins', {
   // pickers in the webapp's assignment builder; bound secrets live on
   // device_plugins.extraCredentials. NULL = no extra slots (primary secret only).
   credentialSlots: text('credentialSlots'),
+  // Quick actions declared by the plugin in /discover (JSON array of
+  // { id, label, description?, kind: 'url'|'shell'|'files'|'action', url?{
+  // path?}, actionId?, prefill? }). Drives the Devices page "Device Actions"
+  // column. NULL = no quick actions advertised.
+  quickActions: text('quickActions'),
   createdAt: text('createdAt').notNull(),
   lastSeenAt: text('lastSeenAt'),
 });

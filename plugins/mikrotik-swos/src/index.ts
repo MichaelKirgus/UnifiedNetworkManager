@@ -17,10 +17,13 @@ import {
   resolvePluginIdentity,
   stateHandler,
   createPinningGuard,
+  quickActionHandler,
+  buildWebUiUrl,
   StateRequestBody,
   CertificateRow,
   resolveUserPass,
   catalogFirmwareRow,
+  type QuickAction,
 } from '@unm/plugin-sdk';
 import { SwosClient, SwosAuthError } from './swosClient';
 import { createPlatform } from './platform';
@@ -64,7 +67,7 @@ const identity = resolvePluginIdentity({
   vendors: ['mikrotik'],
   // 'deviceState' advertises POST /state — the dynamic document behind the
   // per-device Config page (ports with live state + PoE/LAG/VLAN actions).
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState', 'updates'],
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState', 'updates', 'quickActions'],
 });
 
 /**
@@ -132,6 +135,18 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
   },
 ];
 
+/** Quick actions propagated to the Devices page "Device Actions" column. */
+const QUICK_ACTIONS: QuickAction[] = [
+  {
+    id: 'webui',
+    label: 'Web UI',
+    description: "Open the switch's management web interface in a new tab",
+    iconPath: '/icons/swos.svg',
+    kind: 'url',
+    url: {},
+  },
+];
+
 // Pre-wired app: cors + json (32mb — backup downloads can be several MB) +
 // /healthz + /discover (+ static icons, mDNS on listen) come from @unm/plugin-sdk
 // — this file only registers its own routes.
@@ -148,11 +163,31 @@ const server = createPluginServer({
     requiredSecretType: 'usernamePassword',
     options: PLUGIN_OPTIONS,
     actions: listCatalog(),
+    // Quick action for the Devices page "Device Actions" column. The web-UI URL
+    // is resolved by THIS plugin (scheme follows swosTransportOf — SwOS Lite is
+    // HTTP-only; port = the matching configured option).
+    quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/swos.svg',
     deviceModels: DEVICE_MODELS,
   },
 });
 const app = server.app;
+
+// POST /quick-action — resolve a kind:'url' quick action into the management web-UI
+// URL. The plugin owns all URL knowledge; no credentials are transmitted.
+app.post('/quick-action', quickActionHandler(async (body, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  const qa = QUICK_ACTIONS.find((q) => q.id === body.actionId && q.kind === 'url');
+  if (!qa) throw new Error(`Unknown url quick action: ${body.actionId}`);
+  // Mirror swosTransportOf(): HTTP unless the address carries an explicit https:// prefix.
+  const scheme = /^https:\/\//i.test(String(body.managementAddress ?? '').trim()) ? 'https' : 'http';
+  return {
+    url: buildWebUiUrl(body.managementAddress, {
+      webUiPort: scheme === 'https' ? resolveHttpsPort(settings.httpsPort) : resolveHttpPort(settings.httpPort),
+      scheme,
+    }, qa.url?.path),
+  };
+}, 'mikrotik-swos-plugin'));
 
 // Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
 // Emission is gated per call by the `logToApi` option via setEnabled() — it

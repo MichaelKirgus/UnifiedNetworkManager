@@ -28,6 +28,8 @@ export interface PluginIdentity {
   options?: PluginOptionDescriptor[];
   /** Action catalog declared by the plugin (drives plan creation in the webapp). */
   actions?: unknown[];
+  /** Quick actions for the Devices page "Device Actions" column (see types/quickActions.ts). */
+  quickActions?: unknown[];
   /** Icon path relative to the plugin root (e.g. "/icons/lancom.svg"); proxied via GET /plugins/:id/icon. */
   iconUrl?: string | null;
   /** Supported device model catalog (drives Model/Firmware dropdowns in the webapp). Absent = no catalog. */
@@ -72,6 +74,43 @@ function normalizeIconPath(raw: unknown): string | null {
   if (/^[a-z][a-z0-9+.-]*:/i.test(p)) return null; // scheme like http: — reject
   if (p.includes('..')) return null; // path traversal — reject
   return p.startsWith('/') ? p : `/${p}`;
+}
+
+/**
+ * Defensively normalizes a raw `quickActions` array from /discover: keeps only
+ * entries with a non-empty string id + label and a known kind, coerces the
+ * optional url.path to a string, and drops malformed items instead of failing
+ * discovery. The API persists the list verbatim — validation against the plugin's
+ * own catalog (kind 'action' → actionId must exist) happens at render time in the
+ * webapp, not here.
+ */
+function normalizeQuickActions(raw: unknown): unknown[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: unknown[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const e = item as Record<string, unknown>;
+    if (typeof e.id !== 'string' || e.id.trim() === '') continue;
+    if (typeof e.label !== 'string' || e.label.trim() === '') continue;
+    if (e.kind !== 'url' && e.kind !== 'shell' && e.kind !== 'files' && e.kind !== 'action') continue;
+    const entry: Record<string, unknown> = { id: e.id.trim(), label: e.label.trim(), kind: e.kind };
+    if (typeof e.description === 'string' && e.description.trim() !== '') entry.description = e.description.trim();
+    // Plugin-provided icon path — kept verbatim; the API icon proxy re-validates
+    // it (scheme/traversal) when the webapp actually requests the image.
+    if (typeof e.iconPath === 'string' && e.iconPath.trim() !== '') entry.iconPath = e.iconPath.trim();
+    if (e.kind === 'url') {
+      const urlObj = (e.url && typeof e.url === 'object' ? e.url : {}) as Record<string, unknown>;
+      const path = typeof urlObj.path === 'string' ? urlObj.path.trim() : '';
+      entry.url = path !== '' ? { path } : {};
+    }
+    if (e.kind === 'action') {
+      if (typeof e.actionId !== 'string' || e.actionId.trim() === '') continue; // unusable without a target
+      entry.actionId = e.actionId.trim();
+      if (e.prefill && typeof e.prefill === 'object' && !Array.isArray(e.prefill)) entry.prefill = e.prefill;
+    }
+    out.push(entry);
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 export interface DiscoveryOptions {
@@ -166,6 +205,7 @@ async function fetchIdentity(endpoint: string): Promise<PluginIdentity | null> {
       // Workers/Plugins settings UIs can tune per-plugin poll windows.
       options: withStandardOptions(Array.isArray(data.options) ? (data.options as PluginOptionDescriptor[]) : undefined),
       actions: Array.isArray(data.actions) ? data.actions : undefined,
+      quickActions: normalizeQuickActions(data.quickActions),
       iconUrl: normalizeIconPath(data.iconUrl),
       deviceModels: normalizeDeviceModels(data.deviceModels),
       credentialSlots: normalizeCredentialSlots(data.credentialSlots),
@@ -194,6 +234,10 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
   // actually carries one, so a catalog-less upsert never wipes it.
   const hasActions = Array.isArray(identity.actions) && identity.actions.length > 0;
   const actionDescriptors = hasActions ? JSON.stringify(identity.actions) : null;
+  // Quick actions: same guard — an empty/absent list must not wipe stored ones
+  // (the mDNS TXT path carries none).
+  const hasQuickActions = Array.isArray(identity.quickActions) && identity.quickActions.length > 0;
+  const quickActionsJson = hasQuickActions ? JSON.stringify(identity.quickActions) : null;
   // Icon + device model catalog: same guard — the mDNS TXT path carries neither,
   // so a TXT upsert must never wipe values set by the HTTP polling path.
   const iconUrl = identity.iconUrl ?? null;
@@ -218,6 +262,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
         ...(hasMetrics ? { metricDescriptors } : {}),
         ...(hasOptions ? { optionDescriptors } : {}),
         ...(hasActions ? { actionDescriptors } : {}),
+        ...(hasQuickActions ? { quickActions: quickActionsJson } : {}),
         ...(hasIcon ? { iconUrl } : {}),
         ...(hasModels ? { deviceModels: deviceModelsJson } : {}),
         ...(hasSlots ? { credentialSlots: credentialSlotsJson } : {}),
@@ -236,6 +281,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
       metricDescriptors,
       optionDescriptors,
       actionDescriptors,
+      quickActions: quickActionsJson,
       iconUrl,
       deviceModels: deviceModelsJson,
       credentialSlots: credentialSlotsJson,

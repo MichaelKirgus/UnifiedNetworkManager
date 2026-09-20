@@ -10,6 +10,7 @@ import { asc, eq, and, desc, inArray } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { DeviceStateError, fetchDeviceState } from '../deviceState';
 import { DeviceProbeError, fetchDeviceProbe } from '../deviceProbe';
+import { resolveDeviceQuickActionUrl } from '../deviceQuickAction';
 import { DeviceFilesystemError, performFilesystemOp, type FilesystemOp } from '../deviceFilesystem';
 import {
   SessionCredentialError,
@@ -1126,6 +1127,58 @@ router.get('/devices/:deviceId/probe', requireAuth, requirePermission('devices:r
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
   }
+});
+
+// POST /devices/:deviceId/quick-action - resolve ONE kind:'url' quick action for a
+// device's assignment into the management web-UI URL. The Devices page "Device
+// Actions" column calls this when the user clicks a url-kind shortcut; the plugin
+// owns all URL knowledge (scheme, path + its configured `webUiPort` option, which
+// rides in via per-device settings). Body: { actionId, pluginId? } — no explicit
+// plugin = the assignment that advertised the quick action. Gated on devices:read
+// (opening a web UI is a read; it transmits NO credentials to the browser).
+router.post('/devices/:deviceId/quick-action', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
+  const { deviceId } = req.params;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const actionId = typeof body.actionId === 'string' ? body.actionId : '';
+  if (!actionId) {
+    res.status(400).json({ error: '"actionId" is required' });
+    return;
+  }
+
+  // Resolve the assignment that owns this quick action. An explicit pluginId wins;
+  // otherwise find the assigned plugin whose persisted quickActions list contains
+  // the id (a device can have several plugins, each with its own shortcuts).
+  let pluginId = typeof body.pluginId === 'string' ? body.pluginId : '';
+  if (!pluginId) {
+    const assignments = await db.query.devicePlugins.findMany({ where: eq(schema.devicePlugins.deviceId, deviceId) });
+    const pluginIds = Array.from(new Set(assignments.map((a) => a.pluginId)));
+    let found = false;
+    for (const pid of pluginIds) {
+      const row = await db.query.plugins.findFirst({ where: eq(schema.plugins.id, pid) });
+      if (!row?.quickActions) continue;
+      try {
+        const list = JSON.parse(row.quickActions);
+        if (Array.isArray(list) && list.some((q) => q && typeof q === 'object' && (q as Record<string, unknown>).id === actionId)) {
+          pluginId = pid;
+          found = true;
+          break;
+        }
+      } catch {
+        /* malformed cache — skip */
+      }
+    }
+    if (!found) {
+      res.status(400).json({ error: `No assigned plugin advertises quick action "${actionId}"` });
+      return;
+    }
+  }
+
+  const out = await resolveDeviceQuickActionUrl(deviceId, pluginId, actionId);
+  if (!out.ok) {
+    res.status(502).json({ error: out.error ?? 'Quick-action resolution failed' });
+    return;
+  }
+  res.status(200).json({ deviceId, url: out.url });
 });
 
 // POST /devices/:deviceId/filesystem - one file operation on a device's filesystem,

@@ -1433,6 +1433,49 @@ paths:
         '502':
           description: Plugin failed to report probe data
 
+  /devices/{deviceId}/quick-action:
+    post:
+      tags: [Devices]
+      summary: Resolve a kind:'url' quick action into the device's web-UI URL
+      description: >-
+        Resolves ONE kind:'url' quick action for a device's assignment into the
+        management web-UI URL. The Devices page "Device Actions" column calls this
+        when the user clicks a url-kind shortcut; the plugin owns all URL knowledge
+        (scheme, path + its configured `webUiPort` option, which rides in via
+        per-device settings). Without an explicit `pluginId`, the assignment whose
+        persisted quickActions list contains the id is used. Gated on devices:read —
+        opening a web UI transmits NO credentials to the browser.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actionId]
+              properties:
+                actionId: { type: string, description: "The quick-action id to resolve (must be a kind:'url' entry)" }
+                pluginId: { type: string, description: "Assigned plugin that owns the quick action (default = auto-resolve from the device's assignments)" }
+      responses:
+        '200':
+          description: Resolved web-UI URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuickActionResult'
+        '400':
+          description: Missing actionId / no assigned plugin advertises the quick action
+        '401':
+          description: Authentication required
+        '404':
+          description: Device or plugin endpoint not found
+        '502':
+          description: Plugin failed to resolve the URL (unknown action / bad address)
+
   /devices/{deviceId}/filesystem:
     post:
       tags: [Devices]
@@ -4850,6 +4893,40 @@ components:
         secretLabel: { type: [string, 'null'] }
 
     # One row of the device ↔ plugin join table (a device can have several).
+    # One quick action a plugin propagates for its devices (Devices page "Device Actions" column).
+    QuickAction:
+      type: object
+      required: [id, label, kind]
+      properties:
+        id: { type: string, description: "Stable id within the plugin's quick-action list (e.g. 'webui', 'shell')" }
+        label: { type: string, description: "Label rendered on the button" }
+        description: { type: string, description: "Tooltip / menu description" }
+        iconPath: { type: string, description: "Optional icon path served from the plugin's /icons dir (rendered via the API icon proxy); generic per-kind glyph when absent" }
+        kind:
+          type: string
+          enum: [url, shell, files, action]
+          description: >-
+            url = open the management web UI (resolved via POST /devices/{id}/quick-action);
+            shell/files = reuse the SSH console / filesystem browser dialogs;
+            action = run a catalog action through the plan workflow with risk gating.
+        url:
+          type: object
+          properties:
+            path: { type: string, description: "Path the plugin appends to the resolved base URL (kind 'url' only)" }
+        actionId: { type: string, description: "Catalog entry id for kind 'action'" }
+        prefill:
+          type: object
+          additionalProperties: true
+          description: "Pre-filled input values merged under the action schema defaults (kind 'action')"
+
+    # Response of POST /devices/{deviceId}/quick-action.
+    QuickActionResult:
+      type: object
+      required: [deviceId, url]
+      properties:
+        deviceId: { type: string }
+        url: { type: string, format: uri, description: "Fully resolved, browser-openable management web-UI URL" }
+
     DevicePluginAssignment:
       type: object
       required: [id, deviceId, pluginId, isPrimary, order]
@@ -4876,6 +4953,11 @@ components:
           items:
             $ref: '#/components/schemas/BoundCredentialSlot'
           description: "The plugin's declared slots with their bound secrets resolved (list views only)"
+        pluginQuickActions:
+          type: array
+          items:
+            $ref: '#/components/schemas/QuickAction'
+          description: "The assigned plugin's quick actions for the Devices page 'Device Actions' column (list views only; absent when the plugin advertises none)"
 
     # A device address as presented to the UI and plugins (primary flag included).
     DeviceAddress:

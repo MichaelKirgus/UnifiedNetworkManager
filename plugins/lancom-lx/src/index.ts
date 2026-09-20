@@ -23,9 +23,12 @@ import {
   resolveHttpsPort,
   resolveHttpPort,
   resolveSshPort,
+  quickActionHandler,
+  buildWebUiUrl,
   warnOnce,
   catalogFirmwareRow,
   CertificateRow,
+  type QuickAction,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 import { LcosOptions, getLcosInventory, readLcosClock, walkLcosCounters } from './lcosClient';
@@ -61,7 +64,7 @@ const identity = resolvePluginIdentity({
   vendors: ['lancom'],
   // monitoring + inventory over the LCOS-LX MIB, plus an interactive SSH console
   // ('sshConsole') — LX access points expose a CLI shell over SSH (port 22).
-  capabilities: ['monitoring', 'inventory', 'sshConsole', 'updates'],
+  capabilities: ['monitoring', 'inventory', 'sshConsole', 'updates', 'quickActions'],
 });
 
 /**
@@ -207,6 +210,25 @@ const consoleUpgrade = makeConsoleUpgrade({
   },
 });
 
+/** Quick actions propagated to the Devices page "Device Actions" column. */
+const QUICK_ACTIONS: QuickAction[] = [
+  {
+    id: 'webui',
+    label: 'Web UI',
+    description: "Open the AP's management web interface in a new tab",
+    iconPath: '/icons/lancom-lx.svg',
+    kind: 'url',
+    url: {},
+  },
+  {
+    id: 'shell',
+    label: 'Shell',
+    description: 'Interactive LCOS CLI shell over SSH (requires a bound SSH credential)',
+    iconPath: '/icons/lancom-lx.svg',
+    kind: 'shell',
+  },
+];
+
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
@@ -227,6 +249,10 @@ const server = createPluginServer({
     ],
     metrics: DISCOVER_METRICS,
     options: PLUGIN_OPTIONS,
+    // Quick actions for the Devices page "Device Actions" column. The web-UI URL
+    // is resolved by THIS plugin (port = the configured httpsPort option);
+    // shell reuses the existing console dialog.
+    quickActions: QUICK_ACTIONS,
     // Icon + supported device model catalog — drives the webapp's Model/Firmware
     // dropdowns and the icon shown on the Devices pages. The user's selection is
     // forwarded to /monitoring (model/firmwareVersion) for future per-model logic.
@@ -235,6 +261,15 @@ const server = createPluginServer({
   },
 });
 const app = server.app;
+
+// POST /quick-action — resolve a kind:'url' quick action into the management web-UI
+// URL. The plugin owns all URL knowledge; no credentials are transmitted.
+app.post('/quick-action', quickActionHandler(async (body, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  const qa = QUICK_ACTIONS.find((q) => q.id === body.actionId && q.kind === 'url');
+  if (!qa) throw new Error(`Unknown url quick action: ${body.actionId}`);
+  return { url: buildWebUiUrl(body.managementAddress, { webUiPort: resolveHttpsPort(settings.httpsPort), scheme: 'https' }, qa.url?.path) };
+}, 'lancom-lx-plugin'));
 
 // Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
 // Emission is gated per call by the `logToApi` option via setEnabled() — it

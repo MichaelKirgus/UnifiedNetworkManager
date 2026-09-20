@@ -17,6 +17,8 @@ import {
   stateHandler,
   probeHandler,
   filesystemHandler,
+  quickActionHandler,
+  buildWebUiUrl,
   type FilesystemRequestBody,
   type FilesystemResponseBody,
   createSftpPool,
@@ -43,6 +45,7 @@ import {
   type SshCredentials,
   type SshTerminalSession,
   type UpdateRow,
+  type QuickAction,
 } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } from './client/truenasClient';
 import {
@@ -179,7 +182,7 @@ const identity = resolvePluginIdentity({
   // Branch column), and the Config-page System item shows it + the branch actions.
   version: '0.15.0',
   vendors: ['truenas'],
-  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates'],
+  capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
 
 /**
@@ -539,6 +542,32 @@ const consoleUpgrade = makeConsoleUpgrade({
   },
 });
 
+/** Quick actions propagated to the Devices page "Device Actions" column. */
+const QUICK_ACTIONS: QuickAction[] = [
+  {
+    id: 'webui',
+    label: 'Web UI',
+    description: "Open the appliance's management web interface in a new tab",
+    iconPath: '/icons/truenas.svg',
+    kind: 'url',
+    url: {},
+  },
+  {
+    id: 'shell',
+    label: 'Shell',
+    description: 'Interactive SSH shell on the host (requires a bound SSH credential)',
+    iconPath: '/icons/truenas.svg',
+    kind: 'shell',
+  },
+  {
+    id: 'files',
+    label: 'Files',
+    description: "Browse the appliance's filesystem over SFTP (requires a bound SSH credential)",
+    iconPath: '/icons/truenas.svg',
+    kind: 'files',
+  },
+];
+
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
@@ -579,10 +608,28 @@ const server = createPluginServer({
     // and validated against /config dispatches + state action refs.
     actions: actionRegistry.listCatalog(),
     modules: actionRegistry.listModules(),
+    // Quick actions for the Devices page "Device Actions" column. The web-UI URL
+    // is resolved by THIS plugin (scheme follows transport, port = httpsPort);
+    // shell/files reuse the existing console + filesystem dialogs.
+    quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/truenas.svg',
   },
 });
 const app = server.app;
+
+// POST /quick-action — resolve a kind:'url' quick action into the management web-UI
+// URL. The plugin owns all URL knowledge; no credentials are transmitted.
+app.post('/quick-action', quickActionHandler(async (body, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  const qa = QUICK_ACTIONS.find((q) => q.id === body.actionId && q.kind === 'url');
+  if (!qa) throw new Error(`Unknown url quick action: ${body.actionId}`);
+  return {
+    url: buildWebUiUrl(body.managementAddress, {
+      webUiPort: resolveHttpsPort(settings.httpsPort),
+      scheme: typeof settings.transport === 'string' && settings.transport === 'http' ? 'http' : 'https',
+    }, qa.url?.path),
+  };
+}, 'truenas-plugin'));
 
 // ---------------------------------------------------------------------------
 // POST /monitoring — the telemetry worker polls every ~30 s (10 s budget).

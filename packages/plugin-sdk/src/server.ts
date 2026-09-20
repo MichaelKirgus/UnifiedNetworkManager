@@ -22,6 +22,9 @@ import {
   MetricDescriptor,
   PluginOptionDescriptor,
   ProbeRequestBody,
+  QuickAction,
+  QuickActionRequestBody,
+  QuickActionResponseBody,
   ProbeResponseBody,
   StateRequestBody,
 } from './types';
@@ -38,6 +41,8 @@ export interface DiscoveryExtras {
   metrics?: MetricDescriptor[];
   options?: PluginOptionDescriptor[];
   actions?: CatalogEntry[];
+  /** Quick actions for the Devices page "Device Actions" column (see types.ts). */
+  quickActions?: QuickAction[];
   modules?: string[];
   iconUrl?: string;
   deviceModels?: DeviceModelEntry[];
@@ -89,6 +94,7 @@ export function buildDiscoverPayload(identity: PluginIdentity, extras?: Discover
     ...(e.metrics !== undefined ? { metrics: e.metrics } : {}),
     ...(e.options !== undefined ? { options: e.options } : {}),
     ...(e.actions !== undefined ? { actions: e.actions } : {}),
+    ...(Array.isArray(e.quickActions) && e.quickActions.length > 0 ? { quickActions: e.quickActions } : {}),
     ...(e.modules !== undefined ? { modules: e.modules } : {}),
     ...(e.iconUrl !== undefined ? { iconUrl: e.iconUrl } : {}),
     ...(e.deviceModels !== undefined ? { deviceModels: e.deviceModels } : {}),
@@ -255,6 +261,45 @@ export function probeHandler(
       res.status(200).json(result);
     } catch (err) {
       console.error(`[${logTag ?? 'plugin'}] /probe failed:`, err instanceof Error ? err.message : err);
+      res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  };
+}
+
+/**
+ * Express-4-safe handler factory for the POST /quick-action endpoint (capability
+ * 'quickActions'). The API brokers a click on one of this plugin's advertised
+ * quick actions: it resolves kind:'url' entries into the device's management web-UI
+ * URL. The PLUGIN owns all URL knowledge — scheme, path and the configured web-UI
+ * port (read via readSettings() from the `x-unm-settings` header) — so the API and
+ * webapp never assemble appliance URLs themselves.
+ *
+ * The callback receives the parsed body (deviceId/managementAddress/actionId) AND the
+ * raw request. It must look up `actionId` in its own quickActions list, build the URL
+ * with buildWebUiUrl() and return { url }. Unknown ids or non-url kinds → throw.
+ *
+ * Success: 200 + QuickActionResponseBody ({ url }).
+ * Failure: 502 + { error } (unknown action / bad address).
+ */
+export function quickActionHandler(
+  fn: (body: QuickActionRequestBody, req: express.Request) => Promise<QuickActionResponseBody>,
+  logTag?: string
+): express.RequestHandler {
+  return async (req, res) => {
+    try {
+      const body = req.body as QuickActionRequestBody;
+      if (!body || typeof body.managementAddress !== 'string' || !body.actionId) {
+        res.status(400).json({ error: 'Invalid quick-action request: managementAddress + actionId required' });
+        return;
+      }
+      const result = await fn(body, req);
+      if (!result || typeof result.url !== 'string' || !/^https?:\/\//i.test(result.url)) {
+        res.status(502).json({ error: 'Plugin returned an invalid URL for the quick action' });
+        return;
+      }
+      res.status(200).json(result);
+    } catch (err) {
+      console.error(`[${logTag ?? 'plugin'}] /quick-action failed:`, err instanceof Error ? err.message : err);
       res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
     }
   };

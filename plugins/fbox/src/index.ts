@@ -24,8 +24,11 @@ import {
   resolveHttpsPort,
   resolveHttpPort,
   resolveSshPort,
+  quickActionHandler,
+  buildWebUiUrl,
   CertificateRow,
   resolveUserPass,
+  type QuickAction,
 } from '@unm/plugin-sdk';
 import { FBoxAuthError, FBoxCredentials, FBoxNotFritzError, FBoxTransport } from './fboxClient';
 import { DEFAULT_OPTIONS, FBoxOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
@@ -39,7 +42,7 @@ const identity = resolvePluginIdentity({
   name: PLUGIN_NAME,
   version: '0.1.0',
   vendors: ['avm'],
-  capabilities: ['monitoring', 'inventory'],
+  capabilities: ['monitoring', 'inventory', 'quickActions'],
 });
 
 const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
@@ -100,6 +103,18 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
   },
 ];
 
+/** Quick actions propagated to the Devices page "Device Actions" column. */
+const QUICK_ACTIONS: QuickAction[] = [
+  {
+    id: 'webui',
+    label: 'Web UI',
+    description: "Open the box's management web interface in a new tab",
+    iconPath: '/icons/fbox.svg',
+    kind: 'url',
+    url: {},
+  },
+];
+
 const server = createPluginServer({
   identity,
   logTag: 'fbox-plugin',
@@ -110,11 +125,24 @@ const server = createPluginServer({
     // web UI logs in with a username/password pair (SID cookie session).
     requiredSecretType: 'usernamePassword',
     options: PLUGIN_OPTIONS,
+    // Quick action for the Devices page "Device Actions" column. The web-UI URL
+    // is resolved by THIS plugin (scheme follows the transport option, port =
+    // the configured httpsPort option).
+    quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/fbox.svg',
     deviceModels: DEVICE_MODELS,
   },
 });
 const app = server.app;
+
+// POST /quick-action — resolve a kind:'url' quick action into the management web-UI
+// URL. The plugin owns all URL knowledge; no credentials are transmitted.
+app.post('/quick-action', quickActionHandler(async (body, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  const qa = QUICK_ACTIONS.find((q) => q.id === body.actionId && q.kind === 'url');
+  if (!qa) throw new Error(`Unknown url quick action: ${body.actionId}`);
+  return { url: buildWebUiUrl(body.managementAddress, { webUiPort: resolveHttpsPort(settings.httpsPort), scheme: typeof settings.transport === 'string' && settings.transport === 'http' ? 'http' : 'https' }, qa.url?.path) };
+}, 'fbox-plugin'));
 
 const logger = createPluginLogger(identity);
 

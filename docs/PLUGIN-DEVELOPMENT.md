@@ -66,6 +66,8 @@ the shared SDK first — keep that structure when editing.
 | --- | --- |
 | `resolvePluginIdentity({uuid,name,version,vendors,capabilities,authType?})` | Multi-instance identity from env (`PORT`, `ADVERTISED_ENDPOINT`, `PLUGIN_INSTANCE_ID`, `PLUGIN_DISPLAY_NAME`). Returns `{effectiveUuid, displayName, port, endpoint, …}`. |
 | `createPluginServer({identity, logTag?, jsonLimit?, iconsDir?, discovery?, selfMetricsExtra?})` | Pre-wired express app: cors + json + `/healthz` + `/discover` + **auto-mounted `GET /metrics`** (self-metrics — see §11) (+ static `/icons`). `.listen()` binds the port and starts mDNS advertising (service type `_unm-plugin._tcp`). Returns `{app, identity, listen()}`. |
+| `quickActionHandler(fn)` | Express handler factory for `POST /quick-action` (kind-`'url'` quick actions). `fn(body: {deviceId, managementAddress, actionId}, req) → Promise<{url}>`; 200 on success, 502 + `{error}` when it throws. |
+| `buildWebUiUrl(address, {webUiPort?, scheme?}, path?)` | Builds the browser-openable management web-UI URL: explicit `http(s)://` in the address wins verbatim; bare addresses get the configured port (omitted when equal to the scheme default) + optional path. The single home for web-UI URL knowledge — never assemble appliance URLs by hand. |
 | `readSettings(req, options)` | Parses the `x-unm-settings` JSON header the API injects on every call, merged over your declared option defaults. Missing/malformed header → sane defaults. |
 | `clampInt(v,min,max,fallback)`, `hostFromAddress(addr)`, `pickString/pickNumber` | Small shared helpers. |
 | `MetricDescriptor` + factories `gaugeMetric/textMetric/tableMetric/errorDescriptor/modelFirmwareDescriptors` | The metric contract the webapp renders from, plus convenience builders. |
@@ -103,7 +105,29 @@ for you from `resolvePluginIdentity`. Optional extras:
 | `iconUrl` | Relative path served from your static `/icons` dir, e.g. `/icons/my-plugin.svg`. |
 | `deviceModels: DeviceModelEntry[]` | `{vendor, model, iconPath?, firmwareVersions?}` — drives Model/Firmware dropdowns; the selection is forwarded to every `/monitoring` call as `model`/`firmwareVersion`. |
 | `credentialSlots: CredentialSlotDescriptor[]` | Extra named credentials beyond the primary secret (e.g. a web-UI login for backup actions). `{name, secretType, required?, description?}`. The API passes decrypted slot fields under `credentials.slots.<name>`. |
+| `quickActions: QuickAction[]` | One-click shortcuts for the Devices page "Device Actions" column — see §4a below. Advertise the `'quickActions'` capability when at least one entry has `kind: 'url'`. |
 | `identityProvider` / `secretsProvider` | Special capabilities — see basic-auth / secrets-provider plugins. |
+
+### 4a. Quick actions (`/discover quickActions`, `POST /quick-action`)
+
+Plugins propagate a small set of one-click shortcuts for their devices, rendered in the Devices page "Device Actions" column (hidden by default; users enable it via the table's Columns picker). Each entry:
+
+```ts
+{ id: 'webui', label: 'Web UI', description?: string,
+  iconPath?: string,              // optional icon from your /icons dir (API icon proxy); generic glyph when absent
+  kind: 'url' | 'shell' | 'files' | 'action',
+  url?: { path?: string },        // kind 'url': path appended to the resolved base
+  actionId?: string,              // kind 'action': id of a single-device catalog entry
+  prefill?: Record<string, unknown> }
+```
+
+- **`kind: 'url'`** — open the device's management web UI. The PLUGIN owns ALL URL knowledge (scheme, path, port): implement `POST /quick-action` with the SDK's `quickActionHandler(fn)` and build the URL with `buildWebUiUrl(managementAddress, { webUiPort, scheme }, path)`. **Never hard-code a port** — declare an integer option for it (default = the vendor-known port, e.g. 443/80) and read it via `readSettings(req, PLUGIN_OPTIONS)`; per-device overrides then work automatically through the settings pipeline. The API brokers the click (`POST /v1/devices/:id/quick-action`) with the device's effective settings in `x-unm-settings` and hands the URL to the browser verbatim — no credentials are transmitted.
+- **`kind: 'shell'`** — reuses the webapp's SSH console dialog; requires capability `'sshConsole'`. No plugin endpoint needed.
+- **`kind: 'files'`** — reuses the filesystem browser dialog; requires capability `'filesystem'`. No plugin endpoint needed.
+- **`kind: 'action'`** — runs a catalog entry through the plan workflow with risk gating: `read` = instant, `write` = confirm dialog, **`dangerous` is never offered as a quick action** (the webapp drops it). Use for safe one-click ops like "Reboot"-adjacent reads or service restarts.
+- **Icons** — each entry may carry an `iconPath` (relative path served from your static `/icons` dir, same rules as `iconUrl`). The webapp renders it through the API icon proxy (`/v1/plugins/:id/icon?path=…`) and falls back to a generic per-kind glyph when absent or broken: Globe for `url`, Terminal for `shell`, FolderOpen for `files`, Zap for `action`. Up to 3 actions render as plain icon buttons in the row (like the Management Actions column); extras collapse into a "more" dropdown.
+
+The API persists the list on the plugin row and attaches it to every device assignment view (`pluginQuickActions`).
 
 ---
 

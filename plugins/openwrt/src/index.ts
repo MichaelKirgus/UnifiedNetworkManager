@@ -43,8 +43,10 @@ import {
   resolveSshPort,
   resolveSshCredentials,
   buildDeviceTimeInfo,
+  quickActionHandler,
+  buildWebUiUrl,
 } from '@unm/plugin-sdk';
-import type { CertificateRow, ProbeRequestBody, StateRequestBody } from '@unm/plugin-sdk';
+import type { CertificateRow, ProbeRequestBody, StateRequestBody, QuickAction } from '@unm/plugin-sdk';
 
 import { Backend } from './client/backend';
 import { closeSshPools } from './client/sshBackend';
@@ -81,7 +83,7 @@ const identity = resolvePluginIdentity({
   // ssh: SSH data path (uci reads/writes, /proc stats, console shell).
   // probe: short-cycle live telemetry for on-demand webapp polling.
   // sshConsole: interactive dropbear shell over WebSocket (/console).
-  capabilities: ['monitoring', 'inventory', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'sshConsole'],
+  capabilities: ['monitoring', 'inventory', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'sshConsole', 'quickActions'],
 });
 
 /**
@@ -195,6 +197,25 @@ const consoleUpgrade = makeConsoleUpgrade({
   },
 });
 
+/** Quick actions propagated to the Devices page "Device Actions" column. */
+const QUICK_ACTIONS: QuickAction[] = [
+  {
+    id: 'webui',
+    label: 'Web UI (LuCI)',
+    description: "Open the appliance's LuCI web interface in a new tab",
+    iconPath: '/icons/openwrt.svg',
+    kind: 'url',
+    url: {},
+  },
+  {
+    id: 'shell',
+    label: 'Shell',
+    description: 'Interactive dropbear shell over SSH (requires a bound or primary credential)',
+    iconPath: '/icons/openwrt.svg',
+    kind: 'shell',
+  },
+];
+
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
@@ -229,10 +250,24 @@ const server = createPluginServer({
     // registry serves /discover, /plan and /config — see src/actions/registry.ts.
     actions: listCatalog(),
     modules: listModules(),
+    // Quick actions for the Devices page "Device Actions" column. The LuCI URL
+    // is resolved by THIS plugin (scheme https — matching the plugin's own
+    // candidate order, port = the configured httpsPort option); shell reuses
+    // the existing console dialog.
+    quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/openwrt.svg',
   },
 });
 const app = server.app;
+
+// POST /quick-action — resolve a kind:'url' quick action into the LuCI web-UI URL.
+// The plugin owns all URL knowledge; no credentials are transmitted.
+app.post('/quick-action', quickActionHandler(async (body, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  const qa = QUICK_ACTIONS.find((q) => q.id === body.actionId && q.kind === 'url');
+  if (!qa) throw new Error(`Unknown url quick action: ${body.actionId}`);
+  return { url: buildWebUiUrl(body.managementAddress, { webUiPort: resolveHttpsPort(settings.httpsPort), scheme: 'https' }, qa.url?.path) };
+}, 'openwrt-plugin'));
 
 // --- Settings helpers -----------------------------------------------------------
 

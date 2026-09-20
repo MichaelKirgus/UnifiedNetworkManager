@@ -21,7 +21,10 @@ import {
   resolveHttpPort,
   resolveSshPort,
   resolveUserPass,
+  quickActionHandler,
+  buildWebUiUrl,
   catalogFirmwareRow,
+  type QuickAction,
 } from '@unm/plugin-sdk';
 import { RouterOsAuthError } from './routerosClient';
 import { DEFAULT_OPTIONS, MonitoringResult, RouterOsOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
@@ -58,7 +61,7 @@ const identity = resolvePluginIdentity({
   vendors: ['mikrotik'],
   // monitoring + inventory over the REST API, plus an interactive SSH console
   // ('sshConsole') — RouterOS exposes a full CLI shell over SSH (port 22).
-  capabilities: ['monitoring', 'inventory', 'sshConsole', 'updates'],
+  capabilities: ['monitoring', 'inventory', 'sshConsole', 'updates', 'quickActions'],
 });
 
 /**
@@ -211,6 +214,25 @@ const consoleUpgrade = makeConsoleUpgrade({
   },
 });
 
+/** Quick actions propagated to the Devices page "Device Actions" column. */
+const QUICK_ACTIONS: QuickAction[] = [
+  {
+    id: 'webui',
+    label: 'Web UI',
+    description: "Open the router's management web interface in a new tab",
+    iconPath: '/icons/routeros.svg',
+    kind: 'url',
+    url: {},
+  },
+  {
+    id: 'shell',
+    label: 'Shell',
+    description: 'Interactive RouterOS CLI shell over SSH (uses the bound or primary credential)',
+    iconPath: '/icons/routeros.svg',
+    kind: 'shell',
+  },
+];
+
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
@@ -236,11 +258,29 @@ const server = createPluginServer({
       },
     ],
     options: PLUGIN_OPTIONS,
+    // Quick actions for the Devices page "Device Actions" column. The web-UI URL
+    // is resolved by THIS plugin (scheme follows schemeMode, port = httpsPort);
+    // shell reuses the existing console dialog.
+    quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/routeros.svg',
     deviceModels: DEVICE_MODELS,
   },
 });
 const app = server.app;
+
+// POST /quick-action — resolve a kind:'url' quick action into the management web-UI
+// URL. The plugin owns all URL knowledge; no credentials are transmitted.
+app.post('/quick-action', quickActionHandler(async (body, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  const qa = QUICK_ACTIONS.find((q) => q.id === body.actionId && q.kind === 'url');
+  if (!qa) throw new Error(`Unknown url quick action: ${body.actionId}`);
+  return {
+    url: buildWebUiUrl(body.managementAddress, {
+      webUiPort: resolveHttpsPort(settings.httpsPort),
+      scheme: typeof settings.schemeMode === 'string' && settings.schemeMode === 'http' ? 'http' : 'https',
+    }, qa.url?.path),
+  };
+}, 'mikrotik-routeros-plugin'));
 
 // Structured logs shipped to the API (see docs/PLUGIN-DEVELOPMENT.md, Logging).
 // Emission is gated per call by the `logToApi` option via setEnabled() — it

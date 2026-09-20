@@ -73,8 +73,69 @@ export const CAPABILITIES = [
   // Reserved for future log-forwarder plugins (syslog daemon, OpenSearch, ...).
   // Regular plugins do NOT advertise this — they ship logs via createPluginLogger.
   'logIngestion',
+  // Serves POST /quick-action — resolves a plugin-declared quick action of kind
+  // 'url' into the device's management web-UI URL (see QuickAction + buildWebUiUrl).
+  // The PLUGIN owns the URL knowledge (scheme, path); the API brokers the request
+  // and never assembles URLs itself. Advertise when /discover carries quickActions
+  // with at least one kind:'url' entry.
+  'quickActions',
 ] as const;
 export type PluginCapability = (typeof CAPABILITIES)[number];
+
+// ---------------------------------------------------------------------------
+// Quick actions (/discover `quickActions`, POST /quick-action) — the Devices
+// page "Device Actions" column. A plugin propagates a small set of one-click
+// shortcuts for its devices: open the management web UI, drop into an SSH shell,
+// browse files, or run a catalog action with risk-based gating (read = instant,
+  // write = confirm dialog, dangerous = never offered here).
+// ---------------------------------------------------------------------------
+
+/** The kind of shortcut a quick action performs. */
+export type QuickActionKind = 'url' | 'shell' | 'files' | 'action';
+
+/** One entry as advertised in /discover `quickActions`. */
+export interface QuickAction {
+  /** Stable id within this plugin's quick-action list (e.g. "webui", "shell"). */
+  id: string;
+  /** Label rendered on the button (e.g. "Web UI", "Shell", "Files"). */
+  label: string;
+  /** Tooltip / description shown in the menu. */
+  description?: string;
+  /**
+   * Optional icon for this action, served from the plugin's static `/icons` dir
+   * (same rules as `iconUrl`). The webapp renders it through the API icon proxy;
+   * when absent, a generic per-kind glyph is shown instead.
+   */
+  iconPath?: string;
+  kind: QuickActionKind;
+  /**
+   * kind 'url' — the plugin resolves this to a full URL via POST /quick-action
+   * (it owns the scheme + path knowledge, e.g. `https://<host>/ui/`). The API
+   * brokers the call and hands the URL to the browser verbatim.
+   */
+  url?: {
+    /** Path appended to the resolved base (may be empty). */
+    path?: string;
+  };
+  /** kind 'action' — id of a single-device entry in this plugin's action catalog. */
+  actionId?: string;
+  /** Pre-filled input values merged under the action schema defaults. */
+  prefill?: Record<string, unknown>;
+}
+
+/** Body of POST /quick-action (API → plugin). Mirrors StateRequestBody minus credentials. */
+export interface QuickActionRequestBody {
+  deviceId: string;
+  managementAddress: string;
+  /** The quick-action id the caller clicked (must be one of the advertised ones). */
+  actionId: string;
+}
+
+/** Response of POST /quick-action for kind 'url' entries. */
+export interface QuickActionResponseBody {
+  /** Fully resolved, browser-openable URL (scheme + host + port + path). */
+  url: string;
+}
 
 // ---------------------------------------------------------------------------
 // Metric descriptors — the webapp renders entirely from these

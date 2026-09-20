@@ -34,6 +34,20 @@ export interface BoundCredentialSlot {
   secretLabel?: string | null;
 }
 
+/** One quick action a plugin advertises for its devices (Devices page column). */
+export interface QuickActionView {
+  id: string;
+  label: string;
+  description?: string;
+  kind: 'url' | 'shell' | 'files' | 'action';
+  /** kind 'url': path the plugin appends to the resolved base URL. */
+  url?: { path: string };
+  /** kind 'action': id of a single-device entry in this plugin's action catalog. */
+  actionId?: string;
+  /** Pre-filled input values for kind 'action'. */
+  prefill?: Record<string, unknown>;
+}
+
 export interface DevicePluginAssignment {
   id: string;
   deviceId: string;
@@ -55,6 +69,8 @@ export interface DevicePluginAssignmentView extends DevicePluginAssignment {
   pluginEndpoint?: string;
   /** The assigned plugin's advertised capabilities (e.g. 'deviceState'). */
   pluginCapabilities?: string[];
+  /** The assigned plugin's quick actions for the Devices page "Device Actions" column. */
+  pluginQuickActions?: QuickActionView[];
   /** True when the plugin was seen within the last 5 minutes. */
   pluginOnline?: boolean;
   secretLabel?: string | null;
@@ -268,12 +284,35 @@ export async function listAssignmentViews(deviceId: string): Promise<DevicePlugi
         /* malformed cache — skip capability display */
       }
     }
+    let quickActions: QuickActionView[] | undefined;
+    if (plugin?.quickActions) {
+      try {
+        const parsed = JSON.parse(plugin.quickActions);
+        if (Array.isArray(parsed)) {
+          quickActions = parsed
+            .filter((q): q is Record<string, unknown> => !!q && typeof q === 'object')
+            .map((q) => ({
+              id: String(q.id ?? ''),
+              label: String(q.label ?? ''),
+              ...(typeof q.description === 'string' ? { description: q.description } : {}),
+              kind: (['url', 'shell', 'files', 'action'].includes(String(q.kind)) ? String(q.kind) : 'url') as QuickActionView['kind'],
+              ...(q.url && typeof q.url === 'object' ? { url: { path: String((q.url as Record<string, unknown>).path ?? '') } } : {}),
+              ...(typeof q.actionId === 'string' ? { actionId: q.actionId } : {}),
+              ...(q.prefill && typeof q.prefill === 'object' ? { prefill: q.prefill as Record<string, unknown> } : {}),
+            }))
+            .filter((q) => q.id !== '' && q.label !== '');
+        }
+      } catch {
+        /* malformed cache — skip quick-action display */
+      }
+    }
     return {
       ...a,
       pluginName: plugin?.name,
       pluginVersion: plugin?.version,
       pluginEndpoint: plugin?.endpoint,
       pluginCapabilities: capabilities,
+      pluginQuickActions: quickActions,
       pluginOnline:
         plugin?.lastSeenAt !== null &&
         plugin?.lastSeenAt !== undefined &&
