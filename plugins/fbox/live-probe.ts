@@ -1,5 +1,5 @@
 /**
- * READ-ONLY live probe for a real FRITZ!Box — pins down the actual wire shapes
+ * READ-ONLY live probe for a real router — pins down the actual wire shapes
  * of the web-UI data endpoints against production hardware before release.
  *
  * Usage:  ../../node_modules/.bin/tsx live-probe.ts <address> [username] [password]

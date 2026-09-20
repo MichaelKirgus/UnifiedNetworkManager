@@ -5,7 +5,7 @@
  * of device-reported product names is stripped by normalizeModelName()). The
  * trailing generic entry has no iconPath → DeviceIcon falls back to the plugin
  * icon, exactly like the OPNsense "Custom / DIY" pattern. Firmware lines are
- * FRITZ!OS major versions (point updates excluded) — verify/trim against live
+ * firmware major versions (point updates excluded) — verify/trim against live
  * hardware in the probe step.
  */
 

@@ -1,15 +1,15 @@
 /**
- * FRITZ!Box web-UI session transport — dual-mode.
+ * Router web-UI session transport — dual-mode.
  *
  * Two UI generations exist in the field and are detected at login time:
  *
- * 1. CLASSIC (FRITZ!OS ≤ 8.x, "html" UI):
+ * 1. CLASSIC (older firmware generation, "html" UI):
  *      GET /login_sid.lua?username=…&password=… → `SID` cookie (or a real SID
  *      inside `<SessionInfo>` XML). Every data request then sends the cookie:
  *        GET /systeminfo64.json, /overview.lua?get_data=1, /internetinfo.json,
  *        /laninfo.json, /wlaninfo.json?ifname=wlanN …
  *
- * 2. HTML2 (new FRITZ!OS generation): the classic data endpoints are GONE
+ * 2. HTML2 (new firmware generation): the classic data endpoints are GONE
  *    (404 even with a valid session). Login is a PBKDF2 challenge-response:
  *      - GET /login_sid.lua → zero SID + `<Challenge>` (8-hex, ignored)
  *      - GET /              → login page embedding `const data = {…}` with
@@ -26,8 +26,8 @@
  *    (pages: overview via any pid, netDev host table with xhrId=all, wSet,
  *    energy, usbOv, dslOv — see endpoints.ts).
  *
- * Transport choice (`transport` option): FRITZ!Boxes serve self-signed TLS by
- * default — `auto` (default) tries https first and falls back to plain http
+ * Transport choice (`transport` option): these routers serve self-signed TLS
+ * by default — `auto` (default) tries https first and falls back to plain http
  * only on NETWORK-level failures (connection refused / DNS / timeout), never
  * on HTTP-level ones. The resolved scheme is pinned after a successful login.
  */
@@ -49,17 +49,17 @@ export class FBoxAuthError extends Error {
   }
 }
 
-/** Raised when the target does not look like an AVM router at all. */
-export class FBoxNotFritzError extends Error {
+/** Raised when the target does not look like a supported router at all. */
+export class FBoxUnsupportedTargetError extends Error {
   constructor() {
-    super('Target does not respond with a FRITZ!OS web UI — is this an AVM router?');
-    this.name = 'FBoxNotFritzError';
+    super('Target does not respond with a supported web UI — is this one of the routers this plugin supports?');
+    this.name = 'FBoxUnsupportedTargetError';
   }
 }
 
 // Network-vs-HTTP error classification and self-signed-TLS acceptance come from
 // the shared SDK transport layer (isNetworkLevelError / insecureHttpsAgent) —
-// FRITZ!Boxes, like every other UNM appliance, present a self-signed cert by default.
+// these routers, like every other UNM appliance, present a self-signed cert by default.
 
 export interface FBoxCredentials {
   username: string;
@@ -70,12 +70,12 @@ export interface FBoxCredentials {
  *
  * A fresh client means a FULL LOGIN on every poll (classic: login_sid.lua;
  * html2: login_sid.lua + GET / + POST /index.lua). At the API's 30 s beat that
- * is ~6 logins/minute per box — enough to trip FRITZ!OS' web-UI rate limit,
+ * is ~6 logins/minute per box — enough to trip the web-UI rate limit,
  * which then blocks further logins for up to ~100 s. Because the block window
  * outlasts the poll interval, naive retries re-trigger it on every beat: a
  * self-sustaining lockout (observed live 2026-08-30 — both boxes offline while
  * ping worked). Reusing one client per box keeps the session alive across polls
- * (FRITZ!OS sessions outlive our poll interval by far), so logins drop to ~1
+ * (web-UI sessions outlive our poll interval by far), so logins drop to ~1
  * per 15 min / reboot. The key includes a password hash, so credential
  * rotation transparently yields a fresh client; entries are tiny and bounded
  * by the device count.
@@ -132,7 +132,7 @@ interface SessionInfo {
 }
 
 /**
- * Parses the `<SessionInfo>` XML that FRITZ!OS returns from login_sid.lua:
+ * Parses the `<SessionInfo>` XML returned from login_sid.lua:
  *   <SessionInfo><SID>0…</SID><Challenge>6cc4df30</Challenge>
  *     <BlockTime>0</BlockTime><Rights></Rights>
  *     <Users><User last="1">fritz1649</User></Users></SessionInfo>
@@ -198,8 +198,8 @@ const AUTH_FAIL_BACKOFF_MS = 120_000;
  * (5 min → 10 min → cap 30 min). The base MUST exceed the box' penalty decay
  * time — a 2-min base was proven insufficient live (the box re-armed on every
  * attempt, keeping its counters hot indefinitely). A multi-minute silence lets
- * FRITZ!OS' penalty counters fully decay; the next attempt then succeeds and
- * everything resets.
+ * the firmware's penalty counters fully decay; the next attempt then succeeds
+ * and everything resets.
  */
 const blockStreak = new Map<string, number>();
 const ESCALATION_BASE_MS = 5 * 60_000;
@@ -560,7 +560,7 @@ export class FBoxClient {
 
     // Some firmware versions answer 401 directly; others redirect without a cookie.
     if (res.status === 401 || res.status === 403) throw new FBoxAuthError();
-    if (res.status === 404 || res.status === 405) throw new FBoxNotFritzError();
+    if (res.status === 404 || res.status === 405) throw new FBoxUnsupportedTargetError();
     if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status} from login`);
 
     // The box answered over this scheme — pin it for the data requests.
@@ -596,7 +596,7 @@ export class FBoxClient {
     const html = Buffer.from(pageRes.data ?? '').toString('utf8');
     const gData = parseLoginPageData(html);
     if (!gData || typeof gData.challenge !== 'string' || !gData.challenge.includes('$')) {
-      throw new FBoxAuthError('Unsupported FRITZ!OS login protocol — no challenge-response config found.');
+      throw new FBoxAuthError('Unsupported web-UI login protocol — no challenge-response config found.');
     }
 
     const blockTime = Number(gData.blockTime ?? 0);

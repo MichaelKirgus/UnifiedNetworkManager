@@ -1,9 +1,9 @@
 /**
- * Typed views over the FRITZ!Box web-UI read endpoints.
+ * Typed views over the router web-UI read endpoints.
  *
  * The box's own HTTP(S) UI exposes a set of JSON/lua data endpoints that are
  * always available (no box-side enablement, unlike TR-064) and work across
- * FRITZ!OS 7.x/8.x:
+ * firmware generations:
  *   - GET /systeminfo64.json            → system identity + health counters
  *   - GET /overview.lua?get_data=1      → LAN/WAN overview incl. connected devices
  *   - GET /internetinfo.json            → WAN connection state (type, IP, DNS)
@@ -75,7 +75,7 @@ export { normalizeMac };
 export function normalizeModelName(raw: unknown): string {
   if (typeof raw !== 'string') return '';
   const s = raw.trim();
-  // "FRITZ!Box 7590" / "FritzBox 4060" / "AVM FRITZ!Box 7530 AX" → "7590" / "4060" / "7530 AX".
+  // Vendor-prefixed product names (e.g. brand + model) → plain model number.
   const m = s.match(/\b(\d{3,5}(?:\s*[A-Za-z]+)?)\s*$/);
   return m ? m[1].replace(/\s+/g, ' ') : s;
 }
@@ -294,8 +294,8 @@ export function parseWlanInfo(raw: unknown, ifname: string): FBoxWlanRadio {
 
 // --- HTML2 generation (POST /data.lua multiplexed pages) ------------------------------
 //
-// The new FRITZ!OS UI removed every classic data endpoint; all information now
-// flows through `POST /data.lua {page:<pid>, sid}`. Verified live payload shapes:
+// The new web-UI generation removed every classic data endpoint; all information
+// now flows through `POST /data.lua {page:<pid>, sid}`. Verified live payload shapes:
 //   - no page param            → home overview (fritzos identity, internet WAN,
 //                                wlan band text) — unknown pids fall back to it too
 //   - netDev (+ xhrId=all)     → LAN host table: data.active[] + data.passive[]
@@ -307,7 +307,7 @@ export function parseWlanInfo(raw: unknown, ifname: string): FBoxWlanRadio {
 export interface FBoxHtml2System {
   name: string; // fb_name when set, else '' — hostname is user-configurable on the box
   model: string; // normalized product name ("7530 AX")
-  rawModel: string; // "FRITZ!Box 7530 AX"
+  rawModel: string; // as reported by the device (brand prefix included)
   version: string; // full firmware from iframeUrl (e.g. "256.08.25"), nspver fallback
 }
 

@@ -34,7 +34,12 @@ import {
   parseWlanInfo,
 } from './endpoints';
 
+/** Which query method the plugin uses (plugin option `apiMode`). */
+export type FBoxApiMode = 'webui' | 'tr064';
+
 export interface FBoxOptions {
+  /** Query method — web-UI session or TR-064/UPnP SOAP. */
+  apiMode?: FBoxApiMode;
   transport?: FBoxTransport;
   requestTimeoutMs: number;
   /** HTTPS management port when the address has no explicit port (default 443). */
@@ -43,9 +48,12 @@ export interface FBoxOptions {
   httpPort?: number;
   /** SSH daemon port for the host-key inventory probe (default 22). */
   sshPort?: number;
+  /** TR-064/UPnP SOAP control-channel port (default 49003) — used when apiMode is tr064. */
+  tr064Port?: number;
 }
 
 export const DEFAULT_OPTIONS: FBoxOptions = {
+  apiMode: 'webui',
   transport: 'auto',
   requestTimeoutMs: 3000,
 };
@@ -77,9 +85,9 @@ export interface MonitoringResult {
 }
 
 /**
- * Collects one full snapshot. Throws on auth failure / non-AVM target / total
- * unreachability (the caller maps those to health); partial endpoint failures
- * are collected into `warnings` instead.
+ * Collects one full snapshot. Throws on auth failure / unsupported target /
+ * total unreachability (the caller maps those to health); partial endpoint
+ * failures are collected into `warnings` instead.
  */
 export async function getMonitoring(host: string, creds: FBoxCredentials, opts: FBoxOptions): Promise<MonitoringResult> {
   // CACHED per (host, credentials) — a fresh client would force a full login
@@ -122,9 +130,9 @@ export async function getMonitoring(host: string, creds: FBoxCredentials, opts: 
   const internetRaw = value(inetR, 'internetinfo.json');
   const lanRaw = value(lanR, 'laninfo.json');
 
-  // Neither identity endpoint answered → this is not a FRITZ!OS web UI.
+  // Neither identity endpoint answered → this is not a supported web UI.
   if (systemRaw == null && overviewRaw == null) {
-    throw new Error('No FRITZ!OS data endpoints responded — target does not look like an AVM router.');
+    throw new Error('No web-UI data endpoints responded — target does not look like a supported router.');
   }
 
   const radios: FBoxWlanRadio[] = [];
@@ -185,9 +193,9 @@ async function getHtml2Snapshot(client: FBoxClient): Promise<MonitoringResult> {
   const boxNet6Html = boxNet6R.status === 'fulfilled' ? boxNet6R.value : null;
 
   // The home overview carries the system identity — without it we cannot tell
-  // this is a FRITZ!OS box at all.
+  // this is a supported box at all.
   if (overviewRaw == null) {
-    throw new Error('No FRITZ!OS data endpoints responded — target does not look like an AVM router.');
+    throw new Error('No web-UI data endpoints responded — target does not look like a supported router.');
   }
 
   const ovr = parseHtml2Overview(overviewRaw);

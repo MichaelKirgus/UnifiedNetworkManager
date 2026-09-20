@@ -15,7 +15,7 @@ import http from 'http';
 
 const MOCK_PORT = 48751;
 const HTML2_MOCK_PORT = 48754; // html2-generation mock box (PBKDF2 login + /data.lua)
-const NONFRITZ_PORT = 48753; // must NOT collide with PLUGIN_PORT
+const UNSUPPORTED_TARGET_PORT = 48753; // must NOT collide with PLUGIN_PORT
 const PLUGIN_PORT = 48752;
 const BASE = `http://localhost:${PLUGIN_PORT}`;
 
@@ -52,8 +52,8 @@ function makeMockBox(port: number): http.Server & { state: MockState } {
   const state: MockState = { sid: 'MOCKSID-001', loginCount: 0, requests: [], expireNextDataRequest: false };
 
   const systeminfo = {
-    name: 'FritzBox-Lab',
-    model: 'FRITZ!Box 7590',
+    name: 'RouterLab-1',
+    model: 'Vendor Router 7590',
     version: '183.09',
     uptime: 123456,
     temperature: 42,
@@ -220,8 +220,8 @@ function makeHtml2MockBox(port: number): http.Server & { state: Html2MockState }
   // --- /data.lua page payloads (shapes pinned from live hardware) -------------------
   const overviewData = {
     fritzos: {
-      fb_name: 'FritzBox-HTML2',
-      Productname: 'FRITZ!Box 7530 AX',
+      fb_name: 'RouterLab-2',
+      Productname: 'Vendor Router 7530 AX',
       nspver: '8.25',
       iframeUrl: 'https://fritzhelp.avm.de/help/?hardware=256&version=256.08.25&action=feature',
     },
@@ -247,7 +247,7 @@ function makeHtml2MockBox(port: number): http.Server & { state: Html2MockState }
   const netDevData = {
     fbox: [
       // The box itself — must NOT appear in the host inventory.
-      { mac: '80:23:95:81:08:B0', name: 'FRITZ!Box 7530 AX', model: 'fbox', type: 'unknown', ipv4: { ip: '192.168.178.1' } },
+      { mac: '80:23:95:81:08:B0', name: 'Vendor Router 7530 AX', model: 'fbox', type: 'unknown', ipv4: { ip: '192.168.178.1' } },
     ],
     active: [
       { mac: 'AA:BB:CC:DD:EE:01', name: 'wired-pc', type: 'ethernet', port: 'LAN 1 mit 1 Gbit/s ', ipv4: { ip: '192.168.178.10' } },
@@ -278,7 +278,7 @@ function makeHtml2MockBox(port: number): http.Server & { state: Html2MockState }
 
   const energyData = {
     drain: [
-      { name: 'FRITZ!Box Gesamtsystem', statuses: 'aktiv seit 2 Tagen, 3 Stunden, 4 Minuten' }, // 2d+3h+4m = 183840 s
+      { name: 'Router Gesamtsystem', statuses: 'aktiv seit 2 Tagen, 3 Stunden, 4 Minuten' }, // 2d+3h+4m = 183840 s
       { name: 'LAN-Anschlüsse', lan: [{ name: 'LAN 1', class: 'green' }, { name: 'LAN 2', class: '' }] },
     ],
   };
@@ -417,9 +417,9 @@ function makeHtml2MockBox(port: number): http.Server & { state: Html2MockState }
   return Object.assign(server, { state });
 }
 
-// --- A non-AVM target (answers but is not a FRITZ!OS UI) ---------------------------------
+// --- An unsupported target (answers but has no supported web UI) ---------------------------
 
-function makeNonFritzServer(): http.Server {
+function makeUnsupportedTargetServer(): http.Server {
   const server = http.createServer((req, res) => {
     if (req.url?.startsWith('/login_sid.lua')) {
       // A generic web server that has no such endpoint.
@@ -429,7 +429,7 @@ function makeNonFritzServer(): http.Server {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end('<html><body>some other device</body></html>');
   });
-  server.listen(NONFRITZ_PORT);
+  server.listen(UNSUPPORTED_TARGET_PORT);
   return server;
 }
 
@@ -438,7 +438,7 @@ function makeNonFritzServer(): http.Server {
 async function main(): Promise<void> {
   const mock = makeMockBox(MOCK_PORT);
   const h2Mock = makeHtml2MockBox(HTML2_MOCK_PORT);
-  const nonFritz = makeNonFritzServer();
+  const unsupportedTarget = makeUnsupportedTargetServer();
   await new Promise((r) => setTimeout(r, 150)); // let the mocks bind
 
   process.env.PORT = String(PLUGIN_PORT);
@@ -481,7 +481,7 @@ async function main(): Promise<void> {
   check('HTTP 200', mon.status === 200, mon.status);
   check('health ok', mon.data.health === 'ok', mon.data.health);
   const m = mon.data.metrics ?? {};
-  check('system.name', m['system.name'] === 'FritzBox-Lab', m['system.name']);
+  check('system.name', m['system.name'] === 'RouterLab-1', m['system.name']);
   check('system.swVersion (Identity key)', m['system.swVersion'] === '183.09', m['system.swVersion']);
   check('system.uptime seconds', m['system.uptime'] === 123456, m['system.uptime']);
   check('system.cpuLoad clamped %', m['system.cpuLoad'] === 12, m['system.cpuLoad']);
@@ -586,10 +586,10 @@ async function main(): Promise<void> {
   check('health critical on auth failure', bad.data.health === 'critical', bad.data);
   check('system.error set', typeof bad.data.metrics?.['system.error'] === 'string' && bad.data.metrics['system.error'].length > 0, bad.data.metrics);
 
-  // --- non-AVM target → unknown -----------------------------------------------------------
-  console.log('\n/monitoring (non-AVM target)');
-  const nf = await post('/monitoring', monitoringBody(`localhost:${NONFRITZ_PORT}`));
-  check('health unknown for non-FRITZ!OS target', nf.data.health === 'unknown', nf.data);
+  // --- unsupported target → unknown -----------------------------------------------------------
+  console.log('\n/monitoring (unsupported target)');
+  const nf = await post('/monitoring', monitoringBody(`localhost:${UNSUPPORTED_TARGET_PORT}`));
+  check('health unknown for unsupported target', nf.data.health === 'unknown', nf.data);
 
   // --- missing address → critical -----------------------------------------------------------
   console.log('\n/monitoring (no address)');
@@ -599,7 +599,7 @@ async function main(): Promise<void> {
   // --- cleanup ------------------------------------------------------------------------------
   mock.close();
   h2Mock.close();
-  nonFritz.close();
+  unsupportedTarget.close();
   console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }
