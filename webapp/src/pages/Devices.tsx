@@ -567,7 +567,8 @@ export default function Devices() {
     {
       header: 'Metrics',
       key: 'metrics',
-      width: 320,
+      // 3 MetricCells per line at their 120px minimum + two 20px gaps = 400.
+      width: 400,
       sortable: false,
       render: (row) => {
         const metrics = row.summaryMetrics ?? [];

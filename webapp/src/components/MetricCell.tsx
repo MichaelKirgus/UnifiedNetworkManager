@@ -27,10 +27,14 @@ export function MetricCell({ metric }: { metric: SummaryMetric }) {
 function InlineText({ metric }: { metric: SummaryMetric }) {
   // Same footprint as MiniGauge (min-w + label over value) so text/plot metrics
   // line up with gauges in the Metrics column instead of collapsing to content
-  // width and wrapping their labels.
+  // width and wrapping their labels. The value sits on its OWN row — never
+  // sharing a line with the label — so long labels ("BANDWIDTH RX") and wide
+  // values can't collide regardless of what the plugin reports.
   return (
-    <div className="flex min-w-[90px] flex-col gap-1">
-      <span className="text-[10px] uppercase tracking-wide text-faint">{metric.label}</span>
+    <div className="flex min-w-[120px] flex-col gap-1">
+      <span className="min-w-0 truncate text-[10px] uppercase tracking-wide text-faint" title={metric.label}>
+        {metric.label}
+      </span>
       <span className="text-xs font-semibold text-foreground">
         {formatValue(metric.value, metric.unit, metric.format)}
       </span>
@@ -49,13 +53,17 @@ function MiniGauge({ metric }: { metric: SummaryMetric }) {
   // Default gauge hue — centralized status token (blue).
   const color = metric.color ?? 'rgb(var(--status-info))';
   return (
-    <div className="flex min-w-[90px] flex-col gap-1">
-      <div className="flex items-baseline justify-between">
-        <span className="text-[10px] uppercase tracking-wide text-faint">{metric.label}</span>
-        <span className="text-xs font-semibold text-foreground">
-          {formatValue(metric.value, metric.unit, metric.format)}
-        </span>
-      </div>
+    <div className="flex min-w-[120px] flex-col gap-1">
+      {/* Label and value are stacked, NOT on one line: with justify-between a
+          long label ("BANDWIDTH RX") and a wide value collide in narrow cells.
+          Stacking guarantees clearance for any label/value combination; the
+          label truncates (full text in the tooltip) if it still overflows. */}
+      <span className="min-w-0 truncate text-[10px] uppercase tracking-wide text-faint" title={metric.label}>
+        {metric.label}
+      </span>
+      <span className="text-xs font-semibold text-foreground">
+        {formatValue(metric.value, metric.unit, metric.format)}
+      </span>
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: color }} />
       </div>
