@@ -3279,6 +3279,110 @@ paths:
         '404':
           description: Documented host not found
 
+  /documented-hosts/bulk:
+    post:
+      tags: [Inventory]
+      summary: Batch update for documented hosts (active/stale + site/layer)
+      description: >-
+        Requires permission `documented-hosts:write`. Marks every existing id
+        in the batch active or stale (`isActive`) and/or sets its site/layer
+        placement (`siteId` / `layerId`, null clears) — all in one call. Omitted
+        fields are left untouched; unknown ids are reported in `missing` and
+        never abort the call. At most 5000 ids per request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Documented host ids to update"
+                isActive:
+                  type: boolean
+                  description: "true = mark active, false = mark stale (omitted = no flag change)"
+                siteId:
+                  type: [string, 'null']
+                  description: "Site id to assign to every row in the batch; null clears the placement. Must exist when set (omitted = no change)"
+                layerId:
+                  type: [string, 'null']
+                  description: "Topology-layer id to assign to every row in the batch; null clears the placement. Must exist when set (omitted = no change)"
+      responses:
+        '200':
+          description: Update summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated, missing]
+                properties:
+                  updated: { type: integer, description: "Hosts whose flag was changed" }
+                  missing:
+                    type: array
+                    items: { type: string }
+                    description: "Submitted ids that do not exist"
+        '400':
+          description: Empty batch or more than 5000 ids
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-hosts:write permission
+
+  /documented-hosts/merge:
+    post:
+      tags: [Inventory]
+      summary: Merge several documented host rows into one
+      description: >-
+        Requires permission `documented-hosts:write`. Merges a set of
+        documented hosts (e.g. duplicates created when a multi-NIC machine was
+        imported once per MAC) into a SINGLE row: addresses are unioned with
+        per-address user data preserved, DNS names and friendly name/description
+        merged, tags unioned, site/layer taken from the first row that has one,
+        and the host stays active when ANY input row is active. The surviving row is the
+        OLDEST by createdAt — its id and createdAt are kept; all other rows are
+        deleted. Returns the merged host plus the removed ids.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 2
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Documented host ids to merge (oldest survives)"
+      responses:
+        '200':
+          description: The merged host + removed row ids
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [merged, removed, count]
+                properties:
+                  merged:
+                    $ref: '#/components/schemas/DocumentedHost'
+                  removed:
+                    type: array
+                    items: { type: string }
+                    description: "Ids of the rows that were deleted"
+                  count: { type: integer, description: "Number of rows that were merged" }
+        '400':
+          description: Fewer than 2 ids, more than 5000 ids, or unknown ids
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-hosts:write permission
+
   /documented-hosts/import:
     post:
       tags: [Inventory]
@@ -3340,9 +3444,12 @@ paths:
         data: existing DNS names, friendly name, description, site/layer
         placement are preserved; new addresses/MACs/network references from
         the observation are added to the host's address list (hosts match by
-        MAC first, then by shared address). `dryRun` defaults to true — it
-        returns a per-host plan (create/update/skip + reason) without writing
-        anything; pass `dryRun: false` to apply.
+        MAC first, then by shared address). A host that is ALSO known in the
+        device inventory inherits its site/layer/tags from the observing
+        device — gaps only: an existing host keeps its user values and only
+        gains what it lacks. `dryRun` defaults to true — it returns a per-host
+        plan (create/update/skip + reason) without writing anything; pass
+        `dryRun: false` to apply.
       requestBody:
         required: true
         content:
@@ -5885,6 +5992,14 @@ components:
         siteName: { type: [string, 'null'], description: "Display name of the placed-at site" }
         layerId: { type: [string, 'null'] }
         layerName: { type: [string, 'null'], description: "Display name of the topology layer" }
+        tags:
+          type: array
+          items: { type: string }
+          default: []
+          description: >-
+            User-assigned free-form tags (same data basis as devices.tags,
+            e.g. "vm", "lab"). Also auto-applied from a matching device on
+            inventory import when the host has none yet.
         ips:
           type: array
           minItems: 1
@@ -5903,6 +6018,13 @@ components:
         macMismatch:
           type: boolean
           description: "Any documented MAC differs from what is currently observed for its address"
+        isActive:
+          type: boolean
+          default: true
+          description: >-
+            User-maintained lifecycle flag — true = the host is in active use,
+            false = stale/retired (the row stays documented but is dimmed in
+            the UI). Every new or imported host starts active.
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
 
@@ -5936,6 +6058,15 @@ components:
         description: { type: [string, 'null'] }
         siteId: { type: [string, 'null'], description: "Site this host is placed at; must exist when set" }
         layerId: { type: [string, 'null'], description: "Topology layer this host sits on; must exist when set" }
+        tags:
+          type: array
+          items: { type: string }
+          default: []
+          description: "Free-form user tags (same data basis as devices.tags); omitted = none"
+        isActive:
+          type: boolean
+          default: true
+          description: "Lifecycle flag — false marks the host stale/retired (new hosts default to active)"
         ips:
           type: array
           minItems: 1
@@ -5959,6 +6090,13 @@ components:
         description: { type: [string, 'null'] }
         siteId: { type: [string, 'null'], description: "Site this host is placed at; must exist when set" }
         layerId: { type: [string, 'null'], description: "Topology layer this host sits on; must exist when set" }
+        tags:
+          type: array
+          items: { type: string }
+          description: "Replaces the full tag list (same data basis as devices.tags); [] clears all. Omitted = keep current"
+        isActive:
+          type: boolean
+          description: "Lifecycle flag — true = active use, false = stale/retired. Omitted = keep the current value"
         ips:
           type: array
           minItems: 1
@@ -6040,15 +6178,25 @@ components:
             type: object
             required: [mac, hostname, ips, action]
             properties:
-              mac: { type: string }
+              mac: { type: string, description: "Representative MAC of this entry (first-seen; for merged groups the first NIC)" }
               hostname: { type: [string, 'null'] }
               ips: { type: integer, description: "Documentable addresses of this host" }
               action: { type: string, enum: [create, update, skip] }
               reason: { type: string, description: "Why the host is skipped (action=skip only)" }
               stripped: { type: integer, description: "Public addresses removed by a strip policy (action=create/update only)" }
+              mergedFrom:
+                type: array
+                items: { type: string }
+                description: >-
+                  Extra MACs folded into this entry by the smart hostname merge
+                  (a multi-NIC machine observed once per NIC); empty/absent =
+                  single-MAC row.
         created: { type: integer }
         updated: { type: integer }
         skipped: { type: integer }
+        mergedGroups:
+          type: integer
+          description: "How many live MAC rows were folded into one entry by the hostname merge (dry-run only)"
 
     NetworkLayer:
       type: object

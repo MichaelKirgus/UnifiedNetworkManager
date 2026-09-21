@@ -56,6 +56,8 @@ export interface DataTableBulkAction<T> {
   confirm?: (count: number) => string;
   /** Called with the currently selected rows (resolved from the full row list). */
   onClick: (rows: T[]) => void | Promise<void>;
+  /** When set, the button is disabled unless this returns true for the current selection. */
+  enabled?: (rows: T[]) => boolean;
 }
 
 /** Minimal shape of an auto-refreshing query — satisfied by any useQuery() result.
@@ -79,6 +81,13 @@ interface DataTableProps<T> {
   selectable?: boolean;
   /** Bulk action buttons rendered in the selection bar (requires `selectable`). */
   bulkActions?: DataTableBulkAction<T>[];
+  /** Optional extra CSS classes for one data row (e.g. dimming stale rows).
+   * Applied to the `<tr>` after the default hover/selection classes. */
+  rowClassName?: (row: T) => string | undefined;
+  /** Imperative selection handle — when provided, `ref.current(keys)` selects
+   * exactly those row keys (replaces any current selection). Used e.g. to
+   * select all duplicate rows of a host with one click before merging them. */
+  selectionRef?: React.MutableRefObject<((keys: string[]) => void) | null>;
   /** Called when the pointer enters a row, or leaves the table body entirely.
    * Used e.g. by the WiFi page to highlight matching spectrum bars on hover. */
   onRowHover?: (row: T | null) => void;  /** Optional detail content rendered in a full-width row directly under each
@@ -228,6 +237,8 @@ export function DataTable<T>({
   searchPlaceholder = 'Search…',
   selectable = false,
   bulkActions,
+  rowClassName,
+  selectionRef,
   onRowHover,
   renderRowDetail,
   expandable,
@@ -244,6 +255,15 @@ export function DataTable<T>({
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   // Expanded parent rows (expandable prop) — session-only like selection.
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
+
+  // Imperative selection handle for the owning page (see `selectionRef`).
+  useEffect(() => {
+    if (!selectionRef) return;
+    selectionRef.current = (keys: string[]) => setSelectedKeys(new Set(keys));
+    return () => {
+      selectionRef.current = null;
+    };
+  }, [selectionRef]);
 
   // Rows currently passing search + column filters (pre-sort) — used by select-all.
   const filteredRef = useRef<T[]>([]);
@@ -686,16 +706,21 @@ export function DataTable<T>({
       {selectable && selectedKeys.size > 0 && (
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-info/60 px-3 py-1.5 text-sm">
           <span className="font-medium text-secondary">{selectedKeys.size} selected</span>
-          {(bulkActions ?? []).map((action) => (
-            <button
-              key={action.label}
-              type="button"
-              onClick={() => void runBulkAction(action)}
-              className="rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-secondary hover:bg-background"
-            >
-              {action.label} ({selectedKeys.size})
-            </button>
-          ))}
+          {(bulkActions ?? []).map((action) => {
+            const selectedRows = rows.filter((r) => selectedKeys.has(rowKey(r)));
+            const enabled = action.enabled ? action.enabled(selectedRows) : true;
+            return (
+              <button
+                key={action.label}
+                type="button"
+                disabled={!enabled}
+                onClick={() => void runBulkAction(action)}
+                className="rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-secondary hover:bg-background disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {action.label} ({selectedKeys.size})
+              </button>
+            );
+          })}
           <button type="button" onClick={clearSelection} className="ml-auto text-xs font-medium text-muted-foreground underline-offset-2 hover:text-secondary hover:underline">
             Clear selection
           </button>
@@ -822,7 +847,7 @@ export function DataTable<T>({
               return (
                 <Fragment key={key}>
                   <tr
-                    className={clsx('hover:bg-background', selectable && selectedKeys.has(key) && 'bg-info/40')}
+                    className={clsx('hover:bg-background', selectable && selectedKeys.has(key) && 'bg-info/40', rowClassName?.(row))}
                     onMouseEnter={() => onRowHover?.(row)}
                   >
                     {expandable && (

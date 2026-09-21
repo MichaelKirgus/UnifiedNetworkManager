@@ -12,6 +12,7 @@ export type CsvImportField =
   | 'description'
   | 'siteId'
   | 'layerId'
+  | 'tags'
   | 'address'
   | 'mac'
   | 'networkLabel';
@@ -26,6 +27,7 @@ export const CSV_IMPORT_FIELDS: { field: CsvImportField; label: string; hint: st
   { field: 'description', label: 'Description', hint: 'Optional documentation text' },
   { field: 'siteId', label: 'Site', hint: 'Site NAME (resolved to the site id on import)' },
   { field: 'layerId', label: 'Layer', hint: 'Topology layer NAME (resolved to the layer id on import)' },
+  { field: 'tags', label: 'Tags', hint: 'Free-form tags, comma-separated within one cell (same basis as device tags); merged additively into existing hosts' },
 ];
 
 /**
@@ -102,6 +104,7 @@ export function suggestHeaderMapping(headers: string[]): Partial<Record<CsvImpor
     ['description', /(desc(?:ription)?|comment|note|bemerkung|beschreibung)/i],
     ['siteId', /\b(site|standort)\b/i],
     ['layerId', /\b(layer|ebene|tier)\b/i],
+    ['tags', /(^|\s)tags?(\s|$)|\b(etiketten|labels?)\b/i],
     ['networkLabel', /(network|netzwerk|subnet|vlan|segment)/i],
   ];
 

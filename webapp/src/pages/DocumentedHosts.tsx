@@ -1,10 +1,11 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { CircleCheck, CircleX, DatabaseZap, Dices, NotebookPen, Pencil, Plus, Trash2, TriangleAlert, Upload, X } from 'lucide-react';
+import { Archive, CircleCheck, CircleX, DatabaseZap, Dices, GitMerge, NotebookPen, Pencil, Plus, Tag, Trash2, TriangleAlert, Upload, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { ChipInput } from '../components/ChipInput';
 import { IpCidrInput } from '../components/IpCidrInput';
-import { api, DocumentedHost, DocumentedHostRequest, NetworkLayer, Site } from '../api/client';
+import { api, Device, DocumentedHost, DocumentedHostRequest, NetworkLayer, Site } from '../api/client';
 import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
 import { isIpLiteral } from '../utils/address';
@@ -51,6 +52,10 @@ interface HostFormState {
   description: string;
   siteId: string;
   layerId: string;
+  /** Free-form tags (same data basis as devices.tags). */
+  tags: string[];
+  /** Lifecycle flag — false marks the host stale/retired. New hosts default to active. */
+  isActive: boolean;
   ips: IpDraft[];
 }
 
@@ -60,6 +65,8 @@ const EMPTY_FORM: HostFormState = {
   description: '',
   siteId: '',
   layerId: '',
+  tags: [],
+  isActive: true,
   ips: [{ address: '', vlanId: '', mac: '', networkLabel: '' }],
 };
 
@@ -70,6 +77,8 @@ function formFromHost(h: DocumentedHost): HostFormState {
     description: h.description ?? '',
     siteId: h.siteId ?? '',
     layerId: h.layerId ?? '',
+    tags: [...(h.tags ?? [])],
+    isActive: h.isActive !== false,
     ips: h.ips.map((ip) => ({ address: ip.address, vlanId: ip.vlanId != null ? String(ip.vlanId) : '', mac: ip.mac ?? '', networkLabel: ip.networkLabel ?? '' })),
   };
 }
@@ -78,10 +87,18 @@ function formFromHost(h: DocumentedHost): HostFormState {
 // Table cell renderers
 // ---------------------------------------------------------------------------
 
-/** Discovery status badge + MAC-mismatch warning for one documented host. */
+/** Discovery status badge + stale marker + MAC-mismatch warning. */
 function StatusCell({ row }: { row: DocumentedHost }) {
   return (
     <div className="flex items-center gap-1.5">
+      {!row.isActive && (
+        <span
+          title="Marked as not in active use — the entry stays documented but is treated as a stale item"
+          className="inline-flex items-center gap-1 rounded bg-warning px-1.5 py-0.5 text-xs font-medium text-warning-fg"
+        >
+          <Archive className="h-3 w-3" /> Stale
+        </span>
+      )}
       {row.discovered ? (
         <span className="inline-flex items-center gap-1 rounded bg-success px-1.5 py-0.5 text-xs font-medium text-success-fg">
           <CircleCheck className="h-3 w-3" /> Discovered
@@ -184,11 +201,24 @@ interface HostFormCardProps {
   deviceLayers: Map<string, string>;
   /** Every address already in use or documented (lowercase) — free-IP suggestions skip these. */
   takenIps: Set<string>;
+  /** All registered devices — a host whose name matches one can inherit its site/layer/tags. */
+  devices: Device[];
   onClose: () => void;
   onSaved: () => void;
 }
 
-function HostFormCard({ initial, sites, layers, networkOptions, liveIndex, networksForMatch, deviceLayers, takenIps, onClose, onSaved }: HostFormCardProps) {
+/** Case-insensitive union of tag lists (first occurrence's casing wins). */
+function mergeTags(...lists: string[][]): string[] {
+  const out: string[] = [];
+  for (const list of lists) {
+    for (const t of list) {
+      if (!out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t);
+    }
+  }
+  return out;
+}
+
+function HostFormCard({ initial, sites, layers, networkOptions, liveIndex, networksForMatch, deviceLayers, takenIps, devices, onClose, onSaved }: HostFormCardProps) {
   const [form, setForm] = useState<HostFormState>(() => (initial ? formFromHost(initial) : EMPTY_FORM));
   const [newName, setNewName] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -287,6 +317,29 @@ function HostFormCard({ initial, sites, layers, networkOptions, liveIndex, netwo
     [newName, liveIndex, form.dnsNames]
   );
 
+  // --- Device match — a host that is ALSO known in the device inventory -------
+  // (one of its DNS names equals a device name, case-insensitive). Its site /
+  // layer / tags can be applied to this row with one click.
+
+  const matchedDevices = useMemo(() => {
+    const names = new Set(form.dnsNames.map((n) => n.toLowerCase()));
+    if (names.size === 0) return [];
+    return devices.filter((d) => names.has(d.name.trim().toLowerCase()));
+  }, [form.dnsNames, devices]);
+
+  /** Applies the first matched device's placement — gaps only: existing user
+   * values are kept, tags are merged additively. */
+  function applyFromDevice() {
+    const d = matchedDevices[0];
+    if (!d) return;
+    setForm((f) => ({
+      ...f,
+      siteId: f.siteId || (d.siteId ?? ''),
+      layerId: f.layerId || deviceLayers.get(d.name.toLowerCase()) || '',
+      tags: mergeTags(f.tags, d.tags ?? []),
+    }));
+  }
+
   function addDnsName(name?: string) {
     const v = (name ?? newName).trim().toLowerCase();
     if (!v || form.dnsNames.includes(v)) return;
@@ -372,6 +425,8 @@ function HostFormCard({ initial, sites, layers, networkOptions, liveIndex, netwo
       description: form.description.trim() || null,
       siteId: form.siteId || null,
       layerId: form.layerId || null,
+      tags: form.tags,
+      isActive: form.isActive,
       ips: ips.map((ip) => ({
         address: ip.address.trim(),
         vlanId: ip.vlanId.trim() === '' ? null : Number(ip.vlanId),
@@ -472,7 +527,7 @@ function HostFormCard({ initial, sites, layers, networkOptions, liveIndex, netwo
             </div>
           </div>
 
-          {/* Friendly name + description */}
+          {/* Friendly name + placement */}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label className="mb-1 block text-sm font-medium text-secondary">Friendly name</label>
@@ -504,6 +559,25 @@ function HostFormCard({ initial, sites, layers, networkOptions, liveIndex, netwo
               </div>
             </div>
           </div>
+
+          {/* Device match — this host is also a registered device: inherit its placement */}
+          {matchedDevices.length > 0 && (
+            <button
+              type="button"
+              onClick={applyFromDevice}
+              title={`This name matches the registered device "${matchedDevices[0].name}" — copies its site, layer and tags into this row. Existing values are kept; tags are merged.`}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted"
+            >
+              <DatabaseZap className="h-4 w-4" /> Apply from device “{matchedDevices[0].name}” (site, layer, tags)
+            </button>
+          )}
+
+          {/* Tags — free-form labels, same data basis as devices */}
+          <div>
+            <label className="mb-1 block text-sm font-medium text-secondary">Tags</label>
+            <ChipInput values={form.tags} onChange={(tags) => setForm((f) => ({ ...f, tags }))} ariaLabel="Host tags" />
+          </div>
+
           <div>
             <label className="mb-1 block text-sm font-medium text-secondary">Description</label>
             <textarea
@@ -514,6 +588,12 @@ function HostFormCard({ initial, sites, layers, networkOptions, liveIndex, netwo
               onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
             />
           </div>
+
+          {/* Lifecycle flag */}
+          <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="Uncheck to mark this host as a stale item — the entry stays documented but is dimmed in the list. New hosts default to active.">
+            <span className="text-sm font-medium text-secondary">In active use</span>
+            <input type="checkbox" checked={form.isActive} onChange={(e) => setForm((f) => ({ ...f, isActive: e.target.checked }))} />
+          </label>
 
           {/* IP addresses — a little table so every filled field keeps its legend */}
           <div>
@@ -756,6 +836,7 @@ function ImportModal({ sites, layers, onClose, onDone }: ImportModalProps) {
         description: get('description') || null,
         siteId,
         layerId,
+        tags: splitCellValues(get('tags')),
         ips: addresses.map((a) => ({ address: a, mac: mac || null, networkLabel: networkLabel || null })),
       });
     });
@@ -979,6 +1060,8 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
   const plannedCreates = plan?.planned.filter((p) => p.action === 'create').length ?? 0;
   const plannedUpdates = plan?.planned.filter((p) => p.action === 'update').length ?? 0;
   const plannedSkips = plan?.planned.filter((p) => p.action === 'skip').length ?? 0;
+  // Smart hostname merge — live rows of one multi-NIC machine folded into a single entry.
+  const mergedGroupCount = plan?.mergedGroups ?? 0;
 
   return (
     <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-primary/40 p-4 sm:items-center" onClick={onClose}>
@@ -996,7 +1079,8 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
             <p className="mb-3 text-sm text-secondary">
               Copies every host currently observed in the inventory into the documented hosts. Existing entries are
               MERGED, never overwritten: their DNS names, friendly name, description and placement stay untouched —
-              only new addresses, MACs and network references from the observation are added. Nothing is deleted.
+              only new addresses, MACs and network references from the observation are added. A host that is ALSO a
+              registered device inherits its site/layer/tags when they are missing. Nothing is deleted.
             </p>
 
             <div className="mb-4 flex flex-col gap-2 text-sm">
@@ -1083,6 +1167,11 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
             <div className="mb-4 flex flex-wrap gap-2 text-sm">
               <span className="rounded bg-success px-2 py-1 font-medium text-success-fg">{plannedCreates} to create</span>
               <span className="rounded bg-info px-2 py-1 font-medium text-info-fg">{plannedUpdates} to update (merge)</span>
+              {mergedGroupCount > 0 && (
+                <span title="Live rows sharing one hostname were folded into a single documented host — multi-NIC machines no longer create duplicate rows." className="rounded bg-warning px-2 py-1 font-medium text-warning-fg">
+                  {mergedGroupCount} multi-NIC host(s) merged by hostname
+                </span>
+              )}
               {plannedSkips > 0 && <span className="rounded bg-muted px-2 py-1 font-medium text-secondary">{plannedSkips} skipped</span>}
             </div>
 
@@ -1147,9 +1236,19 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
                   </tr>
                 </thead>
                 <tbody>
-                  {plan.planned.slice(0, 300).map((p) => (
-                    <tr key={p.mac} className="border-t border-border">
-                      <td className="px-2 py-1 font-mono">{p.mac}</td>
+                  {plan.planned.slice(0, 300).map((p, i) => (
+                    <tr key={`${p.mac}-${i}`} className="border-t border-border">
+                      <td className="px-2 py-1 font-mono">
+                        {p.mac}
+                        {(p.mergedFrom ?? []).length > 0 && (
+                          <span
+                            title={`Folded into one host by hostname — also covers MAC ${p.mergedFrom!.join(', ')}`}
+                            className="ml-1 inline-flex items-center gap-0.5 rounded bg-warning px-1 py-0.5 text-[10px] font-semibold text-warning-fg"
+                          >
+                            <GitMerge className="h-3 w-3" /> +{p.mergedFrom!.length}
+                          </span>
+                        )}
+                      </td>
                       <td className="max-w-[220px] truncate px-2 py-1 font-mono" title={p.hostname ?? undefined}>
                         {p.hostname ?? <span className="text-faint">—</span>}
                       </td>
@@ -1213,6 +1312,70 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
 }
 
 // ---------------------------------------------------------------------------
+// Bulk placement picker — sets a site or layer on every selected row in one
+// bulk call (the registries are the SAME ones devices use).
+// ---------------------------------------------------------------------------
+
+interface PlacementPickerProps {
+  kind: 'site' | 'layer';
+  /** Ids of the selected rows to update. */
+  ids: string[];
+  sites: Site[];
+  layers: NetworkLayer[];
+  onClose: () => void;
+}
+
+function PlacementPickerModal({ kind, ids, sites, layers, onClose }: PlacementPickerProps) {
+  const queryClient = useQueryClient();
+  const [value, setValue] = useState(''); // '' = not chosen yet; 'clear' = unassign
+  const options = kind === 'site' ? sites : layers;
+  const label = kind === 'site' ? 'Site' : 'Layer';
+
+  function apply() {
+    if (!value) return;
+    const targetId = value === 'clear' ? null : value;
+    api.bulkSetDocumentedHostPlacement(ids, kind === 'site' ? { siteId: targetId } : { layerId: targetId })
+      .then((res) => {
+        queryClient.invalidateQueries({ queryKey: ['documentedHosts'] });
+        if (res.missing.length > 0) alert(`${res.updated} updated, ${res.missing.length} id(s) no longer exist.`);
+      })
+      .catch((err) => alert(`Failed to set ${label.toLowerCase()}: ${(err as Error).message}`));
+    onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-primary/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-sm rounded-md border border-border bg-card p-5 shadow-lg" onClick={(e) => e.stopPropagation()}>
+        <h2 className="mb-3 text-base font-semibold text-foreground">Set {label.toLowerCase()} for {ids.length} selected host{ids.length === 1 ? '' : 's'}</h2>
+        <p className="mb-3 text-sm text-secondary">
+          Assigns the chosen {label.toLowerCase()} to every selected row in one call — no per-row editing needed.
+        </p>
+        <select className="w-full rounded-md border border-border px-2 py-1.5 text-sm" value={value} onChange={(e) => setValue(e.target.value)}>
+          <option value="">— choose {label.toLowerCase()} —</option>
+          {options.map((o) => (
+            <option key={o.id} value={o.id}>{o.name}</option>
+          ))}
+          <option value="clear">— unassign (clear) —</option>
+        </select>
+        <div className="mt-4 flex justify-end gap-2 border-t border-border pt-3">
+          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={!value}
+            onClick={apply}
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+          >
+            Apply to {ids.length} host{ids.length === 1 ? '' : 's'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
@@ -1225,12 +1388,16 @@ export default function DocumentedHosts() {
   const [editing, setEditing] = useState<DocumentedHost | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [inventoryImportOpen, setInventoryImportOpen] = useState(false);
+  // Imperative handle into the table's selection (one-click duplicate select).
+  const tableSelection = useRef<((keys: string[]) => void) | null>(null);
 
   // Documented hosts + the reference data the form needs. The live host rows
   // power MAC auto-fill in the form and keep "discovered" fresh (30 s cadence).
   const hostsQuery = useQuery({ queryKey: ['documentedHosts'], queryFn: () => api.documentedHosts(), refetchInterval: 30_000 });
   const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: api.sites });
   const layersQuery = useQuery({ queryKey: ['layers'], queryFn: api.layers });
+  // Registered devices — a documented host whose name matches one can inherit its placement.
+  const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
   const networksQuery = useQuery({ queryKey: ['networks'], queryFn: () => api.networks() });
   const liveHostsQuery = useQuery({ queryKey: ['hosts'], queryFn: () => api.hosts(), refetchInterval: 30_000 });
   // Topology graph — device nodes carry the RESOLVED layer (override > plugin
@@ -1264,6 +1431,42 @@ export default function DocumentedHosts() {
     }
     return m;
   }, [topologyQuery.data]);
+
+  // Duplicate detection: rows sharing ANY DNS name belong to one group (union-find).
+  // A multi-NIC machine imported once per MAC ends up as several rows with the
+  // same hostname — these are merge candidates.
+  const duplicateGroups = useMemo(() => {
+    const hosts = hostsQuery.data ?? [];
+    const parent = new Map<string, string>();
+    const find = (x: string): string => {
+      let r = x;
+      while (parent.get(r) !== r) r = parent.get(r)!;
+      return r;
+    };
+    for (const h of hosts) parent.set(h.id, h.id);
+    const nameToId = new Map<string, string>();
+    for (const h of hosts) {
+      for (const n of h.dnsNames) {
+        const key = n.toLowerCase();
+        const first = nameToId.get(key);
+        if (!first) nameToId.set(key, h.id);
+        else parent.set(find(h.id), find(first)); // union
+      }
+    }
+    const byRoot = new Map<string, DocumentedHost[]>();
+    for (const h of hosts) {
+      const root = find(h.id);
+      const list = byRoot.get(root);
+      if (list) list.push(h);
+      else byRoot.set(root, [h]);
+    }
+    // row id -> its full duplicate group (only groups with 2+ members).
+    const out = new Map<string, DocumentedHost[]>();
+    for (const members of byRoot.values()) {
+      if (members.length > 1) for (const m of members) out.set(m.id, members);
+    }
+    return out;
+  }, [hostsQuery.data]);
 
   // Every address already in use or documented — free-IP suggestions must skip
   // all of them so a new host never collides with reality.
@@ -1309,6 +1512,35 @@ export default function DocumentedHosts() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['documentedHosts'] }),
   });
 
+  // Active/stale lifecycle — optimistic flip, rolled back on failure.
+  function handleToggleActive(row: DocumentedHost) {
+    const next = !row.isActive;
+    const prevData = hostsQuery.data;
+    queryClient.setQueryData<DocumentedHost[]>(['documentedHosts'], (old) =>
+      old?.map((h) => (h.id === row.id ? { ...h, isActive: next } : h)) ?? old
+    );
+    toggleActiveMutation.mutate({ id: row.id, isActive: next }, {
+      onSettled: () => queryClient.invalidateQueries({ queryKey: ['documentedHosts'] }),
+      onError: () => {
+        if (prevData) queryClient.setQueryData(['documentedHosts'], prevData);
+      },
+    });
+  }
+  const toggleActiveMutation = useMutation({
+    mutationFn: ({ id, isActive }: { id: string; isActive: boolean }) => api.bulkUpdateDocumentedHosts([id], isActive),
+  });
+
+  // Merge duplicate rows into one — the oldest row survives (its id + createdAt
+  // are kept); addresses are unioned with per-address data preserved.
+  const mergeMutation = useMutation({
+    mutationFn: (ids: string[]) => api.mergeDocumentedHosts(ids),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['documentedHosts'] }),
+  });
+
+  // Bulk site/layer placement — a picker modal collects the target value, then
+  // one bulk call sets it on every selected row (null = clear).
+  const [placementPicker, setPlacementPicker] = useState<{ kind: 'site' | 'layer'; ids: string[] } | null>(null);
+
   const columns: DataTableColumn<DocumentedHost>[] = [
     {
       header: 'Name',
@@ -1316,17 +1548,30 @@ export default function DocumentedHosts() {
       width: 240,
       exportValue: (row) => row.dnsNames.join(', '),
       searchText: (row) => [row.dnsNames.join(' '), row.friendlyName ?? '', row.description ?? ''].join(' '),
-      render: (row) => (
-        <div className="leading-tight">
-          <span className="font-medium text-foreground">{row.dnsNames[0]}</span>
-          {row.dnsNames.length > 1 && (
-            <span title={row.dnsNames.slice(1).join(', ')} className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] font-semibold text-secondary">
-              +{row.dnsNames.length - 1}
-            </span>
-          )}
-          {row.friendlyName && <p className="text-xs text-faint">{row.friendlyName}</p>}
-        </div>
-      ),
+      render: (row) => {
+        const dups = duplicateGroups.get(row.id);
+        return (
+          <div className="leading-tight">
+            <span className="font-medium text-foreground">{row.dnsNames[0]}</span>
+            {row.dnsNames.length > 1 && (
+              <span title={row.dnsNames.slice(1).join(', ')} className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] font-semibold text-secondary">
+                +{row.dnsNames.length - 1}
+              </span>
+            )}
+            {dups && (
+              <button
+                type="button"
+                title={`${dups.length} documented hosts share this name — click to select them all, then use “Merge selected”`}
+                onClick={() => tableSelection.current?.(dups.map((h) => h.id))}
+                className="ml-1 inline-flex items-center gap-0.5 rounded bg-warning px-1 py-0.5 text-[10px] font-semibold text-warning-fg hover:opacity-80"
+              >
+                <GitMerge className="h-3 w-3" /> {dups.length}
+              </button>
+            )}
+            {row.friendlyName && <p className="text-xs text-faint">{row.friendlyName}</p>}
+          </div>
+        );
+      },
     },
     {
       header: 'IPs / MAC',
@@ -1360,6 +1605,27 @@ export default function DocumentedHosts() {
       key: 'layerName',
       width: 110,
       render: (row) => row.layerName ?? <span className="text-faint">—</span>,
+    },
+    {
+      // Free-form user tags — same data basis as devices.
+      header: 'Tags',
+      key: 'tags',
+      width: 160,
+      exportValue: (row) => (row.tags ?? []).join(', '),
+      render: (row) => {
+        const tags = row.tags ?? [];
+        if (tags.length === 0) return <span className="text-faint">—</span>;
+        return (
+          <div className="flex flex-wrap gap-1">
+            {tags.map((t) => (
+              <span key={t} className="inline-flex items-center gap-1 rounded-full bg-accent-indigo/60 px-2 py-0.5 text-xs font-medium text-accent-indigo-fg">
+                <Tag className="h-3 w-3" />
+                {t}
+              </span>
+            ))}
+          </div>
+        );
+      },
     },
     {
       header: 'Status',
@@ -1408,11 +1674,20 @@ export default function DocumentedHosts() {
           {
             header: 'Actions',
             key: 'actions',
-            width: 100,
+            width: 130,
             sortable: false as const,
             excludeFromExport: true,
             render: (row: DocumentedHost) => (
               <div className="flex gap-1">
+                <button
+                  type="button"
+                  aria-label={row.isActive ? `Mark ${row.dnsNames[0]} stale` : `Mark ${row.dnsNames[0]} active`}
+                  title={row.isActive ? 'Mark as a stale item (not in active use)' : 'Mark as active again'}
+                  className={`rounded-md p-1.5 hover:bg-muted ${row.isActive ? 'text-secondary hover:text-warning-fg' : 'text-warning-fg hover:text-foreground'}`}
+                  onClick={() => handleToggleActive(row)}
+                >
+                  <Archive className="h-4 w-4" />
+                </button>
                 <button type="button" aria-label={`Edit ${row.dnsNames[0]}`} title="Edit host" className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground" onClick={() => openEdit(row)}>
                   <Pencil className="h-4 w-4" />
                 </button>
@@ -1460,6 +1735,7 @@ export default function DocumentedHosts() {
           networksForMatch={networksForMatch}
           deviceLayers={deviceLayers}
           takenIps={takenIps}
+          devices={devicesQuery.data ?? []}
           onClose={closeForm}
           onSaved={handleSaved}
         />
@@ -1478,9 +1754,49 @@ export default function DocumentedHosts() {
           searchPlaceholder="Search documented hosts…"
           emptyMessage="No documented hosts yet — create one with “New host” or import your spreadsheet as CSV."
           selectable={canWrite}
+          rowClassName={(row) => (row.isActive ? undefined : 'opacity-50')}
+          selectionRef={tableSelection}
           bulkActions={
             canWrite
               ? [
+                  {
+                    label: 'Merge selected',
+                    enabled: (rows) => rows.length >= 2,
+                    confirm: (count) => `Merge ${count} documented host${count === 1 ? '' : 's'} into ONE row?\nThe oldest row survives; addresses are combined and the other rows are deleted. This cannot be undone.`,
+                    onClick: async (selected) => {
+                      try {
+                        const res = await mergeMutation.mutateAsync(selected.map((h) => h.id));
+                        alert(`Merged ${res.count} row(s) into “${res.merged.dnsNames[0]}”.`);
+                      } catch (err) {
+                        alert(`Merge failed: ${(err as Error).message}`);
+                      }
+                    },
+                  },
+                  {
+                    label: 'Set site…',
+                    onClick: async (selected: DocumentedHost[]) => setPlacementPicker({ kind: 'site', ids: selected.map((h) => h.id) }),
+                  },
+                  {
+                    label: 'Set layer…',
+                    onClick: async (selected: DocumentedHost[]) => setPlacementPicker({ kind: 'layer', ids: selected.map((h) => h.id) }),
+                  },
+                  {
+                    label: 'Mark active',
+                    onClick: async (selected: DocumentedHost[]) => {
+                      const res = await api.bulkUpdateDocumentedHosts(selected.map((h) => h.id), true);
+                      queryClient.invalidateQueries({ queryKey: ['documentedHosts'] });
+                      if (res.missing.length > 0) alert(`${res.updated} marked active, ${res.missing.length} id(s) no longer exist.`);
+                    },
+                  },
+                  {
+                    label: 'Mark stale',
+                    confirm: (count) => `Mark ${count} documented host${count === 1 ? '' : 's'} as a stale item? They stay documented but are dimmed in the list.`,
+                    onClick: async (selected: DocumentedHost[]) => {
+                      const res = await api.bulkUpdateDocumentedHosts(selected.map((h) => h.id), false);
+                      queryClient.invalidateQueries({ queryKey: ['documentedHosts'] });
+                      if (res.missing.length > 0) alert(`${res.updated} marked stale, ${res.missing.length} id(s) no longer exist.`);
+                    },
+                  },
                   {
                     label: 'Delete selected',
                     confirm: (count) => `Delete ${count} documented host${count === 1 ? '' : 's'}? This cannot be undone.`,
@@ -1516,6 +1832,16 @@ export default function DocumentedHosts() {
         <InventoryImportModal
           onClose={() => setInventoryImportOpen(false)}
           onDone={() => queryClient.invalidateQueries({ queryKey: ['documentedHosts'] })}
+        />
+      )}
+
+      {placementPicker && canWrite && (
+        <PlacementPickerModal
+          kind={placementPicker.kind}
+          ids={placementPicker.ids}
+          sites={sitesQuery.data ?? []}
+          layers={layersQuery.data ?? []}
+          onClose={() => setPlacementPicker(null)}
         />
       )}
     </Layout>

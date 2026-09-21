@@ -404,6 +404,11 @@ export async function initDb(): Promise<void> {
       "createdAt" TEXT NOT NULL,
       "updatedAt" TEXT NOT NULL
     )`);
+  // isActive was added after the table existed — idempotent upgrade for old DBs.
+  // Default TRUE: every pre-existing host counts as active until marked stale.
+  await pool.query(`ALTER TABLE documented_hosts ADD COLUMN IF NOT EXISTS "isActive" BOOLEAN NOT NULL DEFAULT TRUE`);
+  // Free-form tags (same data basis as devices.tags) — added after the table existed.
+  await pool.query(`ALTER TABLE documented_hosts ADD COLUMN IF NOT EXISTS "tags" TEXT NOT NULL DEFAULT '[]'`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_documented_hosts_site ON documented_hosts ("siteId")`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_documented_hosts_layer ON documented_hosts ("layerId")`);
 

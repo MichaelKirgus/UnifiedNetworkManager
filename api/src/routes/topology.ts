@@ -25,6 +25,51 @@ const CACHE_TTL_MS = 30_000; // matches the telemetry poll cadence
 // served from another caller's cache entry.
 const cache = new Map<string, { at: number; payload: TopologyResult }>();
 
+/**
+ * Plugin-suggested default layer per device — for each assignment, look up the
+ * device's selected model in that plugin's catalog (plugins.deviceModels JSON)
+ * and take its `defaultLayerId`. A suggestion is only honored when it names an
+ * existing layer. Shared by GET /topology and the documented-hosts inventory
+ * import (which applies a known device's placement to matching hosts).
+ */
+export async function loadSuggestedLayers(
+  devices: Array<{ id: string; vendor: string; model: string | null }>,
+  assignments: Array<{ deviceId: string; pluginId: string }>,
+  validLayerIds: Set<string>
+): Promise<Map<string, string>> {
+  const suggestedByDevice = new Map<string, string>();
+  if (assignments.length === 0) return suggestedByDevice;
+  const deviceById = new Map(devices.map((d) => [d.id, d] as const));
+  const pluginRows = await db.query.plugins.findMany({
+    where: inArray(schema.plugins.id, Array.from(new Set(assignments.map((a) => a.pluginId)))),
+  });
+  const modelsByPlugin = new Map<string, Array<{ vendor: string; model: string; defaultLayerId?: string }>>();
+  for (const p of pluginRows) {
+    if (!p.deviceModels) continue;
+    try {
+      const parsed = JSON.parse(p.deviceModels);
+      if (Array.isArray(parsed)) modelsByPlugin.set(p.id, parsed);
+    } catch {
+      /* corrupt catalog — no suggestion from this plugin */
+    }
+  }
+  for (const a of assignments) {
+    const dev = deviceById.get(a.deviceId);
+    if (!dev || !dev.model) continue;
+    const models = modelsByPlugin.get(a.pluginId);
+    if (!models) continue;
+    const entry = models.find(
+      (m) => m && typeof m.vendor === 'string' && typeof m.model === 'string'
+        && m.vendor.toLowerCase() === dev.vendor.toLowerCase()
+        && m.model === dev.model
+    );
+    if (entry?.defaultLayerId && validLayerIds.has(entry.defaultLayerId)) {
+      suggestedByDevice.set(dev.id, entry.defaultLayerId);
+    }
+  }
+  return suggestedByDevice;
+}
+
 router.get('/topology', requireAuth, requirePermission('topology:read'), async (req, res: Response) => {
   try {
     // The OpenAPI validator coerces `includeHosts` to a real boolean (the spec
@@ -73,40 +118,12 @@ router.get('/topology', requireAuth, requirePermission('topology:read'), async (
     // producing a dangling band.
     const validLayerIds = new Set(layerRows.map((l) => l.id));
 
-    // Plugin-suggested default layers: for each assignment, look up the device's
-    // selected model in that plugin's catalog (plugins.deviceModels JSON) and
-    // take its `defaultLayerId`. First matching assignment wins; a suggestion is
-    // only honored when it names an existing layer.
-    const suggestedByDevice = new Map<string, string>();
-    if (assignments.length > 0) {
-      const pluginRows = await db.query.plugins.findMany({
-        where: inArray(schema.plugins.id, Array.from(new Set(assignments.map((a) => a.pluginId)))),
-      });
-      const modelsByPlugin = new Map<string, Array<{ vendor: string; model: string; defaultLayerId?: string }>>();
-      for (const p of pluginRows) {
-        if (!p.deviceModels) continue;
-        try {
-          const parsed = JSON.parse(p.deviceModels);
-          if (Array.isArray(parsed)) modelsByPlugin.set(p.id, parsed);
-        } catch {
-          /* corrupt catalog — no suggestion from this plugin */
-        }
-      }
-      for (const a of assignments) {
-        const dev = deviceRows.find((d) => d.id === a.deviceId);
-        if (!dev || !dev.model) continue;
-        const models = modelsByPlugin.get(a.pluginId);
-        if (!models) continue;
-        const entry = models.find(
-          (m) => m && typeof m.vendor === 'string' && typeof m.model === 'string'
-            && m.vendor.toLowerCase() === dev.vendor.toLowerCase()
-            && m.model === dev.model
-        );
-        if (entry?.defaultLayerId && validLayerIds.has(entry.defaultLayerId)) {
-          suggestedByDevice.set(dev.id, entry.defaultLayerId);
-        }
-      }
-    }
+    // Plugin-suggested default layers — see loadSuggestedLayers().
+    const suggestedByDevice = await loadSuggestedLayers(
+      deviceRows.map((d) => ({ id: d.id, vendor: d.vendor, model: d.model })),
+      assignments,
+      validLayerIds
+    );
 
     // ONE latest snapshot per assignment (index-backed findFirst each; the set
     // of assignments is small — a few dozen at most). Port-level detail lives

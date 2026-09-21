@@ -410,6 +410,8 @@ export interface DocumentedHost {
   siteName: string | null;
   layerId: string | null;
   layerName: string | null;
+  /** User-assigned free-form tags (same data basis as devices.tags). */
+  tags: string[];
   ips: DocumentedHostIp[];
   /** True when any documented MAC or IP was observed in the live inventory. */
   discovered: boolean;
@@ -419,6 +421,8 @@ export interface DocumentedHost {
   observedHostname: string | null;
   /** Any documented MAC differs from what is currently observed for its address. */
   macMismatch: boolean;
+  /** User-maintained lifecycle flag — false = stale/retired (row stays, dimmed in the UI). Default true. */
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -441,7 +445,19 @@ export interface DocumentedHostRequest {
   description?: string | null;
   siteId?: string | null;
   layerId?: string | null;
+  /** Free-form user tags (same data basis as devices.tags); omitted = none. */
+  tags?: string[];
+  /** Lifecycle flag — false marks the host stale/retired (new hosts default to active). */
+  isActive?: boolean;
   ips: DocumentedHostIpRequest[];
+}
+
+/** Result of a batch lifecycle update on documented hosts. */
+export interface DocumentedHostBulkResult {
+  /** Hosts whose flag was changed. */
+  updated: number;
+  /** Submitted ids that do not exist. */
+  missing: string[];
 }
 
 /** Result of a bulk documented-host import. */
@@ -475,8 +491,9 @@ export interface DocumentedHostInventoryImportOptions {
   dryRun?: boolean;
 }
 
-/** One planned change for a single live host. */
+/** One planned change for a single live host (or merged hostname group). */
 export interface DocumentedHostInventoryPlanEntry {
+  /** Representative MAC of this entry (first-seen; first NIC for merged groups). */
   mac: string;
   hostname: string | null;
   ips: number;
@@ -484,6 +501,8 @@ export interface DocumentedHostInventoryPlanEntry {
   reason?: string;
   /** Public addresses removed by a strip policy (action=create/update only). */
   stripped?: number;
+  /** Extra MACs folded into this entry by the smart hostname merge (multi-NIC host); empty/absent = single-MAC row. */
+  mergedFrom?: string[];
 }
 
 /** Result of the inventory import (dry-run plan or applied summary). */
@@ -494,6 +513,18 @@ export interface DocumentedHostInventoryImportResult {
   created: number;
   updated: number;
   skipped: number;
+  /** How many live MAC rows were folded into one entry by the hostname merge (dry-run only). */
+  mergedGroups?: number;
+}
+
+/** Result of merging several documented host rows into one. */
+export interface DocumentedHostMergeResult {
+  /** The surviving (merged) host — oldest row's id + createdAt kept. */
+  merged: DocumentedHost;
+  /** Ids of the rows that were deleted. */
+  removed: string[];
+  /** Number of rows that were merged. */
+  count: number;
 }
 
 /** One configured tunnel from the cross-device inventory view. Unlike networks/hosts,
@@ -2295,6 +2326,14 @@ export const api = {
     apiFetch<DocumentedHost>(`/documented-hosts/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteDocumentedHost: (id: string) =>
     apiFetch<void>(`/documented-hosts/${id}`, { method: 'DELETE' }),
+  /** Batch lifecycle update — marks the given hosts active or stale in one call. */
+  bulkUpdateDocumentedHosts: (ids: string[], isActive: boolean) =>
+    apiFetch<DocumentedHostBulkResult>('/documented-hosts/bulk', { method: 'POST', body: JSON.stringify({ ids, isActive }) }),
+  /** Bulk site/layer placement — sets the given fields on every id (null clears). */
+  bulkSetDocumentedHostPlacement: (ids: string[], placement: { siteId?: string | null; layerId?: string | null }) =>
+    apiFetch<DocumentedHostBulkResult>('/documented-hosts/bulk', { method: 'POST', body: JSON.stringify({ ids, ...placement }) }),
+  mergeDocumentedHosts: (ids: string[]) =>
+    apiFetch<DocumentedHostMergeResult>('/documented-hosts/merge', { method: 'POST', body: JSON.stringify({ ids }) }),
   importDocumentedHosts: (body: { hosts: DocumentedHostRequest[]; matchBy?: 'dns' | 'mac'; updateExisting?: boolean }) =>
     apiFetch<DocumentedHostImportResult>('/documented-hosts/import', { method: 'POST', body: JSON.stringify(body) }),
   /** Copy the live host inventory into the documented hosts (additive merge).

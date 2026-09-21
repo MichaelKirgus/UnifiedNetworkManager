@@ -6,7 +6,9 @@ import { ipFamily, ipv4ToInt, ipv6ToBigInt, ipInCidr, isPublicIpv4, isPublicIpv6
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
-import { mergeHostRows, mergeNetworkRows } from './networks';
+import { mergeHostRows, mergeNetworkRows, type MergedHost } from './networks';
+import { loadSuggestedLayers } from './topology';
+import { classifyLayer } from '../utils/topology';
 
 const router = Router();
 
@@ -58,6 +60,47 @@ function normalizeMac(value: string): string | null {
 /** Formats a 12-hex-char MAC into colon form. */
 function formatMac(compact: string): string {
   return compact.replace(/([0-9a-f]{2})(?=[0-9a-f])/g, '$1:');
+}
+
+/** Parses a stored JSON string array defensively (bad data → []). Same basis as devices.tags. */
+function readStringArray(raw: unknown): string[] {
+  let arr: unknown = raw;
+  if (typeof raw === 'string') {
+    try { arr = JSON.parse(raw); } catch { return []; }
+  }
+  if (!Array.isArray(arr)) return [];
+  const out: string[] = [];
+  for (const v of arr) {
+    if (typeof v !== 'string') continue;
+    const t = v.trim();
+    if (t !== '' && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+/** Validates a request-body field as an array of non-empty strings (deduped, trimmed). */
+function parseStringArrayField(raw: unknown, field: string): { value?: string[]; error?: string } {
+  if (!Array.isArray(raw)) return { error: `"${field}" must be an array of strings` };
+  for (const v of raw as unknown[]) {
+    if (typeof v !== 'string' || v.trim() === '') return { error: `"${field}" entries must be non-empty strings` };
+  }
+  const out: string[] = [];
+  for (const v of raw as string[]) {
+    const t = v.trim();
+    if (!out.includes(t)) out.push(t);
+  }
+  return { value: out };
+}
+
+/** Case-insensitive union of tag lists — first occurrence's casing wins. */
+function mergeTagLists(...lists: string[][]): string[] {
+  const out: string[] = [];
+  for (const list of lists) {
+    for (const t of list) {
+      if (!out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t);
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +258,8 @@ export interface DocumentedHostView {
   siteName: string | null;
   layerId: string | null;
   layerName: string | null;
+  /** User-assigned free-form tags (same data basis as devices.tags). */
+  tags: string[];
   ips: DocumentedHostIpView[];
   /** True when any documented MAC or IP was observed in the live inventory. */
   discovered: boolean;
@@ -224,6 +269,8 @@ export interface DocumentedHostView {
   observedHostname: string | null;
   /** Any documented MAC differs from what is currently observed for its address. */
   macMismatch: boolean;
+  /** User-maintained lifecycle flag — false = stale/retired (row stays, dimmed in the UI). Default true. */
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -312,11 +359,13 @@ function shapeHost(
     siteName: h.host.siteId ? (siteNameById.get(h.host.siteId) ?? null) : null,
     layerId: h.host.layerId,
     layerName: h.host.layerId ? (layerNameById.get(h.host.layerId) ?? null) : null,
+    tags: readStringArray(h.host.tags),
     ips,
     discovered,
     lastSeenAt,
     observedHostname: bestName,
     macMismatch,
+    isActive: h.host.isActive !== false, // defensive — the column is NOT NULL DEFAULT TRUE
     createdAt: h.host.createdAt,
     updatedAt: h.host.updatedAt,
   };
@@ -390,6 +439,8 @@ interface HostInput {
   description?: unknown;
   siteId?: unknown;
   layerId?: unknown;
+  tags?: unknown;
+  isActive?: unknown;
   ips?: unknown;
 }
 
@@ -399,6 +450,10 @@ interface ValidatedHost {
   description: string | null;
   siteId: string | null;
   layerId: string | null;
+  /** Free-form tags (same data basis as devices.tags); [] = none. */
+  tags: string[];
+  /** Lifecycle flag — absent in the payload means "keep current" (true for new hosts). */
+  isActive: boolean;
   ips: { address: string; mac: string | null; networkLabel: string | null; vlanId: number | null }[];
 }
 
@@ -427,6 +482,10 @@ async function validateHostInput(body: HostInput): Promise<{ ok: true; value: Va
   const friendlyName = typeof body.friendlyName === 'string' && body.friendlyName.trim() ? body.friendlyName.trim() : null;
   const description = typeof body.description === 'string' && body.description.trim() ? body.description.trim() : null;
 
+  // Lifecycle flag — only an explicit boolean changes it; anything else is ignored.
+  let isActive: boolean | null = null;
+  if (typeof body.isActive === 'boolean') isActive = body.isActive;
+
   // Site / layer references — must exist when provided.
   let siteId: string | null = null;
   if (body.siteId !== undefined && body.siteId !== null) {
@@ -441,6 +500,15 @@ async function validateHostInput(body: HostInput): Promise<{ ok: true; value: Va
     const layer = await db.query.networkLayers.findFirst({ where: eq(schema.networkLayers.id, body.layerId) });
     if (!layer) return { ok: false, error: `Unknown layerId "${body.layerId}"` };
     layerId = layer.id;
+  }
+
+  // Free-form tags (same data basis as devices.tags). Absent/undefined keeps
+  // the current value on a PATCH; an explicit [] clears them.
+  let tags: string[] | null = null;
+  if (body.tags !== undefined) {
+    const ref = parseStringArrayField(body.tags, 'tags');
+    if (ref.error) return { ok: false, error: ref.error };
+    tags = ref.value!;
   }
 
   // IP addresses — at least one required, unique per host.
@@ -472,7 +540,7 @@ async function validateHostInput(body: HostInput): Promise<{ ok: true; value: Va
     ips.push({ address, mac, networkLabel, vlanId });
   }
 
-  return { ok: true, value: { dnsNames, friendlyName, description, siteId, layerId, ips } };
+  return { ok: true, value: { dnsNames, friendlyName, description, siteId, layerId, tags: tags ?? [], isActive: isActive ?? true, ips } };
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +591,8 @@ router.post('/documented-hosts', requireAuth, requirePermission('documented-host
       description: v.description,
       siteId: v.siteId,
       layerId: v.layerId,
+      tags: JSON.stringify(v.tags),
+      isActive: v.isActive, // new hosts default to active
       createdAt: now,
       updatedAt: now,
     });
@@ -559,10 +629,12 @@ router.patch('/documented-hosts/:id', requireAuth, requirePermission('documented
       description: existing.host.description,
       siteId: existing.host.siteId,
       layerId: existing.host.layerId,
+      tags: readStringArray(existing.host.tags),
+      isActive: existing.host.isActive !== false, // defensive — the column is NOT NULL DEFAULT TRUE
       ips: existing.ips.map((i) => ({ address: i.address, mac: i.mac ?? null, networkLabel: i.networkLabel, vlanId: i.vlanId ?? null })),
     };
     const merged: HostInput = { ...current };
-    for (const key of ['dnsNames', 'friendlyName', 'description', 'siteId', 'layerId', 'ips'] as const) {
+    for (const key of ['dnsNames', 'friendlyName', 'description', 'siteId', 'layerId', 'tags', 'isActive', 'ips'] as const) {
       if (body[key] !== undefined) (merged as Record<string, unknown>)[key] = body[key];
     }
 
@@ -581,6 +653,8 @@ router.patch('/documented-hosts/:id', requireAuth, requirePermission('documented
         description: v.description,
         siteId: v.siteId,
         layerId: v.layerId,
+        tags: JSON.stringify(v.tags),
+        isActive: v.isActive, // merged value — keeps the current flag when not provided
         updatedAt: now,
       })
       .where(eq(schema.documentedHosts.id, existing.host.id));
@@ -630,6 +704,7 @@ interface ImportRow {
   description?: unknown;
   siteId?: unknown;
   layerId?: unknown;
+  tags?: unknown;
   ips?: unknown;
 }
 
@@ -715,7 +790,11 @@ router.post('/documented-hosts/import', requireAuth, requirePermission('document
       }
 
       if (existingId) {
-        // Update in place — keep the original id + createdAt.
+        // Update in place — keep the original id + createdAt. isActive is NOT
+        // touched by a CSV import (the lifecycle flag is user-managed); tags are
+        // merged additively so an import never drops existing labels.
+        const existingHost = existingRows.find((h) => h.host.id === existingId);
+        const mergedTags = mergeTagLists(readStringArray(existingHost?.host.tags), v.tags);
         await db.update(schema.documentedHosts)
           .set({
             dnsNames: JSON.stringify(v.dnsNames),
@@ -723,6 +802,7 @@ router.post('/documented-hosts/import', requireAuth, requirePermission('document
             description: v.description,
             siteId: v.siteId,
             layerId: v.layerId,
+            tags: JSON.stringify(mergedTags),
             updatedAt: now,
           })
           .where(eq(schema.documentedHosts.id, existingId));
@@ -742,6 +822,8 @@ router.post('/documented-hosts/import', requireAuth, requirePermission('document
           description: v.description,
           siteId: v.siteId,
           layerId: v.layerId,
+          tags: JSON.stringify(v.tags),
+          isActive: true, // imported hosts start active
           createdAt: now,
           updatedAt: now,
         });
@@ -755,6 +837,65 @@ router.post('/documented-hosts/import', requireAuth, requirePermission('document
     }
 
     res.status(200).json({ created, updated, skipped, errors });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// POST /documented-hosts/bulk — batch updates. Body:
+// { ids: string[], isActive?: boolean, siteId?: string|null, layerId?: string|null }
+// Marks every existing id active/stale and/or sets its site/layer placement in
+// one call (the webapp bulk actions send the current selection). Unknown ids
+// are reported, never fatal; at most 5000 ids per call. Omitted fields = no-op.
+router.post('/documented-hosts/bulk', requireAuth, requirePermission('documented-hosts:write'), async (req: Request, res: Response) => {
+  try {
+    const body = req.body ?? {};
+    const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x) : [];
+    if (ids.length === 0) {
+      res.status(400).json({ error: '"ids" must be a non-empty array of documented host ids' });
+      return;
+    }
+    if (ids.length > 5000) {
+      res.status(400).json({ error: 'At most 5000 ids per bulk update' });
+      return;
+    }
+
+    // Optional fields — each omitted = no-op on that field. siteId/layerId must
+    // reference an existing registry entry (or null to clear the placement).
+    const hasFlag = typeof body.isActive === 'boolean';
+    let siteId: string | null | undefined;
+    if (body.siteId !== undefined) {
+      if (body.siteId === null) siteId = null;
+      else if (typeof body.siteId === 'string' && body.siteId) {
+        const site = await db.query.sites.findFirst({ where: eq(schema.sites.id, body.siteId) });
+        if (!site) { res.status(400).json({ error: `Unknown siteId "${body.siteId}"` }); return; }
+        siteId = site.id;
+      } else { res.status(400).json({ error: '"siteId" must be a non-empty string or null' }); return; }
+    }
+    let layerId: string | null | undefined;
+    if (body.layerId !== undefined) {
+      if (body.layerId === null) layerId = null;
+      else if (typeof body.layerId === 'string' && body.layerId) {
+        const layer = await db.query.networkLayers.findFirst({ where: eq(schema.networkLayers.id, body.layerId) });
+        if (!layer) { res.status(400).json({ error: `Unknown layerId "${body.layerId}"` }); return; }
+        layerId = layer.id;
+      } else { res.status(400).json({ error: '"layerId" must be a non-empty string or null' }); return; }
+    }
+
+    const existing = await db.query.documentedHosts.findMany({ where: inArray(schema.documentedHosts.id, Array.from(new Set(ids))) });
+    const foundIds = new Set(existing.map((h) => h.id));
+    const missing = ids.filter((id) => !foundIds.has(id));
+
+    if ((hasFlag || siteId !== undefined || layerId !== undefined) && existing.length > 0) {
+      const set: Record<string, unknown> = { updatedAt: new Date().toISOString() };
+      if (hasFlag) set.isActive = body.isActive as boolean;
+      if (siteId !== undefined) set.siteId = siteId;
+      if (layerId !== undefined) set.layerId = layerId;
+      await db.update(schema.documentedHosts).set(set).where(inArray(schema.documentedHosts.id, Array.from(foundIds)));
+    }
+
+    res.status(200).json({ updated: hasFlag || siteId !== undefined || layerId !== undefined ? existing.length : 0, missing });
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
@@ -800,7 +941,7 @@ interface InventoryImportOptions {
   dryRun?: boolean;
 }
 
-/** One planned change for a single live host. */
+/** One planned change for a single live host (or merged hostname group). */
 interface InventoryImportPlanEntry {
   mac: string;
   hostname: string | null;
@@ -810,6 +951,8 @@ interface InventoryImportPlanEntry {
   reason?: string;
   /** Public addresses removed by a 'strip' policy (action=create/update only). */
   stripped?: number;
+  /** Extra MACs folded into this entry by the hostname merge (multi-NIC host); empty/absent = single-MAC row. */
+  mergedFrom?: string[];
 }
 
 /** Result of the inventory import (dry-run or applied). */
@@ -820,6 +963,8 @@ interface InventoryImportResult {
   created: number;
   updated: number;
   skipped: number;
+  /** How many live MAC rows were folded into one entry by the hostname merge (dry-run only). */
+  mergedGroups?: number;
 }
 
 /** Normalizes an observed hostname into a documentable DNS name. */
@@ -1005,6 +1150,193 @@ function applyPublicPolicies(
   return { kept, stripped: addrs.length - kept.length };
 }
 
+/** One live host after the smart hostname merge (see groupLiveHostsByHostname). */
+interface LiveHostGroup {
+  /** Representative hostname (null when no row has one) — the merge key. */
+  hostname: string | null;
+  /** Every MAC of the group, first-seen order. */
+  macs: string[];
+  /** First MAC — representative for plan display + fallback DNS name. */
+  mac: string;
+  /** Union of all addresses across the group's rows (deduped, case-insensitive). */
+  addrs: string[];
+  /** Address → the MAC that reported it (lowercased address key). */
+  addrMac: Map<string, string>;
+}
+
+/**
+ * SMART MERGE — one physical machine with several NICs shows up in the live
+ * inventory as ONE ROW PER MAC (mergeHostRows merges by MAC). Group those rows
+ * by their observed hostname so a multi-NIC host is imported/updated as a
+ * SINGLE documented host carrying every address + MAC. Rows without a usable
+ * hostname keep the legacy per-MAC behavior: each stands alone on its own.
+ */
+function groupLiveHostsByHostname(live: MergedHost[]): LiveHostGroup[] {
+  const groups = new Map<string, LiveHostGroup>();
+  for (const h of live) {
+    const key = hostnameToDnsName(h.hostname);
+    if (!key) {
+      // No usable hostname — legacy per-MAC behavior: one group per row.
+      groups.set(`mac:${h.mac.toLowerCase()}`, {
+        hostname: null,
+        macs: [h.mac],
+        mac: h.mac,
+        addrs: [...h.ips],
+        addrMac: new Map(h.ips.map((a) => [a.toLowerCase(), h.mac])),
+      });
+    } else {
+      let g = groups.get(key);
+      if (!g) {
+        g = { hostname: h.hostname, macs: [], mac: h.mac, addrs: [], addrMac: new Map() };
+        groups.set(key, g);
+      }
+      if (!g.macs.includes(h.mac)) g.macs.push(h.mac);
+      for (const a of h.ips) {
+        const k = a.toLowerCase();
+        if (!g.addrMac.has(k)) {
+          g.addrs.push(a);
+          g.addrMac.set(k, h.mac);
+        }
+      }
+    }
+  }
+  return Array.from(groups.values());
+}
+
+// ---------------------------------------------------------------------------
+// Device placement — a host that is ALSO known in the device inventory can
+// inherit its site / layer / tags (the same registries devices use). The live
+// `hosts` table only holds rows collected ON registered devices, so "known in
+// the devices" = at least one of the group's MACs/addresses was observed on a
+// device. Placement uses the SAME precedence as GET /topology for the layer:
+// manual override > plugin-suggested model default > type/vendor heuristic.
+// ---------------------------------------------------------------------------
+
+/** Resolved placement data of one known device. */
+interface DevicePlacement {
+  deviceId: string;
+  name: string;
+  siteId: string | null;
+  /** Resolved topology-layer id (override > suggestion > heuristic). */
+  layerId: string | null;
+  tags: string[];
+}
+
+/** Index of device placements + which devices observed each MAC / address. */
+interface DevicePlacementIndex {
+  placements: Map<string, DevicePlacement>;
+  /** Compact MAC key -> observing device ids (first-seen order). */
+  byMac: Map<string, string[]>;
+  /** Lowercased address -> observing device ids (first-seen order). */
+  byAddr: Map<string, string[]>;
+}
+
+/** Loads the placement of every device that observed any of the given MACs/addresses. */
+async function loadDevicePlacements(macs: string[], addrs: string[]): Promise<DevicePlacementIndex> {
+  const idx: DevicePlacementIndex = { placements: new Map(), byMac: new Map(), byAddr: new Map() };
+  if (macs.length === 0 && addrs.length === 0) return idx;
+
+  const macCandidates = Array.from(new Set(macs.flatMap((m) => [m, macKey(m)])));
+  const conditions = [];
+  if (macCandidates.length > 0) conditions.push(inArray(schema.hosts.mac, macCandidates));
+  if (addrs.length > 0) conditions.push(inArray(schema.hosts.ip, addrs));
+  if (conditions.length === 0) return idx;
+
+  const rows = await db.query.hosts.findMany({ where: or(...conditions) });
+  for (const r of rows) {
+    // Which registered device observed this MAC / address.
+    const push = (map: Map<string, string[]>, key: string) => {
+      const list = map.get(key);
+      if (!list) map.set(key, [r.deviceId]);
+      else if (!list.includes(r.deviceId)) list.push(r.deviceId);
+    };
+    push(idx.byMac, macKey(r.mac));
+    if (r.ip !== '') push(idx.byAddr, r.ip.toLowerCase());
+  }
+
+  const deviceIds = Array.from(new Set(rows.map((r) => r.deviceId)));
+  if (deviceIds.length === 0) return idx;
+
+  const [devices, layerRows, assignments] = await Promise.all([
+    db.query.devices.findMany({ where: inArray(schema.devices.id, deviceIds) }),
+    db.query.networkLayers.findMany(),
+    db.query.devicePlugins.findMany({ where: inArray(schema.devicePlugins.deviceId, deviceIds) }),
+  ]);
+  const validLayerIds = new Set(layerRows.map((l) => l.id));
+  const suggestedByDevice = await loadSuggestedLayers(
+    devices.map((d) => ({ id: d.id, vendor: d.vendor, model: d.model })),
+    assignments,
+    validLayerIds
+  );
+
+  for (const d of devices) {
+    let types: string[] = [];
+    try {
+      const parsed = JSON.parse(d.deviceTypes);
+      if (Array.isArray(parsed)) types = parsed.filter((t): t is string => typeof t === 'string');
+    } catch {
+      /* malformed array — the heuristic simply sees no types */
+    }
+    idx.placements.set(d.id, {
+      deviceId: d.id,
+      name: d.name,
+      siteId: d.siteId ?? null,
+      layerId: classifyLayer({
+        id: d.id,
+        name: d.name,
+        status: d.status,
+        siteId: d.siteId,
+        managementAddress: d.managementAddress,
+        deviceTypes: types,
+        vendor: d.vendor,
+        model: d.model ?? null,
+        layerOverride: d.layerOverride && validLayerIds.has(d.layerOverride) ? d.layerOverride : null,
+        suggestedLayerId: suggestedByDevice.get(d.id) ?? null,
+      }, []), // no port detail — the switch-VLAN heuristic falls through to 'access'
+      tags: readStringArray(d.tags),
+    });
+  }
+  return idx;
+}
+
+/** The placement of the FIRST known device that observed this group (name-sorted for determinism). */
+function placementForGroup(g: LiveHostGroup, idx: DevicePlacementIndex): DevicePlacement | null {
+  const ids = new Set<string>();
+  for (const m of g.macs) for (const id of idx.byMac.get(macKey(m)) ?? []) ids.add(id);
+  for (const a of g.addrs) for (const id of idx.byAddr.get(a.toLowerCase()) ?? []) ids.add(id);
+  const list = [...ids]
+    .map((id) => idx.placements.get(id))
+    .filter((p): p is DevicePlacement => !!p)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return list[0] ?? null;
+}
+
+/**
+ * Applies a known device's placement to a documented host — OPTIONALLY: only
+ * fills gaps. A NEW host takes everything the device knows (site/layer/tags);
+ * an EXISTING host keeps its user values and only gains what it lacks (tags are
+ * merged additively). Returns the fields to write + whether anything changed.
+ */
+function applyDevicePlacement(
+  target: { siteId: string | null; layerId: string | null; tags: string[] } | null,
+  placement: DevicePlacement
+): { siteId?: string | null; layerId?: string | null; tags?: string[]; changed: boolean } {
+  const out: { siteId?: string | null; layerId?: string | null; tags?: string[]; changed: boolean } = { changed: false };
+  if (!target) {
+    // New host — inherit the device's placement.
+    if (placement.siteId) { out.siteId = placement.siteId; out.changed = true; }
+    if (placement.layerId) { out.layerId = placement.layerId; out.changed = true; }
+    if (placement.tags.length > 0) { out.tags = [...placement.tags]; out.changed = true; }
+    return out;
+  }
+  // Existing host — fill gaps only, user values always win.
+  if (!target.siteId && placement.siteId) { out.siteId = placement.siteId; out.changed = true; }
+  if (!target.layerId && placement.layerId) { out.layerId = placement.layerId; out.changed = true; }
+  const mergedTags = mergeTagLists(target.tags, placement.tags);
+  if (mergedTags.length !== target.tags.length) { out.tags = mergedTags; out.changed = true; }
+  return out;
+}
+
 /**
  * Builds the import plan from the live inventory + current documented hosts.
  * Pure function of its inputs — shared by dry-run and apply so both agree.
@@ -1048,11 +1380,23 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
   let updated = 0;
   let skipped = 0;
 
-  for (const h of live) {
+  // SMART MERGE — fold the per-MAC live rows into hostname groups so a
+  // multi-NIC machine is planned as ONE documented host (see above).
+  const groups = groupLiveHostsByHostname(live);
+  const mergedGroups = groups.filter((g) => g.macs.length > 1).length;
+
+  // Device placement — hosts that are also known in the device inventory can
+  // inherit site/layer/tags from their observing device (see above).
+  const placementIdx = await loadDevicePlacements(
+    groups.flatMap((g) => g.macs),
+    groups.flatMap((g) => g.addrs.filter((a) => !isNonDocumentableAddress(a)))
+  );
+
+  for (const g of groups) {
     // Documentable addresses only.
-    let addrs = h.ips.filter((a) => !isNonDocumentableAddress(a));
+    let addrs = g.addrs.filter((a) => !isNonDocumentableAddress(a));
     if (addrs.length === 0) {
-      planned.push({ mac: h.mac, hostname: h.hostname, ips: 0, action: 'skip', reason: 'no documentable address' });
+      planned.push({ mac: g.mac, hostname: g.hostname, ips: 0, action: 'skip', reason: 'no documentable address' });
       skipped++;
       continue;
     }
@@ -1060,7 +1404,7 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
     // Network/range filter FIRST — include-only / exclude runs before every other option.
     const rf = rangeFilterDecision(addrs, opts.rangeMode ?? 'keep-all', ranges);
     if (rf.skip) {
-      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: rf.reason });
+      planned.push({ mac: g.mac, hostname: g.hostname, ips: addrs.length, action: 'skip', reason: rf.reason });
       skipped++;
       continue;
     }
@@ -1069,44 +1413,52 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
     // host with its internal addresses; skip-host drops it entirely).
     const pol = applyPublicPolicies(addrs, opts.publicIpv4Policy ?? 'keep', opts.publicIpv6Policy ?? 'keep');
     if (pol.skipReason) {
-      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: pol.skipReason });
+      planned.push({ mac: g.mac, hostname: g.hostname, ips: addrs.length, action: 'skip', reason: pol.skipReason });
       skipped++;
       continue;
     }
     const stripped = pol.stripped;
     addrs = pol.kept;
     if (addrs.length === 0) {
-      planned.push({ mac: h.mac, hostname: h.hostname, ips: 0, action: 'skip', reason: 'only public addresses' });
+      planned.push({ mac: g.mac, hostname: g.hostname, ips: 0, action: 'skip', reason: 'only public addresses' });
       skipped++;
       continue;
     }
 
-    let dnsName = hostnameToDnsName(h.hostname);
+    let dnsName = hostnameToDnsName(g.hostname);
     if (!dnsName) {
       if (opts.skipWithoutHostname !== false) {
-        planned.push({ mac: h.mac, hostname: null, ips: addrs.length, action: 'skip', reason: 'no hostname' });
+        planned.push({ mac: g.mac, hostname: null, ips: addrs.length, action: 'skip', reason: 'no hostname' });
         skipped++;
         continue;
       }
       // No usable hostname — fall back to the MAC as the DNS name (still valid RFC 1123).
-      dnsName = h.mac.replace(/:/g, '');
+      dnsName = g.mac.replace(/:/g, '');
     }
 
     const nets = addrs.map((a) => mostSpecificSubnet(subnets, a));
     if (opts.skipUnknownNetworks === true && !nets.some((n) => n !== null)) {
-      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: 'no known network' });
+      planned.push({ mac: g.mac, hostname: g.hostname, ips: addrs.length, action: 'skip', reason: 'no known network' });
       skipped++;
       continue;
     }
     if (opts.skipWithoutVlan === true && !nets.some((n) => n !== null && n.vlanId != null)) {
-      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: 'no VLAN discovered' });
+      planned.push({ mac: g.mac, hostname: g.hostname, ips: addrs.length, action: 'skip', reason: 'no VLAN discovered' });
       skipped++;
       continue;
     }
 
     // Match an existing documented host — by MAC first (the stable identity),
-    // then by any shared address.
-    let target = docByMac.get(macKey(h.mac)) ?? null;
+    // then by any shared address. A multi-NIC group matches when ANY of its
+    // MACs or addresses is already documented.
+    let target: HostWithIps | null = null;
+    for (const m of g.macs) {
+      const t = docByMac.get(macKey(m));
+      if (t) {
+        target = t;
+        break;
+      }
+    }
     if (!target) {
       for (const a of addrs) {
         const cands = docByAddr.get(a.toLowerCase());
@@ -1119,6 +1471,7 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
 
     // Would the merge actually change anything?
     let wouldChange = false;
+    const placement = placementForGroup(g, placementIdx);
     if (!target) {
       wouldChange = true;
     } else {
@@ -1132,20 +1485,31 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
       }
       const names = safeParseStringArray(target.host.dnsNames);
       if (dnsName && !names.includes(dnsName)) wouldChange = true;
+      // A known device's placement filling a gap also counts.
+      if (placement && applyDevicePlacement({ siteId: target.host.siteId, layerId: target.host.layerId, tags: readStringArray(target.host.tags) }, placement).changed) {
+        wouldChange = true;
+      }
     }
 
     if (!wouldChange) {
-      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: 'already fully documented' });
+      planned.push({ mac: g.mac, hostname: g.hostname, ips: addrs.length, action: 'skip', reason: 'already fully documented' });
       skipped++;
       continue;
     }
 
     if (target) updated++;
     else created++;
-    planned.push({ mac: h.mac, hostname: h.hostname ?? dnsName, ips: addrs.length, action: target ? 'update' : 'create', stripped: stripped > 0 ? stripped : undefined });
+    planned.push({
+      mac: g.mac,
+      hostname: g.hostname ?? dnsName,
+      ips: addrs.length,
+      action: target ? 'update' : 'create',
+      stripped: stripped > 0 ? stripped : undefined,
+      mergedFrom: g.macs.length > 1 ? g.macs.slice(1) : undefined,
+    });
   }
 
-  return { dryRun: true, totalLiveHosts: live.length, planned, created, updated, skipped };
+  return { dryRun: true, totalLiveHosts: live.length, planned, created, updated, skipped, mergedGroups };
 }
 
 /** Applies the plan — writes only what buildInventoryImportPlan() computed. */
@@ -1185,8 +1549,16 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
   let skipped = 0;
   const now = new Date().toISOString();
 
-  for (const h of live) {
-    let addrs = h.ips.filter((a) => !isNonDocumentableAddress(a));
+  // SMART MERGE — same hostname grouping as the plan, so apply and dry-run agree.
+  const groups = groupLiveHostsByHostname(live);
+  // Device placement — same index as the plan (see above).
+  const placementIdx = await loadDevicePlacements(
+    groups.flatMap((g) => g.macs),
+    groups.flatMap((g) => g.addrs.filter((a) => !isNonDocumentableAddress(a)))
+  );
+
+  for (const g of groups) {
+    let addrs = g.addrs.filter((a) => !isNonDocumentableAddress(a));
     if (addrs.length === 0) {
       skipped++;
       continue;
@@ -1205,14 +1577,14 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
       continue;
     }
     addrs = pol.kept;
-    let dnsName = hostnameToDnsName(h.hostname);
+    let dnsName = hostnameToDnsName(g.hostname);
     if (!dnsName) {
       if (opts.skipWithoutHostname !== false) {
         skipped++;
         continue;
       }
       // MAC as fallback DNS name — valid RFC 1123, keeps the host documentable.
-      dnsName = h.mac.replace(/:/g, '');
+      dnsName = g.mac.replace(/:/g, '');
     }
 
     const nets = addrs.map((a) => mostSpecificSubnet(subnets, a));
@@ -1225,7 +1597,15 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
       continue;
     }
 
-    let target = docByMac.get(macKey(h.mac)) ?? null;
+    // Match by ANY of the group's MACs first, then by any shared address.
+    let target: HostWithIps | null = null;
+    for (const m of g.macs) {
+      const t = docByMac.get(macKey(m));
+      if (t) {
+        target = t;
+        break;
+      }
+    }
     if (!target) {
       for (const a of addrs) {
         const cands = docByAddr.get(a.toLowerCase());
@@ -1244,13 +1624,15 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
     let changed = false;
     addrs.forEach((a, i2) => {
       const net = nets[i2];
+      // The MAC that reported this address (multi-NIC groups carry one per NIC).
+      const rowMac = g.addrMac.get(a.toLowerCase()) ?? g.mac;
       const existingAddr = mergedIps.find((x) => x.address.toLowerCase() === a.toLowerCase());
       if (!existingAddr) {
-        mergedIps.push({ address: a, mac: h.mac, networkLabel: net?.cidr ?? null, vlanId: net?.vlanId ?? null });
+        mergedIps.push({ address: a, mac: rowMac, networkLabel: net?.cidr ?? null, vlanId: net?.vlanId ?? null });
         changed = true;
       } else {
         // Fill gaps only — user values always win.
-        if (!existingAddr.mac) { existingAddr.mac = h.mac; changed = true; }
+        if (!existingAddr.mac) { existingAddr.mac = rowMac; changed = true; }
         if (!existingAddr.networkLabel && net) { existingAddr.networkLabel = net.cidr; changed = true; }
         if (existingAddr.vlanId == null && net?.vlanId != null) { existingAddr.vlanId = net.vlanId; changed = true; }
       }
@@ -1264,12 +1646,30 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
 
     // Friendly name: keep the user's, else derive from the hostname.
     let friendlyName = target?.host.friendlyName ?? null;
-    if (!friendlyName && h.hostname) {
-      const base = h.hostname.trim().split('.')[0];
+    if (!friendlyName && g.hostname) {
+      const base = g.hostname.trim().split('.')[0];
       if (base) {
         friendlyName = base;
         changed = true;
       }
+    }
+
+    // Device placement — a host that is ALSO known in the device inventory
+    // inherits site/layer/tags from its observing device (gaps only, user
+    // values always win). See applyDevicePlacement().
+    const placement = placementForGroup(g, placementIdx);
+    let newSiteId = target?.host.siteId ?? null;
+    let newLayerId = target?.host.layerId ?? null;
+    let newTags: string[] = target ? readStringArray(target.host.tags) : [];
+    if (placement) {
+      const applied = applyDevicePlacement(
+        target ? { siteId: target.host.siteId, layerId: target.host.layerId, tags: newTags } : null,
+        placement
+      );
+      if (applied.changed) changed = true;
+      if (applied.siteId !== undefined) newSiteId = applied.siteId;
+      if (applied.layerId !== undefined) newLayerId = applied.layerId;
+      if (applied.tags !== undefined) newTags = applied.tags;
     }
 
     if (!changed) {
@@ -1279,7 +1679,7 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
 
     if (target) {
       await db.update(schema.documentedHosts)
-        .set({ dnsNames: JSON.stringify(names), friendlyName, updatedAt: now })
+        .set({ dnsNames: JSON.stringify(names), friendlyName, siteId: newSiteId, layerId: newLayerId, tags: JSON.stringify(newTags), updatedAt: now })
         .where(eq(schema.documentedHosts.id, target.host.id));
       // Replace the address list with the MERGED one (existing rows kept + new ones added).
       await db.delete(schema.documentedHostIps).where(eq(schema.documentedHostIps.hostId, target.host.id));
@@ -1296,8 +1696,10 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
         dnsNames: JSON.stringify(names),
         friendlyName,
         description: null,
-        siteId: null,
-        layerId: null,
+        siteId: newSiteId, // inherited from a known device when available (see above)
+        layerId: newLayerId,
+        tags: JSON.stringify(newTags),
+        isActive: true, // imported hosts start active
         createdAt: now,
         updatedAt: now,
       });
@@ -1337,6 +1739,138 @@ router.post('/documented-hosts/import-from-inventory', requireAuth, requirePermi
     }
     const result = await applyInventoryImport(opts);
     res.status(200).json(result);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Merging duplicate rows — one physical host with several NICs/MACs can end up
+// documented as multiple rows (e.g. imported once per MAC from the live
+// inventory). This endpoint merges a set of rows into ONE: addresses are
+// unioned (per-address user data preserved), DNS names + friendly name merged,
+// placement taken from the first row that has one, lifecycle = any active wins.
+// ---------------------------------------------------------------------------
+
+/** Merges two address lists — an address already present keeps its FIRST occurrence's data. */
+function mergeAddressLists(
+  a: { address: string; mac: string | null; networkLabel: string | null; vlanId: number | null }[],
+  b: { address: string; mac: string | null; networkLabel: string | null; vlanId: number | null }[]
+): { address: string; mac: string | null; networkLabel: string | null; vlanId: number | null }[] {
+  const out = [...a];
+  for (const x of b) {
+    if (!out.some((y) => y.address.toLowerCase() === x.address.toLowerCase())) out.push(x);
+  }
+  return out;
+}
+
+/** Merges several documented hosts into one canonical shape (oldest row leads). */
+function mergeHostShapes(hosts: HostWithIps[]): ValidatedHost {
+  const dnsNames: string[] = [];
+  for (const h of hosts) {
+    for (const n of safeParseStringArray(h.host.dnsNames)) if (!dnsNames.includes(n)) dnsNames.push(n);
+  }
+  let friendlyName: string | null = null;
+  let description: string | null = null;
+  let siteId: string | null = null;
+  let layerId: string | null = null;
+  for (const h of hosts) {
+    if (!friendlyName && h.host.friendlyName) friendlyName = h.host.friendlyName;
+    if (!description && h.host.description) description = h.host.description;
+    if (!siteId && h.host.siteId) siteId = h.host.siteId;
+    if (!layerId && h.host.layerId) layerId = h.host.layerId;
+  }
+  // Tags are unioned (case-insensitive dedupe, first occurrence's casing wins).
+  const tags: string[] = [];
+  for (const h of hosts) {
+    for (const t of readStringArray(h.host.tags)) if (!tags.some((x) => x.toLowerCase() === t.toLowerCase())) tags.push(t);
+  }
+  let ips: ValidatedHost['ips'] = [];
+  for (const h of hosts) {
+    ips = mergeAddressLists(ips, h.ips.map((i) => ({ address: i.address, mac: i.mac ?? null, networkLabel: i.networkLabel ?? null, vlanId: i.vlanId ?? null })));
+  }
+  // Any row still in active use keeps the merged host active.
+  const isActive = hosts.some((h) => h.host.isActive !== false);
+  return { dnsNames, friendlyName, description, siteId, layerId, tags, isActive, ips };
+}
+
+// POST /documented-hosts/merge — merge several documented rows into ONE. Body:
+// { ids: string[] } (2..5000). The surviving row is the OLDEST by createdAt;
+// all other ids are deleted after their data was merged in. Returns the merged host.
+router.post('/documented-hosts/merge', requireAuth, requirePermission('documented-hosts:write'), async (req: Request, res: Response) => {
+  try {
+    const body = req.body ?? {};
+    const ids = Array.from(new Set(((Array.isArray(body.ids) ? body.ids : []) as unknown[]).filter((x): x is string => typeof x === 'string' && !!x)));
+    if (ids.length < 2) {
+      res.status(400).json({ error: '"ids" must contain at least 2 documented host ids to merge' });
+      return;
+    }
+    if (ids.length > 5000) {
+      res.status(400).json({ error: 'At most 5000 ids per merge' });
+      return;
+    }
+
+    const hosts = await Promise.all(ids.map((id) => loadOneHost(id)));
+    const missing = ids.filter((_, i) => !hosts[i]);
+    if (missing.length > 0) {
+      res.status(400).json({ error: `Unknown documented host id(s): ${missing.join(', ')}` });
+      return;
+    }
+
+    // Oldest row survives — its id + createdAt are kept.
+    const ordered = hosts
+      .filter((h): h is HostWithIps => !!h)
+      .sort((a, b) => (a.host.createdAt < b.host.createdAt ? -1 : a.host.createdAt > b.host.createdAt ? 1 : a.host.id.localeCompare(b.host.id)));
+    const [survivor, ...rest] = ordered;
+
+    // The union of valid hosts is still a valid host — run the shared validation anyway.
+    const mergedShape = mergeHostShapes(ordered);
+    const validated = await validateHostInput({
+      dnsNames: mergedShape.dnsNames,
+      friendlyName: mergedShape.friendlyName,
+      description: mergedShape.description,
+      siteId: mergedShape.siteId,
+      layerId: mergedShape.layerId,
+      tags: mergedShape.tags,
+      isActive: mergedShape.isActive,
+      ips: mergedShape.ips,
+    });
+    if (!validated.ok) {
+      res.status(400).json({ error: `Merged host is invalid: ${validated.error}` });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    await db.update(schema.documentedHosts)
+      .set({
+        dnsNames: JSON.stringify(validated.value.dnsNames),
+        friendlyName: validated.value.friendlyName,
+        description: validated.value.description,
+        siteId: validated.value.siteId,
+        layerId: validated.value.layerId,
+        tags: JSON.stringify(validated.value.tags),
+        isActive: validated.value.isActive,
+        updatedAt: now,
+      })
+      .where(eq(schema.documentedHosts.id, survivor.host.id));
+
+    // Replace the address list with the union (per-address data preserved).
+    await db.delete(schema.documentedHostIps).where(eq(schema.documentedHostIps.hostId, survivor.host.id));
+    if (validated.value.ips.length > 0) {
+      await db.insert(schema.documentedHostIps).values(
+        validated.value.ips.map((ip) => ({ id: uuidv4(), hostId: survivor.host.id, address: ip.address, mac: ip.mac, networkLabel: ip.networkLabel, vlanId: ip.vlanId, createdAt: now }))
+      );
+    }
+
+    // Delete the merged-away rows + their addresses.
+    for (const h of rest) {
+      await db.delete(schema.documentedHostIps).where(eq(schema.documentedHostIps.hostId, h.host.id));
+      await db.delete(schema.documentedHosts).where(eq(schema.documentedHosts.id, h.host.id));
+    }
+
+    const [merged] = await buildViews([(await loadOneHost(survivor.host.id))!]);
+    res.status(200).json({ merged, removed: rest.map((h) => h.host.id), count: ordered.length });
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

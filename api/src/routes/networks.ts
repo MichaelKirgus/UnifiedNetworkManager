@@ -69,7 +69,7 @@ interface HostDeviceMember {
 }
 
 /** One physical host as presented by GET /hosts — merged across devices and plugins. */
-interface MergedHost {
+export interface MergedHost {
   mac: string;
   /** All addresses of this host, IPv4 first (a dual-stack device has both). */
   ips: string[];

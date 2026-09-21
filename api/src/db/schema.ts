@@ -1591,6 +1591,14 @@ export const documentedHosts = pgTable(
     // Optional placement (NULL = unassigned) — same registries as devices.
     siteId: text('siteId'),
     layerId: text('layerId'),
+    // User-assigned free-form tags (same data basis as devices.tags, e.g. "vm",
+    // "lab") — JSON string array; also auto-applied from a matching device on
+    // inventory import when the host has none yet.
+    tags: text('tags').notNull().default('[]'),
+    // User-maintained lifecycle flag: true = the host is in active use, false =
+    // stale/retired (the row stays documented but is visually dimmed). Default
+    // TRUE — every new or imported host starts active.
+    isActive: boolean('isActive').notNull().default(true),
     createdAt: text('createdAt').notNull(),
     updatedAt: text('updatedAt').notNull(),
   },
