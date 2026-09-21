@@ -925,16 +925,28 @@ function ImportModal({ sites, layers, onClose, onDone }: ImportModalProps) {
 // documented hosts (additive merge, dry-run preview first)
 // ---------------------------------------------------------------------------
 
+/** Splits the ranges textarea into entries (one per line or comma). */
+function parseRanges(text: string): string[] {
+  return text
+    .split(/[\n,]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 interface InventoryImportModalProps {
   onClose: () => void;
   onDone: () => void;
 }
 
 function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
+  type PublicIpPolicy = 'keep' | 'strip' | 'skip-host';
+  type RangeMode = 'keep-all' | 'include-only' | 'exclude';
   const [skipWithoutHostname, setSkipWithoutHostname] = useState(true);
   const [skipUnknownNetworks, setSkipUnknownNetworks] = useState(false);
-  const [skipPublicIpv4, setSkipPublicIpv4] = useState(false);
-  const [skipPublicIpv6, setSkipPublicIpv6] = useState(false);
+  const [publicIpv4Policy, setPublicIpv4Policy] = useState<PublicIpPolicy>('keep');
+  const [publicIpv6Policy, setPublicIpv6Policy] = useState<PublicIpPolicy>('keep');
+  const [rangeMode, setRangeMode] = useState<RangeMode>('keep-all');
+  const [rangesText, setRangesText] = useState('');
   const [skipWithoutVlan, setSkipWithoutVlan] = useState(false);
   const [maxAgeHours, setMaxAgeHours] = useState(24);
   // Phase: 'options' → pick filters; 'plan' → dry-run preview; 'done' → applied.
@@ -943,14 +955,14 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
   const [applied, setApplied] = useState<import('../api/client').DocumentedHostInventoryImportResult | null>(null);
 
   const previewMutation = useMutation({
-    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, skipPublicIpv4, skipPublicIpv6, skipWithoutVlan, maxAgeHours, dryRun: true }),
+    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, publicIpv4Policy, publicIpv6Policy, rangeMode, ranges: parseRanges(rangesText), skipWithoutVlan, maxAgeHours, dryRun: true }),
     onSuccess: (res) => {
       setPlan(res);
       setPhase('plan');
     },
   });
   const applyMutation = useMutation({
-    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, skipPublicIpv4, skipPublicIpv6, skipWithoutVlan, maxAgeHours, dryRun: false }),
+    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, publicIpv4Policy, publicIpv6Policy, rangeMode, ranges: parseRanges(rangesText), skipWithoutVlan, maxAgeHours, dryRun: false }),
     onSuccess: (res) => {
       setApplied(res);
       setPhase('done');
@@ -962,7 +974,7 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
   useEffect(() => {
     if (phase === 'plan') previewMutation.mutate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [skipWithoutHostname, skipUnknownNetworks, skipPublicIpv4, skipPublicIpv6, skipWithoutVlan, maxAgeHours]);
+  }, [skipWithoutHostname, skipUnknownNetworks, publicIpv4Policy, publicIpv6Policy, rangeMode, rangesText, skipWithoutVlan, maxAgeHours]);
 
   const plannedCreates = plan?.planned.filter((p) => p.action === 'create').length ?? 0;
   const plannedUpdates = plan?.planned.filter((p) => p.action === 'update').length ?? 0;
@@ -1000,14 +1012,41 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
                 <span className="text-secondary">Skip hosts without a discovered VLAN</span>
                 <input type="checkbox" checked={skipWithoutVlan} onChange={(e) => setSkipWithoutVlan(e.target.checked)} />
               </label>
-              <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="Drop hosts that carry a publicly routable IPv4 address (RFC 1918 private ranges count as internal).">
-                <span className="text-secondary">Skip hosts with public IPv4 addresses</span>
-                <input type="checkbox" checked={skipPublicIpv4} onChange={(e) => setSkipPublicIpv4(e.target.checked)} />
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="How to treat publicly routable IPv4 addresses (RFC 1918 private ranges count as internal). Strip removes only the public v4 addresses — the host is still imported with its internal ones. Skip-host drops the whole host when it has any public v4 address.">
+                <span className="text-secondary">Public IPv4 addresses</span>
+                <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={publicIpv4Policy} onChange={(e) => setPublicIpv4Policy(e.target.value as PublicIpPolicy)}>
+                  <option value="keep">Keep (import all)</option>
+                  <option value="strip">Strip public, keep internal</option>
+                  <option value="skip-host">Skip whole host</option>
+                </select>
               </label>
-              <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="Drop hosts that carry a publicly routable IPv6 address (ULA fc00::/7 counts as internal).">
-                <span className="text-secondary">Skip hosts with public IPv6 addresses</span>
-                <input type="checkbox" checked={skipPublicIpv6} onChange={(e) => setSkipPublicIpv6(e.target.checked)} />
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="How to treat publicly routable IPv6 addresses (GUA 2000::/3; ULA fc00::/7 counts as internal). Strip removes only the public v6 addresses — the host is still imported with its internal ones. Skip-host drops the whole host when it has any public v6 address.">
+                <span className="text-secondary">Public IPv6 addresses</span>
+                <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={publicIpv6Policy} onChange={(e) => setPublicIpv6Policy(e.target.value as PublicIpPolicy)}>
+                  <option value="keep">Keep (import all)</option>
+                  <option value="strip">Strip public, keep internal</option>
+                  <option value="skip-host">Skip whole host</option>
+                </select>
               </label>
+              <div className="rounded-md border border-border px-3 py-2" title="Restrict the import to specific networks or IP ranges — applied BEFORE all other options. A host matches when ANY of its addresses falls into ANY entry.">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-secondary">Network / IP range filter</span>
+                  <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={rangeMode} onChange={(e) => setRangeMode(e.target.value as RangeMode)}>
+                    <option value="keep-all">All networks (no filter)</option>
+                    <option value="include-only">Only selected ranges</option>
+                    <option value="exclude">Exclude selected ranges</option>
+                  </select>
+                </div>
+                {rangeMode !== 'keep-all' && (
+                  <textarea
+                    className="mt-2 w-full rounded-md border border-border bg-background px-2 py-1 font-mono text-xs"
+                    rows={3}
+                    placeholder={'One CIDR or range per line, e.g.\n192.168.10.0/24\n10.0.5.10-10.0.5.50\nfd00:1::/64'}
+                    value={rangesText}
+                    onChange={(e) => setRangesText(e.target.value)}
+                  />
+                )}
+              </div>
               <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="Only consider hosts observed within this window (the inventory is swept after 24 h).">
                 <span className="text-secondary">Observed within</span>
                 <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={maxAgeHours} onChange={(e) => setMaxAgeHours(Number(e.target.value))}>
@@ -1062,12 +1101,28 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
                 Skip without VLAN
               </label>
               <label className="flex items-center gap-2">
-                <input type="checkbox" checked={skipPublicIpv4} onChange={(e) => setSkipPublicIpv4(e.target.checked)} />
-                Skip public IPv4
+                Public IPv4
+                <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={publicIpv4Policy} onChange={(e) => setPublicIpv4Policy(e.target.value as PublicIpPolicy)}>
+                  <option value="keep">keep</option>
+                  <option value="strip">strip public</option>
+                  <option value="skip-host">skip host</option>
+                </select>
               </label>
               <label className="flex items-center gap-2">
-                <input type="checkbox" checked={skipPublicIpv6} onChange={(e) => setSkipPublicIpv6(e.target.checked)} />
-                Skip public IPv6
+                Public IPv6
+                <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={publicIpv6Policy} onChange={(e) => setPublicIpv6Policy(e.target.value as PublicIpPolicy)}>
+                  <option value="keep">keep</option>
+                  <option value="strip">strip public</option>
+                  <option value="skip-host">skip host</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2">
+                Ranges
+                <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={rangeMode} onChange={(e) => setRangeMode(e.target.value as RangeMode)}>
+                  <option value="keep-all">all</option>
+                  <option value="include-only">only selected</option>
+                  <option value="exclude">exclude</option>
+                </select>
               </label>
               <label className="flex items-center gap-2">
                 Observed within
@@ -1098,7 +1153,12 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
                       <td className="max-w-[220px] truncate px-2 py-1 font-mono" title={p.hostname ?? undefined}>
                         {p.hostname ?? <span className="text-faint">—</span>}
                       </td>
-                      <td className="px-2 py-1">{p.ips}</td>
+                      <td className="px-2 py-1">
+                        {p.ips}
+                        {p.stripped ? (
+                          <span className="text-faint" title={`${p.stripped} public address(es) removed by the strip policy`}> · {p.stripped} stripped</span>
+                        ) : null}
+                      </td>
                       <td className="px-2 py-1">
                         {p.action === 'create' && <span className="rounded bg-success px-1.5 py-0.5 text-[10px] font-semibold text-success-fg">create</span>}
                         {p.action === 'update' && <span className="rounded bg-info px-1.5 py-0.5 text-[10px] font-semibold text-info-fg">merge</span>}

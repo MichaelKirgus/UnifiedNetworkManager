@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { asc, eq, inArray, or } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { isIP } from 'node:net';
-import { ipInCidr, isPublicIpv4, isPublicIpv6 } from '@unm/plugin-sdk';
+import { ipFamily, ipv4ToInt, ipv6ToBigInt, ipInCidr, isPublicIpv4, isPublicIpv6 } from '@unm/plugin-sdk';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
@@ -769,16 +769,29 @@ router.post('/documented-hosts/import', requireAuth, requirePermission('document
 // are added to the host's address list (matched hosts by MAC or observed IP).
 // ---------------------------------------------------------------------------
 
+/**
+ * How to treat publicly routable addresses of one family during the import.
+ * - 'keep'      : import every address as-is (default).
+ * - 'strip'     : drop ONLY the public addresses, still import the host with its
+ *                 internal ones (private v4 / ULA stay) — dual-stack friendly.
+ * - 'skip-host' : any public address of this family → skip the whole host.
+ */
+type PublicIpPolicy = 'keep' | 'strip' | 'skip-host';
+
 /** Options for the inventory import. */
 interface InventoryImportOptions {
   /** Skip live hosts without a usable hostname (no DNS name can be derived). Default true. */
   skipWithoutHostname?: boolean;
   /** Skip live hosts whose addresses match no known logical network. Default false. */
   skipUnknownNetworks?: boolean;
-  /** Skip live hosts that carry a publicly routable IPv4 address (RFC 1918 + loopback/link-local count as internal). Default false. */
-  skipPublicIpv4?: boolean;
-  /** Skip live hosts that carry a publicly routable IPv6 address (ULA fc00::/7, loopback and link-local count as internal). Default false. */
-  skipPublicIpv6?: boolean;
+  /** Policy for publicly routable IPv4 addresses (RFC 1918 + loopback/link-local count as internal). Default 'keep'. */
+  publicIpv4Policy?: PublicIpPolicy;
+  /** Policy for publicly routable IPv6 addresses (GUA 2000::/3; ULA fc00::/7 counts as internal). Default 'keep'. */
+  publicIpv6Policy?: PublicIpPolicy;
+  /** Range filter mode: 'include-only' imports only matching hosts, 'exclude' skips them. Default 'keep-all'. */
+  rangeMode?: 'keep-all' | 'include-only' | 'exclude';
+  /** CIDR networks / IP ranges the range filter applies to (empty = no filtering). */
+  ranges?: string[];
   /** Skip live hosts whose addresses resolve to no known logical network with a discovered VLAN id. Default false. */
   skipWithoutVlan?: boolean;
   /** Only import hosts observed within this many hours (0 = all, default 24 — the sweep window). */
@@ -795,6 +808,8 @@ interface InventoryImportPlanEntry {
   /** 'create' = new documented host, 'update' = merge into an existing one, 'skip' = unchanged/filtered out. */
   action: 'create' | 'update' | 'skip';
   reason?: string;
+  /** Public addresses removed by a 'strip' policy (action=create/update only). */
+  stripped?: number;
 }
 
 /** Result of the inventory import (dry-run or applied). */
@@ -852,6 +867,144 @@ function mostSpecificSubnet(
   return best;
 }
 
+/** Coerces a request value into a PublicIpPolicy ('keep' when absent/unknown). */
+function parsePublicIpPolicy(value: unknown): PublicIpPolicy {
+  if (value === 'strip' || value === 'skip-host') return value;
+  return 'keep';
+}
+
+/** One parsed network/range entry — a CIDR block or an inclusive IP range. */
+interface RangeEntry {
+  family: 'v4' | 'v6';
+  kind: 'cidr' | 'range';
+  cidr?: string;
+  lo?: bigint;
+  hi?: bigint;
+}
+
+/** Parses a single "a.b.c.d/p", "fd00::/64" or "1.2.3.4-1.2.3.9" entry; null when malformed. */
+function parseRangeEntry(raw: string): RangeEntry | null {
+  const v = raw.trim();
+  if (!v) return null;
+  // CIDR block.
+  const slash = v.indexOf('/');
+  if (slash > 0) {
+    const net = v.slice(0, slash);
+    const prefix = Number(v.slice(slash + 1));
+    const fam = ipFamily(net);
+    if (!fam || !Number.isInteger(prefix)) return null;
+    if ((fam === 'v4' && (prefix < 0 || prefix > 32)) || (fam === 'v6' && (prefix < 0 || prefix > 128))) return null;
+    return { family: fam, kind: 'cidr', cidr: v };
+  }
+  // Inclusive IP range "lo-hi".
+  const dash = v.indexOf('-');
+  if (dash > 0) {
+    const loRaw = v.slice(0, dash).trim();
+    const hiRaw = v.slice(dash + 1).trim();
+    const famLo = ipFamily(loRaw);
+    const famHi = ipFamily(hiRaw);
+    if (!famLo || famLo !== famHi) return null;
+    let lo: bigint;
+    let hi: bigint;
+    if (famLo === 'v4') {
+      const a = ipv4ToInt(loRaw);
+      const b = ipv4ToInt(hiRaw);
+      if (a === null || b === null) return null;
+      lo = BigInt(a);
+      hi = BigInt(b);
+    } else {
+      const a = ipv6ToBigInt(loRaw);
+      const b = ipv6ToBigInt(hiRaw);
+      if (a === null || b === null) return null;
+      lo = a;
+      hi = b;
+    }
+    if (lo > hi) return null; // reversed range
+    return { family: famLo, kind: 'range', lo, hi };
+  }
+  return null;
+}
+
+/** True when the address falls into ANY of the parsed entries (family-aware). */
+function hostInRanges(addrs: string[], ranges: RangeEntry[]): boolean {
+  for (const a of addrs) {
+    const fam = ipFamily(a);
+    if (!fam) continue;
+    for (const r of ranges) {
+      if (r.family !== fam) continue;
+      if (r.kind === 'cidr') {
+        if (ipInCidr(a, r.cidr!)) return true;
+      } else {
+        let v: bigint | null;
+        if (fam === 'v4') {
+          const n = ipv4ToInt(a);
+          if (n === null) continue;
+          v = BigInt(n);
+        } else {
+          v = ipv6ToBigInt(a);
+          if (v === null) continue;
+        }
+        if (v >= r.lo! && v <= r.hi!) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Parses all raw range entries once; throws a 400 on the first malformed entry. */
+function parseRanges(rawRanges: string[] | undefined): RangeEntry[] {
+  const out: RangeEntry[] = [];
+  for (const r of rawRanges ?? []) {
+    const e = parseRangeEntry(r);
+    if (!e) throw Object.assign(new Error(`Invalid network/range entry: "${r}" — expected a CIDR block (192.168.1.0/24, fd00::/64) or an inclusive IP range (192.168.1.10-192.168.1.50)`), { status: 400 });
+    out.push(e);
+  }
+  return out;
+}
+
+/**
+ * Applies the network/range filter to a live host's addresses. Returns 'skip' with
+ * a reason, or null when the host passes (and no ranges are configured). Runs
+ * BEFORE all other options.
+ */
+function rangeFilterDecision(
+  addrs: string[],
+  mode: InventoryImportOptions['rangeMode'],
+  ranges: RangeEntry[]
+): { skip?: boolean; reason?: string } {
+  if (mode === 'keep-all' || ranges.length === 0) return {};
+  const matches = hostInRanges(addrs, ranges);
+  if (mode === 'include-only' && !matches) return { skip: true, reason: 'outside selected ranges' };
+  if (mode === 'exclude' && matches) return { skip: true, reason: 'excluded range' };
+  return {};
+}
+
+/**
+ * Applies the per-family public-address policies to an address list. Returns the
+ * addresses to keep, how many were stripped, and a skip reason when a 'skip-host'
+ * policy matched (or kept is empty after stripping).
+ */
+function applyPublicPolicies(
+  addrs: string[],
+  v4Policy: PublicIpPolicy,
+  v6Policy: PublicIpPolicy
+): { kept: string[]; stripped: number; skipReason?: string } {
+  if (v4Policy === 'skip-host' && addrs.some((a) => !a.includes(':') && isPublicIpv4(a))) {
+    return { kept: [], stripped: 0, skipReason: 'public IPv4 address' };
+  }
+  if (v6Policy === 'skip-host' && addrs.some((a) => a.includes(':') && isPublicIpv6(a))) {
+    return { kept: [], stripped: 0, skipReason: 'public IPv6 address' };
+  }
+  const stripV4 = v4Policy === 'strip';
+  const stripV6 = v6Policy === 'strip';
+  if (!stripV4 && !stripV6) return { kept: addrs, stripped: 0 };
+  const kept = addrs.filter((a) => {
+    if (a.includes(':')) return !(stripV6 && isPublicIpv6(a));
+    return !(stripV4 && isPublicIpv4(a));
+  });
+  return { kept, stripped: addrs.length - kept.length };
+}
+
 /**
  * Builds the import plan from the live inventory + current documented hosts.
  * Pure function of its inputs — shared by dry-run and apply so both agree.
@@ -888,6 +1041,8 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
   }
 
   const live = mergeHostRows(hostRows).filter((h) => h.lastSeenAt >= cutoff);
+  // Parse the range filter ONCE (throws 400 on a malformed entry).
+  const ranges = parseRanges(opts.ranges);
   const planned: InventoryImportPlanEntry[] = [];
   let created = 0;
   let updated = 0;
@@ -895,21 +1050,33 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
 
   for (const h of live) {
     // Documentable addresses only.
-    const addrs = h.ips.filter((a) => !isNonDocumentableAddress(a));
+    let addrs = h.ips.filter((a) => !isNonDocumentableAddress(a));
     if (addrs.length === 0) {
       planned.push({ mac: h.mac, hostname: h.hostname, ips: 0, action: 'skip', reason: 'no documentable address' });
       skipped++;
       continue;
     }
 
-    // Publicly routable addresses — opt-out for big fleets that only want internal hosts.
-    if (opts.skipPublicIpv4 === true && addrs.some((a) => !a.includes(':') && isPublicIpv4(a))) {
-      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: 'public IPv4 address' });
+    // Network/range filter FIRST — include-only / exclude runs before every other option.
+    const rf = rangeFilterDecision(addrs, opts.rangeMode ?? 'keep-all', ranges);
+    if (rf.skip) {
+      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: rf.reason });
       skipped++;
       continue;
     }
-    if (opts.skipPublicIpv6 === true && addrs.some((a) => a.includes(':') && isPublicIpv6(a))) {
-      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: 'public IPv6 address' });
+
+    // Public-address policies per family — dual-stack friendly (strip keeps the
+    // host with its internal addresses; skip-host drops it entirely).
+    const pol = applyPublicPolicies(addrs, opts.publicIpv4Policy ?? 'keep', opts.publicIpv6Policy ?? 'keep');
+    if (pol.skipReason) {
+      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: pol.skipReason });
+      skipped++;
+      continue;
+    }
+    const stripped = pol.stripped;
+    addrs = pol.kept;
+    if (addrs.length === 0) {
+      planned.push({ mac: h.mac, hostname: h.hostname, ips: 0, action: 'skip', reason: 'only public addresses' });
       skipped++;
       continue;
     }
@@ -975,7 +1142,7 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
 
     if (target) updated++;
     else created++;
-    planned.push({ mac: h.mac, hostname: h.hostname ?? dnsName, ips: addrs.length, action: target ? 'update' : 'create' });
+    planned.push({ mac: h.mac, hostname: h.hostname ?? dnsName, ips: addrs.length, action: target ? 'update' : 'create', stripped: stripped > 0 ? stripped : undefined });
   }
 
   return { dryRun: true, totalLiveHosts: live.length, planned, created, updated, skipped };
@@ -1011,26 +1178,33 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
   }
 
   const live = mergeHostRows(hostRows).filter((h) => h.lastSeenAt >= cutoff);
+  // Parse the range filter ONCE (throws 400 on a malformed entry).
+  const ranges = parseRanges(opts.ranges);
   let created = 0;
   let updated = 0;
   let skipped = 0;
   const now = new Date().toISOString();
 
   for (const h of live) {
-    const addrs = h.ips.filter((a) => !isNonDocumentableAddress(a));
+    let addrs = h.ips.filter((a) => !isNonDocumentableAddress(a));
     if (addrs.length === 0) {
       skipped++;
       continue;
     }
-    // Publicly routable addresses — opt-out for big fleets that only want internal hosts.
-    if (opts.skipPublicIpv4 === true && addrs.some((a) => !a.includes(':') && isPublicIpv4(a))) {
+    // Network/range filter FIRST — include-only / exclude runs before every other option.
+    const rf = rangeFilterDecision(addrs, opts.rangeMode ?? 'keep-all', ranges);
+    if (rf.skip) {
       skipped++;
       continue;
     }
-    if (opts.skipPublicIpv6 === true && addrs.some((a) => a.includes(':') && isPublicIpv6(a))) {
+
+    // Public-address policies per family — dual-stack friendly.
+    const pol = applyPublicPolicies(addrs, opts.publicIpv4Policy ?? 'keep', opts.publicIpv6Policy ?? 'keep');
+    if (pol.skipReason || pol.kept.length === 0) {
       skipped++;
       continue;
     }
+    addrs = pol.kept;
     let dnsName = hostnameToDnsName(h.hostname);
     if (!dnsName) {
       if (opts.skipWithoutHostname !== false) {
@@ -1147,8 +1321,10 @@ router.post('/documented-hosts/import-from-inventory', requireAuth, requirePermi
     const opts: InventoryImportOptions = {
       skipWithoutHostname: body.skipWithoutHostname !== false,
       skipUnknownNetworks: body.skipUnknownNetworks === true,
-      skipPublicIpv4: body.skipPublicIpv4 === true,
-      skipPublicIpv6: body.skipPublicIpv6 === true,
+      publicIpv4Policy: parsePublicIpPolicy(body.publicIpv4Policy),
+      publicIpv6Policy: parsePublicIpPolicy(body.publicIpv6Policy),
+      rangeMode: body.rangeMode === 'include-only' || body.rangeMode === 'exclude' ? body.rangeMode : 'keep-all',
+      ranges: Array.isArray(body.ranges) ? (body.ranges as unknown[]).filter((r): r is string => typeof r === 'string') : [],
       skipWithoutVlan: body.skipWithoutVlan === true,
       maxAgeHours: typeof body.maxAgeHours === 'number' ? body.maxAgeHours : 24,
       dryRun: body.dryRun !== false, // preview first — explicit opt-in to write

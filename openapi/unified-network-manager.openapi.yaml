@@ -5997,14 +5997,27 @@ components:
           type: boolean
           default: false
           description: "Skip live hosts whose addresses resolve to no known logical network with a discovered VLAN id"
-        skipPublicIpv4:
-          type: boolean
-          default: false
-          description: "Skip live hosts that carry a publicly routable IPv4 address (RFC 1918 private ranges count as internal)"
-        skipPublicIpv6:
-          type: boolean
-          default: false
-          description: "Skip live hosts that carry a publicly routable IPv6 address (ULA fc00::/7 counts as internal)"
+        publicIpv4Policy:
+          type: string
+          enum: [keep, strip, skip-host]
+          default: keep
+          description: "How to treat publicly routable IPv4 addresses (RFC 1918 private ranges count as internal): keep = import as-is; strip = drop only the public v4 addresses but still import the host with its internal ones; skip-host = any public v4 address skips the whole host"
+        publicIpv6Policy:
+          type: string
+          enum: [keep, strip, skip-host]
+          default: keep
+          description: "How to treat publicly routable IPv6 addresses (GUA 2000::/3; ULA fc00::/7 counts as internal): keep = import as-is; strip = drop only the public v6 addresses but still import the host with its internal ones; skip-host = any public v6 address skips the whole host"
+        rangeMode:
+          type: string
+          enum: [keep-all, include-only, exclude]
+          default: keep-all
+          description: "Network/range filter applied BEFORE all other options. include-only imports only hosts with an address inside one of `ranges`; exclude skips hosts with an address inside one of `ranges`"
+        ranges:
+          type: array
+          items:
+            type: string
+          default: []
+          description: "CIDR blocks (192.168.1.0/24, fd00::/64) and/or inclusive IP ranges (192.168.1.10-192.168.1.50). A host matches when ANY of its addresses falls into ANY entry; empty = no range filtering"
         maxAgeHours:
           type: number
           minimum: 0
@@ -6032,6 +6045,7 @@ components:
               ips: { type: integer, description: "Documentable addresses of this host" }
               action: { type: string, enum: [create, update, skip] }
               reason: { type: string, description: "Why the host is skipped (action=skip only)" }
+              stripped: { type: integer, description: "Public addresses removed by a strip policy (action=create/update only)" }
         created: { type: integer }
         updated: { type: integer }
         skipped: { type: integer }

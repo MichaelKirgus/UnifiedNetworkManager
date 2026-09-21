@@ -459,10 +459,14 @@ export interface DocumentedHostInventoryImportOptions {
   skipWithoutHostname?: boolean;
   /** Skip live hosts whose addresses match no known logical network (default false). */
   skipUnknownNetworks?: boolean;
-  /** Skip live hosts that carry a publicly routable IPv4 address (RFC 1918 counts as internal; default false). */
-  skipPublicIpv4?: boolean;
-  /** Skip live hosts that carry a publicly routable IPv6 address (ULA fc00::/7 counts as internal; default false). */
-  skipPublicIpv6?: boolean;
+  /** How to treat public IPv4 addresses: keep | strip (drop only the public ones, still import the host) | skip-host. Default 'keep'. */
+  publicIpv4Policy?: 'keep' | 'strip' | 'skip-host';
+  /** How to treat public IPv6 addresses (GUA; ULA counts as internal): keep | strip | skip-host. Default 'keep'. */
+  publicIpv6Policy?: 'keep' | 'strip' | 'skip-host';
+  /** Range filter mode, applied before all other options: include-only = only hosts inside `ranges`; exclude = skip hosts inside `ranges`. Default 'keep-all'. */
+  rangeMode?: 'keep-all' | 'include-only' | 'exclude';
+  /** CIDR blocks (192.168.1.0/24) and/or inclusive IP ranges (192.168.1.10-192.168.1.50). Empty = no range filtering. */
+  ranges?: string[];
   /** Skip live hosts whose addresses resolve to no known network with a discovered VLAN id (default false). */
   skipWithoutVlan?: boolean;
   /** Only import hosts observed within this many hours (0 = all, default 24). */
@@ -478,6 +482,8 @@ export interface DocumentedHostInventoryPlanEntry {
   ips: number;
   action: 'create' | 'update' | 'skip';
   reason?: string;
+  /** Public addresses removed by a strip policy (action=create/update only). */
+  stripped?: number;
 }
 
 /** Result of the inventory import (dry-run plan or applied summary). */
