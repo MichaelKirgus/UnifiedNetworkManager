@@ -459,6 +459,12 @@ export interface DocumentedHostInventoryImportOptions {
   skipWithoutHostname?: boolean;
   /** Skip live hosts whose addresses match no known logical network (default false). */
   skipUnknownNetworks?: boolean;
+  /** Skip live hosts that carry a publicly routable IPv4 address (RFC 1918 counts as internal; default false). */
+  skipPublicIpv4?: boolean;
+  /** Skip live hosts that carry a publicly routable IPv6 address (ULA fc00::/7 counts as internal; default false). */
+  skipPublicIpv6?: boolean;
+  /** Skip live hosts whose addresses resolve to no known network with a discovered VLAN id (default false). */
+  skipWithoutVlan?: boolean;
   /** Only import hosts observed within this many hours (0 = all, default 24). */
   maxAgeHours?: number;
   /** Preview only — compute the plan without writing anything (default true). */

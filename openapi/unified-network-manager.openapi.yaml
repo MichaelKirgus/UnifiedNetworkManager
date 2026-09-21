@@ -5993,6 +5993,18 @@ components:
           type: boolean
           default: false
           description: "Skip live hosts whose addresses match no known logical network"
+        skipWithoutVlan:
+          type: boolean
+          default: false
+          description: "Skip live hosts whose addresses resolve to no known logical network with a discovered VLAN id"
+        skipPublicIpv4:
+          type: boolean
+          default: false
+          description: "Skip live hosts that carry a publicly routable IPv4 address (RFC 1918 private ranges count as internal)"
+        skipPublicIpv6:
+          type: boolean
+          default: false
+          description: "Skip live hosts that carry a publicly routable IPv6 address (ULA fc00::/7 counts as internal)"
         maxAgeHours:
           type: number
           minimum: 0

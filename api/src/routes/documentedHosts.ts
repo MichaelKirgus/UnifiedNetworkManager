@@ -774,6 +774,12 @@ interface InventoryImportOptions {
   skipWithoutHostname?: boolean;
   /** Skip live hosts whose addresses match no known logical network. Default false. */
   skipUnknownNetworks?: boolean;
+  /** Skip live hosts that carry a publicly routable IPv4 address (RFC 1918 + loopback/link-local count as internal). Default false. */
+  skipPublicIpv4?: boolean;
+  /** Skip live hosts that carry a publicly routable IPv6 address (ULA fc00::/7, loopback and link-local count as internal). Default false. */
+  skipPublicIpv6?: boolean;
+  /** Skip live hosts whose addresses resolve to no known logical network with a discovered VLAN id. Default false. */
+  skipWithoutVlan?: boolean;
   /** Only import hosts observed within this many hours (0 = all, default 24 — the sweep window). */
   maxAgeHours?: number;
   /** Preview only — compute what would change without writing anything. Default true. */
@@ -821,6 +827,41 @@ function isNonDocumentableAddress(addr: string): boolean {
   if (a === '::' || a === '0.0.0.0') return true;
   if (a.startsWith('fe80:')) return true;
   return false;
+}
+
+/** True for a publicly routable IPv4 address (RFC 1918 private ranges count as internal). */
+function isPublicIpv4(addr: string): boolean {
+  const parts = addr.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return false;
+  const [a, b] = parts;
+  // RFC 1918 private ranges.
+  if (a === 10) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  // Loopback + link-local are already filtered as non-documentable, but be safe.
+  if (a === 127 || a === 169) return false;
+  return true;
+}
+
+/** First hextet of an IPv6 literal without full expansion; null when not parseable. */
+function ipv6FirstHextet(addr: string): number | null {
+  const bare = addr.split('%')[0]; // strip zone id defensively
+  if (!bare.includes(':')) return null;
+  if (bare.startsWith('::')) return 0; // leading :: means the first group is zero
+  const v = parseInt(bare.split(':')[0], 16);
+  return Number.isNaN(v) ? null : v;
+}
+
+/** True for a publicly routable IPv6 address (ULA fc00::/7, loopback and link-local count as internal). */
+function isPublicIpv6(addr: string): boolean {
+  if (!addr.includes(':')) return false;
+  const bare = addr.split('%')[0].toLowerCase();
+  if (bare === '::1' || bare === '::') return false; // loopback / unspecified
+  const first = ipv6FirstHextet(bare);
+  if (first == null) return false;
+  if ((first & 0xfe) === 0xfc) return false; // fc00::/7 — unique local addresses
+  if ((first & 0xffc) === 0xfe80) return false; // fe80::/10 — link-local (already filtered)
+  return true;
 }
 
 /**
@@ -916,6 +957,18 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
       continue;
     }
 
+    // Publicly routable addresses — opt-out for big fleets that only want internal hosts.
+    if (opts.skipPublicIpv4 === true && addrs.some((a) => !a.includes(':') && isPublicIpv4(a))) {
+      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: 'public IPv4 address' });
+      skipped++;
+      continue;
+    }
+    if (opts.skipPublicIpv6 === true && addrs.some((a) => a.includes(':') && isPublicIpv6(a))) {
+      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: 'public IPv6 address' });
+      skipped++;
+      continue;
+    }
+
     let dnsName = hostnameToDnsName(h.hostname);
     if (!dnsName) {
       if (opts.skipWithoutHostname !== false) {
@@ -930,6 +983,11 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
     const nets = addrs.map((a) => netFor(a));
     if (opts.skipUnknownNetworks === true && !nets.some((n) => n !== null)) {
       planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: 'no known network' });
+      skipped++;
+      continue;
+    }
+    if (opts.skipWithoutVlan === true && !nets.some((n) => n !== null && n.vlanId != null)) {
+      planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: 'no VLAN discovered' });
       skipped++;
       continue;
     }
@@ -1058,6 +1116,15 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
       skipped++;
       continue;
     }
+    // Publicly routable addresses — opt-out for big fleets that only want internal hosts.
+    if (opts.skipPublicIpv4 === true && addrs.some((a) => !a.includes(':') && isPublicIpv4(a))) {
+      skipped++;
+      continue;
+    }
+    if (opts.skipPublicIpv6 === true && addrs.some((a) => a.includes(':') && isPublicIpv6(a))) {
+      skipped++;
+      continue;
+    }
     let dnsName = hostnameToDnsName(h.hostname);
     if (!dnsName) {
       if (opts.skipWithoutHostname !== false) {
@@ -1070,6 +1137,10 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
 
     const nets = addrs.map((a) => netFor(a));
     if (opts.skipUnknownNetworks === true && !nets.some((n) => n !== null)) {
+      skipped++;
+      continue;
+    }
+    if (opts.skipWithoutVlan === true && !nets.some((n) => n !== null && n.vlanId != null)) {
       skipped++;
       continue;
     }
@@ -1170,6 +1241,9 @@ router.post('/documented-hosts/import-from-inventory', requireAuth, requirePermi
     const opts: InventoryImportOptions = {
       skipWithoutHostname: body.skipWithoutHostname !== false,
       skipUnknownNetworks: body.skipUnknownNetworks === true,
+      skipPublicIpv4: body.skipPublicIpv4 === true,
+      skipPublicIpv6: body.skipPublicIpv6 === true,
+      skipWithoutVlan: body.skipWithoutVlan === true,
       maxAgeHours: typeof body.maxAgeHours === 'number' ? body.maxAgeHours : 24,
       dryRun: body.dryRun !== false, // preview first — explicit opt-in to write
     };

@@ -933,6 +933,9 @@ interface InventoryImportModalProps {
 function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
   const [skipWithoutHostname, setSkipWithoutHostname] = useState(true);
   const [skipUnknownNetworks, setSkipUnknownNetworks] = useState(false);
+  const [skipPublicIpv4, setSkipPublicIpv4] = useState(false);
+  const [skipPublicIpv6, setSkipPublicIpv6] = useState(false);
+  const [skipWithoutVlan, setSkipWithoutVlan] = useState(false);
   const [maxAgeHours, setMaxAgeHours] = useState(24);
   // Phase: 'options' → pick filters; 'plan' → dry-run preview; 'done' → applied.
   const [phase, setPhase] = useState<'options' | 'plan' | 'done'>('options');
@@ -940,14 +943,14 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
   const [applied, setApplied] = useState<import('../api/client').DocumentedHostInventoryImportResult | null>(null);
 
   const previewMutation = useMutation({
-    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, maxAgeHours, dryRun: true }),
+    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, skipPublicIpv4, skipPublicIpv6, skipWithoutVlan, maxAgeHours, dryRun: true }),
     onSuccess: (res) => {
       setPlan(res);
       setPhase('plan');
     },
   });
   const applyMutation = useMutation({
-    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, maxAgeHours, dryRun: false }),
+    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, skipPublicIpv4, skipPublicIpv6, skipWithoutVlan, maxAgeHours, dryRun: false }),
     onSuccess: (res) => {
       setApplied(res);
       setPhase('done');
@@ -959,7 +962,7 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
   useEffect(() => {
     if (phase === 'plan') previewMutation.mutate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [skipWithoutHostname, skipUnknownNetworks, maxAgeHours]);
+  }, [skipWithoutHostname, skipUnknownNetworks, skipPublicIpv4, skipPublicIpv6, skipWithoutVlan, maxAgeHours]);
 
   const plannedCreates = plan?.planned.filter((p) => p.action === 'create').length ?? 0;
   const plannedUpdates = plan?.planned.filter((p) => p.action === 'update').length ?? 0;
@@ -992,6 +995,18 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
               <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="Only import hosts whose addresses fall into a known logical network (from the Networks inventory).">
                 <span className="text-secondary">Skip hosts without a known network</span>
                 <input type="checkbox" checked={skipUnknownNetworks} onChange={(e) => setSkipUnknownNetworks(e.target.checked)} />
+              </label>
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="Only import hosts whose addresses resolve to a known logical network with a discovered VLAN id — drops hosts on untagged or unknown networks.">
+                <span className="text-secondary">Skip hosts without a discovered VLAN</span>
+                <input type="checkbox" checked={skipWithoutVlan} onChange={(e) => setSkipWithoutVlan(e.target.checked)} />
+              </label>
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="Drop hosts that carry a publicly routable IPv4 address (RFC 1918 private ranges count as internal).">
+                <span className="text-secondary">Skip hosts with public IPv4 addresses</span>
+                <input type="checkbox" checked={skipPublicIpv4} onChange={(e) => setSkipPublicIpv4(e.target.checked)} />
+              </label>
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="Drop hosts that carry a publicly routable IPv6 address (ULA fc00::/7 counts as internal).">
+                <span className="text-secondary">Skip hosts with public IPv6 addresses</span>
+                <input type="checkbox" checked={skipPublicIpv6} onChange={(e) => setSkipPublicIpv6(e.target.checked)} />
               </label>
               <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="Only consider hosts observed within this window (the inventory is swept after 24 h).">
                 <span className="text-secondary">Observed within</span>
@@ -1041,6 +1056,18 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
               <label className="flex items-center gap-2">
                 <input type="checkbox" checked={skipUnknownNetworks} onChange={(e) => setSkipUnknownNetworks(e.target.checked)} />
                 Skip unknown networks
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={skipWithoutVlan} onChange={(e) => setSkipWithoutVlan(e.target.checked)} />
+                Skip without VLAN
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={skipPublicIpv4} onChange={(e) => setSkipPublicIpv4(e.target.checked)} />
+                Skip public IPv4
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={skipPublicIpv6} onChange={(e) => setSkipPublicIpv6(e.target.checked)} />
+                Skip public IPv6
               </label>
               <label className="flex items-center gap-2">
                 Observed within
