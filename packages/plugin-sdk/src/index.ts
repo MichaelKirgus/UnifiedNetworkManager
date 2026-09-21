@@ -18,6 +18,12 @@ export { makeConsoleUpgrade } from './consoleWs';
 export type { ConsoleEndpointOptions, ConsoleUpgradeHandler } from './consoleWs';
 export { readSettings, readGlobalSettings, clampInt, hostFromAddress, pickString, pickNumber, pickBool, normalizeMac, resolveUserPass } from './settings';
 export type { UserPassCreds, ResolveUserPassResult } from './settings';
+// IP address math — the ONE place that parses IPv4/IPv6 literals and does CIDR
+// containment / network-address / scope (loopback, link-local, private,
+// multicast, public) classification. Pure + browser-safe; the webapp keeps a
+// documented mirror at webapp/src/utils/ip.ts. See ip.ts.
+export { stripZoneId, ipFamily, ipv4ToInt, ipv4FromInt, ipv6ToWords, ipv6FromWords, ipv6ToBigInt, ipv6FromBigInt, splitCidr, ipInCidr, v4PrefixMatch, v6PrefixMatch, subnetOf, isPrivateIpv4, isLoopbackIpv4, isLinkLocalIpv4, isMulticastIpv4, isReservedIpv4, isUlaIpv6, isLoopbackIpv6, isLinkLocalIpv6, isMulticastIpv6, isDocumentationIpv6, isPublicIpv4, isPublicIpv6, ipScope } from './ip';
+export type { IpScope } from './ip';
 // Outbound device-HTTP shared layer (endpoint resolution + TLS/error primitives). See http.ts.
 export { withPort, resolveEndpointCandidates, toWsUrl, buildWebUiUrl, insecureHttpsAgent, isNetworkLevelError, basicAuthHeader } from './http';
 export type { DeviceApiResult, EndpointTransport, EndpointPorts, EndpointOptions, WebUiUrlOptions } from './http';

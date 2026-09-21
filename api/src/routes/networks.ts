@@ -4,7 +4,7 @@ import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { allowedDeviceIds } from '../deviceAccess';
-import { subnetOf } from '../utils/address';
+import { ipScope, subnetOf } from '@unm/plugin-sdk';
 import { buildFirewallInventoryIndex, enrichFirewallAddress, getCachedFirewallIndex } from '../utils/firewallEnrichment';
 import type { FirewallAddressResolution } from '../utils/firewallEnrichment';
 
@@ -234,15 +234,8 @@ function networkSubnet(subnets: Set<string>): string | null {
 function isNonNetworkSubnet(subnet: string): boolean {
   const [addr, prefix] = subnet.split('/');
   if (prefix === undefined) return false;
-  // IPv4: 127/8 loopback, 169.254/16 link-local (APIPA).
-  if (!addr.includes(':')) {
-    const o = addr.split('.').map(Number);
-    return o[0] === 127 || (o[0] === 169 && o[1] === 254);
-  }
-  // IPv6: ::1 loopback, fe80::/10 link-local (first group fe80..febf).
-  if (addr === '::1') return true;
-  const firstGroup = addr.split(':')[0];
-  return /^fe[89ab][0-9a-f]$/i.test(firstGroup);
+  const scope = ipScope(addr);
+  return scope === 'loopback' || scope === 'link-local';
 }
 
 /**

@@ -6,7 +6,12 @@
  * type a DNS name or an IP address and get reliable pre-fills (MAC, network,
  * site, extra addresses) that they can still override. No server round-trip:
  * both datasets are already cached by react-query on this page.
+ *
+ * All IP math lives in utils/ip.ts (browser mirror of the SDK's ip.ts) —
+ * nothing below re-implements IPv4/IPv6 parsing or CIDR containment.
  */
+
+import { ipFamily, ipv4FromInt, ipv4ToInt, ipv6FromBigInt, ipv6ToBigInt, ipInCidr, splitCidr } from './ip';
 
 // ---------------------------------------------------------------------------
 // MAC helpers (mirror of api/src/routes/documentedHosts.ts)
@@ -108,146 +113,15 @@ export interface NetworkOption {
   vlanId?: number | null;
 }
 
-const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
-
-/** IPv4 literal as a 32-bit unsigned int; null when not an IPv4 literal. */
-function ipv4ToLong(addr: string): number | null {
-  const m = IPV4_RE.exec(addr.trim());
-  if (!m) return null;
-  let n = 0;
-  for (let i = 1; i <= 4; i++) {
-    const o = Number(m[i]);
-    if (o > 255) return null;
-    n = (n << 8) | o;
-  }
-  return n >>> 0;
-}
-
-/** IPv6 literal expanded to its 8 hex groups; null when not valid IPv6. */
-function ipv6Groups(addr: string): number[] | null {
-  const v = addr.trim().replace(/%[a-zA-Z0-9._-]+$/, ''); // strip %zone id
-  if (!v.includes(':')) return null;
-  const ci = v.indexOf('::');
-  const head = ci >= 0 ? v.slice(0, ci) : v;
-  const tail = ci >= 0 ? v.slice(ci + 2) : '';
-  const parseGroups = (s: string): number[] | null => {
-    if (s === '') return [];
-    const out: number[] = [];
-    for (const g of s.split(':')) {
-      if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null;
-      out.push(parseInt(g, 16));
-    }
-    return out;
-  };
-  const h = parseGroups(head);
-  const t = parseGroups(tail);
-  if (!h || !t) return null;
-  const missing = 8 - h.length - t.length;
-  if (missing < 0) return null; // more than 8 groups — invalid
-  return [...h, ...Array(missing).fill(0), ...t];
-}
-
-/** IPv6 literal expanded to two 32-bit words [hi, lo]; null when not IPv6. */
-function ipv6ToWords(addr: string): [number, number] | null {
-  const g = ipv6Groups(addr);
-  if (!g) return null;
-  let hi = 0;
-  for (let i = 0; i < 4; i++) hi = (hi << 16) | g[i];
-  let lo = 0;
-  for (let i = 4; i < 8; i++) lo = (lo << 16) | g[i];
-  return [hi >>> 0, lo >>> 0];
-}
-
-/** IPv6 literal as a full 128-bit BigInt; null when not valid IPv6. */
-export function ipv6ToBigInt(addr: string): bigint | null {
-  const g = ipv6Groups(addr);
-  if (!g) return null;
-  let v = 0n;
-  for (const x of g) v = (v << 16n) | BigInt(x);
-  return v;
-}
-
-/** Formats a 128-bit value as a compressed IPv6 literal. */
-export function ipv6FromBigInt(v: bigint): string {
-  const groups = Array.from({ length: 8 }, (_, i) => Number((v >> BigInt(16 * (7 - i))) & 0xffffn));
-  // Longest run of zero groups becomes "::" (RFC 5952 — leftmost when tied).
-  let bestStart = -1;
-  let bestLen = 0;
-  let curStart = -1;
-  let curLen = 0;
-  for (let i = 0; i < 8; i++) {
-    if (groups[i] === 0) {
-      if (curStart < 0) curStart = i;
-      curLen++;
-      if (curLen > bestLen) {
-        bestLen = curLen;
-        bestStart = curStart;
-      }
-    } else {
-      curStart = -1;
-      curLen = 0;
-    }
-  }
-  // NOTE: map passes the ELEMENT first — format it directly, never re-index.
-  const fmt = (g: number) => g.toString(16);
-  if (bestLen < 2) return groups.map(fmt).join(':');
-  const head = groups.slice(0, bestStart).map(fmt).join(':');
-  const tail = groups.slice(bestStart + bestLen).map(fmt).join(':');
-  return `${head}::${tail}`;
-}
-
-/** Splits "a.b.c.d/p" into network address + prefix; null when malformed. */
-function splitCidr(cidr: string): { net: string; prefix: number } | null {
-  const v = cidr.trim();
-  const i = v.indexOf('/');
-  if (i < 0) return null; // bare addresses are not network references here
-  const net = v.slice(0, i);
-  const prefix = Number(v.slice(i + 1));
-  const max = net.includes(':') ? 128 : 32;
-  if (!Number.isInteger(prefix) || prefix < 0 || prefix > max) return null;
-  return { net, prefix };
-}
-
-function v4PrefixMatch(a: number, n: number, pfx: number): boolean {
-  const mask = pfx === 0 ? 0 : (~0 << (32 - pfx)) >>> 0;
-  return (a & mask) === (n & mask);
-}
-
-function v6PrefixMatch(a: [number, number], n: [number, number], pfx: number): boolean {
-  if (pfx >= 64) {
-    const rem = pfx - 64;
-    const loMask = rem === 0 ? 0 : (~0 << (32 - rem)) >>> 0;
-    return a[0] === n[0] && (a[1] & loMask) === (n[1] & loMask);
-  }
-  const hiMask = pfx === 0 ? 0 : (~0 << (32 - pfx)) >>> 0;
-  return (a[0] & hiMask) === (n[0] & hiMask);
-}
-
 /** Best (largest) prefix of a CIDR in `opt` that contains `addr`; -1 when none match. */
 export function networkMatchScore(opt: NetworkOption, addr: string): number {
-  const v4 = ipv4ToLong(addr);
-  if (v4 !== null) {
-    let best = -1;
-    for (const c of opt.cidrs) {
-      if (c.includes(':')) continue; // a v4 address can't live in a v6 subnet
-      const s = splitCidr(c);
-      if (!s) continue;
-      const n = ipv4ToLong(s.net);
-      if (n === null || !v4PrefixMatch(v4, n, s.prefix)) continue;
-      if (s.prefix > best) best = s.prefix;
-    }
-    return best;
-  }
-  const v6 = ipv6ToWords(addr);
-  if (!v6) return -1;
   let best = -1;
   for (const c of opt.cidrs) {
-    if (!c.includes(':')) continue; // a v6 address can't live in a v4 subnet
+    // ipInCidr already enforces family matching — a v4 address never matches a v6 subnet.
+    if (!ipInCidr(addr, c)) continue;
     const s = splitCidr(c);
-    if (!s) continue;
-    const n = ipv6ToWords(s.net);
-    if (!n || !v6PrefixMatch(v6, n, s.prefix)) continue;
-    if (s.prefix > best) best = s.prefix;
+    if (!s || s.prefix <= best) continue;
+    best = s.prefix;
   }
   return best;
 }
@@ -275,29 +149,11 @@ export function bestNetwork(addr: string, options: NetworkOption[]): NetworkOpti
 
 // ---------------------------------------------------------------------------
 // Family-aware helpers (shared with the reusable IpCidrInput component)
+// ipFamily + ipInCidr come from utils/ip.ts — re-exported so existing import
+// sites keep working.
 // ---------------------------------------------------------------------------
 
-/** The family of an IP literal ("v4" | "v6"); null when not a valid address. */
-export function ipFamily(addr: string): 'v4' | 'v6' | null {
-  const a = addr.trim().replace(/%[a-zA-Z0-9._-]+$/, ''); // strip %zone id
-  if (ipv4ToLong(a) !== null) return 'v4';
-  if (ipv6ToWords(a)) return 'v6';
-  return null;
-}
-
-/** True when `addr` is contained in the CIDR network (families must match). */
-export function ipInCidr(addr: string, cidr: string): boolean {
-  const s = splitCidr(cidr);
-  if (!s) return false;
-  if (!s.net.includes(':')) {
-    const a = ipv4ToLong(addr.trim());
-    const n = ipv4ToLong(s.net);
-    return a !== null && n !== null && v4PrefixMatch(a, n, s.prefix);
-  }
-  const a = ipv6ToWords(addr.trim());
-  const n = ipv6ToWords(s.net);
-  return !!a && !!n && v6PrefixMatch(a, n, s.prefix);
-}
+export { ipFamily, ipInCidr };
 
 /** Validates a bare IP or CIDR string; returns an error message or null. */
 export function validateIpCidr(value: string): string | null {
@@ -434,14 +290,13 @@ export function suggestFreeIp(
   if (!cidr.includes(':')) {
     const s = splitCidr(cidr)!;
     if (s.prefix > 30) return null; // /31, /32 are point-to-point — no free pool
-    const raw = ipv4ToLong(s.net);
+    const raw = ipv4ToInt(s.net);
     if (raw === null) return null;
     const mask = s.prefix === 0 ? 0 : (~0 << (32 - s.prefix)) >>> 0;
     const base = raw & mask; // drop stray host bits from the input CIDR
     const size = 1 << (32 - s.prefix);
     for (let i = 1; i < size - 1; i++) {
-      const a = base + i;
-      const addr = `${(a >>> 24) & 255}.${(a >>> 16) & 255}.${(a >>> 8) & 255}.${a & 255}`;
+      const addr = ipv4FromInt(base + i);
       if (!taken.has(addr)) return { address: addr, cidr };
     }
     return null; // subnet exhausted

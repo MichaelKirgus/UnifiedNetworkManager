@@ -15,7 +15,7 @@
  * invisible for display purposes and the underlying tables refresh every poll.
  */
 
-import { subnetOf } from './address';
+import { ipScope, subnetOf } from '@unm/plugin-sdk';
 
 /** One discovered host matched by a rule address (merged across devices). */
 export interface ResolvedFirewallHost {
@@ -74,62 +74,9 @@ const MAX_HOSTS = 50;
 /** How long a built index stays fresh for repeated requests (ms). */
 const INDEX_TTL_MS = 30_000;
 
-// --- IP math (mirrors utils/address.ts, which keeps its helpers private) -------
+// --- IP math — canonical implementation lives in @unm/plugin-sdk (ip.ts) -------
 
-/** IPv4 literal → 32-bit int, or null when not an IPv4 literal. */
-export function ipv4ToInt(ip: string): number | null {
-  const o = ip.split('.');
-  if (o.length !== 4) return null;
-  let n = 0;
-  for (const part of o) {
-    if (!/^\d{1,3}$/.test(part)) return null;
-    const v = Number(part);
-    if (v > 255) return null;
-    n = (n << 8) | v;
-  }
-  return n >>> 0;
-}
-
-/** IPv6 literal → eight 16-bit groups, or null when malformed. */
-export function ipv6ToWords(ip: string): number[] | null {
-  const addr = ip.trim();
-  if (!addr.includes(':')) return null;
-  if ((addr.match(/::/g) ?? []).length > 1) return null; // at most one "::"
-  let left: string[];
-  let right: string[];
-  if (addr.includes('::')) {
-    const [l, r] = addr.split('::');
-    left = l === '' ? [] : l.split(':');
-    right = r === '' ? [] : r.split(':');
-  } else {
-    left = addr.split(':');
-    right = [];
-  }
-  const parseGroup = (g: string): number[] | null => {
-    if (g.includes('.')) {
-      // Embedded IPv4 tail — expands to exactly two 16-bit groups.
-      const o = g.split('.').map(Number);
-      if (o.length !== 4 || o.some((x) => !Number.isInteger(x) || x < 0 || x > 255)) return null;
-      return [(o[0] << 8) | o[1], (o[2] << 8) | o[3]];
-    }
-    if (!/^[0-9a-f]{1,4}$/i.test(g)) return null;
-    return [parseInt(g, 16)];
-  };
-  const words: number[] = [];
-  for (const g of [...left, ...right]) {
-    const w = parseGroup(g);
-    if (!w) return null;
-    words.push(...w);
-  }
-  if (addr.includes('::')) {
-    if (words.length >= 8) return null; // "::" must compress at least one group
-    const leftWords = left.reduce((n, g) => n + (g.includes('.') ? 2 : 1), 0);
-    words.splice(leftWords, 0, ...Array(8 - words.length).fill(0));
-  } else if (words.length !== 8) {
-    return null;
-  }
-  return words;
-}
+import { ipv4ToInt, ipv6ToWords } from '@unm/plugin-sdk';
 
 /**
  * True for subnets that do NOT identify a real network — loopback and
@@ -139,15 +86,8 @@ export function ipv6ToWords(ip: string): number[] | null {
 function isNonNetworkSubnet(subnet: string): boolean {
   const [addr, prefix] = subnet.split('/');
   if (prefix === undefined) return false;
-  // IPv4: 127/8 loopback, 169.254/16 link-local (APIPA).
-  if (!addr.includes(':')) {
-    const o = addr.split('.').map(Number);
-    return o[0] === 127 || (o[0] === 169 && o[1] === 254);
-  }
-  // IPv6: ::1 loopback, fe80::/10 link-local (first group fe80..febf).
-  if (addr === '::1') return true;
-  const firstGroup = addr.split(':')[0];
-  return /^fe[89ab][0-9a-f]$/i.test(firstGroup);
+  const scope = ipScope(addr);
+  return scope === 'loopback' || scope === 'link-local';
 }
 
 /** Pre-parsed form of an IP literal — one of the two is non-null. */

@@ -1,4 +1,5 @@
 import { AxiosInstance } from 'axios';
+import { subnetOf } from '@unm/plugin-sdk';
 import { searchRoutes, getGatewayStatus, searchGateways } from './client/routes';
 
 /**
@@ -138,36 +139,12 @@ export async function collectRoutes(client: AxiosInstance): Promise<RouteRow[]> 
 
 /**
  * Computes the network address (CIDR) for an interface IP + prefix — i.e. what
- * OPNsense installs as a "connected" route in its kernel table. Supports v4 and
- * v6 via BigInt masking. Returns null on unparseable input.
+ * OPNsense installs as a "connected" route in its kernel table. Delegates to
+ * the canonical SDK implementation (@unm/plugin-sdk ip.ts, v4 + v6).
  */
 function networkAddress(ip: string, prefix: number): string | null {
-  if (ip.includes(':')) {
-    // IPv6 — expand to 128 bits and mask.
-    const groups = ip.split(':').map((g) => parseInt(g || '0', 16));
-    if (groups.length !== 8 || groups.some((g) => Number.isNaN(g))) return null;
-    let addr = 0n;
-    for (const g of groups) addr = (addr << 16n) | BigInt(g);
-    const p = Math.max(0, Math.min(128, prefix));
-    if (p === 0) return '::/0';
-    const mask = ~(BigInt(1) << BigInt(128 - p)) & ((BigInt(1) << 128n) - 1n);
-    let net = addr & mask;
-    const out: string[] = [];
-    for (let i = 7; i >= 0; i--) {
-      out.unshift((Number(net & 0xffffn) >>> 0).toString(16));
-      net >>= 16n;
-    }
-    return `${out.join(':')}/${p}`;
-  }
-  // IPv4.
-  const octets = ip.split('.').map(Number);
-  if (octets.length !== 4 || octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
-  const addr = ((octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]) >>> 0;
-  const p = Math.max(0, Math.min(32, prefix));
-  if (p === 0) return '0.0.0.0/0';
-  const mask = (~0 << (32 - p)) & 0xffffffff;
-  const net = addr & mask;
-  return `${(net >>> 24) & 255}.${(net >>> 16) & 255}.${(net >>> 8) & 255}.${net & 255}/${p}`;
+  const p = Math.max(0, Math.min(ip.includes(':') ? 128 : 32, prefix));
+  return subnetOf(ip, p);
 }
 
 /**

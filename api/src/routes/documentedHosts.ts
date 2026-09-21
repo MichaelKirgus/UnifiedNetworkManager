@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { asc, eq, inArray, or } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { isIP } from 'node:net';
+import { ipInCidr, isPublicIpv4, isPublicIpv6 } from '@unm/plugin-sdk';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
@@ -829,39 +830,26 @@ function isNonDocumentableAddress(addr: string): boolean {
   return false;
 }
 
-/** True for a publicly routable IPv4 address (RFC 1918 private ranges count as internal). */
-function isPublicIpv4(addr: string): boolean {
-  const parts = addr.split('.').map(Number);
-  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return false;
-  const [a, b] = parts;
-  // RFC 1918 private ranges.
-  if (a === 10) return false;
-  if (a === 172 && b >= 16 && b <= 31) return false;
-  if (a === 192 && b === 168) return false;
-  // Loopback + link-local are already filtered as non-documentable, but be safe.
-  if (a === 127 || a === 169) return false;
-  return true;
-}
-
-/** First hextet of an IPv6 literal without full expansion; null when not parseable. */
-function ipv6FirstHextet(addr: string): number | null {
-  const bare = addr.split('%')[0]; // strip zone id defensively
-  if (!bare.includes(':')) return null;
-  if (bare.startsWith('::')) return 0; // leading :: means the first group is zero
-  const v = parseInt(bare.split(':')[0], 16);
-  return Number.isNaN(v) ? null : v;
-}
-
-/** True for a publicly routable IPv6 address (ULA fc00::/7, loopback and link-local count as internal). */
-function isPublicIpv6(addr: string): boolean {
-  if (!addr.includes(':')) return false;
-  const bare = addr.split('%')[0].toLowerCase();
-  if (bare === '::1' || bare === '::') return false; // loopback / unspecified
-  const first = ipv6FirstHextet(bare);
-  if (first == null) return false;
-  if ((first & 0xfe) === 0xfc) return false; // fc00::/7 — unique local addresses
-  if ((first & 0xffc) === 0xfe80) return false; // fe80::/10 — link-local (already filtered)
-  return true;
+/** Most specific known subnet containing the address (+ its VLAN); null when unknown. */
+function mostSpecificSubnet(
+  subnets: { cidr: string; vlanId: number | null }[],
+  addr: string
+): { cidr: string; vlanId: number | null } | null {
+  let best: { cidr: string; vlanId: number | null } | null = null;
+  let bestPrefix = -1;
+  for (const s of subnets) {
+    const i = s.cidr.indexOf('/');
+    if (i < 0) continue;
+    const prefix = Number(s.cidr.slice(i + 1));
+    // Family must match the address.
+    if (s.cidr.includes(':') !== addr.includes(':')) continue;
+    if (!ipInCidr(addr, s.cidr)) continue;
+    if (prefix > bestPrefix) {
+      best = s;
+      bestPrefix = prefix;
+    }
+  }
+  return best;
 }
 
 /**
@@ -881,49 +869,6 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
   for (const n of mergedNetworks) {
     for (const s of n.subnets ?? []) subnets.push({ cidr: s, vlanId: n.vlanId });
   }
-
-  /** Most specific known subnet containing the address (+ its VLAN); null when unknown. */
-  const netFor = (addr: string): { cidr: string; vlanId: number | null } | null => {
-    let best: { cidr: string; vlanId: number | null } | null = null;
-    let bestPrefix = -1;
-    for (const s of subnets) {
-      const i = s.cidr.indexOf('/');
-      if (i < 0) continue;
-      const prefix = Number(s.cidr.slice(i + 1));
-      // Family must match the address.
-      if (s.cidr.includes(':') !== addr.includes(':')) continue;
-      try {
-        const netPart = s.cidr.slice(0, i);
-        const mask = prefix === 0 ? 0n : (~0n << BigInt(128 - prefix)) & ((1n << 128n) - 1n);
-        // Compare via node:net-free BigInt expansion for v6; simple octet math for v4.
-        if (!addr.includes(':')) {
-          const a = addr.split('.').map(Number).reduce((acc, o) => (acc << 8) | o, 0) >>> 0;
-          const n = netPart.split('.').map(Number).reduce((acc, o) => (acc << 8) | o, 0) >>> 0;
-          const m4 = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
-          if ((a & m4) !== (n & m4)) continue;
-        } else {
-          // v6: expand both to BigInt and mask.
-          const expand = (v: string): bigint => {
-            let s = v.replace(/%[a-zA-Z0-9._-]+$/, '');
-            if (!s.includes('::')) s += '::';
-            const [l, r] = s.split('::');
-            const lg = l === '' ? [] : l.split(':').map((x) => parseInt(x, 16));
-            const rg = r === '' ? [] : r.split(':').map((x) => parseInt(x, 16));
-            const mid = Array(8 - lg.length - rg.length).fill(0);
-            return [...lg, ...mid, ...rg].reduce((acc, g) => (acc << 16n) | BigInt(g), 0n);
-          };
-          if ((expand(addr) & mask) !== (expand(netPart) & mask)) continue;
-        }
-      } catch {
-        continue; // malformed subnet — ignore
-      }
-      if (prefix > bestPrefix) {
-        best = s;
-        bestPrefix = prefix;
-      }
-    }
-    return best;
-  };
 
   const maxAgeHours = Number.isFinite(opts.maxAgeHours as number) && (opts.maxAgeHours as number) > 0 ? (opts.maxAgeHours as number) : 24;
   const cutoff = new Date(Date.now() - maxAgeHours * 3600_000).toISOString();
@@ -980,7 +925,7 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
       dnsName = h.mac.replace(/:/g, '');
     }
 
-    const nets = addrs.map((a) => netFor(a));
+    const nets = addrs.map((a) => mostSpecificSubnet(subnets, a));
     if (opts.skipUnknownNetworks === true && !nets.some((n) => n !== null)) {
       planned.push({ mac: h.mac, hostname: h.hostname, ips: addrs.length, action: 'skip', reason: 'no known network' });
       skipped++;
@@ -1049,45 +994,6 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
   for (const n of mergedNetworks) {
     for (const s of n.subnets ?? []) subnets.push({ cidr: s, vlanId: n.vlanId });
   }
-  const netFor = (addr: string): { cidr: string; vlanId: number | null } | null => {
-    let best: { cidr: string; vlanId: number | null } | null = null;
-    let bestPrefix = -1;
-    for (const s of subnets) {
-      const i = s.cidr.indexOf('/');
-      if (i < 0) continue;
-      const prefix = Number(s.cidr.slice(i + 1));
-      if (s.cidr.includes(':') !== addr.includes(':')) continue;
-      try {
-        const netPart = s.cidr.slice(0, i);
-        if (!addr.includes(':')) {
-          const a = addr.split('.').map(Number).reduce((acc, o) => (acc << 8) | o, 0) >>> 0;
-          const n = netPart.split('.').map(Number).reduce((acc, o) => (acc << 8) | o, 0) >>> 0;
-          const m4 = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
-          if ((a & m4) !== (n & m4)) continue;
-        } else {
-          const mask = prefix === 0 ? 0n : (~0n << BigInt(128 - prefix)) & ((1n << 128n) - 1n);
-          const expand = (v: string): bigint => {
-            let s = v.replace(/%[a-zA-Z0-9._-]+$/, '');
-            if (!s.includes('::')) s += '::';
-            const [l, r] = s.split('::');
-            const lg = l === '' ? [] : l.split(':').map((x) => parseInt(x, 16));
-            const rg = r === '' ? [] : r.split(':').map((x) => parseInt(x, 16));
-            const mid = Array(8 - lg.length - rg.length).fill(0);
-            return [...lg, ...mid, ...rg].reduce((acc, g) => (acc << 16n) | BigInt(g), 0n);
-          };
-          if ((expand(addr) & mask) !== (expand(netPart) & mask)) continue;
-        }
-      } catch {
-        continue;
-      }
-      if (prefix > bestPrefix) {
-        best = s;
-        bestPrefix = prefix;
-      }
-    }
-    return best;
-  };
-
   const maxAgeHours = Number.isFinite(opts.maxAgeHours as number) && (opts.maxAgeHours as number) > 0 ? (opts.maxAgeHours as number) : 24;
   const cutoff = new Date(Date.now() - maxAgeHours * 3600_000).toISOString();
 
@@ -1135,7 +1041,7 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
       dnsName = h.mac.replace(/:/g, '');
     }
 
-    const nets = addrs.map((a) => netFor(a));
+    const nets = addrs.map((a) => mostSpecificSubnet(subnets, a));
     if (opts.skipUnknownNetworks === true && !nets.some((n) => n !== null)) {
       skipped++;
       continue;
