@@ -368,7 +368,14 @@ async function collectDockerViaSsh(
   try {
     const port = hostSshPort(host);
     const client = await sshPool.get(host, port, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host, port) });
-    const r = await client.exec(buildDockerInspectCommand(containerIds.slice(0, MAX_CONTAINERS)), sshCreds);
+    // The combined command runs `docker inspect` ONCE PER CONTAINER plus a full
+    // `docker stats --no-stream` pass — on large fleets (250+ containers) that
+    // far exceeds the SDK's 10 s default exec budget and would ALWAYS time out,
+    // silently leaving dockerInfo empty forever. Scale the budget with the fleet
+    // size (~0.5 s per container headroom), capped at 3 min.
+    const ids = containerIds.slice(0, MAX_CONTAINERS);
+    const execTimeoutMs = Math.min(180_000, 60_000 + ids.length * 500);
+    const r = await client.exec(buildDockerInspectCommand(ids), sshCreds, execTimeoutMs);
     if (r.code !== 0 && !r.stdout) {
       log?.('warn', `SSH docker inspect on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`);
       return null;
@@ -467,7 +474,10 @@ async function collectProbeStatsInner(
     const client = await sshPool.get(host, port, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host, port) });
     const list = `$(docker ps -q 2>/dev/null | head -n ${MAX_CONTAINERS})`;
     const cmd = `docker stats --no-stream ${list} --format 'STAT|{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.NetIO}}|{{.BlockIO}}' 2>/dev/null`;
-    const r = await client.exec(cmd, sshCreds);
+    // `docker stats` samples every running container — on large fleets (250+)
+    // that exceeds the SDK's 10 s default exec budget and would always time out,
+    // leaving the Containers page without live stats. Scale with the cap.
+    const r = await client.exec(cmd, sshCreds, Math.min(180_000, 60_000 + MAX_CONTAINERS * 500));
     if (r.code !== 0 && !r.stdout) {
       probeFailLog(host, `SSH docker stats probe on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`, log);
       return null;

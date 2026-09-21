@@ -198,6 +198,15 @@ export class TruenasClient {
     return p;
   }
 
+  /** Detaches a socket safely — removes functional listeners but RE-REGISTERS the
+   *  permanent no-op error guard so a late async 'error' event (e.g. emitted by
+   *  terminate() after removeAllListeners) can never go unhandled and crash the
+   *  whole plugin process. */
+  private detachSocket(ws: WebSocket): void {
+    try { ws.removeAllListeners(); } catch { /* noop */ }
+    ws.on('error', () => { /* guarded — absorbs late async errors from terminate() */ });
+  }
+
   /** Clears socket state after a failed handshake (the socket is dead). */
   private resetAfterFailure(): void {
     const ws = this.ws;
@@ -205,7 +214,7 @@ export class TruenasClient {
     this.state = 'idle';
     this.authedFp = null;
     if (ws) {
-      try { ws.removeAllListeners(); } catch { /* noop */ }
+      this.detachSocket(ws);
     }
     for (const p of this.pending.values()) {
       clearTimeout(p.timer);
@@ -250,7 +259,8 @@ export class TruenasClient {
     this.state = 'idle';
     this.authedFp = null;
     if (ws) {
-      try { ws.removeAllListeners(); ws.terminate(); } catch { /* noop */ }
+      this.detachSocket(ws);
+      try { ws.terminate(); } catch { /* noop */ }
     }
     for (const p of this.pending.values()) {
       clearTimeout(p.timer);
@@ -372,7 +382,8 @@ export class TruenasClient {
               this.ws = null;
               this.state = 'idle';
               this.authedFp = null;
-              try { usedWs.removeAllListeners(); usedWs.terminate(); } catch { /* noop */ }
+              this.detachSocket(usedWs);
+              try { usedWs.terminate(); } catch { /* noop */ }
               for (const p of this.pending.values()) {
                 clearTimeout(p.timer);
                 p.reject(new TruenasRpcError('TrueNAS WebSocket session unresponsive — reconnecting'));

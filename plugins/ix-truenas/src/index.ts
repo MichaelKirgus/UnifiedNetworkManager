@@ -180,7 +180,21 @@ const identity = resolvePluginIdentity({
   // one-shot [EAGAIN] resume like the Web UI's confirm dialog). The firmware row
   // of the Updates page now carries the configured profile as its `branch` (new
   // Branch column), and the Config-page System item shows it + the branch actions.
-  version: '0.15.0',
+  // 0.15.1 — Three inventory fixes for large fleets (250+ containers):
+  // (a) dockerHosts rows now carry the compose `hostname` (the container's L3
+  // name on its network) instead of only the app / docker name, so the Hosts
+  // page shows what ARP/NDP/DNS actually resolve to;
+  // (b) TruenasClient no longer crashes the whole plugin process when a WebSocket
+  // connect times out — detachSocket() re-registers the permanent no-op error
+  // guard after removeAllListeners(), absorbing the late async 'error' event that
+  // terminate() emits. The crash loop wiped the in-memory enrichment cache on
+  // every restart, so large fleets never finished their SSH docker-inspect cycle;
+  // (c) the SSH exec budget now scales with fleet size (~0.5 s per container,
+  // capped at 3 min) instead of using the SDK's flat 10 s default — on a 258-app
+  // box the combined `docker inspect` + `docker stats` command always exceeded
+  // 10 s, so dockerInfo stayed empty forever and NO dockerHosts rows were ever
+  // emitted (the Containers page live-stats probe had the same problem).
+  version: '0.15.1',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -2304,6 +2318,26 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
           if (id && !appNameById.has(id)) appNameById.set(id, pickString(a, ['name', 'id']) ?? '');
         }
       }
+      // Map container id → compose `hostname` (the L3 name the container is
+      // actually reachable by on its network — what ARP/NDP tables and DNS
+      // resolve to). Prefer an explicit service match; for single-service apps
+      // (the common case) the one service's hostname IS the container's.
+      const composeHostnameById = new Map<string, string>();
+      for (const a of apps) {
+        const appName = pickString(a, ['name', 'id']);
+        if (!appName) continue;
+        const svcDetails = serviceDetailsByApp.get(appName);
+        if (!svcDetails || svcDetails.length === 0) continue;
+        const aw = (a['active_workloads'] ?? {}) as Record<string, unknown>;
+        const details = Array.isArray(aw['container_details']) ? (aw['container_details'] as Record<string, unknown>[]) : [];
+        for (const d of details) {
+          const id = pickString(d, ['id']);
+          if (!id || composeHostnameById.has(id)) continue;
+          const svcName = pickString(d, ['service_name']) ?? '';
+          const svc = svcDetails.find((s) => s.hostname === svcName) ?? (svcDetails.length === 1 ? svcDetails[0] : undefined);
+          if (svc?.hostname) composeHostnameById.set(id, svc.hostname);
+        }
+      }
       const seenMacIps = new Set<string>();
       for (const d of dockerInfo) {
         if (d.state !== 'running') continue; // stopped containers have no live address
@@ -2312,7 +2346,10 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
           const key = `${n.mac}|${n.ip}`;
           if (seenMacIps.has(key)) continue;
           seenMacIps.add(key);
-          dockerHosts.push({ mac: n.mac, ip: n.ip, hostname: appNameById.get(d.id) || d.name });
+          // Compose L3 hostname first — it is the name other devices see on the
+          // wire. Fall back to the app name, then the docker container name.
+          const hostname = composeHostnameById.get(d.id) || appNameById.get(d.id) || d.name;
+          if (hostname) dockerHosts.push({ mac: n.mac, ip: n.ip, hostname });
         }
       }
     }
