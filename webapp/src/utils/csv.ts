@@ -139,3 +139,90 @@ export function suggestHeaderMapping(headers: string[]): Partial<Record<CsvImpor
 
   return mapping;
 }
+
+// ---------------------------------------------------------------------------
+// Documented-networks import — same flexible header-mapping approach, different fields.
+// ---------------------------------------------------------------------------
+
+/** Fields a CSV column can be mapped to in the documented-networks import. */
+export type NetworkCsvImportField =
+  | 'name'
+  | 'subnets'
+  | 'vlanId'
+  | 'gateways'
+  | 'dnsServers'
+  | 'ntpServers'
+  | 'friendlyName'
+  | 'description'
+  | 'siteId'
+  | 'layerId'
+  | 'tags';
+
+/** Human labels + hints for each mappable field (shown in the mapping UI). */
+export const NETWORK_CSV_IMPORT_FIELDS: { field: NetworkCsvImportField; label: string; hint: string }[] = [
+  { field: 'name', label: 'Name', hint: 'Primary label / identity of the network — required, unique' },
+  { field: 'subnets', label: 'Subnet(s)', hint: 'One or more CIDR blocks (10.40.0.0/16), comma- or space-separated within one cell' },
+  { field: 'vlanId', label: 'VLAN id', hint: 'Integer 0–4095 when the network lives in a VLAN' },
+  { field: 'gateways', label: 'Gateway(s)', hint: 'One or more gateway IP addresses, comma- or space-separated within one cell' },
+  { field: 'dnsServers', label: 'DNS server(s)', hint: 'One or more DNS server IP addresses, comma- or space-separated within one cell' },
+  { field: 'ntpServers', label: 'NTP server(s)', hint: 'One or more NTP server IP addresses, comma- or space-separated within one cell' },
+  { field: 'friendlyName', label: 'Friendly name', hint: 'Optional human-friendly label' },
+  { field: 'description', label: 'Description', hint: 'Optional documentation text' },
+  { field: 'siteId', label: 'Site', hint: 'Site NAME (resolved to the site id on import)' },
+  { field: 'layerId', label: 'Layer', hint: 'Topology layer NAME (resolved to the layer id on import)' },
+  { field: 'tags', label: 'Tags', hint: 'Free-form tags, comma-separated within one cell; merged additively into existing networks' },
+];
+
+/**
+ * Heuristic header → field mapping for the documented-networks import. Same
+ * rules as suggestHeaderMapping: each column is claimed by at most one field,
+ * higher-priority fields run first and win ambiguous columns.
+ */
+export function suggestNetworkHeaderMapping(headers: string[]): Partial<Record<NetworkCsvImportField, number>> {
+  const mapping: Partial<Record<NetworkCsvImportField, number>> = {};
+  for (const f of NETWORK_CSV_IMPORT_FIELDS) mapping[f.field] = -1;
+
+  // Ordered by priority — distinctive headers claim first. "Netzwerk"/"network"
+  // is the NAME column in most spreadsheets, so it is NOT claimed by subnets.
+  const patterns: [NetworkCsvImportField, RegExp][] = [
+    ['vlanId', /\bvlan\b/i],
+    ['gateways', /(gateway|\bgw\b)/i],
+    ['dnsServers', /\bdns/i],
+    ['ntpServers', /\bntp\b/i],
+    ['subnets', /(subnet|cidr|ip\s?range|netzbereich)\b/i],
+    ['friendlyName', /(friendly|alias|bezeichnung|anzeige)/i],
+    ['description', /(desc(?:ription)?|comment|note|bemerkung|beschreibung)/i],
+    ['siteId', /\b(site|standort)\b/i],
+    ['layerId', /\b(layer|ebene|tier)\b/i],
+    ['tags', /(^|\s)tags?(\s|$)|\b(etiketten|labels?)\b/i],
+  ];
+
+  const claimed = new Set<number>();
+  for (const [field, re] of patterns) {
+    for (let col = 0; col < headers.length; col++) {
+      if (claimed.has(col)) continue;
+      const h = headers[col].trim();
+      if (!h) continue;
+      if (re.test(h)) {
+        mapping[field] = col;
+        claimed.add(col);
+        break;
+      }
+    }
+  }
+
+  // "Name" / "Network" alone → name when nothing better was found for it.
+  if ((mapping.name ?? -1) < 0) {
+    for (let col = 0; col < headers.length; col++) {
+      if (claimed.has(col)) continue;
+      const h = headers[col].trim().toLowerCase();
+      if (h === 'name' || h === 'names' || h === 'network' || h === 'netzwerk') {
+        mapping.name = col;
+        claimed.add(col);
+        break;
+      }
+    }
+  }
+
+  return mapping;
+}

@@ -24,6 +24,7 @@ import {
   ShieldHalf,
   ShieldCheck,
   FileKey2,
+  Globe,
   NotebookPen,
   Settings2,
   UserRound,
@@ -59,6 +60,9 @@ export const NAV_ITEMS: NavItem[] = [
   // User-maintained host documentation — permanent inventory records with
   // live "discovered" matching (distinct from the live ARP/NDP Hosts page).
   { to: '/documented-hosts', label: 'Documented Hosts', icon: NotebookPen, requiresPermission: 'documented-hosts:read' },
+  // User-maintained network documentation — permanent inventory records with
+  // live "discovered" matching (distinct from the live Networks page).
+  { to: '/documented-networks', label: 'Documented Networks', icon: Globe, requiresPermission: 'documented-networks:read' },
   // Cable stands in for a tunnel link (lucide's `Tunnel` icon is not in the installed version).
   { to: '/tunnels', label: 'Tunnels', icon: Cable, requiresPermission: 'tunnels:read' },
   // Firewall rules across devices (filter + NAT kinds) — ShieldHalf reads as a

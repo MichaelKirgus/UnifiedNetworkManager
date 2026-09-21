@@ -14,6 +14,7 @@ import Layers from './pages/Layers';
 import Networks from './pages/Networks';
 import Hosts from './pages/Hosts';
 import DocumentedHosts from './pages/DocumentedHosts';
+import DocumentedNetworks from './pages/DocumentedNetworks';
 import Tunnels from './pages/Tunnels';
 import Firewall from './pages/Firewall';
 import Certificates from './pages/Certificates';
@@ -50,6 +51,7 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   { path: '/networks', permission: 'networks:read' },
   { path: '/hosts', permission: 'hosts:read' },
   { path: '/documented-hosts', permission: 'documented-hosts:read' },
+  { path: '/documented-networks', permission: 'documented-networks:read' },
   { path: '/tunnels', permission: 'tunnels:read' },
   { path: '/firewall', permission: 'firewall:read' },
   { path: '/certificates', permission: 'certificates:read' },
@@ -125,6 +127,7 @@ export default function App() {
       <Route path="/hosts" element={<Page permission="hosts:read"><Hosts /></Page>} />
       {/* User-maintained host documentation (permanent inventory + CSV import). */}
       <Route path="/documented-hosts" element={<Page permission="documented-hosts:read"><DocumentedHosts /></Page>} />
+      <Route path="/documented-networks" element={<Page permission="documented-networks:read"><DocumentedNetworks /></Page>} />
       <Route path="/tunnels" element={<Page permission="tunnels:read"><Tunnels /></Page>} />
       <Route path="/firewall" element={<Page permission="firewall:read"><Firewall /></Page>} />
       <Route path="/certificates" element={<Page permission="certificates:read"><Certificates /></Page>} />

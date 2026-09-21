@@ -1019,7 +1019,7 @@ function parsePublicIpPolicy(value: unknown): PublicIpPolicy {
 }
 
 /** One parsed network/range entry — a CIDR block or an inclusive IP range. */
-interface RangeEntry {
+export interface RangeEntry {
   family: 'v4' | 'v6';
   kind: 'cidr' | 'range';
   cidr?: string;
@@ -1028,7 +1028,7 @@ interface RangeEntry {
 }
 
 /** Parses a single "a.b.c.d/p", "fd00::/64" or "1.2.3.4-1.2.3.9" entry; null when malformed. */
-function parseRangeEntry(raw: string): RangeEntry | null {
+export function parseRangeEntry(raw: string): RangeEntry | null {
   const v = raw.trim();
   if (!v) return null;
   // CIDR block.
@@ -1070,8 +1070,8 @@ function parseRangeEntry(raw: string): RangeEntry | null {
   return null;
 }
 
-/** True when the address falls into ANY of the parsed entries (family-aware). */
-function hostInRanges(addrs: string[], ranges: RangeEntry[]): boolean {
+/** True when any of the addresses falls into ANY of the parsed entries (family-aware). */
+export function hostInRanges(addrs: string[], ranges: RangeEntry[]): boolean {
   for (const a of addrs) {
     const fam = ipFamily(a);
     if (!fam) continue;
@@ -1097,7 +1097,7 @@ function hostInRanges(addrs: string[], ranges: RangeEntry[]): boolean {
 }
 
 /** Parses all raw range entries once; throws a 400 on the first malformed entry. */
-function parseRanges(rawRanges: string[] | undefined): RangeEntry[] {
+export function parseRanges(rawRanges: string[] | undefined): RangeEntry[] {
   const out: RangeEntry[] = [];
   for (const r of rawRanges ?? []) {
     const e = parseRangeEntry(r);
@@ -1112,9 +1112,10 @@ function parseRanges(rawRanges: string[] | undefined): RangeEntry[] {
  * a reason, or null when the host passes (and no ranges are configured). Runs
  * BEFORE all other options.
  */
-function rangeFilterDecision(
+/** Applies the network/range filter to an address list (shared with documented networks). */
+export function rangeFilterDecision(
   addrs: string[],
-  mode: InventoryImportOptions['rangeMode'],
+  mode: 'keep-all' | 'include-only' | 'exclude',
   ranges: RangeEntry[]
 ): { skip?: boolean; reason?: string } {
   if (mode === 'keep-all' || ranges.length === 0) return {};

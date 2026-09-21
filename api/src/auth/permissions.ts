@@ -31,6 +31,10 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // permanent inventory distinct from the live ARP/NDP observations above.
   'documented-hosts:read': 'View documented hosts (the user-maintained host inventory)',
   'documented-hosts:write': 'Create, update and delete documented hosts (incl. CSV import)',
+  // User-maintained network documentation (subnets, VLANs, gateways, DNS) — a
+  // permanent inventory distinct from the live interface observations above.
+  'documented-networks:read': 'View documented networks (the user-maintained network inventory)',
+  'documented-networks:write': 'Create, update and delete documented networks (incl. CSV import)',
   'tunnels:read': 'View the Tunnels page (configured + live tunnel state)',
   'routes:read': 'View the Routes page (static and dynamic routes across devices)',
   'firewall:read': 'View the Firewall page (filter + NAT rules across devices)',

@@ -20,6 +20,7 @@ import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import plansRouter from './routes/plans';
 import networksRouter from './routes/networks';
 import documentedHostsRouter from './routes/documentedHosts';
+import documentedNetworksRouter from './routes/documentedNetworks';
 import updatesRouter from './routes/updates';
 import topologyRouter from './routes/topology';
 import logsRouter from './routes/logs';
@@ -128,6 +129,8 @@ async function main(): Promise<void> {
   api.use(networksRouter);
   // User-maintained host documentation (/documented-hosts + CSV import).
   api.use(documentedHostsRouter);
+  // User-maintained network documentation (/documented-networks + CSV import).
+  api.use(documentedNetworksRouter);
   // Cross-device update center (/updates: device updates + stack self-update card).
   api.use(updatesRouter);
   // Physical + logical topology graph for the Topology page (self-defining path).

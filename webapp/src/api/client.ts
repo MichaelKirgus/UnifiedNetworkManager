@@ -527,6 +527,124 @@ export interface DocumentedHostMergeResult {
   count: number;
 }
 
+// --- Documented networks (user-maintained network documentation) --------------
+
+/** One documented network (user-maintained inventory) with live discovery info. */
+export interface DocumentedNetwork {
+  id: string;
+  /** Primary label / identity ("VLAN 30", "10.40.0.0/16", "Mgmt LAN"). Unique case-insensitively. */
+  name: string;
+  /** Canonicalized CIDR blocks, IPv4 first (may be empty for name-only rows). */
+  subnets: string[];
+  vlanId: number | null;
+  gateways: string[];
+  dnsServers: string[];
+  ntpServers: string[];
+  friendlyName: string | null;
+  description: string | null;
+  siteId: string | null;
+  siteName: string | null;
+  layerId: string | null;
+  layerName: string | null;
+  /** User-assigned free-form tags (same data basis as devices.tags). */
+  tags: string[];
+  /** True when a merged live logical network matches this documented one. */
+  discovered: boolean;
+  /** Most recent collection of any matching live group; null = never seen. */
+  lastSeenAt: string | null;
+  /** Subnets observed on the matching live groups (union, IPv4 first). */
+  observedSubnets: string[];
+  /** VLAN id observed on a matching live group (null when none known). */
+  observedVlanId: number | null;
+  /** User-maintained lifecycle flag — false = stale/retired (row stays, dimmed in the UI). Default true. */
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Create/update payload for a documented network. */
+export interface DocumentedNetworkRequest {
+  name: string;
+  /** CIDR blocks ("10.40.0.0/16", "fd00::/64"); may be empty (name-only row). */
+  subnets?: string[];
+  vlanId?: number | null;
+  gateways?: string[];
+  dnsServers?: string[];
+  ntpServers?: string[];
+  friendlyName?: string | null;
+  description?: string | null;
+  siteId?: string | null;
+  layerId?: string | null;
+  /** Free-form user tags (same data basis as devices.tags); omitted = none. */
+  tags?: string[];
+  /** Lifecycle flag — false marks the network stale/retired (new networks default to active). */
+  isActive?: boolean;
+}
+
+/** Result of a batch lifecycle update on documented networks. */
+export interface DocumentedNetworkBulkResult {
+  updated: number;
+  missing: string[];
+}
+
+/** Result of a bulk documented-network import. */
+export interface DocumentedNetworkImportResult {
+  created: number;
+  updated: number;
+  /** Matched rows left untouched (updateExisting=false). */
+  skipped: number;
+  errors: { index: number; error: string }[];
+}
+
+/** Options for copying the live network inventory into the documented networks. */
+export interface DocumentedNetworkInventoryImportOptions {
+  /** Skip live logical networks without any real subnet (pure SSID/VLAN groups). Default true. */
+  skipWithoutSubnet?: boolean;
+  /** Skip live logical networks with no discovered VLAN id. Default false. */
+  skipWithoutVlan?: boolean;
+  /** Only import networks carrying this address family ('all' = both). Default 'all'. */
+  version?: 'all' | 'v4' | 'v6';
+  /** Range filter mode: include-only / exclude applied to the network's subnets. Default 'keep-all'. */
+  rangeMode?: 'keep-all' | 'include-only' | 'exclude';
+  /** CIDR blocks and/or inclusive IP ranges (empty = no filtering). */
+  ranges?: string[];
+  /** Only import networks observed within this many hours (0 = all, default 24). */
+  maxAgeHours?: number;
+  /** Preview only — compute the plan without writing anything (default true). */
+  dryRun?: boolean;
+}
+
+/** One planned change for a single live logical network. */
+export interface DocumentedNetworkInventoryPlanEntry {
+  name: string;
+  subnets: string[];
+  vlanId: number | null;
+  action: 'create' | 'update' | 'skip';
+  reason?: string;
+}
+
+/** Result of the inventory import (dry-run plan or applied summary). */
+export interface DocumentedNetworkInventoryImportResult {
+  dryRun: boolean;
+  totalLiveNetworks: number;
+  planned: DocumentedNetworkInventoryPlanEntry[];
+  created: number;
+  updated: number;
+  skipped: number;
+  /** Ids of the documented rows this run created or updated (empty on a pure dry-run). */
+  affectedIds?: string[];
+}
+
+/** Result of merging several documented network rows into one. */
+export interface DocumentedNetworkMergeResult {
+  /** The surviving (merged) network — oldest row's id + createdAt kept. */
+  merged: DocumentedNetwork;
+  /** Ids of the rows that were deleted. */
+  removed: string[];
+  /** Number of rows that were merged. */
+  count: number;
+}
+
 /** One configured tunnel from the cross-device inventory view. Unlike networks/hosts,
  * rows are NOT merged across devices — a tunnel row is one logical tunnel on one device. */
 export interface TunnelRow {
@@ -2340,6 +2458,33 @@ export const api = {
    *  dryRun defaults to true — returns a per-host plan without writing. */
   importDocumentedHostsFromInventory: (body: DocumentedHostInventoryImportOptions = {}) =>
     apiFetch<DocumentedHostInventoryImportResult>('/documented-hosts/import-from-inventory', { method: 'POST', body: JSON.stringify(body) }),
+  // Documented networks — the user-maintained network documentation page.
+  documentedNetworks: (params?: { siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<DocumentedNetwork[]>(`/documented-networks${suffix}`);
+  },
+  createDocumentedNetwork: (body: DocumentedNetworkRequest) =>
+    apiFetch<DocumentedNetwork>('/documented-networks', { method: 'POST', body: JSON.stringify(body) }),
+  updateDocumentedNetwork: (id: string, body: Partial<DocumentedNetworkRequest>) =>
+    apiFetch<DocumentedNetwork>(`/documented-networks/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteDocumentedNetwork: (id: string) =>
+    apiFetch<void>(`/documented-networks/${id}`, { method: 'DELETE' }),
+  /** Batch lifecycle update — marks the given networks active or stale in one call. */
+  bulkUpdateDocumentedNetworks: (ids: string[], isActive: boolean) =>
+    apiFetch<DocumentedNetworkBulkResult>('/documented-networks/bulk', { method: 'POST', body: JSON.stringify({ ids, isActive }) }),
+  /** Bulk site/layer placement — sets the given fields on every id (null clears). */
+  bulkSetDocumentedNetworkPlacement: (ids: string[], placement: { siteId?: string | null; layerId?: string | null }) =>
+    apiFetch<DocumentedNetworkBulkResult>('/documented-networks/bulk', { method: 'POST', body: JSON.stringify({ ids, ...placement }) }),
+  mergeDocumentedNetworks: (ids: string[]) =>
+    apiFetch<DocumentedNetworkMergeResult>('/documented-networks/merge', { method: 'POST', body: JSON.stringify({ ids }) }),
+  importDocumentedNetworks: (body: { networks: DocumentedNetworkRequest[]; matchBy?: 'name' | 'subnet'; updateExisting?: boolean }) =>
+    apiFetch<DocumentedNetworkImportResult>('/documented-networks/import', { method: 'POST', body: JSON.stringify(body) }),
+  /** Copy the live network inventory into the documented networks (additive merge).
+   *  dryRun defaults to true — returns a per-network plan without writing. */
+  importDocumentedNetworksFromInventory: (body: DocumentedNetworkInventoryImportOptions = {}) =>
+    apiFetch<DocumentedNetworkInventoryImportResult>('/documented-networks/import-from-inventory', { method: 'POST', body: JSON.stringify(body) }),
   tunnels: (params?: { deviceId?: string; siteId?: string; type?: 'wireguard' | 'openvpn' | 'ipsec' | 'pppoe' | 'gre' }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);

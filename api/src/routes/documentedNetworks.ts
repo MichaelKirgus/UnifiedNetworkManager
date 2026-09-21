@@ -1,0 +1,1194 @@
+import { Router, Request, Response } from 'express';
+import { asc, eq, inArray } from 'drizzle-orm';
+import { v4 as uuidv4 } from 'uuid';
+import { isIP } from 'node:net';
+import { ipFamily, splitCidr, subnetOf, ipv4ToInt, ipv6ToBigInt } from '@unm/plugin-sdk';
+import { db } from '../db';
+import * as schema from '../db/schema';
+import { requireAuth, requirePermission } from '../auth/middleware';
+import { mergeNetworkRows, type MergedNetwork } from './networks';
+// Shared CIDR/IP-range filter helpers (same semantics as the hosts import).
+import { parseRanges, rangeFilterDecision } from './documentedHosts';
+
+const router = Router();
+
+/**
+ * Documented networks — the USER-MAINTAINED network inventory (the "Networks
+ * documentation" page). The documented-network counterpart of documented hosts:
+ * permanent records of what SHOULD exist on the network (name, subnets, VLAN,
+ * gateways, DNS servers, site/layer placement), while `networks` holds
+ * transient interface observations collected by plugins.
+ *
+ * At read time every documented network is cross-referenced against the live
+ * table: a matching merged logical network (by name, CIDR containment either
+ * direction, or VLAN id) marks it "discovered" with its observed subnets and
+ * last-seen timestamp — the foundation for future change-detection.
+ */
+
+// ---------------------------------------------------------------------------
+// Value normalization + validation
+// ---------------------------------------------------------------------------
+
+/** True for a bare IPv4/IPv6 literal (no prefix). */
+function isIpLiteral(value: string): boolean {
+  return isIP(value.trim()) !== 0;
+}
+
+/**
+ * Normalizes a CIDR block ("10.40.0.5/23" → "10.40.0.0/23", host bits cleared).
+ * Returns null when the value is not a valid CIDR (bare IPs are rejected —
+ * subnets must carry an explicit prefix, mirroring the live inventory's rows).
+ */
+function normalizeCidr(value: string): string | null {
+  const s = splitCidr(value);
+  if (!s) return null;
+  if (!isIpLiteral(s.net)) return null;
+  // Canonicalize — clear host bits so "10.40.0.5/23" and "10.40.0.0/23" dedupe.
+  const canonical = subnetOf(s.net, s.prefix);
+  if (!canonical) return null;
+  return canonical;
+}
+
+/** Parses a stored JSON string array defensively (bad data → []). Same basis as devices.tags. */
+function readStringArray(raw: unknown): string[] {
+  let arr: unknown = raw;
+  if (typeof raw === 'string') {
+    try { arr = JSON.parse(raw); } catch { return []; }
+  }
+  if (!Array.isArray(arr)) return [];
+  const out: string[] = [];
+  for (const v of arr) {
+    if (typeof v !== 'string') continue;
+    const t = v.trim();
+    if (t !== '' && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+/** Validates a request-body field as an array of non-empty strings (deduped, trimmed). */
+function parseStringArrayField(raw: unknown, field: string): { value?: string[]; error?: string } {
+  if (!Array.isArray(raw)) return { error: `"${field}" must be an array of strings` };
+  for (const v of raw as unknown[]) {
+    if (typeof v !== 'string' || v.trim() === '') return { error: `"${field}" entries must be non-empty strings` };
+  }
+  const out: string[] = [];
+  for (const v of raw as string[]) {
+    const t = v.trim();
+    if (!out.includes(t)) out.push(t);
+  }
+  return { value: out };
+}
+
+/** Case-insensitive union of tag lists — first occurrence's casing wins. */
+function mergeTagLists(...lists: string[][]): string[] {
+  const out: string[] = [];
+  for (const list of lists) {
+    for (const t of list) {
+      if (!out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t);
+    }
+  }
+  return out;
+}
+
+/** Parses a VLAN id (integer ≥ 0); null when absent/empty, -1 when invalid. */
+function parseVlanId(value: unknown): number | null | -1 {
+  if (value === undefined || value === null) return null;
+  const n = typeof value === 'number' ? value : Number(String(value).trim());
+  if (!Number.isInteger(n) || n < 0 || n > 4095) return -1;
+  return n;
+}
+
+/** Sorts addresses/subnets IPv4-first, then lexicographically (repo convention). */
+function sortAddresses(addrs: string[]): string[] {
+  return [...addrs].sort((a, b) => {
+    const av = a.includes(':') ? 1 : 0;
+    const bv = b.includes(':') ? 1 : 0;
+    return av !== bv ? av - bv : a.localeCompare(b);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Live-observation lookup (discovery)
+// ---------------------------------------------------------------------------
+
+/** One merged live logical network that matches a documented network. */
+interface LiveNetworkMatch {
+  name: string;
+  subnets: string[];
+  vlanId: number | null;
+  collectedAt: string;
+}
+
+/**
+ * Matches the given documented networks against ALL merged live logical
+ * networks (GET /networks data). A match is established when ANY of holds:
+ *   - case-insensitive name equality (documented name vs group display label),
+ *   - CIDR containment in EITHER direction between a documented subnet and a
+ *     member subnet (a documented /16 matches the observed /24s inside it,
+ *     and vice versa — subnets are canonicalized before comparison),
+ *   - VLAN id equality (both sides carry one).
+ * Returns per-documented-network-id the union of all matching live groups.
+ */
+async function loadLiveNetworkMatches(
+  docs: { id: string; name: string; subnets: string[]; vlanId: number | null }[]
+): Promise<Map<string, LiveNetworkMatch[]>> {
+  const out = new Map<string, LiveNetworkMatch[]>();
+  if (docs.length === 0) return out;
+
+  const rows = await db.query.networks.findMany();
+  const liveGroups = mergeNetworkRows(rows);
+  // Canonicalize every live subnet once — containment checks need network addresses.
+  const liveSubnets: { id: string; canonical: string }[] = [];
+  for (const g of liveGroups) {
+    for (const s of g.subnets ?? []) {
+      const c = normalizeCidr(s);
+      if (c) liveSubnets.push({ id: g.key, canonical: c });
+    }
+  }
+
+  for (const d of docs) {
+    const docSubnets = d.subnets.map((s) => normalizeCidr(s)).filter((s): s is string => !!s);
+    const matches: LiveNetworkMatch[] = [];
+    for (const g of liveGroups) {
+      let hit = false;
+      if (d.name.trim().toLowerCase() === g.name.trim().toLowerCase()) hit = true;
+      if (!hit && d.vlanId != null && g.vlanId != null && d.vlanId === g.vlanId) hit = true;
+      if (!hit) {
+        for (const ds of docSubnets) {
+          for (const ls of liveSubnets) {
+            if (ls.id !== g.key) continue;
+            // Containment either direction — same family only.
+            if (cidrsOverlap(ds, ls.canonical)) { hit = true; break; }
+          }
+          if (hit) break;
+        }
+      }
+      if (hit) matches.push({ name: g.name, subnets: [...(g.subnets ?? [])], vlanId: g.vlanId, collectedAt: g.collectedAt });
+    }
+    out.set(d.id, matches);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Response shaping
+// ---------------------------------------------------------------------------
+
+/** One documented network as presented in the API response. */
+export interface DocumentedNetworkView {
+  id: string;
+  name: string;
+  /** Canonicalized CIDR blocks, IPv4 first (may be empty for name-only rows). */
+  subnets: string[];
+  vlanId: number | null;
+  gateways: string[];
+  dnsServers: string[];
+  ntpServers: string[];
+  friendlyName: string | null;
+  description: string | null;
+  siteId: string | null;
+  siteName: string | null;
+  layerId: string | null;
+  layerName: string | null;
+  tags: string[];
+  /** True when a merged live logical network matches this documented one. */
+  discovered: boolean;
+  /** Most recent collection of any matching live group (null = never seen). */
+  lastSeenAt: string | null;
+  /** Subnets observed on the matching live groups (union, IPv4 first). */
+  observedSubnets: string[];
+  /** VLAN id observed on a matching live group (null when none known). */
+  observedVlanId: number | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Shapes one documented network row into the API view. */
+function shapeNetwork(
+  n: typeof schema.documentedNetworks.$inferSelect,
+  siteNameById: Map<string, string>,
+  layerNameById: Map<string, string>,
+  matches: LiveNetworkMatch[] | undefined
+): DocumentedNetworkView {
+  let lastSeenAt: string | null = null;
+  const observed = new Set<string>();
+  let observedVlanId: number | null = null;
+  for (const m of matches ?? []) {
+    if (m.collectedAt > (lastSeenAt ?? '')) lastSeenAt = m.collectedAt;
+    for (const s of m.subnets) observed.add(s);
+    if (observedVlanId == null && m.vlanId != null) observedVlanId = m.vlanId;
+  }
+
+  return {
+    id: n.id,
+    name: n.name,
+    subnets: sortAddresses(readStringArray(n.subnets)),
+    vlanId: n.vlanId ?? null,
+    gateways: readStringArray(n.gateways),
+    dnsServers: readStringArray(n.dnsServers),
+    ntpServers: readStringArray(n.ntpServers),
+    friendlyName: n.friendlyName,
+    description: n.description,
+    siteId: n.siteId,
+    siteName: n.siteId ? (siteNameById.get(n.siteId) ?? null) : null,
+    layerId: n.layerId,
+    layerName: n.layerId ? (layerNameById.get(n.layerId) ?? null) : null,
+    tags: readStringArray(n.tags),
+    discovered: (matches?.length ?? 0) > 0,
+    lastSeenAt,
+    observedSubnets: sortAddresses(Array.from(observed)),
+    observedVlanId,
+    isActive: n.isActive !== false, // defensive — the column is NOT NULL DEFAULT TRUE
+    createdAt: n.createdAt,
+    updatedAt: n.updatedAt,
+  };
+}
+
+/** Batch-loads site + layer display names for the given ids. */
+async function loadReferenceNames(rows: typeof schema.documentedNetworks.$inferSelect[]) {
+  const siteIds = Array.from(new Set(rows.map((r) => r.siteId).filter((s): s is string => !!s)));
+  const layerIds = Array.from(new Set(rows.map((r) => r.layerId).filter((l): l is string => !!l)));
+  const [sites, layers] = await Promise.all([
+    siteIds.length > 0 ? db.query.sites.findMany({ where: inArray(schema.sites.id, siteIds) }) : [],
+    layerIds.length > 0 ? db.query.networkLayers.findMany({ where: inArray(schema.networkLayers.id, layerIds) }) : [],
+  ]);
+  return {
+    siteNameById: new Map(sites.map((s) => [s.id, s.name] as const)),
+    layerNameById: new Map(layers.map((l) => [l.id, l.name] as const)),
+  };
+}
+
+/** Loads documented networks (optionally filtered by site). */
+async function loadNetworks(siteId?: string): Promise<typeof schema.documentedNetworks.$inferSelect[]> {
+  const where = siteId ? eq(schema.documentedNetworks.siteId, siteId) : undefined;
+  return db.query.documentedNetworks.findMany({
+    ...(where ? { where } : {}),
+    orderBy: [asc(schema.documentedNetworks.createdAt)],
+  });
+}
+
+/** Full view for a set of rows — shared by the list route and single-row responses. */
+async function buildViews(rows: typeof schema.documentedNetworks.$inferSelect[]): Promise<DocumentedNetworkView[]> {
+  if (rows.length === 0) return [];
+  const [{ siteNameById, layerNameById }, matches] = await Promise.all([
+    loadReferenceNames(rows),
+    loadLiveNetworkMatches(
+      rows.map((r) => ({ id: r.id, name: r.name, subnets: readStringArray(r.subnets), vlanId: r.vlanId ?? null }))
+    ),
+  ]);
+  return rows.map((r) => shapeNetwork(r, siteNameById, layerNameById, matches.get(r.id)));
+}
+
+// ---------------------------------------------------------------------------
+// Input validation (shared by create / update / import)
+// ---------------------------------------------------------------------------
+
+interface NetworkInput {
+  name?: unknown;
+  subnets?: unknown;
+  vlanId?: unknown;
+  gateways?: unknown;
+  dnsServers?: unknown;
+  ntpServers?: unknown;
+  friendlyName?: unknown;
+  description?: unknown;
+  siteId?: unknown;
+  layerId?: unknown;
+  tags?: unknown;
+  isActive?: unknown;
+}
+
+interface ValidatedNetwork {
+  name: string;
+  subnets: string[];
+  vlanId: number | null;
+  gateways: string[];
+  dnsServers: string[];
+  ntpServers: string[];
+  friendlyName: string | null;
+  description: string | null;
+  siteId: string | null;
+  layerId: string | null;
+  tags: string[];
+  isActive: boolean;
+}
+
+/** Validates + normalizes one network payload. Returns the normalized shape or an error message. */
+async function validateNetworkInput(body: NetworkInput): Promise<{ ok: true; value: ValidatedNetwork } | { ok: false; error: string }> {
+  // Name — required, non-empty after trim (uniqueness is checked by callers).
+  if (typeof body.name !== 'string' || !body.name.trim()) return { ok: false, error: '"name" must be a non-empty string' };
+  const name = body.name.trim();
+
+  // Subnets — optional array of CIDR blocks; canonicalized + deduped.
+  let subnets: string[] = [];
+  if (body.subnets !== undefined) {
+    if (!Array.isArray(body.subnets)) return { ok: false, error: '"subnets" must be an array of CIDR strings' };
+    for (const s of body.subnets as unknown[]) {
+      if (typeof s !== 'string') return { ok: false, error: '"subnets" entries must be CIDR strings' };
+      const norm = normalizeCidr(s);
+      if (!norm) return { ok: false, error: `Invalid subnet: "${s}" — expected a CIDR block like 192.168.1.0/24 or fd00::/64` };
+      if (!subnets.includes(norm)) subnets.push(norm);
+    }
+  }
+
+  // VLAN id.
+  const vlanId = parseVlanId(body.vlanId);
+  if (vlanId === -1) return { ok: false, error: `Invalid VLAN id: "${String(body.vlanId)}" — expected an integer 0–4095` };
+
+  // Gateways / DNS servers / NTP servers — optional arrays of bare IP literals.
+  const parseIpList = (raw: unknown, field: string): { value?: string[]; error?: string } => {
+    if (!Array.isArray(raw)) return { error: `"${field}" must be an array of IP address strings` };
+    const out: string[] = [];
+    for (const v of raw as unknown[]) {
+      if (typeof v !== 'string' || !isIpLiteral(v)) return { error: `Invalid ${field} entry: "${String(v)}" — expected a bare IPv4/IPv6 address` };
+      const t = v.trim();
+      if (!out.includes(t)) out.push(t);
+    }
+    return { value: out };
+  };
+  const gw = parseIpList(body.gateways, 'gateways');
+  if (gw.error) return { ok: false, error: gw.error };
+  const dns = parseIpList(body.dnsServers, 'dnsServers');
+  if (dns.error) return { ok: false, error: dns.error };
+  const ntp = parseIpList(body.ntpServers, 'ntpServers');
+  if (ntp.error) return { ok: false, error: ntp.error };
+
+  // Optional text fields.
+  const friendlyName = typeof body.friendlyName === 'string' && body.friendlyName.trim() ? body.friendlyName.trim() : null;
+  const description = typeof body.description === 'string' && body.description.trim() ? body.description.trim() : null;
+
+  // Lifecycle flag — only an explicit boolean changes it.
+  let isActive: boolean | null = null;
+  if (typeof body.isActive === 'boolean') isActive = body.isActive;
+
+  // Site / layer references — must exist when provided.
+  let siteId: string | null = null;
+  if (body.siteId !== undefined && body.siteId !== null) {
+    if (typeof body.siteId !== 'string' || !body.siteId) return { ok: false, error: '"siteId" must be a non-empty string or null' };
+    const site = await db.query.sites.findFirst({ where: eq(schema.sites.id, body.siteId) });
+    if (!site) return { ok: false, error: `Unknown siteId "${body.siteId}"` };
+    siteId = site.id;
+  }
+  let layerId: string | null = null;
+  if (body.layerId !== undefined && body.layerId !== null) {
+    if (typeof body.layerId !== 'string' || !body.layerId) return { ok: false, error: '"layerId" must be a non-empty string or null' };
+    const layer = await db.query.networkLayers.findFirst({ where: eq(schema.networkLayers.id, body.layerId) });
+    if (!layer) return { ok: false, error: `Unknown layerId "${body.layerId}"` };
+    layerId = layer.id;
+  }
+
+  // Free-form tags (same data basis as devices.tags). Absent/undefined keeps
+  // the current value on a PATCH; an explicit [] clears them.
+  let tags: string[] | null = null;
+  if (body.tags !== undefined) {
+    const ref = parseStringArrayField(body.tags, 'tags');
+    if (ref.error) return { ok: false, error: ref.error };
+    tags = ref.value!;
+  }
+
+  return {
+    ok: true,
+    value: {
+      name,
+      subnets,
+      vlanId: vlanId as number | null,
+      gateways: gw.value ?? [],
+      dnsServers: dns.value ?? [],
+      ntpServers: ntp.value ?? [],
+      friendlyName,
+      description,
+      siteId,
+      layerId,
+      tags: tags ?? [],
+      isActive: isActive ?? true,
+    },
+  };
+}
+
+/**
+ * True when two CIDR blocks overlap — for CIDRs that means one contains the
+ * other (blocks are either disjoint or nested). Families must match. Both sides
+ * may be non-canonical; only the network-prefix bits are compared.
+ */
+function cidrsOverlap(a: string, b: string): boolean {
+  const sa = splitCidr(a);
+  const sb = splitCidr(b);
+  if (!sa || !sb) return false;
+  // Families must match (v4 vs v6 never overlap).
+  if (sa.net.includes(':') !== sb.net.includes(':')) return false;
+  if (!sa.net.includes(':')) {
+    const na = ipv4ToInt(sa.net);
+    const nb = ipv4ToInt(sb.net);
+    if (na === null || nb === null) return false;
+    const pfx = Math.min(sa.prefix, sb.prefix);
+    const mask = pfx === 0 ? 0 : (~0 << (32 - pfx)) >>> 0;
+    return (na & mask) === (nb & mask);
+  }
+  const na = ipv6ToBigInt(sa.net);
+  const nb = ipv6ToBigInt(sb.net);
+  if (na === null || nb === null) return false;
+  const pfx = Math.min(sa.prefix, sb.prefix);
+  const mask = pfx === 0 ? 0n : ((1n << 128n) - 1n) ^ ((1n << BigInt(128 - pfx)) - 1n);
+  return (na & mask) === (nb & mask);
+}
+
+/** True when two subnet lists share ANY CIDR containment in either direction. */
+function subnetsOverlap(a: string[], b: string[]): boolean {
+  const ca = a.map((s) => normalizeCidr(s)).filter((s): s is string => !!s);
+  const cb = b.map((s) => normalizeCidr(s)).filter((s): s is string => !!s);
+  for (const x of ca) {
+    for (const y of cb) {
+      if (cidrsOverlap(x, y)) return true;
+    }
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
+
+/** Loads one documented network; null when missing. */
+async function loadOneNetwork(id: string): Promise<typeof schema.documentedNetworks.$inferSelect | null> {
+  return (await db.query.documentedNetworks.findFirst({ where: eq(schema.documentedNetworks.id, id) })) ?? null;
+}
+
+// GET /documented-networks — list all documented networks with live discovery info.
+// Query params: siteId (filter by placement).
+router.get('/documented-networks', requireAuth, requirePermission('documented-networks:read'), async (_req: Request, res: Response) => {
+  try {
+    const { siteId } = _req.query as Record<string, string | undefined>;
+    const rows = await loadNetworks(siteId);
+    const views = await buildViews(rows);
+    // Most recently updated first — the page is a working inventory.
+    views.sort((a, b) => (b.updatedAt > a.updatedAt ? 1 : -1));
+    res.status(200).json(views);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// POST /documented-networks — create a documented network. Requires documented-networks:write.
+router.post('/documented-networks', requireAuth, requirePermission('documented-networks:write'), async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as NetworkInput;
+    const validated = await validateNetworkInput(body);
+    if (!validated.ok) {
+      res.status(400).json({ error: validated.error });
+      return;
+    }
+
+    // Name uniqueness (case-insensitive at the API layer; the DB index is a
+    // plain unique on name as a backstop).
+    const all = await loadNetworks();
+    const byName = all.find((r) => r.name.toLowerCase() === validated.value.name.toLowerCase());
+    if (byName) {
+      res.status(409).json({ error: `A documented network with the name "${validated.value.name}" already exists` });
+      return;
+    }
+    // A different name covering the SAME subnets is a duplicate too — reject it
+    // here so the page never carries two rows for one network.
+    if (validated.value.subnets.length > 0) {
+      const overlap = all.find((r) => subnetsOverlap(readStringArray(r.subnets), validated.value.subnets));
+      if (overlap) {
+        res.status(409).json({ error: `Subnet range already covered by documented network "${overlap.name}"` });
+        return;
+      }
+    }
+
+    const now = new Date().toISOString();
+    const id = uuidv4();
+    const v = validated.value;
+    await db.insert(schema.documentedNetworks).values({
+      id,
+      name: v.name,
+      subnets: JSON.stringify(v.subnets),
+      vlanId: v.vlanId,
+      gateways: JSON.stringify(v.gateways),
+      dnsServers: JSON.stringify(v.dnsServers),
+      ntpServers: JSON.stringify(v.ntpServers),
+      friendlyName: v.friendlyName,
+      description: v.description,
+      siteId: v.siteId,
+      layerId: v.layerId,
+      tags: JSON.stringify(v.tags),
+      isActive: v.isActive, // new networks default to active
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const [created] = await buildViews([(await loadOneNetwork(id))!]);
+    res.status(201).json(created);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// PATCH /documented-networks/:id — update a documented network (all-or-nothing
+// replace of the provided fields; `subnets`/`gateways`/`dnsServers`/
+// `ntpServers` arrays are replaced wholesale when present).
+router.patch('/documented-networks/:id', requireAuth, requirePermission('documented-networks:write'), async (req: Request, res: Response) => {
+  try {
+    const existing = await loadOneNetwork(req.params.id);
+    if (!existing) {
+      res.status(404).json({ error: 'Documented network not found' });
+      return;
+    }
+
+    const body = (req.body ?? {}) as NetworkInput;
+    // Merge the patch over the current values so partial updates work, then run
+    // the SAME validation as create (the merged result must be a complete row).
+    const current: NetworkInput = {
+      name: existing.name,
+      subnets: readStringArray(existing.subnets),
+      vlanId: existing.vlanId ?? null,
+      gateways: readStringArray(existing.gateways),
+      dnsServers: readStringArray(existing.dnsServers),
+      ntpServers: readStringArray(existing.ntpServers),
+      friendlyName: existing.friendlyName,
+      description: existing.description,
+      siteId: existing.siteId,
+      layerId: existing.layerId,
+      tags: readStringArray(existing.tags),
+      isActive: existing.isActive !== false, // defensive — the column is NOT NULL DEFAULT TRUE
+    };
+    const merged: NetworkInput = { ...current };
+    for (const key of ['name', 'subnets', 'vlanId', 'gateways', 'dnsServers', 'ntpServers', 'friendlyName', 'description', 'siteId', 'layerId', 'tags', 'isActive'] as const) {
+      if (body[key] !== undefined) (merged as Record<string, unknown>)[key] = body[key];
+    }
+
+    const validated = await validateNetworkInput(merged);
+    if (!validated.ok) {
+      res.status(400).json({ error: validated.error });
+      return;
+    }
+
+    // Name uniqueness against OTHER rows (case-insensitive + subnet overlap).
+    const others = await loadNetworks();
+    const clash = others.find((r) => r.id !== existing.id && (r.name.toLowerCase() === validated.value.name.toLowerCase() || subnetsOverlap(readStringArray(r.subnets), validated.value.subnets)));
+    if (clash) {
+      res.status(409).json({ error: `Name or subnet range already used by documented network "${clash.name}"` });
+      return;
+    }
+
+    const v = validated.value;
+    await db.update(schema.documentedNetworks)
+      .set({
+        name: v.name,
+        subnets: JSON.stringify(v.subnets),
+        vlanId: v.vlanId,
+        gateways: JSON.stringify(v.gateways),
+        dnsServers: JSON.stringify(v.dnsServers),
+        ntpServers: JSON.stringify(v.ntpServers),
+        friendlyName: v.friendlyName,
+        description: v.description,
+        siteId: v.siteId,
+        layerId: v.layerId,
+        tags: JSON.stringify(v.tags),
+        isActive: v.isActive, // merged value — keeps the current flag when not provided
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.documentedNetworks.id, existing.id));
+
+    const [updated] = await buildViews([(await loadOneNetwork(existing.id))!]);
+    res.status(200).json(updated);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// DELETE /documented-networks/:id — remove a documented network.
+router.delete('/documented-networks/:id', requireAuth, requirePermission('documented-networks:write'), async (req: Request, res: Response) => {
+  try {
+    const existing = await loadOneNetwork(req.params.id);
+    if (!existing) {
+      res.status(404).json({ error: 'Documented network not found' });
+      return;
+    }
+    await db.delete(schema.documentedNetworks).where(eq(schema.documentedNetworks.id, existing.id));
+    res.status(204).send();
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// POST /documented-networks/bulk — batch updates. Body:
+// { ids: string[], isActive?: boolean, siteId?: string|null, layerId?: string|null }
+// Marks every existing id active/stale and/or sets its site/layer placement in
+// one call (the webapp bulk actions send the current selection). Unknown ids
+// are reported, never fatal; at most 5000 ids per call. Omitted fields = no-op.
+router.post('/documented-networks/bulk', requireAuth, requirePermission('documented-networks:write'), async (req: Request, res: Response) => {
+  try {
+    const body = req.body ?? {};
+    const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x) : [];
+    if (ids.length === 0) {
+      res.status(400).json({ error: '"ids" must be a non-empty array of documented network ids' });
+      return;
+    }
+    if (ids.length > 5000) {
+      res.status(400).json({ error: 'At most 5000 ids per bulk update' });
+      return;
+    }
+
+    // Optional fields — each omitted = no-op on that field. siteId/layerId must
+    // reference an existing registry entry (or null to clear the placement).
+    const hasFlag = typeof body.isActive === 'boolean';
+    let siteId: string | null | undefined;
+    if (body.siteId !== undefined) {
+      if (body.siteId === null) siteId = null;
+      else if (typeof body.siteId === 'string' && body.siteId) {
+        const site = await db.query.sites.findFirst({ where: eq(schema.sites.id, body.siteId) });
+        if (!site) { res.status(400).json({ error: `Unknown siteId "${body.siteId}"` }); return; }
+        siteId = site.id;
+      } else { res.status(400).json({ error: '"siteId" must be a non-empty string or null' }); return; }
+    }
+    let layerId: string | null | undefined;
+    if (body.layerId !== undefined) {
+      if (body.layerId === null) layerId = null;
+      else if (typeof body.layerId === 'string' && body.layerId) {
+        const layer = await db.query.networkLayers.findFirst({ where: eq(schema.networkLayers.id, body.layerId) });
+        if (!layer) { res.status(400).json({ error: `Unknown layerId "${body.layerId}"` }); return; }
+        layerId = layer.id;
+      } else { res.status(400).json({ error: '"layerId" must be a non-empty string or null' }); return; }
+    }
+
+    const existing = await db.query.documentedNetworks.findMany({ where: inArray(schema.documentedNetworks.id, Array.from(new Set(ids))) });
+    const foundIds = new Set(existing.map((n) => n.id));
+    const missing = ids.filter((id) => !foundIds.has(id));
+
+    if ((hasFlag || siteId !== undefined || layerId !== undefined) && existing.length > 0) {
+      const set: Record<string, unknown> = { updatedAt: new Date().toISOString() };
+      if (hasFlag) set.isActive = body.isActive as boolean;
+      if (siteId !== undefined) set.siteId = siteId;
+      if (layerId !== undefined) set.layerId = layerId;
+      await db.update(schema.documentedNetworks).set(set).where(inArray(schema.documentedNetworks.id, Array.from(foundIds)));
+    }
+
+    res.status(200).json({ updated: hasFlag || siteId !== undefined || layerId !== undefined ? existing.length : 0, missing });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CSV import (flexible header mapping — the webapp maps columns client-side and
+// sends already-structured rows; this endpoint only validates + upserts)
+// ---------------------------------------------------------------------------
+
+/** Matches an import row against existing networks. */
+function findExistingNetwork(
+  rows: typeof schema.documentedNetworks.$inferSelect[],
+  byName: Map<string, string>, // lowercased name -> id
+  row: NetworkInput
+): { id: string; how: 'name' | 'subnet' } | null {
+  if (typeof row.name === 'string') {
+    const n = row.name.trim().toLowerCase();
+    if (n && byName.has(n)) return { id: byName.get(n)!, how: 'name' };
+  }
+  // Subnet overlap fallback — a different name covering the same range is the
+  // same network.
+  const subnets = Array.isArray(row.subnets) ? row.subnets : [];
+  for (const r of rows) {
+    if (subnetsOverlap(readStringArray(r.subnets), subnets as string[])) return { id: r.id, how: 'subnet' };
+  }
+  return null;
+}
+
+// POST /documented-networks/import — bulk-create/update documented networks.
+// Body: { networks: [...], matchBy?: 'name'|'subnet', updateExisting?: boolean }.
+// Rows are validated independently — one bad row never aborts the batch.
+router.post('/documented-networks/import', requireAuth, requirePermission('documented-networks:write'), async (req: Request, res: Response) => {
+  try {
+    const body = req.body ?? {};
+    const rows = Array.isArray(body.networks) ? body.networks : null;
+    if (!rows || rows.length === 0) {
+      res.status(400).json({ error: '"networks" must be a non-empty array' });
+      return;
+    }
+    if (rows.length > 5000) {
+      res.status(400).json({ error: 'At most 5000 networks per import batch' });
+      return;
+    }
+    const matchBy: 'name' | 'subnet' = body.matchBy === 'subnet' ? 'subnet' : 'name';
+    const updateExisting = body.updateExisting !== false;
+
+    // Index existing networks for matching.
+    const existingRows = await loadNetworks();
+    const byName = new Map<string, string>();
+    for (const r of existingRows) byName.set(r.name.toLowerCase(), r.id);
+
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+    const errors: { index: number; error: string }[] = [];
+    const now = new Date().toISOString();
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = (rows[i] ?? {}) as NetworkInput;
+      const validated = await validateNetworkInput(row);
+      if (!validated.ok) {
+        errors.push({ index: i, error: validated.error });
+        continue;
+      }
+      const v = validated.value;
+
+      let existingId: string | null = null;
+      if (matchBy === 'name') {
+        existingId = byName.get(v.name.toLowerCase()) ?? null;
+        // Name miss — fall back to subnet overlap so a renamed network still merges.
+        if (!existingId) existingId = findExistingNetwork(existingRows, byName, row)?.id ?? null;
+      } else {
+        existingId = findExistingNetwork(existingRows, byName, row)?.id ?? null;
+      }
+
+      if (existingId && !updateExisting) {
+        skipped++;
+        continue;
+      }
+
+      if (existingId) {
+        // Update in place — keep the original id + createdAt. isActive is NOT
+        // touched by a CSV import (the lifecycle flag is user-managed); tags are
+        // merged additively so an import never drops existing labels.
+        const existing = existingRows.find((r) => r.id === existingId)!;
+        const mergedTags = mergeTagLists(readStringArray(existing.tags), v.tags);
+        await db.update(schema.documentedNetworks)
+          .set({
+            name: v.name,
+            subnets: JSON.stringify(v.subnets),
+            vlanId: v.vlanId,
+            gateways: JSON.stringify(v.gateways),
+            dnsServers: JSON.stringify(v.dnsServers),
+            ntpServers: JSON.stringify(v.ntpServers),
+            friendlyName: v.friendlyName,
+            description: v.description,
+            siteId: v.siteId,
+            layerId: v.layerId,
+            tags: JSON.stringify(mergedTags),
+            updatedAt: now,
+          })
+          .where(eq(schema.documentedNetworks.id, existingId));
+        updated++;
+      } else {
+        const id = uuidv4();
+        await db.insert(schema.documentedNetworks).values({
+          id,
+          name: v.name,
+          subnets: JSON.stringify(v.subnets),
+          vlanId: v.vlanId,
+          gateways: JSON.stringify(v.gateways),
+          dnsServers: JSON.stringify(v.dnsServers),
+          ntpServers: JSON.stringify(v.ntpServers),
+          friendlyName: v.friendlyName,
+          description: v.description,
+          siteId: v.siteId,
+          layerId: v.layerId,
+          tags: JSON.stringify(v.tags),
+          isActive: true, // imported networks start active
+          createdAt: now,
+          updatedAt: now,
+        });
+        created++;
+      }
+    }
+
+    res.status(200).json({ created, updated, skipped, errors });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Import from live inventory — copies the observed logical networks (GET
+// /networks data) into the documented-networks table. The merge is ADDITIVE and
+// never loses user data: existing name, subnets, gateways, DNS/NTP servers,
+// description, site/layer placement are preserved; new subnets/VLAN ids from
+// the observation are added (matched networks by name or subnet overlap).
+// ---------------------------------------------------------------------------
+
+/** Options for the inventory import. */
+interface NetworkInventoryImportOptions {
+  /** Skip live logical networks without any real subnet (pure SSID/VLAN groups). Default true. */
+  skipWithoutSubnet?: boolean;
+  /** Skip live logical networks with no discovered VLAN id. Default false. */
+  skipWithoutVlan?: boolean;
+  /** Only import networks carrying this address family ('all' = both). Default 'all'. */
+  version?: 'all' | 'v4' | 'v6';
+  /** Range filter mode: 'include-only' imports only matching networks, 'exclude' skips them. Default 'keep-all'. */
+  rangeMode?: 'keep-all' | 'include-only' | 'exclude';
+  /** CIDR networks / IP ranges the range filter applies to (empty = no filtering). */
+  ranges?: string[];
+  /** Only import networks observed within this many hours (0 = all, default 24 — the sweep window). */
+  maxAgeHours?: number;
+  /** Preview only — compute what would change without writing anything. Default true. */
+  dryRun?: boolean;
+}
+
+/** One planned change for a single live logical network. */
+interface NetworkInventoryImportPlanEntry {
+  name: string;
+  subnets: string[];
+  vlanId: number | null;
+  /** 'create' = new documented network, 'update' = merge into an existing one, 'skip' = unchanged/filtered out. */
+  action: 'create' | 'update' | 'skip';
+  reason?: string;
+}
+
+/** Result of the inventory import (dry-run or applied). */
+interface NetworkInventoryImportResult {
+  dryRun: boolean;
+  totalLiveNetworks: number;
+  planned: NetworkInventoryImportPlanEntry[];
+  created: number;
+  updated: number;
+  skipped: number;
+  /** Ids of the documented rows this run created or updated (empty on a pure dry-run). */
+  affectedIds: string[];
+}
+
+/** True when the live group carries at least one subnet of the requested family. */
+function hasVersion(g: MergedNetwork, version: 'all' | 'v4' | 'v6'): boolean {
+  if (version === 'all') return true;
+  return (g.subnets ?? []).some((s) => ipFamily(s) === version);
+}
+
+/**
+ * Builds the import plan from the live inventory + current documented networks.
+ * Pure function of its inputs — shared by dry-run and apply so both agree.
+ */
+async function buildNetworkInventoryImportPlan(opts: NetworkInventoryImportOptions): Promise<NetworkInventoryImportResult> {
+  const [networkRows, existing] = await Promise.all([db.query.networks.findMany(), loadNetworks()]);
+
+  // Merged logical networks — the same groups GET /networks presents.
+  const liveGroups = mergeNetworkRows(networkRows);
+  const maxAgeHours = Number.isFinite(opts.maxAgeHours as number) && (opts.maxAgeHours as number) > 0 ? (opts.maxAgeHours as number) : 24;
+  const cutoff = new Date(Date.now() - maxAgeHours * 3600_000).toISOString();
+  const live = liveGroups.filter((g) => g.collectedAt >= cutoff);
+
+  // Parse the range filter ONCE (throws 400 on a malformed entry).
+  const ranges = parseRanges(opts.ranges);
+
+  // Index existing documented networks by name + subnets.
+  const docByName = new Map<string, typeof schema.documentedNetworks.$inferSelect>();
+  for (const r of existing) docByName.set(r.name.toLowerCase(), r);
+
+  const planned: NetworkInventoryImportPlanEntry[] = [];
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (const g of live) {
+    const subnets = [...(g.subnets ?? [])];
+    if (opts.skipWithoutSubnet !== false && subnets.length === 0) {
+      planned.push({ name: g.name, subnets: [], vlanId: g.vlanId, action: 'skip', reason: 'no subnet' });
+      skipped++;
+      continue;
+    }
+    if (opts.skipWithoutVlan === true && g.vlanId == null) {
+      planned.push({ name: g.name, subnets, vlanId: null, action: 'skip', reason: 'no VLAN discovered' });
+      skipped++;
+      continue;
+    }
+    const version = opts.version === 'v4' || opts.version === 'v6' ? opts.version : 'all';
+    if (!hasVersion(g, version)) {
+      planned.push({ name: g.name, subnets, vlanId: g.vlanId, action: 'skip', reason: `no ${version} subnet` });
+      skipped++;
+      continue;
+    }
+    // Network/range filter — include-only / exclude runs before every other option.
+    const rf = rangeFilterDecision(subnets, opts.rangeMode ?? 'keep-all', ranges);
+    if (rf.skip) {
+      planned.push({ name: g.name, subnets, vlanId: g.vlanId, action: 'skip', reason: rf.reason });
+      skipped++;
+      continue;
+    }
+
+    // Match an existing documented network — by name first, then subnet overlap.
+    const target = docByName.get(g.name.toLowerCase()) ?? existing.find((r) => subnetsOverlap(readStringArray(r.subnets), subnets)) ?? null;
+
+    // Would the merge actually change anything?
+    let wouldChange = false;
+    if (!target) {
+      wouldChange = true;
+    } else {
+      const existingSubnets = new Set(readStringArray(target.subnets).map((s) => normalizeCidr(s)).filter(Boolean));
+      for (const s of subnets) {
+        const c = normalizeCidr(s);
+        if (c && !existingSubnets.has(c)) wouldChange = true;
+      }
+      // A missing VLAN id on the documented row also counts.
+      if (target.vlanId == null && g.vlanId != null) wouldChange = true;
+    }
+
+    if (!wouldChange) {
+      planned.push({ name: g.name, subnets, vlanId: g.vlanId, action: 'skip', reason: 'already fully documented' });
+      skipped++;
+      continue;
+    }
+
+    if (target) updated++;
+    else created++;
+    planned.push({ name: g.name, subnets, vlanId: g.vlanId, action: target ? 'update' : 'create' });
+  }
+
+  return { dryRun: true, totalLiveNetworks: live.length, planned, created, updated, skipped, affectedIds: [] };
+}
+
+/** Applies the plan — writes only what buildNetworkInventoryImportPlan() computed. */
+async function applyNetworkInventoryImport(opts: NetworkInventoryImportOptions): Promise<NetworkInventoryImportResult> {
+  const [networkRows, existing] = await Promise.all([db.query.networks.findMany(), loadNetworks()]);
+
+  const liveGroups = mergeNetworkRows(networkRows);
+  const maxAgeHours = Number.isFinite(opts.maxAgeHours as number) && (opts.maxAgeHours as number) > 0 ? (opts.maxAgeHours as number) : 24;
+  const cutoff = new Date(Date.now() - maxAgeHours * 3600_000).toISOString();
+  const live = liveGroups.filter((g) => g.collectedAt >= cutoff);
+
+  // Parse the range filter ONCE (throws 400 on a malformed entry).
+  const ranges = parseRanges(opts.ranges);
+
+  const docByName = new Map<string, typeof schema.documentedNetworks.$inferSelect>();
+  for (const r of existing) docByName.set(r.name.toLowerCase(), r);
+
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+  const affectedIds: string[] = [];
+  const now = new Date().toISOString();
+
+  for (const g of live) {
+    const subnets = [...(g.subnets ?? [])];
+    if (opts.skipWithoutSubnet !== false && subnets.length === 0) { skipped++; continue; }
+    if (opts.skipWithoutVlan === true && g.vlanId == null) { skipped++; continue; }
+    const version = opts.version === 'v4' || opts.version === 'v6' ? opts.version : 'all';
+    if (!hasVersion(g, version)) { skipped++; continue; }
+    const rf = rangeFilterDecision(subnets, opts.rangeMode ?? 'keep-all', ranges);
+    if (rf.skip) { skipped++; continue; }
+
+    // Match by name first, then subnet overlap.
+    let target = docByName.get(g.name.toLowerCase()) ?? null;
+    if (!target) target = existing.find((r) => subnetsOverlap(readStringArray(r.subnets), subnets)) ?? null;
+
+    // --- Merge: ADDITIVE — never drop user data -----------------------------
+    const mergedSubnets = [...(target ? readStringArray(target.subnets) : [])];
+    let changed = false;
+    for (const s of subnets) {
+      const c = normalizeCidr(s);
+      if (!c) continue;
+      const known = new Set(mergedSubnets.map((x) => normalizeCidr(x)).filter(Boolean));
+      if (!known.has(c)) { mergedSubnets.push(c); changed = true; }
+    }
+    let vlanId = target?.vlanId ?? null;
+    if (vlanId == null && g.vlanId != null) { vlanId = g.vlanId; changed = true; }
+
+    // Friendly name: keep the user's, else derive from a subnet-based label.
+    let friendlyName = target?.friendlyName ?? null;
+    if (!friendlyName && subnets.length > 0) {
+      const base = subnets[0].split('/')[0];
+      if (base) { friendlyName = base; changed = true; }
+    }
+
+    if (!changed) { skipped++; continue; }
+
+    if (target) {
+      await db.update(schema.documentedNetworks)
+        .set({ subnets: JSON.stringify(mergedSubnets), vlanId, friendlyName, updatedAt: now })
+        .where(eq(schema.documentedNetworks.id, target.id));
+      affectedIds.push(target.id);
+      updated++;
+    } else {
+      const id = uuidv4();
+      await db.insert(schema.documentedNetworks).values({
+        id,
+        name: g.name,
+        subnets: JSON.stringify(mergedSubnets),
+        vlanId,
+        gateways: '[]',
+        dnsServers: '[]',
+        ntpServers: '[]',
+        friendlyName,
+        description: null,
+        siteId: null, // placement is user-managed — the live inventory has none
+        layerId: null,
+        tags: '[]',
+        isActive: true, // imported networks start active
+        createdAt: now,
+        updatedAt: now,
+      });
+      affectedIds.push(id);
+      created++;
+    }
+  }
+
+  return { dryRun: false, totalLiveNetworks: live.length, planned: [], created, updated, skipped, affectedIds };
+}
+
+// POST /documented-networks/import-from-inventory — copy the LIVE network
+// inventory into the documented networks (additive merge; dry-run by default).
+router.post('/documented-networks/import-from-inventory', requireAuth, requirePermission('documented-networks:write'), async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const opts: NetworkInventoryImportOptions = {
+      skipWithoutSubnet: body.skipWithoutSubnet !== false,
+      skipWithoutVlan: body.skipWithoutVlan === true,
+      version: body.version === 'v4' || body.version === 'v6' ? body.version : 'all',
+      rangeMode: body.rangeMode === 'include-only' || body.rangeMode === 'exclude' ? body.rangeMode : 'keep-all',
+      ranges: Array.isArray(body.ranges) ? (body.ranges as unknown[]).filter((r): r is string => typeof r === 'string') : [],
+      maxAgeHours: typeof body.maxAgeHours === 'number' ? body.maxAgeHours : 24,
+      dryRun: body.dryRun !== false, // preview first — explicit opt-in to write
+    };
+
+    if (opts.dryRun) {
+      const result = await buildNetworkInventoryImportPlan(opts);
+      res.status(200).json(result);
+      return;
+    }
+    const result = await applyNetworkInventoryImport(opts);
+    res.status(200).json(result);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Merging duplicate rows — one physical network can end up documented as
+// multiple rows (e.g. imported once per subnet with different names, or a
+// renamed network re-imported). This endpoint merges a set of rows into ONE:
+// subnets/gateways/DNS servers are unioned, name/friendly name/description/
+// placement taken from the first row that has one, lifecycle = any active wins.
+// ---------------------------------------------------------------------------
+
+/** Merges several documented networks into one canonical shape (oldest row leads). */
+function mergeNetworkShapes(rows: typeof schema.documentedNetworks.$inferSelect[]): ValidatedNetwork {
+  const ordered = [...rows].sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id.localeCompare(b.id)));
+  const first = ordered[0];
+
+  // Subnets / gateways / DNS servers / NTP servers — unioned + deduped.
+  const subnets: string[] = [];
+  for (const r of ordered) {
+    for (const s of readStringArray(r.subnets)) {
+      const c = normalizeCidr(s);
+      if (c && !subnets.includes(c)) subnets.push(c);
+    }
+  }
+  const gateways: string[] = [];
+  for (const r of ordered) for (const g of readStringArray(r.gateways)) if (!gateways.includes(g)) gateways.push(g);
+  const dnsServers: string[] = [];
+  for (const r of ordered) for (const d of readStringArray(r.dnsServers)) if (!dnsServers.includes(d)) dnsServers.push(d);
+  const ntpServers: string[] = [];
+  for (const r of ordered) for (const t of readStringArray(r.ntpServers)) if (!ntpServers.includes(t)) ntpServers.push(t);
+
+  // First non-null wins — the oldest row leads.
+  let vlanId: number | null = null;
+  let friendlyName: string | null = null;
+  let description: string | null = null;
+  let siteId: string | null = null;
+  let layerId: string | null = null;
+  for (const r of ordered) {
+    if (vlanId == null && r.vlanId != null) vlanId = r.vlanId;
+    if (!friendlyName && r.friendlyName) friendlyName = r.friendlyName;
+    if (!description && r.description) description = r.description;
+    if (!siteId && r.siteId) siteId = r.siteId;
+    if (!layerId && r.layerId) layerId = r.layerId;
+  }
+
+  // Tags are unioned (case-insensitive dedupe, first occurrence's casing wins).
+  const tags: string[] = [];
+  for (const r of ordered) {
+    for (const t of readStringArray(r.tags)) if (!tags.some((x) => x.toLowerCase() === t.toLowerCase())) tags.push(t);
+  }
+
+  // Any row still in active use keeps the merged network active.
+  const isActive = rows.some((r) => r.isActive !== false);
+
+  return { name: first.name, subnets, vlanId, gateways, dnsServers, ntpServers, friendlyName, description, siteId, layerId, tags, isActive };
+}
+
+// POST /documented-networks/merge — merge several documented rows into ONE. Body:
+// { ids: string[] } (2..5000). The surviving row is the OLDEST by createdAt;
+// all other ids are deleted after their data was merged in. Returns the merged network.
+router.post('/documented-networks/merge', requireAuth, requirePermission('documented-networks:write'), async (req: Request, res: Response) => {
+  try {
+    const body = req.body ?? {};
+    const ids = Array.from(new Set(((Array.isArray(body.ids) ? body.ids : []) as unknown[]).filter((x): x is string => typeof x === 'string' && !!x)));
+    if (ids.length < 2) {
+      res.status(400).json({ error: '"ids" must contain at least 2 documented network ids to merge' });
+      return;
+    }
+    if (ids.length > 5000) {
+      res.status(400).json({ error: 'At most 5000 ids per merge' });
+      return;
+    }
+
+    const rows = await db.query.documentedNetworks.findMany({ where: inArray(schema.documentedNetworks.id, ids) });
+    const foundIds = new Set(rows.map((r) => r.id));
+    const missing = ids.filter((id) => !foundIds.has(id));
+    if (missing.length > 0) {
+      res.status(400).json({ error: `Unknown documented network id(s): ${missing.join(', ')}` });
+      return;
+    }
+
+    // Oldest row survives — its id + createdAt are kept.
+    const ordered = [...rows].sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id.localeCompare(b.id)));
+    const [survivor, ...rest] = ordered;
+
+    // The union of valid rows is still a valid row — run the shared validation anyway.
+    const mergedShape = mergeNetworkShapes(ordered);
+    const validated = await validateNetworkInput({
+      name: mergedShape.name,
+      subnets: mergedShape.subnets,
+      vlanId: mergedShape.vlanId,
+      gateways: mergedShape.gateways,
+      dnsServers: mergedShape.dnsServers,
+      ntpServers: mergedShape.ntpServers,
+      friendlyName: mergedShape.friendlyName,
+      description: mergedShape.description,
+      siteId: mergedShape.siteId,
+      layerId: mergedShape.layerId,
+      tags: mergedShape.tags,
+      isActive: mergedShape.isActive,
+    });
+    if (!validated.ok) {
+      res.status(400).json({ error: `Merged network is invalid: ${validated.error}` });
+      return;
+    }
+
+    await db.update(schema.documentedNetworks)
+      .set({
+        name: validated.value.name,
+        subnets: JSON.stringify(validated.value.subnets),
+        vlanId: validated.value.vlanId,
+        gateways: JSON.stringify(validated.value.gateways),
+        dnsServers: JSON.stringify(validated.value.dnsServers),
+        ntpServers: JSON.stringify(validated.value.ntpServers),
+        friendlyName: validated.value.friendlyName,
+        description: validated.value.description,
+        siteId: validated.value.siteId,
+        layerId: validated.value.layerId,
+        tags: JSON.stringify(validated.value.tags),
+        isActive: validated.value.isActive,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.documentedNetworks.id, survivor.id));
+
+    // Delete the merged-away rows.
+    for (const r of rest) {
+      await db.delete(schema.documentedNetworks).where(eq(schema.documentedNetworks.id, r.id));
+    }
+
+    const [merged] = await buildViews([(await loadOneNetwork(survivor.id))!]);
+    res.status(200).json({ merged, removed: rest.map((r) => r.id), count: ordered.length });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+export default router;

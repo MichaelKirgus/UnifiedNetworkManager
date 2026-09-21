@@ -155,7 +155,7 @@ interface NetworkDeviceMember {
 }
 
 /** One LOGICAL network as presented by GET /networks — merged across devices. */
-interface MergedNetwork {
+export interface MergedNetwork {
   /** Canonical identity of the logical network (subnet, vlan:<id>, or name). */
   key: string;
   /** Display label: subnet when known ("192.168.1.0/24"), else "VLAN <id>", else the interface name. */

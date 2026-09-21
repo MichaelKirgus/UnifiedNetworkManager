@@ -1639,6 +1639,59 @@ export const documentedHostIps = pgTable(
   }
 );
 
+// ---------------------------------------------------------------------------
+// Documented networks — a USER-MAINTAINED network inventory (the "Networks
+// documentation" page). The documented-network counterpart of documented_hosts:
+// permanent records of what SHOULD exist on the network, cross-referenced at
+// read time against the live `networks` table (merged logical networks) to
+// mark a documented network as "discovered". Unlike hosts there is NO child
+// table — subnets/gateways/DNS servers are JSON arrays because no per-subnet
+// attributes exist (hosts need one row per address for its MAC + VLAN).
+export const documentedNetworks = pgTable(
+  'documented_networks',
+  {
+    id: text('id').primaryKey(),
+    // Primary label / identity of the network ("VLAN 30", "10.40.0.0/16",
+    // "Mgmt LAN"). UNIQUE (case-insensitive uniqueness enforced at the API
+    // layer) — makes import matching deterministic and prevents duplicate rows
+    // (the merge endpoint still handles subnet-overlap duplicates that carry
+    // different names).
+    name: text('name').notNull(),
+    // JSON string array of validated CIDR blocks ("10.40.0.0/16", "fd00::/64").
+    // May be empty — a name-only row (e.g. "VLAN 30" before the subnet is
+    // known) mirrors the live inventory's VLAN-only/SSID groups.
+    subnets: text('subnets').notNull().default('[]'),
+    // VLAN id when the network lives in one (null = unknown / not VLAN-based).
+    vlanId: integer('vlanId'),
+    // JSON string arrays of bare IP literals — dual-stack networks carry both
+    // families. Purely user-maintained (not observable from live inventory).
+    gateways: text('gateways').notNull().default('[]'),
+    dnsServers: text('dnsServers').notNull().default('[]'),
+    ntpServers: text('ntpServers').notNull().default('[]'),
+    friendlyName: text('friendlyName'),
+    description: text('description'),
+    // Optional placement (NULL = unassigned) — same registries as devices.
+    siteId: text('siteId'),
+    layerId: text('layerId'),
+    // User-assigned free-form tags (same data basis as devices.tags).
+    tags: text('tags').notNull().default('[]'),
+    // Lifecycle flag: true = in active use, false = stale/retired (dimmed).
+    isActive: boolean('isActive').notNull().default(true),
+    createdAt: text('createdAt').notNull(),
+    updatedAt: text('updatedAt').notNull(),
+  },
+  (table) => {
+    return {
+      // Name uniqueness — the identity key of a documented network. Case-
+      // INSENSITIVE uniqueness is enforced at the API layer (the router compares
+      // with toLowerCase() and returns 409); every write goes through that check.
+      uqDocumentedNetworksName: uniqueIndex('uq_documented_networks_name').on(table.name),
+      idxDocumentedNetworksSite: index('idx_documented_networks_site').on(table.siteId),
+      idxDocumentedNetworksLayer: index('idx_documented_networks_layer').on(table.layerId),
+    };
+  }
+);
+
 // Add index for config_jobs
 // Note: Drizzle's index definition inside the table definition is 
 // usually the best way to handle this. I'll add it to configJobs.

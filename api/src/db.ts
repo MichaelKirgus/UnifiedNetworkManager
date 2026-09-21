@@ -431,6 +431,39 @@ export async function initDb(): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_documented_host_ips_mac ON documented_host_ips (mac)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_documented_host_ips_address ON documented_host_ips (address)`);
 
+  // Documented networks — USER-MAINTAINED network inventory (the "Networks
+  // documentation" page). Permanent records, unlike the live `networks` table:
+  // name + subnets/VLAN/gateways/DNS servers + optional site/layer. Flat table
+  // (JSON arrays) — no child table because there are no per-subnet attributes.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS documented_networks (
+      id TEXT PRIMARY KEY,
+      "name" TEXT NOT NULL,
+      "subnets" TEXT NOT NULL DEFAULT '[]',
+      "vlanId" INTEGER,
+      "gateways" TEXT NOT NULL DEFAULT '[]',
+      "dnsServers" TEXT NOT NULL DEFAULT '[]',
+      "ntpServers" TEXT NOT NULL DEFAULT '[]',
+      "friendlyName" TEXT,
+      description TEXT,
+      "siteId" TEXT,
+      "layerId" TEXT,
+      "tags" TEXT NOT NULL DEFAULT '[]',
+      "isActive" BOOLEAN NOT NULL DEFAULT TRUE,
+      "createdAt" TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL
+    )`);
+  // Name uniqueness — the identity key of a documented network. Plain column
+  // index so it matches the schema.ts declaration exactly (drizzle-kit push in
+  // setup.sh must not plan a drop/recreate diff). Case-INSENSITIVE uniqueness
+  // is enforced at the API layer (routes/documentedNetworks.ts compares with
+  // toLowerCase() and returns 409) — every write goes through that check.
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_documented_networks_name ON documented_networks ("name")`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_documented_networks_site ON documented_networks ("siteId")`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_documented_networks_layer ON documented_networks ("layerId")`);
+  // NTP servers added after the initial release — existing databases need the column.
+  await pool.query(`ALTER TABLE documented_networks ADD COLUMN IF NOT EXISTS "ntpServers" TEXT NOT NULL DEFAULT '[]'`);
+
   // Tunnels inventory table (Tunnels page) — same lifecycle as networks/hosts.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS tunnels (

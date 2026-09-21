@@ -3468,6 +3468,301 @@ paths:
         '403':
           description: Missing documented-hosts:write permission
 
+  /documented-networks:
+    get:
+      tags: [Inventory]
+      summary: List all documented networks (user-maintained inventory)
+      description: >-
+        The user-maintained network documentation — permanent records of what
+        SHOULD exist on the network (name, subnets, VLAN, gateways, DNS servers,
+        site/layer placement). Distinct from /networks (live interface
+        observations): every row is cross-referenced against the live logical-
+        network inventory at read time and marked `discovered` when a matching
+        name, CIDR containment, or VLAN id was observed recently.
+      parameters:
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to networks placed at a site
+      responses:
+        '200':
+          description: Documented network rows (with live discovery info)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DocumentedNetwork'
+        '401':
+          description: Authentication required
+    post:
+      tags: [Inventory]
+      summary: Create a documented network
+      description: Requires permission `documented-networks:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentedNetworkRequest'
+      responses:
+        '201':
+          description: Created network (with live discovery info)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentedNetwork'
+        '400':
+          description: Invalid payload (bad name / CIDR / IP, unknown site or layer)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-networks:write permission
+        '409':
+          description: Name already used, or subnet range overlaps an existing network
+
+  /documented-networks/{id}:
+    patch:
+      tags: [Inventory]
+      summary: Update a documented network
+      description: >-
+        Requires permission `documented-networks:write`. Partial update — only the
+        provided fields change; when `subnets`/`gateways`/`dnsServers` are present
+        they REPLACE the full list. The merged result must be a complete valid row
+        (a non-empty name).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentedNetworkUpdateRequest'
+      responses:
+        '200':
+          description: Updated network (with live discovery info)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentedNetwork'
+        '400':
+          description: Invalid payload or merged result incomplete
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-networks:write permission
+        '404':
+          description: Documented network not found
+        '409':
+          description: Name or subnet range already used by another network
+    delete:
+      tags: [Inventory]
+      summary: Delete a documented network
+      description: Requires permission `documented-networks:write`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Documented network deleted
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-networks:write permission
+        '404':
+          description: Documented network not found
+
+  /documented-networks/bulk:
+    post:
+      tags: [Inventory]
+      summary: Batch update for documented networks (active/stale + site/layer)
+      description: >-
+        Requires permission `documented-networks:write`. Marks every existing id
+        in the batch active or stale (`isActive`) and/or sets its site/layer
+        placement (`siteId` / `layerId`, null clears) — all in one call. Omitted
+        fields are left untouched; unknown ids are reported in `missing` and
+        never abort the call. At most 5000 ids per request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Documented network ids to update"
+                isActive:
+                  type: boolean
+                  description: "true = mark active, false = mark stale (omitted = no flag change)"
+                siteId:
+                  type: [string, 'null']
+                  description: "Site id to assign to every row in the batch; null clears the placement. Must exist when set (omitted = no change)"
+                layerId:
+                  type: [string, 'null']
+                  description: "Topology-layer id to assign to every row in the batch; null clears the placement. Must exist when set (omitted = no change)"
+      responses:
+        '200':
+          description: Update summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated, missing]
+                properties:
+                  updated: { type: integer, description: "Networks whose flag was changed" }
+                  missing:
+                    type: array
+                    items: { type: string }
+                    description: "Submitted ids that do not exist"
+        '400':
+          description: Empty batch or more than 5000 ids
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-networks:write permission
+
+  /documented-networks/merge:
+    post:
+      tags: [Inventory]
+      summary: Merge several documented network rows into one
+      description: >-
+        Requires permission `documented-networks:write`. Merges a set of
+        documented networks (e.g. duplicates created when the same subnet range
+        was imported under different names) into a SINGLE row: subnets, gateways
+        and DNS servers are unioned + deduped, name/friendly name/description/
+        site/layer taken from the first row that has one, tags unioned, and the
+        network stays active when ANY input row is active. The surviving row is
+        the OLDEST by createdAt — its id and createdAt are kept; all other rows
+        are deleted. Returns the merged network plus the removed ids.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 2
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Documented network ids to merge (oldest survives)"
+      responses:
+        '200':
+          description: The merged network + removed row ids
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [merged, removed, count]
+                properties:
+                  merged:
+                    $ref: '#/components/schemas/DocumentedNetwork'
+                  removed:
+                    type: array
+                    items: { type: string }
+                    description: "Ids of the rows that were deleted"
+                  count: { type: integer, description: "Number of rows that were merged" }
+        '400':
+          description: Fewer than 2 ids, more than 5000 ids, or unknown ids
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-networks:write permission
+
+  /documented-networks/import:
+    post:
+      tags: [Inventory]
+      summary: Bulk-import documented networks (CSV import backend)
+      description: >-
+        Requires permission `documented-networks:write`. The webapp parses the CSV
+        client-side with a flexible header mapping and sends already-structured
+        rows; this endpoint only validates + upserts. Rows are validated
+        independently — one bad row never aborts the batch (per-row errors come
+        back in `errors`). Matching against existing networks is by name
+        (`matchBy: name`, default) or subnet overlap (`matchBy: subnet`); matched
+        rows are updated in place when `updateExisting` is true, otherwise
+        skipped. At most 5000 rows per batch.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [networks]
+              properties:
+                networks:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items:
+                    $ref: '#/components/schemas/DocumentedNetworkRequest'
+                matchBy:
+                  type: string
+                  enum: [name, subnet]
+                  default: name
+                  description: "How to match rows against existing networks"
+                updateExisting:
+                  type: boolean
+                  default: true
+                  description: "Update matched networks in place (false = skip them)"
+      responses:
+        '200':
+          description: Import summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentedNetworkImportResult'
+        '400':
+          description: Empty batch or more than 5000 rows
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-networks:write permission
+
+  /documented-networks/import-from-inventory:
+    post:
+      tags: [Inventory]
+      summary: Import the live network inventory into the documented networks
+      description: >-
+        Requires permission `documented-networks:write`. Copies the observed
+        logical networks (the same data as GET /networks) into the user-maintained
+        documented-networks table. The merge is ADDITIVE and never loses user
+        data: existing name, subnets, gateways, DNS servers, description, site/layer
+        placement are preserved; new subnets/VLAN ids from the observation are added
+        (networks match by name first, then by subnet overlap). `dryRun` defaults to
+        true — it returns a per-network plan (create/update/skip + reason) without
+        writing anything; pass `dryRun: false` to apply.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentedNetworkInventoryImportRequest'
+      responses:
+        '200':
+          description: Import plan (dry run) or applied summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentedNetworkInventoryImportResult'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-networks:write permission
+
   /topology:
     get:
       tags: [Inventory]
@@ -6197,6 +6492,252 @@ components:
         mergedGroups:
           type: integer
           description: "How many live MAC rows were folded into one entry by the hostname merge (dry-run only)"
+
+    DocumentedNetwork:
+      type: object
+      description: >-
+        One documented network (user-maintained inventory) with live discovery
+        info. `discovered` = a merged live logical network matches this row by
+        name, CIDR containment (either direction), or VLAN id; `observedSubnets`
+        / `observedVlanId` carry what the matching live group(s) report right now.
+      required: [id, name, subnets, discovered, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        name:
+          type: string
+          description: "Primary label / identity (\"VLAN 30\", \"10.40.0.0/16\", \"Mgmt LAN\"); unique case-insensitively"
+        subnets:
+          type: array
+          items: { type: string }
+          default: []
+          description: "Canonicalized CIDR blocks, IPv4 first (may be empty for name-only rows)"
+        vlanId:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 4095
+          description: "VLAN id when the network lives in one; null = unknown / not VLAN-based"
+        gateways:
+          type: array
+          items: { type: string }
+          default: []
+          description: "Documented gateway IP literals (dual-stack networks carry both families)"
+        dnsServers:
+          type: array
+          items: { type: string }
+          default: []
+          description: "Documented DNS server IP literals"
+        ntpServers:
+          type: array
+          items: { type: string }
+          default: []
+          description: "Documented NTP server IP literals"
+        friendlyName: { type: [string, 'null'], description: "Optional human-friendly label" }
+        description: { type: [string, 'null'] }
+        siteId: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'], description: "Display name of the placed-at site" }
+        layerId: { type: [string, 'null'] }
+        layerName: { type: [string, 'null'], description: "Display name of the topology layer" }
+        tags:
+          type: array
+          items: { type: string }
+          default: []
+          description: "User-assigned free-form tags (same data basis as devices.tags)"
+        discovered:
+          type: boolean
+          description: "True when a merged live logical network matches this documented one"
+        lastSeenAt:
+          type: [string, 'null']
+          format: date-time
+          description: "Most recent collection of any matching live group; null = never seen"
+        observedSubnets:
+          type: array
+          items: { type: string }
+          default: []
+          description: "Subnets observed on the matching live groups (union, IPv4 first)"
+        observedVlanId:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 4095
+          description: "VLAN id observed on a matching live group; null when none known"
+        isActive:
+          type: boolean
+          default: true
+          description: >-
+            User-maintained lifecycle flag — true = in active use, false =
+            stale/retired (the row stays documented but is dimmed in the UI).
+            Every new or imported network starts active.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    DocumentedNetworkRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: "Primary label / identity of the network; unique case-insensitively"
+        subnets:
+          type: array
+          items: { type: string }
+          default: []
+          description: "CIDR blocks (\"10.40.0.0/16\", \"fd00::/64\"); canonicalized + deduped server-side; may be empty"
+        vlanId:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 4095
+          description: "VLAN id when the network lives in one; null = unknown"
+        gateways:
+          type: array
+          items: { type: string }
+          default: []
+          description: "Gateway IP literals (bare IPv4/IPv6, no prefix)"
+        dnsServers:
+          type: array
+          items: { type: string }
+          default: []
+          description: "DNS server IP literals (bare IPv4/IPv6, no prefix)"
+        ntpServers:
+          type: array
+          items: { type: string }
+          default: []
+          description: "NTP server IP literals (bare IPv4/IPv6, no prefix)"
+        friendlyName: { type: [string, 'null'] }
+        description: { type: [string, 'null'] }
+        siteId: { type: [string, 'null'], description: "Site this network is placed at; must exist when set" }
+        layerId: { type: [string, 'null'], description: "Topology layer this network sits on; must exist when set" }
+        tags:
+          type: array
+          items: { type: string }
+          default: []
+          description: "Free-form user tags (same data basis as devices.tags); omitted = none"
+        isActive:
+          type: boolean
+          default: true
+          description: "Lifecycle flag — false marks the network stale/retired (new networks default to active)"
+
+    DocumentedNetworkUpdateRequest:
+      type: object
+      description: >-
+        Partial update of a documented network — every property is optional; only
+        the provided fields change. When `subnets` / `gateways` / `dnsServers` /
+        `ntpServers` are present they REPLACE the full list. The merged result must be a complete
+        valid row (a non-empty name), enforced server-side.
+      properties:
+        name: { type: string, minLength: 1, description: "Replaces the network's identity label" }
+        subnets:
+          type: array
+          items: { type: string }
+          description: "Replaces the full subnet list (CIDR blocks)"
+        vlanId:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 4095
+          description: "VLAN id; null clears it"
+        gateways:
+          type: array
+          items: { type: string }
+          description: "Replaces the full gateway list (IP literals); [] clears all. Omitted = keep current"
+        dnsServers:
+          type: array
+          items: { type: string }
+          description: "Replaces the full DNS server list (IP literals); [] clears all. Omitted = keep current"
+        ntpServers:
+          type: array
+          items: { type: string }
+          description: "Replaces the full NTP server list (IP literals); [] clears all. Omitted = keep current"
+        friendlyName: { type: [string, 'null'] }
+        description: { type: [string, 'null'] }
+        siteId: { type: [string, 'null'], description: "Site this network is placed at; must exist when set" }
+        layerId: { type: [string, 'null'], description: "Topology layer this network sits on; must exist when set" }
+        tags:
+          type: array
+          items: { type: string }
+          description: "Replaces the full tag list (same data basis as devices.tags); [] clears all. Omitted = keep current"
+        isActive:
+          type: boolean
+          description: "Lifecycle flag — true = active use, false = stale/retired. Omitted = keep the current value"
+
+    DocumentedNetworkImportResult:
+      type: object
+      required: [created, updated, skipped, errors]
+      properties:
+        created: { type: integer }
+        updated: { type: integer }
+        skipped: { type: integer, description: "Matched rows left untouched (updateExisting=false)" }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [index, error]
+            properties:
+              index: { type: integer, description: "0-based position in the submitted batch" }
+              error: { type: string }
+
+    DocumentedNetworkInventoryImportRequest:
+      type: object
+      properties:
+        skipWithoutSubnet:
+          type: boolean
+          default: true
+          description: "Skip live logical networks without any real subnet (pure SSID/VLAN groups)"
+        skipWithoutVlan:
+          type: boolean
+          default: false
+          description: "Skip live logical networks with no discovered VLAN id"
+        version:
+          type: string
+          enum: [all, v4, v6]
+          default: all
+          description: "Only import networks carrying at least one subnet of this address family"
+        rangeMode:
+          type: string
+          enum: [keep-all, include-only, exclude]
+          default: keep-all
+          description: "Network/range filter applied BEFORE all other options. include-only imports only networks with a subnet inside one of `ranges`; exclude skips such networks"
+        ranges:
+          type: array
+          items:
+            type: string
+          default: []
+          description: "CIDR blocks (192.168.1.0/24, fd00::/64) and/or inclusive IP ranges (192.168.1.10-192.168.1.50). A network matches when ANY of its subnets falls into ANY entry; empty = no range filtering"
+        maxAgeHours:
+          type: number
+          minimum: 0
+          default: 24
+          description: "Only import networks observed within this many hours (0 = all)"
+        dryRun:
+          type: boolean
+          default: true
+          description: "Preview only — compute the plan without writing anything"
+
+    DocumentedNetworkInventoryImportResult:
+      type: object
+      required: [dryRun, totalLiveNetworks, planned, created, updated, skipped]
+      properties:
+        dryRun: { type: boolean }
+        totalLiveNetworks: { type: integer, description: "Live logical networks considered (within the age window)" }
+        planned:
+          type: array
+          items:
+            type: object
+            required: [name, subnets, vlanId, action]
+            properties:
+              name: { type: string, description: "Display label of the live logical network" }
+              subnets:
+                type: array
+                items: { type: string }
+                description: "Real subnets of this network (empty for pure SSID/VLAN groups)"
+              vlanId:
+                type: [integer, 'null']
+                minimum: 0
+                maximum: 4095
+                description: "Discovered VLAN id; null when unknown"
+              action: { type: string, enum: [create, update, skip] }
+              reason: { type: string, description: "Why the network is skipped (action=skip only)" }
+        created: { type: integer }
+        updated: { type: integer }
+        skipped: { type: integer }
 
     NetworkLayer:
       type: object
