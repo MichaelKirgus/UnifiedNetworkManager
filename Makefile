@@ -1,4 +1,4 @@
-.PHONY: setup build up down stop-api stop-web restart api-dev web-dev clean
+.PHONY: setup build test up down stop-api stop-web restart api-dev web-dev clean
 
 # Install all dependencies across the monorepo (in parallel — each folder has
 # its own node_modules, so there are no cross-folder races).
@@ -81,6 +81,10 @@ build:
 	  (cd mcp && npm run build) & \
 	  wait )
 	@echo "Build complete."
+
+# Run the offline test suites (no Docker / live services required).
+test:
+	./node_modules/.bin/tsx scripts/verify-ip-math.ts
 
 # Start infrastructure (DB and Plugins).
 # NOTE: no sudo here — setup.sh detects whether the current user can reach the
