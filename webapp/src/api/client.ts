@@ -716,6 +716,33 @@ export interface TunnelRow {
   collectedAt: string;
 }
 
+/** One service from the cross-device inventory view (Services page). Unlike
+ * networks/hosts, rows are NOT merged across devices — a row is one logical
+ * service on one device. `type` labels the init system / framework managing it. */
+export interface ServiceRow {
+  deviceId: string;
+  pluginId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  /** Display name of the reporting plugin instance (e.g. "OPNsense Plugin"). */
+  pluginName?: string | null;
+  /** Service name on the device ("sshd", "smb", "unbound", "nginx.service"). */
+  name: string;
+  /** Init system / framework: systemd | openrc | runit | sysvinit | freebsd-rc | truenas. */
+  type: 'systemd' | 'openrc' | 'runit' | 'sysvinit' | 'freebsd-rc' | 'truenas' | string;
+  status: 'running' | 'stopped' | 'failed' | 'unknown';
+  /** True when enabled to start on boot (null = not observable). */
+  enabled?: boolean | null;
+  /** Main process id (null when stopped or not a live-process metric). */
+  pid?: number | null;
+  /** Human description from the vendor; '' = none. */
+  description?: string;
+  /** Vendor-specific extras (systemd sub-state, TrueNAS matched process, …). */
+  extra?: Record<string, unknown>;
+  collectedAt: string;
+}
+
 /** One available update on one device, as reported by a plugin's `updates` metric. */
 export interface UpdateRow {
   deviceId: string;
@@ -2528,6 +2555,15 @@ export const api = {
     if (params?.type) qs.set('type', params.type);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<TunnelRow[]>(`/tunnels${suffix}`);
+  },
+  services: (params?: { deviceId?: string; siteId?: string; type?: string; status?: 'running' | 'stopped' | 'failed' | 'unknown' }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.type) qs.set('type', params.type);
+    if (params?.status) qs.set('status', params.status);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<ServiceRow[]>(`/services${suffix}`);
   },
   certificates: (params?: { deviceId?: string; siteId?: string; type?: 'https' | 'ssh' }) => {
     const qs = new URLSearchParams();

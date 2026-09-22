@@ -36,6 +36,10 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'documented-networks:read': 'View documented networks (the user-maintained network inventory)',
   'documented-networks:write': 'Create, update and delete documented networks (incl. CSV import)',
   'tunnels:read': 'View the Tunnels page (configured + live tunnel state)',
+  // Cross-device service inventory — OPNsense rc services, TrueNAS middleware
+  // services and generic Linux systemd/OpenRC/runit/SysVinit units. Managed via
+  // the plan/config workflow; this read permission only gates viewing the page.
+  'services:read': 'View the Services page (systemd/rc/middleware services across devices)',
   'routes:read': 'View the Routes page (static and dynamic routes across devices)',
   'firewall:read': 'View the Firewall page (filter + NAT rules across devices)',
   'certificates:read': 'View the Certificates page (TLS certs + SSH host keys across devices)',

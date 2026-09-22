@@ -72,6 +72,7 @@ import {
   type ServiceNetDetail,
 } from './enrich';
 import { alertDedupeKey, registry as actionRegistry, TruenasActionContext } from './actions';
+import { collectServices } from './services';
 import { buildTruenasState } from './state';
 import { buildPlan, PlanningError } from './plan';
 import { collectShares, collectShareSessions, isMethodMissing, withSessionCounts } from './shares';
@@ -170,6 +171,10 @@ const identity = resolvePluginIdentity({
   // file transport (downloadJobFile/uploadFile) alongside the JSON-RPC socket.
   // Every plan with a mutating step now gets a best-effort config.backup.download
   // rollback step prepended per device (finalizePlan rollbackStep).
+  // 0.16.0 — Services page support: /monitoring emits a `services[]` metric
+  // during inventory polls — one row per service on the appliance (SCALE:
+  // systemd units via `systemctl list-units` over SSH; CORE: /etc/rc.d scripts).
+  // Requires a bound ssh slot; without one the key is simply absent (no wipe).
   // 0.15.0 — Update-branch + manual firmware update (the Web UI's System →
   // Update page as plan actions): update.profile.read (read `update.config` +
   // the license-gated choice list from `update.profile_choices`) and
@@ -2231,6 +2236,24 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   }
   if (collectInventory && routes !== undefined) metrics['routes'] = routes;
 
+  // --- Services (Services page) ---------------------------------------------
+  // One row per service on the appliance, read from the middleware JSON-RPC API
+  // (`service.query` — every service the appliance's own UI lists, including
+  // the special services the middleware manages outside the init system). Older
+  // releases without that method fall back to SSH (systemd / rc scripts).
+  // Best-effort — a failed collection yields NO rows and the key is omitted
+  // entirely (absent = no wipe of stored rows; we only emit it when collection
+  // actually succeeded with at least one row).
+  if (collectInventory) {
+    try {
+      const serviceRows = await collectServices(host, client, creds, body.credentials as Record<string, unknown> | undefined);
+      if (serviceRows.length > 0) metrics['services'] = serviceRows;
+    } catch (e) {
+      // Best-effort — a service-collection failure must not sink the poll.
+      console.warn(`[services] collection failed for ${host}: ${errMsg(e)}`);
+    }
+  }
+
   // --- Certificates (normalized for the cross-device Certificates page) ----
   // Management HTTPS cert + SSH host key on port 22. Both probes are
   // credential-free and best-effort; a failure simply contributes no row.
@@ -2535,6 +2558,16 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
       visualization: 'table',
       columns: ['destination', 'gateway', 'protocol', 'status'],
       group: 'Storage',
+    });
+  }
+  if (Array.isArray(metrics['services']) && (metrics['services'] as unknown[]).length > 0) {
+    out.push({
+      key: 'services',
+      label: 'Services',
+      type: 'string',
+      visualization: 'table',
+      columns: ['name', 'type', 'status', 'description'],
+      group: 'System',
     });
   }
   if (Array.isArray(metrics['filesystems']) && (metrics['filesystems'] as unknown[]).length > 0) {

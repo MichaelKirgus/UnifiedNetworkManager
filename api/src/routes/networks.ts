@@ -660,6 +660,91 @@ router.get('/tunnels', requireAuth, requirePermission('tunnels:read'), async (_r
   }
 });
 
+// GET /services - All services across devices (Services page).
+// Query params: deviceId (exact), siteId (filter by device's site),
+// type ('systemd'|'openrc'|'runit'|'sysvinit'|'freebsd-rc'|'truenas'),
+// status ('running'|'stopped'|'failed'|'unknown'). One row per service on one
+// device — no cross-device merge needed (a row is already one logical service).
+router.get('/services', requireAuth, requirePermission('services:read'), async (_req, res: Response) => {
+  try {
+    const { deviceId, siteId, type, status } = _req.query as Record<string, string | undefined>;
+
+    if (type && !['systemd', 'openrc', 'runit', 'sysvinit', 'freebsd-rc', 'truenas', 'openwrt'].includes(type)) {
+      res.status(400).json({ error: '"type" must be one of: systemd, openrc, runit, sysvinit, freebsd-rc, truenas, openwrt' });
+      return;
+    }
+    if (status && !['running', 'stopped', 'failed', 'unknown'].includes(status)) {
+      res.status(400).json({ error: '"status" must be one of: running, stopped, failed, unknown' });
+      return;
+    }
+
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json([]);
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json([]);
+      return;
+    }
+
+    const typeClause = type ? eq(schema.deviceServices.type, type) : undefined;
+    const statusClause = status ? eq(schema.deviceServices.status, status) : undefined;
+    let where;
+    if (deviceId && siteId) {
+      // Both filters: verify the device belongs to the site first.
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) {
+        res.status(200).json([]);
+        return;
+      }
+      where = and(eq(schema.deviceServices.deviceId, deviceId), typeClause, statusClause);
+    } else if (deviceId) {
+      where = and(eq(schema.deviceServices.deviceId, deviceId), typeClause, statusClause);
+    } else if (siteId) {
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
+      if (deviceIds.length === 0) {
+        res.status(200).json([]);
+        return;
+      }
+      where = and(inArray(schema.deviceServices.deviceId, deviceIds), typeClause, statusClause);
+    } else {
+      const clauses = [typeClause, statusClause].filter(Boolean);
+      if (allowed !== null) clauses.push(inArray(schema.deviceServices.deviceId, [...allowed]));
+      where = clauses.length > 0 ? and(...clauses) : undefined;
+    }
+
+    const rows = await db.query.deviceServices.findMany({
+      ...(where ? { where } : {}),
+      orderBy: [asc(schema.deviceServices.deviceId), asc(schema.deviceServices.type), asc(schema.deviceServices.name)],
+    });
+
+    const [deviceViews, pluginNames] = await Promise.all([
+      loadDeviceViews(Array.from(new Set(rows.map((r) => r.deviceId)))),
+      loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId)))),
+    ]);
+
+    res.status(200).json(
+      rows.map((r) => {
+        const device = deviceViews.get(r.deviceId);
+        return {
+          ...r,
+          extra: safeParseJson<Record<string, unknown>>(r.extra),
+          deviceName: device?.name ?? null,
+          managementAddress: device?.managementAddress ?? null,
+          siteName: device?.siteName ?? null,
+          pluginName: pluginNames.get(r.pluginId) ?? null,
+        };
+      })
+    );
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 // GET /certificates - All certificate endpoints across devices (Certificates page).
 // Query params: deviceId (exact), siteId (filter by device's site),
 // type ('https'|'ssh'). One row per endpoint on a device — the management HTTPS

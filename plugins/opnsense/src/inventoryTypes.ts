@@ -1,7 +1,7 @@
 import { TunnelRow } from './tunnels';
 import { RouteRow } from './routes';
 import { FirewallRuleRow } from './firewall';
-import type { CertificateRow } from '@unm/plugin-sdk';
+import type { CertificateRow, ServiceRow } from '@unm/plugin-sdk';
 
 /**
  * The cached inventory snapshot for one appliance (see getInventory in index.ts).
@@ -36,4 +36,8 @@ export interface InventorySnapshot {
   /** Certificate endpoints (management HTTPS cert + SSH host key) for the
    * Certificates page. [] = nothing readable this cycle (e.g. plain-http UI). */
   certificates: CertificateRow[];
+  /** rc-managed services with running state (Services page) — see collectServices.
+   * null = collection failed this cycle → /monitoring must NOT emit the key, so a
+   * transient failure never wipes previously stored rows. */
+  services: ServiceRow[] | null;
 }

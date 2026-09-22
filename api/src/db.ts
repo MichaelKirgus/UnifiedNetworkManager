@@ -544,6 +544,27 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_firewall_rules_device ON firewall_rules ("deviceId")`);
 
+  // Services inventory table (Services page) — same lifecycle as tunnels/routes.
+  // One row per service on one device, normalized by the plugin to a unified
+  // shape. PK = deviceId+pluginId+name+type so a service managed by two
+  // frameworks coexists; delete-on-absent at ingest keys on name|type pairs.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_services (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'unknown',
+      status TEXT NOT NULL DEFAULT 'unknown',
+      enabled BOOLEAN,
+      pid INTEGER,
+      description TEXT NOT NULL DEFAULT '',
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name, type)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_services_device ON device_services ("deviceId")`);
+
   // Certificates inventory table (Certificates page) — same lifecycle as tunnels/routes.
   // One row per certificate endpoint on one device: the management HTTPS cert and/or
   // the SSH host key. PK = deviceId+pluginId+name so re-probes upsert in place; a

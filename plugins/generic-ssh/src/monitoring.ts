@@ -26,6 +26,7 @@ import type {
   NetworkRow,
   PortRowLike,
   RouteRow,
+  ServiceRow,
 } from './types';
 
 // --- Per-host inventory cache -------------------------------------------------
@@ -450,6 +451,141 @@ export class GenericSshCollector {
     return rows;
   }
 
+  /**
+   * Services (Services page) — detects the init system and lists its services
+   * with live state. ONE combined exec round-trip probes every known init in a
+   * single shell script; only the section that produced output is parsed:
+   *
+   *   - systemd:  `systemctl list-units --type=service --all` (Debian/Ubuntu/
+   *     RHEL/SUSE/NixOS-with-systemd) → active/sub state + load state, plus a
+   *     second pass (`systemctl show -p MainPID --value`) that captures the
+   *     live PID of every running unit so the Services page can show it.
+   *   - OpenRC:   `rc-status --all` (Alpine/Gentoo) → started/stopped per runlevel.
+   *   - runit/sv: enumerate `/run/service/*` + pidfile check (NixOS, embedded).
+   *   - SysVinit: `service --status-all` (`[ + ]`/`[ - ]`) — the last resort
+   *     for minimal boxes without any of the above.
+   *
+   * Returns null when NO known init system produced output (the caller omits
+   * the key entirely → absent = no wipe, per the ingestion contract).
+   */
+  async services(): Promise<ServiceRow[] | null> {
+    const r = await this.backend.exec([
+      'echo __SYSTEMD__',
+      "systemctl list-units --type=service --all --no-legend --plain 2>/dev/null | head -n 400",
+      // MainPID per RUNNING unit — one remote loop (single SSH round-trip) that
+      // asks systemd for each running unit's MainPID. `systemctl show -p … --value`
+      // is portable across all modern systemd versions (unlike list-units
+      // --output=full-property, which older releases reject). Emits "unit pid".
+      'echo __SYSTEMD_PIDS__',
+      "for u in $(systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | awk '{print $1}'); do printf '%s %s\\n' \"$u\" \"$(systemctl show -p MainPID --value \"$u\" 2>/dev/null)\"; done",
+      'echo __OPENRC__',
+      "rc-status --all 2>/dev/null | head -n 300",
+      'echo __RUNIT__',
+      "for d in /run/service/*; do [ -d \"$d\" ] || continue; n=$(basename \"$d\"); if [ -f \"$d/run\" ]; then echo \"running|$n\"; else echo \"stopped|$n\"; fi; done 2>/dev/null | head -n 300",
+      'echo __SYSV__',
+      "service --status-all 2>/dev/null | head -n 300",
+    ].join('\n'), 15_000).catch(() => null);
+    if (!r || r.code !== 0) return null;
+
+    const out = r.stdout ?? '';
+    const section = (marker: string, next?: string): string => {
+      const i = out.indexOf(marker);
+      if (i === -1) return '';
+      let body = out.slice(i + marker.length);
+      if (next) {
+        const j = body.indexOf(next);
+        if (j !== -1) body = body.slice(0, j);
+      }
+      return body.trim();
+    };
+
+    // 1. systemd — the common case on modern distros.
+    const systemdOut = section('__SYSTEMD__', '__SYSTEMD_PIDS__');
+    // MainPID lookup from the second pass — one "unit.service pid" line per
+    // running unit (empty/0 when the unit has no main process).
+    const mainPidByUnit = new Map<string, number>();
+    for (const line of section('__SYSTEMD_PIDS__', '__OPENRC__').split('\n')) {
+      const m = line.trim().match(/^(\S+\.service)\s+(\d+)\s*$/);
+      if (!m) continue;
+      const p = Number(m[2]);
+      if (Number.isFinite(p) && p > 1) mainPidByUnit.set(m[1], Math.trunc(p)); // PID 1 = init itself
+    }
+    if (systemdOut) {
+      const rows: ServiceRow[] = [];
+      for (const line of systemdOut.split('\n')) {
+        // "sshd.service loaded active running OpenSSH server daemon"
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 4 || !parts[0].endsWith('.service')) continue;
+        const name = parts[0].slice(0, -'.service'.length);
+        const load = parts[1]?.toLowerCase() ?? '';
+        const active = parts[2]?.toLowerCase() ?? '';
+        const sub = parts[3]?.toLowerCase() ?? '';
+        let status: ServiceRow['status'];
+        if (active === 'failed') status = 'failed';
+        else if (active === 'activating' || active === 'deactivating') status = 'unknown';
+        else if (active === 'active' && (sub === 'running' || sub === 'exited')) status = 'running';
+        else if (active === 'inactive' || active === 'dead') status = 'stopped';
+        else status = 'unknown';
+        rows.push({
+          name,
+          type: 'systemd',
+          status,
+          enabled: load === 'loaded' ? null : false, // "not-found"/"masked" ≈ not enabled
+          pid: mainPidByUnit.get(`${name}.service`) ?? null,
+          description: parts.slice(4).join(' ') || null,
+        });
+      }
+      if (rows.length > 0) return rows;
+    }
+
+    // 2. OpenRC — "* started sshd" / "   stopped cron" per runlevel section.
+    const openrcOut = section('__OPENRC__', '__RUNIT__');
+    if (openrcOut) {
+      const rows: ServiceRow[] = [];
+      for (const line of openrcOut.split('\n')) {
+        // "* started sshd" / "   stopped cron" (leading * marks the default runlevel)
+        const m = line.trim().match(/^(?:\*|\s+)?(started|stopped)\s+(\S+)/);
+        if (!m) continue;
+        rows.push({
+          name: m[2],
+          type: 'openrc',
+          status: m[1] === 'started' ? 'running' : 'stopped',
+          enabled: null,
+          pid: null,
+          description: null,
+        });
+      }
+      if (rows.length > 0) return rows;
+    }
+
+    // 3. runit/sv — one service per /run/service directory.
+    const runitOut = section('__RUNIT__', '__SYSV__');
+    if (runitOut) {
+      const rows: ServiceRow[] = [];
+      for (const line of runitOut.split('\n')) {
+        const m = line.trim().match(/^(running|stopped)\|(\S+)/);
+        if (!m) continue;
+        rows.push({ name: m[2], type: 'runit', status: m[1] === 'running' ? 'running' : 'stopped', enabled: null, pid: null, description: null });
+      }
+      if (rows.length > 0) return rows;
+    }
+
+    // 4. SysVinit — " [ + ]  sshd" / " [ - ]  cron".
+    const sysvOut = section('__SYSV__');
+    if (sysvOut) {
+      const rows: ServiceRow[] = [];
+      for (const line of sysvOut.split('\n')) {
+        const m = line.trim().match(/^\[\s*([+\-])\s*\]\s+(\S+)/);
+        if (!m) continue;
+        rows.push({ name: m[2], type: 'sysvinit', status: m[1] === '+' ? 'running' : 'stopped', enabled: null, pid: null, description: null });
+      }
+      if (rows.length > 0) return rows;
+    }
+
+    // No known init system produced output — omit the key entirely.
+    return null;
+  }
+
   /** Physical disks — `lsblk` (util-linux; absent on minimal busybox → []). */
   async disks(): Promise<DiskRow[]> {
     const r = await this.backend.exec("lsblk -bno NAME,MODEL,SERIAL,SIZE,ROTA,TYPE 2>/dev/null").catch(() => null);
@@ -483,11 +619,12 @@ export class GenericSshCollector {
       throw new Error(`Inventory collection failed: SSH exec "true" returned code ${ping?.code ?? 'null'}`);
     }
 
-    const [board, networks, neighborsRes, routes, filesystems, disks] = await Promise.all([
+    const [board, networks, neighborsRes, routes, services, filesystems, disks] = await Promise.all([
       this.boardInfo().catch(() => null),
       this.interfaces().catch(() => [] as NetworkRow[]),
       this.neighbors().catch(() => ({ arp: [], ndp: [] })),
       this.routes().catch(() => [] as RouteRow[]),
+      this.services().catch(() => null),
       this.filesystems().catch(() => [] as FilesystemRow[]),
       this.disks().catch(() => [] as DiskRow[]),
     ]);
@@ -517,6 +654,7 @@ export class GenericSshCollector {
       arp: neighborsRes.arp,
       ndp: neighborsRes.ndp,
       routes,
+      services,
       ports,
       filesystems,
       disks,
@@ -580,6 +718,10 @@ export async function collectMonitoring(
       metrics['arp'] = inventory.arp;
       if (inventory.ndp.length > 0) metrics['ndp'] = inventory.ndp;
       metrics['routes'] = inventory.routes;
+      // Services: null = no known init system detected → omit the key entirely
+      // (absent = no wipe). A present array — even empty after detection — is
+      // authoritative for this device+plugin.
+      if (inventory.services !== null) metrics['services'] = inventory.services;
       metrics['filesystems'] = inventory.filesystems;
       if (inventory.disks.length > 0) metrics['disks'] = inventory.disks;
     }
@@ -668,6 +810,7 @@ export function descriptorsFromMetrics(metrics: Record<string, unknown>): Metric
     ['arp', 'ARP Table', ['mac', 'ip', 'intf']],
     ['ndp', 'NDP Table', ['mac', 'ip', 'intf']],
     ['routes', 'Routes', ['destination', 'gateway', 'protocol', 'status']],
+    ['services', 'Services', ['name', 'type', 'status', 'description']],
     ['filesystems', 'Filesystems', ['name', 'type', 'sizeBytes', 'usedBytes', 'availBytes', 'mountpoint']],
   ];
   for (const [key, label, columns] of tables) {

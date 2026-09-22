@@ -66,6 +66,9 @@ export { SftpSession, createSftpPool, resolvePath, SftpPathError } from './sftp'
 export type { SftpCredentials, SftpSessionOptions, SftpPool, SftpPoolOptions, FsEntry, FsListResult, FsStat } from './sftp';// Certificate collection + chain validation for the Certificates page. See certificates.ts.
 export { parseCertificate, validateChain, probeTlsEndpoint, probeSshHostKey, collectDeviceCertificates, collectCertificatesForBaseUrl, parseProbeTarget } from './certificates';
 export type { CertificateInfo, RawCertificate, CertificateRow, TlsProbeOptions, TlsProbeResult, SshProbeOptions, SshProbeResult, DeviceCertOptions, ChainValidation } from './certificates';
+// Service-inventory contract for the Services page (see services.ts).
+export { SERVICE_STATUSES } from './services';
+export type { ServiceType, ServiceStatus, ServiceRow } from './services';
 // Certificate/host-key PINNING — refuse connections whose key differs from UNM's inventory. See pinning.ts.
 export { pinningContextFromRequest, knownFingerprint, verifyTlsFingerprint, verifyEndpointForRequest, endpointUsesTls, createPinningGuard, rememberPinningContext, currentPinningContextFor, dynamicSshHostVerifier, makeSshHostVerifier, resolveSshPinnedFingerprint, normalizeCertFingerprint, certFingerprintMatches, endpointKey, recordObservedFingerprint, observedFingerprintFor, sshPinningErrorMessage, CertificatePinningError, resolveHttpsPort, resolveHttpPort, resolveSshPort } from './pinning';
 export type { PinningMode, KnownCertificate, PinningContext, TlsPreflightOptions, TlsPreflightResult, EndpointCheckOptions, PinningGuard, PinningGuardOptions, PinningPorts } from './pinning';

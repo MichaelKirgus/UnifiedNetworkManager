@@ -3168,6 +3168,95 @@ const containersInstallAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Services (Services page) — start/stop/restart ONE middleware service.
+// `service.control [VERB, name]` is the appliance's own control entry point
+// (job-based; verified against truenas/middleware ServiceService). It works for
+// EVERY registered service — including the special ones the middleware manages
+// outside the init system (smb/nfs/iscsi/s3/vm/docker/…). Verification re-reads
+// `service.started` after the job settles.
+// ---------------------------------------------------------------------------
+
+/** True when a control call failed because the service is already in the target state. */
+function isServiceAlreadyInState(e: unknown, verb: 'START' | 'STOP'): boolean {
+  if (!(e instanceof TruenasRpcError)) return false;
+  const m = e.message ?? '';
+  if (verb === 'START') return /already running|is already started/i.test(m);
+  return /not running|is not started|no such process/i.test(m);
+}
+
+function serviceControlAction(
+  id: string,
+  verb: 'START' | 'STOP' | 'RESTART',
+  label: string,
+  description: string,
+): ActionDescriptor<TruenasActionContext> {
+  return {
+    id,
+    label,
+    description,
+    module: 'Services',
+    riskLevel: 'write' as const,
+    deviceCount: 1 as const,
+    timeoutMs: 120_000,
+    inputSchema: {
+      name: { type: 'string', required: true, minLength: 1, description: 'Service name (e.g. "smb", "nfs", "sshd")' },
+    },
+    async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+      const name = str(input, 'name');
+      if (!name) return { success: false, details: { error: 'Service name is required' } };
+
+      // service.control is a JOB method — it resolves to the job id immediately.
+      let jobId: number | null = null;
+      try {
+        const r = await ctx.client.call<unknown>('service.control', [verb, name], ctx.creds);
+        if (typeof r === 'number') jobId = r;
+        else if (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number') {
+          jobId = (r as Record<string, unknown>)['id'] as number;
+        }
+      } catch (e) {
+        // Already in the target state → treat as success (idempotent), like containers.stop.
+        if (verb !== 'RESTART' && isServiceAlreadyInState(e, verb)) {
+          return { success: true, applied: true, verified: false, details: { service: name, note: `already ${verb === 'START' ? 'running' : 'stopped'}` } };
+        }
+        // Unknown service on this appliance (MatchNotFound) — a clear failure.
+        if (e instanceof TruenasRpcError && /not found|no such/i.test(e.message)) {
+          return { success: false, details: { error: `Service "${name}" not found on this appliance` } };
+        }
+        throw e;
+      }
+
+      // Wait for the job to settle (budget = our timeout minus a safety margin).
+      let waitState = 'UNKNOWN';
+      if (jobId !== null) {
+        const wait = await waitForJob(ctx, jobId, 90_000);
+        waitState = wait.state;
+        if (wait.state === 'RUNNING') {
+          return { success: true, applied: true, details: { service: name, jobId, state: waitState, note: wait.error } };
+        }
+        if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') {
+          return { success: false, details: { service: name, jobId, state: waitState, error: wait.error ?? `Job ended in state ${waitState}` } };
+        }
+      }
+
+      // Verify the resulting live state (service.started is a cheap read).
+      let verified = false;
+      try {
+        const running = await ctx.client.call<boolean>('service.started', [name], ctx.creds);
+        verified = verb === 'STOP' ? !running : !!running;
+      } catch { /* verification best-effort — the job already settled */ }
+      return { success: true, applied: true, verified, details: { service: name, jobId, state: waitState } };
+    },
+  };
+}
+
+const servicesStartAction = serviceControlAction('services.start', 'START', 'Start a service',
+  'Starts ONE named middleware service (service.control START). Services already running are skipped, not failed.');
+const servicesStopAction = serviceControlAction('services.stop', 'STOP', 'Stop a service',
+  'Stops ONE named middleware service (service.control STOP). Services already stopped are skipped, not failed.');
+const servicesRestartAction = serviceControlAction('services.restart', 'RESTART', 'Restart a service',
+  'Restarts ONE named middleware service (service.control RESTART) — stop + start with config regeneration.');
+
 export const registry = createRegistry<TruenasActionContext>([
   systemInfoAction,
   poolsReadAction,
@@ -3224,4 +3313,7 @@ export const registry = createRegistry<TruenasActionContext>([
   catalogTemplatesListAction,
   templateDetailsReadAction,
   containersInstallAction,
+  servicesStartAction,
+  servicesStopAction,
+  servicesRestartAction,
 ]);

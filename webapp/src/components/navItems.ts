@@ -31,6 +31,7 @@ import {
   Users as UsersIcon,
   Wifi as WifiIcon,
   Clock,
+  Cog,
   ArrowUpCircle,
 } from 'lucide-react';
 import { can } from '../auth/permissions';
@@ -65,6 +66,9 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/documented-networks', label: 'Documented Networks', icon: Globe, requiresPermission: 'documented-networks:read' },
   // Cable stands in for a tunnel link (lucide's `Tunnel` icon is not in the installed version).
   { to: '/tunnels', label: 'Tunnels', icon: Cable, requiresPermission: 'tunnels:read' },
+  // Cross-device service inventory — OPNsense rc services, TrueNAS middleware
+  // services and generic Linux systemd/OpenRC/runit/SysVinit units.
+  { to: '/services', label: 'Services', icon: Cog, requiresPermission: 'services:read' },
   // Firewall rules across devices (filter + NAT kinds) — ShieldHalf reads as a
   // protective barrier and is distinct from the Roles (Shield) entry.
   { to: '/firewall', label: 'Firewall', icon: ShieldHalf, requiresPermission: 'firewall:read' },

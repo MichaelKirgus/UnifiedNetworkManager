@@ -92,6 +92,82 @@ export const SYSTEM_ACTIONS: ActionDescriptor[] = [
       return okResult({ service: name, active });
     },
   },
+  // --- Unified service lifecycle (Services page — catalog-driven buttons) -----
+  // Same guards as system.service.restart above: safe-name check + the sshd
+  // blocklist (a plan must never kill its own management session).
+
+  {
+    id: 'services.start',
+    label: 'Start a service',
+    description: 'Starts ONE named unit or init script (systemctl start / init.d / service). The SSH daemon itself is blocked.',
+    module: 'Services',
+    riskLevel: 'write',
+    deviceCount: 1,
+    timeoutMs: 60_000,
+    inputSchema: {
+      name: { type: 'string', required: true, description: 'Unit or init script name (e.g. "postfix", "sshd")' },
+    },
+    execute: async (ctx, input) => {
+      const name = String(input.name).trim();
+      if (!isSafeName(name)) return failResult('Invalid service name.');
+      if (/^sshd?$/.test(name) || /^ssh$/i.test(name)) {
+        return failResult('Starting the SSH service is not allowed through UNM (it would alter the management session).');
+      }
+      const r = await runCommands(ctx.backend, [serviceCmd('start', name)], 60_000);
+      if (!r.ok) return failResult(`Start of ${name} failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
+      const check = await ctx.backend.exec(serviceCmd('status', name)).catch(() => null);
+      const active = /active|running/i.test(check?.stdout ?? '');
+      return okResult({ service: name, active });
+    },
+  },
+  {
+    id: 'services.stop',
+    label: 'Stop a service',
+    description: 'Stops ONE named unit or init script (systemctl stop / init.d / service). The SSH daemon itself is blocked.',
+    module: 'Services',
+    riskLevel: 'write',
+    deviceCount: 1,
+    timeoutMs: 60_000,
+    inputSchema: {
+      name: { type: 'string', required: true, description: 'Unit or init script name (e.g. "postfix", "sshd")' },
+    },
+    execute: async (ctx, input) => {
+      const name = String(input.name).trim();
+      if (!isSafeName(name)) return failResult('Invalid service name.');
+      if (/^sshd?$/.test(name) || /^ssh$/i.test(name)) {
+        return failResult('Stopping the SSH service is not allowed through UNM (it would terminate the management session).');
+      }
+      const r = await runCommands(ctx.backend, [serviceCmd('stop', name)], 60_000);
+      if (!r.ok) return failResult(`Stop of ${name} failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
+      const check = await ctx.backend.exec(serviceCmd('status', name)).catch(() => null);
+      const active = /active|running/i.test(check?.stdout ?? '');
+      return okResult({ service: name, active });
+    },
+  },
+  {
+    id: 'services.restart',
+    label: 'Restart a service',
+    description: 'Restarts ONE named unit or init script (systemctl restart / init.d / service). The SSH daemon itself is blocked.',
+    module: 'Services',
+    riskLevel: 'write',
+    deviceCount: 1,
+    timeoutMs: 60_000,
+    inputSchema: {
+      name: { type: 'string', required: true, description: 'Unit or init script name (e.g. "postfix", "sshd")' },
+    },
+    execute: async (ctx, input) => {
+      const name = String(input.name).trim();
+      if (!isSafeName(name)) return failResult('Invalid service name.');
+      if (/^sshd?$/.test(name) || /^ssh$/i.test(name)) {
+        return failResult('Restarting the SSH service is not allowed through UNM (it would terminate the management session).');
+      }
+      const r = await runCommands(ctx.backend, [serviceCmd('restart', name)], 60_000);
+      if (!r.ok) return failResult(`Restart of ${name} failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
+      const check = await ctx.backend.exec(serviceCmd('status', name)).catch(() => null);
+      const active = /active|running/i.test(check?.stdout ?? '');
+      return okResult({ service: name, active });
+    },
+  },
   {
     id: 'system.timezone.set',
     label: 'Set device timezone',

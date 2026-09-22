@@ -662,16 +662,37 @@ export class Backend {
     return [...rows.values()];
   }
 
-  /** Running services — ubus `service list` over either transport. */
+  /** Running services — ubus `service list` over either transport.
+   *
+   * Procd's response shape (procd service/service.c → service_dump) carries ONE
+   * table per service name with ONLY the fields that deviate from defaults:
+   *   { cron:   { instances: { instance1: { command: [...], pid: 2547 } } },
+   *     blockd: { autostart: false } }
+   * There are NO top-level `running`/`enabled`/`pid` fields — a service is
+   * running iff it has live instances (each carrying its pid), and `autostart`
+   * is present only when the service is NOT enabled at boot. */
   async services(): Promise<ServiceRow[]> {
     const r = await this.ubus<Record<string, Record<string, unknown>>>('service', 'list');
     if (r.ok && r.data) {
-      return Object.entries(r.data).map(([name, d]) => ({
-        name,
-        enabled: !!d['enabled'],
-        running: !!d['running'],
-        pid: num(d['pid']),
-      }));
+      return Object.entries(r.data).map(([name, d]) => {
+        const detail: Record<string, unknown> = d && typeof d === 'object' ? d : {};
+        const instancesRaw = detail['instances'];
+        const instances: Record<string, unknown> =
+          instancesRaw && typeof instancesRaw === 'object' && !Array.isArray(instancesRaw)
+            ? (instancesRaw as Record<string, unknown>)
+            : {};
+        let pid: number | null = null;
+        for (const inst of Object.values(instances)) {
+          const p = num(inst && typeof inst === 'object' ? (inst as Record<string, unknown>)['pid'] : undefined);
+          if (p !== null && p > 0) { pid = p; break; }
+        }
+        return {
+          name,
+          enabled: detail['autostart'] !== false, // field only present when disabled
+          running: Object.keys(instances).length > 0,
+          pid,
+        };
+      });
     }
     return [];
   }

@@ -690,6 +690,46 @@ export const firewallRules = pgTable(
   }
 );
 
+// One row per service on one device, as reported by a plugin's `services`
+// metric. Powers the cross-device Services page with the same upsert-per-poll +
+// delete-on-absent + 24h-sweep lifecycle as tunnels/routes. Vendors normalize to
+// this unified shape at collection time (OPNsense rc services, TrueNAS middleware
+// services, generic Linux systemd/OpenRC/runit/SysVinit). `type` is part of the
+// PK so a service managed by two frameworks on one box coexists.
+export const deviceServices = pgTable(
+  'device_services',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Service name on the device ("sshd", "smb", "unbound", "nginx.service").
+    name: text('name').notNull(),
+    // systemd | openrc | runit | sysvinit | freebsd-rc | truenas — normalized
+    // to lowercase at ingest; unknown labels are kept as-is (free-form).
+    type: text('type').notNull().default('unknown'),
+    // running | stopped | failed | unknown — plugins report what they can observe.
+    status: text('status').notNull().default('unknown'),
+    // True when the service is enabled to start on boot (null = not observable).
+    enabled: boolean('enabled'),
+    // Main process id (null when stopped or not a live-process metric).
+    pid: integer('pid'),
+    // Human description from the vendor ('' = none).
+    description: text('description').notNull().default(''),
+    // Vendor-specific extras (JSON object): systemd sub-state, TrueNAS matched
+    // process command line, rcctl status detail …
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDeviceServices: primaryKey({
+        name: 'device_services_pkey',
+        columns: [table.deviceId, table.pluginId, table.name, table.type],
+      }),
+      idxDeviceServicesDevice: index('idx_device_services_device').on(table.deviceId),
+    };
+  }
+);
+
 // One row per certificate endpoint on one device, as reported by a plugin's
 // `certificates` metric. Powers the cross-device Certificates page with the same
 // upsert-per-poll + delete-on-absent + 24h-sweep lifecycle as tunnels/routes.

@@ -174,7 +174,19 @@ export async function collectMonitoring(
     if (inventory.firewallRules !== null) {
       metrics['firewallRules'] = inventory.firewallRules;
     }
-    if (inventory.services.length > 0) metrics['services'] = inventory.services;
+    // Services page — map the internal init.d rows to the unified SDK contract
+    // (type 'openwrt' + normalized status) so the API's device_services table
+    // ingests them like every other vendor.
+    if (inventory.services.length > 0) {
+      metrics['services'] = inventory.services.map((s) => ({
+        name: s.name,
+        type: 'openwrt',
+        status: s.running ? 'running' : 'stopped',
+        enabled: s.enabled,
+        pid: s.pid ?? null,
+        description: null,
+      }));
+    }
     if (inventory.filesystems.length > 0) metrics['filesystems'] = inventory.filesystems;
     // Certificates — always emitted when present so renewals refresh in place.
     if (inventory.certificates.length > 0) {
@@ -286,7 +298,7 @@ export function descriptorsFromMetrics(metrics: Record<string, unknown>): Metric
     ['tunnels', 'Tunnels', ['name', 'type', 'peerAddress', 'subnet', 'status', 'interfaceName']],
     ['wifiNetworks', 'Wireless Networks', ['name', 'band', 'channel', 'encryption', 'ifc']],
     ['firewallRules', 'Firewall Rules', ['ruleType', 'position', 'protocol', 'sourceIp', 'destIp', 'action', 'enabled']],
-    ['services', 'Services', ['name', 'enabled', 'running']],
+    ['services', 'Services', ['name', 'type', 'status', 'pid']],
     ['filesystems', 'Filesystems', ['name', 'type', 'sizeBytes', 'usedBytes', 'availBytes', 'mountpoint']],
   ];
   for (const [key, label, columns] of tables) {

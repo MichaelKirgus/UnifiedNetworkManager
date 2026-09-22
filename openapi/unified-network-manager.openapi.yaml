@@ -3839,6 +3839,57 @@ paths:
         '401':
           description: Authentication required
 
+  /services:
+    get:
+      tags: [Inventory]
+      summary: List all services across devices
+      description: >-
+        Cross-device view of the normalized `device_services` inventory table,
+        populated by the telemetry worker from each plugin's /monitoring
+        `services[]` metric (OPNsense rc services via core/service, TrueNAS
+        middleware/systemd services over SSH, generic Linux hosts via
+        systemd/OpenRC/runit/SysVinit detection). One row per service on one
+        device — no merging; devices without a reporting plugin contribute no
+        rows. Rows not refreshed within 24h are swept away.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: type
+          required: false
+          schema:
+            type: string
+            enum: [systemd, openrc, runit, sysvinit, freebsd-rc, truenas, openwrt]
+          description: Filter by init system / service framework
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+            enum: [running, stopped, failed, unknown]
+          description: Filter by normalized service state
+      responses:
+        '200':
+          description: Service rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ServiceRow'
+        '400':
+          description: Invalid type or status filter value
+        '401':
+          description: Authentication required
+
   /updates:
     get:
       tags: [Updates]
@@ -6980,6 +7031,39 @@ components:
           additionalProperties: true
           description: "Type-specific extras (ikeType, cryptAlg, mode, allowedIPs, ...)"
         collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this tunnel" }
+
+    ServiceRow:
+      type: object
+      description: >-
+        One service on one device from the cross-device Services page. Vendors
+        normalize to this unified shape at collection time (OPNsense rc services,
+        TrueNAS middleware/systemd services, generic Linux systemd/OpenRC/runit/
+        SysVinit units). `type` labels the init system / framework managing it.
+      required: [deviceId, pluginId, name, type, status, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this service runs on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this service" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        name: { type: string, description: "Service name on the device (e.g. sshd, smb, unbound, nginx.service)" }
+        type:
+          type: string
+          enum: [systemd, openrc, runit, sysvinit, freebsd-rc, truenas, openwrt]
+          description: "Init system / service framework managing the service (free-form labels tolerated)"
+        status:
+          type: string
+          enum: [running, stopped, failed, unknown]
+          description: "Normalized state — what the plugin can observe on this vendor"
+        enabled: { type: [boolean, 'null'], description: "True when enabled to start on boot; null = not observable" }
+        pid: { type: [integer, 'null'], description: "Main process id (null when stopped or not a live-process metric)" }
+        description: { type: string, description: "Human description from the vendor; '' = none" }
+        extra:
+          type: object
+          additionalProperties: true
+          description: "Vendor-specific extras (systemd sub-state, TrueNAS matched process, ...)"
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this service" }
 
     CertificateRow:
       type: object

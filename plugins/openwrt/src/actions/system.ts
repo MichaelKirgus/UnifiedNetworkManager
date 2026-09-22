@@ -70,6 +70,62 @@ export const SYSTEM_ACTIONS: ActionDescriptor[] = [
       return r.ok ? okResult({ service: name }) : failResult(`Restart of ${name} failed: ${r.stderr.slice(0, 300)}`);
     },
   },
+  // --- Unified service lifecycle (Services page — catalog-driven buttons) -----
+
+  {
+    id: 'services.start',
+    label: 'Start a service',
+    description: 'Starts one procd init script (/etc/init.d/<name> start).',
+    module: 'Services',
+    riskLevel: 'write',
+    deviceCount: 1,
+    inputSchema: {
+      name: { type: 'string', required: true, description: 'Init script name (/etc/init.d/<name>)' },
+    },
+    execute: async (ctx, input) => {
+      if (!sshAvailable(ctx)) return noSshResult();
+      const name = String(input.name).replace(/[^a-zA-Z0-9_-]/g, ''); // init script names are safe alnum
+      if (!name) return failResult('Invalid service name.');
+      const r = await runCommands(ctx.backend.ssh!, [`/etc/init.d/${name} start`]);
+      return r.ok ? okResult({ service: name }) : failResult(`Start of ${name} failed: ${r.stderr.slice(0, 300)}`);
+    },
+  },
+  {
+    id: 'services.stop',
+    label: 'Stop a service',
+    description: 'Stops one procd init script (/etc/init.d/<name> stop).',
+    module: 'Services',
+    riskLevel: 'write',
+    deviceCount: 1,
+    inputSchema: {
+      name: { type: 'string', required: true, description: 'Init script name (/etc/init.d/<name>)' },
+    },
+    execute: async (ctx, input) => {
+      if (!sshAvailable(ctx)) return noSshResult();
+      const name = String(input.name).replace(/[^a-zA-Z0-9_-]/g, ''); // init script names are safe alnum
+      if (!name) return failResult('Invalid service name.');
+      const r = await runCommands(ctx.backend.ssh!, [`/etc/init.d/${name} stop`]);
+      return r.ok ? okResult({ service: name }) : failResult(`Stop of ${name} failed: ${r.stderr.slice(0, 300)}`);
+    },
+  },
+  {
+    id: 'services.restart',
+    label: 'Restart a service',
+    description: 'Restarts one procd init script (/etc/init.d/<name> restart).',
+    module: 'Services',
+    riskLevel: 'write',
+    deviceCount: 1,
+    inputSchema: {
+      name: { type: 'string', required: true, description: 'Init script name (/etc/init.d/<name>)' },
+    },
+    execute: async (ctx, input) => {
+      if (!sshAvailable(ctx)) return noSshResult();
+      const name = String(input.name).replace(/[^a-zA-Z0-9_-]/g, ''); // init script names are safe alnum
+      if (!name) return failResult('Invalid service name.');
+      const r = await runCommands(ctx.backend.ssh!, [`/etc/init.d/${name} restart`]);
+      return r.ok ? okResult({ service: name }) : failResult(`Restart of ${name} failed: ${r.stderr.slice(0, 300)}`);
+    },
+  },
   {
     id: 'system.timezone.set',
     label: 'Set device timezone',

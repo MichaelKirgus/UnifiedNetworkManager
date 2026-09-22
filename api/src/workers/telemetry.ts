@@ -49,7 +49,7 @@ const INVENTORY_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 /** Metric keys that carry cross-device inventory (ingested into their own tables). */
 const INVENTORY_METRIC_KEYS = [
   'networks', 'arp', 'ndp', 'hosts', 'dhcpLeases', 'wlanClients', 'macTable', 'dockerHosts', 'vmHosts',
-  'tunnels', 'routes', 'firewallRules', 'certificates',
+  'tunnels', 'routes', 'firewallRules', 'certificates', 'services',
   'wifiNetworks', 'wifiAirtime', 'wifiRadios', 'wifiNeighbors',
   'ports', 'filesystems', 'disks', 'containers', 'images', 'vms', 'updates',
 ] as const;
@@ -620,6 +620,81 @@ async function ingestInventory(
             eq(schema.routes.deviceId, deviceId),
             eq(schema.routes.pluginId, pluginId),
             or(...staleRoutes.map((k) => and(eq(schema.routes.destination, k.destination), eq(schema.routes.protocol, k.protocol))))
+          )
+        );
+      }
+    }
+
+    // --- services (systemd / OpenRC / runit / SysVinit / rc / middleware) -----
+    // Same present-vs-absent contract as routes: a PRESENT-but-empty array is
+    // authoritative ("this device reports no services right now") so stale rows
+    // are wiped; an ABSENT key means "plugin doesn't report services" and must
+    // not touch the table (24h sweep still applies). Identity is name|type —
+    // NOT name alone — because a service managed by two frameworks on one box
+    // coexists in the PK, so one framework's snapshot must never wipe another's.
+    const rawServices = Array.isArray(metrics['services']) ? (metrics['services'] as unknown[]) : null;
+    if (rawServices !== null) {
+      const values: {
+        deviceId: string; pluginId: string; name: string; type: string; status: string;
+        enabled: boolean | null; pid: number | null; description: string; extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawServices) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        if (!name) continue; // name is part of the conflict key
+        const type = typeof r['type'] === 'string' && (r['type'] as string).trim() !== ''
+          ? (r['type'] as string).trim().toLowerCase()
+          : 'unknown';
+        let status = typeof r['status'] === 'string' ? (r['status'] as string).trim().toLowerCase() : '';
+        if (!['running', 'stopped', 'failed', 'unknown'].includes(status)) status = 'unknown';
+        values.push({
+          deviceId,
+          pluginId,
+          name,
+          type,
+          status,
+          enabled: typeof r['enabled'] === 'boolean' ? (r['enabled'] as boolean) : null,
+          pid: typeof r['pid'] === 'number' && Number.isFinite(r['pid']) ? Math.trunc(r['pid']) : null,
+          description: typeof r['description'] === 'string' ? (r['description'] as string).trim() : '',
+          extra: r['extra'] && typeof r['extra'] === 'object' ? JSON.stringify(r['extra']) : '{}',
+          collectedAt,
+        });
+      }
+      // Same de-dup guard as the other inventory blocks.
+      const serviceByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        serviceByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}|${v.type}`, v);
+      }
+      if (serviceByKey.size > 0) {
+        await db.insert(schema.deviceServices).values(Array.from(serviceByKey.values())).onConflictDoUpdate({
+          target: [schema.deviceServices.deviceId, schema.deviceServices.pluginId, schema.deviceServices.name, schema.deviceServices.type],
+          set: {
+            status: sql`excluded.status`,
+            enabled: sql`excluded.enabled`,
+            pid: sql`excluded.pid`,
+            description: sql`excluded.description`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      // A service removed on the device must vanish from the page, not linger
+      // until the 24h sweep. Keyed on name|type pairs (see above).
+      const existingServiceKeys = await db
+        .select({ name: schema.deviceServices.name, type: schema.deviceServices.type })
+        .from(schema.deviceServices)
+        .where(and(eq(schema.deviceServices.deviceId, deviceId), eq(schema.deviceServices.pluginId, pluginId)));
+      const seenServiceKeys = new Set(values.map((v) => `${v.name}|${v.type}`));
+      const staleServices = existingServiceKeys.filter(
+        (k) => !seenServiceKeys.has(`${k.name}|${k.type}`)
+      );
+      if (staleServices.length > 0) {
+        await db.delete(schema.deviceServices).where(
+          and(
+            eq(schema.deviceServices.deviceId, deviceId),
+            eq(schema.deviceServices.pluginId, pluginId),
+            or(...staleServices.map((k) => and(eq(schema.deviceServices.name, k.name), eq(schema.deviceServices.type, k.type))))
           )
         );
       }
@@ -1899,6 +1974,7 @@ async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
   // by polling enabled devices, so the plain stale sweep applies to them.
   await db.delete(schema.tunnels).where(lt(schema.tunnels.collectedAt, cutoff));
   await db.delete(schema.routes).where(lt(schema.routes.collectedAt, cutoff));
+  await db.delete(schema.deviceServices).where(lt(schema.deviceServices.collectedAt, cutoff));
   await db.delete(schema.firewallRules).where(lt(schema.firewallRules.collectedAt, cutoff));
   await db.delete(schema.certificates).where(lt(schema.certificates.collectedAt, cutoff));
   await db.delete(schema.wifiSsids).where(lt(schema.wifiSsids.collectedAt, cutoff));

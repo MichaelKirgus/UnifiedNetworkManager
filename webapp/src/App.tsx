@@ -16,6 +16,7 @@ import Hosts from './pages/Hosts';
 import DocumentedHosts from './pages/DocumentedHosts';
 import DocumentedNetworks from './pages/DocumentedNetworks';
 import Tunnels from './pages/Tunnels';
+import Services from './pages/Services';
 import Firewall from './pages/Firewall';
 import Certificates from './pages/Certificates';
 import RoutesPage from './pages/Routes';
@@ -53,6 +54,8 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   { path: '/documented-hosts', permission: 'documented-hosts:read' },
   { path: '/documented-networks', permission: 'documented-networks:read' },
   { path: '/tunnels', permission: 'tunnels:read' },
+  // Cross-device service inventory (systemd/OpenRC/runit/SysVinit/rc/middleware).
+  { path: '/services', permission: 'services:read' },
   { path: '/firewall', permission: 'firewall:read' },
   { path: '/certificates', permission: 'certificates:read' },
   { path: '/routes', permission: 'routes:read' },
@@ -129,6 +132,8 @@ export default function App() {
       <Route path="/documented-hosts" element={<Page permission="documented-hosts:read"><DocumentedHosts /></Page>} />
       <Route path="/documented-networks" element={<Page permission="documented-networks:read"><DocumentedNetworks /></Page>} />
       <Route path="/tunnels" element={<Page permission="tunnels:read"><Tunnels /></Page>} />
+      {/* Cross-device service inventory (OPNsense rc, TrueNAS middleware, Linux inits). */}
+      <Route path="/services" element={<Page permission="services:read"><Services /></Page>} />
       <Route path="/firewall" element={<Page permission="firewall:read"><Firewall /></Page>} />
       <Route path="/certificates" element={<Page permission="certificates:read"><Certificates /></Page>} />
       <Route path="/routes" element={<Page permission="routes:read"><RoutesPage /></Page>} />

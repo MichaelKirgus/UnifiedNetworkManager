@@ -71,6 +71,18 @@ export interface DiskRow {
   poolName?: string | null;
 }
 
+/** One service row → `metrics['services']` (device_services table).
+ * Mirrors the SDK's ServiceRow contract — see packages/plugin-sdk/src/services.ts. */
+export interface ServiceRow {
+  name: string;
+  type?: 'systemd' | 'openrc' | 'runit' | 'sysvinit' | string;
+  status?: 'running' | 'stopped' | 'failed' | 'unknown';
+  enabled?: boolean | null;
+  pid?: number | null;
+  description?: string | null;
+  extra?: Record<string, unknown>;
+}
+
 /** System identity info (hostname, OS release, uptime). */
 export interface BoardInfo {
   hostname: string;
@@ -89,6 +101,9 @@ export interface InventorySnapshot {
   arp: HostRow[];
   ndp: HostRow[];
   routes: RouteRow[];
+  /** Services (Services page) — null when no known init system was detected
+   *  (the caller then omits the key entirely; absent = no wipe of stored rows). */
+  services: ServiceRow[] | null;
   ports: PortRowLike[];
   filesystems: FilesystemRow[];
   disks: DiskRow[];

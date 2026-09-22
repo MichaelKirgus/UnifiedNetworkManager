@@ -64,6 +64,44 @@ export const systemActions: ActionDescriptor[] = [
       return { success: res.ok, applied: res.ok, details: dataOf(res) ?? {} };
     },
   },
+  // --- Unified service lifecycle (Services page — catalog-driven buttons) -----
+
+  {
+    id: 'services.start',
+    label: 'Start a service',
+    module: 'Services',
+    riskLevel: 'write',
+    deviceCount: 1,
+    inputSchema: { name: { type: 'string', required: true, description: 'Service name (e.g. pf, unbound, dnsmasq)' } },
+    execute: async (ctx, input) => {
+      const res = await sys.startService(ctx.client, String(input.name));
+      return { success: res.ok, applied: res.ok, details: dataOf(res) ?? {} };
+    },
+  },
+  {
+    id: 'services.stop',
+    label: 'Stop a service',
+    module: 'Services',
+    riskLevel: 'write',
+    deviceCount: 1,
+    inputSchema: { name: { type: 'string', required: true, description: 'Service name (e.g. pf, unbound, dnsmasq)' } },
+    execute: async (ctx, input) => {
+      const res = await sys.stopService(ctx.client, String(input.name));
+      return { success: res.ok, applied: res.ok, details: dataOf(res) ?? {} };
+    },
+  },
+  {
+    id: 'services.restart',
+    label: 'Restart a service',
+    module: 'Services',
+    riskLevel: 'write',
+    deviceCount: 1,
+    inputSchema: { name: { type: 'string', required: true, description: 'Service name (e.g. pf, unbound, dnsmasq)' } },
+    execute: async (ctx, input) => {
+      const res = await sys.restartService(ctx.client, String(input.name));
+      return { success: res.ok, applied: res.ok, details: dataOf(res) ?? {} };
+    },
+  },
   {
     id: 'system.reboot',
     label: 'Reboot appliance',

@@ -54,6 +54,7 @@ import { searchGateways } from './client/routes';
 import { collectTunnels, attachTunnelRates, enrichTunnelsWithLiveState, TunnelRow } from './tunnels';
 import { collectRoutes, deriveConnectedAndDefaultRoutes, enrichRoutesWithGatewayStatus, RouteRow } from './routes';
 import { collectFirewallRules, fetchFilterRuleStats } from './firewall';
+import { collectServices } from './services';
 import { collectZfsViaSsh } from './zfsSsh';
 import { getAction, listModules } from './actions/registry';
 import { ActionContext, ActionResult, StepCredentials, validateInput } from './actions/types';
@@ -426,7 +427,7 @@ async function collectInventory(
   // Raw interfaces_info entries — kept for the PPPoE tunnel detector (which
   // needs the interface TYPE fields that parseNetworkRows discards).
   let ifEntries: Record<string, unknown>[] = [];
-  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [], routes: [], firewallRules: null, gateways: [], filesystems: [], disks: [], certificates: [] };
+  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [], routes: [], firewallRules: null, services: null, gateways: [], filesystems: [], disks: [], certificates: [] };
   if (info?.ok && info.data && typeof info.data === 'object') {
     const d = info.data as Record<string, unknown>;
     if (d['name'] !== undefined) snap.hostname = String(d['name']);
@@ -526,6 +527,15 @@ async function collectInventory(
     snap.firewallRules = await collectFirewallRules(client);
   } catch {
     // best-effort — a failing firewall endpoint must not sink the inventory cache
+  }
+
+  // rc-managed services + running state (Services page) — same registry the
+  // appliance's System → Services UI reads. null on failure: /monitoring then
+  // omits the key so previously stored rows survive a transient outage.
+  try {
+    snap.services = await collectServices(client);
+  } catch {
+    // best-effort — a failing service endpoint must not sink the inventory cache
   }
 
   // Configured gateways (routing/settings) — used to derive default-route rows
@@ -817,6 +827,11 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
   if (Array.isArray(metrics['routes']) && (metrics['routes'] as unknown[]).length > 0) {
     push({ key: 'routes', label: 'Routes', type: 'string', visualization: 'table', group: 'Inventory', columns: ['destination', 'gateway', 'protocol', 'distance', 'status'], intervalMs: INVENTORY_INTERVAL_MS });
     push({ key: 'firewallRules', label: 'Firewall Rules', type: 'string', visualization: 'table', group: 'Inventory', columns: ['ruleType', 'position', 'protocol', 'sourceIp', 'destIp', 'action', 'enabled'], intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  // rc-managed services (Services page) — inventory, slow refresh; also
+  // normalized into the API's cross-device `device_services` table.
+  if (Array.isArray(metrics['services']) && (metrics['services'] as unknown[]).length > 0) {
+    push({ key: 'services', label: 'Services', type: 'string', visualization: 'table', group: 'Inventory', columns: ['name', 'type', 'status', 'description'], intervalMs: INVENTORY_INTERVAL_MS });
   }
   // Interface MACs (name + mac per interface).
   if (Array.isArray(metrics['interfaces']) && (metrics['interfaces'] as unknown[]).length > 0) {
@@ -1350,6 +1365,13 @@ async function collectMetrics(
         );
       }
       metrics['firewallRules'] = fwRows;
+    }
+    // Services (Services page): emit the cached rc-service rows with their running
+    // state. Only present when collection SUCCEEDED — a failed cycle keeps the
+    // previous snapshot's rows alive on the API side; an appliance that reports
+    // zero services emits [] which authoritatively clears stale rows.
+    if (inventory.services !== null) {
+      metrics['services'] = inventory.services;
     }
     // Certificates — emit the collected rows (HTTPS cert + SSH host key). Always
     // emitted when present so a renewed/changed cert refreshes in place; an empty

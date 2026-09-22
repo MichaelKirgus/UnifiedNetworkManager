@@ -26,6 +26,9 @@ const STATUS_STYLES: Record<string, string> = {
   down: 'bg-danger text-danger-fg border-danger-border',
   enabled: 'bg-info text-info-fg border-info-border',
   disabled: 'bg-muted text-muted-foreground border-border line-through',
+  // Service states (Services page) — `running`/`failed` reuse the plan-step
+  // styles above; only `stopped` needs a dedicated entry.
+  stopped: 'bg-muted text-secondary border-border',
   // Route states (Routes page): installed/active vs. configured-but-inactive.
   active: 'bg-success text-success-fg border-success-border',
   inactive: 'bg-muted text-muted-foreground border-border line-through',
