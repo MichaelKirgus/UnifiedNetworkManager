@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { asc, eq, inArray } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { isIP } from 'node:net';
-import { ipFamily, splitCidr, subnetOf, ipv4ToInt, ipv6ToBigInt, isPublicIpv4, isPublicIpv6 } from '@unm/plugin-sdk';
+import { ipFamily, splitCidr, subnetOf, ipv4ToInt, ipv4FromInt, ipv6ToBigInt, ipv6FromBigInt, ipInCidr, isPublicIpv4, isPublicIpv6 } from '@unm/plugin-sdk';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
@@ -172,6 +172,158 @@ async function loadLiveNetworkMatches(
 }
 
 // ---------------------------------------------------------------------------
+// Host-address statistics (computed from the documented hosts at read time)
+// ---------------------------------------------------------------------------
+
+/** Per-subnet usable-host stats for one IPv4 CIDR; null for v6 / invalid. */
+/**
+ * Per-subnet host-address statistics — one entry per documented subnet, both
+ * families. `total`/`free` are STRINGS because a v6 /64's 2^64 addresses
+ * overflow Number.MAX_SAFE_INTEGER; v4 values fit in numbers but are stringified
+ * for a uniform shape.
+ */
+export interface SubnetHostStats {
+  cidr: string;
+  family: 'v4' | 'v6';
+  /** Total usable addresses in this subnet (string — see above). */
+  total: string;
+  /** Distinct documented host IPs inside this subnet. */
+  used: number;
+  /** Free = total − used, clamped at 0 (string like `total`). */
+  free: string;
+  /** First usable address of the subnet. */
+  firstHost: string | null;
+  lastHost: string | null;
+  /** Broadcast address — v4 /30 and larger only (RFC 3021 /31 + /32 have none); null for v6. */
+  broadcastAddress: string | null;
+}
+
+/**
+ * Host-address stats for ONE documented subnet. IPv4 reserves the network +
+ * broadcast addresses (the usual convention; RFC 3021 point-to-point /31 and
+ * /32 reserve nothing). IPv6 has no such reservations — every address is
+ * usable, so totals are exact powers of two.
+ */
+function subnetHostStats(cidr: string, allDocumentedIps: string[]): SubnetHostStats | null {
+  const s = splitCidr(cidr);
+  if (!s) return null;
+  const fam = ipFamily(s.net);
+  // Distinct documented IPs inside this exact subnet (family-matched).
+  const usedSet = new Set<string>();
+  for (const ip of allDocumentedIps) {
+    if (ipFamily(ip) !== fam) continue;
+    if (ipInCidr(ip, cidr)) usedSet.add(ip);
+  }
+
+  if (fam === 'v4') {
+    const n = ipv4ToInt(s.net);
+    if (n === null) return null;
+    const size = 1 << (32 - s.prefix); // /31 → 2, /32 → 1
+    let total: number;
+    let firstHost: string | null;
+    let lastHost: string | null;
+    let broadcastAddress: string | null;
+    if (s.prefix <= 30) {
+      total = size - 2;
+      firstHost = ipv4FromInt(n + 1);
+      lastHost = ipv4FromInt(n + size - 2);
+      broadcastAddress = ipv4FromInt(n + size - 1);
+    } else if (s.prefix === 31) {
+      total = 2;
+      firstHost = ipv4FromInt(n);
+      lastHost = ipv4FromInt(n + 1);
+      broadcastAddress = null;
+    } else { // /32
+      total = 1;
+      firstHost = ipv4FromInt(n);
+      lastHost = ipv4FromInt(n);
+      broadcastAddress = null;
+    }
+    return {
+      cidr, family: 'v4',
+      total: String(total), used: usedSet.size,
+      free: String(Math.max(0, total - usedSet.size)),
+      firstHost, lastHost, broadcastAddress,
+    };
+  }
+
+  if (fam === 'v6') {
+    const totalBig = 1n << BigInt(128 - s.prefix);
+    // v6 has no reserved network address — the first usable host IS the
+    // network address; there is no broadcast concept, so lastHost is the
+    // final address of the block.
+    const netBig = ipv6ToBigInt(s.net) ?? 0n;
+    return {
+      cidr, family: 'v6',
+      total: totalBig.toString(), used: usedSet.size,
+      free: (totalBig - BigInt(usedSet.size)).toString(),
+      firstHost: ipv6FromBigInt(netBig), lastHost: ipv6FromBigInt(netBig + totalBig - 1n), broadcastAddress: null,
+    };
+  }
+
+  return null; // malformed / unknown family — the row's subnets are validated anyway
+}
+
+/** Aggregated host stats for a documented network. */
+interface NetworkHostStats {
+  /** Sum of usable hosts over all v4 subnets; null when the row has none. */
+  totalHosts: number | null;
+  /** Usable v4 hosts minus distinct documented host IPs inside any v4 subnet (≥ 0); null like totalHosts. */
+  freeHosts: number | null;
+  /** First usable host of each v4 subnet, ", "-joined; null when none. */
+  firstHost: string | null;
+  lastHost: string | null;
+  broadcastAddress: string | null;
+  /** First address of each v6 subnet (the network address itself), ", "-joined; null when none. */
+  firstHostV6: string | null;
+  lastHostV6: string | null;
+  /** Per-subnet breakdown (v4 + v6) — the dual-stack view with different prefixes per family. */
+  subnetStats: SubnetHostStats[];
+}
+
+/**
+ * Computes the network's host-address statistics from its documented subnets
+ * and ALL documented host IPs (the documented-hosts page data). The aggregate
+ * columns stay IPv4-only (broadcast semantics); `subnetStats` covers every
+ * subnet in both families. Stale hosts still count: their addresses are
+ * documented as expected to exist.
+ */
+function computeHostStats(subnets: string[], allDocumentedIps: string[]): NetworkHostStats {
+  const perSubnet = subnets.map((s) => subnetHostStats(s, allDocumentedIps)).filter((x): x is SubnetHostStats => x !== null);
+
+  const v4 = perSubnet.filter((s) => s.family === 'v4');
+  if (v4.length === 0) return { totalHosts: null, freeHosts: null, firstHost: null, lastHost: null, broadcastAddress: null, firstHostV6: null, lastHostV6: null, subnetStats: perSubnet };
+
+  const v4Subnets = subnets.filter((s) => !s.split('/')[0].includes(':'));
+  // Distinct documented IPs that fall inside ANY of the network's v4 subnets.
+  const used = new Set<string>();
+  for (const ip of allDocumentedIps) {
+    if (ipFamily(ip) !== 'v4') continue;
+    if (v4Subnets.some((s) => ipInCidr(ip, s))) used.add(ip);
+  }
+
+  const totalHosts = v4.reduce((sum, s) => sum + Number(s.total), 0);
+  // v6 aggregates — first/last address of each v6 subnet (no broadcast concept).
+  const v6 = perSubnet.filter((s) => s.family === 'v6');
+  return {
+    totalHosts,
+    freeHosts: Math.max(0, totalHosts - used.size),
+    firstHost: v4.map((s) => s.firstHost).filter(Boolean).join(', ') || null,
+    lastHost: v4.map((s) => s.lastHost).filter(Boolean).join(', ') || null,
+    broadcastAddress: v4.map((s) => s.broadcastAddress).filter(Boolean).join(', ') || null,
+    firstHostV6: v6.map((s) => s.firstHost).filter(Boolean).join(', ') || null,
+    lastHostV6: v6.map((s) => s.lastHost).filter(Boolean).join(', ') || null,
+    subnetStats: perSubnet,
+  };
+}
+
+/** Loads every documented host IP address (the basis for the free-host counts). */
+async function loadDocumentedHostIps(): Promise<string[]> {
+  const rows = await db.query.documentedHostIps.findMany();
+  return rows.map((r) => r.address);
+}
+
+// ---------------------------------------------------------------------------
 // Response shaping
 // ---------------------------------------------------------------------------
 
@@ -200,6 +352,19 @@ export interface DocumentedNetworkView {
   observedSubnets: string[];
   /** VLAN id observed on a matching live group (null when none known). */
   observedVlanId: number | null;
+  /** Usable IPv4 host addresses over all v4 subnets; null for name-only / v6-only rows. */
+  totalHosts: number | null;
+  /** Usable hosts minus documented host IPs inside the network's v4 subnets (≥ 0). */
+  freeHosts: number | null;
+  /** First usable host of each v4 subnet, ", "-joined; null when no v4 subnet. */
+  firstHost: string | null;
+  lastHost: string | null;
+  broadcastAddress: string | null;
+  /** First address of each v6 subnet (the network address itself), ", "-joined; null when none. */
+  firstHostV6: string | null;
+  lastHostV6: string | null;
+  /** Per-subnet used/free breakdown for EVERY documented subnet (v4 + v6). */
+  subnetStats: SubnetHostStats[];
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -210,7 +375,8 @@ function shapeNetwork(
   n: typeof schema.documentedNetworks.$inferSelect,
   siteNameById: Map<string, string>,
   layerNameById: Map<string, string>,
-  matches: LiveNetworkMatch[] | undefined
+  matches: LiveNetworkMatch[] | undefined,
+  allDocumentedIps: string[]
 ): DocumentedNetworkView {
   let lastSeenAt: string | null = null;
   const observed = new Set<string>();
@@ -221,10 +387,13 @@ function shapeNetwork(
     if (observedVlanId == null && m.vlanId != null) observedVlanId = m.vlanId;
   }
 
+  const subnets = sortAddresses(readStringArray(n.subnets));
+  const hostStats = computeHostStats(subnets, allDocumentedIps);
+
   return {
     id: n.id,
     name: n.name,
-    subnets: sortAddresses(readStringArray(n.subnets)),
+    subnets,
     vlanId: n.vlanId ?? null,
     gateways: readStringArray(n.gateways),
     dnsServers: readStringArray(n.dnsServers),
@@ -240,6 +409,14 @@ function shapeNetwork(
     lastSeenAt,
     observedSubnets: sortAddresses(Array.from(observed)),
     observedVlanId,
+    totalHosts: hostStats.totalHosts,
+    freeHosts: hostStats.freeHosts,
+    firstHost: hostStats.firstHost,
+    lastHost: hostStats.lastHost,
+    broadcastAddress: hostStats.broadcastAddress,
+    firstHostV6: hostStats.firstHostV6,
+    lastHostV6: hostStats.lastHostV6,
+    subnetStats: hostStats.subnetStats,
     isActive: n.isActive !== false, // defensive — the column is NOT NULL DEFAULT TRUE
     createdAt: n.createdAt,
     updatedAt: n.updatedAt,
@@ -272,13 +449,14 @@ async function loadNetworks(siteId?: string): Promise<typeof schema.documentedNe
 /** Full view for a set of rows — shared by the list route and single-row responses. */
 async function buildViews(rows: typeof schema.documentedNetworks.$inferSelect[]): Promise<DocumentedNetworkView[]> {
   if (rows.length === 0) return [];
-  const [{ siteNameById, layerNameById }, matches] = await Promise.all([
+  const [{ siteNameById, layerNameById }, matches, allDocumentedIps] = await Promise.all([
     loadReferenceNames(rows),
     loadLiveNetworkMatches(
       rows.map((r) => ({ id: r.id, name: r.name, subnets: readStringArray(r.subnets), vlanId: r.vlanId ?? null }))
     ),
+    loadDocumentedHostIps(),
   ]);
-  return rows.map((r) => shapeNetwork(r, siteNameById, layerNameById, matches.get(r.id)));
+  return rows.map((r) => shapeNetwork(r, siteNameById, layerNameById, matches.get(r.id), allDocumentedIps));
 }
 
 // ---------------------------------------------------------------------------
@@ -977,6 +1155,25 @@ function applyPublicSubnetPolicies(
 }
 
 /**
+ * Display name for an imported network — the live group's label, RE-DERIVED
+ * from the kept subnets when that label was itself stripped away. A dual-stack
+ * LAN is labeled by its most specific subnet (mergeNetworkRows); if the strip
+ * policy removed exactly that CIDR (e.g. a public v6 /64), naming the row after
+ * it would document a network under an address we deliberately excluded.
+ * Falls back to "VLAN <id>", then the original label.
+ */
+function deriveImportName(g: MergedNetwork, keptSubnets: string[]): string {
+  if (keptSubnets.includes(g.name)) return g.name;
+  // Most specific KEPT subnet — mirrors mergeNetworkRows' canonical identity.
+  // It is a kept subnet by definition (the user chose "keep" for its family),
+  // so it is always a valid name even when publicly routable.
+  const best = [...keptSubnets].sort((a, b) => Number(b.split('/')[1]) - Number(a.split('/')[1]))[0];
+  if (best) return best;
+  if (g.vlanId != null) return `VLAN ${g.vlanId}`;
+  return g.name; // nothing better — keep the original label rather than an empty name
+}
+
+/**
  * Builds the import plan from the live inventory + current documented networks.
  * Pure function of its inputs — shared by dry-run and apply so both agree.
  */
@@ -1043,8 +1240,12 @@ async function buildNetworkInventoryImportPlan(opts: NetworkInventoryImportOptio
       continue;
     }
 
-    // Match an existing documented network — by name first, then subnet overlap.
-    const target = docByName.get(g.name.toLowerCase()) ?? existing.find((r) => subnetsOverlap(readStringArray(r.subnets), subnets)) ?? null;
+    // The label may have been stripped away — re-derive it from the kept set.
+    const importName = deriveImportName(g, subnets);
+
+    // Match an existing documented network — by name (original OR derived) first,
+    // then subnet overlap.
+    const target = docByName.get(g.name.toLowerCase()) ?? docByName.get(importName.toLowerCase()) ?? existing.find((r) => subnetsOverlap(readStringArray(r.subnets), subnets)) ?? null;
 
     // Would the merge actually change anything?
     let wouldChange = false;
@@ -1061,14 +1262,14 @@ async function buildNetworkInventoryImportPlan(opts: NetworkInventoryImportOptio
     }
 
     if (!wouldChange) {
-      planned.push({ name: g.name, subnets, vlanId: g.vlanId, action: 'skip', reason: 'already fully documented' });
+      planned.push({ name: importName, subnets, vlanId: g.vlanId, action: 'skip', reason: 'already fully documented' });
       skipped++;
       continue;
     }
 
     if (target) updated++;
     else created++;
-    planned.push({ name: g.name, subnets, vlanId: g.vlanId, action: target ? 'update' : 'create', ...(stripped > 0 ? { stripped } : {}) });
+    planned.push({ name: importName, subnets, vlanId: g.vlanId, action: target ? 'update' : 'create', ...(stripped > 0 ? { stripped } : {}) });
   }
 
   return { dryRun: true, totalLiveNetworks: live.length, planned, created, updated, skipped, affectedIds: [] };
@@ -1109,8 +1310,11 @@ async function applyNetworkInventoryImport(opts: NetworkInventoryImportOptions):
     if (pol.skipReason || pol.kept.length === 0) { skipped++; continue; }
     subnets = pol.kept;
 
-    // Match by name first, then subnet overlap.
-    let target = docByName.get(g.name.toLowerCase()) ?? null;
+    // The label may have been stripped away — re-derive it from the kept set.
+    const importName = deriveImportName(g, subnets);
+
+    // Match by name (original OR derived) first, then subnet overlap.
+    let target = docByName.get(g.name.toLowerCase()) ?? docByName.get(importName.toLowerCase()) ?? null;
     if (!target) target = existing.find((r) => subnetsOverlap(readStringArray(r.subnets), subnets)) ?? null;
 
     // --- Merge: ADDITIVE — never drop user data -----------------------------
@@ -1144,7 +1348,7 @@ async function applyNetworkInventoryImport(opts: NetworkInventoryImportOptions):
       const id = uuidv4();
       await db.insert(schema.documentedNetworks).values({
         id,
-        name: g.name,
+        name: importName,
         subnets: JSON.stringify(mergedSubnets),
         vlanId,
         gateways: '[]',

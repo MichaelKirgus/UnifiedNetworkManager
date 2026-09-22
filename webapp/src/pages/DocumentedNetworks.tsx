@@ -8,6 +8,7 @@ import { api, DocumentedNetwork, DocumentedNetworkRequest, NetworkLayer, Site } 
 import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
 import { isIpLiteral } from '../utils/address';
+import { ipFamily, ipv4FromInt, ipv6FromBigInt, splitCidr } from '../utils/ip';
 import { NETWORK_CSV_IMPORT_FIELDS, NetworkCsvImportField, parseCsv, splitCellValues, suggestNetworkHeaderMapping } from '../utils/csv';
 
 /**
@@ -142,6 +143,79 @@ function cidrsOverlap(a: string, b: string): boolean {
   return (ia & mask) === (ib & mask);
 }
 
+/**
+ * Finds the next free network of `prefix` size inside `baseCidrOrIp`, skipping
+ * every CIDR in `existingSubnets` that overlaps a candidate. The base may be a
+ * bare IP (treated as /32 or /128) — in which case only an equal-or-smaller
+ * prefix can fit. Returns the CIDR, or { error } when nothing fits.
+ */
+function nextFreeNetwork(baseCidrOrIp: string, prefix: number, existingSubnets: string[]): { cidr?: string; error?: string } {
+  const base = splitCidr(baseCidrOrIp) ?? (isIpLiteral(baseCidrOrIp.trim()) ? { net: baseCidrOrIp.trim(), prefix: baseCidrOrIp.trim().includes(':') ? 128 : 32 } : null);
+  if (!base) return { error: `"${baseCidrOrIp}" is not a valid IP or CIDR.` };
+  const family = ipFamily(base.net);
+  if (family === 'v4' && prefix > 32) return { error: `Prefix /${prefix} is too large for IPv4 (max /32).` };
+  if (family === 'v6' && prefix > 128) return { error: `Prefix /${prefix} is too large for IPv6 (max /128).` };
+  const existing = existingSubnets.filter((s) => ipFamily(s.split('/')[0]) === family);
+
+  // Safety cap — a pathological search (e.g. all of IPv4 in /32s) must not freeze the UI.
+  const MAX_CANDIDATES = 5_000_000;
+
+  if (family === 'v4') {
+    const ipInt = ipv4ToInt(base.net);
+    if (ipInt === null) return { error: `Invalid IPv4 address "${base.net}".` };
+    // v4 prefix mask — /0 must be 0, not the full word (JS shifts mod 32).
+    const v4Mask = (pfx: number): number => (pfx === 0 ? 0 : (~0 << (32 - pfx)) >>> 0);
+    // CIDR base → search inside that block. Bare IP → search forward from the
+    // aligned block containing it, across the whole v4 space.
+    let start: number;
+    let end: number;
+    if (splitCidr(baseCidrOrIp)) {
+      const baseNet = ipInt & v4Mask(base.prefix);
+      // A numerically LARGER prefix is a SMALLER network — it fits when
+      // prefix >= base.prefix; only a bigger block (smaller number) can't fit.
+      if (prefix < base.prefix) return { error: `No /${prefix} network fits inside ${base.net}/${base.prefix}.` };
+      start = baseNet & v4Mask(prefix);
+      // 1 << 32 === 4 in JS (shifts are mod 32) — handle a /0 base explicitly.
+      end = baseNet + (base.prefix === 0 ? 0x1_0000_0000 : 1 << (32 - base.prefix));
+    } else {
+      start = ipInt & v4Mask(prefix);
+      end = 0x1_0000_0000; // whole v4 space
+    }
+    const size = 1 << (32 - prefix);
+    let checked = 0;
+    for (let c = start; c < end; c += size) {
+      if (++checked > MAX_CANDIDATES) return { error: `Search space too large — narrow the base range or use a bigger prefix.` };
+      const cidr = `${ipv4FromInt(c)}/${prefix}`;
+      if (!existing.some((s) => cidrsOverlap(cidr, s))) return { cidr };
+    }
+    return { error: `No free /${prefix} network found starting at ${base.net}.` };
+  }
+
+  const ipBig = ipv6ToBigInt(base.net);
+  if (ipBig === null) return { error: `Invalid IPv6 address "${base.net}".` };
+  const FULL128 = (1n << 128n) - 1n;
+  let start: bigint;
+  let end: bigint;
+  if (splitCidr(baseCidrOrIp)) {
+    const netMask = base.prefix === 0 ? 0n : FULL128 ^ ((1n << BigInt(128 - base.prefix)) - 1n);
+    const baseNet = ipBig & netMask;
+    if (prefix < base.prefix) return { error: `No /${prefix} network fits inside ${base.net}/${base.prefix}.` };
+    start = baseNet & (FULL128 ^ ((1n << BigInt(128 - prefix)) - 1n));
+    end = baseNet + (1n << BigInt(128 - base.prefix));
+  } else {
+    start = ipBig & (FULL128 ^ ((1n << BigInt(128 - prefix)) - 1n));
+    end = 1n << 128n; // whole v6 space
+  }
+  const size = 1n << BigInt(128 - prefix);
+  let checked = 0;
+  for (let c = start; c < end; c += size) {
+    if (++checked > MAX_CANDIDATES) return { error: `Search space too large — narrow the base range or use a bigger prefix.` };
+    const cidr = `${ipv6FromBigInt(c)}/${prefix}`;
+    if (!existing.some((s) => cidrsOverlap(cidr, s))) return { cidr };
+  }
+  return { error: `No free /${prefix} network found starting at ${base.net}.` };
+}
+
 // ---------------------------------------------------------------------------
 // Table cell renderers
 // ---------------------------------------------------------------------------
@@ -221,8 +295,31 @@ interface NetworkFormCardProps {
 function NetworkFormCard({ initial, sites, layers, liveNameOptions, onClose, onSaved }: NetworkFormCardProps) {
   const [form, setForm] = useState<NetworkFormState>(() => (initial ? formFromNetwork(initial) : EMPTY_FORM));
   const [error, setError] = useState<string | null>(null);
+  // "Next free" subnet finder — family + prefix size + optional base range to search in.
+  const [nextFreeFamily, setNextFreeFamily] = useState<'v4' | 'v6'>('v4');
+  const [nextFreePrefix, setNextFreePrefix] = useState('24');
+  const [nextFreeBase, setNextFreeBase] = useState('10.0.0.0/8');
   // Live logical networks — power the name datalist + subnet auto-fill below.
   const liveQuery = useQuery({ queryKey: ['networks'], queryFn: () => api.networks(), refetchInterval: 30_000 });
+  // Documented rows (shared cache with the page's own query) — power the
+  // "next free" search below.
+  const documentedQuery = useQuery({ queryKey: ['documentedNetworks'], queryFn: () => api.documentedNetworks() });
+
+  // Every CIDR already in play (documented rows + live inventory) — the
+  // "next free" search must not collide with any of them.
+  const existingSubnets = useMemo(() => {
+    const set = new Set<string>();
+    for (const n of documentedQuery.data ?? []) for (const s of n.subnets) if (s.includes('/')) set.add(s);
+    for (const n of liveQuery.data ?? []) for (const s of n.subnets ?? []) if (s.includes('/')) set.add(s);
+    return Array.from(set);
+  }, [documentedQuery.data, liveQuery.data]);
+
+  /** Switching the family resets prefix + base to sensible defaults. */
+  function changeNextFreeFamily(fam: 'v4' | 'v6') {
+    setNextFreeFamily(fam);
+    if (fam === 'v4') { setNextFreePrefix('24'); setNextFreeBase('10.0.0.0/8'); }
+    else { setNextFreePrefix('64'); setNextFreeBase('fd00::/48'); }
+  }
 
   function patch(p: Partial<NetworkFormState>) {
     setForm((f) => ({ ...f, ...p }));
@@ -269,6 +366,30 @@ function NetworkFormCard({ initial, sites, layers, liveNameOptions, onClose, onS
   }
   function removeIpRow(kind: 'gateways' | 'dnsServers' | 'ntpServers', index: number) {
     setForm((f) => ({ ...f, [kind]: f[kind].filter((_, i) => i !== index) }));
+  }
+
+  /** Computes the next free network of the chosen size and appends it as a subnet row. */
+  function handleNextFree() {
+    const prefix = Number(nextFreePrefix);
+    const maxPfx = nextFreeFamily === 'v4' ? 32 : 128;
+    if (!Number.isInteger(prefix) || prefix < 1 || prefix > maxPfx) {
+      setError(`Prefix must be an integer between 1 and ${maxPfx} for IPv${nextFreeFamily === 'v4' ? '4' : '6'}.`);
+      return;
+    }
+    // Empty base → the whole address space of the chosen family.
+    const rawBase = nextFreeBase.trim();
+    if (rawBase !== '' && !isCidrLiteral(rawBase) && !isIpLiteral(rawBase)) {
+      setError(`"${rawBase}" is not a valid IP or CIDR base range.`);
+      return;
+    }
+    const base = rawBase === '' ? (nextFreeFamily === 'v4' ? '0.0.0.0/0' : '::/0') : rawBase;
+    const res = nextFreeNetwork(base, prefix, existingSubnets);
+    if (res.error || !res.cidr) {
+      setError(res.error ?? 'Could not find a free network.');
+      return;
+    }
+    setError(null);
+    setForm((f) => ({ ...f, subnets: [...f.subnets.filter((s) => s.trim() !== ''), res.cidr!] }));
   }
 
   function submit() {
@@ -408,9 +529,47 @@ function NetworkFormCard({ initial, sites, layers, liveNameOptions, onClose, onS
                   </div>
                 </Fragment>
               ))}
-              <button type="button" onClick={addSubnetRow} className="self-start rounded-md border border-border px-2 py-1 text-xs text-secondary hover:bg-muted">
-                + Add subnet
-              </button>
+              <div className="flex items-center gap-2 self-start">
+                <button type="button" onClick={addSubnetRow} className="rounded-md border border-border px-2 py-1 text-xs text-secondary hover:bg-muted">
+                  + Add subnet
+                </button>
+                <button
+                  type="button"
+                  onClick={handleNextFree}
+                  title="Finds the next free network of the chosen size that does not overlap any documented or live-inventory subnet, and adds it as a row."
+                  className="rounded-md border border-border px-2 py-1 text-xs text-secondary hover:bg-muted"
+                >
+                  Next free
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={nextFreeFamily}
+                  onChange={(e) => changeNextFreeFamily(e.target.value as 'v4' | 'v6')}
+                  title="Address family of the network to look for."
+                  className="rounded-md border border-border bg-background px-1.5 py-0.5 text-xs"
+                >
+                  <option value="v4">IPv4</option>
+                  <option value="v6">IPv6</option>
+                </select>
+                <label className="flex items-center gap-1 text-xs text-faint" title="Size of the network to look for (prefix length).">
+                  /
+                  <input
+                    type="number"
+                    min={1}
+                    max={nextFreeFamily === 'v4' ? 32 : 128}
+                    value={nextFreePrefix}
+                    onChange={(e) => setNextFreePrefix(e.target.value)}
+                    className="w-14 rounded-md border border-border bg-background px-1.5 py-0.5 font-mono text-xs"
+                  />
+                </label>
+                <input
+                  value={nextFreeBase}
+                  onChange={(e) => setNextFreeBase(e.target.value)}
+                  placeholder={'Optional base range, e.g. 10.40.0.0/16 or fd00::/48 (empty = whole space)'}
+                  className="min-w-[220px] flex-1 rounded-md border border-border bg-background px-2 py-0.5 font-mono text-xs"
+                />
+              </div>
             </div>
           </div>
           <label className="text-sm">
@@ -1458,6 +1617,101 @@ export default function DocumentedNetworks() {
       hiddenByDefault: true,
       exportValue: (row) => row.observedSubnets.join(', '),
       render: (row) => <ObservedCell row={row} />,
+    },
+    {
+      // Usable IPv4 hosts minus the documented host IPs inside this network's v4 subnets.
+      header: 'Free hosts',
+      key: 'freeHosts',
+      width: 120,
+      exportValue: (row) => row.freeHosts ?? '',
+      render: (row) => {
+        if (row.freeHosts == null || row.totalHosts == null) return <span className="text-faint">—</span>;
+        const pct = row.totalHosts > 0 ? Math.round((row.freeHosts / row.totalHosts) * 100) : 100;
+        return (
+          <span title={`${row.freeHosts} of ${row.totalHosts} usable hosts are not documented yet`}>
+            {row.freeHosts.toLocaleString()}
+            <span className="ml-1 text-xs text-faint">/ {row.totalHosts.toLocaleString()}</span>
+            <span className={`ml-1 rounded px-1 py-0.5 text-[10px] font-semibold ${pct > 90 ? 'bg-success text-success-fg' : pct > 50 ? 'bg-info text-info-fg' : 'bg-warning text-warning-fg'}`}>{pct}%</span>
+          </span>
+        );
+      },
+    },
+    {
+      header: 'Hosts total',
+      key: 'totalHosts',
+      width: 100,
+      exportValue: (row) => row.totalHosts ?? '',
+      render: (row) => (row.totalHosts != null ? <span className="font-mono text-xs">{row.totalHosts.toLocaleString()}</span> : <span className="text-faint">—</span>),
+    },
+    {
+      header: 'First host (IPv4)',
+      key: 'firstHost',
+      width: 140,
+      hiddenByDefault: true,
+      exportValue: (row) => row.firstHost ?? '',
+      render: (row) => <IpListCell ips={row.firstHost ? row.firstHost.split(', ') : []} />,
+    },
+    {
+      header: 'Last host (IPv4)',
+      key: 'lastHost',
+      width: 140,
+      hiddenByDefault: true,
+      exportValue: (row) => row.lastHost ?? '',
+      render: (row) => <IpListCell ips={row.lastHost ? row.lastHost.split(', ') : []} />,
+    },
+    {
+      header: 'Broadcast (IPv4)',
+      key: 'broadcastAddress',
+      width: 140,
+      hiddenByDefault: true,
+      exportValue: (row) => row.broadcastAddress ?? '',
+      render: (row) => <IpListCell ips={row.broadcastAddress ? row.broadcastAddress.split(', ') : []} />,
+    },
+    {
+      // v6 has no reserved network address — the first usable host IS the
+      // network address; there is no broadcast concept in IPv6.
+      header: 'First host (IPv6)',
+      key: 'firstHostV6',
+      width: 180,
+      hiddenByDefault: true,
+      exportValue: (row) => row.firstHostV6 ?? '',
+      render: (row) => <IpListCell ips={row.firstHostV6 ? row.firstHostV6.split(', ') : []} />,
+    },
+    {
+      header: 'Last host (IPv6)',
+      key: 'lastHostV6',
+      width: 180,
+      hiddenByDefault: true,
+      exportValue: (row) => row.lastHostV6 ?? '',
+      render: (row) => <IpListCell ips={row.lastHostV6 ? row.lastHostV6.split(', ') : []} />,
+    },
+    {
+      // Per-subnet used/free breakdown — the dual-stack view where v4 and v6
+      // prefixes differ, so one aggregate number per family is not enough.
+      header: 'Subnet details',
+      key: 'subnetStats',
+      width: 280,
+      hiddenByDefault: true,
+      exportValue: (row) => row.subnetStats.map((s) => `${s.cidr}: ${s.used}/${s.total} used`).join('; '),
+      render: (row) => {
+        if (!row.subnetStats || row.subnetStats.length === 0) return <span className="text-faint">—</span>;
+        return (
+          <div className="flex flex-col gap-1 leading-tight">
+            {row.subnetStats.map((s) => {
+              const pct = Number(s.total) > 0 ? Math.min(100, Math.round((s.used / Number(s.total)) * 100)) : 100;
+              return (
+                <div key={s.cidr} className="flex items-center gap-2">
+                  <span className={`font-mono text-xs ${s.family === 'v6' ? 'text-accent-purple-fg' : ''}`}>{s.cidr}</span>
+                  <span className="ml-auto font-mono text-xs" title={`${s.used} of ${s.total} usable addresses are documented`}>
+                    {s.used.toLocaleString()} / {Number(s.total) > Number.MAX_SAFE_INTEGER ? s.total : Number(s.total).toLocaleString()}
+                  </span>
+                  <span className={`rounded px-1 py-0.5 text-[10px] font-semibold ${pct === 0 ? 'bg-success text-success-fg' : pct < 20 ? 'bg-info text-info-fg' : 'bg-warning text-warning-fg'}`}>{pct}%</span>
+                </div>
+              );
+            })}
+          </div>
+        );
+      },
     },
     {
       header: 'Last seen',

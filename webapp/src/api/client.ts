@@ -529,6 +529,23 @@ export interface DocumentedHostMergeResult {
 
 // --- Documented networks (user-maintained network documentation) --------------
 
+/** Per-subnet host-address stats — one entry per documented subnet, both families. */
+export interface SubnetHostStats {
+  cidr: string;
+  family: 'v4' | 'v6';
+  /** Total usable addresses in this subnet (string — a v6 /64's 2^64 overflows safe integers). */
+  total: string;
+  /** Distinct documented host IPs inside this subnet. */
+  used: number;
+  /** Free = total − used, clamped at 0 (string like `total`). */
+  free: string;
+  /** First usable address of the subnet (v6: the network address itself). */
+  firstHost: string | null;
+  lastHost: string | null;
+  /** Broadcast address — v4 /30 and larger only; null for v6. */
+  broadcastAddress: string | null;
+}
+
 /** One documented network (user-maintained inventory) with live discovery info. */
 export interface DocumentedNetwork {
   id: string;
@@ -556,6 +573,19 @@ export interface DocumentedNetwork {
   observedSubnets: string[];
   /** VLAN id observed on a matching live group (null when none known). */
   observedVlanId: number | null;
+  /** Usable IPv4 host addresses over all v4 subnets; null for name-only / v6-only rows. */
+  totalHosts: number | null;
+  /** Usable hosts minus documented host IPs inside the network's v4 subnets (≥ 0). */
+  freeHosts: number | null;
+  /** First usable host of each v4 subnet, ", "-joined; null when no v4 subnet. */
+  firstHost: string | null;
+  lastHost: string | null;
+  broadcastAddress: string | null;
+  /** First address of each v6 subnet (the network address itself), ", "-joined; null when none. */
+  firstHostV6: string | null;
+  lastHostV6: string | null;
+  /** Per-subnet used/free breakdown for every documented subnet (v4 + v6). */
+  subnetStats: SubnetHostStats[];
   /** User-maintained lifecycle flag — false = stale/retired (row stays, dimmed in the UI). Default true. */
   isActive: boolean;
   createdAt: string;

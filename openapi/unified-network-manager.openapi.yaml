@@ -6559,6 +6559,43 @@ components:
           minimum: 0
           maximum: 4095
           description: "VLAN id observed on a matching live group; null when none known"
+        totalHosts:
+          type: [integer, 'null']
+          minimum: 0
+          description: >-
+            Usable IPv4 host addresses over all v4 subnets (network + broadcast
+            reserved for /30 and larger; RFC 3021 point-to-point /31 and /32
+            count every address). Null when the row has no v4 subnet.
+        freeHosts:
+          type: [integer, 'null']
+          minimum: 0
+          description: >-
+            Usable hosts minus the distinct documented host IPs (documented-hosts
+            page) that fall inside any of the network's v4 subnets; clamped at 0.
+            Null when totalHosts is null.
+        firstHost:
+          type: [string, 'null']
+          description: "First usable host address of each v4 subnet, \", \"-joined (e.g. \"192.168.1.1\"); null when no v4 subnet"
+        lastHost:
+          type: [string, 'null']
+          description: "Last usable host address of each v4 subnet, \", \"-joined; null when no v4 subnet"
+        broadcastAddress:
+          type: [string, 'null']
+          description: "Broadcast address of each v4 subnet (only for /30 and larger — RFC 3021 /31 + /32 have none), comma-joined; null when no v4 subnet"
+        firstHostV6:
+          type: [string, 'null']
+          description: "First address of each v6 subnet (the network address itself — v6 has no reserved network address), \" \"-joined; null when no v6 subnet"
+        lastHostV6:
+          type: [string, 'null']
+          description: "Last address of each v6 subnet, \" \"-joined; null when no v6 subnet. IPv6 has no broadcast concept"
+        subnetStats:
+          type: array
+          items: { $ref: '#/components/schemas/SubnetHostStats' }
+          default: []
+          description: >-
+            Per-subnet used/free breakdown for EVERY documented subnet (v4 and
+            v6) — the dual-stack view where the two families carry different
+            prefixes, so one aggregate number per family is not enough.
         isActive:
           type: boolean
           default: true
@@ -6568,6 +6605,32 @@ components:
             Every new or imported network starts active.
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+
+    SubnetHostStats:
+      type: object
+      description: >-
+        Host-address statistics for ONE documented subnet. IPv4 reserves the
+        network + broadcast addresses (RFC 3021 /31 and /32 reserve nothing);
+        IPv6 has no such reservations, so its totals are exact powers of two.
+        `total`/`free` are strings because a v6 /64's 2^64 addresses overflow
+        safe integers.
+      required: [cidr, family, total, used, free]
+      properties:
+        cidr: { type: string, description: "The documented subnet (canonical CIDR)" }
+        family: { type: string, enum: [v4, v6] }
+        total:
+          type: string
+          description: "Total usable addresses in this subnet"
+        used:
+          type: integer
+          minimum: 0
+          description: "Distinct documented host IPs (documented-hosts page) inside this subnet"
+        free:
+          type: string
+          description: "Free = total − used, clamped at 0"
+        firstHost: { type: [string, 'null'], description: "First usable address of the subnet (v6: the network address itself)" }
+        lastHost: { type: [string, 'null'], description: "Last usable address of the subnet" }
+        broadcastAddress: { type: [string, 'null'], description: "Broadcast address — v4 /30 and larger only; null for v6 (no broadcast concept)" }
 
     DocumentedNetworkRequest:
       type: object
