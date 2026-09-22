@@ -604,6 +604,10 @@ export interface DocumentedNetworkInventoryImportOptions {
   skipWithoutVlan?: boolean;
   /** Only import networks carrying this address family ('all' = both). Default 'all'. */
   version?: 'all' | 'v4' | 'v6';
+  /** Policy for publicly routable IPv4 subnets (RFC 1918 + loopback/link-local count as internal). Default 'keep'. */
+  publicIpv4Policy?: 'keep' | 'strip' | 'skip-network';
+  /** Policy for publicly routable IPv6 subnets (GUA 2000::/3; ULA fc00::/7 counts as internal). Default 'keep'. */
+  publicIpv6Policy?: 'keep' | 'strip' | 'skip-network';
   /** Range filter mode: include-only / exclude applied to the network's subnets. Default 'keep-all'. */
   rangeMode?: 'keep-all' | 'include-only' | 'exclude';
   /** CIDR blocks and/or inclusive IP ranges (empty = no filtering). */
@@ -621,6 +625,8 @@ export interface DocumentedNetworkInventoryPlanEntry {
   vlanId: number | null;
   action: 'create' | 'update' | 'skip';
   reason?: string;
+  /** Public subnets removed by a 'strip' policy (action=create/update only). */
+  stripped?: number;
 }
 
 /** Result of the inventory import (dry-run plan or applied summary). */

@@ -2,13 +2,14 @@ import { Router, Request, Response } from 'express';
 import { asc, eq, inArray } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { isIP } from 'node:net';
-import { ipFamily, splitCidr, subnetOf, ipv4ToInt, ipv6ToBigInt } from '@unm/plugin-sdk';
+import { ipFamily, splitCidr, subnetOf, ipv4ToInt, ipv6ToBigInt, isPublicIpv4, isPublicIpv6 } from '@unm/plugin-sdk';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { mergeNetworkRows, type MergedNetwork } from './networks';
-// Shared CIDR/IP-range filter helpers (same semantics as the hosts import).
-import { parseRanges, rangeFilterDecision } from './documentedHosts';
+// Shared CIDR/IP-range parsing (the entries themselves are family-aware; the
+// matching below is CIDR-aware — hostInRanges only understands bare IPs).
+import { parseRanges, type RangeEntry } from './documentedHosts';
 
 const router = Router();
 
@@ -825,6 +826,10 @@ interface NetworkInventoryImportOptions {
   rangeMode?: 'keep-all' | 'include-only' | 'exclude';
   /** CIDR networks / IP ranges the range filter applies to (empty = no filtering). */
   ranges?: string[];
+  /** Policy for publicly routable IPv4 subnets (RFC 1918 + loopback/link-local count as internal). Default 'keep'. */
+  publicIpv4Policy?: PublicIpPolicy;
+  /** Policy for publicly routable IPv6 subnets (GUA 2000::/3; ULA fc00::/7 counts as internal). Default 'keep'. */
+  publicIpv6Policy?: PublicIpPolicy;
   /** Only import networks observed within this many hours (0 = all, default 24 — the sweep window). */
   maxAgeHours?: number;
   /** Preview only — compute what would change without writing anything. Default true. */
@@ -839,6 +844,8 @@ interface NetworkInventoryImportPlanEntry {
   /** 'create' = new documented network, 'update' = merge into an existing one, 'skip' = unchanged/filtered out. */
   action: 'create' | 'update' | 'skip';
   reason?: string;
+  /** Public subnets removed by a 'strip' policy (action=create/update only). */
+  stripped?: number;
 }
 
 /** Result of the inventory import (dry-run or applied). */
@@ -856,7 +863,117 @@ interface NetworkInventoryImportResult {
 /** True when the live group carries at least one subnet of the requested family. */
 function hasVersion(g: MergedNetwork, version: 'all' | 'v4' | 'v6'): boolean {
   if (version === 'all') return true;
-  return (g.subnets ?? []).some((s) => ipFamily(s) === version);
+  // Classify on the NETWORK ADDRESS — ipFamily() rejects CIDR strings outright.
+  return (g.subnets ?? []).some((s) => ipFamily(s.split('/')[0]) === version);
+}
+
+/** Numeric address-space bounds [lo, hi] of a CIDR block; null when malformed. */
+function subnetBounds(cidr: string): { lo: bigint; hi: bigint } | null {
+  const sc = splitCidr(cidr);
+  if (!sc) return null;
+  if (!sc.net.includes(':')) {
+    const n = ipv4ToInt(sc.net);
+    if (n === null) return null;
+    const lo = BigInt(n);
+    return { lo, hi: lo + (1n << BigInt(32 - sc.prefix)) - 1n };
+  }
+  const n = ipv6ToBigInt(sc.net);
+  if (n === null) return null;
+  const lo = n;
+  return { lo, hi: lo + ((1n << BigInt(128 - sc.prefix)) - 1n) };
+}
+
+/** True when any of the network's subnets intersects ANY parsed range entry. */
+function subnetIntersectsRanges(subnets: string[], ranges: RangeEntry[]): boolean {
+  for (const s of subnets) {
+    const b = subnetBounds(s);
+    if (!b) continue;
+    const fam = ipFamily(s.split('/')[0]);
+    if (!fam) continue;
+    for (const r of ranges) {
+      if (r.family !== fam) continue;
+      // CIDR blocks are nested or disjoint — interval intersection is exact.
+      if (r.kind === 'cidr') {
+        const rb = subnetBounds(r.cidr!);
+        if (!rb) continue;
+        if (b.lo <= rb.hi && rb.lo <= b.hi) return true;
+      } else if (b.lo <= r.hi! && r.lo! <= b.hi) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Applies the network/range filter to a live network's subnets. Same modes and
+ * reasons as the hosts import, but CIDR-aware (hostInRanges only matches bare IPs).
+ */
+function subnetRangeFilterDecision(
+  subnets: string[],
+  mode: 'keep-all' | 'include-only' | 'exclude',
+  ranges: RangeEntry[]
+): { skip?: boolean; reason?: string } {
+  if (mode === 'keep-all' || ranges.length === 0) return {};
+  const matches = subnetIntersectsRanges(subnets, ranges);
+  if (mode === 'include-only' && !matches) return { skip: true, reason: 'outside selected ranges' };
+  if (mode === 'exclude' && matches) return { skip: true, reason: 'excluded range' };
+  return {};
+}
+
+/**
+ * Policy for publicly routable subnets of one address family — same basis as the
+ * documented-hosts import, adapted to network-level rows:
+ * - 'keep'        : import every subnet as-is (default).
+ * - 'strip'       : drop ONLY the public subnets, still document the network with its
+ *                   internal ones (private v4 / ULA stay) — dual-stack friendly.
+ * - 'skip-network': any public subnet of this family → skip the whole network.
+ */
+type PublicIpPolicy = 'keep' | 'strip' | 'skip-network';
+
+/** Coerces a request value into a PublicIpPolicy ('keep' when absent/unknown). */
+function parsePublicIpPolicy(value: unknown): PublicIpPolicy {
+  if (value === 'strip' || value === 'skip-network') return value;
+  return 'keep';
+}
+
+/**
+ * Applies the per-family public-subnet policies to a live network's subnets.
+ * Returns the subnets to keep, how many were stripped, and a skip reason when a
+ * 'skip-network' policy matched (or kept is empty after stripping).
+ */
+/** True when a CIDR block's NETWORK ADDRESS is publicly routable (family-aware). */
+function isPublicSubnet(cidr: string): boolean {
+  // The SDK classifiers take BARE IP literals — "a.b.c.d/p" would parse as null.
+  const net = cidr.split('/')[0];
+  if (!net) return false;
+  return ipFamily(net) === 'v4' ? isPublicIpv4(net) : isPublicIpv6(net);
+}
+
+function applyPublicSubnetPolicies(
+  subnets: string[],
+  v4Policy: PublicIpPolicy,
+  v6Policy: PublicIpPolicy
+): { kept: string[]; stripped: number; skipReason?: string } {
+  // Family is read from the NETWORK ADDRESS — ipFamily() rejects CIDR strings.
+  const famOf = (s: string) => ipFamily(s.split('/')[0]);
+  if (v4Policy === 'skip-network' && subnets.some((s) => famOf(s) === 'v4' && isPublicSubnet(s))) {
+    return { kept: [], stripped: 0, skipReason: 'public IPv4 subnet' };
+  }
+  if (v6Policy === 'skip-network' && subnets.some((s) => famOf(s) === 'v6' && isPublicSubnet(s))) {
+    return { kept: [], stripped: 0, skipReason: 'public IPv6 subnet' };
+  }
+  const stripV4 = v4Policy === 'strip';
+  const stripV6 = v6Policy === 'strip';
+  if (!stripV4 && !stripV6) return { kept: subnets, stripped: 0 };
+  let stripped = 0;
+  const kept = subnets.filter((s) => {
+    const fam = famOf(s);
+    if (fam === 'v4' && stripV4 && isPublicSubnet(s)) { stripped++; return false; }
+    if (fam === 'v6' && stripV6 && isPublicSubnet(s)) { stripped++; return false; }
+    return true;
+  });
+  return { kept, stripped };
 }
 
 /**
@@ -885,7 +1002,7 @@ async function buildNetworkInventoryImportPlan(opts: NetworkInventoryImportOptio
   let skipped = 0;
 
   for (const g of live) {
-    const subnets = [...(g.subnets ?? [])];
+    let subnets = [...(g.subnets ?? [])];
     if (opts.skipWithoutSubnet !== false && subnets.length === 0) {
       planned.push({ name: g.name, subnets: [], vlanId: g.vlanId, action: 'skip', reason: 'no subnet' });
       skipped++;
@@ -903,9 +1020,25 @@ async function buildNetworkInventoryImportPlan(opts: NetworkInventoryImportOptio
       continue;
     }
     // Network/range filter — include-only / exclude runs before every other option.
-    const rf = rangeFilterDecision(subnets, opts.rangeMode ?? 'keep-all', ranges);
+    const rf = subnetRangeFilterDecision(subnets, opts.rangeMode ?? 'keep-all', ranges);
     if (rf.skip) {
       planned.push({ name: g.name, subnets, vlanId: g.vlanId, action: 'skip', reason: rf.reason });
+      skipped++;
+      continue;
+    }
+
+    // Public-subnet policies per family — dual-stack friendly (strip keeps the
+    // network with its internal subnets; skip-network drops it entirely).
+    const pol = applyPublicSubnetPolicies(subnets, opts.publicIpv4Policy ?? 'keep', opts.publicIpv6Policy ?? 'keep');
+    if (pol.skipReason) {
+      planned.push({ name: g.name, subnets, vlanId: g.vlanId, action: 'skip', reason: pol.skipReason });
+      skipped++;
+      continue;
+    }
+    const stripped = pol.stripped;
+    subnets = pol.kept;
+    if (subnets.length === 0) {
+      planned.push({ name: g.name, subnets: [], vlanId: g.vlanId, action: 'skip', reason: 'only public subnets' });
       skipped++;
       continue;
     }
@@ -935,7 +1068,7 @@ async function buildNetworkInventoryImportPlan(opts: NetworkInventoryImportOptio
 
     if (target) updated++;
     else created++;
-    planned.push({ name: g.name, subnets, vlanId: g.vlanId, action: target ? 'update' : 'create' });
+    planned.push({ name: g.name, subnets, vlanId: g.vlanId, action: target ? 'update' : 'create', ...(stripped > 0 ? { stripped } : {}) });
   }
 
   return { dryRun: true, totalLiveNetworks: live.length, planned, created, updated, skipped, affectedIds: [] };
@@ -963,13 +1096,18 @@ async function applyNetworkInventoryImport(opts: NetworkInventoryImportOptions):
   const now = new Date().toISOString();
 
   for (const g of live) {
-    const subnets = [...(g.subnets ?? [])];
+    let subnets = [...(g.subnets ?? [])];
     if (opts.skipWithoutSubnet !== false && subnets.length === 0) { skipped++; continue; }
     if (opts.skipWithoutVlan === true && g.vlanId == null) { skipped++; continue; }
     const version = opts.version === 'v4' || opts.version === 'v6' ? opts.version : 'all';
     if (!hasVersion(g, version)) { skipped++; continue; }
-    const rf = rangeFilterDecision(subnets, opts.rangeMode ?? 'keep-all', ranges);
+    const rf = subnetRangeFilterDecision(subnets, opts.rangeMode ?? 'keep-all', ranges);
     if (rf.skip) { skipped++; continue; }
+
+    // Public-subnet policies per family — dual-stack friendly.
+    const pol = applyPublicSubnetPolicies(subnets, opts.publicIpv4Policy ?? 'keep', opts.publicIpv6Policy ?? 'keep');
+    if (pol.skipReason || pol.kept.length === 0) { skipped++; continue; }
+    subnets = pol.kept;
 
     // Match by name first, then subnet overlap.
     let target = docByName.get(g.name.toLowerCase()) ?? null;
@@ -1038,6 +1176,8 @@ router.post('/documented-networks/import-from-inventory', requireAuth, requirePe
       skipWithoutSubnet: body.skipWithoutSubnet !== false,
       skipWithoutVlan: body.skipWithoutVlan === true,
       version: body.version === 'v4' || body.version === 'v6' ? body.version : 'all',
+      publicIpv4Policy: parsePublicIpPolicy(body.publicIpv4Policy),
+      publicIpv6Policy: parsePublicIpPolicy(body.publicIpv6Policy),
       rangeMode: body.rangeMode === 'include-only' || body.rangeMode === 'exclude' ? body.rangeMode : 'keep-all',
       ranges: Array.isArray(body.ranges) ? (body.ranges as unknown[]).filter((r): r is string => typeof r === 'string') : [],
       maxAgeHours: typeof body.maxAgeHours === 'number' ? body.maxAgeHours : 24,

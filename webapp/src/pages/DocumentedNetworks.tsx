@@ -846,9 +846,12 @@ interface InventoryImportModalProps {
 
 function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
   type RangeMode = 'keep-all' | 'include-only' | 'exclude';
+  type PublicIpPolicy = 'keep' | 'strip' | 'skip-network';
   const [skipWithoutSubnet, setSkipWithoutSubnet] = useState(true);
   const [skipWithoutVlan, setSkipWithoutVlan] = useState(false);
   const [version, setVersion] = useState<'all' | 'v4' | 'v6'>('all');
+  const [publicIpv4Policy, setPublicIpv4Policy] = useState<PublicIpPolicy>('keep');
+  const [publicIpv6Policy, setPublicIpv6Policy] = useState<PublicIpPolicy>('keep');
   const [rangeMode, setRangeMode] = useState<RangeMode>('keep-all');
   const [rangesText, setRangesText] = useState('');
   const [maxAgeHours, setMaxAgeHours] = useState(24);
@@ -858,14 +861,14 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
   const [applied, setApplied] = useState<import('../api/client').DocumentedNetworkInventoryImportResult | null>(null);
 
   const previewMutation = useMutation({
-    mutationFn: () => api.importDocumentedNetworksFromInventory({ skipWithoutSubnet, skipWithoutVlan, version, rangeMode, ranges: parseRangesText(rangesText), maxAgeHours, dryRun: true }),
+    mutationFn: () => api.importDocumentedNetworksFromInventory({ skipWithoutSubnet, skipWithoutVlan, version, publicIpv4Policy, publicIpv6Policy, rangeMode, ranges: parseRangesText(rangesText), maxAgeHours, dryRun: true }),
     onSuccess: (res) => {
       setPlan(res);
       setPhase('plan');
     },
   });
   const applyMutation = useMutation({
-    mutationFn: () => api.importDocumentedNetworksFromInventory({ skipWithoutSubnet, skipWithoutVlan, version, rangeMode, ranges: parseRangesText(rangesText), maxAgeHours, dryRun: false }),
+    mutationFn: () => api.importDocumentedNetworksFromInventory({ skipWithoutSubnet, skipWithoutVlan, version, publicIpv4Policy, publicIpv6Policy, rangeMode, ranges: parseRangesText(rangesText), maxAgeHours, dryRun: false }),
     onSuccess: (res) => {
       setApplied(res);
       setPhase('done');
@@ -877,7 +880,7 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
   useEffect(() => {
     if (phase === 'plan') previewMutation.mutate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [skipWithoutSubnet, skipWithoutVlan, version, rangeMode, rangesText, maxAgeHours]);
+  }, [skipWithoutSubnet, skipWithoutVlan, version, publicIpv4Policy, publicIpv6Policy, rangeMode, rangesText, maxAgeHours]);
 
   const plannedCreates = plan?.planned.filter((p) => p.action === 'create').length ?? 0;
   const plannedUpdates = plan?.planned.filter((p) => p.action === 'update').length ?? 0;
@@ -917,6 +920,22 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
                   <option value="all">All (v4 + v6)</option>
                   <option value="v4">IPv4 only</option>
                   <option value="v6">IPv6 only</option>
+                </select>
+              </label>
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="How to treat publicly routable IPv4 subnets (RFC 1918 private ranges count as internal). Strip removes only the public v4 subnets — the network is still documented with its internal ones. Skip-network drops the whole network when it has any public v4 subnet.">
+                <span className="text-secondary">Public IPv4 subnets</span>
+                <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={publicIpv4Policy} onChange={(e) => setPublicIpv4Policy(e.target.value as PublicIpPolicy)}>
+                  <option value="keep">Keep (import all)</option>
+                  <option value="strip">Strip public, keep internal</option>
+                  <option value="skip-network">Skip whole network</option>
+                </select>
+              </label>
+              <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2" title="How to treat publicly routable IPv6 subnets (GUA 2000::/3; ULA fc00::/7 counts as internal). Strip removes only the public v6 subnets — the network is still documented with its internal ones. Skip-network drops the whole network when it has any public v6 subnet.">
+                <span className="text-secondary">Public IPv6 subnets</span>
+                <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={publicIpv6Policy} onChange={(e) => setPublicIpv6Policy(e.target.value as PublicIpPolicy)}>
+                  <option value="keep">Keep (import all)</option>
+                  <option value="strip">Strip public, keep internal</option>
+                  <option value="skip-network">Skip whole network</option>
                 </select>
               </label>
               <div className="rounded-md border border-border px-3 py-2" title="Restrict the import to specific networks or IP ranges — applied BEFORE all other options. A network matches when ANY of its subnets falls into ANY entry.">
@@ -996,6 +1015,22 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
                 </select>
               </label>
               <label className="flex items-center gap-2">
+                Public IPv4
+                <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={publicIpv4Policy} onChange={(e) => setPublicIpv4Policy(e.target.value as PublicIpPolicy)}>
+                  <option value="keep">keep</option>
+                  <option value="strip">strip public</option>
+                  <option value="skip-network">skip network</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2">
+                Public IPv6
+                <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={publicIpv6Policy} onChange={(e) => setPublicIpv6Policy(e.target.value as PublicIpPolicy)}>
+                  <option value="keep">keep</option>
+                  <option value="strip">strip public</option>
+                  <option value="skip-network">skip network</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2">
                 Ranges
                 <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={rangeMode} onChange={(e) => setRangeMode(e.target.value as RangeMode)}>
                   <option value="keep-all">all</option>
@@ -1037,6 +1072,9 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
                         ) : (
                           <span className="text-faint">—</span>
                         )}
+                        {p.stripped ? (
+                          <span className="ml-1 text-faint" title={`${p.stripped} public subnet(s) removed by the strip policy`}> · {p.stripped} stripped</span>
+                        ) : null}
                       </td>
                       <td className="px-2 py-1">{p.vlanId != null ? `V${p.vlanId}` : <span className="text-faint">—</span>}</td>
                       <td className="px-2 py-1">

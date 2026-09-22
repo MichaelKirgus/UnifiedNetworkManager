@@ -6690,6 +6690,24 @@ components:
           enum: [all, v4, v6]
           default: all
           description: "Only import networks carrying at least one subnet of this address family"
+        publicIpv4Policy:
+          type: string
+          enum: [keep, strip, skip-network]
+          default: keep
+          description: >-
+            Policy for publicly routable IPv4 subnets (RFC 1918 + loopback/
+            link-local count as internal). strip removes only the public v4
+            subnets — the network is still documented with its internal ones;
+            skip-network drops the whole network when it has any public v4 subnet.
+        publicIpv6Policy:
+          type: string
+          enum: [keep, strip, skip-network]
+          default: keep
+          description: >-
+            Policy for publicly routable IPv6 subnets (GUA 2000::/3; ULA fc00::/7
+            counts as internal). strip removes only the public v6 subnets — the
+            network is still documented with its internal ones; skip-network drops
+            the whole network when it has any public v6 subnet.
         rangeMode:
           type: string
           enum: [keep-all, include-only, exclude]
@@ -6735,6 +6753,9 @@ components:
                 description: "Discovered VLAN id; null when unknown"
               action: { type: string, enum: [create, update, skip] }
               reason: { type: string, description: "Why the network is skipped (action=skip only)" }
+              stripped:
+                type: integer
+                description: "Public subnets removed by a 'strip' policy (action=create/update only)"
         created: { type: integer }
         updated: { type: integer }
         skipped: { type: integer }

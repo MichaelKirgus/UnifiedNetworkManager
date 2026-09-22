@@ -172,6 +172,52 @@ async function main(): Promise<void> {
   const plan1 = (await dry1.json()) as { totalLiveNetworks?: number; planned?: Array<{ name: string; action: string }>; created?: number; updated?: number; skipped?: number };
   check('dry-run returns a per-network plan', dry1.status === 200 && (plan1.planned?.length ?? 0) > 0, { status: dry1.status, total: plan1.totalLiveNetworks });
 
+  // --- Filter checks on a CLEAN SLATE (before anything is documented) --------
+  // The live fleet carries public WAN subnets + private LANs, so every filter below is observable.
+  const isPublicV4Cidr = (cidr: string): boolean => {
+    const net = cidr.split('/')[0];
+    if (!net || net.includes(':')) return false;
+    const o = net.split('.').map(Number);
+    if (o.length !== 4) return false;
+    if (o[0] >= 224) return false; // multicast + reserved space count as internal (SDK parity)
+    if (o[0] === 10) return false;
+    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return false;
+    if (o[0] === 192 && o[1] === 168) return false;
+    if (o[0] === 127 || o[0] === 169) return false; // loopback / link-local
+    return true;
+  };
+
+  // Public-IP policies (same scheme as the hosts import).
+  const dryPub = await authed('POST', '/documented-networks/import-from-inventory', { skipWithoutSubnet: true, maxAgeHours: 24, dryRun: true, publicIpv4Policy: 'skip-network' });
+  const planPub = (await dryPub.json()) as { planned?: Array<{ name: string; action: string; reason?: string; subnets: string[] }> };
+  const pubLeak = (planPub.planned ?? []).filter((p) => p.action !== 'skip').some((p) => p.subnets.some(isPublicV4Cidr));
+  const pubAffected = (planPub.planned ?? []).some((p) => p.action === 'skip' && p.reason === 'public IPv4 subnet');
+  check('public v4 skip-network policy skips the public WAN networks', !pubLeak && pubAffected, planPub);
+
+  const dryStrip = await authed('POST', '/documented-networks/import-from-inventory', { skipWithoutSubnet: true, maxAgeHours: 24, dryRun: true, publicIpv4Policy: 'strip' });
+  const planStrip = (await dryStrip.json()) as { planned?: Array<{ name: string; action: string; subnets: string[]; stripped?: number }> };
+  const stripLeaksPublic = (planStrip.planned ?? []).filter((p) => p.action !== 'skip').some((p) => p.subnets.some(isPublicV4Cidr));
+  check('public v4 strip policy removes public subnets from every planned row', !stripLeaksPublic, planStrip);
+
+  // Family filter — a v4-only run must never plan a network without any v4 subnet.
+  const dryV4 = await authed('POST', '/documented-networks/import-from-inventory', { skipWithoutSubnet: true, maxAgeHours: 24, dryRun: true, version: 'v4' });
+  const planV4 = (await dryV4.json()) as { planned?: Array<{ action: string; subnets: string[] }> };
+  const v4Leak = (planV4.planned ?? []).filter((p) => p.action !== 'skip').some((p) => !p.subnets.some((s) => s.includes('/') && !s.split('/')[0].includes(':')));
+  check('family filter: no planned row without a v4 subnet', !v4Leak, planV4);
+
+  // Range filter — exclude mode must skip the matching networks (CIDR-aware).
+  const dryRange = await authed('POST', '/documented-networks/import-from-inventory', { skipWithoutSubnet: true, maxAgeHours: 24, dryRun: true, rangeMode: 'exclude', ranges: ['10.25.0.0/16'] });
+  const planRange = (await dryRange.json()) as { planned?: Array<{ action: string; reason?: string; subnets: string[] }> };
+  const inExcluded = (cidr: string): boolean => {
+    const sc = cidr.split('/');
+    if (sc.length !== 2) return false;
+    const a = sc[0].split('.').map(Number);
+    return a.length === 4 && a[0] === 10 && a[1] === 25;
+  };
+  const rangeExcludedSeen = (planRange.planned ?? []).some((p) => p.action === 'skip' && p.reason === 'excluded range');
+  const rangeLeak = (planRange.planned ?? []).filter((p) => p.action !== 'skip').some((p) => p.subnets.some(inExcluded));
+  check('range filter: excluded networks skipped, none planned', rangeExcludedSeen && !rangeLeak, planRange);
+
   // Pre-document ONE live network with user data — the apply must merge additively.
   const target = (plan1.planned ?? []).find((p) => p.action === 'create' && p.name);
   let preDocId: string | null = null;
