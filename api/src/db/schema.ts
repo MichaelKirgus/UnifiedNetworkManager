@@ -1494,6 +1494,12 @@ export const plans = pgTable(
     // How many times the scheduler has already attempted this schedule (drives
     // the run-asap backoff; reset on every fresh execution).
     scheduleAttempts: integer('scheduleAttempts').notNull().default(0),
+    // JSON object — per-plan retry policy for FAILED steps, overriding the global
+    // defaults (planStepRetryMaxAttempts / planStepRetryWaitMs):
+    //   { maxAttempts?: number, waitMs?: number }  — partial override; missing keys inherit.
+    //   null (column NULL) = use the global settings. A plugin may also set this on
+    //   the plan it returns from /plan (e.g. to DISABLE retries for a critical intent).
+    retryPolicy: text('retryPolicy'),
     finishedAt: text('finishedAt'),
     // Last time this plan reached a terminal status (succeeded/failed/cancelled).
     // Distinct from finishedAt, which is cleared when the plan is re-executed —

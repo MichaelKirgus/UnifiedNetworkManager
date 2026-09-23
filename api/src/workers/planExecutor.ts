@@ -37,12 +37,16 @@ interface PlanRecord {
   error: string | null;
   cancelledAt: string | null;
   startedAt: string | null;
+  /** JSON per-plan retry override ({ maxAttempts?, waitMs? }) or null = global defaults. */
+  retryPolicy?: string | null;
 }
 
 /** The ActionResult a plugin /config call returns, as stored on plan_steps.result. */
 interface StoredStepResult {
   success: boolean;
   result?: Record<string, unknown>;
+  /** How many dispatch attempts this step took (omitted when it succeeded first try). */
+  attempts?: number;
 }
 
 function parseJson<T>(raw: string | null, fallback: T): T {
@@ -156,6 +160,46 @@ async function skipRemainingSteps(planId: string): Promise<void> {
   }
 }
 
+/**
+ * Effective per-step retry policy for one plan: the global settings
+ * (planStepRetryMaxAttempts / planStepRetryWaitMs) overridden by whatever the
+ * plan row carries in `retryPolicy` — a partial object ({ maxAttempts?, waitMs? })
+ * where missing keys inherit, or null/absent = pure global defaults. A plugin
+ * may set this on the plan it returns from /plan (e.g. { maxAttempts: 0 } to
+ * DISABLE retries for a critical intent), and users can edit it before execution.
+ */
+async function resolveStepRetryPolicy(planRow: PlanRecord): Promise<{ maxAttempts: number; waitMs: number }> {
+  const gMax = Number(await getEffectiveSettingValue('planStepRetryMaxAttempts'));
+  const gWait = Number(await getEffectiveSettingValue('planStepRetryWaitMs'));
+  let maxAttempts = Number.isFinite(gMax) ? Math.trunc(gMax) : 2;
+  let waitMs = Number.isFinite(gWait) ? Math.round(gWait) : 15_000;
+  const override = parseJson<Record<string, unknown> | null>(planRow.retryPolicy ?? null, null);
+  if (override && typeof override === 'object') {
+    const m = Number(override['maxAttempts']);
+    if (Number.isFinite(m)) maxAttempts = Math.trunc(m);
+    const w = Number(override['waitMs']);
+    if (Number.isFinite(w)) waitMs = Math.round(w);
+  }
+  return {
+    maxAttempts: Math.min(Math.max(maxAttempts, 0), 10),
+    waitMs: Math.min(Math.max(waitMs, 1_000), 3_600_000),
+  };
+}
+
+/**
+ * Sleeps up to `ms` in 2 s chunks so a cancel can interrupt the wait. Resolves
+ * true when a cancel landed mid-sleep (the caller must then stop and finalize).
+ */
+async function sleepCancellable(planId: string, ms: number): Promise<boolean> {
+  const end = Date.now() + Math.max(0, ms);
+  for (;;) {
+    if (Date.now() >= end) return false;
+    await new Promise((r) => setTimeout(r, Math.min(2_000, end - Date.now())));
+    const fresh = await db.query.plans.findFirst({ where: (p, { eq }) => eq(p.id, planId) });
+    if ((fresh as PlanRecord | null)?.cancelledAt) return true;
+  }
+}
+
 async function processPlan(planId: string): Promise<void> {
   const plan = (await db.query.plans.findFirst({
     where: (plans, { eq }) => eq(plans.id, planId),
@@ -173,8 +217,10 @@ async function processPlan(planId: string): Promise<void> {
 
   // Catalog for per-action timeout overrides + riskLevel (read-only actions
   // are exempt from post-apply verification — a read IS its own confirmation).
+  // retryOnDispatchFailure=false is the plugin's flapping guard: power /
+  // firmware-flash / config-restore actions that must never be re-dispatched.
   const catalogRaw = parseJson<unknown>(plugin.actionDescriptors ?? null, []);
-  const catalog: Array<{ id?: string; timeoutMs?: number; riskLevel?: 'read' | 'write' | 'dangerous' }> = Array.isArray(catalogRaw)
+  const catalog: Array<{ id?: string; timeoutMs?: number; riskLevel?: 'read' | 'write' | 'dangerous'; retryOnDispatchFailure?: boolean }> = Array.isArray(catalogRaw)
     ? (catalogRaw as never[])
     : [];
 
@@ -285,58 +331,123 @@ async function processPlan(planId: string): Promise<void> {
 
     await markStep(step.id, 'running');
 
-    // Traceability: mirror each dispatched step as a config job row (terminal
-    // status set here — the legacy configJob worker only picks up 'queued' rows).
-    const jobId = crypto.randomUUID();
-    const nowStart = new Date().toISOString();
-    await db.insert(schema.configJobs).values({
-      id: jobId,
-      deviceId: step.deviceId,
-      pluginId: plan.pluginId,
-      action: step.actionId,
-      status: 'running',
-      payload: JSON.stringify(input),
-      result: null,
-      planId: plan.id,
-      createdAt: nowStart,
-      finishedAt: null,
-    });
-
     const entry = catalog.find((c) => c.id === step.actionId);
     // Default per-step timeout is a system setting; catalog entries may override via timeoutMs.
     const defaultStepTimeoutMs = Number(await getEffectiveSettingValue('planStepTimeoutMs')) || 60_000;
     const timeoutMs = typeof entry?.timeoutMs === 'number' ? entry.timeoutMs : defaultStepTimeoutMs;
     const headers = await settingsHeaders(plan.pluginId, step.deviceId).catch(() => ({}));
 
+    // --- Retry loop -----------------------------------------------------------
+    // A FAILED step is re-dispatched only when the failure is TRANSIENT:
+    //   - dispatch-level: the plugin was unreachable or the round-trip timed out
+    //     (the appliance may simply not be ready yet — reboot, update in flight);
+    //   - action-level: the plugin explicitly reports `retryable: true` on its
+    //     ActionResult (e.g. "service not started", "container still starting").
+    // A hard failure (validation error, missing object, wrong state that will
+    // NOT fix itself) is final — it fails the plan immediately, no matter what
+    // the retry policy says. The wait between attempts is the plugin's per-failure
+    // hint (`waitMs`) when present, else the policy default. Each attempt gets its
+    // own config_jobs row for full traceability of every dispatch.
+    const retryPolicy = await resolveStepRetryPolicy(plan);
+
     let stored: StoredStepResult;
-    try {
-      const response = await axios.post(
-        `${plugin.endpoint.replace(/\/$/, '')}/config`,
-        {
-          deviceId: device.id,
-          managementAddress: device.managementAddress,
-          credentials,
-          actionId: step.actionId,
-          input,
-        },
-        { timeout: timeoutMs, headers }
-      );
-      const body = response.data ?? {};
-      stored = { success: body.success !== false, result: (body.result ?? {}) as Record<string, unknown> };
-    } catch (err) {
-      const e = err as { response?: { status?: number; data?: { error?: string } }; message?: string };
-      if (e.response?.status === 400 && e.response.data?.error) {
-        stored = { success: false, result: { error: e.response.data.error } };
-      } else {
-        stored = { success: false, result: { error: `Dispatch failed: ${e.message ?? 'unreachable'}` } };
+    let transient = false;
+    let waitHintMs: number | null = null;
+    let attempts = 0;
+    for (;;) {
+      // Traceability: mirror each dispatched attempt as a config job row (terminal
+      // status set here — the legacy configJob worker only picks up 'queued' rows).
+      const jobId = crypto.randomUUID();
+      const nowStart = new Date().toISOString();
+      await db.insert(schema.configJobs).values({
+        id: jobId,
+        deviceId: step.deviceId,
+        pluginId: plan.pluginId,
+        action: step.actionId,
+        status: 'running',
+        payload: JSON.stringify(input),
+        result: null,
+        planId: plan.id,
+        createdAt: nowStart,
+        finishedAt: null,
+      });
+
+      attempts++;
+      transient = false;
+      waitHintMs = null;
+      try {
+        const response = await axios.post(
+          `${plugin.endpoint.replace(/\/$/, '')}/config`,
+          {
+            deviceId: device.id,
+            managementAddress: device.managementAddress,
+            credentials,
+            actionId: step.actionId,
+            input,
+          },
+          { timeout: timeoutMs, headers }
+        );
+        const body = response.data ?? {};
+        stored = { success: body.success !== false, result: (body.result ?? {}) as Record<string, unknown> };
+      } catch (err) {
+        const e = err as { response?: { status?: number; data?: { error?: string } }; message?: string };
+        if (e.response?.status === 400 && e.response.data?.error) {
+          // A plugin-side validation/contract error — deterministic, never retryable.
+          stored = { success: false, result: { error: e.response.data.error } };
+        } else {
+          // Unreachable / timeout — the appliance or plugin may simply not be ready yet.
+          transient = true;
+          stored = { success: false, result: { error: `Dispatch failed: ${e.message ?? 'unreachable'}` } };
+        }
+      }
+
+      const resObj = (stored.result ?? {}) as Record<string, unknown>;
+      if (!stored.success) {
+        // The plugin's EXPLICIT classification wins; when it stays silent the
+        // dispatch-level guess stands (device not ready yet → retry). A missing
+        // `retryable` key must NOT downgrade a transient dispatch failure to hard.
+        if (resObj['retryable'] === true || resObj['retryable'] === false) transient = resObj['retryable'];
+        const hint = Number(resObj['waitMs']);
+        if (Number.isFinite(hint) && hint > 0) waitHintMs = Math.min(Math.round(hint), 3_600_000);
+      }
+
+      // Flapping guard: the action's catalog entry may declare that a failed
+      // attempt is ALWAYS final — re-dispatching would flap the device (e.g.
+      // reboot it twice, flash firmware twice). Overrides any transient signal.
+      if (!stored.success && entry?.retryOnDispatchFailure === false) transient = false;
+
+      await db.update(schema.configJobs)
+        .set({ status: stored.success ? 'succeeded' : 'failed', result: JSON.stringify(resObj), finishedAt: new Date().toISOString() })
+        .where(eq(schema.configJobs.id, jobId));
+
+      if (stored.success || !transient || attempts >= retryPolicy.maxAttempts) break;
+
+      // Cooperative cancel before + during the wait.
+      const fresh = await db.query.plans.findFirst({ where: (p, { eq }) => eq(p.id, planId) });
+      if ((fresh as PlanRecord | null)?.cancelledAt) {
+        stored.attempts = attempts;
+        await markStep(step.id, 'failed', stored);
+        await skipRemainingSteps(planId);
+        await finishPlan(planId, 'cancelled', 'Cancelled by user before completion');
+        return;
+      }
+      const waitMs = waitHintMs ?? retryPolicy.waitMs;
+      // eslint-disable-next-line no-console
+      console.warn(`[planExecutor] step ${step.stepIndex} (${step.actionId}) attempt ${attempts}/${retryPolicy.maxAttempts} failed (transient) — retrying in ${Math.round(waitMs / 1000)}s:`, resObj['error']);
+      const cancelled = await sleepCancellable(planId, waitMs);
+      if (cancelled) {
+        stored.attempts = attempts;
+        await markStep(step.id, 'failed', stored);
+        await skipRemainingSteps(planId);
+        await finishPlan(planId, 'cancelled', 'Cancelled by user before completion');
+        return;
       }
     }
 
+    if (attempts > 1) stored.attempts = attempts;
+
     const stepStatus = stored.success ? 'succeeded' : 'failed';
     await markStep(step.id, stepStatus, stored);
-    await db.update(schema.configJobs)
-      .set({ status: stored.success ? 'succeeded' : 'failed', result: JSON.stringify(stored.result ?? {}), finishedAt: new Date().toISOString() })
-      .where(eq(schema.configJobs.id, jobId));
 
     if (stored.success) {
       results.set(step.stepIndex, stored);
@@ -347,12 +458,19 @@ async function processPlan(planId: string): Promise<void> {
     // without snapshots) are recorded but do NOT abort the plan.
     if (step.bestEffort) {
       // eslint-disable-next-line no-console
-      console.warn(`[planExecutor] best-effort step ${step.stepIndex} (${step.actionId}) failed:`, stored.result?.error);
+      console.warn(`[planExecutor] best-effort step ${step.stepIndex} (${step.actionId}) failed after ${attempts} attempt(s):`, stored.result?.error);
       continue;
     }
 
+    const errText = (stored.result as { error?: string })?.error ?? 'unknown error';
     await skipRemainingSteps(planId);
-    await finishPlan(planId, 'failed', `Step ${step.stepIndex} (${step.actionId}) failed: ${(stored.result as { error?: string })?.error ?? 'unknown error'}`);
+    await finishPlan(
+      planId,
+      'failed',
+      attempts > 1
+        ? `Step ${step.stepIndex} (${step.actionId}) failed after ${attempts} attempt(s): ${errText}`
+        : `Step ${step.stepIndex} (${step.actionId}) failed: ${errText}`
+    );
     return;
   }
 

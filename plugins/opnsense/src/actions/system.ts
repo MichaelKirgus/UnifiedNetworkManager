@@ -109,6 +109,9 @@ export const systemActions: ActionDescriptor[] = [
     riskLevel: 'dangerous',
     deviceCount: 1,
     timeoutMs: 30_000,
+    // Flapping guard — a failed reboot must never be re-dispatched (it would
+    // power-cycle the gateway again).
+    retryOnDispatchFailure: false,
     inputSchema: {},
     execute: async (ctx) => {
       const res = await sys.reboot(ctx.client);
@@ -122,6 +125,8 @@ export const systemActions: ActionDescriptor[] = [
     riskLevel: 'dangerous',
     deviceCount: 1,
     timeoutMs: 30_000,
+    // Flapping guard — a failed halt must never be re-dispatched.
+    retryOnDispatchFailure: false,
     inputSchema: {},
     execute: async (ctx) => {
       const res = await sys.halt(ctx.client);
@@ -155,6 +160,9 @@ export const systemActions: ActionDescriptor[] = [
     riskLevel: 'dangerous',
     deviceCount: 1,
     timeoutMs: 60_000,
+    // Flapping guard — a failed restore must never be re-dispatched (it would
+    // overwrite the config again).
+    retryOnDispatchFailure: false,
     inputSchema: { snapshotUuid: { type: 'string', required: true, description: 'Snapshot uuid (e.g. from a prior snapshot.create step)' } },
     execute: async (ctx, input) => {
       const res = await backup.activateSnapshot(ctx.client, String(input.snapshotUuid));
@@ -238,6 +246,9 @@ export const systemActions: ActionDescriptor[] = [
     riskLevel: 'dangerous',
     deviceCount: 1,
     timeoutMs: 60_000,
+    // Flapping guard — a failed firmware update must never be re-dispatched
+    // (it would start the update job again).
+    retryOnDispatchFailure: false,
     inputSchema: {},
     execute: async (ctx) => {
       // Guard: only start the job when there is actually something to update.
@@ -269,6 +280,9 @@ export const systemActions: ActionDescriptor[] = [
     riskLevel: 'dangerous',
     deviceCount: 1,
     timeoutMs: 60_000,
+    // Flapping guard — a failed major upgrade must never be re-dispatched
+    // (it would start the upgrade job again).
+    retryOnDispatchFailure: false,
     inputSchema: {},
     execute: async (ctx) => {
       const st = firmware.parseFirmwareStatus((await firmware.getFirmwareStatus(ctx.client)).data ?? {});

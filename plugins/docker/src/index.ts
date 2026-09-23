@@ -24,6 +24,7 @@ import {
   StateRequestBody,
   StateSection,
   clampInt,
+  isTransientTransportError,
   createPluginLogger,
   createPluginServer,
   errorDescriptor,
@@ -385,7 +386,11 @@ app.post('/config', async (req, res) => {
     res.status(200).json({ success: result.success, result });
   } catch (err) {
     logger.error(`Config action ${actionId} failed: ${(err as Error).message}`, { deviceId, context: { actionId } });
-    res.status(200).json({ success: false, result: { error: (err as Error).message } });
+    // Transport-level failures (daemon unreachable / not ready yet) are
+    // transient — the plan executor re-dispatches them per the plan's retry
+    // policy. Engine-API errors already come back as ok:false results.
+    const retryable = isTransientTransportError(err);
+    res.status(200).json({ success: false, result: { error: (err as Error).message, ...(retryable ? { retryable: true } : {}) } });
   }
 });
 

@@ -242,6 +242,31 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'Default per-step dispatch timeout when a plan step runs against a plugin. Individual catalog actions may override this with their own timeoutMs.',
   },
   {
+    key: 'planStepRetryMaxAttempts',
+    label: 'Plan step retries (default)',
+    type: 'integer',
+    category: 'Execution',
+    min: 0,
+    max: 10,
+    default: 2,
+    exposeToPlugins: true,
+    help:
+      'Total dispatch attempts per FAILED plan step by default (initial + retries — e.g. 2 = one initial attempt plus one retry), applied only when the failure is TRANSIENT (the plugin reports retryable=true, or the dispatch itself timed out / could not reach the plugin). A hard failure (validation error, missing object, …) always fails the plan immediately. Individual plans can override this with their own retry policy; 1 disables step retries globally.',
+  },
+  {
+    key: 'planStepRetryWaitMs',
+    label: 'Plan step retry wait (default)',
+    type: 'integer',
+    category: 'Execution',
+    unit: 'ms',
+    min: 1_000,
+    max: 3_600_000,
+    default: 15_000,
+    exposeToPlugins: true,
+    help:
+      'How long the executor waits between two attempts of a failed plan step (default policy). A plugin can suggest a longer wait per failure via ActionResult.waitMs — e.g. when an appliance needs minutes to settle after an update — and that hint wins over this value for that attempt.',
+  },
+  {
     key: 'pluginDispatchTimeoutMs',
     label: 'Plugin action timeout',
     type: 'integer',

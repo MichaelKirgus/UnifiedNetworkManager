@@ -111,6 +111,9 @@ const systemRebootAction: ActionDescriptor<TruenasActionContext> = {
   riskLevel: 'dangerous' as const,
   deviceCount: 1 as const,
   timeoutMs: 60_000,
+  // Flapping guard — a failed reboot must never be re-dispatched (it would
+  // power-cycle the appliance again). The socket drop on success is expected.
+  retryOnDispatchFailure: false,
   inputSchema: {
     reason: { type: 'string', required: true, minLength: 3, maxLength: 200, description: 'Reason recorded in the appliance audit log' },
   },
@@ -176,6 +179,8 @@ const systemShutdownAction: ActionDescriptor<TruenasActionContext> = {
   riskLevel: 'dangerous' as const,
   deviceCount: 1 as const,
   timeoutMs: 60_000,
+  // Flapping guard — a failed shutdown must never be re-dispatched.
+  retryOnDispatchFailure: false,
   inputSchema: {
     reason: { type: 'string', required: true, minLength: 3, maxLength: 200, description: 'Reason recorded in the appliance audit log' },
   },
@@ -213,6 +218,9 @@ const systemFirmwareUpdateAction: ActionDescriptor<TruenasActionContext> = {
   riskLevel: 'dangerous' as const,
   deviceCount: 1 as const,
   timeoutMs: 3_600_000, // multi-GB downloads + install can exceed an hour on slow links
+  // Flapping guard — a failed firmware update must never be re-dispatched (it
+  // would flash the OS again). The socket drop on success is expected.
+  retryOnDispatchFailure: false,
   inputSchema: {
     version: { type: 'string', required: false, minLength: 2, description: 'Target release (e.g. "25.10.1"); omit for the newest matching the configured update profile' },
     train: { type: 'string', required: false, minLength: 2, description: "Update train override (e.g. \"TrueNAS-26-BETA\"); omit to keep the box's configured profile" },
@@ -357,6 +365,9 @@ const configRestoreAction: ActionDescriptor<TruenasActionContext> = {
   riskLevel: 'dangerous' as const,
   deviceCount: 1 as const,
   timeoutMs: 300_000, // upload + config swap; the box then reboots on its own
+  // Flapping guard — a failed restore must never be re-dispatched (it would
+  // overwrite the config DB again and reboot). The socket drop is expected.
+  retryOnDispatchFailure: false,
   inputSchema: {
     fileBase64: { type: 'string', required: true, minLength: 8, description: 'The configuration backup file (as produced by config.backup.download or the Web UI) as base64' },
     fileName: { type: 'string', required: false, maxLength: 200, description: 'Original file name (informational only)' },
@@ -422,6 +433,9 @@ const configResetAction: ActionDescriptor<TruenasActionContext> = {
   riskLevel: 'dangerous' as const,
   deviceCount: 1 as const,
   timeoutMs: 300_000,
+  // Flapping guard — a failed factory reset must never be re-dispatched (it
+  // would wipe the config again and reboot). The socket drop is expected.
+  retryOnDispatchFailure: false,
   inputSchema: {
     reboot: { type: 'boolean', required: false, default: true, description: 'Reboot after the reset (TrueNAS default)' },
   },
@@ -564,6 +578,8 @@ const firmwareUpdateFileAction: ActionDescriptor<TruenasActionContext> = {
   riskLevel: 'dangerous' as const,
   deviceCount: 1 as const,
   timeoutMs: 7_200_000, // multi-GB update files + install can exceed an hour on slow links
+  // Flapping guard — a failed firmware-from-file update must never be re-dispatched.
+  retryOnDispatchFailure: false,
   inputSchema: {
     path: { type: 'string', required: false, minLength: 2, description: "Absolute path of an .update file ALREADY on the appliance (e.g. /mnt/tank/TrueNAS-25.10.1.update); omit when passing fileBase64" },
     destination: { type: 'string', required: false, maxLength: 200, description: "Pool mountpoint to stage the uploaded file in (e.g. /mnt/tank); omit for :temp: — only used with fileBase64" },

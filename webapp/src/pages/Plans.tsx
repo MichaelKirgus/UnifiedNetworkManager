@@ -472,6 +472,9 @@ function CreatePlan({ onDone, onCancel }: { onDone: () => void; onCancel: () => 
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [selectedDeviceIds, setSelectedDeviceIds] = useState<string[]>([]);
   const [formError, setFormError] = useState<string | null>(null);
+  // Optional per-plan retry override (empty = inherit the global defaults).
+  const [retryMax, setRetryMax] = useState('');
+  const [retryWaitS, setRetryWaitS] = useState('');
 
   // Devices that have THIS plugin assigned (the plan can only target those).
   const eligibleDevices: Device[] = useMemo(() => {
@@ -487,13 +490,18 @@ function CreatePlan({ onDone, onCancel }: { onDone: () => void; onCancel: () => 
   }
 
   const createPlan = useMutation({
-    mutationFn: () =>
-      api.createPlan({
+    mutationFn: () => {
+      const retryPolicy: Record<string, number> = {};
+      if (retryMax.trim() !== '') retryPolicy.maxAttempts = Number(retryMax);
+      if (retryWaitS.trim() !== '') retryPolicy.waitMs = Math.round(Number(retryWaitS) * 1000);
+      return api.createPlan({
         pluginId,
         intentActionId: intentId,
         inputs,
         devices: selectedDeviceIds.map((deviceId) => ({ deviceId })),
-      }),
+        ...(Object.keys(retryPolicy).length > 0 ? { retryPolicy } : {}),
+      });
+    },
     onSuccess: (plan) => {
       window.location.href = `/plans/${plan.id}`;
     },
@@ -619,6 +627,37 @@ function CreatePlan({ onDone, onCancel }: { onDone: () => void; onCancel: () => 
             )}
           </section>
         )}
+
+        {/* Step 4: optional retry override */}
+        <section className="rounded-md border border-border bg-card p-4 shadow-sm">
+          <h2 className="mb-1 text-sm font-semibold text-foreground">Retry policy (optional)</h2>
+          <p className="text-xs text-muted-foreground">
+            Failed steps are retried only when the failure is transient (the plugin reports it as retryable, or the dispatch timed out / could not
+            reach the plugin). Leave empty to use the global defaults — or set max attempts to 0 to disable retries for this plan.
+          </p>
+          <div className="mt-2 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <label className="block text-sm">
+              <span className="mb-1 block font-medium text-secondary">Max attempts per step</span>
+              <input
+                type="number" min={0} max={10}
+                value={retryMax}
+                onChange={(e) => setRetryMax(e.target.value)}
+                placeholder="inherit global default"
+                className="w-full rounded-md border border-border px-3 py-2 text-sm"
+              />
+            </label>
+            <label className="block text-sm">
+              <span className="mb-1 block font-medium text-secondary">Wait between attempts (seconds)</span>
+              <input
+                type="number" min={1} max={3600}
+                value={retryWaitS}
+                onChange={(e) => setRetryWaitS(e.target.value)}
+                placeholder="inherit global default"
+                className="w-full rounded-md border border-border px-3 py-2 text-sm"
+              />
+            </label>
+          </div>
+        </section>
 
         <div className="flex items-center gap-3">
           <button

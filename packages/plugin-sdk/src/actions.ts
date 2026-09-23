@@ -115,6 +115,12 @@ export interface ActionDescriptor<Context = unknown> {
   deviceCount: 1 | 'N';
   /** Per-action timeout override (ms) for long-running ops. */
   timeoutMs?: number;
+  /**
+   * When false, the plan executor never re-dispatches this action after a failed
+   * attempt (flapping guard for power / firmware-flash / config-restore actions).
+   * Absent/true = normal retry policy applies.
+   */
+  retryOnDispatchFailure?: boolean;
   inputSchema: InputSchema;
   execute: (ctx: Context, input: Record<string, unknown>) => Promise<ActionResult>;
 }
@@ -145,6 +151,7 @@ export function createRegistry<Context = unknown>(actions: ActionDescriptor<Cont
         riskLevel: a.riskLevel,
         deviceCount: 1 as const,
         timeoutMs: a.timeoutMs,
+        retryOnDispatchFailure: a.retryOnDispatchFailure,
         inputSchema: a.inputSchema,
       })),
   };

@@ -301,6 +301,9 @@ export interface CatalogEntry {
   /** Exact device count (1 = single-device action, 2 = tunnel intent...). */
   deviceCount: number | 'N';
   beOnly?: boolean;
+  timeoutMs?: number;
+  /** Flapping guard — false = the plan executor never re-dispatches this action. */
+  retryOnDispatchFailure?: boolean;
   inputSchema: InputSchema;
 }
 
@@ -314,6 +317,8 @@ export function listCatalog(): CatalogEntry[] {
     riskLevel: a.riskLevel,
     deviceCount: 1 as const,
     beOnly: a.beOnly,
+    timeoutMs: a.timeoutMs,
+    retryOnDispatchFailure: a.retryOnDispatchFailure,
     inputSchema: a.inputSchema,
   }));
   const fromIntents: CatalogEntry[] = MULTI_DEVICE_INTENTS.map((i) => ({

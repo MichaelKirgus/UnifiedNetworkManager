@@ -109,6 +109,29 @@ export default function PlanDetail() {
     onSuccess: () => planQuery.refetch(),
   });
 
+  // Per-plan retry policy — the global defaults (Settings → Execution) are the
+  // baseline; this card overrides them for THIS plan only. Only transient
+  // failures (plugin reports retryable, or dispatch timeout/unreachable) retry.
+  const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.listSettings });
+  const globalRetryMax = Number(settingsQuery.data?.settings.find((s) => s.key === 'planStepRetryMaxAttempts')?.value ?? 2);
+  const globalRetryWaitMs = Number(settingsQuery.data?.settings.find((s) => s.key === 'planStepRetryWaitMs')?.value ?? 15_000);
+  const [retryMax, setRetryMax] = useState<string | null>(null); // null = inherit
+  const [retryWaitS, setRetryWaitS] = useState<string | null>(null); // seconds; null = inherit
+  useEffect(() => {
+    if (!plan) return;
+    setRetryMax(plan.retryPolicy?.maxAttempts !== undefined ? String(plan.retryPolicy.maxAttempts) : null);
+    setRetryWaitS(plan.retryPolicy?.waitMs !== undefined ? String(Math.round(plan.retryPolicy.waitMs / 1000)) : null);
+  }, [plan?.id, plan?.retryPolicy]);
+  const retryMutation = useMutation({
+    mutationFn: () => {
+      const policy: Record<string, number> = {};
+      if (retryMax !== null && retryMax.trim() !== '') policy.maxAttempts = Number(retryMax);
+      if (retryWaitS !== null && retryWaitS.trim() !== '') policy.waitMs = Math.round(Number(retryWaitS) * 1000);
+      return api.updatePlan(id, { retryPolicy: Object.keys(policy).length > 0 ? policy : null });
+    },
+    onSuccess: () => planQuery.refetch(),
+  });
+
   if (planQuery.isLoading) return <Layout><p className="text-sm text-muted-foreground">Loading plan…</p></Layout>;
   if (planQuery.isError || !plan) {
     return (
@@ -223,6 +246,59 @@ export default function PlanDetail() {
           </span>
         </div>
       )}
+
+      {/* Retry policy — per-plan override of the global defaults (Settings → Execution). */}
+      <section className="mb-5 rounded-md border border-border bg-card p-4 shadow-sm">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-foreground">Retry policy</h2>
+          {canApply && editable && (
+            retryMutation.isPending ? (
+              <span className="text-xs text-faint">Saving…</span>
+            ) : (
+              <button
+                onClick={() => retryMutation.mutate()}
+                disabled={retryMax === null && retryWaitS === null}
+                title={retryMax === null && retryWaitS === null ? 'Nothing to change — the plan uses the global defaults' : 'Save this plan’s retry policy'}
+                className="rounded-md bg-primary px-3 py-1 text-xs font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
+              >
+                Save
+              </button>
+            )
+          )}
+        </div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Failed steps are re-dispatched only when the failure is TRANSIENT — the plugin reports it as retryable (appliance not ready, service still
+          starting, …) or the dispatch itself timed out / could not reach the plugin. Hard failures fail this plan immediately.
+        </p>
+        <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <label className="block text-sm">
+            <span className="mb-1 block font-medium text-secondary">Max attempts per step</span>
+            <input
+              type="number" min={0} max={10}
+              value={retryMax ?? ''}
+              disabled={!canApply || !editable}
+              onChange={(e) => setRetryMax(e.target.value)}
+              placeholder={`inherit (${globalRetryMax})`}
+              className="w-full rounded-md border border-border px-3 py-2 text-sm disabled:opacity-50"
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="mb-1 block font-medium text-secondary">Wait between attempts (seconds)</span>
+            <input
+              type="number" min={1} max={3600}
+              value={retryWaitS ?? ''}
+              disabled={!canApply || !editable}
+              onChange={(e) => setRetryWaitS(e.target.value)}
+              placeholder={`inherit (${Math.round(globalRetryWaitMs / 1000)})`}
+              className="w-full rounded-md border border-border px-3 py-2 text-sm disabled:opacity-50"
+            />
+          </label>
+        </div>
+        <p className="mt-2 text-xs text-faint">
+          Leave a field empty to inherit the global default. A plugin can suggest a longer wait per failure (e.g. minutes for an update to settle) —
+          that hint wins over this value for that attempt.
+        </p>
+      </section>
 
       {/* Who + when — attribution and execution timing for the current run. */}
       <section className="mb-5 grid grid-cols-2 gap-x-6 gap-y-3 rounded-md border border-border bg-card p-4 text-sm shadow-sm sm:grid-cols-3 lg:grid-cols-6">

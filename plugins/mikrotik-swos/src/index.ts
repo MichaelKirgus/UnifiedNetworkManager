@@ -8,6 +8,7 @@ import {
   createPluginLogger,
   createPluginServer,
   errorDescriptor,
+  isTransientTransportError,
   modelFirmwareDescriptors,
   parseProbeTarget,
   readSettings,
@@ -476,7 +477,11 @@ app.post('/config', async (req, res) => {
       return;
     }
     logger.error(`Config action ${actionId} failed for ${managementAddress}: ${(err as Error).message}`, { deviceId: typeof deviceId === 'string' ? deviceId : null, context: { host: managementAddress, actionId } });
-    res.status(200).json({ success: false, result: { error: (err as Error).message } });
+    // Transport-level failures (switch down / not ready yet) are transient — the
+    // plan executor re-dispatches them per the plan's retry policy. Auth errors
+    // above stay hard.
+    const retryable = isTransientTransportError(err);
+    res.status(200).json({ success: false, result: { error: (err as Error).message, ...(retryable ? { retryable: true } : {}) } });
   }
 });
 

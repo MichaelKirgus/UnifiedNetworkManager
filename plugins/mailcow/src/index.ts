@@ -22,6 +22,7 @@ import {
   MetricDescriptor,
   PluginOptionDescriptor,
   clampInt,
+  isTransientTransportError,
   createPluginLogger,
   createPluginServer,
   errorDescriptor,
@@ -477,7 +478,12 @@ app.post('/config', async (req, res) => {
     res.status(200).json({ success: result.success, result });
   } catch (err) {
     logger.error(`Config action ${actionId} failed for ${host}: ${errMsg(err)}`, { deviceId, context: { host, actionId } });
-    res.status(200).json({ success: false, result: { error: errMsg(err) } });
+    // Transport-level failures (instance down / not ready yet) are transient —
+    // the plan executor re-dispatches them per the plan's retry policy. A
+    // MailcowApiError means the API answered (bad key, duplicate object, …) —
+    // that stays a hard failure.
+    const retryable = !(err instanceof MailcowApiError) && isTransientTransportError(err);
+    res.status(200).json({ success: false, result: { error: errMsg(err), ...(retryable ? { retryable: true } : {}) } });
   }
 });
 

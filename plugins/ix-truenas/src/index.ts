@@ -46,6 +46,7 @@ import {
   type SshTerminalSession,
   type UpdateRow,
   type QuickAction,
+  SshError,
 } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } from './client/truenasClient';
 import {
@@ -2650,6 +2651,24 @@ function applianceHost(managementAddress: unknown): string {
   return typeof managementAddress === 'string' ? managementAddress.trim() : '';
 }
 
+/**
+ * Classifies a thrown config-action error for the UNM plan executor's retry
+ * logic (ActionResult.retryable). TRANSIENT = the appliance/channel was not
+ * reachable or ready at that moment — a re-dispatch can succeed:
+ *   - TruenasRpcError WITHOUT an RPC code: transport failure (timeout,
+ *     "WebSocket session unresponsive", socket drop) — e.g. the box is busy
+ *     with an update, rebooting, or its middlewared is overloaded;
+ *   - SshError: SSH channel down / appliance unreachable over that path.
+ * A TruenasRpcError WITH a code is a JSON-RPC METHOD rejection (validation,
+ * "app not found", …) — deterministic, so it stays a HARD failure. Auth errors
+ * are hard too (retries cannot fix bad credentials).
+ */
+function isTransientConfigError(e: unknown): boolean {
+  if (e instanceof SshError) return true;
+  if (e instanceof TruenasRpcError && e.code === undefined) return true; // transport-level only
+  return false;
+}
+
 app.post('/config', async (req, res) => {
   const body = req.body ?? {};
   const deviceId = typeof body.deviceId === 'string' ? body.deviceId : null;
@@ -2714,7 +2733,10 @@ app.post('/config', async (req, res) => {
     res.status(200).json({ success: result.success, result });
   } catch (err) {
     logger.error(`Config action ${actionId} failed for ${host}: ${errMsg(err)}`, { deviceId, context: { host, actionId } });
-    res.status(200).json({ success: false, result: { error: errMsg(err) } });
+    // Transport-level failures are transient — the plan executor re-dispatches
+    // them per the plan's retry policy. Method rejections stay hard failures.
+    const retryable = isTransientConfigError(err);
+    res.status(200).json({ success: false, result: { error: errMsg(err), ...(retryable ? { retryable: true } : {}) } });
   }
 });
 

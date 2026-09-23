@@ -170,6 +170,7 @@ export function listCatalog(): CatalogEntry[] {
     riskLevel: a.riskLevel,
     deviceCount: 1 as const,
     timeoutMs: a.timeoutMs,
+    retryOnDispatchFailure: a.retryOnDispatchFailure,
     inputSchema: a.inputSchema,
   }));
   const fromIntents: CatalogEntry[] = MULTI_DEVICE_INTENTS.map((i) => ({

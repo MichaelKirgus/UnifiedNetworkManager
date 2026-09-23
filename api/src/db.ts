@@ -140,6 +140,9 @@ export async function initDb(): Promise<void> {
   await pool.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS "preScheduleStatus" TEXT`);
   await pool.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS "scheduleAttempts" INTEGER NOT NULL DEFAULT 0`);
 
+  // Plans: per-plan retry policy for failed steps (JSON, null = global defaults).
+  await pool.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS "retryPolicy" TEXT`);
+
   // Roles: named bundles of permissions (see backfillAdminRole for the seed).
   await pool.query(`
     CREATE TABLE IF NOT EXISTS roles (

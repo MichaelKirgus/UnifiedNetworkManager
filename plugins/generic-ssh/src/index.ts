@@ -22,6 +22,7 @@
 import path from 'path';
 import {
   PluginOptionDescriptor,
+  isTransientTransportError,
   createPluginLogger,
   createPluginServer,
   createTerminalPool,
@@ -556,7 +557,11 @@ app.post('/config', async (req, res) => {
     res.status(200).json({ success: result.success, result: { ...result } });
   } catch (err) {
     logger.error(`Config action ${actionId} failed for ${managementAddress}: ${(err as Error).message}`, { deviceId, context: { host: managementAddress, actionId } });
-    res.status(200).json({ success: false, result: { error: (err as Error).message } });
+    // Transport-level failures (SSH channel down / device not ready yet) are
+    // transient — the plan executor re-dispatches them per the plan's retry
+    // policy. Command-level failures already come back as ok:false results.
+    const retryable = isTransientTransportError(err);
+    res.status(200).json({ success: false, result: { error: (err as Error).message, ...(retryable ? { retryable: true } : {}) } });
   }
 });
 

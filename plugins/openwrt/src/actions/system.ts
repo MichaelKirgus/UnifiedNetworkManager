@@ -159,6 +159,9 @@ export const SYSTEM_ACTIONS: ActionDescriptor[] = [
     riskLevel: 'dangerous',
     deviceCount: 1,
     timeoutMs: 30_000,
+    // Flapping guard — a failed reboot must never be re-dispatched (it would
+    // power-cycle the router again).
+    retryOnDispatchFailure: false,
     inputSchema: {},
     execute: async (ctx) => {
       if (!sshAvailable(ctx)) return noSshResult();
@@ -175,6 +178,8 @@ export const SYSTEM_ACTIONS: ActionDescriptor[] = [
     riskLevel: 'dangerous',
     deviceCount: 1,
     timeoutMs: 30_000,
+    // Flapping guard — a failed halt must never be re-dispatched.
+    retryOnDispatchFailure: false,
     inputSchema: {},
     execute: async (ctx) => {
       if (!sshAvailable(ctx)) return noSshResult();

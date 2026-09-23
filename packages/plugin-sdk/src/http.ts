@@ -13,6 +13,7 @@
  */
 
 import https from 'https';
+import { SshError } from './ssh';
 
 /**
  * The canonical result envelope for one device-API call. Non-2xx and network
@@ -209,7 +210,34 @@ export function isNetworkLevelError(err: unknown): boolean {
   const msg = String(e.message ?? '');
   return /timeout|timed out|ECONNREFUSED|ENOTFOUND/i.test(msg) || TLS_FAILURE_PATTERN.test(msg);
 }
-
+/**
+ * True when `err` is a TRANSIENT transport-level failure — the device/channel
+ * was not reachable or ready at that moment, so a re-dispatch can succeed:
+ * connection refused/reset/timeout, DNS blip, socket drop. Used by plugins'
+ * /config handlers to mark such failures `retryable: true` for the UNM plan
+ * executor (see ActionResult.retryable). Deliberately EXCLUDES TLS-handshake
+ * mismatches (a plain-HTTP box behind an https candidate is a CONFIG problem —
+ * retrying will never fix it) and auth errors. HTTP-level outcomes (4xx/5xx
+ * with a response body) are NOT transport failures: the endpoint answered, so
+ * the failure is final for that attempt.
+ */
+export function isTransientTransportError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: string; message?: string };
+  // SSH channel down / appliance unreachable over an SSH path (SshError covers
+  // connect failures, exec timeouts and socket drops — all transient).
+  if (e instanceof SshError) return true;
+  if (typeof e.code === 'string' && NETWORK_ERROR_CODES.has(e.code)) {
+    // EPROTO can be a TLS handshake mismatch (config problem) — only treat it
+    // as transient when the message does not look like one.
+    if (e.code === 'EPROTO') return !TLS_FAILURE_PATTERN.test(String(e.message ?? ''));
+    return true;
+  }
+  const msg = String(e.message ?? '');
+  if (!msg) return false;
+  if (TLS_FAILURE_PATTERN.test(msg)) return false; // plain-HTTP box — not transient
+  return /timeout|timed out|ECONNREFUSED|ENOTFOUND|socket hang up/i.test(msg);
+}
 /** Builds an HTTP Basic `Authorization` header value from a username/password pair. */
 export function basicAuthHeader(username: string, password: string): string {
   return `Basic ${Buffer.from(`${username ?? ''}:${password ?? ''}`, 'utf8').toString('base64')}`;

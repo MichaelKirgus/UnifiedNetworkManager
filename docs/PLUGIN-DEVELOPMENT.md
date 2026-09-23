@@ -221,6 +221,71 @@ confirmation. Use the SDK's `pollUntil(probe, isDone, {timeoutMs, intervalMs})`
 helper (probe errors are swallowed; only the bounded timeout decides) and keep
 verification INSIDE `execute()` — it must not exceed the action's `timeoutMs`.
 
+### Retrying failed steps (`ActionResult.retryable` / `waitMs`)
+
+A plan step that FAILS is re-dispatched by the executor **only when the failure
+is transient**. The retry budget comes from the plan's retry policy (per-plan
+override ⊕ global settings `planStepRetryMaxAttempts` / `planStepRetryWaitMs`,
+visible on the Settings page and editable per plan in the webapp). You decide
+WHICH failures are transient:
+
+| How your action reports | Executor behavior |
+|---|---|
+| **Dispatch-level failure** (the plugin was unreachable or the round-trip timed out) | **Transient by default** — the device may simply not be ready yet (reboot, update in flight). Re-dispatched per the retry policy unless your action opts out below. |
+| `{ success: false, retryable: true }` | **Transient** — the step is dispatched again until `maxAttempts` TOTAL dispatches (initial + retries), waiting `waitMs` (or your per-failure hint) between attempts. Use for "appliance not ready yet", "service still starting", "container not up", "job queue busy". The SDK's `isTransientTransportError(err)` classifies connection/timeout/socket-drop errors for exactly this — wire it into your `/config` catch so transport failures come back as `{ success: false, retryable: true }`. |
+| `{ success: false, retryable: true, waitMs: 120_000 }` | Same, but the NEXT attempt waits your suggested `waitMs` (clamped to ≤ 3600 s) instead of the policy default — e.g. minutes for an update to settle. |
+| `{ success: false }` or a **thrown error** without classification | **Hard failure** — fails the plan immediately, no retries, regardless of the retry policy. Use for validation errors, missing objects, wrong states that will not fix themselves. |
+
+Rules of thumb:
+
+- A thrown exception is hard UNLESS your `/config` catch classifies it as a
+  transient transport error (see `isTransientTransportError`). When you want a
+  retry, RETURN `{ success: false, retryable: true, error: '…' }`.
+- Retries re-dispatch the SAME step with the SAME input — keep actions
+  idempotent (the executor already skips steps whose target state is reached).
+- The wait between attempts is interruptible by a user cancel; each attempt gets
+  its own `config_jobs` row, so every dispatch stays auditable.
+
+You can also steer the retry policy for an ENTIRE plan from your `/plan`
+handler — e.g. disable retries for a critical intent where any failure must
+surface immediately:
+
+```ts
+return {
+  id, createdAt, intentActionId, provisionRequests, steps,
+  retryPolicy: { maxAttempts: 0 },   // or { waitMs: 60_000 } to slow the default down
+};
+```
+
+The user's explicit choice at creation time (or an edit before execution) wins
+over your suggestion; omit `retryPolicy` to inherit the global defaults.
+
+#### Flapping guard (`ActionDescriptor.retryOnDispatchFailure`)
+
+Retries re-dispatch the SAME step — which is exactly what you do NOT want for
+actions that cause flapping states: a failed `system.reboot` whose dispatch
+timed out (the box went down) must not be sent again, or the switch would be
+rebooted twice. Declare such actions with `retryOnDispatchFailure: false`:
+
+```ts
+const systemRebootAction: ActionDescriptor<MyContext> = {
+  id: 'system.reboot',
+  // …
+  riskLevel: 'dangerous',
+  retryOnDispatchFailure: false,   // a failed attempt is ALWAYS final — no re-dispatch
+  inputSchema: {},
+  execute: async (ctx) => { /* … */ },
+};
+```
+
+The flag is advertised in `/discover` and honored by the executor for EVERY
+failure kind of that action — it overrides both the dispatch-level transient
+guess and a plugin-reported `retryable: true`. Set it on power actions
+(reboot/halt/shutdown), firmware flashes, config restores/resets, and any other
+non-idempotent or device-downing operation. Everything else (config writes,
+service restarts, container upgrades) should keep the default so "device not
+ready yet" failures self-heal.
+
 ---
 
 ## 7. Device state — `POST /state` (the Config page)

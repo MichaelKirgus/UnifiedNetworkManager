@@ -2078,6 +2078,8 @@ export interface CatalogEntry {
   deviceCount?: number | 'N';
   beOnly?: boolean;
   timeoutMs?: number;
+  /** When false the plan executor never re-dispatches this action (flapping guard). */
+  retryOnDispatchFailure?: boolean;
   inputSchema?: InputSchema;
 }
 
@@ -2255,6 +2257,14 @@ export interface PlanStep {
   finishedAt?: string | null;
 }
 
+/** Per-plan retry override for failed steps — partial; missing keys inherit the global defaults. */
+export interface PlanRetryPolicy {
+  /** Max dispatch attempts per step (0 = no retries). */
+  maxAttempts?: number;
+  /** Wait between attempts in ms when the plugin gives no per-failure hint. */
+  waitMs?: number;
+}
+
 /** A persisted execution plan (list shape; detail adds `steps`). */
 export interface Plan {
   id: string;
@@ -2285,6 +2295,8 @@ export interface Plan {
   scheduledAt?: string | null;
   /** What happens if the plugin is unreachable at the due instant: 'run-asap' retries with backoff, 'skip' marks it skipped. */
   schedulePolicy?: 'run-asap' | 'skip' | null;
+  /** Per-plan retry override for failed steps; null = global defaults (only transient failures are retried). */
+  retryPolicy?: PlanRetryPolicy | null;
   /** Present on list responses. */
   stepCount?: number;
   stepsDone?: number;
@@ -2919,8 +2931,13 @@ export const api = {
     intentActionId: string;
     inputs?: Record<string, unknown>;
     devices: { deviceId: string }[];
+    /** Optional per-plan retry override; wins over the plugin's suggestion and the global defaults. */
+    retryPolicy?: PlanRetryPolicy | null;
   }) => apiFetch<PlanDetail>('/plans', { method: 'POST', body: JSON.stringify(body) }),
   getPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}`),
+  /** Update plan-level settings (currently: the per-plan retry policy). Draft/ready/scheduled only. */
+  updatePlan: (id: string, body: { retryPolicy?: PlanRetryPolicy | null }) =>
+    apiFetch<PlanDetail>(`/plans/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deletePlan: (id: string) => apiFetch<void>(`/plans/${id}`, { method: 'DELETE' }),
   executePlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/execute`, { method: 'POST' }),
   /** Resolve a kind:'url' quick action into the device's management web-UI URL. */

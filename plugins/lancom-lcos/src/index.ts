@@ -11,6 +11,7 @@ import {
   hostFromAddress,
   INVENTORY_INTERVAL_MS,
   makeConsoleUpgrade,
+  isTransientTransportError,
   quickActionHandler,
   buildWebUiUrl,
   modelFirmwareDescriptors,
@@ -881,7 +882,11 @@ app.post('/config', async (req, res) => {
     res.status(200).json({ success: result.success, result: { ...result } });
   } catch (err) {
     logger.error(`Config action ${actionId} failed for ${managementAddress}: ${(err as Error).message}`, { deviceId: typeof deviceId === 'string' ? deviceId : null, context: { host: managementAddress, actionId } });
-    res.status(200).json({ success: false, result: { error: (err as Error).message } });
+    // Transport-level failures (router down / not ready yet) are transient — the
+    // plan executor re-dispatches them per the plan's retry policy. Web-UI/SNMP
+    // protocol errors already come back as ok:false results and stay hard.
+    const retryable = isTransientTransportError(err);
+    res.status(200).json({ success: false, result: { error: (err as Error).message, ...(retryable ? { retryable: true } : {}) } });
   }
 });
 

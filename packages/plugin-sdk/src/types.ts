@@ -349,6 +349,14 @@ export interface CatalogEntry {
   timeoutMs?: number;
   /** Only executable on Business Edition (OPNsense-specific flag). */
   beOnly?: boolean;
+  /**
+   * When false, the plan executor NEVER re-dispatches this action after a failed
+   * attempt — even if the failure looks transient (device not ready yet) or the
+   * plugin reports retryable:true. Set on power / firmware-flash / config-restore
+   * actions where a re-dispatch would flap the device (e.g. reboot it twice).
+   * Absent/true = the normal per-plan retry policy applies.
+   */
+  retryOnDispatchFailure?: boolean;
   inputSchema: InputSchema;
 }
 
@@ -377,6 +385,14 @@ export interface PlanStep {
   bestEffort?: boolean;
 }
 
+/** Per-plan retry override for FAILED plan steps (see ActionResult.retryable). */
+export interface PlanRetryPolicy {
+  /** Max dispatch attempts per step (0 = no retries, 1..10; default from global settings). */
+  maxAttempts?: number;
+  /** Wait between attempts in ms when the plugin gives no per-failure waitMs hint. */
+  waitMs?: number;
+}
+
 /** The output of /plan: ordered, dependency-aware steps + credential requests. */
 export interface Plan {
   id: string;
@@ -384,6 +400,14 @@ export interface Plan {
   intentActionId: string;
   provisionRequests: ProvisionRequest[];
   steps: PlanStep[];
+  /**
+   * Optional per-plan retry policy the plugin wants for this plan — e.g.
+   * `{ maxAttempts: 0 }` to DISABLE step retries for a critical intent where
+   * every failure must surface immediately. The user's explicit choice at
+   * creation time (or an edit before execution) wins over this; when neither is
+   * set, the global settings apply. Omit it to inherit the defaults.
+   */
+  retryPolicy?: PlanRetryPolicy | null;
 }
 
 /** One device in a /plan request (credentials = primary secret fields only). */
@@ -399,13 +423,28 @@ export interface PlanRequest<Credentials extends object = Record<string, unknown
   devices: PlanDevice<Credentials>[];
 }
 
-/** The result an action executor returns. `verified` = plugin re-read state post-apply. */
+/** The result an action executor returns. `verified` = plugin re-read state post-apply.
+ *
+ * RETRY SEMANTICS (plan steps only): when `success` is false the UNM plan
+ * executor decides whether to RE-DISPATCH this step based on:
+ *   - `retryable: true`  → transient failure (appliance not ready yet, service
+ *     still starting, container not up, …) — the step is retried per the plan's
+ *     retry policy; omit/false = hard failure that fails the plan immediately.
+ *   - `waitMs`           → suggested wait before the next attempt (e.g. minutes
+ *     for an update to settle); wins over the policy default for this attempt.
+ * A thrown error is a HARD failure by contract — return { success: false,
+ * retryable: true } instead when you want the executor to retry.
+ */
 export interface ActionResult {
   success: boolean;
   applied?: boolean;
   verified?: boolean;
   details?: Record<string, unknown>;
   error?: string;
+  /** Only meaningful with success=false — marks a TRANSIENT failure worth re-dispatching. */
+  retryable?: boolean;
+  /** Only meaningful with success=false + retryable=true — suggested wait before the next attempt (ms). */
+  waitMs?: number;
 }
 
 // ---------------------------------------------------------------------------

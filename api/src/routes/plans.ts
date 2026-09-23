@@ -50,6 +50,8 @@ interface PlanRow {
   schedulePolicy: string | null;
   preScheduleStatus: string | null;
   scheduleAttempts: number;
+  /** JSON per-plan retry override ({ maxAttempts?, waitMs? }) or null = global defaults. */
+  retryPolicy: string | null;
 }
 
 /**
@@ -216,6 +218,8 @@ function serializePlanRow(row: PlanRow, usernames: Map<string, string>): Record<
     // Scheduling state (null when the plan is not scheduled).
     scheduledAt: row.scheduledAt ?? null,
     schedulePolicy: row.schedulePolicy ?? null,
+    // Per-plan retry override for failed steps — null = global defaults.
+    retryPolicy: parseJson<Record<string, unknown> | null>(row.retryPolicy ?? null, null),
   };
 }
 
@@ -438,6 +442,8 @@ router.post(
         secretRefs?: string[];
         bestEffort?: boolean;
       }>;
+      /** Optional per-plan retry override the plugin wants (e.g. disable retries for a critical intent). */
+      retryPolicy?: { maxAttempts?: number; waitMs?: number } | null;
     };
     try {
       const response = await axios.post(
@@ -480,6 +486,23 @@ router.post(
       return;
     }
 
+    // Per-plan retry policy: the user's explicit choice wins; otherwise a plugin
+    // may set one on the plan it returns from /plan (e.g. { maxAttempts: 0 } to
+    // disable retries for a critical intent); otherwise null = global defaults.
+    const bodyRetryPolicy = isPlainObject(body.retryPolicy) ? (body.retryPolicy as Record<string, unknown>) : undefined;
+    let retryPolicyJson: string | null = null;
+    if (bodyRetryPolicy !== undefined) {
+      retryPolicyJson = JSON.stringify({
+        ...(typeof bodyRetryPolicy['maxAttempts'] === 'number' ? { maxAttempts: Math.trunc(bodyRetryPolicy['maxAttempts']) } : {}),
+        ...(typeof bodyRetryPolicy['waitMs'] === 'number' ? { waitMs: Math.round(bodyRetryPolicy['waitMs']) } : {}),
+      });
+    } else if (plan.retryPolicy && typeof plan.retryPolicy === 'object') {
+      retryPolicyJson = JSON.stringify({
+        ...(typeof plan.retryPolicy.maxAttempts === 'number' ? { maxAttempts: Math.trunc(plan.retryPolicy.maxAttempts) } : {}),
+        ...(typeof plan.retryPolicy.waitMs === 'number' ? { waitMs: Math.round(plan.retryPolicy.waitMs) } : {}),
+      });
+    }
+
     const now = new Date().toISOString();
     const planRowId = uuidv4();
     await db.insert(schema.plans).values({
@@ -499,6 +522,7 @@ router.post(
       updatedAt: now,
       startedAt: null,
       finishedAt: null,
+      retryPolicy: retryPolicyJson,
     });
     for (const step of plan.steps) {
       await db.insert(schema.planSteps).values({
@@ -599,6 +623,59 @@ router.get('/plans/:id', requireAuth, requirePermission('plans:read'), async (re
   }
   res.status(200).json(out);
 });
+
+// PATCH /plans/:id — plan-level settings (draft/ready/scheduled only): the per-plan
+// retry policy for failed steps. `retryPolicy` is a partial object { maxAttempts?,
+// waitMs? } that overrides the global defaults, or null to revert to them.
+router.patch(
+  '/plans/:id',
+  requireAuth,
+  requirePermission('configs:apply'),
+  async (req, res) => {
+    if (!(await assertPlanAccess(req, res, req.params.id))) return;
+    const plan = await loadPlan(req.params.id);
+    if (!plan) {
+      res.status(404).json({ error: 'Plan not found' });
+      return;
+    }
+    if (!EDITABLE_STATUSES.includes(plan.status)) {
+      res.status(409).json({ error: `Plan is ${plan.status} — only draft/ready plans can be edited` });
+      return;
+    }
+
+    const body = req.body ?? {};
+    const updates: Record<string, unknown> = {};
+    if (body.retryPolicy !== undefined) {
+      if (body.retryPolicy === null) {
+        updates.retryPolicy = null; // revert to global defaults
+      } else if (isPlainObject(body.retryPolicy)) {
+        const rp = body.retryPolicy as Record<string, unknown>;
+        const out: Record<string, number> = {};
+        if (rp['maxAttempts'] !== undefined) {
+          const m = Number(rp['maxAttempts']);
+          if (!Number.isFinite(m)) { res.status(400).json({ error: 'retryPolicy.maxAttempts must be a number' }); return; }
+          out.maxAttempts = Math.min(Math.max(Math.trunc(m), 0), 10);
+        }
+        if (rp['waitMs'] !== undefined) {
+          const w = Number(rp['waitMs']);
+          if (!Number.isFinite(w)) { res.status(400).json({ error: 'retryPolicy.waitMs must be a number' }); return; }
+          out.waitMs = Math.min(Math.max(Math.round(w), 1_000), 3_600_000);
+        }
+        updates.retryPolicy = JSON.stringify(out);
+      } else {
+        res.status(400).json({ error: 'retryPolicy must be an object { maxAttempts?, waitMs? } or null' });
+        return;
+      }
+    }
+
+    if (Object.keys(updates).length > 0) {
+      await db.update(schema.plans)
+        .set({ ...updates, updatedAt: new Date().toISOString() } as never)
+        .where(eq(schema.plans.id, plan.id));
+    }
+    res.status(200).json((await serializePlan(plan.id, true))!);
+  }
+);
 
 // PATCH /plans/:id/steps/:stepId — edit a step (draft/ready plans only).
 router.patch(
@@ -1064,6 +1141,8 @@ router.post(
       startedAt: null,
       finishedAt: null,
       retriedFrom: plan.id,
+      // A retry re-applies the SAME payload AND the same retry policy.
+      retryPolicy: plan.retryPolicy ?? null,
     });
     for (const step of steps) {
       await db.insert(schema.planSteps).values({

@@ -570,6 +570,9 @@ const containersRunImageAction: ActionDescriptor<DockerActionContext> = {
   riskLevel: 'write' as const,
   deviceCount: 1 as const,
   timeoutMs: 600_000, // image pulls dominate
+  // Flapping guard — create+start is NOT idempotent (a partial success leaks a
+  // container; a re-dispatch would hit the name-exists guard and fail anyway).
+  retryOnDispatchFailure: false,
   inputSchema: {
     name: { type: 'string', required: true, minLength: 1, maxLength: 40, pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$', description: 'Container / app name (lowercase slug)' },
     image: { type: 'string', required: true, minLength: 2, description: 'Image reference (e.g. "nginx:latest", "ghcr.io/org/app:v1")' },

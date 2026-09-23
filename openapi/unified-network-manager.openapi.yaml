@@ -1867,6 +1867,48 @@ paths:
           description: Authentication required
         '404':
           description: Plan not found
+    patch:
+      tags: [Plans]
+      summary: Update plan-level settings (retry policy)
+      description: >-
+        Requires permission `configs:apply`. Only draft/ready/scheduled plans can be edited.
+        Sets the per-plan retry policy for failed steps — a partial object that overrides
+        the global defaults, or null to revert to them. A step is only retried when its
+        failure is TRANSIENT (the plugin reports retryable=true, or the dispatch itself
+        timed out / could not reach the plugin); hard failures always fail the plan.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                retryPolicy:
+                  oneOf:
+                    - $ref: '#/components/schemas/PlanRetryPolicy'
+                    - type: 'null'
+      responses:
+        '200':
+          description: Updated plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '400':
+          description: Invalid retryPolicy value
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Plan not found
+        '409':
+          description: Plan is executing — only draft/ready plans can be edited
     delete:
       tags: [Plans]
       summary: Delete a plan and its provisioned secrets
@@ -8286,6 +8328,11 @@ components:
             required: [deviceId]
             properties:
               deviceId: { type: string }
+        retryPolicy:
+          $ref: '#/components/schemas/PlanRetryPolicy'
+          description: >-
+            Optional per-plan retry override for failed steps. Wins over the plugin's own
+            suggestion (if any) and over the global defaults; omit to inherit.
 
     PlanStepCreateRequest:
       type: object
@@ -8317,6 +8364,27 @@ components:
           items: { type: integer }
           description: "stepIndex values that must succeed first (cycles rejected)"
         bestEffort: { type: boolean }
+
+    PlanRetryPolicy:
+      type: object
+      additionalProperties: false
+      description: >-
+        Per-plan retry policy for FAILED plan steps — a partial override of the global
+        settings (planStepRetryMaxAttempts / planStepRetryWaitMs); missing keys inherit.
+        Only TRANSIENT failures are retried: the plugin reports `retryable: true` on its
+        ActionResult, or the dispatch itself timed out / could not reach the plugin. A hard
+        failure always fails the plan immediately regardless of this policy.
+      properties:
+        maxAttempts:
+          type: integer
+          minimum: 0
+          maximum: 10
+          description: Max dispatch attempts per step (0 = no retries)
+        waitMs:
+          type: integer
+          minimum: 1000
+          maximum: 3600000
+          description: Wait between attempts in ms when the plugin gives no per-failure hint
 
     PlanScheduleRequest:
       type: object
@@ -8439,6 +8507,14 @@ components:
           description: >-
             What happens when a due execution cannot reach its plugin — 'run-asap'
             retries with backoff until it succeeds, 'skip' marks the plan skipped.
+        retryPolicy:
+          oneOf:
+            - $ref: '#/components/schemas/PlanRetryPolicy'
+            - type: 'null'
+          description: >-
+            Per-plan retry override for failed steps (partial — missing keys inherit
+            from the global settings); null = use the global defaults. May be set by the
+            plugin at planning time or edited before execution.
         stepCount: { type: integer, description: "Present on list responses" }
         stepsDone: { type: integer, description: "Present on list responses" }
 
@@ -8473,6 +8549,9 @@ components:
               description: "Any number of devices (fan-out)"
         beOnly: { type: boolean, description: "Only executable on Business Edition appliances" }
         timeoutMs: { type: integer, description: "Per-action dispatch timeout override" }
+        retryOnDispatchFailure:
+          type: boolean
+          description: "When false the plan executor never re-dispatches this action after a failed attempt (flapping guard for power / firmware-flash / config-restore actions)"
         inputSchema:
           $ref: '#/components/schemas/InputSchema'
 

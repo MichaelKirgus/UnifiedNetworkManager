@@ -613,6 +613,9 @@ const firmwareUpdateAction: ActionDescriptor = {
   riskLevel: 'dangerous',
   deviceCount: 1,
   timeoutMs: 300_000,
+  // Flapping guard — a failed firmware flash must never be re-dispatched (it
+  // would flash the switch again). The connection drop on success is expected.
+  retryOnDispatchFailure: false,
   inputSchema: {
     fileBase64: { type: 'string', required: true, description: 'Firmware image (.bin), base64-encoded' },
     fileName: { type: 'string', pattern: '^\\S{1,255}$', description: 'File name for the upload (e.g. swos-css326-2.19.bin)' },
@@ -641,6 +644,9 @@ const configRestoreAction: ActionDescriptor = {
   riskLevel: 'dangerous',
   deviceCount: 1,
   timeoutMs: 300_000,
+  // Flapping guard — a failed config restore must never be re-dispatched (it
+  // would overwrite the switch's config again and reboot).
+  retryOnDispatchFailure: false,
   inputSchema: {
     fileBase64: { type: 'string', required: true, description: 'Configuration backup (.swb), base64-encoded' },
     fileName: { type: 'string', pattern: '^\\S{1,255}$', description: 'File name for the upload (e.g. <identity>_2.19.swb)' },
@@ -666,6 +672,9 @@ const systemRebootAction: ActionDescriptor = {
   riskLevel: 'dangerous',
   deviceCount: 1,
   timeoutMs: 60_000,
+  // Flapping guard — a failed reboot must never be re-dispatched (it would
+  // power-cycle the switch again). The connection drop on success is expected.
+  retryOnDispatchFailure: false,
   inputSchema: {},
   async execute(ctx) {
     await rebootSwitch(ctx.client);
