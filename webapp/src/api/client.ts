@@ -743,6 +743,82 @@ export interface ServiceRow {
   collectedAt: string;
 }
 
+/** One mail domain from the cross-device Mail page inventory view. Rows are NOT
+ * merged across devices — a row is one logical domain on one device. Quota
+ * columns are bytes (double precision in the DB). */
+export interface MailDomainRow {
+  deviceId: string;
+  pluginId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  /** Display name of the reporting plugin instance (e.g. "Mailcow Plugin"). */
+  pluginName?: string | null;
+  /** FQDN of the mail domain ("example.com"). */
+  domain: string;
+  active: boolean;
+  description?: string;
+  /** Total quota for all mailboxes in this domain, bytes (null = unlimited/unknown). */
+  quotaBytes?: number | null;
+  /** Per-mailbox quota ceiling within the domain, bytes. */
+  maxQuotaPerMailboxBytes?: number | null;
+  /** Default quota applied to new mailboxes in this domain, bytes. */
+  defaultQuotaBytes?: number | null;
+  mailboxCount?: number | null;
+  aliasCount?: number | null;
+  backupMx: boolean;
+  collectedAt: string;
+}
+
+/** One mailbox from the cross-device Mail page inventory view. Identity is the
+ * full username (email address). Quota columns are bytes. */
+export interface MailMailboxRow {
+  deviceId: string;
+  pluginId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  /** Display name of the reporting plugin instance (e.g. "Mailcow Plugin"). */
+  pluginName?: string | null;
+  /** Full address ("user@example.com"). */
+  username: string;
+  domain: string;
+  localPart: string;
+  /** Display name of the mailbox owner; '' = none. */
+  name: string;
+  active: boolean;
+  quotaBytes?: number | null;
+  quotaUsedBytes?: number | null;
+  messageCount?: number | null;
+  forcePwUpdate: boolean;
+  forceTfa: boolean;
+  sogoAccess: boolean;
+  collectedAt: string;
+}
+
+/** One alias from the cross-device Mail page inventory view. Identity is the
+ * address (catch-all = "@domain.tld"). `mailcowId` is the numeric id mailcow's
+ * edit/delete API requires — null means the row cannot be updated/deleted via a plan. */
+export interface MailAliasRow {
+  deviceId: string;
+  pluginId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  /** Display name of the reporting plugin instance (e.g. "Mailcow Plugin"). */
+  pluginName?: string | null;
+  /** Alias address ("alias@example.com", catch-all "@example.com"). */
+  address: string;
+  domain: string;
+  /** Comma-separated list of forwarding targets; '' = none. */
+  goto: string;
+  active: boolean;
+  isCatchAll: boolean;
+  /** Numeric id required by mailcow's edit/delete API (null = not observable). */
+  mailcowId?: number | null;
+  collectedAt: string;
+}
+
 /** One available update on one device, as reported by a plugin's `updates` metric. */
 export interface UpdateRow {
   deviceId: string;
@@ -2564,6 +2640,29 @@ export const api = {
     if (params?.status) qs.set('status', params.status);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<ServiceRow[]>(`/services${suffix}`);
+  },
+  mailDomains: (params?: { deviceId?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<MailDomainRow[]>(`/mail/domains${suffix}`);
+  },
+  mailMailboxes: (params?: { deviceId?: string; siteId?: string; domain?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.domain) qs.set('domain', params.domain);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<MailMailboxRow[]>(`/mail/mailboxes${suffix}`);
+  },
+  mailAliases: (params?: { deviceId?: string; siteId?: string; domain?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.domain) qs.set('domain', params.domain);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<MailAliasRow[]>(`/mail/aliases${suffix}`);
   },
   certificates: (params?: { deviceId?: string; siteId?: string; type?: 'https' | 'ssh' }) => {
     const qs = new URLSearchParams();

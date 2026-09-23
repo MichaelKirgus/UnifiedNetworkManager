@@ -32,6 +32,7 @@ import {
   Wifi as WifiIcon,
   Clock,
   Cog,
+  Mail as MailIcon,
   ArrowUpCircle,
 } from 'lucide-react';
 import { can } from '../auth/permissions';
@@ -69,6 +70,8 @@ export const NAV_ITEMS: NavItem[] = [
   // Cross-device service inventory — OPNsense rc services, TrueNAS middleware
   // services and generic Linux systemd/OpenRC/runit/SysVinit units.
   { to: '/services', label: 'Services', icon: Cog, requiresPermission: 'services:read' },
+  // Cross-device mail inventory — domains, mailboxes and aliases (mailcow).
+  { to: '/mail', label: 'Mail', icon: MailIcon, requiresPermission: 'mail:read' },
   // Firewall rules across devices (filter + NAT kinds) — ShieldHalf reads as a
   // protective barrier and is distinct from the Roles (Shield) entry.
   { to: '/firewall', label: 'Firewall', icon: ShieldHalf, requiresPermission: 'firewall:read' },

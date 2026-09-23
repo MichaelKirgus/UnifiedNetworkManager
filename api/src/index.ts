@@ -19,6 +19,7 @@ import { internalRouter } from './routes/internal';
 import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import plansRouter from './routes/plans';
 import networksRouter from './routes/networks';
+import mailRouter from './routes/mail';
 import documentedHostsRouter from './routes/documentedHosts';
 import documentedNetworksRouter from './routes/documentedNetworks';
 import updatesRouter from './routes/updates';
@@ -127,6 +128,8 @@ async function main(): Promise<void> {
   api.use(configJobsRouter);
   // Cross-device inventory views (/networks, /hosts) — self-defining paths.
   api.use(networksRouter);
+  // Cross-device mail inventory (/mail/domains, /mail/mailboxes, /mail/aliases).
+  api.use(mailRouter);
   // User-maintained host documentation (/documented-hosts + CSV import).
   api.use(documentedHostsRouter);
   // User-maintained network documentation (/documented-networks + CSV import).

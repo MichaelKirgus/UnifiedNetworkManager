@@ -46,6 +46,15 @@ export const SECRET_TYPES: SecretType[] = [
     ],
   },
   {
+    // Generic single-field bearer key — for APIs that authenticate with ONE key
+    // (e.g. mailcow's X-API-Key header) instead of a key+secret pair like `apiKey`.
+    type: 'apiKeyNoSecret',
+    label: 'API Key (without secret)',
+    fields: [
+      { name: 'apiKey', label: 'API Key', input: 'password', secret: true, required: true },
+    ],
+  },
+  {
     type: 'usernamePassword',
     label: 'Username / Password',
     fields: [

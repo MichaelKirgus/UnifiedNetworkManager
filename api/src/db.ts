@@ -565,6 +565,62 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_device_services_device ON device_services ("deviceId")`);
 
+  // Mail inventory tables (Mail page) — same lifecycle as services. One row per
+  // domain / mailbox / alias on one device, normalized by the plugin (mailcow).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS mail_domains (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      active BOOLEAN NOT NULL DEFAULT FALSE,
+      description TEXT NOT NULL DEFAULT '',
+      "quotaBytes" DOUBLE PRECISION,
+      "maxQuotaPerMailboxBytes" DOUBLE PRECISION,
+      "defaultQuotaBytes" DOUBLE PRECISION,
+      "mailboxCount" INTEGER,
+      "aliasCount" INTEGER,
+      "backupMx" BOOLEAN NOT NULL DEFAULT FALSE,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", domain)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_mail_domains_device ON mail_domains ("deviceId")`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS mail_mailboxes (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      username TEXT NOT NULL,
+      domain TEXT NOT NULL DEFAULT '',
+      "localPart" TEXT NOT NULL DEFAULT '',
+      name TEXT NOT NULL DEFAULT '',
+      active BOOLEAN NOT NULL DEFAULT FALSE,
+      "quotaBytes" DOUBLE PRECISION,
+      "quotaUsedBytes" DOUBLE PRECISION,
+      "messageCount" INTEGER,
+      "forcePwUpdate" BOOLEAN NOT NULL DEFAULT FALSE,
+      "forceTfa" BOOLEAN NOT NULL DEFAULT FALSE,
+      "sogoAccess" BOOLEAN NOT NULL DEFAULT FALSE,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", username)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_mail_mailboxes_device ON mail_mailboxes ("deviceId")`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS mail_aliases (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      address TEXT NOT NULL,
+      domain TEXT NOT NULL DEFAULT '',
+      goto TEXT NOT NULL DEFAULT '',
+      active BOOLEAN NOT NULL DEFAULT FALSE,
+      "isCatchAll" BOOLEAN NOT NULL DEFAULT FALSE,
+      "mailcowId" INTEGER,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", address)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_mail_aliases_device ON mail_aliases ("deviceId")`);
+
   // Certificates inventory table (Certificates page) — same lifecycle as tunnels/routes.
   // One row per certificate endpoint on one device: the management HTTPS cert and/or
   // the SSH host key. PK = deviceId+pluginId+name so re-probes upsert in place; a

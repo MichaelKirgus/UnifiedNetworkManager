@@ -3890,6 +3890,114 @@ paths:
         '401':
           description: Authentication required
 
+  /mail/domains:
+    get:
+      tags: [Inventory]
+      summary: List all mail domains across devices
+      description: >-
+        Cross-device view of the normalized `mail_domains` inventory table,
+        populated by the telemetry worker from each plugin's /monitoring
+        `mailDomains[]` metric (mailcow today). One row per domain on one
+        device — no merging; devices without a mail-capable plugin contribute
+        no rows. Rows not refreshed within 24h are swept away.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+      responses:
+        '200':
+          description: Mail domain rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MailDomainRow'
+        '401':
+          description: Authentication required
+
+  /mail/mailboxes:
+    get:
+      tags: [Inventory]
+      summary: List all mailboxes across devices
+      description: >-
+        Cross-device view of the normalized `mail_mailboxes` inventory table,
+        populated by the telemetry worker from each plugin's /monitoring
+        `mailMailboxes[]` metric (mailcow today). One row per mailbox on one
+        device. Rows not refreshed within 24h are swept away.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: domain
+          required: false
+          schema: { type: string }
+          description: Filter by mail domain (exact match)
+      responses:
+        '200':
+          description: Mailbox rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MailMailboxRow'
+        '401':
+          description: Authentication required
+
+  /mail/aliases:
+    get:
+      tags: [Inventory]
+      summary: List all mail aliases across devices
+      description: >-
+        Cross-device view of the normalized `mail_aliases` inventory table,
+        populated by the telemetry worker from each plugin's /monitoring
+        `mailAliases[]` metric (mailcow today). One row per alias on one
+        device; catch-all aliases carry address "@domain.tld". Rows not
+        refreshed within 24h are swept away.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: domain
+          required: false
+          schema: { type: string }
+          description: Filter by mail domain (exact match)
+      responses:
+        '200':
+          description: Alias rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MailAliasRow'
+        '401':
+          description: Authentication required
+
   /updates:
     get:
       tags: [Updates]
@@ -7064,6 +7172,80 @@ components:
           additionalProperties: true
           description: "Vendor-specific extras (systemd sub-state, TrueNAS matched process, ...)"
         collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this service" }
+
+    MailDomainRow:
+      type: object
+      description: >-
+        One mail domain on one device from the cross-device Mail page. Vendors
+        normalize to this unified shape at collection time (mailcow today).
+      required: [deviceId, pluginId, domain, active, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the mail server this domain lives on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this domain" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        domain: { type: string, description: "FQDN of the mail domain (e.g. example.com)" }
+        active: { type: boolean, description: "True when the domain is enabled for mail delivery" }
+        description: { type: string, description: "Human description; '' = none" }
+        quotaBytes: { type: [number, 'null'], description: "Total quota for all mailboxes in this domain (bytes); null = unlimited/unknown" }
+        maxQuotaPerMailboxBytes: { type: [number, 'null'], description: "Per-mailbox quota ceiling within the domain (bytes)" }
+        defaultQuotaBytes: { type: [number, 'null'], description: "Default quota applied to new mailboxes in this domain (bytes)" }
+        mailboxCount: { type: [integer, 'null'], description: "Number of mailboxes in this domain" }
+        aliasCount: { type: [integer, 'null'], description: "Number of aliases in this domain" }
+        backupMx: { type: boolean, description: "True when the domain is a backup MX (relay-only)" }
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this domain" }
+
+    MailMailboxRow:
+      type: object
+      description: >-
+        One mailbox on one device from the cross-device Mail page. Vendors
+        normalize to this unified shape at collection time (mailcow today).
+      required: [deviceId, pluginId, username, active, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the mail server this mailbox lives on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this mailbox" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        username: { type: string, description: "Full address (user@example.com)" }
+        domain: { type: string, description: "Mail domain part; '' = unknown" }
+        localPart: { type: string, description: "Local-part before the @; '' = unknown" }
+        name: { type: string, description: "Display name of the mailbox owner; '' = none" }
+        active: { type: boolean, description: "True when the mailbox is enabled for mail delivery" }
+        quotaBytes: { type: [number, 'null'], description: "Mailbox quota (bytes); null = unlimited/unknown" }
+        quotaUsedBytes: { type: [number, 'null'], description: "Quota used so far (bytes)" }
+        messageCount: { type: [integer, 'null'], description: "Number of messages stored in the mailbox" }
+        forcePwUpdate: { type: boolean, description: "True when the user must change their password at next login" }
+        forceTfa: { type: boolean, description: "True when two-factor authentication is enforced for this mailbox" }
+        sogoAccess: { type: boolean, description: "True when the mailbox has SOGo (webmail) access" }
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this mailbox" }
+
+    MailAliasRow:
+      type: object
+      description: >-
+        One alias on one device from the cross-device Mail page. Vendors
+        normalize to this unified shape at collection time (mailcow today).
+        Catch-all aliases carry address "@domain.tld". `mailcowId` is the
+        numeric id mailcow's edit/delete API requires — null means the row
+        cannot be updated/deleted via a plan.
+      required: [deviceId, pluginId, address, active, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the mail server this alias lives on" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this alias" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        address: { type: string, description: "Alias address (alias@example.com; catch-all @example.com)" }
+        domain: { type: string, description: "Mail domain part; '' = unknown" }
+        goto: { type: string, description: "Comma-separated list of forwarding targets; '' = none" }
+        active: { type: boolean, description: "True when the alias is enabled for mail delivery" }
+        isCatchAll: { type: boolean, description: "True when this alias catches all undeliverable mail for its domain" }
+        mailcowId: { type: [integer, 'null'], description: "Numeric id required by mailcow's edit/delete API; null = not observable" }
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this alias" }
 
     CertificateRow:
       type: object

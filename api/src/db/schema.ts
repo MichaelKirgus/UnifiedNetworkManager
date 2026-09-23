@@ -730,6 +730,104 @@ export const deviceServices = pgTable(
   }
 );
 
+// One row per mail domain on one device, as reported by a plugin's `mailDomains`
+// metric (mailcow today). Powers the cross-device Mail page with the same
+// upsert-per-poll + delete-on-absent + 24h-sweep lifecycle as services. Identity
+// is the domain name; quota columns are bytes in double precision (they exceed
+// int32 for anything beyond ~2 GB).
+export const mailDomains = pgTable(
+  'mail_domains',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // FQDN of the domain ("example.com"). Part of PK.
+    domain: text('domain').notNull(),
+    active: boolean('active').notNull().default(false),
+    description: text('description').notNull().default(''),
+    // Total quota for all mailboxes in this domain, bytes (null = unlimited/unknown).
+    quotaBytes: doublePrecision('quotaBytes'),
+    // Per-mailbox quota ceiling within the domain, bytes.
+    maxQuotaPerMailboxBytes: doublePrecision('maxQuotaPerMailboxBytes'),
+    // Default quota applied to new mailboxes in this domain, bytes.
+    defaultQuotaBytes: doublePrecision('defaultQuotaBytes'),
+    mailboxCount: integer('mailboxCount'),
+    aliasCount: integer('aliasCount'),
+    backupMx: boolean('backupMx').notNull().default(false),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkMailDomains: primaryKey({
+        name: 'mail_domains_pkey',
+        columns: [table.deviceId, table.pluginId, table.domain],
+      }),
+      idxMailDomainsDevice: index('idx_mail_domains_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per mailbox on one device, as reported by a plugin's `mailMailboxes`
+// metric. Same lifecycle as mailDomains; identity is the full username (email).
+export const mailMailboxes = pgTable(
+  'mail_mailboxes',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Full address ("user@example.com"). Part of PK.
+    username: text('username').notNull(),
+    domain: text('domain').notNull().default(''),
+    localPart: text('localPart').notNull().default(''),
+    name: text('name').notNull().default(''),
+    active: boolean('active').notNull().default(false),
+    quotaBytes: doublePrecision('quotaBytes'),
+    quotaUsedBytes: doublePrecision('quotaUsedBytes'),
+    messageCount: integer('messageCount'),
+    forcePwUpdate: boolean('forcePwUpdate').notNull().default(false),
+    forceTfa: boolean('forceTfa').notNull().default(false),
+    sogoAccess: boolean('sogoAccess').notNull().default(false),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkMailMailboxes: primaryKey({
+        name: 'mail_mailboxes_pkey',
+        columns: [table.deviceId, table.pluginId, table.username],
+      }),
+      idxMailMailboxesDevice: index('idx_mail_mailboxes_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per alias on one device, as reported by a plugin's `mailAliases`
+// metric. Same lifecycle; identity is the address (catch-all = "@domain.tld").
+// mailcowId is the numeric id mailcow's edit/delete API requires — without it
+// the webapp must refuse to offer update/delete for that row.
+export const mailAliases = pgTable(
+  'mail_aliases',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Alias address ("alias@example.com", catch-all "@example.com"). Part of PK.
+    address: text('address').notNull(),
+    domain: text('domain').notNull().default(''),
+    // Comma-separated list of forwarding targets.
+    goto: text('goto').notNull().default(''),
+    active: boolean('active').notNull().default(false),
+    isCatchAll: boolean('isCatchAll').notNull().default(false),
+    mailcowId: integer('mailcowId'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkMailAliases: primaryKey({
+        name: 'mail_aliases_pkey',
+        columns: [table.deviceId, table.pluginId, table.address],
+      }),
+      idxMailAliasesDevice: index('idx_mail_aliases_device').on(table.deviceId),
+    };
+  }
+);
+
 // One row per certificate endpoint on one device, as reported by a plugin's
 // `certificates` metric. Powers the cross-device Certificates page with the same
 // upsert-per-poll + delete-on-absent + 24h-sweep lifecycle as tunnels/routes.

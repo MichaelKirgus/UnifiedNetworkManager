@@ -52,6 +52,7 @@ const INVENTORY_METRIC_KEYS = [
   'tunnels', 'routes', 'firewallRules', 'certificates', 'services',
   'wifiNetworks', 'wifiAirtime', 'wifiRadios', 'wifiNeighbors',
   'ports', 'filesystems', 'disks', 'containers', 'images', 'vms', 'updates',
+  'mailDomains', 'mailMailboxes', 'mailAliases',
 ] as const;
 
 /** True when a snapshot carries at least one inventory array (any length). */
@@ -695,6 +696,201 @@ async function ingestInventory(
             eq(schema.deviceServices.deviceId, deviceId),
             eq(schema.deviceServices.pluginId, pluginId),
             or(...staleServices.map((k) => and(eq(schema.deviceServices.name, k.name), eq(schema.deviceServices.type, k.type))))
+          )
+        );
+      }
+    }
+
+    // --- mail inventory (domains / mailboxes / aliases — mailcow) --------------
+    // Same present-vs-absent contract as services: a PRESENT-but-empty array is
+    // authoritative ("this device reports no <thing> right now") so stale rows
+    // are wiped; an ABSENT key means "plugin doesn't report this inventory"
+    // and must not touch the table (24h sweep still applies). Identities:
+    // domain / username / address.
+    const rawMailDomains = Array.isArray(metrics['mailDomains']) ? (metrics['mailDomains'] as unknown[]) : null;
+    if (rawMailDomains !== null) {
+      const values: {
+        deviceId: string; pluginId: string; domain: string; active: boolean; description: string;
+        quotaBytes: number | null; maxQuotaPerMailboxBytes: number | null; defaultQuotaBytes: number | null;
+        mailboxCount: number | null; aliasCount: number | null; backupMx: boolean; collectedAt: string;
+      }[] = [];
+      for (const raw of rawMailDomains) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const domain = typeof r['domain'] === 'string' ? (r['domain'] as string).trim() : '';
+        if (!domain) continue; // domain is part of the conflict key
+        values.push({
+          deviceId,
+          pluginId,
+          domain,
+          active: typeof r['active'] === 'boolean' ? (r['active'] as boolean) : false,
+          description: typeof r['description'] === 'string' ? (r['description'] as string).trim() : '',
+          quotaBytes: toIntOrNull(r['quotaBytes']),
+          maxQuotaPerMailboxBytes: toIntOrNull(r['maxQuotaPerMailboxBytes']),
+          defaultQuotaBytes: toIntOrNull(r['defaultQuotaBytes']),
+          mailboxCount: toIntOrNull(r['mailboxCount']),
+          aliasCount: toIntOrNull(r['aliasCount']),
+          backupMx: typeof r['backupMx'] === 'boolean' ? (r['backupMx'] as boolean) : false,
+          collectedAt,
+        });
+      }
+      const mailDomainByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        mailDomainByKey.set(`${v.deviceId}|${v.pluginId}|${v.domain}`, v);
+      }
+      if (mailDomainByKey.size > 0) {
+        await db.insert(schema.mailDomains).values(Array.from(mailDomainByKey.values())).onConflictDoUpdate({
+          target: [schema.mailDomains.deviceId, schema.mailDomains.pluginId, schema.mailDomains.domain],
+          set: {
+            active: sql`excluded.active`,
+            description: sql`excluded.description`,
+            quotaBytes: sql`excluded."quotaBytes"`,
+            maxQuotaPerMailboxBytes: sql`excluded."maxQuotaPerMailboxBytes"`,
+            defaultQuotaBytes: sql`excluded."defaultQuotaBytes"`,
+            mailboxCount: sql`excluded."mailboxCount"`,
+            aliasCount: sql`excluded."aliasCount"`,
+            backupMx: sql`excluded."backupMx"`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      const existingMailDomains = await db
+        .select({ domain: schema.mailDomains.domain })
+        .from(schema.mailDomains)
+        .where(and(eq(schema.mailDomains.deviceId, deviceId), eq(schema.mailDomains.pluginId, pluginId)));
+      const seenMailDomains = new Set(values.map((v) => v.domain));
+      const staleMailDomains = existingMailDomains.filter((k) => !seenMailDomains.has(k.domain)).map((k) => k.domain);
+      if (staleMailDomains.length > 0) {
+        await db.delete(schema.mailDomains).where(
+          and(
+            eq(schema.mailDomains.deviceId, deviceId),
+            eq(schema.mailDomains.pluginId, pluginId),
+            notInArray(schema.mailDomains.domain, staleMailDomains)
+          )
+        );
+      }
+    }
+
+    const rawMailMailboxes = Array.isArray(metrics['mailMailboxes']) ? (metrics['mailMailboxes'] as unknown[]) : null;
+    if (rawMailMailboxes !== null) {
+      const values: {
+        deviceId: string; pluginId: string; username: string; domain: string; localPart: string; name: string;
+        active: boolean; quotaBytes: number | null; quotaUsedBytes: number | null; messageCount: number | null;
+        forcePwUpdate: boolean; forceTfa: boolean; sogoAccess: boolean; collectedAt: string;
+      }[] = [];
+      for (const raw of rawMailMailboxes) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const username = typeof r['username'] === 'string' ? (r['username'] as string).trim() : '';
+        if (!username) continue; // username is part of the conflict key
+        values.push({
+          deviceId,
+          pluginId,
+          username,
+          domain: typeof r['domain'] === 'string' ? (r['domain'] as string).trim() : '',
+          localPart: typeof r['localPart'] === 'string' ? (r['localPart'] as string).trim() : '',
+          name: typeof r['name'] === 'string' ? (r['name'] as string).trim() : '',
+          active: typeof r['active'] === 'boolean' ? (r['active'] as boolean) : false,
+          quotaBytes: toIntOrNull(r['quotaBytes']),
+          quotaUsedBytes: toIntOrNull(r['quotaUsedBytes']),
+          messageCount: toIntOrNull(r['messageCount']),
+          forcePwUpdate: typeof r['forcePwUpdate'] === 'boolean' ? (r['forcePwUpdate'] as boolean) : false,
+          forceTfa: typeof r['forceTfa'] === 'boolean' ? (r['forceTfa'] as boolean) : false,
+          sogoAccess: typeof r['sogoAccess'] === 'boolean' ? (r['sogoAccess'] as boolean) : false,
+          collectedAt,
+        });
+      }
+      const mailboxByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        mailboxByKey.set(`${v.deviceId}|${v.pluginId}|${v.username}`, v);
+      }
+      if (mailboxByKey.size > 0) {
+        await db.insert(schema.mailMailboxes).values(Array.from(mailboxByKey.values())).onConflictDoUpdate({
+          target: [schema.mailMailboxes.deviceId, schema.mailMailboxes.pluginId, schema.mailMailboxes.username],
+          set: {
+            domain: sql`excluded.domain`,
+            localPart: sql`excluded."localPart"`,
+            name: sql`excluded.name`,
+            active: sql`excluded.active`,
+            quotaBytes: sql`excluded."quotaBytes"`,
+            quotaUsedBytes: sql`excluded."quotaUsedBytes"`,
+            messageCount: sql`excluded."messageCount"`,
+            forcePwUpdate: sql`excluded."forcePwUpdate"`,
+            forceTfa: sql`excluded."forceTfa"`,
+            sogoAccess: sql`excluded."sogoAccess"`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      const existingMailboxes = await db
+        .select({ username: schema.mailMailboxes.username })
+        .from(schema.mailMailboxes)
+        .where(and(eq(schema.mailMailboxes.deviceId, deviceId), eq(schema.mailMailboxes.pluginId, pluginId)));
+      const seenMailboxes = new Set(values.map((v) => v.username));
+      const staleMailboxes = existingMailboxes.filter((k) => !seenMailboxes.has(k.username)).map((k) => k.username);
+      if (staleMailboxes.length > 0) {
+        await db.delete(schema.mailMailboxes).where(
+          and(
+            eq(schema.mailMailboxes.deviceId, deviceId),
+            eq(schema.mailMailboxes.pluginId, pluginId),
+            notInArray(schema.mailMailboxes.username, staleMailboxes)
+          )
+        );
+      }
+    }
+
+    const rawMailAliases = Array.isArray(metrics['mailAliases']) ? (metrics['mailAliases'] as unknown[]) : null;
+    if (rawMailAliases !== null) {
+      const values: {
+        deviceId: string; pluginId: string; address: string; domain: string; goto: string;
+        active: boolean; isCatchAll: boolean; mailcowId: number | null; collectedAt: string;
+      }[] = [];
+      for (const raw of rawMailAliases) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const address = typeof r['address'] === 'string' ? (r['address'] as string).trim() : '';
+        if (!address) continue; // address is part of the conflict key
+        values.push({
+          deviceId,
+          pluginId,
+          address,
+          domain: typeof r['domain'] === 'string' ? (r['domain'] as string).trim() : '',
+          goto: typeof r['goto'] === 'string' ? (r['goto'] as string).trim() : '',
+          active: typeof r['active'] === 'boolean' ? (r['active'] as boolean) : false,
+          isCatchAll: typeof r['isCatchAll'] === 'boolean' ? (r['isCatchAll'] as boolean) : false,
+          mailcowId: toIntOrNull(r['mailcowId']),
+          collectedAt,
+        });
+      }
+      const aliasByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        aliasByKey.set(`${v.deviceId}|${v.pluginId}|${v.address}`, v);
+      }
+      if (aliasByKey.size > 0) {
+        await db.insert(schema.mailAliases).values(Array.from(aliasByKey.values())).onConflictDoUpdate({
+          target: [schema.mailAliases.deviceId, schema.mailAliases.pluginId, schema.mailAliases.address],
+          set: {
+            domain: sql`excluded.domain`,
+            goto: sql`excluded.goto`,
+            active: sql`excluded.active`,
+            isCatchAll: sql`excluded."isCatchAll"`,
+            mailcowId: sql`excluded."mailcowId"`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      const existingAliases = await db
+        .select({ address: schema.mailAliases.address })
+        .from(schema.mailAliases)
+        .where(and(eq(schema.mailAliases.deviceId, deviceId), eq(schema.mailAliases.pluginId, pluginId)));
+      const seenAliases = new Set(values.map((v) => v.address));
+      const staleAliases = existingAliases.filter((k) => !seenAliases.has(k.address)).map((k) => k.address);
+      if (staleAliases.length > 0) {
+        await db.delete(schema.mailAliases).where(
+          and(
+            eq(schema.mailAliases.deviceId, deviceId),
+            eq(schema.mailAliases.pluginId, pluginId),
+            notInArray(schema.mailAliases.address, staleAliases)
           )
         );
       }
@@ -1992,6 +2188,9 @@ async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
   await db.delete(schema.dockerImages).where(lt(schema.dockerImages.collectedAt, cutoff));
   await db.delete(schema.vms).where(lt(schema.vms.collectedAt, cutoff));
   await db.delete(schema.deviceUpdates).where(lt(schema.deviceUpdates.collectedAt, cutoff));
+  await db.delete(schema.mailDomains).where(lt(schema.mailDomains.collectedAt, cutoff));
+  await db.delete(schema.mailMailboxes).where(lt(schema.mailMailboxes.collectedAt, cutoff));
+  await db.delete(schema.mailAliases).where(lt(schema.mailAliases.collectedAt, cutoff));
 }
 
 /**
