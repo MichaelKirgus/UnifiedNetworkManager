@@ -21,7 +21,8 @@ ROUTEROS_PORT=4012
 DOCKER_PORT=4013
 OPENWRT_PORT=4014
 GENERIC_SSH_PORT=4015
-ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}" "${ICMP_PORT}" "${SNMP_PORT}" "${LANCOM_LX_PORT}" "${LANCOM_LCOS_PORT}" "${SWOS_PORT}" "${FBOX_PORT}" "${TRUENAS_PORT}" "${ROUTEROS_PORT}" "${DOCKER_PORT}" "${OPENWRT_PORT}" "${GENERIC_SSH_PORT}")
+ZABBIX_PORT=4019
+ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}" "${ICMP_PORT}" "${SNMP_PORT}" "${LANCOM_LX_PORT}" "${LANCOM_LCOS_PORT}" "${SWOS_PORT}" "${FBOX_PORT}" "${TRUENAS_PORT}" "${ROUTEROS_PORT}" "${DOCKER_PORT}" "${OPENWRT_PORT}" "${GENERIC_SSH_PORT}" "${ZABBIX_PORT}")
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/unm-dev.XXXXXX")"
 DEV_PIDS=()
 
@@ -265,6 +266,7 @@ wait_for_port "$ROUTEROS_PORT" "mikrotik-routeros-plugin"
 wait_for_port "$DOCKER_PORT" "docker-plugin"
 wait_for_port "$OPENWRT_PORT" "openwrt-plugin"
 wait_for_port "$GENERIC_SSH_PORT" "generic-ssh-plugin"
+wait_for_port "$ZABBIX_PORT" "zabbix-plugin"
 wait_for_port "$BASIC_AUTH_PORT" "basic-auth-plugin"
 wait_for_port "$SECRETS_PORT" "secrets-provider-plugin"
 ok "Plugins are reachable."

@@ -129,6 +129,17 @@ Plugins propagate a small set of one-click shortcuts for their devices, rendered
 
 The API persists the list on the plugin row and attaches it to every device assignment view (`pluginQuickActions`).
 
+### 4b. Inventory sync into an external monitoring system (capability `'inventorySync'`)
+
+Some plugins do not just READ a device — they keep an **external subsystem** in step with UNM's host inventory: when a host is collected or created in UNM it should appear in the monitoring system, disabling a host there should disable it over there, and removals can be mirrored too. The first consumer is the **zabbix plugin**, but the contract is deliberately subsystem-agnostic so Nagios/Prometheus/… plugins reuse it unchanged:
+
+1. **The API serves the authoritative snapshot** — `GET /v1/plugin/inventory/hosts` (internal, `x-plugin-api-key`). It merges the user-maintained `documented_hosts` (+ their IPs) with recent live observations from the `hosts` table and returns plain data (`InventorySnapshot`, see `packages/plugin-sdk/src/types.ts`): each host carries `id`, `name`, `dnsNames[]`, `tags[]`, `isActive`, `documented`, `addresses[{address, mac, networkLabel, vlanId}]`, `lastSeenAt`. Query params: `documentedOnly=1`, `activeOnly=1`, `search=<text>`. The API never interprets monitoring-system concepts — it only brokers the read.
+2. **The plugin owns ALL mapping logic** through its own options + a plan action (the zabbix plugin's `zabbix.host.sync`): name template, target groups, template link, tag filter, IP-interface mode, inactive→disabled and orphan-deletion policy are plain plugin options (`resolveSyncConfig()` in the zabbix plugin is the reference implementation). Adapting to another monitoring system's logic never requires API changes.
+3. **Writes go through the plans system** — a sync action is `riskLevel: 'write'` (confirm dialog) and idempotent; per-host failures are collected into `details.errors`, not thrown, so one bad host never aborts the run. A quick action of `kind: 'action'` pointing at the sync entry gives users a one-click "Sync" button on the Devices page for free.
+4. **Ownership must be explicit** — a sync may only ever touch hosts IT created/claimed. The zabbix plugin's reference model: every synced host carries a marker tag whose **value is the UNM host id**, so matching/orphan detection are keyed on that value and survive name-template changes (a stale technical name is renamed back, not duplicated). Hosts without the marker tag are never touched; an optional `adoptExisting` claims an untagged Zabbix host with a colliding technical name instead of failing. Ambiguous ownership (two UNM hosts → one Zabbix host) is reported in `details.conflicts`, never acted on automatically.
+
+Advertise `'inventorySync'` in your identity's `capabilities` when you implement such an action. The SDK exports the contract types (`InventoryHost`, `InventorySnapshot`) and `createApiClient()` (the zabbix plugin uses it to fetch the snapshot — set `UNM_API_URL` + `PLUGIN_API_KEY` on the service, same as for log shipping).
+
 ---
 
 ## 5. `POST /monitoring` (telemetry)

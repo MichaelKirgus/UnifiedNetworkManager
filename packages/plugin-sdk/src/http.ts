@@ -190,7 +190,7 @@ export function insecureHttpsAgent(): https.Agent {
 
 /** Network-level axios/node error codes that justify an https→http fallback. */
 const NETWORK_ERROR_CODES = new Set([
-  'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'EHOSTUNREACH', 'EPROTO', 'ERR_SSL',
+  'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'EPROTO', 'ERR_SSL',
 ]);
 
 /** TLS handshake failures surface as EPROTO with an OpenSSL message — a plain-HTTP box. */
@@ -236,7 +236,7 @@ export function isTransientTransportError(err: unknown): boolean {
   const msg = String(e.message ?? '');
   if (!msg) return false;
   if (TLS_FAILURE_PATTERN.test(msg)) return false; // plain-HTTP box — not transient
-  return /timeout|timed out|ECONNREFUSED|ENOTFOUND|socket hang up/i.test(msg);
+  return /timeout|timed out|ECONNREFUSED|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|socket hang up/i.test(msg);
 }
 /** Builds an HTTP Basic `Authorization` header value from a username/password pair. */
 export function basicAuthHeader(username: string, password: string): string {

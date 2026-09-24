@@ -8686,7 +8686,7 @@ components:
           type: array
           items:
             type: string
-            enum: [monitoring, configuration, inventory, identityProvider, secretsProvider]
+            enum: [monitoring, configuration, inventory, identityProvider, secretsProvider, deviceState, ssh, filesystem, probe, sshConsole, updates, quickActions, logIngestion, inventorySync]
         endpoint: { type: string, format: uri }
         authType:
           type: string
@@ -8729,7 +8729,7 @@ components:
           type: array
           items:
             type: string
-            enum: [monitoring, configuration, inventory, identityProvider, secretsProvider]
+            enum: [monitoring, configuration, inventory, identityProvider, secretsProvider, deviceState, ssh, filesystem, probe, sshConsole, updates, quickActions, logIngestion, inventorySync]
         endpoint: { type: string, format: uri }
         authType:
           type: string

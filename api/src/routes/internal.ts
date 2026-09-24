@@ -505,5 +505,193 @@ export function internalRouter() {
     }
   });
 
+  // --- Inventory snapshot (capability 'inventorySync') -----------------------
+  //
+  // Serves UNM's host inventory to plugins that keep an EXTERNAL monitoring
+  // subsystem in step with it (Zabbix first — see the zabbix plugin). The API
+  // is a pure broker: it assembles the authoritative snapshot from the
+  // user-maintained `documented_hosts` (+ their IPs) merged with recent live
+  // observations from the `hosts` table, and hands it over verbatim. How the
+  // snapshot maps onto the external system (host names, groups, templates,
+  // status semantics) is entirely plugin-owned — this endpoint never
+  // interprets monitoring-system concepts.
+  //
+  // GET /plugin/inventory/hosts[?documentedOnly=1&activeOnly=1&search=<text>]
+
+  /** Strips MAC separators — the canonical comparison key (mirrors documentedHosts.ts). */
+  function macKey(value: string): string {
+    return value.toLowerCase().replace(/[^0-9a-f]/g, '');
+  }
+
+  /** Parses a stored JSON string array defensively (bad data → []). */
+  function readJsonStringArray(raw: unknown): string[] {
+    let arr: unknown = raw;
+    if (typeof raw === 'string') {
+      try { arr = JSON.parse(raw); } catch { return []; }
+    }
+    if (!Array.isArray(arr)) return [];
+    const out: string[] = [];
+    for (const v of arr) {
+      if (typeof v !== 'string' && typeof v !== 'number') continue;
+      const t = String(v).trim();
+      if (t !== '' && !out.includes(t)) out.push(t);
+    }
+    return out;
+  }
+
+  router.get('/plugin/inventory/hosts', pluginAuth, async (req: Request, res: Response) => {
+    try {
+      const q = req.query ?? {};
+      const documentedOnly = q['documentedOnly'] === '1' || q['documentedOnly'] === 'true';
+      const activeOnly = q['activeOnly'] === '1' || q['activeOnly'] === 'true';
+      const search = typeof q['search'] === 'string' ? q['search'].trim().toLowerCase() : '';
+
+      // --- Load the two sources ---------------------------------------------
+      const docRows = await db.query.documentedHosts.findMany();
+      const docIpRows = await db.query.documentedHostIps.findMany();
+      // The live table is swept after 24h by the telemetry worker, so every row
+      // present counts as a recent observation.
+      const liveRows = documentedOnly ? [] : await db.query.hosts.findMany();
+
+      // --- Merge live observations per MAC ----------------------------------
+      interface LiveObs {
+        mac: string;            // compact hex key
+        hostname: string | null;
+        ips: Map<string, { mac: string | null }>; // ip -> first-seen mac (colon form)
+        lastSeenAt: string;
+      }
+      const liveByMac = new Map<string, LiveObs>();
+      for (const r of liveRows) {
+        const key = macKey(r.mac);
+        let obs = liveByMac.get(key);
+        if (!obs) {
+          obs = { mac: key, hostname: null, ips: new Map(), lastSeenAt: r.lastSeenAt };
+          liveByMac.set(key, obs);
+        }
+        if (r.hostname && !obs.hostname) obs.hostname = r.hostname;
+        if (r.ip !== '') {
+          const existing = obs.ips.get(r.ip);
+          // Prefer a non-empty MAC for the address row.
+          if (!existing || (existing.mac === null && r.mac)) obs.ips.set(r.ip, { mac: r.mac });
+        }
+        if (r.lastSeenAt > obs.lastSeenAt) obs.lastSeenAt = r.lastSeenAt;
+      }
+
+      // --- Assemble documented hosts -----------------------------------------
+      const ipsByHost = new Map<string, typeof docIpRows>();
+      for (const ip of docIpRows) {
+        const list = ipsByHost.get(ip.hostId) ?? [];
+        list.push(ip);
+        ipsByHost.set(ip.hostId, list);
+      }
+
+      // MACs referenced by documented addresses — live observations matching one
+      // are MERGED into the documented host instead of becoming a new entry.
+      const claimedMacs = new Set<string>();
+      const hosts: Record<string, unknown>[] = [];
+
+      for (const d of docRows) {
+        if (activeOnly && !d.isActive) continue;
+        const dnsNames = readJsonStringArray(d.dnsNames);
+        const name = dnsNames[0] || d.friendlyName || `host-${d.id.slice(0, 8)}`;
+
+        // Merge live observations whose MAC matches a documented address MAC.
+        let lastSeenAt: string | null = null;
+        const extraIps: { address: string; mac: string | null }[] = [];
+        for (const ipRow of ipsByHost.get(d.id) ?? []) {
+          if (!ipRow.mac) continue;
+          const key = macKey(ipRow.mac);
+          claimedMacs.add(key);
+          const obs = liveByMac.get(key);
+          if (!obs) continue;
+          if (obs.lastSeenAt > (lastSeenAt ?? '')) lastSeenAt = obs.lastSeenAt;
+          for (const [addr, info] of obs.ips) {
+            // Skip the documented address itself — it is already in the list below.
+            if (addr === ipRow.address) continue;
+            extraIps.push({ address: addr, mac: info.mac });
+          }
+        }
+
+        const addresses = [
+          ...(ipsByHost.get(d.id) ?? []).map((ipRow) => ({
+            address: ipRow.address,
+            mac: ipRow.mac ?? null,
+            networkLabel: ipRow.networkLabel ?? null,
+            vlanId: ipRow.vlanId ?? null,
+          })),
+          ...extraIps.map((e) => ({ address: e.address, mac: e.mac, networkLabel: null, vlanId: null })),
+        ];
+
+        if (search && !hostMatchesSearch({ name, dnsNames, addresses }, search)) continue;
+
+        hosts.push({
+          id: d.id,
+          name,
+          dnsNames,
+          friendlyName: d.friendlyName ?? null,
+          description: d.description ?? null,
+          tags: readJsonStringArray(d.tags),
+          siteId: d.siteId ?? null,
+          layerId: d.layerId ?? null,
+          isActive: d.isActive,
+          documented: true,
+          addresses,
+          lastSeenAt,
+        });
+      }
+
+      // --- Live-only hosts (MAC not claimed by any documented address) --------
+      if (!documentedOnly) {
+        for (const obs of liveByMac.values()) {
+          if (claimedMacs.has(obs.mac)) continue;
+          const ips = [...obs.ips.entries()].map(([address, info]) => ({
+            address,
+            mac: info.mac ?? null,
+            networkLabel: null,
+            vlanId: null,
+          }));
+          if (ips.length === 0) continue; // MAC-only observation without any IP — nothing to monitor
+          const name = obs.hostname || ips[0].address;
+          if (search && !hostMatchesSearch({ name, dnsNames: [], addresses: ips }, search)) continue;
+          hosts.push({
+            id: `live:${obs.mac}`,
+            name,
+            dnsNames: [],
+            friendlyName: null,
+            description: null,
+            tags: [],
+            siteId: null,
+            layerId: null,
+            isActive: true,
+            documented: false,
+            addresses: ips,
+            lastSeenAt: obs.lastSeenAt,
+          });
+        }
+      }
+
+      // Deterministic order for stable diffs on the plugin side.
+      hosts.sort((a, b) => String(a['name']).localeCompare(String(b['name'])));
+
+      res.status(200).json({
+        snapshot: {
+          collectedAt: new Date().toISOString(),
+          hosts,
+        },
+      });
+    } catch (error) {
+      console.error('Error building inventory snapshot:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   return router;
+}
+
+/** Case-insensitive substring match on a host's name, DNS names and addresses. */
+function hostMatchesSearch(host: { name: string; dnsNames: string[]; addresses: Array<{ address: string }> }, search: string): boolean {
+  if (host.name.toLowerCase().includes(search)) return true;
+  for (const n of host.dnsNames) if (n.toLowerCase().includes(search)) return true;
+  for (const a of host.addresses) if (a.address.toLowerCase().includes(search)) return true;
+  return false;
 }

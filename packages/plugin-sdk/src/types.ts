@@ -79,6 +79,15 @@ export const CAPABILITIES = [
   // and never assembles URLs itself. Advertise when /discover carries quickActions
   // with at least one kind:'url' entry.
   'quickActions',
+  // Keeps an EXTERNAL monitoring subsystem (Zabbix, Nagios, …) consistent with
+  // UNM's host inventory. The API serves the authoritative snapshot through the
+  // internal GET /plugin/inventory/hosts endpoint; the plugin reconciles it against
+  // its external system and applies create/update/delete via a plan action. Each
+  // monitoring system has different logic + settings, so the contract stays generic
+  // (see InventorySnapshot) and ALL subsystem-specific mapping is owned by the
+  // plugin through its own options + actions. Advertise when /discover carries an
+  // inventory-sync action in `actions`.
+  'inventorySync',
 ] as const;
 export type PluginCapability = (typeof CAPABILITIES)[number];
 
@@ -879,3 +888,75 @@ export const INVENTORY_KEYS = [
   'wifiNeighbors',
   'ports',
 ] as const;
+
+// ---------------------------------------------------------------------------
+// Inventory sync (capability 'inventorySync') — the API serves UNM's host
+// inventory to a plugin so it can keep an EXTERNAL monitoring subsystem in
+// step. The contract is deliberately SUBSYSTEM-AGNOSTIC: the snapshot below is
+// plain data about UNM hosts; how that maps onto Zabbix/Nagios/… (host names,
+// groups, templates, IPs, status semantics) is 100% plugin-owned via its own
+// options + actions. The API never interprets it — it only brokers the read.
+// ---------------------------------------------------------------------------
+
+/** One IP address of a host in the inventory snapshot. */
+export interface InventoryHostAddress {
+  /** Bare IPv4/IPv6 literal (no scheme, no port). */
+  address: string;
+  /** Documented (expected) MAC when known — "aa:bb:cc:dd:ee:ff", else null. */
+  mac?: string | null;
+  /** Network label the user associated with this address (free-form or a canonical network key), else null. */
+  networkLabel?: string | null;
+  /** VLAN id when known, else null. */
+  vlanId?: number | null;
+}
+
+/** One host in the inventory snapshot — documented hosts and/or live observations merged. */
+export interface InventoryHost {
+  /** Stable UNM identifier: the documented_hosts.id when the host is user-documented, else a synthetic "live:<mac|ip>" key. */
+  id: string;
+  /** Primary display name (first DNS name of a documented host, or observed hostname / IP for live-only hosts). */
+  name: string;
+  /** All known DNS names / FQDNs (documented hosts); empty array for live-only hosts. */
+  dnsNames?: string[];
+  /** Friendly name (documented hosts), else null. */
+  friendlyName?: string | null;
+  /** Free-form description, else null. */
+  description?: string | null;
+  /** User-assigned tags, else empty array. */
+  tags?: string[];
+  /** Site id the host is placed in (documented hosts), else null. */
+  siteId?: string | null;
+  /** Topology layer id (documented hosts), else null. */
+  layerId?: string | null;
+  /** User-maintained lifecycle flag: true = active, false = stale/retired. Live-only hosts are always active. */
+  isActive: boolean;
+  /** True when the host is a user-documented record (documented_hosts row); false for live-observation-only hosts. */
+  documented: boolean;
+  /** All known IP addresses of this host (documented + observed, deduped). */
+  addresses: InventoryHostAddress[];
+  /** ISO timestamp when the host was last seen in the live inventory (null = never observed / documentation only). */
+  lastSeenAt?: string | null;
+}
+
+/** The authoritative UNM host-inventory snapshot served by GET /plugin/inventory/hosts. */
+export interface InventorySnapshot {
+  /** ISO-8601 timestamp when the API assembled this snapshot. */
+  collectedAt: string;
+  /** All hosts matching the request filters (see InventoryHostsQuery). */
+  hosts: InventoryHost[];
+}
+
+/** Query parameters of GET /plugin/inventory/hosts (all optional, AND-combined). */
+export interface InventoryHostsQuery {
+  /** Only documented hosts (documented_hosts rows); omit/false = include live observations too. */
+  documentedOnly?: boolean;
+  /** Only active hosts (isActive=true); omit/false = include inactive ones as well. */
+  activeOnly?: boolean;
+  /** Case-insensitive substring filter on name / DNS names / IPs. */
+  search?: string;
+}
+
+/** Response of the API's internal GET /plugin/inventory/hosts endpoint. */
+export interface InventoryHostsResponse {
+  snapshot: InventorySnapshot;
+}
