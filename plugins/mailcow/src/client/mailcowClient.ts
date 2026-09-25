@@ -130,6 +130,19 @@ async function getRows(client: AxiosInstance, path: string): Promise<Record<stri
   return asRows(res.data);
 }
 
+/**
+ * One GET against `/api/v1/get/...` that returns a single OBJECT (not an array).
+ * mailcow's `fail2ban('get')` and `dkim('details', …)` both answer with one object;
+ * a non-2xx status throws, but a 200 with `{}` / empty body yields `{}`.
+ */
+async function getObject(client: AxiosInstance, path: string): Promise<Record<string, unknown>> {
+  const res = await client.get(path);
+  if (res.status < 200 || res.status >= 300) {
+    throw new MailcowApiError(`mailcow GET ${path} returned HTTP ${res.status}`, res.status);
+  }
+  return res.data && typeof res.data === 'object' && !Array.isArray(res.data) ? (res.data as Record<string, unknown>) : {};
+}
+
 /** One POST against `/api/v1/<action>/...` with the given body; asserts success. */
 async function postAction(client: AxiosInstance, path: string, body: unknown): Promise<MailcowResultItem[]> {
   const res = await client.post(path, body);
@@ -210,4 +223,93 @@ export async function getStatusVersion(client: AxiosInstance): Promise<string | 
   if (res.status < 200 || res.status >= 300) throw new MailcowApiError(`mailcow status returned HTTP ${res.status}`, res.status);
   const v = (res.data as Record<string, unknown> | undefined)?.['version'];
   return typeof v === 'string' ? v : null;
+}
+
+// --- Security ------------------------------------------------------------------
+// fail2ban + DKIM are the two security-relevant surfaces reachable through the
+// JSON API. SPF/DMARC live only in mailcow's live DNS diagnostics (an ajax
+// endpoint, not part of /api/v1), so they are intentionally NOT checked here.
+
+/** One active/permanent ban entry from `fail2ban('get')`. */
+export interface MailcowBanEntry {
+  network: string; // CIDR or host as banned
+  ip?: string; // first address of the network
+}
+
+/** Normalized fail2ban state from GET /api/v1/get/fail2ban. */
+export interface MailcowFail2ban {
+  /** Networks currently banned (active_bans). */
+  activeBans: MailcowBanEntry[];
+  /** Permanently banned networks (perm_bans). */
+  permBans: MailcowBanEntry[];
+  /** Manually denylisted networks/hosts (blacklist, newline-separated string). */
+  blacklist: string[];
+  /** Max failed attempts before a ban. */
+  maxAttempts?: number;
+  /** Retry window in seconds for the attempt count. */
+  retryWindowSeconds?: number;
+}
+
+/**
+ * GET /api/v1/get/fail2ban — fail2ban options + current ban lists.
+ * NOTE: mailcow's `fail2ban('get')` returns PHP `false` (→ empty body) for any
+ * non-admin API key, so a read-only key yields `{}` here; callers must treat an
+ * all-empty result as "not verifiable", not as "no bans".
+ */
+export async function getFail2ban(client: AxiosInstance): Promise<MailcowFail2ban> {
+  const raw = await getObject(client, '/api/v1/get/fail2ban');
+
+  const toEntries = (v: unknown): MailcowBanEntry[] => {
+    if (!Array.isArray(v)) return [];
+    return v
+      .filter((e) => e && typeof e === 'object')
+      .map((e) => {
+        const o = e as Record<string, unknown>;
+        const network = typeof o['network'] === 'string' ? o['network'] : '';
+        if (!network) return null;
+        const ip = typeof o['ip'] === 'string' && o['ip'] ? o['ip'] : undefined;
+        return { network, ...(ip ? { ip } : {}) };
+      })
+      .filter((e): e is MailcowBanEntry => e !== null);
+  };
+
+  const blacklistRaw = typeof raw['blacklist'] === 'string' ? (raw['blacklist'] as string) : '';
+  const num = (v: unknown): number | undefined => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
+    return undefined;
+  };
+
+  return {
+    activeBans: toEntries(raw['active_bans']),
+    permBans: toEntries(raw['perm_bans']),
+    blacklist: blacklistRaw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+    maxAttempts: num(raw['max_attempts']),
+    retryWindowSeconds: num(raw['retry_window']),
+  };
+}
+
+/** Normalized DKIM key state from GET /api/v1/get/dkim/<domain>. */
+export interface MailcowDkim {
+  /** True when the domain has a generated/imported DKIM public key. */
+  present: boolean;
+  /** Estimated key length in bits as reported by mailcow ("1024"…"8192"). */
+  length?: string;
+  /** The selector (e.g. "dkim") — part of the DNS record name. */
+  selector?: string;
+}
+
+/**
+ * GET /api/v1/get/dkim/<domain> — DKIM key details for one domain. Returns an
+ * empty object when the domain has no key (or the caller lacks access). The
+ * public key itself is deliberately NOT surfaced here — only presence + length,
+ * which is all a security check needs and keeps secrets out of metrics.
+ */
+export async function getDkimDetails(client: AxiosInstance, domain: string): Promise<MailcowDkim> {
+  const raw = await getObject(client, `/api/v1/get/dkim/${encodeURIComponent(domain)}`);
+  const pubkey = typeof raw['pubkey'] === 'string' ? (raw['pubkey'] as string) : '';
+  if (!pubkey) return { present: false };
+  const length = typeof raw['length'] === 'string' && raw['length'] ? raw['length'] : undefined;
+  const selector = typeof raw['dkim_selector'] === 'string' && raw['dkim_selector'] ? (raw['dkim_selector'] as string) : undefined;
+  return { present: true, ...(length ? { length } : {}), ...(selector ? { selector } : {}) };
 }

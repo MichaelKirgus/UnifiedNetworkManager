@@ -12,6 +12,10 @@ const KIND_STYLES: Record<string, string> = {
   'rate-limiting': 'bg-accent-teal text-accent-teal-fg',
   account: 'bg-accent-sky text-accent-sky-fg',
   'service-exposure': 'bg-warning text-warning-fg',
+  // Custom kinds emitted by specific plugins (the SDK allows arbitrary strings).
+  'wifi-encryption': 'bg-accent-purple text-accent-purple-fg',
+  'vpn-crypto': 'bg-accent-cyan text-accent-cyan-fg',
+  'email-auth': 'bg-accent-sky text-accent-sky-fg',
   other: 'bg-muted text-secondary',
 };
 
@@ -21,6 +25,10 @@ const KIND_LABELS: Record<string, string> = {
   'rate-limiting': 'rate limiting',
   account: 'accounts',
   'service-exposure': 'exposure',
+  // Custom kinds emitted by specific plugins (the SDK allows arbitrary strings).
+  'wifi-encryption': 'wifi encryption',
+  'vpn-crypto': 'vpn crypto',
+  'email-auth': 'email auth',
   other: 'other',
 };
 

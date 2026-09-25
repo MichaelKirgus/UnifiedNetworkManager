@@ -35,7 +35,7 @@ RUN cd packages/lancom-shared && npm install --legacy-peer-deps && npm run build
 COPY plugins/lancom-lx/package*.json plugins/lancom-lx/tsconfig.json plugins/lancom-lx/
 RUN cd plugins/lancom-lx && npm install --legacy-peer-deps
 
-COPY plugins/lancom-lx/src/index.ts plugins/lancom-lx/src/lcosOids.ts plugins/lancom-lx/src/lcosClient.ts plugins/lancom-lx/src/metrics.ts plugins/lancom-lx/src/deviceModels.ts plugins/lancom-lx/src/
+COPY plugins/lancom-lx/src/index.ts plugins/lancom-lx/src/lcosOids.ts plugins/lancom-lx/src/lcosClient.ts plugins/lancom-lx/src/metrics.ts plugins/lancom-lx/src/deviceModels.ts plugins/lancom-lx/src/security.ts plugins/lancom-lx/src/
 RUN cd plugins/lancom-lx && npm run build \
     && node -e "require('/app/plugins/lancom-lx/node_modules/@unm/snmp-client')"
 

@@ -41,6 +41,7 @@ import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 // "MM/DD/YYYY HH:MM:SS" that some firmware reports (observed live:
 // "09/13/2026 23:06:22"). Unparseable → null so the caller omits the metric.
 import { LcosOptions, getLcosInventory, walkLcosCounters } from './lcosClient';
+import { deriveSecurityChecks } from './security';
 import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 import { DEVICE_MODELS } from './deviceModels';
 import { getAction, listCatalog, listModules } from './actions/registry';
@@ -74,7 +75,9 @@ const identity = resolvePluginIdentity({
   // All four capabilities: monitoring (SNMP walks), inventory (networks/hosts),
   // configuration (SNMP SET actions) + planning (multi-device fan-out). Plus an
   // interactive SSH console ('sshConsole') — LCOS exposes a full CLI over SSH.
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'sshConsole', 'updates', 'quickActions'],
+  // securityChecks: IPsec crypto strength derived from the already-collected
+  // snapshot (no extra SNMP walks).
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'sshConsole', 'updates', 'quickActions', 'securityChecks'],
 });
 
 /**
@@ -164,6 +167,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       'Ship structured log entries (SNMP walk failures, config/plan errors) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
+  },
+  {
+    key: 'securityChecksEnabled',
+    label: 'Security checks',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Run per-device security checks (IPsec crypto strength — IKEv1, DES/3DES, MD5/SHA-1). Findings appear in the cross-device Security page.',
   },
 ];
 
@@ -447,6 +458,17 @@ app.post('/monitoring', async (req, res) => {
     // User-selected hardware model / firmware (from the device form).
     if (selectedModel) metrics['system.model'] = selectedModel;
     if (selectedFirmware) metrics['system.firmwareVersion'] = selectedFirmware;
+
+    // Security checks (IPsec crypto strength) — pure derivation from the
+    // snapshot, throttled internally to a ~15-min cadence. Best-effort: a
+    // failure omits the key entirely (absent = no wipe).
+    if (settings.securityChecksEnabled !== false) {
+      try {
+        metrics['securityChecks'] = deriveSecurityChecks(host, snapshot);
+      } catch {
+        /* best-effort — a failed check must never sink the poll */
+      }
+    }
 
     // --- LAN ----------------------------------------------------------------
     metrics['lan.ports'] = snapshot.lanPorts.map((p) => ({

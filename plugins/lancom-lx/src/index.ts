@@ -32,6 +32,7 @@ import {
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 import { LcosOptions, getLcosInventory, readLcosClock, walkLcosCounters } from './lcosClient';
+import { deriveSecurityChecks } from './security';
 import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 import { DEVICE_MODELS } from './deviceModels';
 
@@ -64,7 +65,9 @@ const identity = resolvePluginIdentity({
   vendors: ['lancom'],
   // monitoring + inventory over the LCOS-LX MIB, plus an interactive SSH console
   // ('sshConsole') — LX access points expose a CLI shell over SSH (port 22).
-  capabilities: ['monitoring', 'inventory', 'sshConsole', 'updates', 'quickActions'],
+  // securityChecks: WiFi cipher strength + PSK brute-force attempts derived from
+  // the already-collected snapshot (no extra SNMP walks).
+  capabilities: ['monitoring', 'inventory', 'sshConsole', 'updates', 'quickActions', 'securityChecks'],
 });
 
 /**
@@ -118,6 +121,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       'Ship structured log entries (SNMP walk failures) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
+  },
+  {
+    key: 'securityChecksEnabled',
+    label: 'Security checks',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Run per-AP security checks (WiFi cipher strength — WEP/open SSIDs — and PSK brute-force attempts from the WLAN failure counters). Findings appear in the cross-device Security page.',
   },
   {
     key: 'httpsPort',
@@ -420,6 +431,17 @@ app.post('/monitoring', async (req, res) => {
     metrics['management.mode'] = mgmt.capwapState || 'standalone';
     metrics['management.controller'] = mgmt.controller || null;
     metrics['management.lmcStatus'] = mgmt.lmcStatus || null;
+
+    // Security checks (WiFi cipher strength + PSK brute-force deltas) — pure
+    // derivation from the snapshot, throttled internally to a ~15-min cadence.
+    // Best-effort: a failure omits the key entirely (absent = no wipe).
+    if (settings.securityChecksEnabled !== false) {
+      try {
+        metrics['securityChecks'] = deriveSecurityChecks(host, snapshot);
+      } catch {
+        /* best-effort — a failed check must never sink the poll */
+      }
+    }
 
     // --- WiFi (only when the device actually exposes WLAN data) -----------
     const hasWifi = snapshot.radios.length > 0 || snapshot.ssids.length > 0 || snapshot.clients.length > 0;

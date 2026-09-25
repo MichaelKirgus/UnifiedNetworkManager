@@ -32,6 +32,7 @@ import {
 } from '@unm/plugin-sdk';
 import { MailcowActionContext } from './actions';
 import { registry as actionRegistry } from './actions';
+import { collectSecurityChecks } from './security';
 import { buildPlan, PlanningError } from './plan';
 import {
   MailcowApiError,
@@ -52,7 +53,8 @@ const identity = resolvePluginIdentity({
   name: 'Mailcow Plugin',
   version: '0.1.0',
   vendors: ['mailcow'],
-  capabilities: ['monitoring', 'inventory', 'configuration', 'planning'],
+  // securityChecks: fail2ban (rate limiting) + per-domain DKIM over the REST API.
+  capabilities: ['monitoring', 'inventory', 'configuration', 'planning', 'securityChecks'],
 });
 
 // --- Options --------------------------------------------------------------------
@@ -98,6 +100,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     type: 'boolean' as const,
     default: true,
     description: 'Ship structured log entries (poll/action failures) to the UNM API for the device Logs view.',
+  },
+  {
+    key: 'securityChecksEnabled',
+    label: 'Security checks',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Run per-instance security checks (fail2ban brute-force protection state and per-domain DKIM key presence/strength). Findings appear in the cross-device Security page.',
   },
 ];
 
@@ -382,6 +392,20 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
       } else {
         firstError = firstError || `alias list failed: ${errMsg(aliasesRes.reason)}`;
         if (!isAuthError(aliasesRes.reason)) health = 'warning';
+      }
+
+      // Security checks (fail2ban + per-domain DKIM). Throttled internally to a
+      // ~15-min cadence; best-effort — a failure omits the key entirely (absent
+      // = no wipe, per the ingestion contract).
+      if (settings.securityChecksEnabled !== false) {
+        try {
+          const domainNames = domainsRes.status === 'fulfilled'
+            ? domainsRes.value.map((r) => normStr(r['domain_name']) ?? normStr(r['domain'])).filter((d): d is string => !!d)
+            : [];
+          metrics['securityChecks'] = await collectSecurityChecks(host, client, domainNames);
+        } catch {
+          /* best-effort — a failed check must never sink the poll */
+        }
       }
     }
   } catch (err) {
