@@ -28,6 +28,7 @@ import {
 } from '@unm/plugin-sdk';
 import { RouterOsAuthError } from './routerosClient';
 import { DEFAULT_OPTIONS, MonitoringResult, RouterOsOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
+import { collectSecurityChecks, type SecuritySettings } from './security';
 import { DEVICE_MODELS } from './deviceModels';
 
 /** Every firmware line known across the RouterOS catalog — the Updates page
@@ -61,7 +62,9 @@ const identity = resolvePluginIdentity({
   vendors: ['mikrotik'],
   // monitoring + inventory over the REST API, plus an interactive SSH console
   // ('sshConsole') — RouterOS exposes a full CLI shell over SSH (port 22).
-  capabilities: ['monitoring', 'inventory', 'sshConsole', 'updates', 'quickActions'],
+  // securityChecks: per-appliance security checks over the REST API (service
+  // exposure of telnet/ftp/www, failed logins from /log/print) → Security page.
+  capabilities: ['monitoring', 'inventory', 'sshConsole', 'updates', 'quickActions', 'securityChecks'],
 });
 
 /**
@@ -142,6 +145,39 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     max: 65535,
     description:
       "TCP port of the router's SSH daemon. Used for the interactive web console and host-key pinning when the management address carries no explicit port.",
+  },
+  {
+    key: 'securityChecksEnabled',
+    label: 'Security checks',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Run per-appliance security checks (management service exposure — telnet/ftp/www bound to non-loopback interfaces — and failed logins from the router log). Findings appear in the cross-device Security page.',
+  },
+  {
+    key: 'securityAuthFailureWindowHours',
+    label: 'Failed-login window (hours)',
+    type: 'integer' as const,
+    default: 24,
+    min: 1,
+    max: 720,
+    description: 'Look-back window for counting failed login attempts from the router log.',
+  },
+  {
+    key: 'securityAuthFailureWarnThreshold',
+    label: 'Failed-login warning threshold',
+    type: 'integer' as const,
+    default: 10,
+    min: 1,
+    description: '≥ this many failed logins in the window raises a warning (below = info).',
+  },
+  {
+    key: 'securityAuthFailureCriticalThreshold',
+    label: 'Failed-login critical threshold',
+    type: 'integer' as const,
+    default: 50,
+    min: 2,
+    description: '≥ this many failed logins in the window raises a critical finding (likely brute force).',
   },
 ];
 
@@ -383,6 +419,22 @@ app.post('/monitoring', async (req, res) => {
     if (result.certificates.length > 0) {
       metrics['certificates'] = result.certificates;
     }
+
+    // Security checks over the REST API (service exposure + failed logins).
+    // Throttled internally to a ~15-min cadence per host; failure → omit the key
+    // entirely (absent = no wipe, per the ingestion contract).
+    try {
+      const secSettings: SecuritySettings = {
+        enabled: settings.securityChecksEnabled !== false,
+        authFailureWindowHours: Number(settings.securityAuthFailureWindowHours ?? 24),
+        authFailureWarnThreshold: Number(settings.securityAuthFailureWarnThreshold ?? 10),
+        authFailureCriticalThreshold: Number(settings.securityAuthFailureCriticalThreshold ?? 50),
+      };
+      metrics['securityChecks'] = await collectSecurityChecks(managementAddress.trim(), creds, opts, secSettings);
+    } catch {
+      /* best-effort — a failed check must never sink the poll */
+    }
+
     if (health !== 'ok') metrics['system.error'] = warnings.join('; ');
 
     let descriptors = [...buildDescriptors(s), ...modelFirmwareDescriptors(selectedModel, selectedFirmware)];

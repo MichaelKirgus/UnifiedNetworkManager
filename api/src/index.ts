@@ -23,6 +23,7 @@ import mailRouter from './routes/mail';
 import documentedHostsRouter from './routes/documentedHosts';
 import documentedNetworksRouter from './routes/documentedNetworks';
 import updatesRouter from './routes/updates';
+import securityChecksRouter from './routes/securityChecks';
 import topologyRouter from './routes/topology';
 import logsRouter from './routes/logs';
 import notificationsRouter from './routes/notifications';
@@ -136,6 +137,8 @@ async function main(): Promise<void> {
   api.use(documentedNetworksRouter);
   // Cross-device update center (/updates: device updates + stack self-update card).
   api.use(updatesRouter);
+  // Cross-device security findings (Security page) — actionable checks only.
+  api.use(securityChecksRouter);
   // Physical + logical topology graph for the Topology page (self-defining path).
   api.use(topologyRouter);
   // Plugin log entries (global view + per-device section in DeviceDetail).

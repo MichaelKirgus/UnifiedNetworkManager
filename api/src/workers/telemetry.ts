@@ -2131,6 +2131,83 @@ async function ingestInventory(
           ));
       }
     }
+
+    // --- Security checks (Security page) --------------------------------------
+    // Generic key — any plugin advertising capability 'securityChecks' may emit it:
+    //   securityChecks[] { name, kind, status, detail?, count?, extra? }
+    // Same lifecycle as device_updates. Only ACTIONABLE findings persist: rows with
+    // status 'ok' are dropped (a clean check is the absence of a row), so the table
+    // holds warnings/criticals only and the nav badge counts real issues. A present
+    // array — even empty — is authoritative for this device+plugin; an ABSENT key
+    // (metrics-only poll, or collection failed) never wipes stored rows.
+    const rawSecurityChecks = Array.isArray(metrics['securityChecks']) ? (metrics['securityChecks'] as unknown[]) : null;
+    if (rawSecurityChecks !== null) {
+      const secNumOrNull = (v: unknown): number | null =>
+        typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : null;
+      const secExtraOf = (r: Record<string, unknown>): string => {
+        const e = r['extra'];
+        if (!e || typeof e !== 'object' || Array.isArray(e)) return '{}';
+        try {
+          return JSON.stringify(e);
+        } catch {
+          return '{}';
+        }
+      };
+      const values: {
+        deviceId: string; pluginId: string; kind: string; name: string;
+        status: string; detail: string | null; count: number | null; extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawSecurityChecks) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        // Only non-'ok' rows persist — 'ok' means "no issue" and is the absence of a row.
+        // 'info' covers positive/neutral states worth surfacing (e.g. rate limiting active).
+        const status = r['status'];
+        if (status !== 'info' && status !== 'warning' && status !== 'critical') continue;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        if (!name) continue; // name is part of the conflict key
+        const kind = typeof r['kind'] === 'string' && (r['kind'] as string).trim() !== '' ? (r['kind'] as string).trim() : 'other';
+        values.push({
+          deviceId,
+          pluginId,
+          kind,
+          name,
+          status: status as string,
+          detail: typeof r['detail'] === 'string' && (r['detail'] as string).trim() !== '' ? (r['detail'] as string).slice(0, 2_048) : null,
+          count: secNumOrNull(r['count']),
+          extra: secExtraOf(r),
+          collectedAt,
+        });
+      }
+      if (values.length > 0) {
+        const byKey = new Map<string, typeof values[number]>();
+        for (const v of values) byKey.set(`${v.kind}|${v.name}`, v);
+        await db.insert(schema.deviceSecurityChecks).values(Array.from(byKey.values())).onConflictDoUpdate({
+          target: [schema.deviceSecurityChecks.deviceId, schema.deviceSecurityChecks.pluginId, schema.deviceSecurityChecks.kind, schema.deviceSecurityChecks.name],
+          set: {
+            status: sql`excluded."status"`,
+            detail: sql`excluded."detail"`,
+            count: sql`excluded."count"`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+        const seenKeys = new Set(values.map((v) => `${v.kind}|${v.name}`));
+        await db.delete(schema.deviceSecurityChecks)
+          .where(and(
+            eq(schema.deviceSecurityChecks.deviceId, deviceId),
+            eq(schema.deviceSecurityChecks.pluginId, pluginId),
+            notInArray(sql`"kind" || '|' || name`, Array.from(seenKeys))
+          ));
+      } else {
+        // Present-but-no-findings is the authoritative wipe — same contract as updates.
+        await db.delete(schema.deviceSecurityChecks)
+          .where(and(
+            eq(schema.deviceSecurityChecks.deviceId, deviceId),
+            eq(schema.deviceSecurityChecks.pluginId, pluginId)
+          ));
+      }
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(
@@ -2188,6 +2265,7 @@ async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
   await db.delete(schema.dockerImages).where(lt(schema.dockerImages.collectedAt, cutoff));
   await db.delete(schema.vms).where(lt(schema.vms.collectedAt, cutoff));
   await db.delete(schema.deviceUpdates).where(lt(schema.deviceUpdates.collectedAt, cutoff));
+  await db.delete(schema.deviceSecurityChecks).where(lt(schema.deviceSecurityChecks.collectedAt, cutoff));
   await db.delete(schema.mailDomains).where(lt(schema.mailDomains.collectedAt, cutoff));
   await db.delete(schema.mailMailboxes).where(lt(schema.mailMailboxes.collectedAt, cutoff));
   await db.delete(schema.mailAliases).where(lt(schema.mailAliases.collectedAt, cutoff));

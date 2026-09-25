@@ -17,6 +17,7 @@ import { ROUTES_ACTIONS } from './routes';
 import { SNAPSHOT_ACTIONS } from './backup';
 import { WIREGUARD_ACTIONS } from './wireguard';
 import { PACKAGES_ACTIONS } from './packages';
+import { SECURITY_ACTIONS } from './security';
 
 const ALL_ACTIONS: SdkActionDescriptor<ActionContext>[] = [
   ...SYSTEM_ACTIONS,
@@ -24,6 +25,7 @@ const ALL_ACTIONS: SdkActionDescriptor<ActionContext>[] = [
   ...SNAPSHOT_ACTIONS,
   ...WIREGUARD_ACTIONS,
   ...PACKAGES_ACTIONS,
+  ...SECURITY_ACTIONS,
 ];
 
 export const registry = createRegistry<ActionContext>(ALL_ACTIONS);

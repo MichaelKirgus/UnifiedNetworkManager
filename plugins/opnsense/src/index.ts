@@ -57,13 +57,17 @@ import { collectRoutes, deriveConnectedAndDefaultRoutes, enrichRoutesWithGateway
 import { collectFirewallRules, fetchFilterRuleStats } from './firewall';
 import { collectServices } from './services';
 import { collectZfsViaSsh } from './zfsSsh';
+import { collectSecurityChecks, DEFAULT_WATCHED_FILES, type SecuritySettings } from './security';
 import { getAction, listModules } from './actions/registry';
 import { ActionContext, ActionResult, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest, listCatalog } from './plan';
 import { InventorySnapshot } from './inventoryTypes';
 import { buildOpnsenseState } from './state';
 
-export const PLUGIN_UUID = 'b0e6c8a2-4f1e-4a3d-9c7b-1a2b3c4d5e6f';
+// Base UUID + shared state store live in ./stateStore so the monitoring path and
+// the security actions both bind to the SAME instance-scoped effective uuid.
+import { PLUGIN_UUID } from './stateStore';
+export { PLUGIN_UUID };
 export const PLUGIN_NAME = 'OPNsense Plugin';
 
 /**
@@ -89,7 +93,9 @@ const identity = resolvePluginIdentity({
   // per-device Config page (interfaces with live status + system power actions).
   // 'ssh' = optional SSH data path for ZFS pool/dataset inventory (the API has
   // no ZFS listing) — only used when an `ssh` credential slot is bound.
-  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState', 'ssh', 'updates', 'quickActions'],
+  // securityChecks: per-appliance security checks over the same ssh slot (file
+  // integrity, failed logins, active rate limiting, account hygiene).
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'deviceState', 'ssh', 'updates', 'quickActions', 'securityChecks'],
 });
 
 /**
@@ -883,6 +889,47 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
       'Ship structured log entries (poll failures, config/plan errors) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
   },
   {
+    key: 'securityChecksEnabled',
+    label: 'Security checks',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Run per-appliance security checks on the inventory window (file integrity of identity/config files, failed sshd logins, active rate limiting, account hygiene). Requires a bound SSH credential slot — skipped silently in API-only mode. Findings appear in the cross-device Security page.',
+  },
+  {
+    key: 'securityWatchedFiles',
+    label: 'Watched files (integrity)',
+    type: 'string' as const,
+    default: DEFAULT_WATCHED_FILES.join(', '),
+    description:
+      'Comma-separated absolute paths to hash and watch for changes. First sight baselines silently; a later change raises a critical finding until you re-baseline via the security.rebaseline action.',
+  },
+  {
+    key: 'securityAuthFailureWindowHours',
+    label: 'Failed-login window (hours)',
+    type: 'integer' as const,
+    default: 24,
+    min: 1,
+    max: 720,
+    description: 'Look-back window for counting unsuccessful sshd login attempts.',
+  },
+  {
+    key: 'securityAuthFailureWarnThreshold',
+    label: 'Failed-login warning threshold',
+    type: 'integer' as const,
+    default: 10,
+    min: 1,
+    description: '≥ this many failed logins in the window raises a warning (below = info).',
+  },
+  {
+    key: 'securityAuthFailureCriticalThreshold',
+    label: 'Failed-login critical threshold',
+    type: 'integer' as const,
+    default: 50,
+    min: 2,
+    description: '≥ this many failed logins in the window raises a critical finding (likely brute force).',
+  },
+  {
     key: 'transport',
     label: 'Transport',
     type: 'string' as const,
@@ -1507,6 +1554,28 @@ app.post('/monitoring', async (req, res) => {
       console.error(`[opnsense-plugin] firmware updates failed for ${managementAddress}: ${(e as Error)?.message ?? e}`);
     }
 
+    // Security checks ride the INVENTORY window: file-integrity baselines +
+    // failed-login/rate-limit/account scans over the optional `ssh` slot.
+    // Failure → omit the key entirely (absent = no wipe, per the ingestion
+    // contract). No ssh slot bound → skipped silently (API-only mode).
+    if (collectInventory) {
+      try {
+        const secSettings: SecuritySettings = {
+          enabled: settings.securityChecksEnabled !== false,
+          watchedFiles: String(settings.securityWatchedFiles ?? DEFAULT_WATCHED_FILES.join(', '))
+            .split(',')
+            .map((s) => s.trim())
+            .filter((s) => s.startsWith('/')),
+          authFailureWindowHours: Number(settings.securityAuthFailureWindowHours ?? 24),
+          authFailureWarnThreshold: Number(settings.securityAuthFailureWarnThreshold ?? 10),
+          authFailureCriticalThreshold: Number(settings.securityAuthFailureCriticalThreshold ?? 50),
+        };
+        metrics['securityChecks'] = await collectSecurityChecks(managementAddress, credentials, sshPort, deviceId, secSettings);
+      } catch {
+        /* best-effort — a failed check must never sink the poll */
+      }
+    }
+
     // Health: prefer the appliance's own status code (0=critical, 1=warning,
     // 2=ok); fall back to "did we collect anything at all".
     let health: Health = 'unknown';
@@ -1677,6 +1746,9 @@ async function buildActionContext(args: {
     syncClasses: runtime.syncClasses as ActionContext['syncClasses'],
     dnsBackend: runtime.dnsBackend,
     dhcpBackend: runtime.dhcpBackend,
+    // SSH port for actions that ride the optional `ssh` slot (ZFS inventory,
+    // security re-baseline) — mirrors the monitoring path's sshPortOf(settings).
+    extra: { sshPort: resolveSshPort(settings.sshPort) },
   };
 }
 

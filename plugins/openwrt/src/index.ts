@@ -52,6 +52,8 @@ import type { CertificateRow, ProbeRequestBody, StateRequestBody, QuickAction } 
 import { Backend } from './client/backend';
 import { closeSshPools } from './client/sshBackend';
 import { collectMonitoring, getInventory } from './monitoring';
+import { stateStore } from './stateStore';
+import { collectSecurityChecks, DEFAULT_WATCHED_FILES, type SecuritySettings } from './security';
 import { getAction, listModules } from './actions/registry';
 import type { ActionContext } from './actions/types';
 import { validateInput } from '@unm/plugin-sdk';
@@ -60,7 +62,10 @@ import { buildPlan, PlanningError, listCatalog } from './plan';
 import type { PlanRequest } from './plan';
 import { buildOpenWrtState } from './state';
 
-export const PLUGIN_UUID = 'aa9f941c-f63c-432c-adef-19049b320d03';
+// Base UUID + shared state store live in ./stateStore so the monitoring path and
+// the security actions both bind to the SAME instance-scoped effective uuid.
+import { PLUGIN_UUID } from './stateStore';
+export { PLUGIN_UUID };
 export const PLUGIN_NAME = 'OpenWRT Plugin';
 
 /**
@@ -84,7 +89,9 @@ const identity = resolvePluginIdentity({
   // ssh: SSH data path (uci reads/writes, /proc stats, console shell).
   // probe: short-cycle live telemetry for on-demand webapp polling.
   // sshConsole: interactive dropbear shell over WebSocket (/console).
-  capabilities: ['monitoring', 'inventory', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'sshConsole', 'quickActions'],
+  // securityChecks: per-appliance security checks (file integrity, failed logins,
+  //                 active rate limiting, account hygiene) → Security page.
+  capabilities: ['monitoring', 'inventory', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'sshConsole', 'quickActions', 'securityChecks'],
 });
 
 /**
@@ -148,6 +155,47 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       'Ship structured log entries (poll failures, config/plan errors) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
+  },
+  {
+    key: 'securityChecksEnabled',
+    label: 'Security checks',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Run per-appliance security checks on the inventory window (file integrity of identity/config files, failed dropbear logins, active firewall rate limits, account hygiene). Findings appear in the cross-device Security page.',
+  },
+  {
+    key: 'securityWatchedFiles',
+    label: 'Watched files (integrity)',
+    type: 'string' as const,
+    default: DEFAULT_WATCHED_FILES.join(', '),
+    description:
+      'Comma-separated absolute paths to hash and watch for changes. First sight baselines silently; a later change raises a critical finding until you re-baseline via the security.rebaseline action.',
+  },
+  {
+    key: 'securityAuthFailureWindowHours',
+    label: 'Failed-login window (hours)',
+    type: 'integer' as const,
+    default: 24,
+    min: 1,
+    max: 720,
+    description: 'Look-back window for counting unsuccessful dropbear login attempts.',
+  },
+  {
+    key: 'securityAuthFailureWarnThreshold',
+    label: 'Failed-login warning threshold',
+    type: 'integer' as const,
+    default: 10,
+    min: 1,
+    description: '≥ this many failed logins in the window raises a warning (below = info).',
+  },
+  {
+    key: 'securityAuthFailureCriticalThreshold',
+    label: 'Failed-login critical threshold',
+    type: 'integer' as const,
+    default: 50,
+    min: 2,
+    description: '≥ this many failed logins in the window raises a critical finding (likely brute force).',
   },
 ];
 
@@ -388,6 +436,29 @@ app.post('/monitoring', async (req, res) => {
       collectInventory: collectInventoryFlag,
       certificates,
     });
+
+    // Security checks ride the INVENTORY window (like updates): file-integrity
+    // baselines + failed-login/rate-limit/account scans are comparatively heavy,
+    // so they run at most once per inventory cycle. Failure → omit the key
+    // entirely (absent = no wipe, per the ingestion contract). Skipped in forced
+    // 'luci' mode — every check needs the SSH transport.
+    if (collectInventoryFlag) {
+      try {
+        const secSettings: SecuritySettings = {
+          enabled: settings.securityChecksEnabled !== false,
+          watchedFiles: String(settings.securityWatchedFiles ?? DEFAULT_WATCHED_FILES.join(', '))
+            .split(',')
+            .map((s) => s.trim())
+            .filter((s) => s.startsWith('/')),
+          authFailureWindowHours: Number(settings.securityAuthFailureWindowHours ?? 24),
+          authFailureWarnThreshold: Number(settings.securityAuthFailureWarnThreshold ?? 10),
+          authFailureCriticalThreshold: Number(settings.securityAuthFailureCriticalThreshold ?? 50),
+        };
+        result.metrics['securityChecks'] = await collectSecurityChecks(backend, deviceId, secSettings);
+      } catch {
+        /* best-effort — a failed check must never sink the poll */
+      }
+    }
 
     // Echo of the user-selected model/firmware (mirrors the opnsense plugin) —
     // informational only; shown as text cards in the device detail view.

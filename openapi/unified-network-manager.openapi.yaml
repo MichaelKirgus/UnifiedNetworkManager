@@ -23,6 +23,7 @@ tags:
   - name: Layers
   - name: Inventory
   - name: Updates
+  - name: Security
   - name: Logs
   - name: Notifications
   - name: Users
@@ -4086,6 +4087,57 @@ paths:
         '401':
           description: Authentication required
 
+  /security-checks:
+    get:
+      tags: [Security]
+      summary: Cross-device security findings (unsuccessful logins, file integrity, rate limiting)
+      description: >-
+        Cross-device view of the normalized `device_security_checks` table, populated by
+        the telemetry worker from each plugin's /monitoring `securityChecks[]` metric —
+        plugins opt in via capability 'securityChecks'. Each row is one CHECK on one
+        device (e.g. "auth-failures", "/etc/passwd integrity", "rate limiting active").
+        Only ACTIONABLE findings are persisted: rows with status 'ok' are dropped at
+        ingest, so a clean device has no rows and the nav badge counts real issues. A
+        check that is resolved (or renamed) vanishes on the next inventory poll; rows
+        not refreshed within 24h are swept away. Device-level access control applies —
+        scoped callers get an empty list for out-of-scope devices, never a leak.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: kind
+          required: false
+          schema:
+            type: string
+            enum: [auth-failures, file-integrity, rate-limiting, account, service-exposure, other]
+          description: Filter by check kind
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+            enum: [info, warning, critical]
+          description: Filter by verdict ('ok' rows are never stored)
+      responses:
+        '200':
+          description: Security finding rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityChecksResponse'
+        '400':
+          description: Invalid kind or status filter value
+        '401':
+          description: Authentication required
+
   /certificates:
     get:
       tags: [Inventory]
@@ -7770,6 +7822,50 @@ components:
             $ref: '#/components/schemas/UpdateRow'
         stack:
           $ref: '#/components/schemas/StackUpdateInfo'
+
+    SecurityCheckRow:
+      type: object
+      required: [deviceId, pluginId, kind, name, status, collectedAt]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this finding is for" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this finding" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        kind:
+          type: string
+          enum: [auth-failures, file-integrity, rate-limiting, account, service-exposure, other]
+          description: >-
+            Check kind (plugins may emit custom kinds): auth-failures = unsuccessful
+            login attempts; file-integrity = important config/identity files changed vs
+            a known baseline; rate-limiting = brute-force protection active; account =
+            account hygiene findings; service-exposure = sensitive services on
+            unexpected interfaces.
+        name: { type: string, description: "Stable identity within (device, kind): 'auth-failures', '/etc/passwd', …" }
+        status:
+          type: string
+          enum: [info, warning, critical]
+          description: >-
+            Verdict. A check with no issue emits status 'ok', which is dropped at
+            ingest (absence of a row = clean). 'info' covers positive/neutral states
+            worth surfacing (e.g. rate limiting active); 'warning'/'critical' are problems.
+        detail: { type: [string, 'null'], description: "Short human-readable finding line (capped at 2 KB)" }
+        count: { type: [integer, 'null'], description: "Numeric magnitude when one exists (failed-login count, changed-file count…)" }
+        extra:
+          type: object
+          additionalProperties: true
+          description: "Plugin-specific details (JSON) — e.g. per-source failed-login breakdown or baseline-vs-current hashes"
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this finding" }
+
+    SecurityChecksResponse:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/SecurityCheckRow'
 
     ContainersOverview:
       type: object

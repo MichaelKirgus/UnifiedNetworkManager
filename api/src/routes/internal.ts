@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { db } from '../db';
-import { eq, desc } from 'drizzle-orm';
+import { and, eq, desc, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import * as schema from '../db/schema';
 
@@ -681,6 +681,135 @@ export function internalRouter() {
       });
     } catch (error) {
       console.error('Error building inventory snapshot:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // --- Generic plugin state store -------------------------------------------
+  //
+  // A small, generic key/value store so plugins can persist opaque JSON blobs
+  // ACROSS polls and container restarts without owning a database connection or
+  // a local volume. The natural key is (pluginId, namespace, key): `namespace`
+  // groups one feature's state ("file-integrity"), `key` is the plugin-chosen
+  // stable identity within it ("<host>|/etc/passwd"). `value` is an opaque JSON
+  // blob owned entirely by the plugin — the API never interprets it. This is the
+  // foundation for any future "remember this between polls" need (baselines,
+  // counters, TOFU fingerprints, …). All routes are gated by x-plugin-api-key and
+  // validate the self-reported pluginId against the plugins table (same as logs).
+
+  const MAX_STATE_VALUE_BYTES = 65_536; // one blob — baselines/counters are tiny
+  const MAX_STATE_ENTRIES_PER_REQUEST = 200;
+
+  /** Validate a self-reported plugin id, returning the row or null. */
+  async function knownPlugin(pluginId: string) {
+    if (!pluginId || typeof pluginId !== 'string') return null;
+    return db.query.plugins.findFirst({ where: (plugins, { eq }) => eq(plugins.id, pluginId) });
+  }
+
+  /** Parse a stored JSON blob back to an object for the response. */
+  function parseStateValue(raw: string): unknown {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw; // non-JSON (shouldn't happen — we only store serialized JSON)
+    }
+  }
+
+  /** GET /plugin/state/:pluginId?namespace=&deviceId= - list a plugin's state rows. */
+  router.get('/plugin/state/:pluginId', pluginAuth, async (req: Request, res: Response) => {
+    const { pluginId } = req.params;
+    try {
+      if (!(await knownPlugin(pluginId))) return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
+      const namespace = typeof req.query.namespace === 'string' ? (req.query.namespace as string) : null;
+      const deviceId = typeof req.query.deviceId === 'string' ? (req.query.deviceId as string) : null;
+
+      let rows = await db.query.pluginState.findMany({ where: eq(schema.pluginState.pluginId, pluginId) });
+      if (namespace) rows = rows.filter((r) => r.namespace === namespace);
+      if (deviceId) rows = rows.filter((r) => r.deviceId === deviceId);
+
+      res.status(200).json({
+        rows: rows.map((r) => ({
+          namespace: r.namespace,
+          key: r.key,
+          value: parseStateValue(r.value),
+          deviceId: r.deviceId,
+          updatedAt: r.updatedAt,
+        })),
+      });
+    } catch (error) {
+      console.error('Error listing plugin state:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  /** PUT /plugin/state - upsert a batch of state rows for one plugin.
+   *  Body: { pluginId, entries: [{ namespace, key, value, deviceId? }] }. */
+  router.put('/plugin/state', pluginAuth, async (req: Request, res: Response) => {
+    const { pluginId, entries } = req.body ?? {};
+    if (!(await knownPlugin(pluginId))) return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
+    if (!Array.isArray(entries)) return res.status(400).json({ error: 'entries must be an array' });
+
+    try {
+      const now = new Date().toISOString();
+      let upserted = 0;
+      for (const e of entries.slice(0, MAX_STATE_ENTRIES_PER_REQUEST)) {
+        if (!e || typeof e !== 'object') continue;
+        const namespace = typeof e.namespace === 'string' ? (e.namespace as string).trim() : '';
+        const key = typeof e.key === 'string' ? (e.key as string).trim() : '';
+        if (!namespace || !key) continue; // both are part of the PK
+        let value: string;
+        try {
+          value = JSON.stringify(e.value ?? {});
+        } catch {
+          continue; // non-serializable blob — skip rather than fail the batch
+        }
+        if (value.length > MAX_STATE_VALUE_BYTES) continue; // oversized blob — skip
+        const deviceId = typeof e.deviceId === 'string' && e.deviceId ? (e.deviceId as string) : null;
+
+        await db.insert(schema.pluginState).values({ pluginId, namespace, key, value, deviceId, updatedAt: now }).onConflictDoUpdate({
+          target: [schema.pluginState.pluginId, schema.pluginState.namespace, schema.pluginState.key],
+          set: { value: sql`excluded."value"`, deviceId: sql`excluded."deviceId"`, updatedAt: sql`excluded."updatedAt"` },
+        });
+        upserted++;
+      }
+      res.status(200).json({ upserted });
+    } catch (error) {
+      console.error('Error upserting plugin state:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  /** DELETE /plugin/state/:pluginId?namespace=&deviceId= - delete a plugin's rows.
+   *  With `keys` (array) in the body, deletes exactly those keys within the
+   *  namespace; otherwise deletes every row matching namespace/deviceId filters. */
+  router.delete('/plugin/state/:pluginId', pluginAuth, async (req: Request, res: Response) => {
+    const { pluginId } = req.params;
+    try {
+      if (!(await knownPlugin(pluginId))) return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
+      const namespace = typeof req.query.namespace === 'string' ? (req.query.namespace as string) : null;
+      const deviceId = typeof req.query.deviceId === 'string' ? (req.query.deviceId as string) : null;
+      const keys = Array.isArray((req.body ?? {}).keys) ? ((req.body ?? {}).keys as unknown[]).filter((k): k is string => typeof k === 'string') : null;
+
+      let rows = await db.query.pluginState.findMany({ where: eq(schema.pluginState.pluginId, pluginId) });
+      if (namespace) rows = rows.filter((r) => r.namespace === namespace);
+      if (deviceId) rows = rows.filter((r) => r.deviceId === deviceId);
+      if (keys) {
+        const keySet = new Set(keys);
+        rows = rows.filter((r) => keySet.has(r.key));
+      }
+
+      let deleted = 0;
+      for (const r of rows) {
+        await db.delete(schema.pluginState).where(and(
+          eq(schema.pluginState.pluginId, pluginId),
+          eq(schema.pluginState.namespace, r.namespace),
+          eq(schema.pluginState.key, r.key),
+        ));
+        deleted++;
+      }
+      res.status(200).json({ deleted });
+    } catch (error) {
+      console.error('Error deleting plugin state:', error);
       res.status(500).json({ error: 'Internal server error' });
     }
   });

@@ -297,3 +297,29 @@ export async function collectZfsViaSsh(
     return null; // best-effort — keep previous data, never sink the poll
   }
 }
+
+/**
+ * Runs ONE read-only command over the bound `ssh` slot (same pool + host-key
+ * pinning as the ZFS path). Returns null when no ssh slot is bound or on any
+ * failure — callers treat that as "checks not applicable" and never sink the
+ * poll. Used by the security checks (file integrity, auth failures, rate
+ * limits) which have no REST-API equivalent.
+ */
+export async function execViaSshSlot(
+  host: string,
+  credentials: Record<string, unknown> | undefined,
+  command: string,
+  opts?: { port?: number; timeoutMs?: number },
+): Promise<{ code: number; stdout: string; stderr: string } | null> {
+  // slotOnly: the primary secret is an apiKey — only a bound `ssh` slot counts.
+  const creds = resolveSshCredentials(credentials, { slotOnly: true });
+  if (!creds) return null;
+
+  const port = resolveSshPort(opts?.port);
+  try {
+    const client = await sshPool.get(host, port, creds, { hostKeyVerifier: dynamicSshHostVerifier(host, port) });
+    return await client.exec(command, creds, opts?.timeoutMs ?? 20_000);
+  } catch {
+    return null; // best-effort — no usable SSH path right now
+  }
+}

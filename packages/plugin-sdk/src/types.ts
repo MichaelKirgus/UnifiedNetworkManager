@@ -68,6 +68,14 @@ export const CAPABILITIES = [
   // the cross-device table from this; applying an update is always a plan — each row
   // may carry applyActionId/applyInput pointing at THIS plugin's action catalog.
   'updates',
+  // Runs per-appliance security checks (unsuccessful logins, important-file
+  // integrity, active rate limiting / brute-force protection, …) and emits them
+  // as `metrics['securityChecks']` = SecurityCheckRow[] during inventory
+  // collection (see security.ts). The webapp's Security page renders the
+  // cross-device findings table from this. Each plugin owns WHAT to check —
+  // every appliance exposes these signals differently; only the result shape is
+  // shared. Rows with status 'ok' are dropped by the API (findings-only table).
+  'securityChecks',
   'secretsProvider',
   'identityProvider',
   // Reserved for future log-forwarder plugins (syslog daemon, OpenSearch, ...).

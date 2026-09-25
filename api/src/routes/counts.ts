@@ -17,7 +17,7 @@ const router = Router();
  */
 interface CountSpec {
   /** Response key + the permission required to see it. */
-  key: 'notifications' | 'configJobs' | 'plans' | 'certificates' | 'updates';
+  key: 'notifications' | 'configJobs' | 'plans' | 'certificates' | 'updates' | 'securityChecks';
   permission: string;
   compute: (req: Request, userId: string) => Promise<number>;
 }
@@ -115,6 +115,23 @@ const COUNTS: CountSpec[] = [
         .select({ n: sql<number>`count(*)::int` })
         .from(schema.deviceUpdates)
         .where(allowed !== null ? inArray(schema.deviceUpdates.deviceId, [...allowed]) : undefined);
+      return row?.n ?? 0;
+    },
+  },
+  {
+    // Actionable security findings across the caller's devices. Only warning/
+    // critical rows are ever persisted (status 'ok' is dropped at ingest), so a
+    // plain count IS the number of open issues — the badge lights up only when
+    // something actually needs attention.
+    key: 'securityChecks',
+    permission: 'security:read',
+    compute: async (req) => {
+      const allowed = await allowedDeviceIds(req);
+      if (allowed !== null && allowed.size === 0) return 0;
+      const [row] = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(schema.deviceSecurityChecks)
+        .where(allowed !== null ? inArray(schema.deviceSecurityChecks.deviceId, [...allowed]) : undefined);
       return row?.n ?? 0;
     },
   },

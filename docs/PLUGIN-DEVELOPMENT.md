@@ -168,10 +168,41 @@ The API's telemetry worker polls every ~30 s with a **hard 10 s budget**.
   - `wifiNetworks[]`, `wifiAirtime[]`, `wifiRadios[]`, `wifiNeighbors[]`, `wlanClients[]` → WiFi page
   - **Storage page:** `filesystems[]` (`{name, type?, mountpoint?, sizeBytes?, usedBytes?, freeBytes?, status?, parent?, extra?}` — types: `zfs-pool`, `zfs-dataset`, `ext4`, `squashfs`, `usb`, `other`) and `disks[]` (`{name, model?, serial?, capacityBytes?, rotationRate?, health?, poolName?, extra?}` — rotation: `hdd|ssd|flash|unknown`). Emit them even when EMPTY so removed datasets/disks vanish on the next poll; omit the key entirely only if your device class has no storage at all. Datasets set `parent` to their pool name — the webapp nests them under the pool row (expander). The optional `extra` JSON object carries plugin-specific details (ZFS dataset props like quota/compression/mount options, disk temperature) stored verbatim for expandable rows and future config/state endpoints.
   - **Containers page:** `containers[]` (`{name, state?, image?, version?, upgradeAvailable?, extra?}`) — one row per App/container workload on the device (TrueNAS SCALE Apps today; any plugin may emit it). `state` is normalized to UPPERCASE at ingest (`RUNNING`, `STOPPED`, …); put vendor-specific details in `extra`: `networks[] {name, driver?, subnets?}`, `ips[]` (static container IPs), `ports[]` (published host ports), `containerCount`, `containers[]` per-service detail `{service, image, state}`, `volumeMounts[]`. Emit even when EMPTY so uninstalled apps vanish on the next poll; omit the key only if your device class has no containers at all.
+  - **Security page:** `securityChecks[]` (`{name, kind, status, detail?, count?, extra?}`) — per-appliance security findings; see §5a below. Only rows with `status !== 'ok'` are persisted (the API drops clean checks); emit the key even when EMPTY so resolved findings clear on the next poll, and omit it only when collection FAILED or your device class has no applicable checks at all.
   A key present-but-empty upserts + deletes-on-absent; a key *absent* means "I don't report this" and never wipes data.
 
 Health conventions: unreachable/bad creds → `critical`; stale snapshot or
 degraded state → `warning`; wrong device type → `unknown`.
+
+### 5a. Security checks (capability `'securityChecks'`)
+
+Cross-device **Security page** of actionable findings (failed logins, file-integrity changes, active rate limiting, exposed services, account hygiene). Advertise the capability and emit `metrics['securityChecks']` during your INVENTORY window (the checks are comparatively heavy — never on every 30 s poll):
+
+```ts
+type SecurityCheckRow = {
+  name: string;      // stable identity WITHIN (device, kind) — e.g. "/etc/passwd", "auth-failures"
+  kind: 'auth-failures' | 'file-integrity' | 'rate-limiting' | 'account' | 'service-exposure' /* or a custom string */;
+  status: 'ok' | 'info' | 'warning' | 'critical';   // 'ok' rows are dropped at ingest
+  detail?: string;   // human-readable explanation (shown in the page)
+  count?: number;    // optional numeric magnitude (e.g. failure count, banned IPs)
+  extra?: Record<string, unknown>;                  // free-form drill-down data
+};
+```
+
+Conventions:
+- **`info`** is for positive/neutral state worth surfacing ("fail2ban active — 3 IPs banned", "a handful of scanner failures") — it persists but renders as a neutral badge. `warning` = should look at this; `critical` = act now.
+- Run every check best-effort and in parallel; one missing tool degrades THAT check to not-applicable, never the poll. Wrap the whole emission so a failure omits the key (no wipe).
+- **File-integrity checks must NOT auto-resolve.** A changed file keeps raising `critical` until an operator explicitly re-baselines it — otherwise an attacker who edits `/etc/passwd` clears their own finding by editing it again. Persist baselines in the generic state store (§5b) and ship a `security.rebaseline` write action (reference: `plugins/generic-ssh/src/security.ts` + `actions/security.ts`).
+- Reference implementations: **generic-ssh** (file integrity + journald/syslog auth failures + fail2ban/nftables rate limits + uid-0/empty-password accounts), **openwrt** (busybox `logread`, uci firewall `limit` rules, dropbear), **opnsense** (over the optional `ssh` slot — no REST equivalent; FreeBSD `sha256`, `/etc/master.passwd`, pf rate limits), **mikrotik-routeros** (REST-only: `/ip/service` exposure + `/log/print` failed logins).
+
+### 5b. Generic plugin state store (persistent data in the UNM database)
+
+Plugins that must remember something ACROSS polls and container restarts — file-integrity baselines, last-seen counters, TOFU fingerprints — use the SDK's `createPluginStateStore({ effectiveUuid })` instead of a local volume or their own DB. The API owns storage (table `plugin_state`, PK `(pluginId, namespace, key)`) behind internal `/v1/plugin/state/*` routes (`x-plugin-api-key`).
+
+- **Natural key = `(namespace, key)`** — `namespace` groups one feature ("file-integrity"), `key` is your stable identity within it ("<host>|/etc/passwd"). `value` is an opaque JSON blob (≤ 64 KB). Every call is scoped to THIS plugin instance automatically.
+- **Multi-instance rule:** the scope is the EFFECTIVE uuid (`<uuid>:<instanceId>` when `PLUGIN_INSTANCE_ID` is set). Build ONE shared module-level store per process bound to the resolved effective uuid and use it from BOTH `/monitoring` and your actions — never build a second one in an action from raw env (an unset/incorrect id silently no-ops or clobbers another instance's state). Reference: `plugins/generic-ssh/src/stateStore.ts`.
+- **Best-effort by contract:** every operation resolves on failure (`list → {}`, `put → 0`) — a missing key, unreachable API or malformed response degrades to "no state", so e.g. file-integrity simply re-baselines next poll instead of sinking the check.
+- Rows carry an optional `deviceId` so deleting a device cascades its baselines; stale rows age out via the API's retention sweep.
 
 ---
 

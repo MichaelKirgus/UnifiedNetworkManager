@@ -20,6 +20,7 @@ import { ROUTES_ACTIONS } from './routes';
 import { INTERFACE_ACTIONS } from './interfaces';
 import { DNS_ACTIONS, DHCP_ACTIONS } from './dnsDhcp';
 import { WIRELESS_ACTIONS } from './wireless';
+import { SECURITY_ACTIONS } from './security';
 
 const ALL_ACTIONS: ActionDescriptor[] = [
   ...SYSTEM_ACTIONS,
@@ -32,6 +33,7 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   ...DNS_ACTIONS,
   ...DHCP_ACTIONS,
   ...WIRELESS_ACTIONS,
+  ...SECURITY_ACTIONS,
 ];
 
 const byId = new Map<string, ActionDescriptor>(ALL_ACTIONS.map((a) => [a.id, a]));

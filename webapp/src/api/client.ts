@@ -864,6 +864,29 @@ export interface UpdatesResponse {
   stack: StackUpdateInfo;
 }
 
+/** One actionable security finding on one device, as reported by a plugin's `securityChecks` metric. */
+export interface SecurityCheckRow {
+  deviceId: string;
+  pluginId: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  /** Display name of the reporting plugin instance (e.g. "Generic SSH Plugin (Linux)"). */
+  pluginName?: string | null;
+  kind: 'auth-failures' | 'file-integrity' | 'rate-limiting' | 'account' | 'service-exposure' | 'other';
+  /** Stable identity within (device, kind): "auth-failures", "/etc/passwd", … */
+  name: string;
+  status: 'info' | 'warning' | 'critical';
+  detail?: string | null;
+  count?: number | null;
+  extra?: Record<string, unknown>;
+  collectedAt: string;
+}
+
+export interface SecurityChecksResponse {
+  rows: SecurityCheckRow[];
+}
+
 /** The X.509 leaf certificate of one endpoint (ssh rows carry synthetic fields). */
 export interface CertificateInfo {
   commonName: string;
@@ -1184,7 +1207,7 @@ export interface NotificationPrefs {
 }
 
 /** Which nav items can carry a badge count (mirrors the API's /counts keys). */
-export type NavCountKey = 'notifications' | 'configJobs' | 'plans' | 'certificates' | 'updates';
+export type NavCountKey = 'notifications' | 'configJobs' | 'plans' | 'certificates' | 'updates' | 'securityChecks';
 
 /** Per-user navigation preferences (order + hidden pages), additive over defaults. */
 export interface NavPreferences {
@@ -2761,6 +2784,16 @@ export const api = {
     if (params?.kind) qs.set('kind', params.kind);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<UpdatesResponse>(`/updates${suffix}`);
+  },
+  /** Cross-device security findings — actionable checks only (warning/critical). */
+  securityChecks: (params?: { deviceId?: string; siteId?: string; kind?: string; status?: 'info' | 'warning' | 'critical' }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.kind) qs.set('kind', params.kind);
+    if (params?.status) qs.set('status', params.status);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<SecurityChecksResponse>(`/security-checks${suffix}`);
   },
   /** Physical + logical topology graph for the Topology page. */
   topology: (params?: { siteId?: string; includeHosts?: boolean }) => {

@@ -787,6 +787,11 @@ router.delete('/devices/:deviceId', requireAuth, requirePermission('devices:writ
     await db.delete(schema.containers).where(eq(schema.containers.deviceId, deviceId));
     await db.delete(schema.dockerImages).where(eq(schema.dockerImages.deviceId, deviceId));
     await db.delete(schema.vms).where(eq(schema.vms.deviceId, deviceId));
+    await db.delete(schema.deviceUpdates).where(eq(schema.deviceUpdates.deviceId, deviceId));
+    await db.delete(schema.deviceSecurityChecks).where(eq(schema.deviceSecurityChecks.deviceId, deviceId));
+    // Generic plugin state scoped to this device (file-integrity baselines, …) —
+    // rows carry a nullable deviceId; only the device-scoped ones cascade.
+    await db.delete(schema.pluginState).where(eq(schema.pluginState.deviceId, deviceId));
     await db.delete(schema.certificates).where(eq(schema.certificates.deviceId, deviceId));
     await db.delete(schema.certificateHistory).where(eq(schema.certificateHistory.deviceId, deviceId));
     await db.delete(schema.storageFilesystems).where(eq(schema.storageFilesystems.deviceId, deviceId));

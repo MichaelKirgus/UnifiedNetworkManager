@@ -99,6 +99,10 @@ export const NAV_ITEMS: NavItem[] = [
   // Cross-device update center — firmware/packages/images available across devices,
   // plus the "UNM itself" self-update card. Badge = count of available updates.
   { to: '/updates', label: 'Updates', icon: ArrowUpCircle, requiresPermission: 'updates:read', countKey: 'updates' },
+  // Cross-device security findings — unsuccessful logins, changed important files,
+  // active rate limiting / brute-force protection (per-appliance checks owned by
+  // each plugin). Badge = count of open warning/critical findings.
+  { to: '/security', label: 'Security', icon: ShieldCheck, requiresPermission: 'security:read', countKey: 'securityChecks' },
   // Physical + logical network graph (inferred cables + per-VLAN segments).
   { to: '/topology', label: 'Topology', icon: GitGraph, requiresPermission: 'topology:read' },
   // Layer registry — the topology view's horizontal bands (open to all users).
@@ -138,6 +142,7 @@ export const BADGE_COLORS: Record<NavCountKey, string> = {
   plans: 'bg-status-info',
   certificates: 'bg-status-critical',
   updates: 'bg-status-ok',
+  securityChecks: 'bg-status-critical',
 };
 
 /**

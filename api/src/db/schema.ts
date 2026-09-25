@@ -1443,6 +1443,73 @@ export const deviceUpdates = pgTable(
   }
 );
 
+// One row per ACTIONABLE security finding as reported by a plugin's
+// `securityChecks` metric (capability 'securityChecks'). Powers the cross-device
+// Security page. Same upsert + delete-on-absent lifecycle as device_updates: a
+// check that is no longer flagged (resolved, or renamed) must vanish on the next
+// inventory poll. Rows with status='ok' are dropped at ingest time — only
+// warning/critical findings persist, so a clean device has zero rows here.
+export const deviceSecurityChecks = pgTable(
+  'device_security_checks',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // auth-failures | file-integrity | rate-limiting | account | service-exposure | other.
+    kind: text('kind').notNull().default('other'),
+    // Stable identity within (device, plugin, kind): "auth-failures", "/etc/passwd", …
+    name: text('name').notNull(),
+    status: text('status').notNull().default('warning'),
+    detail: text('detail'),
+    count: integer('count'),
+    // Plugin-specific details (JSON object) stored verbatim.
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDeviceSecurityChecks: primaryKey({
+        name: 'device_security_checks_pkey',
+        columns: [table.deviceId, table.pluginId, table.kind, table.name],
+      }),
+      idxDeviceSecurityChecksDevice: index('idx_device_security_checks_device').on(table.deviceId),
+    };
+  }
+);
+
+// Generic per-plugin persistent state (see routes/internal.ts /plugin/state/*).
+// Plugins that need to remember something ACROSS polls and container restarts —
+// e.g. file-integrity baselines keyed by host+path, last-seen counters, TOFU
+// fingerprints — store it here instead of owning a database connection or a local
+// volume. The API owns the storage; plugins read/write through the internal
+// `x-plugin-api-key` routes (SDK createPluginStateStore). The natural key is
+// (pluginId, namespace, key): `namespace` groups a feature's state ("file-integrity"),
+// and `key` is the plugin-chosen stable identity within it ("<host>|/etc/passwd").
+// `value` is an opaque JSON blob owned entirely by the plugin — the API never
+// interprets it. `deviceId` (optional) scopes rows to a device so DELETE /devices
+// cascades them; state not tied to one device leaves it null.
+export const pluginState = pgTable(
+  'plugin_state',
+  {
+    pluginId: text('pluginId').notNull(),
+    // Optional device scope — set when the state belongs to one device so a
+    // device deletion cascades its rows; null for global/plugin-wide state.
+    deviceId: text('deviceId'),
+    namespace: text('namespace').notNull(),
+    key: text('key').notNull(),
+    value: text('value').notNull().default('{}'),
+    updatedAt: text('updatedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkPluginState: primaryKey({
+        name: 'plugin_state_pkey',
+        columns: [table.pluginId, table.namespace, table.key],
+      }),
+      idxPluginStateDevice: index('idx_plugin_state_device').on(table.deviceId),
+    };
+  }
+);
+
 // Execution plans produced by a plugin's /plan endpoint (e.g. an OPNsense
 // WireGuard tunnel spanning two firewalls). The API persists the plan and its
 // steps, fulfils the plan's provisionRequests via the secrets provider at

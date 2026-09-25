@@ -57,7 +57,15 @@ export type { NtpQueryResult } from './ntp';
 // Update gathering (capability 'updates'): row contract + version comparison +
 // SSH package-manager adapters. See updates.ts.
 export { compareVersions, isUpdateAvailable, firmwareRow, extractMajorMinor, latestCatalogLine, catalogFirmwareRow, PACKAGE_MANAGER_ADAPTERS, detectPackageManager, readOsReleaseIds, listUpgradablePackages, runPackageUpgrade, runPackageUpgradeList, packageRequiresReboot, buildDetachedUpgradeScript, buildUpgradeStatusScript, parseDetachedUpgradeStatus, UPGRADE_DONE_MARKER, DETACHED_ALREADY_RUNNING_EXIT } from './updates';
-export type { UpdateKind, UpdateRow, UpdateExecBackend, UpgradablePackage, PmAdapter, SshUpdatesOptions, PackageUpgradeResult, DetachedUpgradeStatus } from './updates';// SSH access for plugins (shared transport + credential resolution). See ssh.ts.
+export type { UpdateKind, UpdateRow, UpdateExecBackend, UpgradablePackage, PmAdapter, SshUpdatesOptions, PackageUpgradeResult, DetachedUpgradeStatus } from './updates';
+// Security checks (capability 'securityChecks'): row contract for the cross-device
+// Security page. See security.ts.
+export type { SecurityCheckKind, SecurityCheckRow } from './security';
+// Generic plugin state store — persistent opaque JSON blobs in the UNM database
+// across polls/restarts (baselines, counters, TOFU fingerprints). See stateStore.ts.
+export { createPluginStateStore } from './stateStore';
+export type { PluginStateStore, PluginStateEntry, PluginStateRow, PluginStateStoreOptions } from './stateStore';
+// SSH access for plugins (shared transport + credential resolution). See ssh.ts.
 export { SshClient, createSshPool, resolveSshCredentials, resolveSlotFields, resolveRootSlotCredentials, wrapSudo, probePrivilege, shQuote, normalizeFingerprint, fingerprintMatches, computeFingerprint, normalizePrivateKey } from './ssh';
 export type { SshCredentials, SshClientOptions, ExecResult, SshPool, SshPoolOptions, SshFingerprint, SudoExecBackend, PrivilegeMode, PrivilegeProbe } from './ssh';
 export { SshError, SshAuthError, SshHostKeyError, SshTimeoutError } from './ssh';

@@ -47,13 +47,18 @@ import type { ProbeRequestBody, StateRequestBody } from '@unm/plugin-sdk';
 import { SshBackend, closeSshPools, resolveGenericSshCredentials } from './client/sshClient';
 import { createElevatedBackend } from './client/privilege';
 import { collectLive, collectMonitoring, getInventory } from './monitoring';
+import { stateStore } from './stateStore';
+import { collectSecurityChecks, DEFAULT_WATCHED_FILES, type SecuritySettings } from './security';
 import { buildPlan, listCatalogWithIntents, PlanningError } from './plan';
 import type { PlanRequest } from './plan';
 import { getAction } from './actions/registry';
 import type { ActionContext } from './actions/types';
 import { buildGenericSshState } from './state';
 
-export const PLUGIN_UUID = '00000000-0000-4000-8000-00000000000c';
+// Base UUID + shared state store live in ./stateStore so the monitoring path and
+// the security actions both bind to the SAME instance-scoped effective uuid.
+import { PLUGIN_UUID } from './stateStore';
+export { PLUGIN_UUID };
 export const PLUGIN_NAME = 'Generic SSH Plugin (Linux)';
 
 /**
@@ -77,8 +82,15 @@ const identity = resolvePluginIdentity({
   //                (WireGuard tunnel) fanned into ordered steps with auto-snapshots.
   // updates: emits metrics['updates'] (upgradable OS packages via the host's
   //          package manager) for the cross-device Updates page; applying is a plan.
-  capabilities: ['monitoring', 'inventory', 'ssh', 'filesystem', 'probe', 'sshConsole', 'configuration', 'planning', 'updates'],
+  // securityChecks: per-appliance security checks (file integrity, failed logins,
+  //                 active rate limiting, account hygiene) → Security page.
+  capabilities: ['monitoring', 'inventory', 'ssh', 'filesystem', 'probe', 'sshConsole', 'configuration', 'planning', 'updates', 'securityChecks'],
 });
+
+// Persistent file-integrity baselines live in UNM's database (plugin state store),
+// NOT on local disk — a container rebuild must not re-baseline every watched host.
+// The shared, instance-scoped store is imported from ./stateStore above so the
+// security actions bind to the exact same effective uuid as this monitoring path.
 
 /**
  * The options this plugin exposes for configuration. Declared in /discover so
@@ -113,6 +125,50 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     maxLength: 64,
     description:
       "Optional username to elevate to via sudo (empty = the default, usually root). Only used when the logged-in user is not already root and has passwordless sudo — or when a dedicated root credential slot is bound.",
+  },
+  {
+    key: 'securityChecksEnabled',
+    label: 'Enable security checks',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Run per-appliance security checks during inventory polls (file integrity of important config files, unsuccessful logins, active rate limiting / brute-force protection, account hygiene). Findings appear on the cross-device Security page.',
+  },
+  {
+    key: 'securityWatchedFiles',
+    label: 'Security — watched files',
+    type: 'string' as const,
+    default: DEFAULT_WATCHED_FILES.join(', '),
+    maxLength: 1024,
+    description:
+      'Comma-separated absolute paths whose sha256 is baselined (first sight) and checked for changes on every inventory poll. A changed file raises a critical finding; re-baseline it via the security.rebaseline action once verified.',
+  },
+  {
+    key: 'securityAuthFailureWindowHours',
+    label: 'Security — failed-login window (hours)',
+    type: 'integer' as const,
+    default: 24,
+    min: 1,
+    max: 720,
+    description: 'Look-back window for counting unsuccessful login attempts.',
+  },
+  {
+    key: 'securityAuthFailureWarnThreshold',
+    label: 'Security — failed-login warning threshold',
+    type: 'integer' as const,
+    default: 10,
+    min: 1,
+    max: 1_000_000,
+    description: 'Unsuccessful logins in the window at or above this count raise a WARNING finding (below it is INFO — normal scanner noise).',
+  },
+  {
+    key: 'securityAuthFailureCriticalThreshold',
+    label: 'Security — failed-login critical threshold',
+    type: 'integer' as const,
+    default: 50,
+    min: 1,
+    max: 1_000_000,
+    description: 'Unsuccessful logins in the window at or above this count raise a CRITICAL finding (likely an active brute-force attempt).',
   },
 ];
 
@@ -298,6 +354,28 @@ app.post('/monitoring', async (req, res) => {
     }
 
     const result = await collectMonitoring(host, backend, { collectInventory: collectInventoryFlag });
+
+    // Security checks ride the INVENTORY window (like updates): file-integrity
+    // baselines + failed-login/rate-limit/account scans are comparatively heavy,
+    // so they run at most once per inventory cycle. Failure → omit the key
+    // entirely (absent = no wipe, per the ingestion contract).
+    if (collectInventoryFlag) {
+      try {
+        const secSettings: SecuritySettings = {
+          enabled: settings.securityChecksEnabled !== false,
+          watchedFiles: String(settings.securityWatchedFiles ?? DEFAULT_WATCHED_FILES.join(', '))
+            .split(',')
+            .map((s) => s.trim())
+            .filter((s) => s.startsWith('/')),
+          authFailureWindowHours: Number(settings.securityAuthFailureWindowHours ?? 24),
+          authFailureWarnThreshold: Number(settings.securityAuthFailureWarnThreshold ?? 10),
+          authFailureCriticalThreshold: Number(settings.securityAuthFailureCriticalThreshold ?? 50),
+        };
+        result.metrics['securityChecks'] = await collectSecurityChecks(host, deviceId, backend, stateStore, secSettings);
+      } catch {
+        /* best-effort — a failed check must never sink the poll */
+      }
+    }
 
     if (selectedModel) result.metrics['system.model'] = selectedModel;
     if (selectedFirmware) result.metrics['system.firmwareVersion'] = selectedFirmware;

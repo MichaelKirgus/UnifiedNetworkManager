@@ -11,6 +11,7 @@ import { dhcpActions } from './dhcp';
 import { trafficshaperActions } from './trafficshaper';
 import { ntpdActions, syslogActions, monitActions } from './services';
 import { syncActions } from './sync';
+import { securityActions } from './security';
 
 /**
  * The action registry — the single source of truth for everything this plugin
@@ -35,6 +36,7 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   ...syslogActions,
   ...monitActions,
   ...syncActions,
+  ...securityActions,
 ];
 
 const byId = new Map<string, ActionDescriptor>(ALL_ACTIONS.map((a) => [a.id, a]));

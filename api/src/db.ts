@@ -980,6 +980,43 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_device_updates_device ON device_updates ("deviceId")`);
 
+  // Device security-check findings (Security page) — one row per ACTIONABLE finding,
+  // upserted per inventory poll from the plugin's `securityChecks` metric
+  // (capability 'securityChecks'). Same lifecycle as device_updates; only rows with
+  // status warning/critical persist ('ok' is dropped at ingest). See schema.deviceSecurityChecks.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_security_checks (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'other',
+      name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'warning',
+      detail TEXT,
+      count INTEGER,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", kind, name)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_security_checks_device ON device_security_checks ("deviceId")`);
+
+  // Generic per-plugin persistent state (see schema.pluginState). Plugins store
+  // opaque JSON blobs here across polls/restarts via the internal /plugin/state/*
+  // routes — e.g. file-integrity baselines keyed by host+path. The API never
+  // interprets `value`; it is owned entirely by the plugin.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS plugin_state (
+      "pluginId" TEXT NOT NULL,
+      "deviceId" TEXT,
+      namespace TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL DEFAULT '{}',
+      "updatedAt" TEXT NOT NULL,
+      PRIMARY KEY ("pluginId", namespace, key)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_plugin_state_device ON plugin_state ("deviceId")`);
+
   // Plugin log entries (see schema.pluginLogs). Pushed by plugins in batches
   // via POST /plugin/logs; swept by the retention worker after LOG_RETENTION_DAYS.
   await pool.query(`

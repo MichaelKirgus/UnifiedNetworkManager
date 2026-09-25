@@ -66,6 +66,11 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // and Docker images/apps available for update. Applying an update is a plan
   // (configs:apply + 2FA); this read permission only gates viewing the page.
   'updates:read': 'View the Updates page (available firmware/package/image updates across devices)',
+  // Cross-device security findings — unsuccessful logins, changed important
+  // files, active rate limiting / brute-force protection. Findings can carry
+  // sensitive detail (source IPs of failed logins), so they get their own
+  // permission instead of riding on devices:read.
+  'security:read': 'View the Security page (unsuccessful logins, file-integrity and rate-limit findings across devices)',
   'topology:read': 'View the Topology page (physical + logical network graph)',
   'sites:read': 'View sites',
   'config-jobs:read': 'View configuration jobs',
