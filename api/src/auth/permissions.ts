@@ -62,6 +62,12 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'time:read': 'View the Time page (device clocks, timezones and clock drift across devices)',
   'containers:read': 'View the Containers page (Apps/container workloads across devices)',
   'vms:read': 'View the VMs page (virtual machines and their NICs across devices)',
+  // Central file repository — device-independent store of ISOs, firmware images,
+  // config backups and scripts. Files live on a volume only the API mounts;
+  // metadata + usage audit trail in Postgres. Plugins access it through the
+  // internal /plugin/files/* routes (x-plugin-api-key), never the volume itself.
+  'files:read': 'View the Files page (the central file repository)',
+  'files:write': 'Upload, download and delete files in the central file repository',
   // Cross-device update center — firmware, OS packages (package manager over SSH)
   // and Docker images/apps available for update. Applying an update is a plan
   // (configs:apply + 2FA); this read permission only gates viewing the page.

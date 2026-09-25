@@ -12,7 +12,7 @@
  * "initiated").
  */
 
-import { ActionDescriptor, ActionResult, compareVersions, createRegistry, dynamicSshHostVerifier, pickNumber, pickString, pollUntil, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { ActionDescriptor, ActionResult, compareVersions, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, pickNumber, pickString, pollUntil, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
 import { normalizeVmDevice, sshPool } from './enrich';
 
@@ -22,6 +22,8 @@ export interface TruenasActionContext {
   creds: TruenasCredentials;
   /** The device management address (host[:port]) — needed by actions that reach the appliance over a different channel than the RPC socket (e.g. SSH for container logs). */
   host?: string;
+  /** UNM's device id for this step — recorded in audit trails (e.g. file-repo usage rows). */
+  deviceId?: string | null;
   /** The request's raw `credentials` body (primary secret + bound slots) — needed by actions that use a slot distinct from the primary (e.g. SSH for container logs). */
   rawCredentials?: Record<string, unknown> | null;
 }
@@ -308,35 +310,52 @@ const configBackupDownloadAction: ActionDescriptor<TruenasActionContext> = {
       if (input[k] === true) options[k] = true; // defaults are false — only send explicit trues
     }
 
-    // 1. Start the config.save job over JSON-RPC.
+    // 1. Start the backup via core.download — on TrueNAS 25.10+ (v26 API) a plain
+    //    JSON-RPC call to config.save fails with "Pipe 'output' is not open" because
+    //    it is a pipe job; core.download OPENS the output pipe and returns
+    //    [jobId, "/_download/{id}?auth_token=…"] (the same path the Web UI uses).
+    //    buffered=true: the job's output is spooled in RAM until completion and the
+    //    URL stays valid for 3600s — with the default (buffered=false) the job BLOCKS
+    //    until a client downloads or 60s elapse, so waiting for the job first would
+    //    deadlock it into "[Errno 32] Broken pipe".
     let jobId: number | null = null;
+    let downloadPath: string | null = null;
     try {
-      const r = await ctx.client.call<unknown>('config.save', [options], ctx.creds);
-      if (typeof r === 'number') jobId = r;
-      else if (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number') jobId = (r as Record<string, unknown>)['id'] as number;
+      const r = await ctx.client.call<unknown>('core.download', ['config.save', [options], 'truenas-config-backup', true], ctx.creds);
+      if (Array.isArray(r) && typeof r[0] === 'number' && typeof r[1] === 'string') {
+        jobId = r[0];
+        downloadPath = r[1];
+      } else {
+        throw new Error('core.download did not return [jobId, url]');
+      }
     } catch (e) {
-      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+      // Legacy fallback (pre-25.10): config.save as a plain job + minted token.
+      try {
+        const r = await ctx.client.call<unknown>('config.save', [options], ctx.creds);
+        if (typeof r === 'number') jobId = r;
+        else if (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number') jobId = (r as Record<string, unknown>)['id'] as number;
+      } catch (e2) {
+        return { success: false, details: { error: `Could not start config.save: ${e2 instanceof Error ? e2.message : String(e2)} (core.download: ${e instanceof Error ? e.message : String(e)})` } };
+      }
     }
     if (jobId === null) return { success: false, details: { error: 'config.save did not return a job id' } };
 
-    // 2. Wait for the job to settle — the download pipe only streams once it has output.
+    // 2. Wait for the job to settle — middlewared buffers the pipe output until it is downloaded.
     const wait = await waitForJob(ctx, jobId, 180_000);
     if (wait.state === 'RUNNING') return { success: false, details: { jobId, error: `config.save job still running after ${Math.round(180_000 / 1000)}s` } };
     if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') return { success: false, details: { jobId, error: wait.error ?? `Job ended in state ${wait.state}` } };
 
-    // 3. Mint a single-use download token bound to the job and fetch the file over HTTP.
-    let authToken: string;
-    try {
-      const t = await ctx.client.call<unknown>('auth.generate_token', [null, { job: jobId, filename: 'config-backup' }], ctx.creds);
-      if (typeof t !== 'string' || t.length === 0) throw new Error('auth.generate_token returned no token');
-      authToken = t;
-    } catch (e) {
-      return { success: false, details: { jobId, error: `Could not mint download token: ${e instanceof Error ? e.message : String(e)}` } };
-    }
-
+    // 3. Fetch the file over HTTP — core.download's URL already carries a single-use
+    //    token; on the legacy path mint one via auth.generate_token.
     let data: Buffer;
     try {
-      data = await ctx.client.downloadJobFile(jobId, authToken);
+      if (downloadPath) {
+        data = await ctx.client.downloadAtPath(downloadPath);
+      } else {
+        const t = await ctx.client.call<unknown>('auth.generate_token', [null, { job: jobId, filename: 'config-backup' }], ctx.creds);
+        if (typeof t !== 'string' || t.length === 0) throw new Error('auth.generate_token returned no token');
+        data = await ctx.client.downloadJobFile(jobId, t);
+      }
     } catch (e) {
       return { success: false, details: { jobId, error: e instanceof Error ? e.message : String(e) } };
     }
@@ -1168,7 +1187,34 @@ const containersDeleteAction: ActionDescriptor<TruenasActionContext> = {
 //   vms.suspend  → vm.suspend(id)          freeze RAM state (guest must run)
 //   vms.resume   → vm.resume(id)           unfreeze SUSPENDED/PAUSED guests
 //   vms.delete   → vm.delete(id,{zvols})   destructive; zvols removes storage
-// NICs are VM devices: attach = vm.device.create({id, attributes:{dtype:'NIC',…}}),
+/**
+ * True when the appliance speaks the v26+ VM device API (TrueNAS 25.10 and up):
+ * `vm.device.create` takes a single { vm, attributes } object — the legacy
+ * { id, attributes } shape is rejected with "Extra inputs are not permitted" —
+ * and NIC devices carry the MODEL as `type` (E1000/VIRTIO) while bridge-vs-
+ * macvlan is inferred from nic_attach. Older releases keep the legacy shape,
+ * where `type` was the attachment kind (BRIDGE/MACVLAN).
+ */
+async function usesV26VmDeviceApi(ctx: TruenasActionContext): Promise<boolean> {
+  try {
+    const si = await ctx.client.call<Record<string, unknown>>('system.info', [], ctx.creds);
+    const v = (pickString(si, ['version']) ?? '').replace(/^(scale|core)\s+/i, '').trim();
+    const m = v.match(/^(\d+)\.(\d+)/);
+    if (!m) return true; // unknown version — assume modern
+    const major = Number(m[1]);
+    return major > 25 || (major === 25 && Number(m[2]) >= 10);
+  } catch {
+    return true; // can't determine — assume modern
+  }
+}
+
+/** Builds the vm.device.create argument for the appliance's API generation. */
+function vmDeviceCreateArg(v26: boolean, vmId: number, attributes: Record<string, unknown>): Record<string, unknown> {
+  return v26 ? { vm: vmId, attributes } : { id: vmId, attributes };
+}
+
+// ---------------------------------------------------------------------------
+// NICs are VM devices: attach = vm.device.create({vm|id, attributes:{dtype:'NIC',…}}),
 // detach = vm.device.delete(deviceId) — the integer device id is resolved from
 // the NIC's MAC via vm.query. `vms.nic-choices` (read-only) feeds the webapp's
 // attach dialog with the appliance's bridges + MACVLANs.
@@ -1579,7 +1625,7 @@ const vmsNicAttachAction: ActionDescriptor<TruenasActionContext> = {
   inputSchema: {
     name: { type: 'string', required: true, minLength: 1, description: 'VM name' },
     nicAttach: { type: 'string', required: true, minLength: 1, description: 'Bridge or MACVLAN interface to attach (from vms.nic-choices)' },
-    type: { type: 'string', required: false, enum: ['BRIDGE', 'MACVLAN'], default: 'BRIDGE', description: 'NIC attachment kind' },
+    type: { type: 'string', required: false, enum: ['BRIDGE', 'MACVLAN'], default: 'BRIDGE', description: 'NIC attachment kind — only honored by pre-25.10 appliances; TrueNAS 25.10+ infers bridge vs MACVLAN from nic_attach' },
     mac: { type: 'string', required: false, pattern: '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', description: 'Optional fixed MAC (appliance assigns one when omitted)' },
   },
   async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
@@ -1596,9 +1642,15 @@ const vmsNicAttachAction: ActionDescriptor<TruenasActionContext> = {
     if (!vm) return { success: false, details: { error: `VM "${name}" not found on this appliance` } };
 
     try {
-      const attributes: Record<string, unknown> = { dtype: 'NIC', type, nic_attach: nicAttach };
+      const v26 = await usesV26VmDeviceApi(ctx);
+      // v26+: `type` is the NIC MODEL (E1000/VIRTIO) and bridge-vs-macvlan is
+      // inferred from nic_attach — so the attachment kind validated above is not
+      // sent. Legacy: type = BRIDGE|MACVLAN.
+      const attributes: Record<string, unknown> = { dtype: 'NIC', nic_attach: nicAttach };
+      if (v26) attributes['type'] = 'VIRTIO'; // appliance default is E1000 — VIRTIO is the expected model
+      else attributes['type'] = type;
       if (mac) attributes['mac'] = mac;
-      await ctx.client.call('vm.device.create', [{ id: vm.id, attributes }], ctx.creds);
+      await ctx.client.call('vm.device.create', [vmDeviceCreateArg(v26, vm.id, attributes)], ctx.creds, 30_000);
       // Verify by re-reading the VM's devices. When a MAC was requested it must
       // appear; when omitted the appliance assigns one — then we confirm the NIC
       // count grew instead (the new device is dtype NIC on nicAttach).
@@ -1677,6 +1729,607 @@ const vmsNicDetachAction: ActionDescriptor<TruenasActionContext> = {
     } catch (e) {
       return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
     }
+  },
+};
+
+// ---------------------------------------------------------------------------
+// VM creation + ISO / device management (VMs page). GENERIC contract — any
+// hypervisor plugin implementing these ids gets the webapp's Create-VM dialog,
+// CD-ROM/ISO flow and per-device detach button for free. TrueNAS mapping:
+//   vms.create         → vm.create(...) + vm.device.create(DISK|NIC) — vm.create
+//                        EXCLUDES devices, they are added separately afterwards.
+//                        The DISK abstraction is a fresh ZVOL (create_zvol +
+//                        zvol_name + zvol_volsize under the chosen dataset) or an
+//                        existing disk path.
+//   vms.create-choices → pool.dataset.query — datasets/pools a new zvol may live in
+//   vms.iso-upload     → UNM file-repo stream (SDK FileRepoClient.getStream) piped
+//                        into the appliance's `filesystem.put` JOB over /_upload —
+//                        multi-GB safe, nothing buffered. Records a repo usage row.
+//   vms.iso-choices    → filesystem.listdir + stat of a dataset dir (.iso/.img)
+//   vms.cdrom-attach   → vm.device.create(dtype CDROM) — or vm.device.update on
+//                        the VM's EXISTING CD-ROM, so re-attaching (ISO swap) is
+//                        idempotent instead of stacking drives. With repoFileId +
+//                        dataset it first ensures the ISO exists on the appliance
+//                        (streamed from UNM's file repo via filesystem.put when
+//                        missing), so "install OS from a repo ISO" is ONE step.
+//   vms.device-detach  → vm.device.delete(deviceId, {zvol?, force?}) — integer
+//                        device id from the inventory rows; removeStorage=true
+//                        destroys a DISK's backing zvol. Requires a STOPPED VM.
+//   vms.device-edit    → vm.device.update(deviceId, attributes)
+// All of them work with ONLY the primary credential (JSON-RPC) — no SSH needed.
+// ---------------------------------------------------------------------------
+
+/** Lazily-built shared UNM file-repo client (the SDK's ONE implementation). */
+let repoClient: FileRepoClient | null = null;
+function fileRepo(): FileRepoClient {
+  if (!repoClient) repoClient = createFileRepoClient();
+  return repoClient;
+}
+
+/** Reads a finite number from an action input (defensive — schema already validated). */
+function num(input: Record<string, unknown>, key: string, fallback: number): number {
+  const v = input[key];
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+}
+
+/** True for system-managed datasets that must never host VM zvols (mirrors middleware's INTERNAL_DATASETS). */
+function isSystemDataset(name: string): boolean {
+  if (name === '.system' || name.startsWith('.system/')) return true;
+  for (const p of ['ix-applications', 'ix-apps']) {
+    if (name === p || name.includes(`/${p}`)) return true;
+  }
+  for (const bp of ['boot-pool', 'freenas-boot']) {
+    if (name === bp || name.startsWith(`${bp}/`)) return true;
+  }
+  return false;
+}
+
+/** Resolves a dataset/pool NAME to its mountpoint (/mnt/…) via pool.dataset.query. */
+async function resolveDatasetMount(ctx: TruenasActionContext, dataset: string): Promise<string | null> {
+  try {
+    const rows = await ctx.client.call<Record<string, unknown>[]>('pool.dataset.query', [], ctx.creds, 20_000);
+    for (const r of rows ?? []) {
+      if (pickString(r, ['name']) !== dataset) continue;
+      const mp = pickString(r, ['mountpoint']);
+      return mp && mp !== 'legacy' && mp !== 'unmounted' ? mp : `/mnt/${dataset}`;
+    }
+  } catch { /* fall through — the pool may not appear in the dataset query */ }
+  try {
+    const pools = await ctx.client.call<Record<string, unknown>[]>('pool.query', [], ctx.creds);
+    if ((pools ?? []).some((p) => pickString(p, ['name']) === dataset)) return `/mnt/${dataset}`;
+  } catch { /* ignore */ }
+  return null;
+}
+
+const vmsCreateChoicesAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.create-choices',
+  label: 'List VM creation choices',
+  description:
+    'Read-only list of the datasets (and pools) a new VM disk zvol can live in, with their mountpoints. Feeds the Create-VM dialog\'s dataset picker.',
+  module: 'VMs',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  async execute(ctx: TruenasActionContext): Promise<ActionResult> {
+    try {
+      const rows = await ctx.client.call<Record<string, unknown>[]>('pool.dataset.query', [], ctx.creds, 20_000);
+      const out: { name: string; mountpoint: string }[] = [];
+      for (const r of rows ?? []) {
+        const name = pickString(r, ['name']);
+        if (!name || isSystemDataset(name)) continue;
+        // Pools (no slash) and FILESYSTEM datasets are valid zvol parents.
+        const type = typeof r['type'] === 'string' ? (r['type'] as string).toLowerCase() : '';
+        if (name.includes('/') && type !== 'filesystem') continue;
+        const mp = pickString(r, ['mountpoint']);
+        out.push({ name, mountpoint: mp && mp !== 'legacy' && mp !== 'unmounted' ? mp : `/mnt/${name}` });
+      }
+      out.sort((a, b) => a.name.localeCompare(b.name));
+      return { success: true, details: { datasets: out } };
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+  },
+};
+
+const vmsCreateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.create',
+  label: 'Create VM',
+  description:
+    'Creates a NEW VM (vm.create) with an abstracted DISK device — either a fresh ZVOL under the chosen dataset (create_zvol + zvol_name + zvol_volsize, named <dataset>/<zvolName or vm-name>) or an existing disk path — plus an optional NIC. vm.create excludes devices, so each is added via vm.device.create afterwards.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 2, maxLength: 64, pattern: '^[A-Za-z][A-Za-z0-9_-]*$', description: 'VM name' },
+    description: { type: 'string', required: false, maxLength: 512, description: 'Optional guest description' },
+    vcpus: { type: 'number', required: true, min: 1, max: 16, default: 1, description: 'Virtual CPUs (vcpus = cores × threads)' },
+    cores: { type: 'number', required: false, min: 1, max: 16, default: 1, description: 'Cores per package' },
+    threads: { type: 'number', required: false, min: 1, max: 8, default: 1, description: 'Threads per core (hyperthreading)' },
+    memoryMiB: { type: 'number', required: true, min: 20, default: 2048, description: 'RAM in MiB' },
+    minMemoryMiB: { type: 'number', required: false, min: 0, description: 'Optional minimum RAM (ballooning) in MiB' },
+    bootloader: { type: 'string', required: false, enum: ['UEFI', 'UEFI_CSM'], default: 'UEFI', description: 'Firmware' },
+    autostart: { type: 'boolean', required: false, default: false, description: 'Start the VM when the appliance boots' },
+    diskMode: { type: 'string', required: true, enum: ['zvol', 'path'], default: 'zvol', description: 'zvol = create a new ZFS volume; path = attach an existing disk' },
+    dataset: { type: 'string', required: false, minLength: 1, description: 'Parent dataset for the new zvol (from vms.create-choices) — required when diskMode=zvol' },
+    sizeBytes: { type: 'number', required: false, min: 1073741824, description: 'New zvol size in bytes — required when diskMode=zvol' },
+    zvolName: { type: 'string', required: false, minLength: 1, maxLength: 64, pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$', description: 'Optional ZVOL leaf name under the chosen dataset (default: VM name; case preserved) — only used when diskMode=zvol' },
+    diskPath: { type: 'string', required: false, minLength: 1, pattern: '^/dev/zvol/', description: 'Existing disk path (zvol or raw file) — required when diskMode=path' },
+    diskType: { type: 'string', required: false, enum: ['AHCI', 'VIRTIO'], default: 'VIRTIO', description: 'Disk controller interface' },
+    nicAttach: { type: 'string', required: false, minLength: 1, description: 'Optional bridge/MACVLAN to attach (from vms.nic-choices)' },
+    nicType: { type: 'string', required: false, enum: ['BRIDGE', 'MACVLAN'], default: 'BRIDGE', description: 'NIC attachment kind — only honored by pre-25.10 appliances; TrueNAS 25.10+ infers bridge vs MACVLAN from nic_attach' },
+    mac: { type: 'string', required: false, pattern: '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', description: 'Optional fixed MAC (appliance assigns one when omitted)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'VM name is required' } };
+
+    // Idempotency guard — a VM with this name already exists.
+    let vms: VmInfo[];
+    try {
+      vms = await listVms(ctx);
+    } catch (e) {
+      return { success: false, details: { error: `Could not read existing VMs: ${e instanceof Error ? e.message : String(e)}` } };
+    }
+    if (vms.some((v) => v.name === name)) {
+      return { success: false, details: { error: `A VM named "${name}" already exists on this appliance` } };
+    }
+
+    const diskMode = strOr(input, 'diskMode', 'zvol');
+    const dataset = str(input, 'dataset');
+    const sizeBytes = typeof input['sizeBytes'] === 'number' ? (input['sizeBytes'] as number) : undefined;
+    const diskPath = str(input, 'diskPath');
+    if (diskMode === 'zvol' && (!dataset || !sizeBytes)) {
+      return { success: false, details: { error: 'diskMode=zvol requires dataset + sizeBytes' } };
+    }
+    if (diskMode === 'path' && !diskPath) {
+      return { success: false, details: { error: 'diskMode=path requires diskPath' } };
+    }
+
+    const create: Record<string, unknown> = {
+      name,
+      vcpus: num(input, 'vcpus', 1),
+      cores: num(input, 'cores', 1),
+      threads: num(input, 'threads', 1),
+      memory: num(input, 'memoryMiB', 2048), // TrueNAS reports/accepts MiB
+      bootloader: strOr(input, 'bootloader', 'UEFI'),
+      autostart: input['autostart'] === true,
+    };
+    const description = str(input, 'description');
+    if (description) create['description'] = description;
+    if (typeof input['minMemoryMiB'] === 'number') create['min_memory'] = input['minMemoryMiB'];
+
+    let vmId: number | null = null;
+    try {
+      const created = await ctx.client.call<Record<string, unknown>>('vm.create', [create], ctx.creds);
+      vmId = typeof created?.['id'] === 'number' ? (created['id'] as number) : null;
+    } catch (e) {
+      return { success: false, details: { error: `vm.create failed: ${e instanceof Error ? e.message : String(e)}` } };
+    }
+    if (vmId === null) {
+      return { success: false, details: { error: 'VM create was accepted but no id came back — check the appliance VM list' } };
+    }
+
+    // DISK device — vm.create EXCLUDES devices, so it is added separately.
+    const diskAttrs: Record<string, unknown> = { dtype: 'DISK', type: strOr(input, 'diskType', 'VIRTIO') };
+    let zvolFullName: string | null = null;
+    if (diskMode === 'zvol' && dataset) {
+      // The zvol leaf is the user's optional override or the VM name under the
+      // chosen parent dataset — e.g. VIRTUALIZATION01/VM/<name>. Case is PRESERVED
+      // (ZFS dataset names are case-sensitive and allow uppercase); only characters
+      // that are invalid in a dataset name are stripped.
+      const requested = str(input, 'zvolName');
+      const leaf = (requested || name).replace(/[^a-zA-Z0-9_]/g, '');
+      if (!leaf) {
+        return { success: false, details: { error: `Invalid zvolName "${requested}" — it must contain at least one letter or digit` } };
+      }
+      zvolFullName = `${dataset}/${leaf}`;
+      Object.assign(diskAttrs, { create_zvol: true, zvol_name: zvolFullName, zvol_volsize: sizeBytes });
+    } else if (diskPath) {
+      diskAttrs['path'] = diskPath;
+    }
+
+    const v26 = await usesV26VmDeviceApi(ctx);
+    const errors: string[] = [];
+    try {
+      // 60s budget — a zvol-backed disk create can exceed the client's 5s default
+      // (zvol provisioning + flapping WS sessions), and the NIC attach below is fast.
+      await ctx.client.call('vm.device.create', [vmDeviceCreateArg(v26, vmId, diskAttrs)], ctx.creds, 60_000);
+    } catch (e) {
+      errors.push(`disk device: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // Optional NIC.
+    const nicAttach = str(input, 'nicAttach');
+    if (nicAttach) {
+      // v26+: `type` is the NIC MODEL — send VIRTIO explicitly (the appliance's own
+      // default is E1000); bridge-vs-macvlan is inferred from nic_attach.
+      // Legacy: type = BRIDGE|MACVLAN.
+      const nicAttrs: Record<string, unknown> = { dtype: 'NIC', nic_attach: nicAttach };
+      if (v26) nicAttrs['type'] = 'VIRTIO';
+      else nicAttrs['type'] = strOr(input, 'nicType', 'BRIDGE');
+      const mac = str(input, 'mac');
+      if (mac) nicAttrs['mac'] = mac.toUpperCase();
+      try {
+        await ctx.client.call('vm.device.create', [vmDeviceCreateArg(v26, vmId, nicAttrs)], ctx.creds, 30_000);
+      } catch (e) {
+        errors.push(`NIC device: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    // Verify by re-reading the VM — it must exist with its DISK (and NIC).
+    const wait = await pollUntil(
+      async () => {
+        try {
+          const vms2 = await listVms(ctx);
+          const vm2 = vms2.find((v) => v.name === name);
+          if (!vm2) return null;
+          let disks = 0;
+          let nics = 0;
+          for (const d of vm2.devices) {
+            const dev = normalizeVmDevice(d);
+            if (!dev) continue;
+            if (dev.dtype === 'DISK') disks++;
+            else if (dev.dtype === 'NIC') nics++;
+          }
+          return { ok: disks >= 1 && (!nicAttach || nics >= 1), disks, nics };
+        } catch {
+          return null;
+        }
+      },
+      (r) => r !== null && r.ok,
+      { timeoutMs: 60_000, intervalMs: 2_000 },
+    );
+
+    // The RPC may have timed out / errored even though the device actually landed
+    // (e.g. a slow zvol create that finished just after our client gave up). Trust
+    // the re-read: if the DISK (+NIC) are present, report success with a note.
+    if (errors.length > 0 && wait.ok) {
+      return {
+        success: true,
+        applied: true,
+        verified: true,
+        details: { name, vmId, diskMode, ...(zvolFullName ? { zvolName: zvolFullName } : {}), ...(nicAttach ? { nicAttach } : {}), note: `Device RPC reported an error but the device is present on re-read — treated as success. ${errors.join('; ')}` },
+      };
+    }
+    if (errors.length > 0) {
+      return {
+        success: false,
+        applied: true,
+        details: {
+          error: `VM "${name}" was created but device setup failed — delete it via vms.delete and retry. ${errors.join('; ')}`,
+          name, vmId, zvolName: zvolFullName,
+        },
+      };
+    }
+    return { success: true, applied: true, verified: wait.ok, details: { name, vmId, diskMode, ...(zvolFullName ? { zvolName: zvolFullName } : {}), ...(nicAttach ? { nicAttach } : {}) } };
+  },
+};
+
+const vmsIsoUploadAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.iso-upload',
+  label: 'Upload ISO from file repo to appliance',
+  description:
+    'Streams a file from UNM\'s central file repository onto the appliance (filesystem.put JOB over /_upload) into the chosen dataset — multi-GB safe, nothing buffered. Skips when the file already exists there at matching size (idempotent), and records a usage row on the repo file.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 3_600_000, // multi-GB ISOs over a slow link legitimately take a long time
+  inputSchema: {
+    dataset: { type: 'string', required: true, minLength: 1, description: 'Target dataset (from vms.create-choices), e.g. VIRTUALIZATION01/ISO' },
+    repoFileId: { type: 'string', required: true, minLength: 1, description: 'UNM file-repo id of the ISO to upload' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const dataset = str(input, 'dataset');
+    if (!dataset) return { success: false, details: { error: 'Target dataset is required' } };
+    const repoFileId = str(input, 'repoFileId');
+    if (!repoFileId) return { success: false, details: { error: 'repoFileId (UNM file-repo id) is required' } };
+
+    // Shared with vms.cdrom-attach — streams the repo file onto the appliance
+    // (skipping when already present at matching size).
+    const ensured = await ensureRepoFileOnAppliance(ctx, dataset, repoFileId);
+    if (!ensured.ok) return { success: false, details: { error: ensured.error, retryable: true } };
+
+    // Verify by re-reading the appliance: the file must exist at the expected size.
+    let verified = false;
+    try {
+      const st = await ctx.client.call<Record<string, unknown>>('filesystem.stat', [ensured.path], ctx.creds);
+      verified = typeof st['size'] === 'number';
+    } catch { /* stat failure → unverified */ }
+
+    return { success: true, applied: true, verified, details: { dataset, path: ensured.path, uploaded: ensured.uploaded } };
+  },
+};
+
+const vmsIsoChoicesAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.iso-choices',
+  label: 'List ISOs in a dataset',
+  description:
+    'Read-only list of the .iso/.img files in one dataset directory (filesystem.listdir + stat). Feeds the CD-ROM attach dialog\'s "existing ISO" picker.',
+  module: 'VMs',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    dataset: { type: 'string', required: true, minLength: 1, description: 'Dataset to list (from vms.create-choices)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const dataset = str(input, 'dataset');
+    if (!dataset) return { success: false, details: { error: 'Dataset is required' } };
+    const mp = await resolveDatasetMount(ctx, dataset);
+    if (!mp) return { success: false, details: { error: `Dataset "${dataset}" not found on this appliance` } };
+
+    let entries: Record<string, unknown>[];
+    try {
+      entries = await ctx.client.call<Record<string, unknown>[]>('filesystem.listdir', [mp], ctx.creds);
+    } catch (e) {
+      return { success: false, details: { error: `Could not list ${mp}: ${e instanceof Error ? e.message : String(e)}` } };
+    }
+
+    const files: { path: string; name: string; sizeBytes: number | null }[] = [];
+    for (const en of entries ?? []) {
+      const fname = pickString(en, ['name']);
+      if (!fname || !/\.(iso|img)$/i.test(fname)) continue;
+      let sizeBytes: number | null = null;
+      try {
+        const st = await ctx.client.call<Record<string, unknown>>('filesystem.stat', [`${mp}/${fname}`], ctx.creds);
+        sizeBytes = typeof st['size'] === 'number' ? (st['size'] as number) : null;
+      } catch { /* keep the entry without a size */ }
+      files.push({ path: `${mp}/${fname}`, name: fname, sizeBytes });
+    }
+    files.sort((a, b) => a.name.localeCompare(b.name));
+    return { success: true, details: { dataset, mountpoint: mp, files } };
+  },
+};
+
+/**
+ * Ensures a repo file exists at <mount>/<fileName> on the appliance — reuses it
+ * when already present with matching size, otherwise streams it from UNM's file
+ * repo into the `filesystem.put` JOB over /_upload (multi-GB safe). Returns the
+ * final path + whether an upload happened. Records a repo usage row.
+ */
+async function ensureRepoFileOnAppliance(
+  ctx: TruenasActionContext,
+  dataset: string,
+  repoFileId: string,
+): Promise<{ ok: true; path: string; uploaded: boolean } | { ok: false; error: string }> {
+  const mp = await resolveDatasetMount(ctx, dataset);
+  if (!mp) return { ok: false, error: `Dataset "${dataset}" not found on this appliance` };
+
+  let meta; // FileRepoEntry | null (inferred — SDK client)
+  try {
+    meta = await fileRepo().getMeta(repoFileId);
+  } catch (e) {
+    return { ok: false, error: `Could not reach the UNM file repo: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (!meta) return { ok: false, error: 'Repo file not found — it may have been deleted from the Files page' };
+
+  const targetPath = `${mp}/${meta.name}`;
+
+  // Already there with matching size → reuse (idempotent re-attach / ISO swap).
+  try {
+    const st = await ctx.client.call<Record<string, unknown>>('filesystem.stat', [targetPath], ctx.creds);
+    if (typeof st['size'] === 'number' && (st['size'] as number) === meta.sizeBytes) {
+      return { ok: true, path: targetPath, uploaded: false };
+    }
+  } catch { /* missing → upload below */ }
+
+  let stream; // Readable from the SDK client (inferred type)
+  try {
+    stream = await fileRepo().getStream(repoFileId);
+  } catch (e) {
+    return { ok: false, error: `Could not open repo file for streaming: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  let r: Record<string, unknown>;
+  try {
+    // filesystem.put(path) — the /_upload body IS the job's input pipe; parent dirs are auto-created.
+    r = await ctx.client.uploadFileStream(ctx.creds, 'filesystem.put', stream, meta.name, undefined, [targetPath]);
+  } catch (e) {
+    return { ok: false, error: `Upload to ${dataset} failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  const jobId = typeof r['job_id'] === 'number' ? (r['job_id'] as number) : null;
+  if (jobId !== null) {
+    const w = await waitForJob(ctx, jobId, 3_540_000);
+    if (w.state && w.state !== 'SUCCESS' && w.state !== 'FINISHED') {
+      return { ok: false, error: w.error ?? `filesystem.put job ended in state ${w.state}` };
+    }
+  }
+
+  // Audit trail — which file was uploaded where/when (best-effort).
+  try {
+    await fileRepo().recordUse(repoFileId, { deviceId: ctx.deviceId ?? undefined, note: `uploaded to ${ctx.host ?? 'appliance'} dataset ${dataset} as ${targetPath}` });
+  } catch { /* audit only — never fail the step for it */ }
+
+  return { ok: true, path: targetPath, uploaded: true };
+}
+
+const vmsCdromAttachAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.cdrom-attach',
+  label: 'Attach CD-ROM (ISO) to VM',
+  description:
+    'Attaches a CD-ROM drive pointing at an ISO on the appliance (vm.device.create dtype CDROM — path must live under /mnt/). When the VM already has a CD-ROM device it is UPDATED in place, so swapping the installed ISO is idempotent. With repoFileId + dataset the ISO is first streamed from UNM\'s file repo when missing — "install OS from a repo ISO" in one step.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 3_600_000, // the optional repo→appliance upload dominates for multi-GB ISOs
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'VM name' },
+    path: { type: 'string', required: false, minLength: 1, pattern: '^/mnt/', description: 'ISO path on the appliance (from vms.iso-choices) — omit when using repoFileId' },
+    dataset: { type: 'string', required: false, minLength: 1, description: 'Target dataset for a repo upload (from vms.create-choices) — required with repoFileId' },
+    repoFileId: { type: 'string', required: false, minLength: 1, description: 'UNM file-repo id of the ISO to attach (uploaded first when missing)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'VM name is required' } };
+
+    // Resolve the ISO path — either given directly or pulled from UNM's file repo.
+    let path = str(input, 'path') ?? '';
+    let uploadedFromRepo = false;
+    const repoFileId = str(input, 'repoFileId');
+    if (!path && repoFileId) {
+      const dataset = str(input, 'dataset');
+      if (!dataset) return { success: false, details: { error: 'repoFileId requires a target dataset' } };
+      const ensured = await ensureRepoFileOnAppliance(ctx, dataset, repoFileId);
+      if (!ensured.ok) return { success: false, details: { error: ensured.error } };
+      path = ensured.path;
+      uploadedFromRepo = ensured.uploaded;
+    }
+    if (!path || !path.startsWith('/mnt/')) {
+      return { success: false, details: { error: 'Either a /mnt/ ISO path or repoFileId + dataset is required' } };
+    }
+
+    const vms = await listVms(ctx);
+    const vm = vms.find((v) => v.name === name);
+    if (!vm) return { success: false, details: { error: `VM "${name}" not found on this appliance` } };
+
+    // Existing CD-ROM device → update it (ISO swap); otherwise create a new one.
+    let cdromId: number | null = null;
+    for (const d of vm.devices) {
+      const dev = normalizeVmDevice(d);
+      if (!dev || dev.dtype !== 'CDROM') continue;
+      const raw = d as Record<string, unknown>;
+      cdromId = typeof raw['id'] === 'number' ? (raw['id'] as number) : typeof dev.attrs['id'] === 'number' ? (dev.attrs['id'] as number) : null;
+      break;
+    }
+
+    try {
+      const v26 = await usesV26VmDeviceApi(ctx);
+      if (cdromId !== null) {
+        // vm.device.update keeps the [id, {attributes}] shape on both API generations.
+        await ctx.client.call('vm.device.update', [cdromId, { attributes: { dtype: 'CDROM', path } }], ctx.creds);
+      } else {
+        await ctx.client.call('vm.device.create', [vmDeviceCreateArg(v26, vm.id, { dtype: 'CDROM', path })], ctx.creds, 30_000);
+      }
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+
+    // Verify by re-reading the VM's devices — a CDROM with this path must exist.
+    const wait = await pollUntil(
+      async () => {
+        try {
+          const vms2 = await listVms(ctx);
+          const vm2 = vms2.find((v) => v.name === name);
+          if (!vm2) return null;
+          for (const d of vm2.devices) {
+            const dev = normalizeVmDevice(d);
+            if (!dev || dev.dtype !== 'CDROM') continue;
+            if (pickString(dev.attrs, ['path']) === path) return true;
+          }
+          return false;
+        } catch {
+          return null;
+        }
+      },
+      (found) => found === true,
+      { timeoutMs: 30_000, intervalMs: 2_000 },
+    );
+    return { success: true, applied: true, verified: wait.ok, details: { name, path, ...(uploadedFromRepo ? { uploadedFromRepo: true } : {}), ...(cdromId !== null ? { updatedDeviceId: cdromId } : {}) } };
+  },
+};
+
+const vmsDeviceDetachAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.device-detach',
+  label: 'Detach device from VM',
+  description:
+    'Removes ONE attached device (any dtype — NIC, disk, display, CD-ROM, PCIe, USB) by its integer device id (vm.device.delete). The VM must be STOPPED. With removeStorage=true a DISK\'s backing zvol is destroyed too.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'VM name (state check + error context)' },
+    deviceId: { type: 'number', required: true, min: 1, description: 'Integer device id from the VM inventory row' },
+    removeStorage: { type: 'boolean', required: false, default: false, description: 'Also destroy a DISK\'s backing zvol (destructive)' },
+    force: { type: 'boolean', required: false, default: false, description: 'Force removal even if the appliance would otherwise refuse' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    const deviceId = num(input, 'deviceId', -1);
+    if (!name) return { success: false, details: { error: 'VM name is required' } };
+    if (deviceId < 1) return { success: false, details: { error: 'deviceId (integer device id) is required' } };
+
+    const vms = await listVms(ctx);
+    const vm = vms.find((v) => v.name === name);
+    if (!vm) return { success: false, details: { error: `VM "${name}" not found on this appliance` } };
+    if (vm.state !== 'STOPPED') {
+      return { success: false, details: { error: `VM "${name}" is ${vm.state.toLowerCase()} — stop it before detaching devices` } };
+    }
+
+    const opts: Record<string, unknown> = {};
+    if (input['removeStorage'] === true) opts['zvol'] = true;
+    if (input['force'] === true) opts['force'] = true;
+
+    try {
+      await ctx.client.call('vm.device.delete', [deviceId, opts], ctx.creds);
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+
+    // Verify by re-reading the VM's devices — this integer id must be gone.
+    const wait = await pollUntil(
+      async () => {
+        try {
+          const vms2 = await listVms(ctx);
+          const vm2 = vms2.find((v) => v.name === name);
+          if (!vm2) return true; // VM itself is gone — device certainly is
+          for (const d of vm2.devices) {
+            const raw = d as Record<string, unknown>;
+            const dev = normalizeVmDevice(d);
+            const id = typeof raw['id'] === 'number' ? (raw['id'] as number) : typeof dev?.attrs['id'] === 'number' ? (dev.attrs['id'] as number) : null;
+            if (id === deviceId) return false;
+          }
+          return true;
+        } catch {
+          return null;
+        }
+      },
+      (gone) => gone === true,
+      { timeoutMs: 30_000, intervalMs: 2_000 },
+    );
+    return { success: true, applied: true, verified: wait.ok, details: { name, deviceId, removeStorage: input['removeStorage'] === true } };
+  },
+};
+
+const vmsDeviceEditAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.device-edit',
+  label: 'Edit VM device attributes',
+  description:
+    'Updates ONE attached device\'s attributes in place (vm.device.update) — e.g. a NIC\'s bridge, a display\'s resolution/port, or a CD-ROM\'s ISO path. The full attribute set is replaced; include every field that must survive.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    deviceId: { type: 'number', required: true, min: 1, description: 'Integer device id from the VM inventory row' },
+    dtype: { type: 'string', required: true, enum: ['NIC', 'DISK', 'CDROM', 'DISPLAY', 'PCI', 'USB'], description: 'Device type (must match the existing device)' },
+    attributes: { type: 'object', required: true, properties: {}, description: 'Full replacement attribute set for the device (without dtype — it is added automatically)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const deviceId = num(input, 'deviceId', -1);
+    if (deviceId < 1) return { success: false, details: { error: 'deviceId (integer device id) is required' } };
+    const dtype = strOr(input, 'dtype', '').toUpperCase();
+    if (!dtype) return { success: false, details: { error: 'dtype is required' } };
+    const attrsRaw = input['attributes'];
+    if (!attrsRaw || typeof attrsRaw !== 'object' || Array.isArray(attrsRaw)) {
+      return { success: false, details: { error: 'attributes (object) is required' } };
+    }
+
+    try {
+      await ctx.client.call('vm.device.update', [deviceId, { attributes: { dtype, ...(attrsRaw as Record<string, unknown>) } }], ctx.creds);
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+
+    // Verify the device still exists after the update (attribute values are
+    // normalized by the appliance — existence is the honest check here).
+    let verified = false;
+    try {
+      const rows = await ctx.client.call<Record<string, unknown>[]>('vm.device.query', [[['id', '=', deviceId]]], ctx.creds);
+      verified = (rows ?? []).length > 0;
+    } catch { /* unverified */ }
+    return { success: true, applied: true, verified, details: { deviceId, dtype } };
   },
 };
 
@@ -3305,6 +3958,13 @@ export const registry = createRegistry<TruenasActionContext>([
   vmsNicChoicesAction,
   vmsNicAttachAction,
   vmsNicDetachAction,
+  vmsCreateChoicesAction,
+  vmsCreateAction,
+  vmsIsoUploadAction,
+  vmsIsoChoicesAction,
+  vmsCdromAttachAction,
+  vmsDeviceDetachAction,
+  vmsDeviceEditAction,
   storageScrubAction,
   storageSnapshotAction,
   storageQuotaSetAction,

@@ -1,5 +1,6 @@
 import http from 'http';
 import https from 'https';
+import type { Readable } from 'stream';
 import WebSocket, { RawData } from 'ws';
 import { toWsUrl, withPort } from '@unm/plugin-sdk';
 
@@ -484,6 +485,21 @@ export class TruenasClient {
    */
   async downloadJobFile(jobId: number, authToken: string): Promise<Buffer> {
     const url = `${this.httpBase()}/_download/${jobId}?auth_token=${encodeURIComponent(authToken)}`;
+    return this.fetchFile(url);
+  }
+
+  /**
+   * Downloads a file from an appliance-absolute path (e.g. the URL returned by
+   * `core.download`: "/_download/86?auth_token=…"). Same endpoint + semantics as
+   * downloadJobFile, but the caller supplies the full path (token included).
+   */
+  async downloadAtPath(path: string): Promise<Buffer> {
+    const p = path.startsWith('/') ? path : `/${path}`;
+    return this.fetchFile(`${this.httpBase()}${p}`);
+  }
+
+  /** Shared HTTP file fetch — streams the body, rejects non-2xx with a body excerpt. */
+  private fetchFile(url: string): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       const lib = url.startsWith('https') ? https : http;
       const req = lib.get(url, (res) => {
@@ -572,6 +588,86 @@ export class TruenasClient {
         req.destroy(new TruenasRpcError(`TrueNAS file upload timed out after ${Math.max(5_000, this.timeoutMs)} ms`));
       });
       req.end(body);
+    });
+  }
+
+  /**
+   * Streaming variant of uploadFile() for LARGE files (multi-GB ISOs / firmware
+   * images) that must NOT be buffered in memory. Same multipart layout as the
+   * appliance's FileApplication mandates (`data` field first, then `file`), but
+   * the file part is piped from a readable stream with `Transfer-Encoding:
+   * chunked` instead of a pre-built Content-Length body. The appliance's nginx
+   * sets client_max_body_size 0 (no cap) and streams into the job's input pipe,
+   * so this works for arbitrarily large files. Returns `{job_id}` on success.
+   */
+  async uploadFileStream(
+    creds: TruenasCredentials,
+    method: string,
+    fileStream: Readable,
+    fileName: string,
+    authToken?: string,
+    params: unknown[] = []
+  ): Promise<Record<string, unknown>> {
+    const boundary = `----unm${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
+    const dataPart = JSON.stringify({ method, params });
+    const head = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="data"\r\n\r\n` +
+        `${dataPart}\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\n` +
+        'Content-Type: application/octet-stream\r\n\r\n'
+    );
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+
+    let authHeader: string;
+    if (authToken) {
+      authHeader = `Token ${authToken}`;
+    } else if (creds.kind === 'apiKey') {
+      authHeader = `Bearer ${creds.apiKey ?? ''}`;
+    } else {
+      authHeader = `Basic ${Buffer.from(`${creds.username ?? ''}:${creds.password ?? ''}`).toString('base64')}`;
+    }
+
+    const url = `${this.httpBase()}/_upload`;
+    return new Promise((resolve, reject) => {
+      const lib = url.startsWith('https') ? https : http;
+      // No Content-Length — chunked transfer. The appliance streams the file into
+      // the job's input pipe as it arrives (nginx client_max_body_size 0).
+      const req = lib.request(
+        url,
+        { method: 'POST', headers: { Authorization: authHeader, 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Transfer-Encoding': 'chunked' } },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => {
+            const buf = Buffer.concat(chunks);
+            if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+              reject(new TruenasRpcError(`TrueNAS file upload failed with HTTP ${res.statusCode}: ${buf.toString('utf8').slice(0, 300)}`));
+              return;
+            }
+            try {
+              resolve(JSON.parse(buf.toString('utf8')) as Record<string, unknown>);
+            } catch {
+              reject(new TruenasRpcError(`TrueNAS file upload returned non-JSON response: ${buf.toString('utf8').slice(0, 300)}`));
+            }
+          });
+        }
+      );
+      req.on('error', (e: Error) => { try { fileStream.destroy(); } catch { /* noop */ } reject(new TruenasRpcError(`TrueNAS file upload failed: ${e.message}`)); });
+      // Large uploads legitimately take a long time — no idle timeout here; the
+      // caller bounds the whole operation via its plan-step budget.
+      // Multipart layout, in order: head → raw file bytes → tail. The source
+      // stream is piped with end:false so we can append the closing boundary.
+      req.write(head);
+      let failed = false;
+      const fail = (e: Error): void => {
+        if (failed) return;
+        failed = true;
+        try { req.destroy(); } catch { /* noop */ }
+        reject(new TruenasRpcError(`TrueNAS file upload failed reading source: ${e.message}`));
+      };
+      fileStream.on('error', fail);
+      fileStream.pipe(req, { end: false });
+      fileStream.on('end', () => req.end(tail));
     });
   }
 }

@@ -21,6 +21,7 @@ tags:
   - name: Secrets
   - name: Sites
   - name: Layers
+  - name: Files
   - name: Inventory
   - name: Updates
   - name: Security
@@ -3038,6 +3039,147 @@ paths:
           description: Site not found
         '409':
           description: Devices still reference this site
+
+  /files:
+    get:
+      tags: [Files]
+      summary: List files in the central file repository
+      description: >-
+        The device-independent file repo (ISOs, firmware images, config backups,
+        scripts). Files live on a volume only the API mounts; metadata + usage
+        audit trail in Postgres. Requires permission `files:read`. Optional
+        `category` query filter (e.g. `iso`, `firmware`). Newest first.
+      parameters:
+        - in: query
+          name: category
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Repo files (newest first)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FileRepoEntry'
+        '401':
+          description: Authentication required (requires files:read)
+    post:
+      tags: [Files]
+      summary: Upload a file to the central repository
+      description: >-
+        Requires permission `files:write`. The body is the RAW file content
+        (`application/octet-stream`); the original name travels in the
+        `x-file-name` header and an optional category in `x-file-category`
+        (e.g. `iso`, `firmware`, `config-backup`, `script`). Identical content
+        (same SHA-256) is deduplicated — the existing file is returned with
+        `deduplicated: true`. Same name + different content gets a numeric
+        suffix, so nothing is ever silently overwritten. Multi-GB ISOs stream
+        through without buffering.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: File stored (or deduplicated)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  file:
+                    $ref: '#/components/schemas/FileRepoEntry'
+                  deduplicated: { type: boolean }
+        '400':
+          description: Missing x-file-name header or JSON body sent instead of octet-stream
+        '401':
+          description: Authentication required (requires files:write)
+
+  /files/{id}:
+    get:
+      tags: [Files]
+      summary: Download a repo file (raw bytes, attachment)
+      description: >-
+        Requires permission `files:read`. Streams the stored content with
+        `Content-Disposition: attachment` and records a usage row for the audit
+        trail. 404 when the file is unknown or its content is missing from the
+        repo volume.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The file's raw bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          description: Authentication required (requires files:read)
+        '404':
+          description: File not found or content missing from the repo volume
+    delete:
+      tags: [Files]
+      summary: Delete a repo file (content + metadata)
+      description: >-
+        Requires permission `files:write`. Removes both the stored bytes and the
+        metadata row; usage audit rows are kept. 404 when unknown.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          description: Authentication required (requires files:write)
+        '403':
+          description: Missing files:write permission
+        '404':
+          description: File not found
+
+  /files/{id}/uses:
+    get:
+      tags: [Files]
+      summary: Usage audit trail for one repo file
+      description: >-
+        Requires permission `files:read`. Returns every recorded use of the file
+        (downloads, plugin fetches for device use) newest first — "which file
+        was used, for what device, when".
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Usage records (newest first)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fileId: { type: string }
+                  uses:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FileRepoUse'
+        '401':
+          description: Authentication required (requires files:read)
+        '404':
+          description: File not found
 
   /layers:
     get:
@@ -8274,6 +8416,30 @@ components:
         pluginId: { type: string }
         result:
           $ref: '#/components/schemas/FilesystemResult'
+
+    # --- Central file repository (device-independent store) -------------------
+    FileRepoEntry:
+      type: object
+      required: [id, name, category, sizeBytes, sha256, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string, description: "Original file name as uploaded" }
+        category: { type: string, description: "Open set — iso | firmware | config-backup | script | other" }
+        sizeBytes: { type: integer }
+        sha256: { type: string, description: "SHA-256 hex of the stored content (integrity + dedupe)" }
+        uploadedBy: { type: string, nullable: true, description: "Username that uploaded it; null for plugin uploads" }
+        createdAt: { type: string, format: date-time, description: "When the file was uploaded" }
+
+    FileRepoUse:
+      type: object
+      required: [id, fileId, createdAt]
+      properties:
+        id: { type: string }
+        fileId: { type: string }
+        deviceId: { type: string, nullable: true, description: "Device the file was used on (null for plain downloads)" }
+        note: { type: string, nullable: true, description: "Free-form context (e.g. 'installed as VM disk')" }
+        usedBy: { type: string, nullable: true, description: "Username or 'plugin'" }
+        createdAt: { type: string, format: date-time }
 
     ConsoleTicketRequest:
       type: object

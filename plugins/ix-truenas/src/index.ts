@@ -1609,6 +1609,8 @@ interface VmRow {
  * so the webapp never has to know a specific appliance's attribute schema. */
 interface VmDevice {
   dtype: string;
+  /** The appliance's integer device id (vm.device.delete target) when known. */
+  id?: number;
   label?: string;
   detail?: string;
 }
@@ -1617,7 +1619,15 @@ interface VmDevice {
  * dtypes get tailored labels (MAC, disk path, display resolution…); unknown ones
  * fall back to `dtype` + a compact dump of their scalar attributes so no data is
  * ever silently dropped when a new dtype appears on a future release. */
-function formatVmDevice(dev: { dtype: string; attrs: Record<string, unknown> }): VmDevice {
+/** Extracts the integer device id from a raw vm.query devices[] entry — TrueNAS
+ * 26+ nests it at the entry top level; legacy shapes carry it inside attributes. */
+function pickVmDeviceId(raw: Record<string, unknown>, attrs: Record<string, unknown>): number | undefined {
+  if (typeof raw['id'] === 'number') return raw['id'];
+  if (typeof attrs['id'] === 'number') return attrs['id'];
+  return undefined;
+}
+
+function formatVmDevice(dev: { dtype: string; attrs: Record<string, unknown> }, id?: number): VmDevice {
   const a = dev.attrs;
   const s = (k: string): string | undefined => {
     const v = a[k];
@@ -1631,34 +1641,34 @@ function formatVmDevice(dev: { dtype: string; attrs: Record<string, unknown> }):
       const parts: string[] = [];
       if (s('type')) parts.push(s('type') as string);
       if (s('nic_attach')) parts.push(`→ ${s('nic_attach')}`);
-      return { dtype: 'NIC', label: mac ?? 'no MAC assigned', detail: parts.join(' ') || undefined };
+      return { dtype: 'NIC', id, label: mac ?? 'no MAC assigned', detail: parts.join(' ') || undefined };
     }
     case 'DISK':
     case 'RAW': {
       const path = s('path');
-      return { dtype: dev.dtype, label: path ?? 'disk', detail: s('type') };
+      return { dtype: dev.dtype, id, label: path ?? 'disk', detail: s('type') };
     }
     case 'CDROM': {
       const path = s('path');
-      return { dtype: 'CDROM', label: path && path !== '' ? path : 'CD-ROM drive', detail: s('type') };
+      return { dtype: 'CDROM', id, label: path && path !== '' ? path : 'CD-ROM drive', detail: s('type') };
     }
     case 'DISPLAY': {
       const type = s('type');
       const parts: string[] = [];
       if (s('resolution')) parts.push(s('resolution') as string);
       if (s('port')) parts.push(`:${s('port')}`);
-      return { dtype: 'DISPLAY', label: `Display${type ? ` (${type})` : ''}`, detail: parts.join(' ') || undefined };
+      return { dtype: 'DISPLAY', id, label: `Display${type ? ` (${type})` : ''}`, detail: parts.join(' ') || undefined };
     }
     case 'PCI': {
       const hostdev = s('hostdev');
-      return { dtype: 'PCI', label: hostdev ?? 'PCI passthrough', detail: s('rombar') ? `rombar=${a['rombar']}` : undefined };
+      return { dtype: 'PCI', id, label: hostdev ?? 'PCI passthrough', detail: s('rombar') ? `rombar=${a['rombar']}` : undefined };
     }
     default: {
       // Unknown / future dtype — surface it generically so nothing is lost.
       const interesting = Object.entries(a)
         .filter(([k, v]) => k !== 'dtype' && (typeof v === 'string' || typeof v === 'number') && v !== '' && v !== null)
         .slice(0, 4);
-      return { dtype: dev.dtype, label: dev.dtype.toLowerCase(), detail: interesting.map(([k, v]) => `${k}=${v}`).join(' ') || undefined };
+      return { dtype: dev.dtype, id, label: dev.dtype.toLowerCase(), detail: interesting.map(([k, v]) => `${k}=${v}`).join(' ') || undefined };
     }
   }
 }
@@ -1683,7 +1693,7 @@ function buildVmRows(vms: Record<string, unknown>[]): VmRow[] {
     for (const d of devicesRaw) {
       const dev = normalizeVmDevice(d);
       if (!dev) continue;
-      devices.push(formatVmDevice(dev));
+      devices.push(formatVmDevice(dev, pickVmDeviceId(d, dev.attrs)));
     }
 
     rows.push({
@@ -2727,8 +2737,9 @@ app.post('/config', async (req, res) => {
     await assertPinned(req, host, transport, ports);
 
     // host + rawCredentials let slot-based actions (e.g. containers.logs.read over SSH)
-    // reach the appliance on a different channel than the RPC socket.
-    const ctx: TruenasActionContext = { client: getClient(host, transport, timeoutMs, ports), creds, host, rawCredentials: body.credentials as Record<string, unknown> | null };
+    // reach the appliance on a different channel than the RPC socket; deviceId feeds
+    // audit trails (file-repo usage rows).
+    const ctx: TruenasActionContext = { client: getClient(host, transport, timeoutMs, ports), creds, host, deviceId, rawCredentials: body.credentials as Record<string, unknown> | null };
     const result = await action.execute(ctx, input);
     res.status(200).json({ success: result.success, result });
   } catch (err) {

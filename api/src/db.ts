@@ -1203,6 +1203,33 @@ export async function initDb(): Promise<void> {
   await pool.query(`ALTER TABLE devices DROP COLUMN IF EXISTS "pluginId"`);
   await pool.query(`ALTER TABLE devices DROP COLUMN IF EXISTS "secretId"`);
 
+  // Central file repository (see src/fileRepo.ts): device-independent store of
+  // ISOs/firmware/config-backups/scripts. Content lives on a volume only the api
+  // container mounts; metadata + usage audit trail live here.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS repo_files (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'other',
+      "sizeBytes" BIGINT NOT NULL DEFAULT 0,
+      sha256 TEXT NOT NULL UNIQUE,
+      "storagePath" TEXT NOT NULL,
+      "uploadedBy" TEXT,
+      "createdAt" TEXT NOT NULL
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_repo_files_category ON repo_files (category)`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS repo_file_uses (
+      id TEXT PRIMARY KEY,
+      "fileId" TEXT NOT NULL,
+      "deviceId" TEXT,
+      note TEXT,
+      "usedBy" TEXT,
+      "createdAt" TEXT NOT NULL
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_repo_file_uses_file ON repo_file_uses ("fileId")`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_repo_file_uses_device ON repo_file_uses ("deviceId")`);
+
   const existingAdmin = await db.query.users.findFirst({
     where: (users, { eq }) => eq(users.username, 'admin'),
   });

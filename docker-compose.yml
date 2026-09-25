@@ -36,6 +36,11 @@ services:
       - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-http://localhost:5173}
       # How many days of plugin log entries are kept before the retention sweep deletes them.
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
+      # Central file repository (ISOs, firmware images, config backups, scripts).
+      # Only the api container mounts this volume — plugins reach it through the
+      # API's /plugin/files/* routes and never see the filesystem. Set to a host
+      # path (e.g. /opt/unm/file-repo) instead of the named volume if you prefer.
+      - FILE_REPO_PATH=${FILE_REPO_PATH:-/data/file-repo}
       # Secrets provider selection (the API is a pure secrets broker).
       # SECRETS_PLUGIN_ID names the active secrets provider plugin; if unset or
       # offline the API falls back to the built-in secrets-provider plugin.
@@ -45,6 +50,9 @@ services:
       # All plugins listen on the conventional internal port 4080 (see
       # docs/PLUGIN-DEVELOPMENT.md); compose maps distinct HOST ports to it.
       - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080,http://openwrt-plugin:4080,http://generic-ssh-plugin:4080,http://generic-http-plugin:4080,http://generic-ntp-plugin:4080,http://mailcow-plugin:4080,http://zabbix-plugin:4080}
+    volumes:
+      # Central file repository — the ONLY container that may touch this volume.
+      - filerepo:/data/file-repo
     depends_on:
       - postgres
     restart: unless-stopped
@@ -601,3 +609,6 @@ services:
 
 volumes:
   pgdata:
+  # Central file repository (ISOs/firmware/config backups/scripts). Mounted on
+  # the api service ONLY — plugins access files through the API, never directly.
+  filerepo:

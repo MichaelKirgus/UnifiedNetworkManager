@@ -1695,6 +1695,8 @@ export interface DeviceTimeOverview {
 export interface VmDevice {
   /** Appliance-native device type (NIC | DISK | DISPLAY | CDROM | PCI | …). */
   dtype: string;
+  /** The appliance's integer device id when known — target of vms.device-detach/edit. */
+  id?: number;
   /** Primary display value (MAC, disk path, "Display (SPICE)", …). */
   label?: string;
   /** Secondary detail (model → bridge, controller type, resolution:port, …). */
@@ -1737,6 +1739,30 @@ export interface VmRow {
 /** Response of GET /vms — one row per VM on one device (no cross-device merge). */
 export interface VmsOverview {
   vms: VmRow[];
+}
+
+/** One file in the central repository (device-independent store of ISOs, firmware,
+ * config backups and scripts — files live on a volume only the API mounts). */
+export interface FileRepoEntry {
+  id: string;
+  /** Original file name as uploaded. */
+  name: string;
+  /** Open category set (iso | firmware | config-backup | script | other). */
+  category: string;
+  sizeBytes: number;
+  sha256: string;
+  uploadedBy: string | null;
+  createdAt: string;
+}
+
+/** One usage record of a repo file (audit trail — which device, when). */
+export interface FileRepoUse {
+  id: string;
+  fileId: string;
+  deviceId: string | null;
+  note: string | null;
+  usedBy: string | null;
+  createdAt: string;
 }
 
 /** Device-level access scope rules — a user may see any device matching ANY rule. Empty = unrestricted. */
@@ -2776,6 +2802,51 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<VmsOverview>(`/vms${suffix}`);
   },
+  // --- Central file repository (device-independent store) ---------------------
+  /** Lists repo files, newest first. Optional category filter. */
+  repoFiles: (category?: string) => {
+    const suffix = category ? `?category=${encodeURIComponent(category)}` : '';
+    return apiFetch<{ files: FileRepoEntry[] }>(`/files${suffix}`);
+  },
+  /** Uploads a file to the repo. RAW octet-stream body + x-file-name header —
+   * multi-GB ISOs stream through without base64/buffering. Identical content is
+   * deduplicated (existing entry returned, deduplicated: true). */
+  uploadRepoFile: async (file: File, category?: string): Promise<{ file: FileRepoEntry; deduplicated: boolean }> => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/files`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'x-file-name': file.name,
+        ...(category ? { 'x-file-category': category } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: file,
+    });
+    if (!res.ok) {
+      let message = `API error ${res.status}`;
+      try { const b = await res.json(); if (b?.error) message = b.error; } catch { /* keep generic */ }
+      throw new ApiError(message, res.status);
+    }
+    return res.json() as Promise<{ file: FileRepoEntry; deduplicated: boolean }>;
+  },
+  /** Downloads a repo file as a Blob (authed — the API records a usage row). */
+  downloadRepoFile: async (id: string): Promise<Blob> => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/files/${encodeURIComponent(id)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      let message = `API error ${res.status}`;
+      try { const b = await res.json(); if (b?.error) message = b.error; } catch { /* keep generic */ }
+      throw new ApiError(message, res.status);
+    }
+    return res.blob();
+  },
+  /** Deletes a repo file (content + metadata). Usage rows are kept. */
+  deleteRepoFile: (id: string) => apiFetch<void>(`/files/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** The usage audit trail of one repo file (newest first). */
+  repoFileUses: (id: string) => apiFetch<{ fileId: string; uses: FileRepoUse[] }>(`/files/${encodeURIComponent(id)}/uses`),
   /** Cross-device update center — available updates + stack self-update info. */
   updates: (params?: { deviceId?: string; siteId?: string; kind?: 'firmware' | 'os-package' | 'docker-image' | 'app' }) => {
     const qs = new URLSearchParams();

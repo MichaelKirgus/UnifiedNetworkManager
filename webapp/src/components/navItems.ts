@@ -17,6 +17,7 @@ import {
   HardDrive,
   Share2,
   Monitor,
+  FolderOpen,
   Server,
   Waypoints,
   KeySquare,
@@ -96,6 +97,10 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/time', label: 'Time', icon: Clock, requiresPermission: 'time:read' },
   // Cross-device virtual machines (TrueNAS SCALE VMs today; generic key for future hypervisor plugins).
   { to: '/vms', label: 'VMs', icon: Monitor, requiresPermission: 'vms:read' },
+  // Central file repository — device-independent store of ISOs/firmware/config
+  // backups/scripts. Files live on a volume only the API mounts; metadata + usage
+  // audit trail in Postgres (plugins reach it through /plugin/files/*).
+  { to: '/files', label: 'Files', icon: FolderOpen, requiresPermission: 'files:read' },
   // Cross-device update center — firmware/packages/images available across devices,
   // plus the "UNM itself" self-update card. Badge = count of available updates.
   { to: '/updates', label: 'Updates', icon: ArrowUpCircle, requiresPermission: 'updates:read', countKey: 'updates' },

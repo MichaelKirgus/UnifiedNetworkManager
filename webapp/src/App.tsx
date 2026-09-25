@@ -31,6 +31,7 @@ import Time from './pages/Time';
 import ContainerLogsPage from './pages/ContainerLogsPage';
 import ConsolePage from './pages/ConsolePage';
 import FileBrowserPage from './pages/FileBrowserPage';
+import Files from './pages/Files';
 import Vms from './pages/Vms';
 import Updates from './pages/Updates';
 import Security from './pages/Security';
@@ -74,6 +75,9 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   // Cross-device clock overview — each device's local time + drift vs UNM.
   { path: '/time', permission: 'time:read' },
   { path: '/vms', permission: 'vms:read' },
+  // Central file repository — device-independent store of ISOs/firmware/config
+  // backups/scripts (volume mounted on the API only; metadata in Postgres).
+  { path: '/files', permission: 'files:read' },
   // Cross-device update center (firmware/packages/images) + stack self-update card.
   { path: '/updates', permission: 'updates:read' },
   // Cross-device security findings — unsuccessful logins, file integrity, rate limiting.
@@ -165,6 +169,8 @@ export default function App() {
       <Route path="/container-logs/:deviceId" element={<Page permission="containers:read"><ContainerLogsPage /></Page>} />
       {/* Cross-device virtual machines (TrueNAS SCALE VMs today; generic key for future hypervisor plugins). */}
       <Route path="/vms" element={<Page permission="vms:read"><Vms /></Page>} />
+      {/* Central file repository — device-independent store of ISOs/firmware/config backups/scripts. */}
+      <Route path="/files" element={<Page permission="files:read"><Files /></Page>} />
       {/* Cross-device update center — available updates + stack self-update card. */}
       <Route path="/updates" element={<Page permission="updates:read"><Updates /></Page>} />
       {/* Cross-device security findings — unsuccessful logins, file integrity, rate limiting. */}

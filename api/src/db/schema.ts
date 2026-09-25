@@ -1903,6 +1903,59 @@ export const documentedNetworks = pgTable(
   }
 );
 
+// Central file repository (see src/fileRepo.ts). DEVICE-INDEPENDENT store owned
+// by the API: files live on a volume only the api container mounts, metadata here.
+// `storagePath` is RELATIVE to the repo root and human-readable
+// (`<category>/<YYYY-MM-DD>/<name>`); content identity is sha256 (dedupe).
+export const repoFiles = pgTable(
+  'repo_files',
+  {
+    id: text('id').primaryKey(),
+    // Original file name as uploaded (e.g. "debian-12.8.0-amd64-netinst.iso").
+    name: text('name').notNull(),
+    // Open category set, e.g. 'iso' | 'firmware' | 'config-backup' | 'script' | 'other'.
+    category: text('category').notNull().default('other'),
+    sizeBytes: bigint('sizeBytes', { mode: 'number' }).notNull().default(0),
+    // SHA-256 hex of the stored content (integrity + dedupe).
+    sha256: text('sha256').notNull(),
+    // Relative path under the repo root (category/date/name) — human-readable.
+    storagePath: text('storagePath').notNull(),
+    // Username that uploaded it (null for plugin uploads without a user context).
+    uploadedBy: text('uploadedBy'),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => {
+    return {
+      uqRepoFilesSha256: uniqueIndex('uq_repo_files_sha256').on(table.sha256),
+      idxRepoFilesCategory: index('idx_repo_files_category').on(table.category),
+    };
+  }
+);
+
+// Audit trail for repo file usage — "which file was used, for what device, when".
+// Written by plugins (via the internal /plugin/files/:id/use route) and by the
+// API on download. Kept after a file is deleted (references it by id).
+export const repoFileUses = pgTable(
+  'repo_file_uses',
+  {
+    id: text('id').primaryKey(),
+    fileId: text('fileId').notNull(),
+    // The device the file was used on, when known (null for plain downloads).
+    deviceId: text('deviceId'),
+    // Free-form context (e.g. "installed as VM disk", "firmware update").
+    note: text('note'),
+    // Username or plugin id that triggered the use (null = unknown).
+    usedBy: text('usedBy'),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => {
+    return {
+      idxRepoFileUsesFile: index('idx_repo_file_uses_file').on(table.fileId),
+      idxRepoFileUsesDevice: index('idx_repo_file_uses_device').on(table.deviceId),
+    };
+  }
+);
+
 // Add index for config_jobs
 // Note: Drizzle's index definition inside the table definition is 
 // usually the best way to handle this. I'll add it to configJobs.

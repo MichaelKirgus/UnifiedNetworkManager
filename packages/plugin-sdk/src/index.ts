@@ -41,6 +41,10 @@ export { TtlCache } from './ttlCache';
 export type { TtlCacheOptions } from './ttlCache';
 export { createApiClient, isNotFound } from './apiClient';
 export type { ApiClientOptions } from './apiClient';
+// Central file repository client (capability 'fileRepo'): the ONE implementation of
+// the API's /plugin/files/* contract — list/get/upload/remove/recordUse. See fileRepo.ts.
+export { createFileRepoClient } from './fileRepo';
+export type { FileRepoEntry, FileRepoClient, FileRepoClientOptions } from './fileRepo';
 export { createPluginLogger, warnOnce, LOG_LEVELS } from './logging';
 export type { PluginLogger, PluginLoggerOptions, PluginLogEntry, LogLevel, LogCallOptions } from './logging';
 export { createNotifier, NOTIFICATION_SEVERITIES } from './notifications';

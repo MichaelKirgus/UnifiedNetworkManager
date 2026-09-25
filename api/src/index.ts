@@ -30,6 +30,7 @@ import notificationsRouter from './routes/notifications';
 import systemRouter from './routes/system';
 import settingsRouter from './routes/settings';
 import countsRouter from './routes/counts';
+import { filesRouter, internalFileRepoRouter } from './routes/files';
 import { startNotificationsWorker } from './workers/notifications';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startTelemetryRetentionWorker } from './workers/telemetryRetention';
@@ -102,6 +103,10 @@ async function main(): Promise<void> {
   // never shadow public paths like POST /users — see routes/internal.ts.
   api.use(configJobsListRouter);
   api.use(internalRouter());
+  // Central file repository — internal plugin routes (/plugin/files/*, gated by
+  // x-plugin-api-key). Mounted before the OpenAPI validator like the other
+  // /plugin/* paths: plugins do repo CRUD here and NEVER touch the volume.
+  api.use(internalFileRepoRouter);
 
   api.use(
     OpenApiValidator.middleware({
@@ -151,6 +156,8 @@ async function main(): Promise<void> {
   api.use(settingsRouter);
   // Aggregated nav-badge counts for the sidebar (permission-aware).
   api.use(countsRouter);
+  // Central file repository (/files: list/upload/download/delete + usage audit).
+  api.use(filesRouter);
   // The plans router defines its own /plans/... paths (like the devices router),
   // so it is mounted without an extra prefix.
   api.use(plansRouter);
