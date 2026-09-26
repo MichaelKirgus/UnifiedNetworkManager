@@ -53,6 +53,7 @@ import {
   collectProbeStates,
   collectProbeStats,
   collectProbeVmStates,
+  collectProbeVmStats,
   ensureEnrichment,
   ensureVmEnrichment,
   getEnrichment,
@@ -70,6 +71,7 @@ import {
   type ProbeContainerState,
   type ProbeContainerStat,
   type ProbeVmState,
+  type ProbeVmStat,
   type ServiceNetDetail,
 } from './enrich';
 import { alertDedupeKey, registry as actionRegistry, TruenasActionContext } from './actions';
@@ -200,7 +202,17 @@ const identity = resolvePluginIdentity({
   // box the combined `docker inspect` + `docker stats` command always exceeded
   // 10 s, so dockerInfo stayed empty forever and NO dockerHosts rows were ever
   // emitted (the Containers page live-stats probe had the same problem).
-  version: '0.15.1',
+  // 0.16.1 — VMs page CPU columns: /monitoring's vms[] rows now carry `cores` +
+  // `threads` in extra (vm.query reports both per VM) and an EFFECTIVE
+  // vcpus = cores × threads when the appliance's legacy `vcpus` field is
+  // missing or implausible (verified live: always 1 on TrueNAS 26 even for
+  // 8-vCPU guests). New probe key 'vmStats' — per-VM LIVE CPU utilization via
+  // ONE `virsh domstats` over the shared SSH pool: libvirt exposes no ready-made
+  // percent, only cumulative cpu.time (ns) + vcpu.current, so the plugin derives
+  // Δcpu.time / (Δwall × vcpus) between polls (same math as libvirt's own
+  // tooling; guest agents are not running in these guests). First poll after a
+  // restart has no baseline → cpuPct absent for that cycle only.
+  version: '0.16.1',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -1704,14 +1716,27 @@ function buildVmRows(vms: Record<string, unknown>[]): VmRow[] {
       devices.push(formatVmDevice(dev, pickVmDeviceId(d, dev.attrs)));
     }
 
+    // CPU topology — vm.query reports cores + threads per VM. The legacy
+    // `vcpus` field is UNRELIABLE on TrueNAS 26 (verified live: always 1 even
+    // for 8-vCPU guests), so the EFFECTIVE allocation is cores × threads when
+    // both are known — libvirt's own vcpu.current confirms it matches; fall
+    // back to what the appliance said only when topology is absent.
+    const cores = pickNumber(v, ['cores']);
+    const threads = pickNumber(v, ['threads']);
+    const legacyVcpus = pickNumber(v, ['vcpus']);
+    const derived = cores && threads ? cores * threads : null;
+    const vcpus = derived ?? legacyVcpus;
+
     rows.push({
       name,
       state,
-      vcpus: pickNumber(v, ['vcpus']),
+      vcpus: vcpus ?? null,
       memoryMiB: pickNumber(v, ['memory']), // TrueNAS reports MiB
       archType: pickString(v, ['arch_type']) ?? pickString(v, ['machine_type']) ?? null,
       extra: {
         devices,
+        ...(cores !== undefined ? { cores } : {}),
+        ...(threads !== undefined ? { threads } : {}),
         ...(pickString(v, ['description']) && (v['description'] as string) !== '' ? { description: v['description'] } : {}),
         ...(pickString(v, ['uuid']) ? { uuid: v['uuid'] } : {}),
         autostart: typeof v['autostart'] === 'boolean' ? (v['autostart'] as boolean) : undefined,
@@ -2823,9 +2848,14 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
 //     over SSH — real libvirt states ('running', 'shut off', …), so the VMs
 //     page can watch specific guests through a start/stop transition. Same
 //     `names` selection + empty-map semantics as containerStates.
+//   - 'vmStats': per-VM LIVE CPU utilization from ONE `virsh domstats` over SSH
+//     — libvirt exposes no ready-made percent, only cumulative cpu.time (ns)
+//     plus vcpu.current, so the plugin derives Δcpu.time / (Δwall × vcpus)
+//     between polls. First poll after a restart has no baseline → cpuPct is
+//     absent for that cycle; the webapp shows "—" until then.
 // Unknown keys are ignored; an empty/absent list means "the default set".
 // ---------------------------------------------------------------------------
-const PROBE_KEYS = new Set(['containerStats', 'containerStates', 'vmStates', 'deviceTime']);
+const PROBE_KEYS = new Set(['containerStats', 'containerStates', 'vmStates', 'vmStats', 'deviceTime']);
 
 app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   const settings = readSettings(req, PLUGIN_OPTIONS);
@@ -2857,10 +2887,38 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   // cover everything running). Absent/empty = full collection.
   const nameSel = Array.isArray(body.names) && body.names.length > 0 ? body.names : undefined;
 
-  const [stats, states, vmStates, deviceTime] = await Promise.all([
+  // TrueNAS SCALE names its libvirt domains by UUID, not by VM name (verified
+  // live: `virsh list` shows uuids), so BOTH vm probe keys need a uuid→name map
+  // to make the webapp's per-VM lookups match. One cheap vm.query when either
+  // key is wanted; on failure the collectors fall back to raw domain names.
+  let uuidToName: Map<string, string> | undefined;
+  if (wanted.has('vmStates') || wanted.has('vmStats')) {
+    try {
+      const apiKeyUsername = typeof settings.apiKeyUsername === 'string' ? (settings.apiKeyUsername as string).trim() : '';
+      const credRes = resolveCredentials(body.credentials as Record<string, unknown> | undefined, apiKeyUsername);
+      if (credRes.creds) {
+        const client = getClient(host, transportOf(settings), 10_000, portsOf(settings));
+        await client.login(credRes.creds);
+        const rawVms = await client.call<Record<string, unknown>[]>('vm.query', [], credRes.creds, 8_000);
+        uuidToName = new Map();
+        for (const v of rawVms ?? []) {
+          const u = pickString(v, ['uuid']);
+          const n = pickString(v, ['name']);
+          if (u && n) uuidToName.set(u.toLowerCase(), n);
+        }
+      }
+    } catch (e) {
+      logFn('warn', `vm.query for probe name mapping failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  const [stats, states, vmStates, vmStats, deviceTime] = await Promise.all([
     wanted.has('containerStats') ? collectProbeStats(host, sshCreds, logFn) : Promise.resolve(null),
     wanted.has('containerStates') ? collectProbeStates(host, sshCreds, logFn, nameSel) : Promise.resolve(null),
-    wanted.has('vmStates') ? collectProbeVmStates(host, sshCreds, logFn, nameSel) : Promise.resolve(null),
+    wanted.has('vmStates') ? collectProbeVmStates(host, sshCreds, logFn, nameSel, uuidToName) : Promise.resolve(null),
+    // vmStats needs NO names selection — the CPU percent is only meaningful
+    // for everything at once (one domstats pass covers all domains anyway).
+    wanted.has('vmStats') ? collectProbeVmStats(host, sshCreds, logFn, uuidToName) : Promise.resolve(null),
     // 'deviceTime' — the appliance's CURRENT local wall clock via one cheap SSH
     // `date -Iseconds` (ISO-8601 WITH a UTC offset → an absolute instant without
     // needing the IANA zone). Powers live drift analysis on the Time page.
@@ -2892,6 +2950,15 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
     const flat: Record<string, ProbeVmState> = {};
     for (const [name, s] of vmStates) flat[name] = s;
     metrics['vmStates'] = flat;
+  }
+  if (wanted.has('vmStats')) {
+    // null → 502 (webapp keeps last good data); an EMPTY map is a valid answer
+    // (no domains at all). cpuPct may be absent on the first poll after a
+    // restart — no baseline yet for the counter delta.
+    if (!vmStats) throw new Error('SSH virsh domstats probe returned no data');
+    const flat: Record<string, ProbeVmStat> = {};
+    for (const [name, s] of vmStats) flat[name] = s;
+    metrics['vmStats'] = flat;
   }
   if (wanted.has('deviceTime')) {
     // null = SSH failure → 502. `date -Iseconds` carries a UTC offset so the SDK

@@ -58,6 +58,18 @@ function UptimeCell({ row }: { row: VmRow }) {
   );
 }
 
+/** Live CPU% cell — percent of ALLOCATED vCPUs with amber/red tint at high
+ * utilization (same thresholds as the Containers page). "—" until the first
+ * successful probe cycle after a plugin restart has established its baseline. */
+function CpuCell({ pct }: { pct?: number | null }) {
+  if (pct === undefined || pct === null) return <span className="text-faint">—</span>;
+  return (
+    <span className={clsx('font-mono text-xs', pct >= 90 ? 'text-danger-fg' : pct >= 60 ? 'text-warning-fg' : 'text-foreground')}>
+      {pct.toFixed(1)}%
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Extra / devices helpers
 // ---------------------------------------------------------------------------
@@ -1183,9 +1195,11 @@ export default function Vms() {
     return Array.isArray(actions) && actions.some((a) => a.id === actionId);
   }
 
-  // --- Live VM states probe (3s cadence, 'vmStates' key via virsh list) ------
+  // --- Live VM probe (3s cadence, 'vmStates' + 'vmStats' keys via virsh) ------
   // Fresh plugins report real libvirt states; the State badge flips in ~3 s
-  // after a start/stop instead of waiting for the next inventory poll.
+  // after a start/stop instead of waiting for the next inventory poll. The same
+  // poll also carries per-VM LIVE CPU utilization (virsh domstats cpu.time
+  // deltas, computed plugin-side) for the CPU% column.
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
   // Devices feed the Create-VM target picker (hypervisor devices with a plugin
   // that advertises vms.create).
@@ -1210,8 +1224,8 @@ export default function Vms() {
 
   const probeResults = useQueries({
     queries: probeTargets.map((t) => ({
-      queryKey: ['device-probe', t.deviceId, 'vmStates'],
-      queryFn: () => api.deviceProbe(t.deviceId, ['vmStates'], t.pluginId),
+      queryKey: ['device-probe', t.deviceId, 'vmStates+vmStats'],
+      queryFn: () => api.deviceProbe(t.deviceId, ['vmStates', 'vmStats'], t.pluginId),
       refetchInterval: 3_000,
       // Same rationale as the Containers page probe — no retry storm on a
       // short-cycle poll; the next tick retries and stale data is kept.
@@ -1221,21 +1235,36 @@ export default function Vms() {
     })),
   });
 
-  // deviceId|pluginId → { at, states: guest name → normalized state }. A failed
-  // poll keeps serving the last good snapshot (react-query retains data).
+  // deviceId|pluginId → { at, states: guest name → normalized state,
+  // stats: guest name → live CPU stat }. A failed poll keeps serving the last
+  // good snapshot (react-query retains data).
   const liveVmStatesByDevice = useMemo(() => {
-    const m = new Map<string, { at: number; states: Record<string, string> }>();
+    const m = new Map<string, { at: number; states: Record<string, string>; stats: Record<string, { cpuPct?: number; vcpus?: number }> }>();
     probeTargets.forEach((t, i) => {
       const res = probeResults[i];
       if (!res?.data) return;
-      const raw = res.data.probe.metrics['vmStates'];
-      if (!raw || typeof raw !== 'object') return;
+      const rawStates = res.data.probe.metrics['vmStates'];
+      if (!rawStates || typeof rawStates !== 'object') return;
       const states: Record<string, string> = {};
-      for (const [name, entry] of Object.entries(raw as Record<string, unknown>)) {
+      for (const [name, entry] of Object.entries(rawStates as Record<string, unknown>)) {
         const s = typeof entry === 'string' ? entry : (entry && typeof entry === 'object' && typeof (entry as Record<string, unknown>).status === 'string') ? String((entry as Record<string, unknown>).status) : '';
         if (s) states[name] = normalizeVmState(s);
       }
-      m.set(`${t.deviceId}|${t.pluginId}`, { at: Date.parse(res.data.probe.collectedAt) || Date.now(), states });
+      // vmStats is optional — older plugins don't serve it; the CPU% column
+      // simply stays "—" until a fresh plugin version is deployed.
+      const rawStats = res.data.probe.metrics['vmStats'];
+      const stats: Record<string, { cpuPct?: number; vcpus?: number }> = {};
+      if (rawStats && typeof rawStats === 'object') {
+        for (const [name, entry] of Object.entries(rawStats as Record<string, unknown>)) {
+          if (!entry || typeof entry !== 'object') continue;
+          const o = entry as Record<string, unknown>;
+          stats[name] = {
+            cpuPct: typeof o['cpuPct'] === 'number' ? (o['cpuPct'] as number) : undefined,
+            vcpus: typeof o['vcpus'] === 'number' ? (o['vcpus'] as number) : undefined,
+          };
+        }
+      }
+      m.set(`${t.deviceId}|${t.pluginId}`, { at: Date.parse(res.data.probe.collectedAt) || Date.now(), states, stats });
     });
     return m;
   }, [probeTargets, probeResults]);
@@ -1245,6 +1274,13 @@ export default function Vms() {
     const e = liveVmStatesByDevice.get(`${deviceId}|${pluginId}`);
     if (!e || Date.now() - e.at > 30_000) return null;
     return e.states[name] ?? null;
+  }
+
+  /** Fresh (≤30 s) live CPU stat for one VM — null when the probe has no recent data. */
+  function freshLiveCpu(deviceId: string, pluginId: string, name: string): { cpuPct?: number; vcpus?: number } | null {
+    const e = liveVmStatesByDevice.get(`${deviceId}|${pluginId}`);
+    if (!e || Date.now() - e.at > 30_000) return null;
+    return e.stats[name] ?? null;
   }
 
   /** Effective state: fresh live probe wins over the cached inventory state. */
@@ -1491,6 +1527,66 @@ export default function Vms() {
         ) : (
           <span className="text-faint">—</span>
         ),
+    },
+    {
+      // CPU topology as reported by the hypervisor (TrueNAS: vm.query cores/threads).
+      header: 'Cores',
+      key: 'cores',
+      width: 70,
+      sortAccessor: (node) => {
+        const e = node.row ? extraOf(node.row) : {};
+        return typeof e['cores'] === 'number' ? (e['cores'] as number) : -1;
+      },
+      exportValue: (node) => {
+        const e = node.row ? extraOf(node.row) : {};
+        return typeof e['cores'] === 'number' ? String(e['cores']) : '';
+      },
+      render: (node) => {
+        const c = node.row ? extraOf(node.row)['cores'] : undefined;
+        return typeof c === 'number' ? <span className="font-mono text-xs">{c}</span> : <span className="text-faint">—</span>;
+      },
+    },
+    {
+      header: 'Threads',
+      key: 'threads',
+      width: 70,
+      sortAccessor: (node) => {
+        const e = node.row ? extraOf(node.row) : {};
+        return typeof e['threads'] === 'number' ? (e['threads'] as number) : -1;
+      },
+      exportValue: (node) => {
+        const e = node.row ? extraOf(node.row) : {};
+        return typeof e['threads'] === 'number' ? String(e['threads']) : '';
+      },
+      render: (node) => {
+        const t = node.row ? extraOf(node.row)['threads'] : undefined;
+        return typeof t === 'number' ? <span className="font-mono text-xs">{t}</span> : <span className="text-faint">—</span>;
+      },
+    },
+    {
+      // LIVE CPU utilization from the 3 s probe (virsh domstats cpu.time deltas,
+      // computed plugin-side). "—" until the first successful cycle after a
+      // plugin restart establishes its baseline.
+      header: 'CPU',
+      key: 'cpuPct',
+      width: 80,
+      sortAccessor: (node) => {
+        if (!node.row) return -1;
+        const live = freshLiveCpu(node.row.deviceId, node.row.pluginId, node.row.name);
+        return live?.cpuPct ?? null;
+      },
+      exportValue: (node) => {
+        if (!node.row) return '';
+        const live = freshLiveCpu(node.row.deviceId, node.row.pluginId, node.row.name);
+        return live?.cpuPct !== undefined ? `${live.cpuPct.toFixed(1)}%` : '';
+      },
+      render: (node) => {
+        if (!node.row) return null;
+        const state = effectiveState(node.row);
+        if (!RUNNING_STATES.has(state)) return <span className="text-faint">—</span>;
+        const live = freshLiveCpu(node.row.deviceId, node.row.pluginId, node.row.name);
+        return <CpuCell pct={live?.cpuPct} />;
+      },
     },
     {
       header: 'Memory',

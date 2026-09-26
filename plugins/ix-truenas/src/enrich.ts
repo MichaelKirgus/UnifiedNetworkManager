@@ -598,15 +598,24 @@ export async function collectProbeVmStates(
   host: string,
   sshCreds: ReturnType<typeof resolveSshCredentials>,
   log?: (level: 'info' | 'warn', message: string) => void,
-  names?: string[]
+  names?: string[],
+  uuidToName?: Map<string, string>
 ): Promise<Map<string, ProbeVmState> | null> {
   if (!sshCreds) return null; // no ssh slot bound — API-only mode
   const full = await dedupeProbe(host, 'vmStates', () => collectProbeVmStatesInner(host, sshCreds, log));
   if (!full) return null;
-  if (!names || names.length === 0) return full;
+  // TrueNAS SCALE names its libvirt domains by UUID (verified live on 26.0
+  // BETA: `virsh list` shows the uuid, not the VM name) — remap to the vm.query
+  // name so the webapp's per-VM lookups match. No-op when names already equal.
+  const remapped = new Map<string, ProbeVmState>();
+  for (const [name, s] of full) {
+    const finalName = uuidToName?.get(name.toLowerCase()) ?? name;
+    remapped.set(finalName, { name: finalName, status: s.status });
+  }
+  if (!names || names.length === 0) return remapped;
   const wanted = new Set(names);
   const out = new Map<string, ProbeVmState>();
-  for (const [name, s] of full) if (wanted.has(name)) out.set(name, s);
+  for (const [name, s] of remapped) if (wanted.has(name)) out.set(name, { name, status: s.status });
   return out;
 }
 
@@ -639,6 +648,126 @@ async function collectProbeVmStatesInner(
     return out;
   } catch (e) {
     probeFailLog(host, e instanceof SshError ? `SSH virsh list probe on ${host} failed: ${e.message}` : `SSH virsh list probe on ${host} unexpected error: ${(e as Error).message}`, log);
+    return null; // best-effort — the webapp keeps its last good snapshot
+  }
+}
+
+/** One VM's live CPU stat as served by POST /probe (key 'vmStats'). */
+export interface ProbeVmStat {
+  /** Domain name (= the VM name in vm.query). */
+  name: string;
+  /** Live CPU utilization in percent of ALLOCATED vCPUs, derived from two
+   * `virsh domstats` cpu.time samples. Absent on the first poll after a plugin
+   * restart (no baseline yet) and when libvirt reports no counter. */
+  cpuPct?: number;
+  /** vCPU count libvirt reports right now (`vcpu.current`) — the EFFECTIVE
+   * allocation, which is cores × threads even when vm.query's legacy `vcpus`
+   * field says something else (verified live: always 1 on TrueNAS 26). */
+  vcpus?: number;
+}
+
+/** CPU-time delta tracker for the PROBE path — cpu.time is a monotonic
+ * nanosecond counter per domain, so one CounterTracker yields the fraction of
+ * ONE vCPU's time consumed between two polls (×100 = percent). Separate from
+ * any enrichment trackers: the webapp probes every few seconds. */
+const probeVmCpuTimeTracker = new CounterTracker({ toBitsPerSec: false });
+
+/**
+ * Collects live per-VM CPU stats for the PROBE path: ONE `virsh domstats` over
+ * the shared SSH pool (sub-second, zero TrueNAS API load). libvirt exposes no
+ * ready-made "CPU %" — only cumulative cpu.time in nanoseconds plus vcpu.current
+ * (verified live on 26.0 BETA; guest agents are NOT running in these guests, so
+ * `virsh guestinfo` is a dead end). The percent is therefore derived from the
+ * delta between two samples: Δcpu.time / (Δwall × vcpus) — exactly how libvirt's
+ * own tooling computes it. First poll after a plugin restart has no baseline →
+ * cpuPct is absent for that cycle only; the webapp shows "—". Requires a bound
+ * ssh slot (same as vmStates); returns null on failure so the caller throws and
+ * the webapp keeps its last good snapshot. An EMPTY map is valid (no domains).
+ *
+ * `uuidToName` — TrueNAS SCALE names its libvirt domains by UUID, not by VM name
+ * (verified live: `virsh list` shows uuids), so the caller passes a vm.query
+ * uuid→name map and every domain key is remapped to the real VM name.
+ */
+export async function collectProbeVmStats(
+  host: string,
+  sshCreds: ReturnType<typeof resolveSshCredentials>,
+  log?: (level: 'info' | 'warn', message: string) => void,
+  uuidToName?: Map<string, string>
+): Promise<Map<string, ProbeVmStat> | null> {
+  if (!sshCreds) return null; // no ssh slot bound — API-only mode
+  const full = await dedupeProbe(host, 'vmStats', () => collectProbeVmStatsInner(host, sshCreds, log));
+  if (!full) return null;
+  const remapped = new Map<string, ProbeVmStat>();
+  for (const [name, s] of full) {
+    const finalName = uuidToName?.get(name.toLowerCase()) ?? name;
+    remapped.set(finalName, { ...s, name: finalName });
+  }
+  return remapped; // empty map is a valid answer (no domains at all)
+}
+
+async function collectProbeVmStatsInner(
+  host: string,
+  sshCreds: NonNullable<ReturnType<typeof resolveSshCredentials>>,
+  log?: (level: 'info' | 'warn', message: string) => void
+): Promise<Map<string, ProbeVmStat> | null> {
+  try {
+    const port = hostSshPort(host);
+    const client = await sshPool.get(host, port, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host, port) });
+    // One domstats pass over ALL domains (running + stopped — cheap). The domain
+    // header carries the NAME in quotes (TrueNAS SCALE names its libvirt domains
+    // after the VM, verified live), so no UUID→name join is needed. Only cpu.time
+    // and vcpu.current are consumed; everything else is ignored.
+    const r = await client.exec([buildVirshPreamble(), 'run_virsh domstats 2>/dev/null'].join('\n'), sshCreds);
+    if (r.code !== 0 && !r.stdout) {
+      probeFailLog(host, `SSH virsh domstats probe on ${host} failed (exit ${r.code}): ${r.stderr.slice(0, 200)}`, log);
+      return null;
+    }
+    // Pass 1 — parse the flat key=value blocks into per-domain raw fields.
+    const raw = new Map<string, { cpuTimeNs?: number; vcpus?: number; state?: number }>();
+    let name: string | null = null;
+    for (const line of r.stdout.split('\n')) {
+      if (line.startsWith('Domain: ')) {
+        // `Domain: '<name>'` — strip the surrounding quotes.
+        const rawName = line.slice('Domain: '.length).trim();
+        name = rawName.replace(/^'/, '').replace(/'$/, '');
+        continue;
+      }
+      if (!name) continue;
+      const eq = line.indexOf('=');
+      if (eq < 0) continue; // not a key=value stat line
+      const k = line.slice(0, eq).trim();
+      const v = Number(line.slice(eq + 1).trim());
+      if (!Number.isFinite(v)) continue;
+      const entry = raw.get(name) ?? {};
+      if (k === 'cpu.time') entry.cpuTimeNs = v;
+      else if (k === 'vcpu.current') entry.vcpus = Math.round(v);
+      else if (k === 'state.state') entry.state = Math.round(v); // 1=running, 5=shutoff, …
+      raw.set(name, entry);
+    }
+    // Pass 2 — derive the CPU percent from the counter delta. cpu.time is in
+    // NANOSECONDS — convert to seconds first so Δs/Δwall is the fraction of ONE
+    // vCPU consumed per second; dividing by the ALLOCATED count makes a fully-
+    // busy 4-vCPU VM read ~100%, not ~400%.
+    const out = new Map<string, ProbeVmStat>();
+    for (const [n, f] of raw) {
+      const stat: ProbeVmStat = { name: n };
+      if (f.vcpus && f.vcpus > 0) stat.vcpus = f.vcpus;
+      // cpuPct is only meaningful while the domain RUNS (state.state=1). A
+      // shutting-down guest still accrues a few ms of CPU time, which would
+      // otherwise show as a bogus percent on a "shut off" row. The tracker is
+      // sampled for EVERY domain regardless — so a freshly started VM has its
+      // baseline ready on the very next poll instead of one cycle later.
+      if (f.cpuTimeNs !== undefined) {
+        const rate = probeVmCpuTimeTracker.sample(`vmstats|${host}|${n}`, f.cpuTimeNs / 1e9);
+        if ((f.state ?? 1) === 1 && rate !== null && rate > 0) {
+          stat.cpuPct = Math.min(999, (rate / (f.vcpus ?? 1)) * 100);
+        }
+      }
+      out.set(n, stat);
+    }
+    return out; // empty map is a valid answer (no domains at all)
+  } catch (e) {
+    probeFailLog(host, e instanceof SshError ? `SSH virsh domstats probe on ${host} failed: ${e.message}` : `SSH virsh domstats probe on ${host} unexpected error: ${(e as Error).message}`, log);
     return null; // best-effort — the webapp keeps its last good snapshot
   }
 }
@@ -713,7 +842,13 @@ const vmInFlight = new Set<string>();
  * libvirt-sock on some appliances (TrueNAS SCALE uses a custom socket), so we
  * probe the known candidate paths with the working query-parameter URI form.
  */
-function buildVirshCommand(): string {
+/** The shared `run_virsh` definition + socket-detection preamble. TrueNAS SCALE
+ * runs libvirtd on a NON-standard socket and the stock virsh binary ignores both
+ * `-c` URI overrides in some positions AND the LIBVIRT_DEFAULT_URI env var — but
+ * the query-parameter form `qemu+unix:///system?socket=<path>` works (verified
+ * live on 26.0 BETA). Every combined command that shells out to virsh starts
+ * with this block so it finds a working daemon first. */
+function buildVirshPreamble(): string {
   const candidates = LIBVIRT_SOCKET_CANDIDATES.map((s) => `'${s}'`).join(' ');
   return [
     // run_virsh: plain `virsh` when its stock socket works, otherwise the
@@ -725,6 +860,12 @@ function buildVirshCommand(): string {
     `    if [ -S "$s" ] && virsh -c "qemu+unix:///system?socket=$s" list --name >/dev/null 2>&1; then VIRSH_URI="qemu+unix:///system?socket=$s"; break; fi`,
     '  done',
     'fi',
+  ].join('\n');
+}
+
+function buildVirshCommand(): string {
+  return [
+    buildVirshPreamble(),
     // Live guest states for the probe path (key 'vmStates'): one `virsh list --all`
     // covers every domain. State is columns 3..NF ("running", "shut off", …).
     "run_virsh list --all 2>/dev/null | awk 'NR>2 && NF>=3 {st=$3; for(i=4;i<=NF;i++) st=st\" \"$i; print \"VS|\" st \"|\" $2}'",
