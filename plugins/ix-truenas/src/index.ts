@@ -212,7 +212,29 @@ const identity = resolvePluginIdentity({
   // Δcpu.time / (Δwall × vcpus) between polls (same math as libvirt's own
   // tooling; guest agents are not running in these guests). First poll after a
   // restart has no baseline → cpuPct absent for that cycle only.
-  version: '0.16.1',
+  // 0.17.0 — VM device ATTACH (the webapp's generic "Add device" dialog): the
+  // plugin now advertises every attachable device type via vms.device-types
+  // (read-only descriptor: dtype, form fields as inputSchema, requiresStopped,
+  // choicesActionId) so the webapp renders the whole flow generically — a future
+  // Proxmox plugin with other types/fields gets the same dialog for free. New
+  // read actions vms.pci-choices (vm.device.passthrough_device_choices + iommu)
+  // and vms.usb-choices (vm.device.usb_passthrough_choices, normalized to
+  // {id, description, vendorId, productId, available}); new write actions
+  // vms.disk-attach (existing /dev/zvol/… path — stopped VM only — or a fresh
+  // ZVOL that hot-plugs), vms.display-attach (VNC/SPICE, appliance auto-assigns
+  // free ports; one display per VM), vms.pci-attach (pptdev passthrough — IOMMU
+  // + stopped VM) and vms.usb-attach (vendor/product-keyed passthrough,
+  // hot-pluggable). All verified by re-reading the VM's devices.
+  // 0.18.0 — Transport-drop tolerance generalized to EVERY write action: all
+  // writes now go through dispatchWrite() — on a lost response it either
+  // idempotently re-dispatches (setters), verifies the effect via a state
+  // re-read and reports applied / not-applied / unconfirmed, or retries once
+  // after proving the write did NOT land. Unconfirmed destructive ops fail the
+  // step instead of double-firing. vms.device-types gains two more attachable
+  // types — NIC (bridge/MACVLAN picker via vms.nic-choices) and CDROM (ISO from
+  // repo / dataset / manual path, in-place swap) — so the webapp's single
+  // "Add device" dialog now covers every attach flow.
+  version: '0.18.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -1680,8 +1702,18 @@ function formatVmDevice(dev: { dtype: string; attrs: Record<string, unknown> }, 
       return { dtype: 'DISPLAY', id, label: `Display${type ? ` (${type})` : ''}`, detail: parts.join(' ') || undefined };
     }
     case 'PCI': {
-      const hostdev = s('hostdev');
-      return { dtype: 'PCI', id, label: hostdev ?? 'PCI passthrough', detail: s('rombar') ? `rombar=${a['rombar']}` : undefined };
+      // TrueNAS 26 keys the device by pptdev ('pci_<dom>_<bus>_<slot>_<func>');
+      // older releases used hostdev. Show whichever is present.
+      const dev = s('pptdev') ?? s('hostdev');
+      return { dtype: 'PCI', id, label: dev ? `PCI ${dev}` : 'PCI passthrough', detail: s('rombar') ? `rombar=${a['rombar']}` : undefined };
+    }
+    case 'USB': {
+      // TrueNAS keys USB passthrough by vendor/product ids (survives reboots) —
+      // surface them so the row is identifiable without a second RPC.
+      const usb = (a['usb'] ?? {}) as Record<string, unknown>;
+      const vid = typeof usb['vendor_id'] === 'string' ? (usb['vendor_id'] as string) : undefined;
+      const pid = typeof usb['product_id'] === 'string' ? (usb['product_id'] as string) : undefined;
+      return { dtype: 'USB', id, label: vid && pid ? `USB ${vid}:${pid}` : 'USB passthrough', detail: s('controller_type') };
     }
     default: {
       // Unknown / future dtype — surface it generically so nothing is lost.

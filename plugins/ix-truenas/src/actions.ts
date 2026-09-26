@@ -12,6 +12,7 @@
  * "initiated").
  */
 
+import { randomBytes } from 'node:crypto';
 import { ActionDescriptor, ActionResult, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, pickNumber, pickString, pollUntil, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
 import { hostSshPort, normalizeVmDevice, sshPool } from './enrich';
@@ -172,8 +173,18 @@ const systemTimezoneSetAction: ActionDescriptor<TruenasActionContext> = {
     const tz = str(input, 'timezone');
     if (!tz) throw new Error('timezone is required');
     // system.general.update takes a PARTIAL object — only the fields we change.
-    await ctx.client.call<unknown>('system.general.update', [{ timezone: tz }], ctx.creds);
-    return { success: true, applied: true, details: { timezone: tz } };
+    // Transport-tolerant — a lost response is confirmed by re-reading the config (the zone must match).
+    const dr = await dispatchWrite(ctx, 'system.general.update', [{ timezone: tz }], {
+      verify: async () => {
+        try {
+          const general = await ctx.client.call<Record<string, unknown>>('system.general.config', [], ctx.creds);
+          return pickString(general as Record<string, unknown>, ['timezone']) === tz; // matches — applied
+        } catch {
+          return null;
+        }
+      },
+    });
+    return { success: true, applied: true, details: { timezone: tz, ...(dr.note ? { transportNote: dr.note } : {}) } };
   },
 };
 
@@ -617,8 +628,19 @@ const updateProfileSetAction: ActionDescriptor<TruenasActionContext> = {
     if (!profile) return { success: false, details: { error: `Unknown profile "${raw}" — expected one of ${UPDATE_PROFILES.join(', ')}` } };
     try {
       // update.update takes a PARTIAL object — only the fields we change.
-      const updated = await ctx.client.call<Record<string, unknown>>('update.update', [{ profile }], ctx.creds);
-      return { success: true, applied: true, details: { profile: pickString(updated, ['profile']) ?? profile, note: 'Update branch changed — future updates now target this track. No reboot required.' } };
+      // Transport-tolerant — a lost response is confirmed by re-reading the config (the profile must match).
+      const dr = await dispatchWrite(ctx, 'update.update', [{ profile }], {
+        verify: async () => {
+          try {
+            const cfg = await ctx.client.call<Record<string, unknown>>('update.config', [], ctx.creds);
+            return pickString(cfg, ['profile']) === profile; // matches — applied
+          } catch {
+            return null;
+          }
+        },
+      });
+      const updated = dr.value as Record<string, unknown> | undefined;
+      return { success: true, applied: true, details: { profile: pickString(updated ?? {}, ['profile']) ?? profile, note: 'Update branch changed — future updates now target this track. No reboot required.', ...(dr.note ? { transportNote: dr.note } : {}) } };
     } catch (e) {
       // The appliance rejects profiles it does not offer ("Invalid profile." /
       // "This profile is unavailable.") — surface verbatim with a hint.
@@ -737,6 +759,8 @@ const alertsDismissAction: ActionDescriptor<TruenasActionContext> = {
     }
 
     let dismissed = 0;
+    let unconfirmed = 0;
+    const notes: string[] = [];
     const missing: string[] = [];
     for (const k of keys) {
       const uuids = byKey.get(k);
@@ -746,15 +770,29 @@ const alertsDismissAction: ActionDescriptor<TruenasActionContext> = {
       }
       for (const uuid of uuids) {
         try {
-          await ctx.client.call('alert.dismiss', [uuid], ctx.creds);
+          // Transport-tolerant — a lost response is confirmed by re-reading alert.list (dismissed flag).
+          const r = await dispatchWrite(ctx, 'alert.dismiss', [uuid], {
+            verify: async () => {
+              try {
+                const rows = await ctx.client.call<Record<string, unknown>[]>('alert.list', [], ctx.creds);
+                const row = (rows ?? []).find((a) => pickString(a, ['id', 'uuid']) === uuid);
+                if (!row) return true; // gone — applied
+                return (row['dismissed'] as boolean | undefined) === true ? true : false; // dismissed — applied; still active — not applied
+              } catch {
+                return null;
+              }
+            },
+          });
+          if (r.note) notes.push(r.note);
+          if (r.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
           dismissed++;
         } catch (e) {
-          if (!(e instanceof TruenasRpcError)) throw e; // transport error — surface it
+          if (!(e instanceof TruenasRpcError)) throw e; // non-RPC error — surface it
           // Method error = alert vanished or was dismissed in the meantime.
         }
       }
     }
-    return { success: true, details: { dismissed, missing } };
+    return { success: unconfirmed === 0, details: { dismissed, missing, ...(notes.length > 0 ? { notes } : {}) } };
   },
 };
 
@@ -791,6 +829,8 @@ const alertsUndismissAction: ActionDescriptor<TruenasActionContext> = {
     }
 
     let undismissed = 0;
+    let unconfirmed = 0;
+    const notes: string[] = [];
     const missing: string[] = [];
     for (const k of keys) {
       const uuids = byKey.get(k);
@@ -800,15 +840,29 @@ const alertsUndismissAction: ActionDescriptor<TruenasActionContext> = {
       }
       for (const uuid of uuids) {
         try {
-          await ctx.client.call('alert.undismiss', [uuid], ctx.creds);
+          // Transport-tolerant — a lost response is confirmed by re-reading alert.list (dismissed flag).
+          const r = await dispatchWrite(ctx, 'alert.undismiss', [uuid], {
+            verify: async () => {
+              try {
+                const rows = await ctx.client.call<Record<string, unknown>[]>('alert.list', [], ctx.creds);
+                const row = (rows ?? []).find((a) => pickString(a, ['id', 'uuid']) === uuid);
+                if (!row) return null; // gone — can't confirm either way
+                return (row['dismissed'] as boolean | undefined) !== true ? true : false; // active again — applied; still dismissed — not applied
+              } catch {
+                return null;
+              }
+            },
+          });
+          if (r.note) notes.push(r.note);
+          if (r.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
           undismissed++;
         } catch (e) {
-          if (!(e instanceof TruenasRpcError)) throw e; // transport error — surface it
+          if (!(e instanceof TruenasRpcError)) throw e; // non-RPC error — surface it
           // Method error = alert vanished or was re-enabled in the meantime.
         }
       }
     }
-    return { success: true, details: { undismissed, missing } };
+    return { success: unconfirmed === 0, details: { undismissed, missing, ...(notes.length > 0 ? { notes } : {}) } };
   },
 };
 
@@ -851,9 +905,78 @@ async function callWithRetry<T>(ctx: TruenasActionContext, method: string, param
   try {
     return await ctx.client.call<T>(method, params, ctx.creds);
   } catch (e) {
-    if (!(e instanceof TruenasRpcError) || !/timed out/i.test(e.message)) throw e;
+    if (!isTransportError(e)) throw e;
     return await ctx.client.call<T>(method, params, ctx.creds, 15_000);
   }
+}
+
+/** True when an error is a TRANSPORT-level failure (dropped WebSocket session or per-call timeout) rather than an appliance-side method error. On such errors the write may have been applied even though we lost the response — callers must re-read state before declaring failure. */
+function isTransportError(e: unknown): boolean {
+  return e instanceof TruenasRpcError && /unresponsive|timed out/i.test(e.message);
+}
+
+/** Outcome of a transport-tolerant write dispatch (see dispatchWrite). `value` is undefined when the call's response was lost and the effect was confirmed by re-reading state instead. `unconfirmed` marks the one case where neither confirmation nor re-dispatch happened — callers must treat it as "not proven applied" (typically: fail unless a later state check confirms it). */
+interface DispatchResult<T> { value: T; note?: string; unconfirmed?: boolean }
+
+/**
+ * Dispatches a WRITE RPC tolerating ONE transport-level failure. When the socket
+ * drops mid-call ("unresponsive — reconnecting" / per-call timeout) the appliance
+ * may have applied it anyway, so before giving up we re-read state via `verify`:
+ *   - verify → true  : the effect is already visible → success (no re-dispatch).
+ *   - verify → false : it demonstrably did NOT apply → retry once on the fresh session.
+ *   - verify → null  : state unreadable → do NOT blindly re-dispatch (destructive ops
+ *                      must not be doubled) — report applied-but-unconfirmed instead.
+ * `idempotentRetry` skips verification and simply re-dispatches — for full-replacement
+ * writes where a second identical call is harmless. Non-transport errors are thrown
+ * for the caller's existing handling (already-in-state / already-exists mappings).
+ */
+async function dispatchWrite<T>(
+  ctx: TruenasActionContext,
+  method: string,
+  params: unknown[],
+  opts?: { timeoutMs?: number; verify?: () => Promise<boolean | null>; idempotentRetry?: boolean },
+): Promise<DispatchResult<T>> {
+  try {
+    return { value: await ctx.client.call<T>(method, params, ctx.creds, opts?.timeoutMs) };
+  } catch (e) {
+    if (!isTransportError(e)) throw e;
+  }
+  // Transport dropped mid-call — did the appliance apply it anyway?
+  if (opts?.idempotentRetry) {
+    return { value: await ctx.client.call<T>(method, params, ctx.creds, opts.timeoutMs), note: 'Response lost to a transport drop — re-dispatched (idempotent write).' };
+  }
+  const seen = opts?.verify ? await opts.verify() : null;
+  if (seen === true) {
+    return { value: undefined as T, note: 'Response lost to a transport drop — verified applied on re-read.' };
+  }
+  if (seen !== false) {
+    return { value: undefined as T, unconfirmed: true, note: 'Response lost to a transport drop and state could not be confirmed — check the appliance.' };
+  }
+  return { value: await ctx.client.call<T>(method, params, ctx.creds, opts?.timeoutMs), note: 'Response lost to a transport drop — re-dispatched after confirming it had not applied.' };
+}
+
+/** Builds a VM-state verify for dispatchWrite: true when in `applied`, false when in `notApplied`, null (unknown/transitioning) otherwise. */
+function vmStateVerify(ctx: TruenasActionContext, name: string, applied: Set<string>, notApplied: Set<string>): () => Promise<boolean | null> {
+  return async () => {
+    const s = await readVmStates(ctx, [name]);
+    if (s === null) return null;
+    const st = s[name];
+    if (applied.has(st)) return true;
+    if (notApplied.has(st)) return false;
+    return null; // transitioning / gone — don't guess
+  };
+}
+
+/** Builds an app-state verify for dispatchWrite (same contract as vmStateVerify). */
+function appStateVerify(ctx: TruenasActionContext, name: string, applied: Set<string>, notApplied: Set<string>): () => Promise<boolean | null> {
+  return async () => {
+    const s = await readAppStates(ctx, [name]);
+    if (s === null) return null;
+    const st = s[name];
+    if (applied.has(st)) return true;
+    if (notApplied.has(st)) return false;
+    return null;
+  };
 }
 
 /** Fetches all installed apps with their current state. */
@@ -1017,10 +1140,15 @@ const containersStopAction: ActionDescriptor<TruenasActionContext> = {
     const { toRun, skipped, missing } = planAppOutcomes(names, apps, new Set(['STOPPED', 'STOPPING']));
 
     let stopped = 0;
+    let unconfirmed = 0;
+    const notes: Record<string, string> = {};
     const errors: Record<string, string> = {};
     for (const n of toRun) {
       try {
-        await ctx.client.call('app.stop', [n], ctx.creds);
+        // Transport-tolerant — a lost response is confirmed by re-reading the state.
+        const r = await dispatchWrite(ctx, 'app.stop', [n], { verify: appStateVerify(ctx, n, new Set(['STOPPED', 'STOPPING']), new Set(['RUNNING'])) });
+        if (r.note) notes[n] = r.note;
+        if (r.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
         stopped++;
       } catch (e) {
         if (isAlreadyInState(e)) skipped[n] = 'already stopped';
@@ -1029,8 +1157,8 @@ const containersStopAction: ActionDescriptor<TruenasActionContext> = {
     }
     // Verify: app.stop is a server-side job — every driven app must actually
     // reach STOPPED for this step to count as verified.
-    const verified = Object.keys(errors).length === 0 && (await verifyAppStates(ctx, toRun, new Set(['STOPPED'])));
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { stopped, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyAppStates(ctx, toRun, new Set(['STOPPED'])));
+    return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { stopped, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -1052,10 +1180,15 @@ const containersStartAction: ActionDescriptor<TruenasActionContext> = {
     const { toRun, skipped, missing } = planAppOutcomes(names, apps, new Set(['RUNNING', 'DEPLOYING']));
 
     let started = 0;
+    let unconfirmed = 0;
+    const notes: Record<string, string> = {};
     const errors: Record<string, string> = {};
     for (const n of toRun) {
       try {
-        await ctx.client.call('app.start', [n], ctx.creds);
+        // Transport-tolerant — a lost response is confirmed by re-reading the state.
+        const r = await dispatchWrite(ctx, 'app.start', [n], { verify: appStateVerify(ctx, n, new Set(['RUNNING', 'DEPLOYING']), new Set(['STOPPED'])) });
+        if (r.note) notes[n] = r.note;
+        if (r.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
         started++;
       } catch (e) {
         if (isAlreadyInState(e)) skipped[n] = 'already running';
@@ -1063,8 +1196,8 @@ const containersStartAction: ActionDescriptor<TruenasActionContext> = {
       }
     }
     // Verify: every driven app must actually reach RUNNING.
-    const verified = Object.keys(errors).length === 0 && (await verifyAppStates(ctx, toRun, new Set(['RUNNING'])));
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { started, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyAppStates(ctx, toRun, new Set(['RUNNING'])));
+    return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { started, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -1086,6 +1219,8 @@ const containersRestartAction: ActionDescriptor<TruenasActionContext> = {
     const byName = new Map(apps.map((a) => [a.name, a]));
 
     let restarted = 0;
+    let unconfirmed = 0;
+    const notes: Record<string, string> = {};
     const missing: string[] = [];
     const errors: Record<string, string> = {};
     for (const n of names) {
@@ -1095,19 +1230,28 @@ const containersRestartAction: ActionDescriptor<TruenasActionContext> = {
         continue;
       }
       try {
-        // Stop first unless it is not running, then start.
+        // Stop first unless it is not running, then start. Both dispatches are
+        // transport-tolerant — a lost response is confirmed by re-reading the state.
         if (normState(app.state) !== 'STOPPED') {
-          await ctx.client.call('app.stop', [n], ctx.creds);
+          const r0 = await dispatchWrite(ctx, 'app.stop', [n], { verify: appStateVerify(ctx, n, new Set(['STOPPED']), new Set(['RUNNING'])) });
+          if (r0.note) notes[n] = r0.note;
+          if (r0.unconfirmed) {
+            // Stop response lost AND state unreadable — don't start on top of an unknown state.
+            errors[n] = 'Stop before restart could not be confirmed (transport drop, state unreadable) — re-run the step';
+            continue;
+          }
         }
-        await ctx.client.call('app.start', [n], ctx.creds);
+        const r1 = await dispatchWrite(ctx, 'app.start', [n], { verify: appStateVerify(ctx, n, new Set(['RUNNING', 'DEPLOYING']), new Set(['STOPPED'])) });
+        if (r1.note) notes[n] = r1.note;
+        if (r1.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
         restarted++;
       } catch (e) {
         errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
     // Verify: a restart is only done when every driven app is RUNNING again.
-    const verified = Object.keys(errors).length === 0 && (await verifyAppStates(ctx, names.filter((n) => byName.has(n)), new Set(['RUNNING'])));
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { restarted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyAppStates(ctx, names.filter((n) => byName.has(n)), new Set(['RUNNING'])));
+    return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { restarted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -1130,6 +1274,8 @@ const containersUpgradeAction: ActionDescriptor<TruenasActionContext> = {
     const byName = new Map(apps.map((a) => [a.name, a]));
 
     let upgraded = 0;
+    let unconfirmed = 0;
+    const notes: Record<string, string> = {};
     const skipped: Record<string, string> = {};
     const missing: string[] = [];
     const errors: Record<string, string> = {};
@@ -1145,7 +1291,23 @@ const containersUpgradeAction: ActionDescriptor<TruenasActionContext> = {
         continue;
       }
       try {
-        await ctx.client.call('app.upgrade', [n, { app_version: 'latest' }], ctx.creds);
+        // Transport-tolerant — a lost response is confirmed by re-reading: the app must settle into a stable state AND no longer flag an available upgrade.
+        const r = await dispatchWrite(ctx, 'app.upgrade', [n, { app_version: 'latest' }], {
+          verify: async () => {
+            try {
+              const apps = await listApps(ctx);
+              const row = apps.find((a) => a.name === n);
+              if (!row) return null; // gone / unreadable — don't guess
+              const st = normState(row.state);
+              if (st !== 'RUNNING' && st !== 'STOPPED') return null; // still DEPLOYING — not settled yet
+              return row.upgrade_available === false ? true : null; // stable + no pending update → applied; still flagged → unknown (may be mid-redeploy)
+            } catch {
+              return null;
+            }
+          },
+        });
+        if (r.note) notes[n] = r.note;
+        if (r.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
         upgraded++;
       } catch (e) {
         errors[n] = e instanceof Error ? e.message : String(e);
@@ -1154,8 +1316,8 @@ const containersUpgradeAction: ActionDescriptor<TruenasActionContext> = {
     // Verify: an upgrade redeploys the app server-side — every driven app must
     // settle back into a stable state (RUNNING or STOPPED), not stay DEPLOYING.
     const upgradedNames = names.filter((n) => byName.has(n) && !skipped[n]);
-    const verified = Object.keys(errors).length === 0 && (await verifyAppStates(ctx, upgradedNames, new Set(['RUNNING', 'STOPPED'])));
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { upgraded, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyAppStates(ctx, upgradedNames, new Set(['RUNNING', 'STOPPED'])));
+    return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { upgraded, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -1178,6 +1340,7 @@ const containersDeleteAction: ActionDescriptor<TruenasActionContext> = {
     const byName = new Map(apps.map((a) => [a.name, a]));
 
     let deleted = 0;
+    const notes: Record<string, string> = {};
     const missing: string[] = [];
     const errors: Record<string, string> = {};
     for (const n of names) {
@@ -1186,15 +1349,18 @@ const containersDeleteAction: ActionDescriptor<TruenasActionContext> = {
         continue;
       }
       try {
-        await ctx.client.call('app.delete', [n, { remove_images: true, force_remove_custom_app: true }], ctx.creds);
-        deleted++;
+        // Transport-tolerant — a lost response is confirmed by re-reading (the app must be GONE).
+        const r = await dispatchWrite(ctx, 'app.delete', [n, { remove_images: true, force_remove_custom_app: true }], { verify: appStateVerify(ctx, n, new Set(['gone']), new Set()) });
+        if (r.note) notes[n] = r.note;
+        if (r.unconfirmed) errors[n] = 'Delete could not be confirmed (transport drop, state unreadable) — re-run the step'; // destructive: never assume applied
+        else deleted++;
       } catch (e) {
         errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
     // Verify: every driven app must be gone from app.query.
     const verified = Object.keys(errors).length === 0 && (await verifyAppStates(ctx, names.filter((n) => byName.has(n)), new Set(['gone'])));
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { deleted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -1314,19 +1480,26 @@ const vmsStartAction: ActionDescriptor<TruenasActionContext> = {
     const { toRun, skipped, missing } = planVmOutcomes(names, vms, new Set(['RUNNING']));
 
     let started = 0;
+    let unconfirmed = 0;
+    const notes: Record<string, string> = {};
     const errors: Record<string, string> = {};
     for (const vm of toRun) {
       try {
-        await ctx.client.call('vm.start', [vm.id], ctx.creds);
+        // Transport-tolerant: a dropped socket may have lost the response even
+        // though the VM is starting — re-read state before retrying.
+        const r = await dispatchWrite(ctx, 'vm.start', [vm.id], { verify: vmStateVerify(ctx, vm.name, new Set(['RUNNING']), new Set(['STOPPED', 'SUSPENDED', 'PAUSED'])) });
+        if (r.note) notes[vm.name] = r.note;
+        if (r.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
         started++;
       } catch (e) {
         if (isAlreadyInState(e)) skipped[vm.name] = 'already running';
         else errors[vm.name] = e instanceof Error ? e.message : String(e);
       }
     }
-    // Verify: every driven VM must actually reach RUNNING.
-    const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, toRun.map((v) => v.name), new Set(['RUNNING'])));
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { started, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    // Verify: every driven VM must actually reach RUNNING. An unconfirmed dispatch
+    // (response lost AND state unreadable) is not proven applied → fail the step.
+    const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyVmStates(ctx, toRun.map((v) => v.name), new Set(['RUNNING'])));
+    return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { started, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -1349,6 +1522,7 @@ const vmsStopAction: ActionDescriptor<TruenasActionContext> = {
     const { toRun, skipped, missing } = planVmOutcomes(names, vms, new Set(['STOPPED']));
 
     let stopped = 0;
+    let unconfirmed = 0;
     const notes: Record<string, string> = {};
     const errors: Record<string, string> = {};
     for (const vm of toRun) {
@@ -1357,8 +1531,10 @@ const vmsStopAction: ActionDescriptor<TruenasActionContext> = {
         // job settles when the guest acks or its shutdown timeout elapses. Wait
         // with a bounded budget so an unresponsive guest surfaces as a per-VM
         // error (the user can then Kill it) instead of a silent "accepted".
-        const r = await ctx.client.call<unknown>('vm.stop', [vm.id], ctx.creds);
-        const job = describeAccepted(r);
+        const dr = await dispatchWrite(ctx, 'vm.stop', [vm.id], { verify: vmStateVerify(ctx, vm.name, new Set(['STOPPED']), new Set(['RUNNING'])) });
+        if (dr.note) notes[vm.name] = dr.note; // response lost — state already confirmed on re-read
+        if (dr.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
+        const job = describeAccepted(dr.value);
         if (typeof job['jobId'] === 'number') {
           const wait = await waitForJob(ctx, job['jobId'], 150_000);
           if (wait.state === 'RUNNING') {
@@ -1379,8 +1555,8 @@ const vmsStopAction: ActionDescriptor<TruenasActionContext> = {
     }
     // Verify: the ACPI powerdown job settling is not enough — every driven VM
     // must actually be STOPPED. A guest still shutting down stays "unverified".
-    const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, toRun.map((v) => v.name), new Set(['STOPPED'])));
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { stopped, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
+    const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyVmStates(ctx, toRun.map((v) => v.name), new Set(['STOPPED'])));
+    return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { stopped, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -1403,10 +1579,15 @@ const vmsKillAction: ActionDescriptor<TruenasActionContext> = {
     const { toRun, skipped, missing } = planVmOutcomes(names, vms, new Set(['STOPPED']));
 
     let killed = 0;
+    let unconfirmed = 0;
+    const notes: Record<string, string> = {};
     const errors: Record<string, string> = {};
     for (const vm of toRun) {
       try {
-        await ctx.client.call('vm.poweroff', [vm.id], ctx.creds);
+        // Transport-tolerant — a hard kill that lost its response is confirmed by re-reading the state.
+        const r = await dispatchWrite(ctx, 'vm.poweroff', [vm.id], { verify: vmStateVerify(ctx, vm.name, new Set(['STOPPED']), new Set(['RUNNING'])) });
+        if (r.note) notes[vm.name] = r.note;
+        if (r.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
         killed++;
       } catch (e) {
         if (isAlreadyInState(e)) skipped[vm.name] = 'already stopped';
@@ -1414,8 +1595,8 @@ const vmsKillAction: ActionDescriptor<TruenasActionContext> = {
       }
     }
     // Verify: a hard kill must leave every driven VM STOPPED.
-    const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, toRun.map((v) => v.name), new Set(['STOPPED'])));
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { killed, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyVmStates(ctx, toRun.map((v) => v.name), new Set(['STOPPED'])));
+    return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { killed, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -1438,6 +1619,7 @@ const vmsRestartAction: ActionDescriptor<TruenasActionContext> = {
     const byName = new Map(vms.map((v) => [v.name, v]));
 
     let restarted = 0;
+    let unconfirmed = 0;
     const notes: Record<string, string> = {};
     const missing: string[] = [];
     const errors: Record<string, string> = {};
@@ -1449,10 +1631,16 @@ const vmsRestartAction: ActionDescriptor<TruenasActionContext> = {
       }
       try {
         if (vm.state === 'STOPPED') {
-          await ctx.client.call('vm.start', [vm.id], ctx.creds);
+          // Transport-tolerant — a lost response is confirmed by re-reading the state.
+          const r0 = await dispatchWrite(ctx, 'vm.start', [vm.id], { verify: vmStateVerify(ctx, n, new Set(['RUNNING']), new Set(['STOPPED'])) });
+          if (r0.note) notes[n] = r0.note;
+          if (r0.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
         } else {
-          const r = await ctx.client.call<unknown>('vm.restart', [vm.id], ctx.creds);
-          const job = describeAccepted(r);
+          // Transport-tolerant — a lost response is confirmed by re-reading the state.
+          const dr = await dispatchWrite(ctx, 'vm.restart', [vm.id], { verify: vmStateVerify(ctx, n, new Set(['RUNNING']), new Set(['STOPPED'])) });
+          if (dr.note) notes[n] = dr.note; // response lost — state already confirmed on re-read
+          if (dr.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
+          const job = describeAccepted(dr.value);
           if (typeof job['jobId'] === 'number') {
             const wait = await waitForJob(ctx, job['jobId'], 150_000);
             if (wait.state === 'RUNNING') {
@@ -1472,8 +1660,8 @@ const vmsRestartAction: ActionDescriptor<TruenasActionContext> = {
       }
     }
     // Verify: a restart is only done when every driven VM is RUNNING again.
-    const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, names.filter((n) => byName.has(n)), new Set(['RUNNING'])));
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { restarted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
+    const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyVmStates(ctx, names.filter((n) => byName.has(n)), new Set(['RUNNING'])));
+    return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { restarted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -1495,6 +1683,8 @@ const vmsSuspendAction: ActionDescriptor<TruenasActionContext> = {
     const { toRun, skipped, missing } = planVmOutcomes(names, vms, new Set(['SUSPENDED']));
 
     let suspended = 0;
+    let unconfirmed = 0;
+    const notes: Record<string, string> = {};
     const errors: Record<string, string> = {};
     for (const vm of toRun) {
       if (vm.state !== 'RUNNING') {
@@ -1502,7 +1692,10 @@ const vmsSuspendAction: ActionDescriptor<TruenasActionContext> = {
         continue;
       }
       try {
-        await ctx.client.call('vm.suspend', [vm.id], ctx.creds);
+        // Transport-tolerant — a lost response is confirmed by re-reading the state.
+        const r = await dispatchWrite(ctx, 'vm.suspend', [vm.id], { verify: vmStateVerify(ctx, vm.name, new Set(['SUSPENDED']), new Set(['RUNNING'])) });
+        if (r.note) notes[vm.name] = r.note;
+        if (r.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
         suspended++;
       } catch (e) {
         if (isAlreadyInState(e)) skipped[vm.name] = 'already suspended';
@@ -1510,8 +1703,8 @@ const vmsSuspendAction: ActionDescriptor<TruenasActionContext> = {
       }
     }
     // Verify: every driven VM must actually be SUSPENDED.
-    const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, toRun.map((v) => v.name), new Set(['SUSPENDED'])));
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { suspended, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyVmStates(ctx, toRun.map((v) => v.name), new Set(['SUSPENDED'])));
+    return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { suspended, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -1533,8 +1726,10 @@ const vmsResumeAction: ActionDescriptor<TruenasActionContext> = {
     const byName = new Map(vms.map((v) => [v.name, v]));
 
     let resumed = 0;
+    let unconfirmed = 0;
     const skipped: Record<string, string> = {};
     const missing: string[] = [];
+    const notes: Record<string, string> = {};
     const errors: Record<string, string> = {};
     for (const n of names) {
       const vm = byName.get(n);
@@ -1551,7 +1746,10 @@ const vmsResumeAction: ActionDescriptor<TruenasActionContext> = {
         continue;
       }
       try {
-        await ctx.client.call('vm.resume', [vm.id], ctx.creds);
+        // Transport-tolerant — a lost response is confirmed by re-reading the state.
+        const r = await dispatchWrite(ctx, 'vm.resume', [vm.id], { verify: vmStateVerify(ctx, n, new Set(['RUNNING']), new Set(['SUSPENDED', 'PAUSED'])) });
+        if (r.note) notes[n] = r.note;
+        if (r.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
         resumed++;
       } catch (e) {
         if (isAlreadyInState(e)) skipped[n] = 'already running';
@@ -1559,8 +1757,8 @@ const vmsResumeAction: ActionDescriptor<TruenasActionContext> = {
       }
     }
     // Verify: every driven VM must actually be RUNNING again.
-    const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, names.filter((n) => byName.has(n)), new Set(['RUNNING'])));
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { resumed, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyVmStates(ctx, names.filter((n) => byName.has(n)), new Set(['RUNNING'])));
+    return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { resumed, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -1586,6 +1784,7 @@ const vmsDeleteAction: ActionDescriptor<TruenasActionContext> = {
 
     let deleted = 0;
     const missing: string[] = [];
+    const notes: Record<string, string> = {};
     const errors: Record<string, string> = {};
     for (const n of names) {
       const vm = byName.get(n);
@@ -1596,8 +1795,14 @@ const vmsDeleteAction: ActionDescriptor<TruenasActionContext> = {
       try {
         // vm.delete refuses running guests — stop first (bounded job wait).
         if (vm.state === 'RUNNING') {
-          const r = await ctx.client.call<unknown>('vm.stop', [vm.id], ctx.creds);
-          const job = describeAccepted(r);
+          const dr = await dispatchWrite(ctx, 'vm.stop', [vm.id], { verify: vmStateVerify(ctx, n, new Set(['STOPPED']), new Set(['RUNNING'])) });
+          if (dr.note) notes[n] = dr.note;
+          if (dr.unconfirmed) {
+            // Stop response lost AND state unreadable — don't delete a possibly-running guest.
+            errors[n] = 'Stop before delete could not be confirmed (transport drop, state unreadable) — re-run the step';
+            continue;
+          }
+          const job = describeAccepted(dr.value);
           if (typeof job['jobId'] === 'number') {
             const wait = await waitForJob(ctx, job['jobId'], 150_000);
             if (wait.state !== 'RUNNING' && wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') {
@@ -1606,7 +1811,10 @@ const vmsDeleteAction: ActionDescriptor<TruenasActionContext> = {
             }
           }
         }
-        await ctx.client.call('vm.delete', [vm.id, removeStorage ? { zvols: true } : {}], ctx.creds);
+        // Transport-tolerant — a lost response is confirmed by re-reading (the VM must be GONE).
+        const dd = await dispatchWrite(ctx, 'vm.delete', [vm.id, removeStorage ? { zvols: true } : {}], { verify: vmStateVerify(ctx, n, new Set(['gone']), new Set()) });
+        if (dd.note) notes[n] = dd.note;
+        if (dd.unconfirmed) errors[n] = 'Delete response lost and state unreadable — re-run the step to confirm';
         deleted++;
       } catch (e) {
         errors[n] = e instanceof Error ? e.message : String(e);
@@ -1614,7 +1822,7 @@ const vmsDeleteAction: ActionDescriptor<TruenasActionContext> = {
     }
     // Verify: every driven VM must be gone from vm.query.
     const verified = Object.keys(errors).length === 0 && (await verifyVmStates(ctx, names.filter((n) => byName.has(n)), new Set(['gone'])));
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { deleted, missing, removeStorage, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { deleted, missing, removeStorage, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -1675,7 +1883,34 @@ const vmsNicAttachAction: ActionDescriptor<TruenasActionContext> = {
       if (v26) attributes['type'] = 'VIRTIO'; // appliance default is E1000 — VIRTIO is the expected model
       else attributes['type'] = type;
       if (mac) attributes['mac'] = mac;
-      await ctx.client.call('vm.device.create', [vmDeviceCreateArg(v26, vm.id, attributes)], ctx.creds, 30_000);
+      const beforeCount = vm.devices.filter((d) => normalizeVmDevice(d)?.dtype === 'NIC').length;
+      // Transport-tolerant: a lost response is confirmed by re-reading — the NIC
+      // must show up (by MAC when requested, otherwise as a count increase).
+      const r = await dispatchWrite(ctx, 'vm.device.create', [vmDeviceCreateArg(v26, vm.id, attributes)], {
+        timeoutMs: 30_000,
+        verify: async () => {
+          try {
+            const vms2 = await listVms(ctx);
+            const vm2 = vms2.find((v) => v.name === name);
+            if (!vm2) return null;
+            if (mac) {
+              for (const d of vm2.devices) {
+                const dev = normalizeVmDevice(d);
+                if (dev?.dtype !== 'NIC') continue;
+                const m2 = pickString(dev.attrs, ['mac']);
+                if (m2 && m2.toLowerCase() === mac.toLowerCase()) return true;
+              }
+              return false; // VM exists but no NIC with that MAC — not applied
+            }
+            const count = vm2.devices.filter((d) => normalizeVmDevice(d)?.dtype === 'NIC').length;
+            if (count > beforeCount) return true;
+            if (count < beforeCount) return null; // unexpected shrinkage — don't guess
+            return false; // unchanged — not applied
+          } catch {
+            return null;
+          }
+        },
+      });
       // Verify by re-reading the VM's devices. When a MAC was requested it must
       // appear; when omitted the appliance assigns one — then we confirm the NIC
       // count grew instead (the new device is dtype NIC on nicAttach).
@@ -1683,7 +1918,6 @@ const vmsNicAttachAction: ActionDescriptor<TruenasActionContext> = {
       if (mac) {
         verified = await verifyVmNic(ctx, name, mac, true);
       } else {
-        const beforeCount = vm.devices.filter((d) => normalizeVmDevice(d)?.dtype === 'NIC').length;
         const wait = await pollUntil(
           async () => {
             try {
@@ -1696,11 +1930,11 @@ const vmsNicAttachAction: ActionDescriptor<TruenasActionContext> = {
             }
           },
           (grew) => grew === true,
-          { timeoutMs: 30_000, intervalMs: 2_000 },
+          { timeoutMs: 15_000, intervalMs: 2_000 },
         );
         verified = wait.ok;
       }
-      return { success: true, applied: true, verified, details: { name, nicAttach, type, ...(mac ? { mac } : {}) } };
+      return { success: true, applied: true, verified, details: { name, nicAttach, type, ...(mac ? { mac } : {}), ...(r.note ? { note: r.note } : {}) } };
     } catch (e) {
       return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
     }
@@ -1747,10 +1981,28 @@ const vmsNicDetachAction: ActionDescriptor<TruenasActionContext> = {
 
     try {
       const force = input['force'] === true;
-      await ctx.client.call('vm.device.delete', [deviceId, force ? { force: true } : {}], ctx.creds);
+      // Transport-tolerant — a lost response is confirmed by re-reading (the NIC must be GONE).
+      const r = await dispatchWrite(ctx, 'vm.device.delete', [deviceId, force ? { force: true } : {}], {
+        verify: async () => {
+          try {
+            const vms2 = await listVms(ctx);
+            const vm2 = vms2.find((v) => v.name === name);
+            if (!vm2) return null; // VM gone — can't confirm either way
+            for (const d of vm2.devices) {
+              const dev = normalizeVmDevice(d);
+              if (dev?.dtype !== 'NIC') continue;
+              const m2 = pickString(dev.attrs, ['mac']);
+              if (m2 && m2.toLowerCase() === mac) return false; // still present — not applied
+            }
+            return true; // gone — applied
+          } catch {
+            return null;
+          }
+        },
+      });
       // Verify by re-reading the VM's devices — the NIC with this MAC must be gone.
       const verified = await verifyVmNic(ctx, name, mac, false);
-      return { success: true, applied: true, verified, details: { name, mac: mac.toUpperCase(), deviceId } };
+      return { success: true, applied: true, verified, details: { name, mac: mac.toUpperCase(), deviceId, ...(r.note ? { note: r.note } : {}) } };
     } catch (e) {
       return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
     }
@@ -1928,8 +2180,25 @@ const vmsCreateAction: ActionDescriptor<TruenasActionContext> = {
 
     let vmId: number | null = null;
     try {
-      const created = await ctx.client.call<Record<string, unknown>>('vm.create', [create], ctx.creds);
+      // Transport-tolerant — a lost response is confirmed by re-reading (the VM must exist);
+      // when it does, the id comes from the re-read row. When it demonstrably did NOT apply,
+      // dispatchWrite retries once on the fresh session (a duplicate create would just error).
+      const dr = await dispatchWrite(ctx, 'vm.create', [create], {
+        verify: async () => {
+          try {
+            return (await listVms(ctx)).some((v) => v.name === name); // exists — applied
+          } catch {
+            return null;
+          }
+        },
+      });
+      const created = dr.value as Record<string, unknown> | undefined;
       vmId = typeof created?.['id'] === 'number' ? (created['id'] as number) : null;
+      if (vmId === null && dr.note) {
+        // Response lost — the verify proved the VM exists; recover its id from the re-read.
+        const row = (await listVms(ctx)).find((v) => v.name === name);
+        vmId = typeof row?.id === 'number' ? row.id : null;
+      }
     } catch (e) {
       return { success: false, details: { error: `vm.create failed: ${e instanceof Error ? e.message : String(e)}` } };
     }
@@ -1961,7 +2230,27 @@ const vmsCreateAction: ActionDescriptor<TruenasActionContext> = {
     try {
       // 60s budget — a zvol-backed disk create can exceed the client's 5s default
       // (zvol provisioning + flapping WS sessions), and the NIC attach below is fast.
-      await ctx.client.call('vm.device.create', [vmDeviceCreateArg(v26, vmId, diskAttrs)], ctx.creds, 60_000);
+      // Transport-tolerant — a lost response is confirmed by re-reading the VM's devices.
+      const rd = await dispatchWrite(ctx, 'vm.device.create', [vmDeviceCreateArg(v26, vmId, diskAttrs)], {
+        timeoutMs: 60_000,
+        verify: async () => {
+          try {
+            const vms2 = await listVms(ctx);
+            const vm2 = vms2.find((v) => v.name === name);
+            if (!vm2) return null;
+            for (const d of vm2.devices) {
+              const dev = normalizeVmDevice(d);
+              if (dev?.dtype !== 'DISK') continue;
+              if (zvolFullName && pickString(dev.attrs, ['path']) === `/dev/zvol/${zvolFullName}`) return true;
+              if (!zvolFullName) return true; // path mode — any DISK counts
+            }
+            return false;
+          } catch {
+            return null;
+          }
+        },
+      });
+      if (rd.note) errors.push(`disk device: ${rd.note}`);
     } catch (e) {
       errors.push(`disk device: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -1978,7 +2267,27 @@ const vmsCreateAction: ActionDescriptor<TruenasActionContext> = {
       const mac = str(input, 'mac');
       if (mac) nicAttrs['mac'] = mac.toUpperCase();
       try {
-        await ctx.client.call('vm.device.create', [vmDeviceCreateArg(v26, vmId, nicAttrs)], ctx.creds, 30_000);
+        // Transport-tolerant — a lost response is confirmed by re-reading the VM's devices.
+        const rn = await dispatchWrite(ctx, 'vm.device.create', [vmDeviceCreateArg(v26, vmId, nicAttrs)], {
+          timeoutMs: 30_000,
+          verify: async () => {
+            try {
+              const vms2 = await listVms(ctx);
+              const vm2 = vms2.find((v) => v.name === name);
+              if (!vm2) return null;
+              for (const d of vm2.devices) {
+                const dev = normalizeVmDevice(d);
+                if (dev?.dtype !== 'NIC') continue;
+                if (mac && pickString(dev.attrs, ['mac'])?.toLowerCase() === mac.toLowerCase()) return true;
+                if (!mac) return true; // any NIC counts — the appliance assigns MACs
+              }
+              return false;
+            } catch {
+              return null;
+            }
+          },
+        });
+        if (rn.note) errors.push(`NIC device: ${rn.note}`);
       } catch (e) {
         errors.push(`NIC device: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -2353,23 +2662,40 @@ const vmsCdromAttachAction: ActionDescriptor<TruenasActionContext> = {
     let rpcError: string | null = null;
     try {
       const v26 = await usesV26VmDeviceApi(ctx);
+      // Transport-tolerant (see dispatchWrite): a dropped socket or per-call timeout
+      // does NOT mean the device wasn't created — the appliance may simply be slow
+      // validating the ISO on a degraded pool. The verify callback re-reads the VM's
+      // devices; only when the CDROM is demonstrably absent do we retry/fail below.
+      const cdromVerify = async (): Promise<boolean | null> => {
+        try {
+          const vms2 = await listVms(ctx);
+          const vm2 = vms2.find((v) => v.name === name);
+          if (!vm2) return null;
+          for (const d of vm2.devices) {
+            const dev = normalizeVmDevice(d);
+            if (dev?.dtype !== 'CDROM') continue;
+            if (pickString(dev.attrs, ['path']) === path) return true;
+          }
+          return false; // VM exists but no CDROM at this path — not applied
+        } catch {
+          return null;
+        }
+      };
       if (cdromId !== null) {
         // vm.device.update keeps the [id, {attributes}] shape on both API generations.
-        await ctx.client.call('vm.device.update', [cdromId, { attributes: { dtype: 'CDROM', path } }], ctx.creds, 120_000);
+        const ru = await dispatchWrite(ctx, 'vm.device.update', [cdromId, { attributes: { dtype: 'CDROM', path } }], { timeoutMs: 120_000, verify: cdromVerify });
+        if (ru.note) rpcError = ru.note;
       } else {
         // Observed live (KIRGUSBANDE, 26.0.0-BETA.2): vm.device.create for a CDROM takes
         // ~60s EVEN VIA THE WEB UI — the appliance-side work is just slow there, and the
         // Web UI only survives it because its WS session has no per-call timeout. Give
         // this call 120s of headroom; if it still times out we fall through to re-read.
-        await ctx.client.call('vm.device.create', [vmDeviceCreateArg(v26, vm.id, { dtype: 'CDROM', path })], ctx.creds, 120_000);
+        const rc = await dispatchWrite(ctx, 'vm.device.create', [vmDeviceCreateArg(v26, vm.id, { dtype: 'CDROM', path })], { timeoutMs: 120_000, verify: cdromVerify });
+        if (rc.note) rpcError = rc.note;
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      // A TIMEOUT does not mean the device wasn't created — the appliance may simply be
-      // slow validating the ISO on a degraded pool. Fall through to re-read: if the CDROM
-      // shows up, report success with a note; only fail when it's genuinely absent.
-      if (/timed out/i.test(msg)) rpcError = msg;
-      else return { success: false, details: { error: `${await poolHealthNote(ctx, path.replace(/^\/mnt\//, ''))}CD-ROM attach failed: ${msg}`.trim() } };
+      return { success: false, details: { error: `${await poolHealthNote(ctx, path.replace(/^\/mnt\//, ''))}CD-ROM attach failed: ${msg}`.trim() } };
     }
 
     // Verify by re-reading the VM's devices — a CDROM with this path must exist.
@@ -2442,10 +2768,32 @@ const vmsDeviceDetachAction: ActionDescriptor<TruenasActionContext> = {
     if (input['removeStorage'] === true) opts['zvol'] = true;
     if (input['force'] === true) opts['force'] = true;
 
+    // Transport-tolerant — a lost response is confirmed by re-reading (the device must be GONE).
+    // Any error here (method error, or a failed post-drop retry) falls through to the
+    // verification poll below, which decides success from the appliance's actual state.
+    let deleteError: string | null = null;
     try {
-      await ctx.client.call('vm.device.delete', [deviceId, opts], ctx.creds);
+      const dr = await dispatchWrite(ctx, 'vm.device.delete', [deviceId, opts], {
+        verify: async () => {
+          try {
+            const vms2 = await listVms(ctx);
+            const vm2 = vms2.find((v) => v.name === name);
+            if (!vm2) return true; // VM itself is gone — device certainly is
+            for (const d of vm2.devices) {
+              const raw = d as Record<string, unknown>;
+              const dev = normalizeVmDevice(d);
+              const id = typeof raw['id'] === 'number' ? (raw['id'] as number) : typeof dev?.attrs['id'] === 'number' ? (dev.attrs['id'] as number) : null;
+              if (id === deviceId) return false; // still present — not applied
+            }
+            return true;
+          } catch {
+            return null;
+          }
+        },
+      });
+      if (dr.note) deleteError = dr.note; // transport drop — verified/retried inside dispatchWrite
     } catch (e) {
-      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+      deleteError = e instanceof Error ? e.message : String(e);
     }
 
     // Verify by re-reading the VM's devices — this integer id must be gone.
@@ -2469,6 +2817,10 @@ const vmsDeviceDetachAction: ActionDescriptor<TruenasActionContext> = {
       (gone) => gone === true,
       { timeoutMs: 30_000, intervalMs: 2_000 },
     );
+    // A transport drop only counts as a failure when the device is still there.
+    if (deleteError && !wait.ok) {
+      return { success: false, details: { error: `Device detach failed: ${deleteError}` } };
+    }
     return { success: true, applied: true, verified: wait.ok, details: { name, deviceId, removeStorage: input['removeStorage'] === true } };
   },
 };
@@ -2497,8 +2849,20 @@ const vmsDeviceEditAction: ActionDescriptor<TruenasActionContext> = {
       return { success: false, details: { error: 'attributes (object) is required' } };
     }
 
+    // Transport-tolerant — a lost response is confirmed by re-reading (the device must still exist).
+    let note: string | undefined;
     try {
-      await ctx.client.call('vm.device.update', [deviceId, { attributes: { dtype, ...(attrsRaw as Record<string, unknown>) } }], ctx.creds);
+      const r = await dispatchWrite(ctx, 'vm.device.update', [deviceId, { attributes: { dtype, ...(attrsRaw as Record<string, unknown>) } }], {
+        verify: async () => {
+          try {
+            const rows = await ctx.client.call<Record<string, unknown>[]>('vm.device.query', [[['id', '=', deviceId]]], ctx.creds);
+            return (rows ?? []).length > 0; // exists — applied (or pre-existing either way)
+          } catch {
+            return null;
+          }
+        },
+      });
+      note = r.note;
     } catch (e) {
       return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
     }
@@ -2510,7 +2874,533 @@ const vmsDeviceEditAction: ActionDescriptor<TruenasActionContext> = {
       const rows = await ctx.client.call<Record<string, unknown>[]>('vm.device.query', [[['id', '=', deviceId]]], ctx.creds);
       verified = (rows ?? []).length > 0;
     } catch { /* unverified */ }
-    return { success: true, applied: true, verified, details: { deviceId, dtype } };
+    return { success: true, applied: true, verified, details: { deviceId, dtype, ...(note ? { note } : {}) } };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// VM device ATTACH — the generic contract for the webapp's "Add device" dialog.
+// The plugin is the single source of truth for what this hypervisor can attach:
+//   vms.device-types (read) → details.types[] — one entry per attachable type,
+//     each carrying its own inputSchema (the form fields), a `requiresStopped`
+//     flag and an optional `choicesActionId` pointing at the read-only action
+//     that feeds the dialog's pickers. The webapp renders this generically — it
+//     has NO knowledge of TrueNAS dtypes, so a future Proxmox plugin with other
+//     types/fields/actions gets the same dialog for free.
+//   vms.nic-choices / vms.pci-choices / vms.usb-choices (read) → normalized
+//     picker lists from vm.device.nic_attach_choices / passthrough_device_choices
+//     / usb_passthrough_choices (+ iommu).
+//   vms.disk-attach / vms.display-attach / vms.pci-attach / vms.usb-attach /
+//     vms.nic-attach / vms.cdrom-attach (write) → vm.device.create with the
+//     dtype-specific attributes:
+//       DISK    { path | create_zvol+zvol_name+zvol_volsize, type, iotype }
+//                — a zvol disk is hot-pluggable on TrueNAS 26; an existing
+//                /dev/zvol/… or raw file requires a STOPPED VM (the appliance
+//                enforces it too).
+//       DISPLAY { type VNC|SPICE, resolution, port, web_port, bind, wait,
+//                password, web } — the appliance auto-assigns free ports when
+//                omitted; at most ONE display per VM (appliance rule) → the
+//                dialog is hidden once one exists.
+//       PCI     { pptdev: 'pci_<dom>_<bus>_<slot>_<func>' } — STOPPED only, and
+//                only while IOMMU is enabled on the host.
+//       USB     { usb:{vendor_id,product_id}, controller_type } — identified by
+//                vendor/product so it survives reboots; hot-pluggable.
+// All of them work with ONLY the primary credential (JSON-RPC) — no SSH needed.
+// ---------------------------------------------------------------------------
+
+/** One attachable device type as advertised in vms.device-types details.types[]. */
+interface VmDeviceTypeDescriptor {
+  /** Appliance-native dtype (DISK | DISPLAY | PCI | USB | NIC | CDROM). */
+  dtype: string;
+  label: string;
+  description?: string;
+  /** True when the appliance requires a STOPPED VM for this type. */
+  requiresStopped: boolean;
+  /** Read-only catalog action whose details feed the dialog's pickers (optional). */
+  choicesActionId?: string;
+  /** The form fields — rendered by the webapp via SchemaForm, validated here on submit. */
+  inputSchema: Record<string, { type: 'string' | 'number' | 'boolean'; label?: string; description?: string; required?: boolean; default?: unknown; enum?: (string | number)[]; min?: number; max?: number; pattern?: string }>;
+}
+
+/** The full attachable-type catalog for this appliance — static per plugin. */
+const VM_DEVICE_TYPES: VmDeviceTypeDescriptor[] = [
+  {
+    dtype: 'DISK',
+    label: 'Disk',
+    description: 'Attach a disk drive — either an existing ZVOL/disk image on the appliance or a brand-new ZVOL. New ZVOLs hot-plug; attaching an EXISTING disk requires a stopped VM.',
+    requiresStopped: false, // new zvols hot-plug; existing paths need a stopped VM (appliance-enforced)
+    choicesActionId: 'vms.disk-choices',
+    inputSchema: {
+      mode: { type: 'string', label: 'Source', required: true, enum: ['existing', 'new-zvol'], default: 'existing', description: 'Attach an existing disk or create a new ZVOL' },
+      path: { type: 'string', label: 'Disk (existing)', required: false, description: 'ZVOL or raw file from the appliance — pick one above; must start with /dev/zvol/' },
+      dataset: { type: 'string', label: 'Dataset for new ZVOL', required: false, description: 'Parent dataset (from vms.create-choices)' },
+      sizeBytes: { type: 'number', label: 'ZVOL size (bytes)', required: false, min: 1073741824, description: 'Size of the new ZVOL in bytes' },
+      zvolName: { type: 'string', label: 'ZVOL name', required: false, description: 'Leaf name under the dataset — defaults to <VM>-diskN' },
+      diskType: { type: 'string', label: 'Controller', required: true, enum: ['VIRTIO', 'AHCI'], default: 'VIRTIO', description: 'Disk controller interface' },
+    },
+  },
+  {
+    dtype: 'DISPLAY',
+    label: 'Display (console)',
+    description: 'Attach a VNC/SPICE display server so the guest console can be viewed from a client. A password is generated when not given — it is reported in the result.',
+    requiresStopped: false, // hot-pluggable; at most one per VM (appliance rule)
+    inputSchema: {
+      type: { type: 'string', label: 'Protocol', required: true, enum: ['VNC', 'SPICE'], default: 'VNC' },
+      resolution: { type: 'string', label: 'Resolution', required: false, description: 'e.g. 1024x768 — auto-assigned when empty' },
+      port: { type: 'number', label: 'Port', required: false, min: 5900, max: 65535, description: 'VNC/SPICE port — auto-assigned (free) when empty' },
+      password: { type: 'string', label: 'Console password', required: false, description: 'Required by the appliance — a random one is generated and reported in the result when left empty' },
+      web: { type: 'boolean', label: 'Web console (SPICE only)', default: true, description: 'Expose the display through the appliance web UI — SPICE displays only; automatically disabled for VNC' },
+    },
+  },
+  {
+    dtype: 'PCI',
+    label: 'PCIe passthrough',
+    description: 'Pass a host PCI device (GPU, NIC, …) through to the VM. Requires IOMMU on the host and a STOPPED VM.',
+    requiresStopped: true,
+    choicesActionId: 'vms.pci-choices',
+    inputSchema: {
+      pptdev: { type: 'string', label: 'PCI device', required: true, description: 'Host PCI device from the picker above (pci_<domain>_<bus>_<slot>_<function>)' },
+    },
+  },
+  {
+    dtype: 'USB',
+    label: 'USB passthrough',
+    description: 'Pass a host USB device through to the VM, identified by vendor/product so it survives reboots.',
+    requiresStopped: false, // hot-pluggable
+    choicesActionId: 'vms.usb-choices',
+    inputSchema: {
+      usbDevice: { type: 'string', label: 'USB device', required: true, description: 'Host USB device from the picker above (usb_<bus>_<device>)' },
+      controllerType: { type: 'string', label: 'Controller', required: false, enum: ['nec-xhci', 'qemu-xhci', 'ehci'], default: 'nec-xhci', description: 'Virtual USB controller model' },
+    },
+  },
+  {
+    dtype: 'NIC',
+    label: 'Network interface',
+    description: 'Attach a network interface — pick a bridge or MACVLAN from the appliance; omit the MAC to let it be auto-assigned.',
+    requiresStopped: false, // hot-pluggable
+    choicesActionId: 'vms.nic-choices',
+    inputSchema: {
+      nicAttach: { type: 'string', label: 'Interface (bridge / MACVLAN)', required: true, description: 'Bridge or MACVLAN from the picker above' },
+      type: { type: 'string', label: 'Attachment kind', required: false, enum: ['BRIDGE', 'MACVLAN'], default: 'BRIDGE', description: 'Auto-set from the picker — only honored by pre-25.10 appliances (newer ones infer it)' },
+      mac: { type: 'string', label: 'MAC address (optional)', required: false, pattern: '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', description: 'Fixed MAC — auto-assigned when empty' },
+    },
+  },
+  {
+    dtype: 'CDROM',
+    label: 'CD-ROM / ISO',
+    description: 'Attach a CD-ROM drive pointing at an ISO — from the UNM file repo, an existing ISO on the appliance, or a manual /mnt/ path. Swaps the ISO in place when the VM already has a CD-ROM.',
+    requiresStopped: false, // hot-pluggable; updates the existing device in place
+    inputSchema: {
+      source: { type: 'string', label: 'ISO source', required: true, enum: ['repo', 'dataset', 'path'], default: 'repo' },
+      repoFileId: { type: 'string', label: 'File from repo', required: false, description: 'UNM file-repo ISO (uploaded first when missing)' },
+      dataset: { type: 'string', label: 'Dataset', required: false, description: 'Target dataset for a repo upload / parent of an existing ISO' },
+      path: { type: 'string', label: 'ISO path (/mnt/…)', required: false, pattern: '^/mnt/', description: 'Existing ISO on the appliance or manual path' },
+    },
+  },
+];
+
+const vmsDeviceTypesAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.device-types',
+  label: 'List attachable VM device types',
+  description:
+    'Read-only descriptor of every device type this hypervisor can attach to a VM — dtype, form fields (inputSchema), whether the VM must be stopped and which read-only action feeds the pickers. Drives the webapp\'s generic "Add device" dialog; no appliance round-trip.',
+  module: 'VMs',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  async execute(): Promise<ActionResult> {
+    return { success: true, details: { types: VM_DEVICE_TYPES } };
+  },
+};
+
+const vmsPciChoicesAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.pci-choices',
+  label: 'List PCIe passthrough devices',
+  description:
+    'Read-only list of the host PCI devices available for passthrough (vm.device.passthrough_device_choices), normalized to {id, description, available, critical, error} + whether IOMMU is enabled on the host. Feeds the Add-device dialog\'s PCIe picker.',
+  module: 'VMs',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000, // enumerates every PCI device + IOMMU groups — slow on big hosts
+  inputSchema: {},
+  async execute(ctx: TruenasActionContext): Promise<ActionResult> {
+    try {
+      let iommu = false;
+      try { iommu = (await ctx.client.call<boolean>('vm.device.iommu_enabled', [], ctx.creds)) === true; } catch { /* unknown */ }
+      const raw = await ctx.client.call<Record<string, Record<string, unknown>>>('vm.device.passthrough_device_choices', [], ctx.creds);
+      const devices: { id: string; description: string; available: boolean; critical: boolean; error?: string | null }[] = [];
+      for (const [id, info] of Object.entries(raw ?? {})) {
+        if (!info || typeof info !== 'object') continue;
+        devices.push({
+          id,
+          description: pickString(info, ['description']) ?? id,
+          available: info['available'] === true,
+          critical: info['critical'] === true,
+          error: typeof info['error'] === 'string' ? (info['error'] as string) : null,
+        });
+      }
+      // Usable devices first — the dialog's picker should lead with what works.
+      devices.sort((a, b) => Number(b.available && !b.critical) - Number(a.available && !a.critical) || a.description.localeCompare(b.description));
+      return { success: true, details: { iommuEnabled: iommu, devices } };
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+  },
+};
+
+const vmsUsbChoicesAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.usb-choices',
+  label: 'List USB passthrough devices',
+  description:
+    'Read-only list of the host USB devices available for passthrough (vm.device.usb_passthrough_choices), normalized to {id, description, vendorId, productId, available}. Feeds the Add-device dialog\'s USB picker.',
+  module: 'VMs',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  async execute(ctx: TruenasActionContext): Promise<ActionResult> {
+    try {
+      const raw = await ctx.client.call<Record<string, Record<string, unknown>>>('vm.device.usb_passthrough_choices', [], ctx.creds);
+      const devices: { id: string; description: string; vendorId?: string | null; productId?: string | null; available: boolean }[] = [];
+      for (const [id, info] of Object.entries(raw ?? {})) {
+        if (!info || typeof info !== 'object') continue;
+        const cap = (info['capability'] ?? {}) as Record<string, unknown>;
+        devices.push({
+          id,
+          description: pickString(info, ['description']) ?? id,
+          vendorId: pickString(cap, ['vendor_id']),
+          productId: pickString(cap, ['product_id']),
+          available: info['available'] === true,
+        });
+      }
+      devices.sort((a, b) => Number(b.available) - Number(a.available) || a.description.localeCompare(b.description));
+      return { success: true, details: { devices } };
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+  },
+};
+
+const vmsDiskChoicesAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.disk-choices',
+  label: 'List attachable disks',
+  description:
+    'Read-only list of the appliance\'s ZVOLs (vm.device.disk_choices), normalized to {path, name} and sorted. Feeds the Add-device dialog\'s existing-disk picker for DISK attaches.',
+  module: 'VMs',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  async execute(ctx: TruenasActionContext): Promise<ActionResult> {
+    try {
+      const raw = await ctx.client.call<Record<string, string>>('vm.device.disk_choices', [], ctx.creds);
+      const disks: { path: string; name: string }[] = [];
+      for (const [path, name] of Object.entries(raw ?? {})) {
+        if (!path.startsWith('/dev/zvol/')) continue; // raw files are not hot-pluggable — skip them here
+        disks.push({ path, name: typeof name === 'string' && name !== '' ? name : path });
+      }
+      disks.sort((a, b) => a.name.localeCompare(b.name));
+      return { success: true, details: { disks } };
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+  },
+};
+
+/** Resolves a VM by name and checks its state against the attach requirements. */
+async function resolveVmForAttach(ctx: TruenasActionContext, name: string | undefined): Promise<{ ok: true; vm: VmInfo } | { ok: false; error: string }> {
+  if (!name) return { ok: false, error: 'VM name is required' };
+  const vms = await listVms(ctx);
+  const vm = vms.find((v) => v.name === name);
+  if (!vm) return { ok: false, error: `VM "${name}" not found on this appliance` };
+  return { ok: true, vm };
+}
+
+/** Creates a VM device, tolerating ONE transport-level failure (dropped socket).
+ * When the create's response is lost mid-flight ("unresponsive — reconnecting"),
+ * the appliance may have applied it anyway — so before retrying we re-read the
+ * VM's devices and only retry when the device demonstrably did NOT land. This
+ * makes a flaky WebSocket unable to create duplicate devices. */
+async function createVmDevice(
+  ctx: TruenasActionContext,
+  vmId: number,
+  attrs: Record<string, unknown>,
+  timeoutMs: number,
+  landedCheck: (dev: { dtype: string; attrs: Record<string, unknown> }) => boolean,
+): Promise<void> {
+  const v26 = await usesV26VmDeviceApi(ctx);
+  try {
+    await ctx.client.call('vm.device.create', [vmDeviceCreateArg(v26, vmId, attrs)], ctx.creds, timeoutMs);
+    return;
+  } catch (e) {
+    if (!(e instanceof TruenasRpcError) || !/unresponsive|timed out/i.test(e.message)) throw e;
+  }
+  // Transport dropped mid-call — did the appliance apply it anyway?
+  const landed = await pollUntil(
+    async () => {
+      try {
+        const vms2 = await listVms(ctx);
+        const vm2 = vms2.find((v) => v.id === vmId);
+        if (!vm2) return false;
+        for (const d of vm2.devices) {
+          const dev = normalizeVmDevice(d);
+          if (dev && landedCheck(dev)) return true;
+        }
+        return false;
+      } catch {
+        return null;
+      }
+    },
+    (found) => found === true,
+    { timeoutMs: 10_000, intervalMs: 2_000 },
+  );
+  if (landed.ok) return; // it landed — nothing to retry
+  await ctx.client.call('vm.device.create', [vmDeviceCreateArg(v26, vmId, attrs)], ctx.creds, timeoutMs);
+}
+
+/** Verifies a freshly created device is present by re-reading the VM's devices. */
+async function verifyVmDevicePresent(ctx: TruenasActionContext, name: string, match: (dev: { dtype: string; attrs: Record<string, unknown> }) => boolean): Promise<boolean> {
+  const wait = await pollUntil(
+    async () => {
+      try {
+        const vms2 = await listVms(ctx);
+        const vm2 = vms2.find((v) => v.name === name);
+        if (!vm2) return false;
+        for (const d of vm2.devices) {
+          const dev = normalizeVmDevice(d);
+          if (dev && match(dev)) return true;
+        }
+        return false;
+      } catch {
+        return null;
+      }
+    },
+    (found) => found === true,
+    { timeoutMs: 45_000, intervalMs: 2_000 },
+  );
+  return wait.ok;
+}
+
+const vmsDiskAttachAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.disk-attach',
+  label: 'Attach disk to VM',
+  description:
+    'Attaches a DISK device (vm.device.create dtype DISK). mode=existing attaches an existing /dev/zvol/… path or raw file (VM must be STOPPED — the appliance enforces it); mode=new-zvol creates a fresh ZVOL under the chosen dataset and hot-plugs it. Verified by re-reading the VM\'s devices.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000, // a new zvol can take a while to provision
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'VM name' },
+    mode: { type: 'string', required: true, enum: ['existing', 'new-zvol'], default: 'existing', description: 'existing = attach a disk path; new-zvol = create + attach a fresh ZVOL' },
+    path: { type: 'string', required: false, minLength: 1, pattern: '^/dev/zvol/', description: 'Existing ZVOL or raw file (from vms.disk-choices) — required when mode=existing' },
+    dataset: { type: 'string', required: false, minLength: 1, description: 'Parent dataset for the new zvol (from vms.create-choices) — required when mode=new-zvol' },
+    sizeBytes: { type: 'number', required: false, min: 1073741824, description: 'New zvol size in bytes — required when mode=new-zvol' },
+    zvolName: { type: 'string', required: false, minLength: 1, maxLength: 64, pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$', description: 'Optional ZVOL leaf name (default: <VM>-diskN)' },
+    diskType: { type: 'string', required: false, enum: ['AHCI', 'VIRTIO'], default: 'VIRTIO', description: 'Disk controller interface' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    const mode = strOr(input, 'mode', 'existing');
+    if (mode !== 'existing' && mode !== 'new-zvol') return { success: false, details: { error: `Unsupported disk mode "${mode}"` } };
+
+    const resolved = await resolveVmForAttach(ctx, name);
+    if (!resolved.ok) return { success: false, details: { error: resolved.error } };
+    const vm = resolved.vm;
+
+    // Existing disks cannot be hot-plugged — the appliance refuses a running VM.
+    if (mode === 'existing' && vm.state !== 'STOPPED') {
+      return { success: false, details: { error: `VM "${name}" is ${vm.state.toLowerCase()} — stop it before attaching an existing disk` } };
+    }
+
+    const attrs: Record<string, unknown> = { dtype: 'DISK', type: strOr(input, 'diskType', 'VIRTIO') };
+    let zvolFullName: string | null = null;
+    if (mode === 'new-zvol') {
+      const dataset = str(input, 'dataset');
+      const sizeBytes = typeof input['sizeBytes'] === 'number' ? (input['sizeBytes'] as number) : undefined;
+      if (!dataset || !sizeBytes) return { success: false, details: { error: 'mode=new-zvol requires dataset + sizeBytes' } };
+      // Default leaf: <VM>-diskN where N is the next free index on this VM.
+      const existing = vm.devices.map((d) => normalizeVmDevice(d)).filter((d) => d?.dtype === 'DISK').length;
+      const requested = str(input, 'zvolName');
+      const leaf = (requested || `${name}-disk${existing + 1}`).replace(/[^a-zA-Z0-9_]/g, '');
+      if (!leaf) return { success: false, details: { error: `Invalid zvolName "${requested}" — it must contain at least one letter or digit` } };
+      zvolFullName = `${dataset}/${leaf}`;
+      Object.assign(attrs, { create_zvol: true, zvol_name: zvolFullName, zvol_volsize: sizeBytes });
+    } else {
+      const path = str(input, 'path');
+      if (!path) return { success: false, details: { error: 'mode=existing requires a disk path' } };
+      attrs['path'] = path;
+    }
+
+    try {
+      await createVmDevice(ctx, vm.id, attrs, 180_000, (dev) => dev.dtype === 'DISK' && (zvolFullName ? pickString(dev.attrs, ['path']) === `/dev/zvol/${zvolFullName}` : true));
+    } catch (e) {
+      return { success: false, details: { error: `Disk attach failed: ${e instanceof Error ? e.message : String(e)}` } };
+    }
+
+    const verified = await verifyVmDevicePresent(ctx, name!, (dev) => dev.dtype === 'DISK' && (zvolFullName ? pickString(dev.attrs, ['path']) === `/dev/zvol/${zvolFullName}` : true));
+    return { success: true, applied: true, verified, details: { name, mode, ...(zvolFullName ? { zvolName: zvolFullName } : {}), path: attrs['path'] as string | undefined } };
+  },
+};
+
+const vmsDisplayAttachAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.display-attach',
+  label: 'Attach display to VM',
+  description:
+    'Attaches a DISPLAY device (vm.device.create dtype DISPLAY — VNC or SPICE). The appliance REQUIRES a console password (a random one is generated and reported in the result when not given) and auto-assigns free ports when port/web_port are omitted. `web` (appliance web UI) is only valid for SPICE displays. A VM may have at most ONE display (appliance rule) — the webapp hides this action once one exists.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'VM name' },
+    type: { type: 'string', required: false, enum: ['VNC', 'SPICE'], default: 'VNC', description: 'Display protocol' },
+    resolution: { type: 'string', required: false, pattern: '^\\d+x\\d+$', description: 'Resolution like 1024x768 (auto-assigned when omitted)' },
+    port: { type: 'number', required: false, min: 5900, max: 65535, description: 'Display port — auto-assigned to a free one when omitted' },
+    password: { type: 'string', required: false, minLength: 1, maxLength: 64, description: 'Console password (required by the appliance) — generated + reported in details when omitted' },
+    web: { type: 'boolean', required: false, default: true, description: 'Expose the display through the appliance web UI — SPICE only; automatically disabled for VNC' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    const resolved = await resolveVmForAttach(ctx, name);
+    if (!resolved.ok) return { success: false, details: { error: resolved.error } };
+    const vm = resolved.vm;
+
+    // One display per VM — the appliance enforces it too; fail fast with a clear message.
+    for (const d of vm.devices) {
+      const dev = normalizeVmDevice(d);
+      if (dev?.dtype === 'DISPLAY') return { success: false, details: { error: `VM "${name}" already has a display device — detach it first to change the console` } };
+    }
+
+    const type = strOr(input, 'type', 'VNC').toUpperCase();
+    // Appliance contract (verified live on 26.0 BETA): a console password is
+    // MANDATORY for every display device; `web` (appliance web UI) is only valid
+    // for SPICE — and the appliance DEFAULTS it to true before validating, so it
+    // must be sent EXPLICITLY false for VNC or creation fails with EINVAL. VNC
+    // passwords are capped at 8 characters.
+    const attrs: Record<string, unknown> = { dtype: 'DISPLAY', type };
+    attrs['web'] = type === 'SPICE' && input['web'] !== false;
+    let password = str(input, 'password');
+    if (!password) {
+      // 8 random alphanumeric chars — fits the VNC cap and is SPICE-safe.
+      const alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+      password = Array.from(randomBytes(8), (b) => alphabet[b % alphabet.length]).join('');
+    } else if (type === 'VNC' && password.length > 8) {
+      return { success: false, details: { error: `VNC console passwords are limited to 8 characters — got ${password.length}` } };
+    }
+    attrs['password'] = password;
+    const resolution = str(input, 'resolution');
+    if (resolution) attrs['resolution'] = resolution;
+    const port = typeof input['port'] === 'number' ? (input['port'] as number) : undefined;
+    if (port !== undefined) attrs['port'] = port;
+
+    try {
+      await createVmDevice(ctx, vm.id, attrs, 120_000, (dev) => dev.dtype === 'DISPLAY');
+    } catch (e) {
+      return { success: false, details: { error: `Display attach failed: ${e instanceof Error ? e.message : String(e)}` } };
+    }
+
+    const verified = await verifyVmDevicePresent(ctx, name!, (dev) => dev.dtype === 'DISPLAY');
+    // Report the appliance-assigned port so the UI can show where to connect.
+    let displayPort: number | undefined;
+    try {
+      const vms2 = await listVms(ctx);
+      for (const d of vms2.find((v) => v.name === name)?.devices ?? []) {
+        const dev = normalizeVmDevice(d);
+        if (dev?.dtype !== 'DISPLAY') continue;
+        displayPort = typeof dev.attrs['port'] === 'number' ? (dev.attrs['port'] as number) : undefined;
+        break;
+      }
+    } catch { /* unverified ports */ }
+    return { success: true, applied: true, verified, details: { name, type, password, ...(displayPort !== undefined ? { port: displayPort } : {}) } };
+  },
+};
+
+const vmsPciAttachAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.pci-attach',
+  label: 'Attach PCIe device to VM',
+  description:
+    'Passes a host PCI device through to ONE VM (vm.device.create dtype PCI, pptdev from vms.pci-choices). Requires IOMMU on the host and a STOPPED VM — both are enforced here AND by the appliance.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'VM name' },
+    pptdev: { type: 'string', required: true, pattern: '^pci_[0-9a-f]+_[0-9a-f]+_[0-9a-f]+_[0-9a-f]+$', description: 'Host PCI device id (from vms.pci-choices)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    const pptdev = str(input, 'pptdev');
+    if (!pptdev) return { success: false, details: { error: 'pptdev (PCI device id) is required' } };
+
+    let iommu = true;
+    try { iommu = (await ctx.client.call<boolean>('vm.device.iommu_enabled', [], ctx.creds)) === true; } catch { /* unknown — let the appliance decide */ }
+    if (!iommu) return { success: false, details: { error: 'IOMMU is not enabled on this host — PCIe passthrough requires it (BIOS setting)' } };
+
+    const resolved = await resolveVmForAttach(ctx, name);
+    if (!resolved.ok) return { success: false, details: { error: resolved.error } };
+    const vm = resolved.vm;
+    if (vm.state !== 'STOPPED') {
+      return { success: false, details: { error: `VM "${name}" is ${vm.state.toLowerCase()} — stop it before attaching a PCIe device` } };
+    }
+
+    try {
+      await createVmDevice(ctx, vm.id, { dtype: 'PCI', pptdev }, 120_000, (dev) => dev.dtype === 'PCI' && pickString(dev.attrs, ['pptdev']) === pptdev);
+    } catch (e) {
+      return { success: false, details: { error: `PCI attach failed: ${e instanceof Error ? e.message : String(e)}` } };
+    }
+
+    const verified = await verifyVmDevicePresent(ctx, name!, (dev) => dev.dtype === 'PCI' && pickString(dev.attrs, ['pptdev']) === pptdev);
+    return { success: true, applied: true, verified, details: { name, pptdev } };
+  },
+};
+
+const vmsUsbAttachAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.usb-attach',
+  label: 'Attach USB device to VM',
+  description:
+    'Passes a host USB device through to ONE VM (vm.device.create dtype USB). The device is identified by vendor/product ids (from vms.usb-choices) so the passthrough survives reboots; hot-pluggable on running VMs.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'VM name' },
+    usbDevice: { type: 'string', required: true, pattern: '^usb_[0-9]+_[0-9]+$', description: 'Host USB device id (from vms.usb-choices)' },
+    controllerType: { type: 'string', required: false, enum: ['piix3-uhci', 'piix4-uhci', 'ehci', 'ich9-ehci1', 'vt82c686b-uhci', 'pci-ohci', 'nec-xhci', 'qemu-xhci'], default: 'nec-xhci', description: 'Virtual USB controller model' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    const usbDevice = str(input, 'usbDevice');
+    if (!usbDevice) return { success: false, details: { error: 'usbDevice (USB device id) is required' } };
+
+    // Resolve the vendor/product ids from the live choices — the appliance keys
+    // USB passthrough by those, not by the bus/device address.
+    let rawChoices: Record<string, Record<string, unknown>>;
+    try {
+      rawChoices = await ctx.client.call<Record<string, Record<string, unknown>>>('vm.device.usb_passthrough_choices', [], ctx.creds);
+    } catch (e) {
+      return { success: false, details: { error: `Could not read USB devices: ${e instanceof Error ? e.message : String(e)}` } };
+    }
+    const info = rawChoices?.[usbDevice];
+    if (!info || typeof info !== 'object') return { success: false, details: { error: `USB device "${usbDevice}" is not present on this host anymore` } };
+    const cap = (info['capability'] ?? {}) as Record<string, unknown>;
+    const vendorId = pickString(cap, ['vendor_id']);
+    const productId = pickString(cap, ['product_id']);
+    if (!vendorId || !productId) return { success: false, details: { error: `USB device "${usbDevice}" has no usable vendor/product ids` } };
+
+    const resolved = await resolveVmForAttach(ctx, name);
+    if (!resolved.ok) return { success: false, details: { error: resolved.error } };
+    const vm = resolved.vm;
+
+    try {
+      await createVmDevice(ctx, vm.id, { dtype: 'USB', usb: { vendor_id: vendorId, product_id: productId }, controller_type: strOr(input, 'controllerType', 'nec-xhci') }, 120_000,
+        (dev) => dev.dtype === 'USB' && pickString((dev.attrs['usb'] ?? {}) as Record<string, unknown>, ['vendor_id']) === vendorId);
+    } catch (e) {
+      return { success: false, details: { error: `USB attach failed: ${e instanceof Error ? e.message : String(e)}` } };
+    }
+
+    const verified = await verifyVmDevicePresent(ctx, name!, (dev) => dev.dtype === 'USB' && pickString((dev.attrs['usb'] ?? {}) as Record<string, unknown>, ['vendor_id']) === vendorId);
+    return { success: true, applied: true, verified, details: { name, usbDevice, vendorId, productId } };
   },
 };
 
@@ -2583,6 +3473,8 @@ const storageScrubAction: ActionDescriptor<TruenasActionContext> = {
     const byName = new Map(pools.map((p) => [p.name, p]));
 
     let started = 0;
+    let unconfirmed = 0;
+    const notes: Record<string, string> = {};
     const skipped: Record<string, string> = {};
     const missing: string[] = [];
     const errors: Record<string, string> = {};
@@ -2593,14 +3485,32 @@ const storageScrubAction: ActionDescriptor<TruenasActionContext> = {
         continue;
       }
       try {
-        await ctx.client.call('pool.scrub', [n], ctx.creds);
+        // Transport-tolerant — a lost response is confirmed by re-reading the pool's scrub state.
+        const r = await dispatchWrite(ctx, 'pool.scrub', [n], {
+          verify: async () => {
+            try {
+              const rows = await ctx.client.call<Record<string, unknown>[]>('pool.query', [[['name', '=', n]]], ctx.creds);
+              const p = (rows ?? [])[0];
+              if (!p) return null; // pool gone — can't confirm either way
+              const st = pickString(p, ['scub_state', 'scrub_state'])?.toUpperCase(); // TrueNAS spells it "scub_state"
+              if (st === 'RUNNING' || st === 'WAITING') return true; // scrub active — applied
+              if (st === 'STOPPED') return false; // not scrubbing — not applied
+              return null; // unknown state — don't guess
+            } catch {
+              return null;
+            }
+          },
+        });
+        if (r.note) notes[n] = r.note;
+        if (r.unconfirmed) unconfirmed++;
         started++;
       } catch (e) {
-        if (/already|in progress/i.test(e instanceof Error ? e.message : String(e))) skipped[n] = 'scrub already in progress';
-        else errors[n] = e instanceof Error ? e.message : String(e);
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/already|in progress/i.test(msg)) skipped[n] = 'scrub already in progress'; // idempotent — a scrub is running
+        else errors[n] = msg;
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { started, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, details: { started, skipped, missing, ...(unconfirmed > 0 ? { unconfirmed } : {}), ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -2629,9 +3539,24 @@ const storageSnapshotAction: ActionDescriptor<TruenasActionContext> = {
     const ts = new Date().toISOString().replace(/[-:TZ]/g, '').slice(0, 14); // YYYYMMDDHHmmss
     const snapName = `${name}@unm-${ts}`;
 
+    const notes: string[] = [];
+    let unconfirmed = false;
     let jobId: number | null = null;
     try {
-      const r = await ctx.client.call<unknown>('pool.snapshot.create', [{ dataset: name, snapshot_name: `unm-${ts}`, recursive }], ctx.creds);
+      // Transport-tolerant — a lost response is confirmed by re-reading (the snapshot must exist).
+      const dr = await dispatchWrite(ctx, 'pool.snapshot.create', [{ dataset: name, snapshot_name: `unm-${ts}`, recursive }], {
+        verify: async () => {
+          try {
+            const rows = await ctx.client.call<Record<string, unknown>[]>('pool.snapshot.query', [[['name', '=', snapName]]], ctx.creds);
+            return (rows ?? []).length > 0; // exists — applied
+          } catch {
+            return null;
+          }
+        },
+      });
+      if (dr.note) notes.push(dr.note);
+      unconfirmed = dr.unconfirmed === true; // response lost AND state unreadable — not proven created
+      const r = dr.value as unknown;
       if (typeof r === 'number') jobId = r;
       else if (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number') jobId = (r as Record<string, unknown>)['id'] as number;
     } catch (e) {
@@ -2639,7 +3564,8 @@ const storageSnapshotAction: ActionDescriptor<TruenasActionContext> = {
     }
 
     // pool.snapshot.create is a JOB method — wait for it to settle so the
-    // retention cleanup below sees the new snapshot.
+    // retention cleanup below sees the new snapshot. (Skipped when the response
+    // was lost but the snapshot's existence was already confirmed on re-read.)
     let note = '';
     if (typeof jobId === 'number') {
       const wait = await waitForJob(ctx, jobId, 240_000);
@@ -2677,7 +3603,7 @@ const storageSnapshotAction: ActionDescriptor<TruenasActionContext> = {
       }
     }
 
-    return { success: Object.keys(pruneErrors).length === 0, applied: true, details: { snapshot: snapName, pruned, ...(note ? { note } : {}), ...(Object.keys(pruneErrors).length ? { pruneErrors } : {}) } };
+    return { success: Object.keys(pruneErrors).length === 0 && !unconfirmed, applied: true, details: { snapshot: snapName, pruned, ...(note ? { note } : {}), ...(notes.length > 0 ? { notes } : {}), ...(Object.keys(pruneErrors).length ? { pruneErrors } : {}) } };
   },
 };
 
@@ -2707,13 +3633,32 @@ const storageQuotaSetAction: ActionDescriptor<TruenasActionContext> = {
       quota = parsed;
     }
     try {
-      await ctx.client.call('pool.dataset.update', [name, { quota }], ctx.creds);
-      return { success: true, applied: true, details: { name, quota, note: quota === null ? 'Quota cleared' : `Quota set to ${quota} bytes` } };
+      // Transport-tolerant — setting an exact value is idempotent, so a lost response can be re-dispatched blindly.
+      const dr = await dispatchWrite(ctx, 'pool.dataset.update', [name, { quota }], { idempotentRetry: true });
+      return { success: true, applied: true, details: { name, quota, note: quota === null ? 'Quota cleared' : `Quota set to ${quota} bytes`, ...(dr.note ? { transportNote: dr.note } : {}) } };
     } catch (e) {
       return { success: false, details: { error: e instanceof Error ? e.message : String(e), name } };
     }
   },
 };
+
+/** Re-reads a dataset's mount state after a dropped transport response.
+ * wantMounted=true → true when the dataset exists AND is mounted, false when it
+ * exists but is unmounted (or is gone — mounting a missing dataset cannot have
+ * succeeded). wantMounted=false → true when the dataset is unmounted or already
+ * gone, false while still mounted. null = state unreadable. */
+async function datasetStateVerify(ctx: TruenasActionContext, name: string, wantMounted: boolean): Promise<boolean | null> {
+  try {
+    const rows = await ctx.client.call<Record<string, unknown>[]>('pool.dataset.query', [[['name', '=', name]]], ctx.creds);
+    const row = (rows ?? [])[0];
+    if (!row) return wantMounted ? false : true; // gone: mount impossible / unmount moot
+    const mp = pickString(row, ['mountpoint']);
+    const mounted = !!mp && mp !== 'unmounted' && mp !== 'legacy';
+    return mounted === wantMounted;
+  } catch {
+    return null;
+  }
+}
 
 const storageMountAction: ActionDescriptor<TruenasActionContext> = {
   id: 'storage.mount',
@@ -2730,18 +3675,23 @@ const storageMountAction: ActionDescriptor<TruenasActionContext> = {
     const names = strArray(input, 'names');
     if (names.length === 0) return { success: false, details: { error: 'No dataset names provided' } };
     let mounted = 0;
+    let unconfirmed = 0;
+    const notes: Record<string, string> = {};
     const skipped: Record<string, string> = {};
     const errors: Record<string, string> = {};
     for (const n of names) {
       try {
-        await ctx.client.call('pool.dataset.mount', [n], ctx.creds);
+        // Transport-tolerant — a lost response is confirmed by re-reading the mount state.
+        const r = await dispatchWrite(ctx, 'pool.dataset.mount', [n], { verify: () => datasetStateVerify(ctx, n, true) });
+        if (r.note) notes[n] = r.note;
+        if (r.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
         mounted++;
       } catch (e) {
         if (/already|mounted/i.test(e instanceof Error ? e.message : String(e))) skipped[n] = 'already mounted';
         else errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { mounted, skipped, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, details: { mounted, skipped, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -2762,18 +3712,23 @@ const storageUnmountAction: ActionDescriptor<TruenasActionContext> = {
     if (names.length === 0) return { success: false, details: { error: 'No dataset names provided' } };
     const force = input['force'] === true;
     let unmounted = 0;
+    let unconfirmed = 0;
+    const notes: Record<string, string> = {};
     const skipped: Record<string, string> = {};
     const errors: Record<string, string> = {};
     for (const n of names) {
       try {
-        await ctx.client.call('pool.dataset.unmount', [n, force ? { force: true } : {}], ctx.creds);
+        // Transport-tolerant — a lost response is confirmed by re-reading the mount state.
+        const r = await dispatchWrite(ctx, 'pool.dataset.unmount', [n, force ? { force: true } : {}], { verify: () => datasetStateVerify(ctx, n, false) });
+        if (r.note) notes[n] = r.note;
+        if (r.unconfirmed) unconfirmed++; // response lost AND state unreadable — not proven applied
         unmounted++;
       } catch (e) {
         if (/not mounted|unmounted/i.test(e instanceof Error ? e.message : String(e))) skipped[n] = 'already unmounted';
         else errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { unmounted, force, skipped, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, details: { unmounted, force, skipped, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -2798,16 +3753,29 @@ const storageDeleteAction: ActionDescriptor<TruenasActionContext> = {
     const force = input['force'] === true;
 
     let deleted = 0;
+    const notes: Record<string, string> = {};
     const errors: Record<string, string> = {};
     for (const n of names) {
       try {
-        await ctx.client.call('pool.dataset.delete', [n, recursive || force ? { recursive, force } : {}], ctx.creds);
-        deleted++;
+        // Transport-tolerant — a lost response is confirmed by re-reading (the dataset must be GONE).
+        const r = await dispatchWrite(ctx, 'pool.dataset.delete', [n, recursive || force ? { recursive, force } : {}], {
+          verify: async () => {
+            try {
+              const rows = await ctx.client.call<Record<string, unknown>[]>('pool.dataset.query', [[['name', '=', n]]], ctx.creds);
+              return (rows ?? []).length === 0; // gone — applied; still present — not applied
+            } catch {
+              return null;
+            }
+          },
+        });
+        if (r.note) notes[n] = r.note;
+        if (r.unconfirmed) errors[n] = 'Delete could not be confirmed (transport drop, state unreadable) — re-run the step'; // destructive: never assume applied
+        else deleted++;
       } catch (e) {
         errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, recursive, force, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, recursive, force, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -2885,8 +3853,9 @@ const smbShareCreateAction: ActionDescriptor<TruenasActionContext> = {
     const home = inBool(input, 'home');
     if (home !== undefined) params['options'] = { home };
     try {
-      await ctx.client.call('sharing.smb.create', [params], ctx.creds);
-      return { success: true, applied: true, details: { name, path } };
+      // Transport-tolerant — a lost response is confirmed by re-querying (the share must exist).
+      const dr = await dispatchWrite(ctx, 'sharing.smb.create', [params], { verify: async () => { try { return findShareId(ctx, 'sharing.smb.query', name) !== null; } catch { return null; } } });
+      return { success: true, applied: true, details: { name, path, ...(dr.note ? { transportNote: dr.note } : {}) } };
     } catch (e) {
       if (isAlreadyExists(e)) return { success: true, applied: false, details: { name, note: 'Share already exists' } };
       return { success: false, details: { error: e instanceof Error ? e.message : String(e), name } };
@@ -2918,8 +3887,9 @@ const smbShareUpdateAction: ActionDescriptor<TruenasActionContext> = {
     if (path) params['path'] = path;
     if ('comment' in input) params['comment'] = inStr(input, 'comment') ?? '';
     try {
-      await ctx.client.call('sharing.smb.update', [found.id, params], ctx.creds);
-      return { success: true, applied: true, details: { name } };
+      // Transport-tolerant — a partial update re-sent with the same values is harmless.
+      const dr = await dispatchWrite(ctx, 'sharing.smb.update', [found.id, params], { idempotentRetry: true });
+      return { success: true, applied: true, details: { name, ...(dr.note ? { transportNote: dr.note } : {}) } };
     } catch (e) {
       return { success: false, details: { error: e instanceof Error ? e.message : String(e), name } };
     }
@@ -2941,19 +3911,23 @@ const smbShareDeleteAction: ActionDescriptor<TruenasActionContext> = {
     const names = strArray(input, 'names');
     if (names.length === 0) return { success: false, details: { error: 'No share names provided' } };
     let deleted = 0;
+    const notes: Record<string, string> = {};
     const missing: string[] = [];
     const errors: Record<string, string> = {};
     for (const n of names) {
       const found = await findShareId(ctx, 'sharing.smb.query', n);
       if (!found) { missing.push(n); continue; } // already gone — idempotent skip
       try {
-        await ctx.client.call('sharing.smb.delete', [found.id], ctx.creds);
-        deleted++;
+        // Transport-tolerant — a lost response is confirmed by re-querying (the share must be GONE).
+        const r = await dispatchWrite(ctx, 'sharing.smb.delete', [found.id], { verify: async () => { try { return findShareId(ctx, 'sharing.smb.query', n) === null; } catch { return null; } } });
+        if (r.note) notes[n] = r.note;
+        if (r.unconfirmed) errors[n] = 'Delete could not be confirmed (transport drop, state unreadable) — re-run the step'; // destructive: never assume applied
+        else deleted++;
       } catch (e) {
         errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -2979,8 +3953,9 @@ const nfsShareCreateAction: ActionDescriptor<TruenasActionContext> = {
     const params: Record<string, unknown> = { path, hosts: hostsRaw.filter((h): h is string => typeof h === 'string') };
     if (inBool(input, 'readOnly')) params['ro'] = true;
     try {
-      await ctx.client.call('sharing.nfs.create', [params], ctx.creds);
-      return { success: true, applied: true, details: { path } };
+      // Transport-tolerant — a lost response is confirmed by re-querying (the export must exist).
+      const dr = await dispatchWrite(ctx, 'sharing.nfs.create', [params], { verify: async () => { try { return findShareId(ctx, 'sharing.nfs.query', undefined, path) !== null; } catch { return null; } } });
+      return { success: true, applied: true, details: { path, ...(dr.note ? { transportNote: dr.note } : {}) } };
     } catch (e) {
       if (isAlreadyExists(e)) return { success: true, applied: false, details: { path, note: 'NFS export already exists' } };
       return { success: false, details: { error: e instanceof Error ? e.message : String(e), path } };
@@ -3011,8 +3986,9 @@ const nfsShareUpdateAction: ActionDescriptor<TruenasActionContext> = {
     const params: Record<string, unknown> = { path, hosts: hostsRaw.filter((h): h is string => typeof h === 'string') };
     if ('readOnly' in input) params['ro'] = inBool(input, 'readOnly') ?? false;
     try {
-      await ctx.client.call('sharing.nfs.update', [found.id, params], ctx.creds);
-      return { success: true, applied: true, details: { path } };
+      // Transport-tolerant — a partial update re-sent with the same values is harmless.
+      const dr = await dispatchWrite(ctx, 'sharing.nfs.update', [found.id, params], { idempotentRetry: true });
+      return { success: true, applied: true, details: { path, ...(dr.note ? { transportNote: dr.note } : {}) } };
     } catch (e) {
       return { success: false, details: { error: e instanceof Error ? e.message : String(e), path } };
     }
@@ -3034,19 +4010,23 @@ const nfsShareDeleteAction: ActionDescriptor<TruenasActionContext> = {
     const paths = strArray(input, 'paths');
     if (paths.length === 0) return { success: false, details: { error: 'No export paths provided' } };
     let deleted = 0;
+    const notes: Record<string, string> = {};
     const missing: string[] = [];
     const errors: Record<string, string> = {};
     for (const p of paths) {
       const found = await findShareId(ctx, 'sharing.nfs.query', undefined, p);
       if (!found) { missing.push(p); continue; } // already gone — idempotent skip
       try {
-        await ctx.client.call('sharing.nfs.delete', [found.id], ctx.creds);
-        deleted++;
+        // Transport-tolerant — a lost response is confirmed by re-querying (the export must be GONE).
+        const r = await dispatchWrite(ctx, 'sharing.nfs.delete', [found.id], { verify: async () => { try { return findShareId(ctx, 'sharing.nfs.query', undefined, p) === null; } catch { return null; } } });
+        if (r.note) notes[p] = r.note;
+        if (r.unconfirmed) errors[p] = 'Delete could not be confirmed (transport drop, state unreadable) — re-run the step'; // destructive: never assume applied
+        else deleted++;
       } catch (e) {
         errors[p] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -3068,7 +4048,8 @@ const iscsiTargetCreateAction: ActionDescriptor<TruenasActionContext> = {
     const name = inStr(input, 'name');
     if (!name) return { success: false, details: { error: '"name" is required' } };
     try {
-      await ctx.client.call('iscsi.target.create', [{ name }], ctx.creds);
+      // Transport-tolerant — a lost response is confirmed by re-querying (the target must exist).
+      const dr = await dispatchWrite(ctx, 'iscsi.target.create', [{ name }], { verify: async () => { try { return findShareId(ctx, 'iscsi.target.query', name) !== null; } catch { return null; } } });
       // Attach a LUN when a backing dataset was given. Modern TrueNAS keeps the
       // target↔extent association in its OWN table (iscsi.targetextent) — extents
       // are created standalone, then linked to the target by id.
@@ -3081,16 +4062,27 @@ const iscsiTargetCreateAction: ActionDescriptor<TruenasActionContext> = {
           let extent = await findShareId(ctx, 'iscsi.extent.query', undefined, path);
           if (!extent) {
             const extentName = path.split('/').filter(Boolean).pop() || `lun-${target.id}`;
-            await ctx.client.call('iscsi.extent.create', [{ name: extentName, type: 'FILE', path }], ctx.creds);
+            // Transport-tolerant — a lost response is confirmed by re-querying (the extent must exist on the path).
+            await dispatchWrite(ctx, 'iscsi.extent.create', [{ name: extentName, type: 'FILE', path }], { verify: async () => { try { return findShareId(ctx, 'iscsi.extent.query', undefined, path) !== null; } catch { return null; } } });
             extent = await findShareId(ctx, 'iscsi.extent.query', undefined, path) ?? (await findShareId(ctx, 'iscsi.extent.query', extentName));
           }
           if (!extent) return { success: true, applied: true, details: { name, note: `Target created but LUN could not be resolved for ${path}` } };
-          await ctx.client.call('iscsi.targetextent.create', [{ target: target.id, extent: extent.id }], ctx.creds);
+          // Transport-tolerant — a lost response is confirmed by re-querying the target↔extent link.
+          await dispatchWrite(ctx, 'iscsi.targetextent.create', [{ target: target.id, extent: extent.id }], {
+            verify: async () => {
+              try {
+                const rows = await ctx.client.call<Record<string, unknown>[]>('iscsi.targetextent.query', [], ctx.creds);
+                return (rows ?? []).some((r) => pickNumber(r, ['target']) === target.id && pickNumber(r, ['extent']) === extent.id); // linked — applied
+              } catch {
+                return null;
+              }
+            },
+          });
         } catch (e) {
           return { success: true, applied: true, details: { name, note: `Target created but LUN attach failed: ${e instanceof Error ? e.message : String(e)}` } };
         }
       }
-      return { success: true, applied: true, details: { name, ...(path ? { path } : {}) } };
+      return { success: true, applied: true, details: { name, ...(path ? { path } : {}), ...(dr.note ? { transportNote: dr.note } : {}) } };
     } catch (e) {
       if (isAlreadyExists(e)) return { success: true, applied: false, details: { name, note: 'iSCSI target already exists' } };
       return { success: false, details: { error: e instanceof Error ? e.message : String(e), name } };
@@ -3113,19 +4105,23 @@ const iscsiTargetDeleteAction: ActionDescriptor<TruenasActionContext> = {
     const names = strArray(input, 'names');
     if (names.length === 0) return { success: false, details: { error: 'No target names provided' } };
     let deleted = 0;
+    const notes: Record<string, string> = {};
     const missing: string[] = [];
     const errors: Record<string, string> = {};
     for (const n of names) {
       const found = await findShareId(ctx, 'iscsi.target.query', n);
       if (!found) { missing.push(n); continue; } // already gone — idempotent skip
       try {
-        await ctx.client.call('iscsi.target.delete', [found.id], ctx.creds);
-        deleted++;
+        // Transport-tolerant — a lost response is confirmed by re-querying (the target must be GONE).
+        const r = await dispatchWrite(ctx, 'iscsi.target.delete', [found.id], { verify: async () => { try { return findShareId(ctx, 'iscsi.target.query', n) === null; } catch { return null; } } });
+        if (r.note) notes[n] = r.note;
+        if (r.unconfirmed) errors[n] = 'Delete could not be confirmed (transport drop, state unreadable) — re-run the step'; // destructive: never assume applied
+        else deleted++;
       } catch (e) {
         errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -3149,7 +4145,8 @@ const nvmeofSubsystemCreateAction: ActionDescriptor<TruenasActionContext> = {
     try {
       // The subsystem collection is `nvmet.subsys.*` (NOT "subsystem") — verified
       // against the live method catalog on 25.10 + 26 BETA appliances.
-      await ctx.client.call('nvmet.subsys.create', [{ name }], ctx.creds);
+      // Transport-tolerant — a lost response is confirmed by re-querying (the subsystem must exist).
+      const dr = await dispatchWrite(ctx, 'nvmet.subsys.create', [{ name }], { verify: async () => { try { return findShareId(ctx, 'nvmet.subsys.query', name) !== null; } catch { return null; } } });
       const path = inStr(input, 'path');
       if (path) {
         const found = await findShareId(ctx, 'nvmet.subsys.query', name);
@@ -3157,13 +4154,27 @@ const nvmeofSubsystemCreateAction: ActionDescriptor<TruenasActionContext> = {
           try {
             // namespace.create requires subsys_id + device_type + device_path.
             // A dataset-backed namespace is a FILE-type namespace on its mountpoint.
-            await ctx.client.call('nvmet.namespace.create', [{ subsys_id: found.id, device_type: 'FILE', device_path: path }], ctx.creds);
+            // Transport-tolerant — a lost response is confirmed by re-querying the namespace list.
+            await dispatchWrite(ctx, 'nvmet.namespace.create', [{ subsys_id: found.id, device_type: 'FILE', device_path: path }], {
+              verify: async () => {
+                try {
+                  const rows = await ctx.client.call<Record<string, unknown>[]>('nvmet.namespace.query', [], ctx.creds);
+                  return (rows ?? []).some((r) => {
+                    const subsysObj = (r['subsys'] ?? {}) as Record<string, unknown>;
+                    const sid = pickNumber(subsysObj, ['id']) ?? pickNumber(r, ['subsystem']);
+                    return sid === found.id && (pickString(r, ['dataset']) === path || pickString(r, ['device_path']) === path); // present — applied
+                  });
+                } catch {
+                  return null;
+                }
+              },
+            });
           } catch (e) {
             return { success: true, applied: true, details: { name, note: `Subsystem created but namespace attach failed: ${e instanceof Error ? e.message : String(e)}` } };
           }
         }
       }
-      return { success: true, applied: true, details: { name, ...(path ? { path } : {}) } };
+      return { success: true, applied: true, details: { name, ...(path ? { path } : {}), ...(dr.note ? { transportNote: dr.note } : {}) } };
     } catch (e) {
       if (isAlreadyExists(e)) return { success: true, applied: false, details: { name, note: 'NVMe-oF subsystem already exists' } };
       return { success: false, details: { error: e instanceof Error ? e.message : String(e), name } };
@@ -3186,19 +4197,23 @@ const nvmeofSubsystemDeleteAction: ActionDescriptor<TruenasActionContext> = {
     const names = strArray(input, 'names');
     if (names.length === 0) return { success: false, details: { error: 'No subsystem NQNs provided' } };
     let deleted = 0;
+    const notes: Record<string, string> = {};
     const missing: string[] = [];
     const errors: Record<string, string> = {};
     for (const n of names) {
       const found = await findShareId(ctx, 'nvmet.subsys.query', n);
       if (!found) { missing.push(n); continue; } // already gone — idempotent skip
       try {
-        await ctx.client.call('nvmet.subsys.delete', [found.id], ctx.creds);
-        deleted++;
+        // Transport-tolerant — a lost response is confirmed by re-querying (the subsystem must be GONE).
+        const r = await dispatchWrite(ctx, 'nvmet.subsys.delete', [found.id], { verify: async () => { try { return findShareId(ctx, 'nvmet.subsys.query', n) === null; } catch { return null; } } });
+        if (r.note) notes[n] = r.note;
+        if (r.unconfirmed) errors[n] = 'Delete could not be confirmed (transport drop, state unreadable) — re-run the step'; // destructive: never assume applied
+        else deleted++;
       } catch (e) {
         errors[n] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -3238,6 +4253,7 @@ const imagesDeleteAction: ActionDescriptor<TruenasActionContext> = {
     }
 
     let deleted = 0;
+    const notes: Record<string, string> = {};
     const missing: string[] = [];
     const errors: Record<string, string> = {};
     const doneIds = new Set<string>(); // several tags can share one image id — delete it once
@@ -3250,13 +4266,25 @@ const imagesDeleteAction: ActionDescriptor<TruenasActionContext> = {
       if (doneIds.has(target)) continue;
       doneIds.add(target);
       try {
-        await ctx.client.call('app.image.delete', [target, { force: false }], ctx.creds);
-        deleted++;
+        // Transport-tolerant — a lost response is confirmed by re-querying (the image must be GONE).
+        const r = await dispatchWrite(ctx, 'app.image.delete', [target, { force: false }], {
+          verify: async () => {
+            try {
+              const after = await ctx.client.call<Record<string, unknown>[]>('app.image.query', [], ctx.creds);
+              return !(after ?? []).some((row) => pickString(row, ['id']) === target); // gone — applied; still present — not applied
+            } catch {
+              return null;
+            }
+          },
+        });
+        if (r.note) notes[ref] = r.note;
+        if (r.unconfirmed) errors[ref] = 'Delete could not be confirmed (transport drop, state unreadable) — re-run the step'; // destructive: never assume applied
+        else deleted++;
       } catch (e) {
         errors[ref] = e instanceof Error ? e.message : String(e);
       }
     }
-    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, details: { deleted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -3295,6 +4323,7 @@ const imagesUpdateAction: ActionDescriptor<TruenasActionContext> = {
     }
 
     let pulled = 0;
+    const notes: Record<string, string> = {};
     const missing: string[] = [];
     const errors: Record<string, string> = {};
     for (const ref of refs) {
@@ -3304,7 +4333,10 @@ const imagesUpdateAction: ActionDescriptor<TruenasActionContext> = {
       }
       try {
         // app.image.pull is a JOB method — it returns the job id immediately.
-        const r = await ctx.client.call<unknown>('app.image.pull', [{ image: ref }], ctx.creds);
+        // Transport-tolerant — re-pulling an image whose digest already matches upstream is a no-op, so a lost response can be re-dispatched blindly (the final update_available check below still proves the outcome).
+        const dr = await dispatchWrite(ctx, 'app.image.pull', [{ image: ref }], { idempotentRetry: true });
+        if (dr.note) notes[ref] = dr.note;
+        const r = dr.value;
         let jobId: number | undefined;
         if (typeof r === 'number') jobId = r;
         else if (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number') jobId = (r as Record<string, unknown>)['id'] as number;
@@ -3338,7 +4370,7 @@ const imagesUpdateAction: ActionDescriptor<TruenasActionContext> = {
       } catch { /* verification is best-effort — the pulls themselves succeeded */ }
     }
 
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { pulled, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { pulled, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -4056,10 +5088,23 @@ function serviceControlAction(
       const name = str(input, 'name');
       if (!name) return { success: false, details: { error: 'Service name is required' } };
 
+      const notes: string[] = [];
       // service.control is a JOB method — it resolves to the job id immediately.
       let jobId: number | null = null;
       try {
-        const r = await ctx.client.call<unknown>('service.control', [verb, name], ctx.creds);
+        // Transport-tolerant — a lost response is confirmed by re-reading service.started.
+        const dr = await dispatchWrite(ctx, 'service.control', [verb, name], {
+          verify: async () => {
+            try {
+              const running = await ctx.client.call<boolean>('service.started', [name], ctx.creds);
+              return verb === 'STOP' ? !running : !!running; // in the target state — applied
+            } catch {
+              return null;
+            }
+          },
+        });
+        if (dr.note) notes.push(dr.note);
+        const r = dr.value;
         if (typeof r === 'number') jobId = r;
         else if (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number') {
           jobId = (r as Record<string, unknown>)['id'] as number;
@@ -4095,7 +5140,7 @@ function serviceControlAction(
         const running = await ctx.client.call<boolean>('service.started', [name], ctx.creds);
         verified = verb === 'STOP' ? !running : !!running;
       } catch { /* verification best-effort — the job already settled */ }
-      return { success: true, applied: true, verified, details: { service: name, jobId, state: waitState } };
+      return { success: true, applied: true, verified, details: { service: name, jobId, state: waitState, ...(notes.length > 0 ? { notes } : {}) } };
     },
   };
 }
@@ -4146,6 +5191,14 @@ export const registry = createRegistry<TruenasActionContext>([
   vmsCdromAttachAction,
   vmsDeviceDetachAction,
   vmsDeviceEditAction,
+  vmsDeviceTypesAction,
+  vmsDiskChoicesAction,
+  vmsPciChoicesAction,
+  vmsUsbChoicesAction,
+  vmsDiskAttachAction,
+  vmsDisplayAttachAction,
+  vmsPciAttachAction,
+  vmsUsbAttachAction,
   storageScrubAction,
   storageSnapshotAction,
   storageQuotaSetAction,

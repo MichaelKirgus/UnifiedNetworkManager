@@ -1,13 +1,13 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { CheckCircle2, Disc, EyeOff, Loader2, Monitor, Pause, Play, Plug, RefreshCw, RotateCw, Square, Trash2, Unplug, X, Zap } from 'lucide-react';
+import { CheckCircle2, EyeOff, Loader2, Monitor, Pause, Play, Plus, RefreshCw, RotateCw, Square, Trash2, Unplug, X, Zap } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { formatBytes, formatDuration } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
-import { SchemaForm, validateSchema } from '../components/SchemaForm';
+import { defaultValues, SchemaForm, validateSchema } from '../components/SchemaForm';
 import { READONLY_MESSAGE, runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, CatalogEntry, Device, FileRepoEntry, InputSchema, VmDevice, VmNic, VmRow } from '../api/client';
 import { useTimeFormat } from '../utils/time';
@@ -266,200 +266,13 @@ function groupByDevice<T>(rows: T[], keyOf: (r: T) => { pluginId: string; device
 }
 
 // ---------------------------------------------------------------------------
-// NIC attach dialog — reads vms.nic-choices (read-only), submits vms.nic-attach
-// through the plan workflow (2FA-gated).
+// Add-device dialog — the NIC attach (vms.nic-choices → vms.nic-attach) and
+// CD-ROM/ISO attach (repo / dataset / manual path → vms.cdrom-attach) flows are
+// folded into it below, driven by the plugin's vms.device-types descriptor.
 // ---------------------------------------------------------------------------
 
 interface NicAttachTarget {
   row: VmRow;
-}
-
-function NicAttachDialog({ target, onClose }: { target: NicAttachTarget; onClose: () => void }) {
-  const { mode } = useExecutionMode();
-  const isPlanMode = mode === 'plan';
-  // Read-Only: the NIC change cannot be saved or applied.
-  const isReadOnly = mode === 'readonly';
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [bridges, setBridges] = useState<string[]>([]);
-  const [macvlans, setMacvlans] = useState<string[]>([]);
-  const [selected, setSelected] = useState('');
-  const [nicType, setNicType] = useState<'BRIDGE' | 'MACVLAN'>('BRIDGE');
-  const [mac, setMac] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [reauth, setReauth] = useState(false);
-  // Plan mode: the NIC-attach plan was saved without executing.
-  const [saved, setSaved] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await api.executePluginAction(target.row.pluginId, { deviceId: target.row.deviceId, actionId: 'vms.nic-choices', input: {} });
-        if (!cancelled) {
-          setBridges(Array.isArray(res.details.bridges) ? (res.details.bridges as string[]) : []);
-          setMacvlans(Array.isArray(res.details.macvlans) ? (res.details.macvlans as string[]) : []);
-        }
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [target.row.pluginId, target.row.deviceId]);
-
-  function pickInterface(value: string) {
-    setSelected(value);
-    setNicType(macvlans.includes(value) ? 'MACVLAN' : 'BRIDGE');
-  }
-
-  async function submit() {
-    if (isReadOnly) return; // Read-Only — the button is disabled; this is a safety net.
-    if (!selected) return;
-    setSaving(true);
-    setError(null);
-    const input: Record<string, unknown> = { name: target.row.name, nicAttach: selected, type: nicType };
-    if (mac.trim()) input['mac'] = mac.trim().toUpperCase();
-    const attempt = async () => {
-      await createAndExecutePlan(target.row.pluginId, 'vms.nic-attach', [{ deviceId: target.row.deviceId, input }], mode);
-      if (isPlanMode) {
-        setSaved(true);
-        return;
-      }
-      onClose();
-    };
-    try {
-      await attempt();
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) setReauth(true);
-      else setError(err instanceof Error ? err.message : String(err));
-      setSaving(false);
-    }
-  }
-
-  // Plan mode: the plan was saved without executing — offer to close.
-  if (saved) {
-    return (
-      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-        <div
-          className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <header className="flex items-center justify-between border-b border-border px-4 py-3">
-            <h2 className="text-base font-semibold text-foreground">Attach NIC — {target.row.name}</h2>
-            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-              <X size={16} />
-            </button>
-          </header>
-          <div className="space-y-3 px-4 py-4">
-            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
-              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
-              NIC attach saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
-            </div>
-          </div>
-          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">
-              Close
-            </button>
-          </footer>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div>
-            <h2 className="text-base font-semibold text-foreground">Attach NIC — {target.row.name}</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">Applies via the plan workflow on {target.row.deviceName ?? target.row.deviceId}.</p>
-          </div>
-          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-            <X size={16} />
-          </button>
-        </header>
-
-        <div className="space-y-4 px-4 py-4">
-          {isReadOnly && (
-            <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
-              <EyeOff size={14} className="mt-0.5 shrink-0" />
-              Read-only mode is active — this change cannot be saved or applied. Switch to Plan or Execute in the top bar.
-            </div>
-          )}
-          {loading && (
-            <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 size={14} className="animate-spin" /> Loading available interfaces…</p>
-          )}
-          {error && !reauth && (
-            <div className="rounded border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
-          )}
-
-          {!loading && !error && (
-            <>
-              <div>
-                <label className="mb-1 block text-xs font-medium text-secondary">Interface</label>
-                <select
-                  value={selected}
-                  onChange={(e) => pickInterface(e.target.value)}
-                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground"
-                >
-                  <option value="">Select a bridge or MACVLAN…</option>
-                  {bridges.length > 0 && (
-                    <optgroup label="Bridges">
-                      {bridges.map((b) => <option key={b} value={b}>{b}</option>)}
-                    </optgroup>
-                  )}
-                  {macvlans.length > 0 && (
-                    <optgroup label="MACVLANs">
-                      {macvlans.map((m) => <option key={m} value={m}>{m}</option>)}
-                    </optgroup>
-                  )}
-                </select>
-              </div>
-
-              <div>
-                <label className="mb-1 block text-xs font-medium text-secondary">MAC address (optional)</label>
-                <input
-                  type="text"
-                  value={mac}
-                  onChange={(e) => setMac(e.target.value)}
-                  placeholder="Auto-assigned when empty"
-                  pattern="^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$"
-                  className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm text-foreground placeholder:text-faint"
-                />
-              </div>
-            </>
-          )}
-        </div>
-
-        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
-          <button
-            type="button"
-            disabled={!selected || saving || isReadOnly}
-            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
-            onClick={() => void submit()}
-            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {saving && <Loader2 size={12} className="animate-spin" />}
-            {isPlanMode ? 'Save as plan' : 'Attach NIC'}
-          </button>
-        </footer>
-
-        {reauth && (
-          <ReauthDialog
-            contextLabel={`Attach NIC to ${target.row.name}`}
-            onClose={() => setReauth(false)}
-            onSuccess={async () => {
-              setReauth(false);
-              try { await submit(); } catch { /* dialog stays open */ }
-            }}
-          />
-        )}
-      </div>
-    </div>
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -890,44 +703,108 @@ function CreateVmDialog({ targets, onClose }: { targets: CreateVmTarget[]; onClo
 //   3. A manual /mnt/ path.
 // ---------------------------------------------------------------------------
 
-interface CdromTarget {
-  row: VmRow;
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Add-device dialog — hypervisor-generic. The plugin's `vms.device-types`
+// read action advertises every attachable device type with its form fields
+// (inputSchema), whether the VM must be stopped, and which read-only action
+// feeds a picker. This dialog renders that contract generically — it has NO
+// knowledge of TrueNAS dtypes, so a future Proxmox plugin with other types /
+// fields / actions gets this same dialog for free. Submit goes through the
+// plan workflow as `vms.<dtype-lowercase>-attach` (2FA-gated).
+// ---------------------------------------------------------------------------
+
+/** One attachable device type as advertised in vms.device-types details.types[]. */
+interface VmDeviceTypeDescriptor {
+  dtype: string;
+  label: string;
+  description?: string;
+  /** True when the appliance requires a STOPPED VM for this type. */
+  requiresStopped: boolean;
+  /** Read-only catalog action whose details feed the dialog's picker (optional). */
+  choicesActionId?: string;
+  inputSchema: InputSchema;
 }
 
-function CdromAttachDialog({ target, onClose }: { target: CdromTarget; onClose: () => void }) {
+/** One normalized picker entry from a type's choices action. */
+interface VmDeviceChoice { id: string; label: string; available?: boolean; hint?: string; }
+
+/** Normalizes the details of a type's choices action into picker entries. */
+function normalizeChoices(dtype: string, details: Record<string, unknown>): { list: VmDeviceChoice[]; iommu?: boolean } {
+  // NIC choices are two flat string lists (bridges + macvlans), not object rows.
+  if (dtype.toUpperCase() === 'NIC') {
+    const bridges = Array.isArray(details['bridges']) ? (details['bridges'] as string[]) : [];
+    const macvlans = Array.isArray(details['macvlans']) ? (details['macvlans'] as string[]) : [];
+    return { list: [
+      ...bridges.map((b) => ({ id: b, label: b })),
+      ...macvlans.map((m) => ({ id: m, label: m, hint: 'MACVLAN' })),
+    ] };
+  }
+  const raw = (details['devices'] ?? details['disks']) as Array<Record<string, unknown>> | undefined;
+  if (!Array.isArray(raw)) return { list: [] };
+  let list: VmDeviceChoice[];
+  switch (dtype.toUpperCase()) {
+    case 'PCI':
+      // Usable devices first — the picker should lead with what works.
+      list = raw
+        .map((x) => ({ id: String(x['id'] ?? ''), label: String(x['description'] ?? x['id']), available: x['available'] === true, hint: x['available'] === true ? undefined : (typeof x['error'] === 'string' && x['error'] !== '' ? x['error'] : 'unavailable') }))
+        .sort((a, b) => Number(b.available ?? false) - Number(a.available ?? false));
+      break;
+    case 'USB':
+      list = raw.map((x) => ({ id: String(x['id'] ?? ''), label: String(x['description'] ?? x['id']), available: x['available'] === true, hint: x['available'] === true ? undefined : 'unavailable' }));
+      break;
+    case 'DISK':
+      list = raw.map((x) => ({ id: String(x['path'] ?? ''), label: String(x['name'] ?? x['path']) }));
+      break;
+    default:
+      list = raw.map((x) => ({ id: String(x['id'] ?? ''), label: String(x['description'] ?? x['id']) }));
+  }
+  return { list, ...(typeof details['iommuEnabled'] === 'boolean' ? { iommu: details['iommuEnabled'] as boolean } : {}) };
+}
+
+function AttachDeviceDialog({ target, stopped, onClose }: { target: NicAttachTarget; stopped: boolean; onClose: () => void }) {
   const { mode } = useExecutionMode();
   const isPlanMode = mode === 'plan';
   const isReadOnly = mode === 'readonly';
+  const row = target.row;
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [source, setSource] = useState<'repo' | 'dataset' | 'path'>('repo');
-  // Repo source.
-  const [repoFiles, setRepoFiles] = useState<FileRepoEntry[]>([]);
-  const [repoFileId, setRepoFileId] = useState('');
-  // Dataset source (existing ISOs on the appliance).
-  const [datasets, setDatasets] = useState<{ name: string; mountpoint: string }[]>([]);
-  const [dataset, setDataset] = useState('');
-  const [isoFiles, setIsoFiles] = useState<{ path: string; name: string; sizeBytes: number | null }[]>([]);
-  const [isoPath, setIsoPath] = useState('');
-  // Manual path.
-  const [manualPath, setManualPath] = useState('');
+  const [types, setTypes] = useState<VmDeviceTypeDescriptor[]>([]);
+  const [dtype, setDtype] = useState('');
+  const [values, setValues] = useState<Record<string, unknown>>({});
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [choiceData, setChoiceData] = useState<{ list: VmDeviceChoice[]; iommu?: boolean } | null>(null);
+  // CD-ROM/ISO source data — loaded when the CDROM type is selected (repo files,
+  // appliance datasets and per-dataset ISO lists). The `source` field in values
+  // picks which of these sections renders.
+  const [cdromRepoFiles, setCdromRepoFiles] = useState<FileRepoEntry[]>([]);
+  const [cdromDatasets, setCdromDatasets] = useState<{ name: string; mountpoint: string }[]>([]);
+  const [cdromIsoFiles, setCdromIsoFiles] = useState<{ path: string; name: string; sizeBytes: number | null }[]>([]);
+  const [cdromIsoPath, setCdromIsoPath] = useState('');
+  const [cdromManualPath, setCdromManualPath] = useState('');
   const [saving, setSaving] = useState(false);
   const [reauth, setReauth] = useState(false);
   // Plan mode: the attach plan was saved without executing.
   const [saved, setSaved] = useState(false);
 
+  // Load the descriptor catalog that drives this whole dialog.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [filesRes, choicesRes] = await Promise.all([
-          api.repoFiles('iso').catch(() => ({ files: [] as FileRepoEntry[] })),
-          api.executePluginAction(target.row.pluginId, { deviceId: target.row.deviceId, actionId: 'vms.create-choices', input: {} }).catch(() => null),
-        ]);
-        if (cancelled) return;
-        setRepoFiles(Array.isArray(filesRes.files) ? filesRes.files : []);
-        const ds = choicesRes?.details.datasets;
-        setDatasets(Array.isArray(ds) ? (ds as { name: string; mountpoint: string }[]) : []);
+        const res = await api.executePluginAction(row.pluginId, { deviceId: row.deviceId, actionId: 'vms.device-types', input: {} });
+        if (!cancelled) {
+          const raw = Array.isArray(res.details.types) ? (res.details.types as VmDeviceTypeDescriptor[]) : [];
+          // A VM may have at most ONE display (appliance rule) — hide the type once it exists.
+          const visible = raw.filter((t) => !(t.dtype === 'DISPLAY' && devicesOf(row).some((d) => d.dtype === 'DISPLAY')));
+          setTypes(visible);
+          if (visible.length > 0) {
+            setDtype(visible[0].dtype);
+            setValues(defaultValues(visible[0].inputSchema));
+          }
+        }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -935,54 +812,175 @@ function CdromAttachDialog({ target, onClose }: { target: CdromTarget; onClose: 
       }
     })();
     return () => { cancelled = true; };
-  }, [target.row.pluginId, target.row.deviceId]);
+  }, [row.pluginId, row.deviceId]);
 
-  // List the ISOs of the chosen dataset (vms.iso-choices — read-only).
+  const selectedType = types.find((t) => t.dtype === dtype) ?? null;
+
+  // Load the picker for the selected type (disk / pci / usb / nic choices).
   useEffect(() => {
-    if (!dataset) { setIsoFiles([]); return; }
+    const actionId = selectedType?.choicesActionId;
+    if (!actionId || !selectedType) { setChoiceData(null); return; }
+    const dtype = selectedType.dtype;
     let cancelled = false;
     (async () => {
       try {
-        const res = await api.executePluginAction(target.row.pluginId, { deviceId: target.row.deviceId, actionId: 'vms.iso-choices', input: { dataset } });
-        if (!cancelled) setIsoFiles(Array.isArray(res.details.files) ? (res.details.files as { path: string; name: string; sizeBytes: number | null }[]) : []);
-      } catch {
-        if (!cancelled) setIsoFiles([]);
+        const res = await api.executePluginAction(row.pluginId, { deviceId: row.deviceId, actionId, input: {} });
+        if (!cancelled) setChoiceData(normalizeChoices(dtype, res.details));
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
       }
     })();
     return () => { cancelled = true; };
-  }, [dataset, target.row.pluginId, target.row.deviceId]);
+  }, [row.pluginId, row.deviceId, selectedType?.choicesActionId]);
 
-  function selectedPath(): string {
-    if (source === 'path') return manualPath.trim();
-    if (source === 'dataset') return isoPath;
-    return ''; // repo — the plugin resolves <mount>/<fileName> itself
+  // CD-ROM source data — repo files + appliance datasets (both cheap reads).
+  useEffect(() => {
+    if (!selectedType || selectedType.dtype.toUpperCase() !== 'CDROM') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [filesRes, choicesRes] = await Promise.all([
+          api.repoFiles('iso').catch(() => ({ files: [] as FileRepoEntry[] })),
+          api.executePluginAction(row.pluginId, { deviceId: row.deviceId, actionId: 'vms.create-choices', input: {} }).catch(() => null),
+        ]);
+        if (cancelled) return;
+        setCdromRepoFiles(Array.isArray(filesRes.files) ? filesRes.files : []);
+        const ds = choicesRes?.details.datasets;
+        setCdromDatasets(Array.isArray(ds) ? (ds as { name: string; mountpoint: string }[]) : []);
+      } catch { /* best-effort — the manual path source still works */ }
+    })();
+    return () => { cancelled = true; };
+  }, [row.pluginId, row.deviceId, selectedType?.dtype]);
+
+  // ISOs of the chosen dataset (vms.iso-choices — read-only).
+  const cdromDataset = String(values['dataset'] ?? '');
+  useEffect(() => {
+    if (!selectedType || selectedType.dtype.toUpperCase() !== 'CDROM' || !cdromDataset) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.executePluginAction(row.pluginId, { deviceId: row.deviceId, actionId: 'vms.iso-choices', input: { dataset: cdromDataset } });
+        if (!cancelled) setCdromIsoFiles(Array.isArray(res.details.files) ? (res.details.files as { path: string; name: string; sizeBytes: number | null }[]) : []);
+      } catch {
+        if (!cancelled) setCdromIsoFiles([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [row.pluginId, row.deviceId, selectedType?.dtype, cdromDataset]);
+
+  function pickType(t: VmDeviceTypeDescriptor) {
+    setDtype(t.dtype);
+    setValues(defaultValues(t.inputSchema));
+    setFieldErrors({});
   }
 
-  async function submit() {
-    if (isReadOnly) return; // Read-Only — the button is disabled; safety net.
-    const input: Record<string, unknown> = { name: target.row.name };
-    if (source === 'repo') {
-      if (!repoFileId) return;
-      const ds = dataset || undefined;
-      if (!ds) return; // a repo upload needs a target dataset
-      input['repoFileId'] = repoFileId;
-      input['dataset'] = ds;
-    } else if (source === 'dataset') {
-      if (!isoPath) return;
-      input['path'] = isoPath;
-    } else {
-      const p = manualPath.trim();
-      if (!p.startsWith('/mnt/')) return;
-      input['path'] = p;
+  // Which schema fields are covered by a picker (or don't apply to the current
+  // disk/ISO mode) — they are hidden from SchemaForm and excluded from the submit.
+  const skippedKeys = useMemo(() => {
+    const skip = new Set<string>();
+    if (!selectedType) return skip;
+    switch (selectedType.dtype.toUpperCase()) {
+      case 'PCI': skip.add('pptdev'); break;
+      case 'USB': skip.add('usbDevice'); break;
+      case 'NIC': skip.add('nicAttach'); break; // covered by the interface picker
+      case 'DISK': {
+        const m = String(values['mode'] ?? 'existing');
+        if (m === 'existing') { skip.add('dataset'); skip.add('sizeBytes'); skip.add('zvolName'); }
+        else { skip.add('path'); }
+        break;
+      }
+      case 'CDROM':
+        // Every field is driven by the custom source section below (the source
+        // select + repo file / dataset / ISO pickers or a manual path).
+        skip.add('source'); skip.add('repoFileId'); skip.add('dataset'); skip.add('path');
+        break;
     }
+    return skip;
+  }, [selectedType, values]);
+
+  const formSchema = useMemo(() => {
+    if (!selectedType) return {} as InputSchema;
+    const out: InputSchema = {};
+    for (const [k, p] of Object.entries(selectedType.inputSchema)) if (!skippedKeys.has(k)) out[k] = p;
+    return out;
+  }, [selectedType, skippedKeys]);
+
+  // The picker's target field key (null = no picker for this type/mode).
+  const choiceField = useMemo(() => {
+    if (!selectedType || !choiceData) return null;
+    switch (selectedType.dtype.toUpperCase()) {
+      case 'PCI': return 'pptdev';
+      case 'USB': return 'usbDevice';
+      case 'NIC': return 'nicAttach';
+      case 'DISK': return values['mode'] === 'existing' ? 'path' : null;
+      default: return null;
+    }
+  }, [selectedType, choiceData, values]);
+
+  const needsStopped = selectedType?.requiresStopped === true && !stopped;
+
+  // CD-ROM source completeness — mirrors the old standalone dialog's canSubmit.
+  const cdromCanSubmit = useMemo(() => {
+    if (!selectedType || selectedType.dtype.toUpperCase() !== 'CDROM') return true;
+    const s = String(values['source'] ?? 'repo');
+    if (s === 'repo') return !!values['repoFileId'] && !!values['dataset'];
+    if (s === 'dataset') return !!cdromIsoPath;
+    return cdromManualPath.trim().startsWith('/mnt/');
+  }, [selectedType, values, cdromIsoPath, cdromManualPath]);
+
+  async function submit() {
+    if (isReadOnly || !selectedType) return; // safety net — the button is disabled
+    const errors: Record<string, string> = validateSchema(selectedType.inputSchema, values);
+    // Conditional requirements SchemaForm can't express on its own.
+    if (choiceField && choiceData && !(values[choiceField] !== undefined && values[choiceField] !== '')) {
+      errors[choiceField] = 'Required';
+    }
+    if (selectedType.dtype === 'DISK' && String(values['mode'] ?? 'existing') === 'new-zvol') {
+      if (!values['dataset']) errors['dataset'] = 'Required';
+      if (typeof values['sizeBytes'] !== 'number') errors['sizeBytes'] = 'Required';
+    }
+    // CD-ROM — the source section's pickers are outside SchemaForm, so their
+    // requirements are checked here.
+    if (selectedType.dtype === 'CDROM' && !cdromCanSubmit) {
+      const s = String(values['source'] ?? 'repo');
+      if (s === 'repo') {
+        if (!values['repoFileId']) errors['repoFileId'] = 'Required';
+        if (!values['dataset']) errors['dataset'] = 'Required';
+      } else if (s === 'dataset') {
+        if (!cdromIsoPath) errors['path'] = 'Select an ISO';
+      } else if (!cdromManualPath.trim().startsWith('/mnt/')) {
+        errors['path'] = 'Must start with /mnt/';
+      }
+    }
+    setFieldErrors(errors);
+    if (Object.keys(errors).length > 0) return;
+
+    // Only the ACTIVE fields ride along — stale mode-irrelevant values are dropped.
+    const input: Record<string, unknown> = { name: row.name };
+    for (const k of Object.keys(selectedType.inputSchema)) {
+      if (skippedKeys.has(k)) continue;
+      const v = values[k];
+      if (v !== undefined && v !== '') input[k] = v;
+    }
+    // CD-ROM — the source section owns its fields, so build them explicitly.
+    if (selectedType.dtype === 'CDROM') {
+      const s = String(values['source'] ?? 'repo');
+      if (s === 'repo') {
+        input['repoFileId'] = values['repoFileId'];
+        input['dataset'] = values['dataset'];
+      } else if (s === 'dataset') {
+        input['path'] = cdromIsoPath;
+      } else {
+        input['path'] = cdromManualPath.trim();
+      }
+    }
+
     setSaving(true);
     setError(null);
+    const actionId = `vms.${selectedType.dtype.toLowerCase()}-attach`;
     const attempt = async () => {
-      await createAndExecutePlan(target.row.pluginId, 'vms.cdrom-attach', [{ deviceId: target.row.deviceId, input }], mode);
-      if (isPlanMode) {
-        setSaved(true);
-        return;
-      }
+      await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input }], mode);
+      if (isPlanMode) { setSaved(true); return; }
       onClose();
     };
     try {
@@ -994,21 +992,19 @@ function CdromAttachDialog({ target, onClose }: { target: CdromTarget; onClose: 
     }
   }
 
-  const canSubmit = source === 'repo' ? !!repoFileId && !!dataset : source === 'dataset' ? !!isoPath : manualPath.trim().startsWith('/mnt/');
-
   // Plan mode: the plan was saved without executing — offer to close.
   if (saved) {
     return (
       <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
         <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
           <header className="flex items-center justify-between border-b border-border px-4 py-3">
-            <h2 className="text-base font-semibold text-foreground">Attach CD-ROM — saved</h2>
+            <h2 className="text-base font-semibold text-foreground">Add device — {row.name}</h2>
             <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted"><X size={16} /></button>
           </header>
           <div className="space-y-3 px-4 py-4">
             <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
               <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
-              CD-ROM attach saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
+              Device attach saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
             </div>
           </div>
           <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
@@ -1024,8 +1020,8 @@ function CdromAttachDialog({ target, onClose }: { target: CdromTarget; onClose: 
       <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
         <header className="flex items-center justify-between border-b border-border px-4 py-3">
           <div>
-            <h2 className="text-base font-semibold text-foreground">Attach CD-ROM (ISO) — {target.row.name}</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">Applies via the plan workflow on {target.row.deviceName ?? target.row.deviceId}.</p>
+            <h2 className="text-base font-semibold text-foreground">Add device — {row.name}</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">Applies via the plan workflow on {row.deviceName ?? row.deviceId}.</p>
           </div>
           <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted"><X size={16} /></button>
         </header>
@@ -1038,86 +1034,168 @@ function CdromAttachDialog({ target, onClose }: { target: CdromTarget; onClose: 
             </div>
           )}
           {loading && (
-            <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 size={14} className="animate-spin" /> Loading ISO sources…</p>
+            <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 size={14} className="animate-spin" /> Loading attachable device types…</p>
           )}
           {error && !reauth && (
             <div className="rounded border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
           )}
 
-          {!loading && !error && (
+          {!loading && !error && types.length === 0 && (
+            <p className="text-sm text-muted-foreground">This hypervisor does not advertise any attachable device types.</p>
+          )}
+
+          {!loading && !error && types.length > 0 && selectedType && (
             <>
-              {/* Source picker. */}
-              <div>
-                <label className="mb-1 block text-xs font-medium text-secondary">ISO source</label>
-                <select value={source} onChange={(e) => setSource(e.target.value as 'repo' | 'dataset' | 'path')}
-                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground">
-                  <option value="repo">From UNM file repo (Files page)</option>
-                  <option value="dataset">Existing ISO on the appliance</option>
-                  <option value="path">Manual path (/mnt/…)</option>
-                </select>
+              {/* Type picker — one button per advertised dtype. */}
+              <div className="flex flex-wrap gap-1.5">
+                {types.map((t) => {
+                  const blocked = t.requiresStopped && !stopped;
+                  return (
+                    <button
+                      key={t.dtype}
+                      type="button"
+                      disabled={blocked || isReadOnly}
+                      title={blocked ? `Stop the VM first — ${t.label.toLowerCase()} requires a stopped VM` : t.description ?? t.label}
+                      onClick={() => pickType(t)}
+                      className={clsx(
+                        'rounded-md border px-2.5 py-1 text-xs font-medium',
+                        t.dtype === dtype ? 'border-primary bg-primary text-primary-fg' : 'border-border bg-background text-secondary hover:bg-muted',
+                        (blocked || isReadOnly) && 'cursor-not-allowed opacity-40',
+                      )}
+                    >
+                      {t.label}
+                    </button>
+                  );
+                })}
               </div>
 
-              {source === 'repo' && (
-                <>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-secondary">File from repo</label>
-                    <select value={repoFileId} onChange={(e) => setRepoFileId(e.target.value)}
-                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground">
-                      <option value="">Select a file…</option>
-                      {repoFiles.map((f) => (
-                        <option key={f.id} value={f.id}>{f.name} ({formatBytes(f.sizeBytes)})</option>
-                      ))}
-                    </select>
-                    {repoFiles.length === 0 && (
-                      <p className="mt-1 text-xs text-faint">No files in the repo yet — upload an ISO on the Files page first.</p>
-                    )}
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-secondary">Target dataset</label>
-                    <select value={dataset} onChange={(e) => setDataset(e.target.value)}
-                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground">
-                      <option value="">Select a dataset…</option>
-                      {datasets.map((d) => (
-                        <option key={d.name} value={d.name}>{d.name}</option>
-                      ))}
-                    </select>
-                    <p className="mt-1 text-xs text-faint">The ISO is streamed onto the appliance when missing, then attached.</p>
-                  </div>
-                </>
-              )}
-
-              {source === 'dataset' && (
-                <>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-secondary">Dataset</label>
-                    <select value={dataset} onChange={(e) => { setDataset(e.target.value); setIsoPath(''); }}
-                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground">
-                      <option value="">Select a dataset…</option>
-                      {datasets.map((d) => (
-                        <option key={d.name} value={d.name}>{d.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-secondary">ISO</label>
-                    <select value={isoPath} onChange={(e) => setIsoPath(e.target.value)} disabled={!dataset}
-                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground disabled:opacity-50">
-                      <option value="">Select an ISO…</option>
-                      {isoFiles.map((f) => (
-                        <option key={f.path} value={f.path}>{f.name}{f.sizeBytes != null ? ` (${formatBytes(f.sizeBytes)})` : ''}</option>
-                      ))}
-                    </select>
-                  </div>
-                </>
-              )}
-
-              {source === 'path' && (
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-secondary">ISO path</label>
-                  <input type="text" value={manualPath} onChange={(e) => setManualPath(e.target.value)} placeholder="/mnt/POOL/VM/debian.iso"
-                    pattern="^/mnt/.+"
-                    className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm text-foreground placeholder:text-faint" />
+              {/* State / capability warnings for the selected type. */}
+              {needsStopped && (
+                <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+                  <EyeOff size={14} className="mt-0.5 shrink-0" />
+                  {selectedType.label} requires a STOPPED VM — stop “{row.name}” first, then reopen this dialog.
                 </div>
+              )}
+              {selectedType.dtype.toUpperCase() === 'PCI' && choiceData?.iommu === false && (
+                <div className="flex items-start gap-2 rounded border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">
+                  <EyeOff size={14} className="mt-0.5 shrink-0" />
+                  IOMMU is not enabled on this host — PCIe passthrough will not work until it is turned on in the BIOS.
+                </div>
+              )}
+
+              {/* Picker fed by the type's choices action (disk / pci / usb). */}
+              {choiceField && choiceData && (
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-secondary">
+                    {(selectedType.inputSchema[choiceField]?.label) ?? 'Device'}
+                  </label>
+                  <select
+                    value={typeof values[choiceField] === 'string' ? (values[choiceField] as string) : ''}
+                    onChange={(e) => {
+                      const next: Record<string, unknown> = { ...values, [choiceField]: e.target.value || undefined };
+                      // NIC — the attachment kind follows the picked interface (MACVLAN hint).
+                      if (selectedType.dtype.toUpperCase() === 'NIC' && e.target.value) {
+                        const entry = choiceData.list.find((c) => c.id === e.target.value);
+                        next['type'] = entry?.hint === 'MACVLAN' ? 'MACVLAN' : 'BRIDGE';
+                      }
+                      setValues(next); setFieldErrors({});
+                    }}
+                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground"
+                  >
+                    <option value="">Select a device…</option>
+                    {choiceData.list.map((c) => (
+                      <option key={c.id} value={c.id} disabled={c.available === false}>
+                        {c.label}{c.hint ? ` — ${c.hint}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* CD-ROM source section — repo file / existing ISO / manual path. */}
+              {selectedType.dtype.toUpperCase() === 'CDROM' && (
+                <div className="space-y-3">
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-secondary">ISO source</label>
+                    <select value={String(values['source'] ?? 'repo')} onChange={(e) => { setValues({ ...values, source: e.target.value }); setCdromIsoPath(''); setCdromManualPath(''); setFieldErrors({}); }}
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground">
+                      <option value="repo">From UNM file repo (Files page)</option>
+                      <option value="dataset">Existing ISO on the appliance</option>
+                      <option value="path">Manual path (/mnt/…)</option>
+                    </select>
+                  </div>
+
+                  {String(values['source'] ?? 'repo') === 'repo' && (
+                    <>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-secondary">File from repo</label>
+                        <select value={typeof values['repoFileId'] === 'string' ? (values['repoFileId'] as string) : ''} onChange={(e) => { setValues({ ...values, repoFileId: e.target.value || undefined }); setFieldErrors({}); }}
+                          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground">
+                          <option value="">Select a file…</option>
+                          {cdromRepoFiles.map((f) => (
+                            <option key={f.id} value={f.id}>{f.name} ({formatBytes(f.sizeBytes)})</option>
+                          ))}
+                        </select>
+                        {fieldErrors['repoFileId'] && <p className="mt-1 text-xs text-danger-fg">{fieldErrors['repoFileId']}</p>}
+                        {cdromRepoFiles.length === 0 && (
+                          <p className="mt-1 text-xs text-faint">No files in the repo yet — upload an ISO on the Files page first.</p>
+                        )}
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-secondary">Target dataset</label>
+                        <select value={typeof values['dataset'] === 'string' ? (values['dataset'] as string) : ''} onChange={(e) => { setValues({ ...values, dataset: e.target.value || undefined }); setCdromIsoPath(''); setFieldErrors({}); }}
+                          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground">
+                          <option value="">Select a dataset…</option>
+                          {cdromDatasets.map((d) => (
+                            <option key={d.name} value={d.name}>{d.name}</option>
+                          ))}
+                        </select>
+                        {fieldErrors['dataset'] && <p className="mt-1 text-xs text-danger-fg">{fieldErrors['dataset']}</p>}
+                        <p className="mt-1 text-xs text-faint">The ISO is streamed onto the appliance when missing, then attached.</p>
+                      </div>
+                    </>
+                  )}
+
+                  {String(values['source'] ?? 'repo') === 'dataset' && (
+                    <>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-secondary">Dataset</label>
+                        <select value={cdromDataset} onChange={(e) => { setValues({ ...values, dataset: e.target.value || undefined }); setCdromIsoPath(''); setFieldErrors({}); }}
+                          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground">
+                          <option value="">Select a dataset…</option>
+                          {cdromDatasets.map((d) => (
+                            <option key={d.name} value={d.name}>{d.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-secondary">ISO</label>
+                        <select value={cdromIsoPath} onChange={(e) => { setCdromIsoPath(e.target.value); setFieldErrors({}); }} disabled={!cdromDataset}
+                          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground disabled:opacity-50">
+                          <option value="">Select an ISO…</option>
+                          {cdromIsoFiles.map((f) => (
+                            <option key={f.path} value={f.path}>{f.name}{f.sizeBytes != null ? ` (${formatBytes(f.sizeBytes)})` : ''}</option>
+                          ))}
+                        </select>
+                        {fieldErrors['path'] && <p className="mt-1 text-xs text-danger-fg">{fieldErrors['path']}</p>}
+                      </div>
+                    </>
+                  )}
+
+                  {String(values['source'] ?? 'repo') === 'path' && (
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-secondary">ISO path</label>
+                      <input type="text" value={cdromManualPath} onChange={(e) => { setCdromManualPath(e.target.value); setFieldErrors({}); }} placeholder="/mnt/POOL/VM/debian.iso"
+                        className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm text-foreground placeholder:text-faint" />
+                      {fieldErrors['path'] && <p className="mt-1 text-xs text-danger-fg">{fieldErrors['path']}</p>}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* The type's form fields, rendered generically from its inputSchema. */}
+              {selectedType.dtype.toUpperCase() !== 'CDROM' && (
+                <SchemaForm schema={formSchema} values={values} onChange={(v) => { setValues(v); setFieldErrors({}); }} fieldErrors={fieldErrors} />
               )}
             </>
           )}
@@ -1127,19 +1205,19 @@ function CdromAttachDialog({ target, onClose }: { target: CdromTarget; onClose: 
           <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
           <button
             type="button"
-            disabled={!canSubmit || saving || isReadOnly}
-            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
+            disabled={!selectedType || saving || isReadOnly || needsStopped}
+            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : needsStopped ? 'Stop the VM first' : undefined}
             onClick={() => void submit()}
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {saving && <Loader2 size={12} className="animate-spin" />}
-            {isPlanMode ? 'Save as plan' : 'Attach CD-ROM'}
+            {isPlanMode ? 'Save as plan' : selectedType ? `Attach ${selectedType.label}` : 'Attach'}
           </button>
         </footer>
 
         {reauth && (
           <ReauthDialog
-            contextLabel={`Attach CD-ROM to ${target.row.name}`}
+            contextLabel={`Add device to ${row.name}`}
             onClose={() => setReauth(false)}
             onSuccess={async () => {
               setReauth(false);
@@ -1386,9 +1464,8 @@ export default function Vms() {
     };
   }
 
-  // --- Create VM + CD-ROM/ISO dialogs ---------------------------------------------
+  // --- Create VM dialog -----------------------------------------------------------
   const [createOpen, setCreateOpen] = useState(false);
-  const [cdromTarget, setCdromTarget] = useState<CdromTarget | null>(null);
 
   // Hypervisor devices that advertise vms.create — the top-bar Create button is
   // GENERIC: one entry per (device, plugin) pair. The dialog itself carries the
@@ -1408,8 +1485,10 @@ export default function Vms() {
     setCreateOpen(true);
   }
 
-  // --- NIC attach / detach --------------------------------------------------------
-  const [nicTarget, setNicTarget] = useState<NicAttachTarget | null>(null);
+  // --- Device attach / detach -----------------------------------------------------
+  // Generic Add-device dialog (NIC + CD-ROM/ISO included) — driven by the
+  // plugin's vms.device-types descriptor.
+  const [attachTarget, setAttachTarget] = useState<NicAttachTarget | null>(null);
 
   function detachDevice(node: VmNode) {
     const row = node.row;
@@ -1655,8 +1734,10 @@ export default function Vms() {
           { id: 'vms.restart', label: `Restart ${r.name}`, icon: <RotateCw size={14} />, available: hasAction(r.pluginId, 'vms.restart') && !readOnly, eligible: !isStopped },
           { id: 'vms.suspend', label: `Suspend ${r.name}`, icon: <Pause size={13} />, available: hasAction(r.pluginId, 'vms.suspend') && !readOnly, eligible: isRunning },
           { id: 'vms.delete', label: `Delete ${r.name}`, icon: <Trash2 size={13} />, available: hasAction(r.pluginId, 'vms.delete') && !readOnly, eligible: true, danger: true },
-          { id: 'vms.nic-attach', label: `Attach NIC to ${r.name}`, icon: <Plug size={14} />, available: hasAction(r.pluginId, 'vms.nic-attach') && !readOnly, eligible: true },
-          { id: 'vms.cdrom-attach', label: `Attach ISO / CD-ROM to ${r.name}`, icon: <Disc size={14} />, available: hasAction(r.pluginId, 'vms.cdrom-attach') && !readOnly, eligible: true },
+          // Generic Add-device — the dialog itself decides which types apply (the
+          // plugin advertises them via vms.device-types; per-type stopped/one-per-
+          // VM rules are enforced inside it).
+          { id: 'vms.device-types', label: `Add device to ${r.name}`, icon: <Plus size={14} />, available: hasAction(r.pluginId, 'vms.device-types') && !readOnly, eligible: true },
         ];
 
         return (
@@ -1672,8 +1753,7 @@ export default function Vms() {
                   title={enabled ? a.label : `Not applicable in state ${state.toLowerCase()}`}
                   disabled={!enabled}
                   onClick={() => {
-                    if (a.id === 'vms.nic-attach') setNicTarget({ row: r });
-                    else if (a.id === 'vms.cdrom-attach') setCdromTarget({ row: r });
+                    if (a.id === 'vms.device-types') setAttachTarget({ row: r });
                     else if (a.id === 'vms.delete') {
                       if (!window.confirm(`Permanently delete VM "${r.name}"? This is destructive.`)) return;
                       void singleVm(r, a.id, `Delete ${r.name}`);
@@ -1800,12 +1880,17 @@ export default function Vms() {
           />
         )}
 
-        {/* Create-VM + CD-ROM/ISO dialogs */}
+        {/* Create-VM dialog */}
         {createOpen && <CreateVmDialog targets={createTargets} onClose={() => setCreateOpen(false)} />}
-        {cdromTarget && <CdromAttachDialog target={cdromTarget} onClose={() => setCdromTarget(null)} />}
 
-        {/* NIC attach dialog */}
-        {nicTarget && <NicAttachDialog target={nicTarget} onClose={() => setNicTarget(null)} />}
+        {/* Generic Add-device dialog (plugin-driven device types — NIC + CD-ROM/ISO included) */}
+        {attachTarget && (
+          <AttachDeviceDialog
+            target={attachTarget}
+            stopped={STOPPED_STATES.has(effectiveState(attachTarget.row))}
+            onClose={() => setAttachTarget(null)}
+          />
+        )}
 
         {/* 2FA revalidation (plan create/execute returned 401) */}
         {reauth && (
