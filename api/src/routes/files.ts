@@ -11,7 +11,7 @@ import {
   openRepoFile,
   recordRepoFileUse,
 } from '../fileRepo';
-import { listFileRepoProviders } from '../fileRepoBroker';
+import { defaultFileRepoProviderId, listFileRepoProviders } from '../fileRepoBroker';
 
 /**
  * Central file repository routes.
@@ -76,13 +76,13 @@ filesRouter.get('/files', requireAuth, requirePermission('files:read'), async (r
   }
 });
 
-// GET /files/providers — the registered file-repo backends + online state.
-// Feeds a future multi-repo picker on the Files page (upload into a specific
-// segment via the x-file-provider header). Read-only, no extra permission beyond files:read.
+// GET /files/providers — the registered file-repo backends + online state, plus
+// the effective default (what new uploads go to when no repo is picked). Feeds
+// the Files page's upload-into picker. Read-only, files:read only.
 filesRouter.get('/files/providers', requireAuth, requirePermission('files:read'), async (_req: Request, res: Response) => {
   try {
-    const providers = await listFileRepoProviders();
-    res.status(200).json({ providers });
+    const [providers, defaultProviderId] = await Promise.all([listFileRepoProviders(), defaultFileRepoProviderId()]);
+    res.status(200).json({ providers, defaultProviderId });
   } catch (err) {
     if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });
     throw err;

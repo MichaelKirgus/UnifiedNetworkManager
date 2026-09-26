@@ -1755,6 +1755,8 @@ export interface FileRepoEntry {
   createdAt: string;
   /** File-repo plugin storing the bytes (capability `fileRepo`); null = api-local volume (legacy). */
   providerId?: string | null;
+  /** Display name for `uploadedBy` — user id resolved to username ('plugin' passes through). */
+  uploadedByName?: string | null;
 }
 
 /** A registered file-repo storage backend (GET /files/providers). */
@@ -1773,6 +1775,8 @@ export interface FileRepoUse {
   note: string | null;
   usedBy: string | null;
   createdAt: string;
+  /** Display name for `usedBy` — user id resolved to username ('plugin' passes through). */
+  usedByName?: string | null;
 }
 
 /** Device-level access scope rules — a user may see any device matching ANY rule. Empty = unrestricted. */
@@ -2818,8 +2822,9 @@ export const api = {
     const suffix = category ? `?category=${encodeURIComponent(category)}` : '';
     return apiFetch<{ files: FileRepoEntry[] }>(`/files${suffix}`);
   },
-  /** Lists the registered file-repo storage backends + online state. */
-  fileRepoProviders: () => apiFetch<{ providers: FileRepoProvider[] }>('/files/providers'),
+  /** Lists the registered file-repo storage backends + online state, plus the
+   * effective default (what new uploads go to when no repo is picked). */
+  fileRepoProviders: () => apiFetch<{ providers: FileRepoProvider[]; defaultProviderId: string | null }>('/files/providers'),
   /** Uploads a file to the repo. RAW octet-stream body + x-file-name header —
    * multi-GB ISOs stream through without base64/buffering. Identical content is
    * deduplicated (existing entry returned, deduplicated: true). `providerId`

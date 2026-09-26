@@ -307,6 +307,19 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     help:
       'Optional HTTPS URL of a JSON release manifest for UNM itself (e.g. a GitHub releases asset). Expected shape: {"latestVersion":"1.2.3","notesUrl":"https://…"}. When set, the Updates page compares it against the running API version and shows an "update available" state; when empty, only current versions are shown.',
   },
+
+  // Central file repository — which file-repo plugin stores NEW uploads by default.
+  {
+    key: 'fileRepoDefaultProviderId',
+    label: 'Default file repository',
+    type: 'string',
+    category: 'Files',
+    default: '',
+    envVar: 'FILE_REPO_PLUGIN_ID',
+    maxLength: 128,
+    help:
+      'The file-repo plugin (capability `fileRepo`) that stores new uploads by default — the Files page preselects it so you normally never have to pick a repo per upload. Empty = auto-resolve (the built-in local-storage repo, or the first online provider). Individual uploads can still override this from the Files page.',
+  },
 ];
 
 const BY_KEY: Record<string, SettingDescriptor> = Object.fromEntries(

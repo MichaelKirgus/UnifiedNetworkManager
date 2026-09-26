@@ -4,7 +4,7 @@ import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 import { Readable } from 'stream';
-import { desc, eq } from 'drizzle-orm';
+import { desc, eq, inArray } from 'drizzle-orm';
 import { db } from './db';
 import * as schema from './db/schema';
 import { deleteBlobViaProvider, openBlobFromProvider, resolveFileRepoProvider, storeBlobViaProvider } from './fileRepoBroker';
@@ -48,6 +48,8 @@ export interface RepoFileEntry {
   createdAt: string;
   /** The file-repo plugin storing the bytes (null = api-local volume, legacy). */
   providerId: string | null;
+  /** Display name for `uploadedBy` — user id resolved to username ('plugin' passes through). */
+  uploadedByName?: string | null;
 }
 
 /** One usage record (audit trail — which file was used, for what device, when). */
@@ -58,6 +60,8 @@ export interface RepoFileUse {
   note: string | null;
   usedBy: string | null;
   createdAt: string;
+  /** Display name for `usedBy` — user id resolved to username ('plugin' passes through). */
+  usedByName?: string | null;
 }
 
 /** The repo root on disk. Only the api container mounts this path. */
@@ -92,13 +96,40 @@ function toEntry(row: typeof schema.repoFiles.$inferSelect): RepoFileEntry {
   };
 }
 
+/**
+ * Batch-resolves user ids to usernames. One query per list call; unknown ids
+ * (deleted users) are simply absent from the map — callers fall back to the raw
+ * id so columns never render empty. 'plugin' is filtered out (not a user).
+ */
+async function usernamesByIds(ids: Iterable<string | null | undefined>): Promise<Map<string, string>> {
+  const set = new Set<string>();
+  for (const id of ids) if (id && id !== 'plugin') set.add(id);
+  const map = new Map<string, string>();
+  if (set.size > 0) {
+    const users = await db.query.users.findMany({ where: (u, { inArray }) => inArray(u.id, [...set]) });
+    for (const u of users) map.set(u.id, u.username);
+  }
+  return map;
+}
+
+/** Resolves the `uploadedBy` ids of a batch of repo file entries. */
+async function resolveUploaders(entries: RepoFileEntry[]): Promise<Map<string, string>> {
+  return usernamesByIds(entries.map((e) => e.uploadedBy));
+}
+
 /** Lists repo files (newest first), optionally filtered by category. */
 export async function listRepoFiles(category?: string): Promise<RepoFileEntry[]> {
   const rows = await db.query.repoFiles.findMany({
     where: category ? (t) => eq(t.category, category) : undefined,
     orderBy: [desc(schema.repoFiles.createdAt)],
   });
-  return rows.map(toEntry);
+  const entries = rows.map(toEntry);
+  const usernames = await resolveUploaders(entries);
+  for (const e of entries) {
+    if (!e.uploadedBy || e.uploadedBy === 'plugin') continue;
+    e.uploadedByName = usernames.get(e.uploadedBy) ?? e.uploadedBy;
+  }
+  return entries;
 }
 
 /** Fetches one repo file by id (null when absent). */
@@ -315,7 +346,13 @@ export async function listRepoFileUses(fileId: string): Promise<RepoFileUse[]> {
     where: (t) => eq(t.fileId, fileId),
     orderBy: [desc(schema.repoFileUses.createdAt)],
   });
-  return rows.map((r) => ({ id: r.id, fileId: r.fileId, deviceId: r.deviceId, note: r.note, usedBy: r.usedBy, createdAt: r.createdAt }));
+  const uses: RepoFileUse[] = rows.map((r) => ({ id: r.id, fileId: r.fileId, deviceId: r.deviceId, note: r.note, usedBy: r.usedBy, createdAt: r.createdAt }));
+  const names = await usernamesByIds(uses.map((u) => u.usedBy));
+  for (const u of uses) {
+    if (!u.usedBy || u.usedBy === 'plugin') continue;
+    u.usedByName = names.get(u.usedBy) ?? u.usedBy;
+  }
+  return uses;
 }
 
 /** Normalizes a category string for on-disk use (lowercase slug). */

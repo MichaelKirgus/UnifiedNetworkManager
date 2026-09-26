@@ -3,6 +3,7 @@ import axios, { AxiosInstance } from 'axios';
 import { eq } from 'drizzle-orm';
 import { db } from './db';
 import * as schema from './db/schema';
+import { getEffectiveSettingValue } from './systemSettings';
 
 /**
  * File-repo broker.
@@ -101,7 +102,9 @@ export async function resolveFileRepoProvider(providerId?: string | null): Promi
     return cachedDefaultProvider.record;
   }
 
-  const configuredId = process.env.FILE_REPO_PLUGIN_ID?.trim();
+  // The "default file repository" is a system setting (Settings page → Files):
+  // stored override ⊕ FILE_REPO_PLUGIN_ID env baseline. Empty = auto-resolve.
+  const configuredId = String((await getEffectiveSettingValue('fileRepoDefaultProviderId')) ?? '').trim();
   let record: ProviderRecord | null = null;
 
   if (configuredId) {
@@ -140,6 +143,16 @@ export async function listFileRepoProviders(): Promise<Array<{ id: string; name:
     .filter((p) => p.capabilities.includes('fileRepo'))
     .sort((a, b) => Number(isOnline(b, now)) - Number(isOnline(a, now)) || a.name.localeCompare(b.name))
     .map((p) => ({ id: p.id, name: p.name, endpoint: p.endpoint, online: isOnline(p, now) }));
+}
+
+/**
+ * The effective default provider for NEW uploads (what the Files page should
+ * preselect): the resolved default when one is online, else null (= auto — no
+ * repo available / local fallback). Mirrors resolveFileRepoProvider() exactly.
+ */
+export async function defaultFileRepoProviderId(): Promise<string | null> {
+  const record = await resolveFileRepoProvider();
+  return record ? record.id : null;
 }
 
 /** One axios instance per provider (control-plane timeout; streams override it). */

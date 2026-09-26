@@ -1,7 +1,7 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { Download, FileUp, FolderOpen, History, Loader2, Trash2, X } from 'lucide-react';
+import { Database, Download, FileUp, FolderOpen, History, Loader2, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { formatBytes } from '../components/formatMetric';
 import { api, ApiError, FileRepoEntry, FileRepoUse } from '../api/client';
@@ -19,6 +19,9 @@ import { useTimeFormat } from '../utils/time';
  */
 
 const CATEGORIES = ['iso', 'firmware', 'config-backup', 'script', 'other'] as const;
+
+/** localStorage key for the user's preferred upload target (survives reloads). */
+const UPLOAD_PROVIDER_KEY = 'unm.files.uploadProvider';
 
 /** Triggers a browser download of an already-fetched blob under `name`. */
 function saveBlob(blob: Blob, name: string): void {
@@ -74,7 +77,7 @@ function UsesDialog({ entry, onClose }: { entry: FileRepoEntry; onClose: () => v
                 <span className="text-faint">{formatDateTime(u.createdAt)}</span>
               </div>
               {u.note && <p className="mt-0.5 text-muted-foreground">{u.note}</p>}
-              {u.usedBy && <p className="mt-0.5 text-[11px] text-faint">by {u.usedBy}</p>}
+              {u.usedBy && <p className="mt-0.5 text-[11px] text-faint">by {u.usedByName ?? u.usedBy}</p>}
             </div>
           ))}
         </div>
@@ -90,6 +93,7 @@ export default function Files() {
 
   const [category, setCategory] = useState<string>(''); // '' = all
   const [uploadCategory, setUploadCategory] = useState<string>('iso');
+  const [uploadProvider, setUploadProvider] = useState<string>(''); // '' = API default
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -102,10 +106,42 @@ export default function Files() {
   });
   const files = filesQuery.data?.files ?? [];
 
+  // Registered file-repo backends + the effective default (system setting /
+  // env). Refreshed periodically so online state stays current.
+  const providersQuery = useQuery({
+    queryKey: ['file-repo-providers'],
+    queryFn: () => api.fileRepoProviders(),
+    refetchInterval: 30_000,
+  });
+  const providers = providersQuery.data?.providers ?? [];
+  const defaultProviderId = providersQuery.data?.defaultProviderId ?? null;
+  const multiRepo = providers.length > 1;
+
+  // Preselect the API's effective default so users normally never touch this.
+  // A choice made in the picker is persisted (localStorage) and preserved on
+  // later visits — only a missing/unknown saved value falls back to the default.
+  useEffect(() => {
+    if (providers.length === 0) return;
+    let saved: string | null = null;
+    try { saved = localStorage.getItem(UPLOAD_PROVIDER_KEY); } catch { /* ignore */ }
+    if (saved && providers.some((p) => p.id === saved)) return; // keep the user's choice
+    setUploadProvider(defaultProviderId ?? providers.find((p) => p.online)?.id ?? '');
+  }, [providers, defaultProviderId]);
+
+  function chooseProvider(id: string) {
+    setUploadProvider(id);
+    try { localStorage.setItem(UPLOAD_PROVIDER_KEY, id); } catch { /* ignore */ }
+  }
+
+  const providerName = (f: FileRepoEntry): string => {
+    if (!f.providerId) return 'local';
+    return providers.find((p) => p.id === f.providerId)?.name ?? 'unknown repo';
+  };
+
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['repo-files'] });
 
   const uploadMutation = useMutation({
-    mutationFn: (file: File) => api.uploadRepoFile(file, uploadCategory || undefined),
+    mutationFn: (file: File) => api.uploadRepoFile(file, uploadCategory || undefined, uploadProvider || undefined),
     onSuccess: ({ file, deduplicated }) => {
       setBusy(false);
       setError(null);
@@ -178,6 +214,26 @@ export default function Files() {
               >
                 {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
+              {/* Target repository — only shown when multiple file-repo backends
+                  exist. Preselected to the effective default (system setting),
+                  so users normally don't need to change it per upload. */}
+              {multiRepo && (
+                <label className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-xs text-secondary">
+                  <Database size={13} className="text-muted-foreground" />
+                  <select
+                    value={uploadProvider}
+                    onChange={(e) => chooseProvider(e.target.value)}
+                    title="File repository to upload into (default is preserved from the system setting)"
+                    className="bg-transparent text-xs text-secondary focus:outline-none"
+                  >
+                    {providers.map((p) => (
+                      <option key={p.id} value={p.id} disabled={!p.online}>
+                        {p.name}{!p.online ? ' (offline)' : ''}{p.id === defaultProviderId ? ' — default' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
             </>
           )}
 
@@ -257,6 +313,7 @@ export default function Files() {
                   <th className="px-3 py-2 font-medium">Category</th>
                   <th className="px-3 py-2 font-medium">Size</th>
                   <th className="hidden px-3 py-2 font-medium lg:table-cell">SHA-256</th>
+                  {multiRepo && <th className="hidden px-3 py-2 font-medium xl:table-cell">Repository</th>}
                   <th className="hidden px-3 py-2 font-medium md:table-cell">Uploaded by</th>
                   <th className="px-3 py-2 font-medium">Uploaded at</th>
                   <th className="px-3 py-2 text-right font-medium">Actions</th>
@@ -271,7 +328,10 @@ export default function Files() {
                     </td>
                     <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-secondary">{formatBytes(f.sizeBytes)}</td>
                     <td className="hidden max-w-[160px] truncate px-3 py-2 font-mono text-[11px] text-faint lg:table-cell" title={f.sha256}>{f.sha256}</td>
-                    <td className="hidden px-3 py-2 text-xs text-secondary md:table-cell">{f.uploadedBy ?? 'plugin'}</td>
+                    {multiRepo && (
+                      <td className="hidden max-w-[180px] truncate px-3 py-2 text-xs text-secondary xl:table-cell" title={providerName(f)}>{providerName(f)}</td>
+                    )}
+                    <td className="hidden px-3 py-2 text-xs text-secondary md:table-cell">{f.uploadedByName ?? f.uploadedBy ?? 'plugin'}</td>
                     <td className="whitespace-nowrap px-3 py-2 text-xs text-secondary" title={new Date(f.createdAt).toISOString()}>{formatDateTime(f.createdAt)}</td>
                     <td className="px-3 py-2">
                       <div className="flex items-center justify-end gap-0.5">

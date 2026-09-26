@@ -3079,7 +3079,15 @@ paths:
         (same SHA-256) is deduplicated — the existing file is returned with
         `deduplicated: true`. Same name + different content gets a numeric
         suffix, so nothing is ever silently overwritten. Multi-GB ISOs stream
-        through without buffering.
+        through without buffering. An optional `x-file-provider` header targets
+        a specific file-repo backend (see GET /files/providers); omitted = the
+        effective default repository.
+      parameters:
+        - name: x-file-provider
+          in: header
+          required: false
+          description: File-repo plugin id to store the bytes in (multi-segment repos). Omitted = default.
+          schema: { type: string }
       requestBody:
         required: true
         content:
@@ -3109,9 +3117,12 @@ paths:
       summary: List file-repo storage backends
       description: >-
         The registered file-repo plugins (capability `fileRepo`) with their online
-        state. Files are stored by a plugin; the API keeps all metadata in Postgres.
-        Requires permission `files:read`. Feeds a multi-repo picker — uploads can
-        target a specific backend via the optional `x-file-provider` header on POST /files.
+        state, plus `defaultProviderId` — the effective default repository for new
+        uploads (system setting `fileRepoDefaultProviderId`, else env baseline,
+        else auto-resolved; null = no provider available). Files are stored by a
+        plugin; the API keeps all metadata in Postgres. Requires permission
+        `files:read`. Feeds a multi-repo picker — uploads can target a specific
+        backend via the optional `x-file-provider` header on POST /files.
       responses:
         '200':
           description: File-repo backends (online first)
@@ -3130,6 +3141,10 @@ paths:
                         name: { type: string }
                         endpoint: { type: string }
                         online: { type: boolean }
+                  defaultProviderId:
+                    type: string
+                    nullable: true
+                    description: Effective default repository for new uploads (null = no provider available)
         '401':
           description: Authentication required (requires files:read)
 
@@ -8457,7 +8472,8 @@ components:
         category: { type: string, description: "Open set — iso | firmware | config-backup | script | other" }
         sizeBytes: { type: integer }
         sha256: { type: string, description: "SHA-256 hex of the stored content (integrity + dedupe)" }
-        uploadedBy: { type: string, nullable: true, description: "Username that uploaded it; null for plugin uploads" }
+        uploadedBy: { type: string, nullable: true, description: "User id that uploaded it; 'plugin' for plugin uploads; null when unknown" }
+        uploadedByName: { type: string, nullable: true, description: "Display name for uploadedBy — user id resolved to username ('plugin' passes through)" }
         createdAt: { type: string, format: date-time, description: "When the file was uploaded" }
         providerId: { type: string, nullable: true, description: "File-repo plugin storing the bytes (capability `fileRepo`); null = api-local volume (legacy)" }
 
@@ -8469,7 +8485,8 @@ components:
         fileId: { type: string }
         deviceId: { type: string, nullable: true, description: "Device the file was used on (null for plain downloads)" }
         note: { type: string, nullable: true, description: "Free-form context (e.g. 'installed as VM disk')" }
-        usedBy: { type: string, nullable: true, description: "Username or 'plugin'" }
+        usedBy: { type: string, nullable: true, description: "User id or 'plugin'" }
+        usedByName: { type: string, nullable: true, description: "Display name for usedBy — user id resolved to username ('plugin' passes through)" }
         createdAt: { type: string, format: date-time }
 
     ConsoleTicketRequest:
