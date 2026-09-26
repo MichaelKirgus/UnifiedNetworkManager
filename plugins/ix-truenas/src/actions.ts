@@ -930,20 +930,24 @@ interface DispatchResult<T> { value: T; note?: string; unconfirmed?: boolean }
  * writes where a second identical call is harmless. Non-transport errors are thrown
  * for the caller's existing handling (already-in-state / already-exists mappings).
  */
+/** Default round-trip budget for a WRITE dispatch. The client's own default is the device setting `timeoutMs` (5 s) — far too short for appliance writes on a busy box: a healthy-but-slow `vm.device.delete` then "times out" at 5 s, the response is lost, and the action has to fall back to state re-reads. 30 s covers every observed write; call sites that are genuinely heavier pass their own budget. */
+const WRITE_DISPATCH_TIMEOUT_MS = 30_000;
+
 async function dispatchWrite<T>(
   ctx: TruenasActionContext,
   method: string,
   params: unknown[],
   opts?: { timeoutMs?: number; verify?: () => Promise<boolean | null>; idempotentRetry?: boolean },
 ): Promise<DispatchResult<T>> {
+  const effTimeout = opts?.timeoutMs ?? WRITE_DISPATCH_TIMEOUT_MS;
   try {
-    return { value: await ctx.client.call<T>(method, params, ctx.creds, opts?.timeoutMs) };
+    return { value: await ctx.client.call<T>(method, params, ctx.creds, effTimeout) };
   } catch (e) {
     if (!isTransportError(e)) throw e;
   }
   // Transport dropped mid-call — did the appliance apply it anyway?
   if (opts?.idempotentRetry) {
-    return { value: await ctx.client.call<T>(method, params, ctx.creds, opts.timeoutMs), note: 'Response lost to a transport drop — re-dispatched (idempotent write).' };
+    return { value: await ctx.client.call<T>(method, params, ctx.creds, effTimeout), note: 'Response lost to a transport drop — re-dispatched (idempotent write).' };
   }
   const seen = opts?.verify ? await opts.verify() : null;
   if (seen === true) {
@@ -952,7 +956,7 @@ async function dispatchWrite<T>(
   if (seen !== false) {
     return { value: undefined as T, unconfirmed: true, note: 'Response lost to a transport drop and state could not be confirmed — check the appliance.' };
   }
-  return { value: await ctx.client.call<T>(method, params, ctx.creds, opts?.timeoutMs), note: 'Response lost to a transport drop — re-dispatched after confirming it had not applied.' };
+  return { value: await ctx.client.call<T>(method, params, ctx.creds, effTimeout), note: 'Response lost to a transport drop — re-dispatched after confirming it had not applied.' };
 }
 
 /** Builds a VM-state verify for dispatchWrite: true when in `applied`, false when in `notApplied`, null (unknown/transitioning) otherwise. */
@@ -1293,6 +1297,7 @@ const containersUpgradeAction: ActionDescriptor<TruenasActionContext> = {
       try {
         // Transport-tolerant — a lost response is confirmed by re-reading: the app must settle into a stable state AND no longer flag an available upgrade.
         const r = await dispatchWrite(ctx, 'app.upgrade', [n, { app_version: 'latest' }], {
+          timeoutMs: 60_000,
           verify: async () => {
             try {
               const apps = await listApps(ctx);
@@ -2184,6 +2189,7 @@ const vmsCreateAction: ActionDescriptor<TruenasActionContext> = {
       // when it does, the id comes from the re-read row. When it demonstrably did NOT apply,
       // dispatchWrite retries once on the fresh session (a duplicate create would just error).
       const dr = await dispatchWrite(ctx, 'vm.create', [create], {
+        timeoutMs: 60_000,
         verify: async () => {
           try {
             return (await listVms(ctx)).some((v) => v.name === name); // exists — applied
@@ -2772,6 +2778,7 @@ const vmsDeviceDetachAction: ActionDescriptor<TruenasActionContext> = {
     // Any error here (method error, or a failed post-drop retry) falls through to the
     // verification poll below, which decides success from the appliance's actual state.
     let deleteError: string | null = null;
+    let deleteTransportDrop = false; // true when the failure traces to a lost response, not an appliance rejection
     try {
       const dr = await dispatchWrite(ctx, 'vm.device.delete', [deviceId, opts], {
         verify: async () => {
@@ -2791,9 +2798,10 @@ const vmsDeviceDetachAction: ActionDescriptor<TruenasActionContext> = {
           }
         },
       });
-      if (dr.note) deleteError = dr.note; // transport drop — verified/retried inside dispatchWrite
+      if (dr.note) { deleteError = dr.note; deleteTransportDrop = true; } // transport drop — verified/retried inside dispatchWrite
     } catch (e) {
       deleteError = e instanceof Error ? e.message : String(e);
+      deleteTransportDrop = isTransportError(e);
     }
 
     // Verify by re-reading the VM's devices — this integer id must be gone.
@@ -2819,62 +2827,171 @@ const vmsDeviceDetachAction: ActionDescriptor<TruenasActionContext> = {
     );
     // A transport drop only counts as a failure when the device is still there.
     if (deleteError && !wait.ok) {
-      return { success: false, details: { error: `Device detach failed: ${deleteError}` } };
+      // Re-running a lost-response delete is SAFE — if it did apply, the re-read
+      // above already failed to confirm it and the next attempt's verify passes on
+      // "device gone". Let the plan executor retry per its policy.
+      return { success: false, details: { error: `Device detach failed: ${deleteError}`, ...(deleteTransportDrop ? { retryable: true } : {}) } };
     }
     return { success: true, applied: true, verified: wait.ok, details: { name, deviceId, removeStorage: input['removeStorage'] === true } };
   },
 };
 
-const vmsDeviceEditAction: ActionDescriptor<TruenasActionContext> = {
-  id: 'vms.device-edit',
-  label: 'Edit VM device attributes',
+/**
+ * vms.device-update — the GENERIC "edit an attached device" contract. The webapp's
+ * Edit-device dialog renders its form from the type descriptor's `editInputSchema`
+ * (prefilled via vms.device-get) and submits the changed fields here; this action
+ * maps them onto appliance attributes for ONE partial-merge vm.device.update call
+ * (TrueNAS merges — verified in middleware source: device_dict['attributes'].update(new_attrs)).
+ * Field names are plugin-agnostic (nicAttach, diskType, resolution, …), so a future
+ * Proxmox/libvirt plugin implementing the same id + descriptor fields gets the dialog for free.
+ */
+const vmsDeviceUpdateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.device-update',
+  label: 'Edit attached VM device',
   description:
-    'Updates ONE attached device\'s attributes in place (vm.device.update) — e.g. a NIC\'s bridge, a display\'s resolution/port, or a CD-ROM\'s ISO path. The full attribute set is replaced; include every field that must survive.',
+    'Updates ONE already-attached device in place (vm.device.update, partial merge) — e.g. a NIC\'s bridge/MAC, a disk\'s controller model, a display\'s resolution/port/password/web console, a USB controller model, or swapping the ISO on an existing CD-ROM. Only fields named by the type descriptor\'s editInputSchema are accepted; everything else keeps its current value.',
   module: 'VMs',
   riskLevel: 'write' as const,
   deviceCount: 1 as const,
-  timeoutMs: 120_000,
+  timeoutMs: 300_000, // CDROM ISO validation on the appliance can take ~60 s+
   inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'VM name' },
     deviceId: { type: 'number', required: true, min: 1, description: 'Integer device id from the VM inventory row' },
-    dtype: { type: 'string', required: true, enum: ['NIC', 'DISK', 'CDROM', 'DISPLAY', 'PCI', 'USB'], description: 'Device type (must match the existing device)' },
-    attributes: { type: 'object', required: true, properties: {}, description: 'Full replacement attribute set for the device (without dtype — it is added automatically)' },
+    fields: { type: 'object', required: true, properties: {}, description: 'Changed editable fields (names match the descriptor\'s editInputSchema)' },
   },
   async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'VM name is required' } };
     const deviceId = num(input, 'deviceId', -1);
     if (deviceId < 1) return { success: false, details: { error: 'deviceId (integer device id) is required' } };
-    const dtype = strOr(input, 'dtype', '').toUpperCase();
-    if (!dtype) return { success: false, details: { error: 'dtype is required' } };
-    const attrsRaw = input['attributes'];
-    if (!attrsRaw || typeof attrsRaw !== 'object' || Array.isArray(attrsRaw)) {
-      return { success: false, details: { error: 'attributes (object) is required' } };
+    const fieldsRaw = input['fields'];
+    if (!fieldsRaw || typeof fieldsRaw !== 'object' || Array.isArray(fieldsRaw)) {
+      return { success: false, details: { error: 'fields (object) is required' } };
     }
+    const fields = fieldsRaw as Record<string, unknown>;
 
-    // Transport-tolerant — a lost response is confirmed by re-reading (the device must still exist).
-    let note: string | undefined;
+    // Resolve the device on the appliance — dtype + current attrs come from there.
+    let vms: VmInfo[];
     try {
-      const r = await dispatchWrite(ctx, 'vm.device.update', [deviceId, { attributes: { dtype, ...(attrsRaw as Record<string, unknown>) } }], {
-        verify: async () => {
-          try {
-            const rows = await ctx.client.call<Record<string, unknown>[]>('vm.device.query', [[['id', '=', deviceId]]], ctx.creds);
-            return (rows ?? []).length > 0; // exists — applied (or pre-existing either way)
-          } catch {
-            return null;
-          }
-        },
-      });
-      note = r.note;
+      vms = await listVms(ctx);
     } catch (e) {
       return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
     }
+    const vm = vms.find((v) => v.name === name);
+    if (!vm) return { success: false, details: { error: `VM "${name}" not found on this appliance` } };
 
-    // Verify the device still exists after the update (attribute values are
-    // normalized by the appliance — existence is the honest check here).
-    let verified = false;
+    let dev: { dtype: string; attrs: Record<string, unknown> } | null = null;
+    for (const d of vm.devices) {
+      const raw = d as Record<string, unknown>;
+      if ((typeof raw['id'] === 'number' ? (raw['id'] as number) : undefined) !== deviceId) continue;
+      dev = normalizeVmDevice(d);
+      break;
+    }
+    if (!dev) return { success: false, details: { error: `Device ${deviceId} not found on VM "${name}" — it may have been detached` } };
+
+    // Map the generic field names onto appliance attributes (partial merge).
+    const patch: Record<string, unknown> = {};
+    const updated: string[] = [];
+    switch (dev.dtype.toUpperCase()) {
+      case 'NIC': {
+        if (typeof fields['nicAttach'] === 'string' && fields['nicAttach'] !== '') { patch['nic_attach'] = fields['nicAttach']; updated.push('nicAttach'); }
+        if (typeof fields['mac'] === 'string' && fields['mac'] !== '') { patch['mac'] = fields['mac']; updated.push('mac'); }
+        break;
+      }
+      case 'DISK':
+      case 'RAW': {
+        if (typeof fields['diskType'] === 'string' && fields['diskType'] !== '') { patch['type'] = fields['diskType']; updated.push('diskType'); }
+        break;
+      }
+      case 'DISPLAY': {
+        if (typeof fields['resolution'] === 'string' && fields['resolution'] !== '') { patch['resolution'] = fields['resolution']; updated.push('resolution'); }
+        if (typeof fields['port'] === 'number') { patch['port'] = fields['port']; updated.push('port'); }
+        if (typeof fields['password'] === 'string' && fields['password'] !== '') { patch['password'] = fields['password']; updated.push('password'); }
+        // web is a plain boolean — always sent by the form, so honor it as-is.
+        if (typeof fields['web'] === 'boolean') { patch['web'] = fields['web']; updated.push('web'); }
+        break;
+      }
+      case 'USB': {
+        if (typeof fields['controllerType'] === 'string' && fields['controllerType'] !== '') { patch['controller_type'] = fields['controllerType']; updated.push('controllerType'); }
+        break;
+      }
+      case 'CDROM': {
+        // Same ISO-source options as vms.cdrom-attach — the resolved /mnt/ path is what gets written.
+        let isoPath = typeof fields['path'] === 'string' ? (fields['path'] as string) : '';
+        if (!isoPath && typeof fields['repoFileId'] === 'string' && fields['repoFileId'] !== '') {
+          const dataset = typeof fields['dataset'] === 'string' ? (fields['dataset'] as string) : '';
+          if (!dataset) return { success: false, details: { error: 'repoFileId requires a target dataset' } };
+          const ensured = await ensureRepoFileOnAppliance(ctx, dataset, fields['repoFileId']);
+          if (!ensured.ok) return { success: false, details: { error: ensured.error } };
+          isoPath = ensured.path;
+        }
+        if (!isoPath.startsWith('/mnt/')) return { success: false, details: { error: 'Either a /mnt/ ISO path or repoFileId + dataset is required' } };
+        patch['path'] = isoPath;
+        updated.push('path');
+        break;
+      }
+      default:
+        return { success: false, details: { error: `Device type ${dev.dtype} cannot be edited in place — detach and re-attach it instead` } };
+    }
+
+    if (updated.length === 0) {
+      return { success: true, applied: false, verified: true, details: { name, deviceId, dtype: dev.dtype, updated: [], note: 'No changes to apply' } };
+    }
+
+    // Verify predicate — every patched attribute must read back with the new value.
+    const expected: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(patch)) {
+      if (k === 'mac') expected[k] = String(v).toLowerCase();
+      else expected[k] = v;
+    }
+    const readDevice = async (): Promise<Record<string, unknown> | null> => {
+      try {
+        const rows = await ctx.client.call<Record<string, unknown>[]>('vm.device.query', [[['id', '=', deviceId]]], ctx.creds);
+        return (rows ?? [])[0] ?? null;
+      } catch {
+        return null;
+      }
+    };
+    const appliedCheck = async (): Promise<boolean | null> => {
+      const row = await readDevice();
+      if (!row) return null; // device gone — can't confirm either way
+      const attrs = (typeof row['attributes'] === 'object' && row['attributes'] ? row['attributes'] : row) as Record<string, unknown>;
+      for (const [k, want] of Object.entries(expected)) {
+        const got = attrs[k];
+        if (got === undefined || got === null) return null; // field not readable yet — unknown
+        if (typeof want === 'string') {
+          if (String(got).toLowerCase() !== want.toLowerCase()) return false;
+        } else if (got !== want) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    // Transport-tolerant — a lost response is confirmed by re-reading the attributes.
+    let note: string | undefined;
     try {
-      const rows = await ctx.client.call<Record<string, unknown>[]>('vm.device.query', [[['id', '=', deviceId]]], ctx.creds);
-      verified = (rows ?? []).length > 0;
-    } catch { /* unverified */ }
-    return { success: true, applied: true, verified, details: { deviceId, dtype, ...(note ? { note } : {}) } };
+      const r = await dispatchWrite(ctx, 'vm.device.update', [deviceId, { attributes: patch }], {
+        timeoutMs: 120_000,
+        verify: appliedCheck,
+      });
+      note = r.note;
+    } catch (e) {
+      // A partial merge is IDEMPOTENT — re-sending the same fields is harmless, so a
+      // transport-level failure that survived dispatchWrite's own retry is safe to let
+      // the plan executor re-dispatch per its retry policy. Method errors stay hard.
+      const msg = e instanceof Error ? e.message : String(e);
+      return { success: false, details: { error: msg, ...(isTransportError(e) ? { retryable: true } : {}) } };
+    }
+
+    // Final arbiter — the appliance may apply the change a moment after the RPC.
+    const wait = await pollUntil(appliedCheck, (ok) => ok === true, { timeoutMs: 45_000, intervalMs: 2_000 });
+    if (!wait.ok && note) {
+      // Unconfirmed after a transport drop — the merge is idempotent, so let the plan
+      // executor re-dispatch instead of failing the step outright.
+      return { success: false, details: { error: `Device update reported "${note}" and the new values are not visible on the appliance yet — retrying`, retryable: true } };
+    }
+    return { success: true, applied: true, verified: wait.ok, details: { name, deviceId, dtype: dev.dtype, updated, ...(note ? { note } : {}) } };
   },
 };
 
@@ -2890,6 +3007,14 @@ const vmsDeviceEditAction: ActionDescriptor<TruenasActionContext> = {
 //   vms.nic-choices / vms.pci-choices / vms.usb-choices (read) → normalized
 //     picker lists from vm.device.nic_attach_choices / passthrough_device_choices
 //     / usb_passthrough_choices (+ iommu).
+// EDITING an attached device is the same generic contract: each descriptor may
+//   carry `editInputSchema` (the subset of fields changeable in place — absent =
+//   detach + re-attach only), and two actions serve it:
+//     vms.device-get    (read)  → current values of those fields for ONE device id
+//                                  (prefill; the webapp never parses appliance attrs).
+//     vms.device-update (write) → partial-merge vm.device.update with the changed
+//                                  fields mapped onto appliance attributes, verified
+//                                  by re-reading each patched attribute.
 //   vms.disk-attach / vms.display-attach / vms.pci-attach / vms.usb-attach /
 //     vms.nic-attach / vms.cdrom-attach (write) → vm.device.create with the
 //     dtype-specific attributes:
@@ -2920,6 +3045,13 @@ interface VmDeviceTypeDescriptor {
   choicesActionId?: string;
   /** The form fields — rendered by the webapp via SchemaForm, validated here on submit. */
   inputSchema: Record<string, { type: 'string' | 'number' | 'boolean'; label?: string; description?: string; required?: boolean; default?: unknown; enum?: (string | number)[]; min?: number; max?: number; pattern?: string }>;
+  /**
+   * The SUBSET of fields that can be changed on an ALREADY-ATTACHED device
+   * (vms.device-update). Absent = nothing is editable in place — the only way
+   * to change such a device is detach + re-attach. Field names match inputSchema
+   * where they overlap, so the webapp renders both dialogs from one descriptor.
+   */
+  editInputSchema?: Record<string, { type: 'string' | 'number' | 'boolean'; label?: string; description?: string; required?: boolean; default?: unknown; enum?: (string | number)[]; min?: number; max?: number; pattern?: string }>;
 }
 
 /** The full attachable-type catalog for this appliance — static per plugin. */
@@ -2938,6 +3070,11 @@ const VM_DEVICE_TYPES: VmDeviceTypeDescriptor[] = [
       zvolName: { type: 'string', label: 'ZVOL name', required: false, description: 'Leaf name under the dataset — defaults to <VM>-diskN' },
       diskType: { type: 'string', label: 'Controller', required: true, enum: ['VIRTIO', 'AHCI'], default: 'VIRTIO', description: 'Disk controller interface' },
     },
+    editInputSchema: {
+      // The backing path/zvol is NOT editable in place (detach + re-attach); only the
+      // controller model can be swapped on an attached disk.
+      diskType: { type: 'string', label: 'Controller', required: true, enum: ['VIRTIO', 'AHCI'], default: 'VIRTIO', description: 'Disk controller interface' },
+    },
   },
   {
     dtype: 'DISPLAY',
@@ -2950,6 +3087,13 @@ const VM_DEVICE_TYPES: VmDeviceTypeDescriptor[] = [
       port: { type: 'number', label: 'Port', required: false, min: 5900, max: 65535, description: 'VNC/SPICE port — auto-assigned (free) when empty' },
       password: { type: 'string', label: 'Console password', required: false, description: 'Required by the appliance — a random one is generated and reported in the result when left empty' },
       web: { type: 'boolean', label: 'Web console (SPICE only)', default: true, description: 'Expose the display through the appliance web UI — SPICE displays only; automatically disabled for VNC' },
+    },
+    editInputSchema: {
+      // The protocol (VNC/SPICE) is NOT editable in place — detach + re-attach.
+      resolution: { type: 'string', label: 'Resolution', required: false, description: 'e.g. 1024x768 — leave empty to keep the current one' },
+      port: { type: 'number', label: 'Port', required: false, min: 5900, max: 65535, description: 'VNC/SPICE port — leave empty to keep the current one' },
+      password: { type: 'string', label: 'Console password', required: false, description: 'Leave empty to keep the current password' },
+      web: { type: 'boolean', label: 'Web console (SPICE only)', default: false, description: 'Expose the display through the appliance web UI — SPICE displays only; automatically disabled for VNC' },
     },
   },
   {
@@ -2972,6 +3116,11 @@ const VM_DEVICE_TYPES: VmDeviceTypeDescriptor[] = [
       usbDevice: { type: 'string', label: 'USB device', required: true, description: 'Host USB device from the picker above (usb_<bus>_<device>)' },
       controllerType: { type: 'string', label: 'Controller', required: false, enum: ['nec-xhci', 'qemu-xhci', 'ehci'], default: 'nec-xhci', description: 'Virtual USB controller model' },
     },
+    editInputSchema: {
+      // The passthrough target itself is NOT editable in place (detach + re-attach);
+      // only the virtual controller model can be swapped.
+      controllerType: { type: 'string', label: 'Controller', required: true, enum: ['piix3-uhci', 'piix4-uhci', 'ehci', 'ich9-ehci1', 'vt82c686b-uhci', 'pci-ohci', 'nec-xhci', 'qemu-xhci'], default: 'nec-xhci', description: 'Virtual USB controller model' },
+    },
   },
   {
     dtype: 'NIC',
@@ -2984,6 +3133,10 @@ const VM_DEVICE_TYPES: VmDeviceTypeDescriptor[] = [
       type: { type: 'string', label: 'Attachment kind', required: false, enum: ['BRIDGE', 'MACVLAN'], default: 'BRIDGE', description: 'Auto-set from the picker — only honored by pre-25.10 appliances (newer ones infer it)' },
       mac: { type: 'string', label: 'MAC address (optional)', required: false, pattern: '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', description: 'Fixed MAC — auto-assigned when empty' },
     },
+    editInputSchema: {
+      nicAttach: { type: 'string', label: 'Interface (bridge / MACVLAN)', required: true, description: 'Bridge or MACVLAN from the picker above' },
+      mac: { type: 'string', label: 'MAC address (optional)', required: false, pattern: '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', description: 'Fixed MAC — leave empty to keep the current one' },
+    },
   },
   {
     dtype: 'CDROM',
@@ -2992,6 +3145,14 @@ const VM_DEVICE_TYPES: VmDeviceTypeDescriptor[] = [
     requiresStopped: false, // hot-pluggable; updates the existing device in place
     inputSchema: {
       source: { type: 'string', label: 'ISO source', required: true, enum: ['repo', 'dataset', 'path'], default: 'repo' },
+      repoFileId: { type: 'string', label: 'File from repo', required: false, description: 'UNM file-repo ISO (uploaded first when missing)' },
+      dataset: { type: 'string', label: 'Dataset', required: false, description: 'Target dataset for a repo upload / parent of an existing ISO' },
+      path: { type: 'string', label: 'ISO path (/mnt/…)', required: false, pattern: '^/mnt/', description: 'Existing ISO on the appliance or manual path' },
+    },
+    editInputSchema: {
+      // Swapping the installed ISO is an in-place update (vm.device.update) — same
+      // source options as attach.
+      source: { type: 'string', label: 'ISO source', required: true, enum: ['repo', 'dataset', 'path'], default: 'path' },
       repoFileId: { type: 'string', label: 'File from repo', required: false, description: 'UNM file-repo ISO (uploaded first when missing)' },
       dataset: { type: 'string', label: 'Dataset', required: false, description: 'Target dataset for a repo upload / parent of an existing ISO' },
       path: { type: 'string', label: 'ISO path (/mnt/…)', required: false, pattern: '^/mnt/', description: 'Existing ISO on the appliance or manual path' },
@@ -3010,6 +3171,74 @@ const vmsDeviceTypesAction: ActionDescriptor<TruenasActionContext> = {
   inputSchema: {},
   async execute(): Promise<ActionResult> {
     return { success: true, details: { types: VM_DEVICE_TYPES } };
+  },
+};
+
+/**
+ * vms.device-get — read the CURRENT values of an attached device's editable
+ * fields (the subset named in each type descriptor's `editInputSchema`). The
+ * webapp's Edit-device dialog prefills its form from this, so it never has to
+ * parse appliance attribute names itself. Field keys match editInputSchema:
+ *   NIC     { nicAttach, mac }        DISK  { diskType }
+ *   DISPLAY { resolution, port, password, web }
+ *   USB     { controllerType }        CDROM { path } (source defaults to 'path')
+ */
+const vmsDeviceGetAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.device-get',
+  label: 'Read attached device values',
+  description:
+    'Read-only — returns the current editable field values of ONE attached VM device (prefill for the Edit-device dialog). Field names match the type descriptor\'s editInputSchema.',
+  module: 'VMs',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'VM name' },
+    deviceId: { type: 'number', required: true, min: 1, description: 'Integer device id from the VM inventory row' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'VM name is required' } };
+    const deviceId = num(input, 'deviceId', -1);
+    if (deviceId < 1) return { success: false, details: { error: 'deviceId (integer device id) is required' } };
+
+    let vms: VmInfo[];
+    try {
+      vms = await listVms(ctx);
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+    const vm = vms.find((v) => v.name === name);
+    if (!vm) return { success: false, details: { error: `VM "${name}" not found on this appliance` } };
+
+    let dev: { dtype: string; attrs: Record<string, unknown> } | null = null;
+    for (const d of vm.devices) {
+      const raw = d as Record<string, unknown>;
+      const id = typeof raw['id'] === 'number' ? (raw['id'] as number) : undefined;
+      if (id !== deviceId) continue;
+      dev = normalizeVmDevice(d);
+      break;
+    }
+    if (!dev) return { success: false, details: { error: `Device ${deviceId} not found on VM "${name}" — it may have been detached` } };
+
+    const a = dev.attrs;
+    switch (dev.dtype.toUpperCase()) {
+      case 'NIC':
+        return { success: true, details: { deviceId, dtype: dev.dtype, values: { nicAttach: pickString(a, ['nic_attach']), mac: pickString(a, ['mac']) } } };
+      case 'DISK':
+      case 'RAW':
+        return { success: true, details: { deviceId, dtype: dev.dtype, values: { diskType: pickString(a, ['type']) ?? 'VIRTIO' } } };
+      case 'DISPLAY': {
+        const port = typeof a['port'] === 'number' ? (a['port'] as number) : undefined;
+        return { success: true, details: { deviceId, dtype: dev.dtype, values: { resolution: pickString(a, ['resolution']), ...(port !== undefined ? { port } : {}), password: pickString(a, ['password']), web: a['web'] === true } } };
+      }
+      case 'USB':
+        return { success: true, details: { deviceId, dtype: dev.dtype, values: { controllerType: pickString(a, ['controller_type']) ?? 'nec-xhci' } } };
+      case 'CDROM':
+        // The current ISO already lives on the appliance — prefill the manual-path source.
+        return { success: true, details: { deviceId, dtype: dev.dtype, values: { source: 'path', path: pickString(a, ['path']) ?? '' } } };
+      default:
+        return { success: false, details: { error: `Device type ${dev.dtype} has no editable fields on this appliance` } };
+    }
   },
 };
 
@@ -3759,6 +3988,7 @@ const storageDeleteAction: ActionDescriptor<TruenasActionContext> = {
       try {
         // Transport-tolerant — a lost response is confirmed by re-reading (the dataset must be GONE).
         const r = await dispatchWrite(ctx, 'pool.dataset.delete', [n, recursive || force ? { recursive, force } : {}], {
+          timeoutMs: 60_000,
           verify: async () => {
             try {
               const rows = await ctx.client.call<Record<string, unknown>[]>('pool.dataset.query', [[['name', '=', n]]], ctx.creds);
@@ -5190,7 +5420,8 @@ export const registry = createRegistry<TruenasActionContext>([
   vmsIsoChoicesAction,
   vmsCdromAttachAction,
   vmsDeviceDetachAction,
-  vmsDeviceEditAction,
+  vmsDeviceUpdateAction,
+  vmsDeviceGetAction,
   vmsDeviceTypesAction,
   vmsDiskChoicesAction,
   vmsPciChoicesAction,

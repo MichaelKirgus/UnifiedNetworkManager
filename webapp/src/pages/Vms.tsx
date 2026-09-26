@@ -1,6 +1,6 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { CheckCircle2, EyeOff, Loader2, Monitor, Pause, Play, Plus, RefreshCw, RotateCw, Square, Trash2, Unplug, X, Zap } from 'lucide-react';
+import { CheckCircle2, EyeOff, Loader2, Monitor, Pencil, Pause, Play, Plus, RefreshCw, RotateCw, Square, Trash2, Unplug, X, Zap } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
@@ -145,6 +145,8 @@ interface DeviceActionContext {
   detachNic: (node: VmNode) => void;
   /** Generic device detach by integer id — any dtype (NIC, disk, display, CD-ROM…). */
   detachDevice: (node: VmNode) => void;
+  /** Opens the generic Edit-device dialog for this attached device. */
+  editDevice: (node: VmNode) => void;
   /** True when the parent VM is stopped — vms.device-detach requires it. */
   vmStopped: (row: VmRow) => boolean;
   /** Read-Only mode — disables the device write actions. */
@@ -166,23 +168,40 @@ function nodeCell(key: string, node: VmNode, depth: number, actions?: DeviceActi
     case 'actions': {
       if (!node.row || !actions) return null;
       const pid = node.row.pluginId;
-      // Generic device detach — any dtype that carries an integer id, when the
-      // plugin advertises vms.device-detach. Requires a STOPPED VM (the appliance
-      // enforces it too); disabled otherwise with an explanatory title.
-      if (node.devId !== undefined && actions.hasAction(pid, 'vms.device-detach')) {
+      // Generic device actions — any dtype that carries an integer id, when the
+      // plugin advertises them. Edit (vms.device-update) works on running VMs for
+      // hot-pluggable types; detach requires a STOPPED VM (the appliance enforces
+      // it too) and is disabled otherwise with an explanatory title.
+      if (node.devId !== undefined && (actions.hasAction(pid, 'vms.device-detach') || actions.hasAction(pid, 'vms.device-update'))) {
         const stopped = actions.vmStopped(node.row);
         const blockedByReadOnly = !!actions.readOnly;
         return (
-          <button
-            type="button"
-            aria-label={`Detach ${node.dtype ?? 'device'} ${node.label ?? ''}`}
-            title={blockedByReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : !stopped ? `Stop the VM first — devices can only be detached while it is stopped` : `Detach ${node.dtype?.toLowerCase() ?? 'device'} ${node.label ?? ''}`}
-            disabled={blockedByReadOnly || !stopped}
-            onClick={() => actions.detachDevice(node)}
-            className="rounded-md p-1 text-danger-fg hover:bg-muted hover:text-danger-fg disabled:cursor-not-allowed disabled:opacity-30"
-          >
-            <Unplug size={13} />
-          </button>
+          <span className="inline-flex items-center gap-0.5">
+            {actions.hasAction(pid, 'vms.device-update') && (
+              <button
+                type="button"
+                aria-label={`Edit ${node.dtype ?? 'device'} ${node.label ?? ''}`}
+                title={blockedByReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : `Edit ${node.dtype?.toLowerCase() ?? 'device'} ${node.label ?? ''}`}
+                disabled={blockedByReadOnly}
+                onClick={() => actions.editDevice(node)}
+                className="rounded-md p-1 text-secondary hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                <Pencil size={13} />
+              </button>
+            )}
+            {actions.hasAction(pid, 'vms.device-detach') && (
+              <button
+                type="button"
+                aria-label={`Detach ${node.dtype ?? 'device'} ${node.label ?? ''}`}
+                title={blockedByReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : !stopped ? `Stop the VM first — devices can only be detached while it is stopped` : `Detach ${node.dtype?.toLowerCase() ?? 'device'} ${node.label ?? ''}`}
+                disabled={blockedByReadOnly || !stopped}
+                onClick={() => actions.detachDevice(node)}
+                className="rounded-md p-1 text-danger-fg hover:bg-muted hover:text-danger-fg disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                <Unplug size={13} />
+              </button>
+            )}
+          </span>
         );
       }
       // Legacy fallback — NIC detach by MAC (plugins that don't carry device ids).
@@ -725,6 +744,16 @@ interface VmDeviceTypeDescriptor {
   /** Read-only catalog action whose details feed the dialog's picker (optional). */
   choicesActionId?: string;
   inputSchema: InputSchema;
+  /** The subset of fields editable on an ALREADY-ATTACHED device (vms.device-update). Absent = not editable in place. */
+  editInputSchema?: InputSchema;
+}
+
+/** Target of the Edit-device dialog — one attached device row under a VM. */
+interface DeviceEditTarget {
+  row: VmRow;
+  /** The appliance's integer device id (vms.device-get / vms.device-update target). */
+  devId: number;
+  dtype: string;
 }
 
 /** One normalized picker entry from a type's choices action. */
@@ -1231,6 +1260,408 @@ function AttachDeviceDialog({ target, stopped, onClose }: { target: NicAttachTar
 }
 
 // ---------------------------------------------------------------------------
+// Edit-device dialog — generic over the plugin's vms.device-types descriptors:
+// the form is rendered from the type's `editInputSchema` (the subset of fields
+// changeable in place), prefilled via vms.device-get, and submitted as a
+// partial-merge vms.device-update through the plan workflow. A future hypervisor
+// plugin implementing those ids + descriptor fields gets this dialog for free.
+// ---------------------------------------------------------------------------
+
+function EditDeviceDialog({ target, stopped, onClose }: { target: DeviceEditTarget; stopped: boolean; onClose: () => void }) {
+  const { mode } = useExecutionMode();
+  const isPlanMode = mode === 'plan';
+  const isReadOnly = mode === 'readonly';
+  const row = target.row;
+
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [descriptor, setDescriptor] = useState<VmDeviceTypeDescriptor | null>(null);
+  const [values, setValues] = useState<Record<string, unknown>>({});
+  /** The values vms.device-get reported — the diff baseline for submit. */
+  const [originals, setOriginals] = useState<Record<string, unknown>>({});
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [choiceData, setChoiceData] = useState<{ list: VmDeviceChoice[]; iommu?: boolean } | null>(null);
+  // CD-ROM ISO source data (same sources as the attach dialog). The manual path
+  // itself lives in values['path'] — prefilled with the device's current ISO.
+  const [cdromRepoFiles, setCdromRepoFiles] = useState<FileRepoEntry[]>([]);
+  const [cdromDatasets, setCdromDatasets] = useState<{ name: string; mountpoint: string }[]>([]);
+  const [cdromIsoFiles, setCdromIsoFiles] = useState<{ path: string; name: string; sizeBytes: number | null }[]>([]);
+  const [cdromIsoPath, setCdromIsoPath] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [reauth, setReauth] = useState(false);
+  // Plan mode: the edit plan was saved without executing.
+  const [saved, setSaved] = useState(false);
+
+  // Load the descriptor for this dtype + the device's current values (prefill).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.executePluginAction(row.pluginId, { deviceId: row.deviceId, actionId: 'vms.device-types', input: {} });
+        if (cancelled) return;
+        const raw = Array.isArray(res.details.types) ? (res.details.types as VmDeviceTypeDescriptor[]) : [];
+        const t = raw.find((x) => x.dtype.toUpperCase() === target.dtype.toUpperCase()) ?? null;
+        setDescriptor(t);
+        if (!t?.editInputSchema) return; // nothing editable — the message below explains why
+        const getRes = await api.executePluginAction(row.pluginId, { deviceId: row.deviceId, actionId: 'vms.device-get', input: { name: row.name, deviceId: target.devId } });
+        if (cancelled) return;
+        const vals = (getRes.details.values && typeof getRes.details.values === 'object' ? getRes.details.values : {}) as Record<string, unknown>;
+        setOriginals(vals);
+        // Prefill — schema defaults first, then the appliance's current values.
+        const merged: Record<string, unknown> = defaultValues(t.editInputSchema);
+        for (const [k, v] of Object.entries(vals)) if (v !== undefined && v !== '') merged[k] = v;
+        setValues(merged);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [row.pluginId, row.deviceId, row.name, target.devId, target.dtype]);
+
+  const isCdrom = descriptor?.dtype.toUpperCase() === 'CDROM';
+  const cdromDataset = String(values['dataset'] ?? '');
+
+  // NIC picker (same choices action as the attach dialog).
+  useEffect(() => {
+    if (!descriptor || !descriptor.choicesActionId) return;
+    const choicesActionId = descriptor.choicesActionId;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.executePluginAction(row.pluginId, { deviceId: row.deviceId, actionId: choicesActionId, input: {} });
+        if (!cancelled) setChoiceData(normalizeChoices(descriptor.dtype, res.details));
+      } catch { /* picker is optional — manual entry still works */ }
+    })();
+    return () => { cancelled = true; };
+  }, [row.pluginId, row.deviceId, descriptor?.choicesActionId, descriptor?.dtype]);
+
+  // CD-ROM source data (repo files + appliance datasets).
+  useEffect(() => {
+    if (!isCdrom) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [filesRes, choicesRes] = await Promise.all([
+          api.repoFiles('iso').catch(() => ({ files: [] as FileRepoEntry[] })),
+          api.executePluginAction(row.pluginId, { deviceId: row.deviceId, actionId: 'vms.create-choices', input: {} }).catch(() => null),
+        ]);
+        if (cancelled) return;
+        setCdromRepoFiles(Array.isArray(filesRes.files) ? filesRes.files : []);
+        const ds = choicesRes?.details.datasets;
+        setCdromDatasets(Array.isArray(ds) ? (ds as { name: string; mountpoint: string }[]) : []);
+      } catch { /* best-effort — the manual path source still works */ }
+    })();
+    return () => { cancelled = true; };
+  }, [row.pluginId, row.deviceId, isCdrom]);
+
+  // ISOs of the chosen dataset.
+  useEffect(() => {
+    if (!isCdrom || !cdromDataset) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.executePluginAction(row.pluginId, { deviceId: row.deviceId, actionId: 'vms.iso-choices', input: { dataset: cdromDataset } });
+        if (!cancelled) setCdromIsoFiles(Array.isArray(res.details.files) ? (res.details.files as { path: string; name: string; sizeBytes: number | null }[]) : []);
+      } catch {
+        if (!cancelled) setCdromIsoFiles([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [row.pluginId, row.deviceId, isCdrom, cdromDataset]);
+
+  const editSchema = descriptor?.editInputSchema ?? ({} as InputSchema);
+
+  // Fields covered by the NIC picker or the CDROM source section — hidden from SchemaForm.
+  const skippedKeys = useMemo(() => {
+    const skip = new Set<string>();
+    if (!descriptor) return skip;
+    if (descriptor.dtype.toUpperCase() === 'NIC') skip.add('nicAttach'); // covered by the interface picker
+    if (isCdrom) { skip.add('source'); skip.add('repoFileId'); skip.add('dataset'); skip.add('path'); }
+    return skip;
+  }, [descriptor, isCdrom]);
+
+  const formSchema = useMemo(() => {
+    const out: InputSchema = {};
+    for (const [k, p] of Object.entries(editSchema)) if (!skippedKeys.has(k)) out[k] = p;
+    return out;
+  }, [editSchema, skippedKeys]);
+
+  // The CDROM source section's completeness — mirrors the attach dialog.
+  const cdromCanSubmit = useMemo(() => {
+    if (!isCdrom) return true;
+    const s = String(values['source'] ?? 'path');
+    if (s === 'repo') return !!values['repoFileId'] && !!values['dataset'];
+    if (s === 'dataset') return !!cdromIsoPath;
+    // source 'path' — the manual input is bound to values['path'] (prefilled with the current ISO).
+    return String(values['path'] ?? '').trim().startsWith('/mnt/');
+  }, [isCdrom, values, cdromIsoPath]);
+
+  // Only CHANGED fields ride along — the appliance merges, so unchanged keys are omitted.
+  const changedKeys = useMemo(() => {
+    if (!descriptor) return [];
+    const out: string[] = [];
+    for (const k of Object.keys(editSchema)) {
+      const v = values[k];
+      const o = originals[k];
+      if (v === undefined || v === '') continue; // empty = "keep current"
+      if (String(v) !== String(o ?? '')) out.push(k);
+    }
+    return out;
+  }, [descriptor, editSchema, values, originals]);
+
+  const needsStopped = descriptor?.requiresStopped === true && !stopped;
+
+  async function submit() {
+    if (isReadOnly || !descriptor) return; // safety net — the button is disabled
+    const errors: Record<string, string> = validateSchema(editSchema, values);
+    if (isCdrom && !cdromCanSubmit) {
+      const s = String(values['source'] ?? 'path');
+      if (s === 'repo') {
+        if (!values['repoFileId']) errors['repoFileId'] = 'Required';
+        if (!values['dataset']) errors['dataset'] = 'Required';
+      } else if (s === 'dataset') {
+        if (!cdromIsoPath) errors['path'] = 'Select an ISO';
+      } else if (!String(values['path'] ?? '').trim().startsWith('/mnt/')) {
+        errors['path'] = 'Must start with /mnt/';
+      }
+    }
+    setFieldErrors(errors);
+    if (Object.keys(errors).length > 0) return;
+
+    // Build the fields payload — only what actually changed.
+    const fields: Record<string, unknown> = {};
+    for (const k of changedKeys) {
+      if (skippedKeys.has(k)) continue; // picker/section-owned — handled below
+      fields[k] = values[k];
+    }
+    if (isCdrom) {
+      const s = String(values['source'] ?? 'path');
+      if (s === 'repo') { fields['repoFileId'] = values['repoFileId']; fields['dataset'] = values['dataset']; }
+      else if (s === 'dataset') { fields['path'] = cdromIsoPath; }
+      else { fields['path'] = String(values['path'] ?? '').trim(); }
+    } else if (descriptor.choicesActionId === 'vms.nic-choices') {
+      // The NIC picker owns nicAttach — include it only when it actually changed.
+      const v = values['nicAttach'];
+      if (typeof v === 'string' && v !== '' && String(v) !== String(originals['nicAttach'] ?? '')) fields['nicAttach'] = v;
+    }
+
+    setSaving(true);
+    setError(null);
+    const attempt = async () => {
+      await createAndExecutePlan(row.pluginId, 'vms.device-update', [{ deviceId: row.deviceId, input: { name: row.name, deviceId: target.devId, fields } }], mode);
+      if (isPlanMode) { setSaved(true); return; }
+      onClose();
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth(true);
+      else setError(err instanceof Error ? err.message : String(err));
+      setSaving(false);
+    }
+  }
+
+  // Plan mode: the plan was saved without executing — offer to close.
+  if (saved) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
+        <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
+          <header className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h2 className="text-base font-semibold text-foreground">Edit device — {row.name}</h2>
+            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted"><X size={16} /></button>
+          </header>
+          <div className="space-y-3 px-4 py-4">
+            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+              Device edit saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
+            </div>
+          </div>
+          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
+          </footer>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
+      <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <header className="flex items-center justify-between border-b border-border px-4 py-3">
+          <div>
+            <h2 className="text-base font-semibold text-foreground">Edit {descriptor?.label ?? target.dtype.toLowerCase()} — {row.name}</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">Unchanged fields keep their current value; applies via the plan workflow on {row.deviceName ?? row.deviceId}.</p>
+          </div>
+          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted"><X size={16} /></button>
+        </header>
+
+        <div className="space-y-4 px-4 py-4">
+          {isReadOnly && (
+            <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+              <EyeOff size={14} className="mt-0.5 shrink-0" />
+              Read-only mode is active — this change cannot be saved or applied. Switch to Plan or Execute in the top bar.
+            </div>
+          )}
+          {loading && (
+            <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 size={14} className="animate-spin" /> Loading current device values…</p>
+          )}
+          {error && !reauth && (
+            <div className="rounded border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
+          )}
+
+          {!loading && !error && descriptor && !descriptor.editInputSchema && (
+            <p className="text-sm text-muted-foreground">
+              {descriptor.label ?? target.dtype.toLowerCase()} devices cannot be edited in place on this hypervisor — detach the device and attach a new one instead.
+            </p>
+          )}
+
+          {!loading && !error && descriptor?.editInputSchema && (
+            <>
+              {needsStopped && (
+                <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+                  <EyeOff size={14} className="mt-0.5 shrink-0" />
+                  Editing this device requires a STOPPED VM — stop “{row.name}” first, then reopen this dialog.
+                </div>
+              )}
+
+              {/* NIC picker (bridge / MACVLAN) when the type advertises one. */}
+              {descriptor.choicesActionId === 'vms.nic-choices' && choiceData && (
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-secondary">Interface (bridge / MACVLAN)</label>
+                  <select
+                    value={typeof values['nicAttach'] === 'string' ? (values['nicAttach'] as string) : ''}
+                    onChange={(e) => { setValues({ ...values, nicAttach: e.target.value || undefined }); setFieldErrors({}); }}
+                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground"
+                  >
+                    <option value="">Select an interface…</option>
+                    {choiceData.list.map((c) => (
+                      <option key={c.id} value={c.id}>{c.label}{c.hint ? ` — ${c.hint}` : ''}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* CD-ROM ISO source section — same sources as the attach dialog. */}
+              {isCdrom && (
+                <div className="space-y-3">
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-secondary">ISO source</label>
+                    <select value={String(values['source'] ?? 'path')} onChange={(e) => { setValues({ ...values, source: e.target.value }); setCdromIsoPath(''); setFieldErrors({}); }}
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground">
+                      <option value="path">Existing ISO on the appliance</option>
+                      <option value="repo">From UNM file repo (Files page)</option>
+                      <option value="dataset">Pick from a dataset</option>
+                    </select>
+                  </div>
+
+                  {String(values['source'] ?? 'path') === 'path' && (
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-secondary">ISO path</label>
+                      <input type="text" value={typeof values['path'] === 'string' ? (values['path'] as string) : ''} onChange={(e) => { setValues({ ...values, path: e.target.value }); setFieldErrors({}); }} placeholder="/mnt/POOL/VM/debian.iso"
+                        className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm text-foreground placeholder:text-faint" />
+                      {fieldErrors['path'] && <p className="mt-1 text-xs text-danger-fg">{fieldErrors['path']}</p>}
+                    </div>
+                  )}
+
+                  {String(values['source'] ?? 'path') === 'repo' && (
+                    <>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-secondary">File from repo</label>
+                        <select value={typeof values['repoFileId'] === 'string' ? (values['repoFileId'] as string) : ''} onChange={(e) => { setValues({ ...values, repoFileId: e.target.value || undefined }); setFieldErrors({}); }}
+                          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground">
+                          <option value="">Select a file…</option>
+                          {cdromRepoFiles.map((f) => (
+                            <option key={f.id} value={f.id}>{f.name} ({formatBytes(f.sizeBytes)})</option>
+                          ))}
+                        </select>
+                        {fieldErrors['repoFileId'] && <p className="mt-1 text-xs text-danger-fg">{fieldErrors['repoFileId']}</p>}
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-secondary">Target dataset</label>
+                        <select value={typeof values['dataset'] === 'string' ? (values['dataset'] as string) : ''} onChange={(e) => { setValues({ ...values, dataset: e.target.value || undefined }); setCdromIsoPath(''); setFieldErrors({}); }}
+                          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground">
+                          <option value="">Select a dataset…</option>
+                          {cdromDatasets.map((d) => (
+                            <option key={d.name} value={d.name}>{d.name}</option>
+                          ))}
+                        </select>
+                        {fieldErrors['dataset'] && <p className="mt-1 text-xs text-danger-fg">{fieldErrors['dataset']}</p>}
+                      </div>
+                    </>
+                  )}
+
+                  {String(values['source'] ?? 'path') === 'dataset' && (
+                    <>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-secondary">Dataset</label>
+                        <select value={cdromDataset} onChange={(e) => { setValues({ ...values, dataset: e.target.value || undefined }); setCdromIsoPath(''); setFieldErrors({}); }}
+                          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground">
+                          <option value="">Select a dataset…</option>
+                          {cdromDatasets.map((d) => (
+                            <option key={d.name} value={d.name}>{d.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-secondary">ISO</label>
+                        <select value={cdromIsoPath} onChange={(e) => { setCdromIsoPath(e.target.value); setFieldErrors({}); }} disabled={!cdromDataset}
+                          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground disabled:opacity-50">
+                          <option value="">Select an ISO…</option>
+                          {cdromIsoFiles.map((f) => (
+                            <option key={f.path} value={f.path}>{f.name}{f.sizeBytes != null ? ` (${formatBytes(f.sizeBytes)})` : ''}</option>
+                          ))}
+                        </select>
+                        {fieldErrors['path'] && <p className="mt-1 text-xs text-danger-fg">{fieldErrors['path']}</p>}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* The type's editable fields, rendered generically from editInputSchema. */}
+              {!isCdrom && (
+                <SchemaForm schema={formSchema} values={values} onChange={(v) => { setValues(v); setFieldErrors({}); }} fieldErrors={fieldErrors} />
+              )}
+
+              {changedKeys.length === 0 && !isReadOnly && (
+                <p className="text-xs text-faint">No changes yet — adjust a field above to enable saving.</p>
+              )}
+            </>
+          )}
+        </div>
+
+        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
+          <button
+            type="button"
+            disabled={!descriptor?.editInputSchema || saving || isReadOnly || needsStopped || changedKeys.length === 0 || (isCdrom && !cdromCanSubmit)}
+            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : needsStopped ? 'Stop the VM first' : undefined}
+            onClick={() => void submit()}
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {saving && <Loader2 size={12} className="animate-spin" />}
+            {isPlanMode ? 'Save as plan' : `Edit ${descriptor?.label ?? 'device'}`}
+          </button>
+        </footer>
+
+        {reauth && (
+          <ReauthDialog
+            contextLabel={`Edit device on ${row.name}`}
+            onClose={() => setReauth(false)}
+            onSuccess={async () => {
+              setReauth(false);
+              try { await submit(); } catch { /* dialog stays open */ }
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page component
 // ---------------------------------------------------------------------------
 
@@ -1485,10 +1916,13 @@ export default function Vms() {
     setCreateOpen(true);
   }
 
-  // --- Device attach / detach -----------------------------------------------------
+  // --- Device attach / edit / detach ------------------------------------------------
   // Generic Add-device dialog (NIC + CD-ROM/ISO included) — driven by the
   // plugin's vms.device-types descriptor.
   const [attachTarget, setAttachTarget] = useState<NicAttachTarget | null>(null);
+  // Generic Edit-device dialog — form rendered from the type's editInputSchema,
+  // prefilled via vms.device-get, submitted as a partial-merge vms.device-update.
+  const [editTarget, setEditTarget] = useState<DeviceEditTarget | null>(null);
 
   function detachDevice(node: VmNode) {
     const row = node.row;
@@ -1542,6 +1976,12 @@ export default function Vms() {
         else setNotice({ kind: 'error', text: `Detach NIC failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     })();
+  }
+
+  function editDevice(node: VmNode) {
+    const row = node.row;
+    if (!row || node.devId === undefined || !node.dtype) return;
+    setEditTarget({ row, devId: node.devId, dtype: node.dtype });
   }
 
   // --- Display tree -----------------------------------------------------------------
@@ -1872,7 +2312,7 @@ export default function Vms() {
                 <ChildRow
                   node={child}
                   ctx={ctx}
-                  actions={{ hasAction, detachNic, detachDevice, vmStopped: (row) => STOPPED_STATES.has(effectiveState(row)), readOnly: mode === 'readonly' }}
+                  actions={{ hasAction, detachNic, detachDevice, editDevice, vmStopped: (row) => STOPPED_STATES.has(effectiveState(row)), readOnly: mode === 'readonly' }}
                 />
               ),
             }}
@@ -1889,6 +2329,15 @@ export default function Vms() {
             target={attachTarget}
             stopped={STOPPED_STATES.has(effectiveState(attachTarget.row))}
             onClose={() => setAttachTarget(null)}
+          />
+        )}
+
+        {/* Generic Edit-device dialog — form from the type's editInputSchema, prefilled via vms.device-get */}
+        {editTarget && (
+          <EditDeviceDialog
+            target={editTarget}
+            stopped={STOPPED_STATES.has(effectiveState(editTarget.row))}
+            onClose={() => setEditTarget(null)}
           />
         )}
 

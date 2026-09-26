@@ -192,10 +192,19 @@ export class TruenasClient {
       });
     });
 
+    // The connect promise is SHARED by concurrent callers. Two dangling-rejection
+    // traps when the handshake fails: (1) a consumer that attaches to an already-
+    // rejected promise without handling it, and (2) `p.finally(...)` — finally
+    // PROPAGATES rejections into its derived promise, which nobody would handle
+    // ("Unhandled promise rejection" crashes the whole process). Handle both:
+    // attach a no-op catch to the shared promise itself, and clear connectPromise
+    // via then/catch instead of finally. Every caller still receives its own
+    // rejection through this shared promise.
+    p.catch(() => { /* handled by each consumer */ });
+
     this.connectPromise = p;
-    void p.finally(() => {
-      if (this.connectPromise === p) this.connectPromise = null;
-    });
+    const clearIfCurrent = () => { if (this.connectPromise === p) this.connectPromise = null; };
+    p.then(clearIfCurrent, clearIfCurrent);
     return p;
   }
 

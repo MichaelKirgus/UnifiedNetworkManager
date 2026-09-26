@@ -234,7 +234,16 @@ const identity = resolvePluginIdentity({
   // types — NIC (bridge/MACVLAN picker via vms.nic-choices) and CDROM (ISO from
   // repo / dataset / manual path, in-place swap) — so the webapp's single
   // "Add device" dialog now covers every attach flow.
-  version: '0.18.0',
+  // 0.19.0 — Generic VM device EDIT (the webapp's pencil button on any attached
+  // device): vms.device-types descriptors gain an optional editInputSchema — the
+  // SUBSET of fields changeable in place (absent = not editable, e.g. PCI). New
+  // read action vms.device-get returns the current values for that subset (form
+  // prefill); new write action vms.device-update sends ONLY the changed fields —
+  // TrueNAS's vm.device.update is a partial attribute merge (verified in the
+  // middleware source), so untouched attributes are preserved. Editable: NIC
+  // (bridge/MAC + MAC), DISK (VIRTIO/AHCI type), DISPLAY (resolution/port/
+  // password/web — protocol fixed), USB (controller type), CDROM (ISO source).
+  version: '0.19.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -2809,6 +2818,16 @@ app.post('/config', async (req, res) => {
     // uploadViaSftp gates the SFTP upload fallback.
     const ctx: TruenasActionContext = { client: getClient(host, transport, timeoutMs, ports), creds, host, deviceId, deviceName, rawCredentials: body.credentials as Record<string, unknown> | null, uploadViaSftp: settings.uploadViaSftp !== false };
     const result = await action.execute(ctx, input);
+    // This plugin reports failures as { success:false, details:{ error } } — the SDK's
+    // ActionResult contract puts `error`/`retryable`/`waitMs` at the TOP level of the
+    // result (the plan executor reads them there; without this normalization every
+    // action failure surfaces in plans as "unknown error"). Promote on the wire.
+    if (result.success === false && typeof result.error !== 'string') {
+      const d = (result.details ?? {}) as Record<string, unknown>;
+      if (typeof d['error'] === 'string') result.error = d['error'];
+      if (typeof result.retryable !== 'boolean' && typeof d['retryable'] === 'boolean') result.retryable = d['retryable'];
+      if (result.waitMs === undefined && typeof d['waitMs'] === 'number') result.waitMs = d['waitMs'];
+    }
     res.status(200).json({ success: result.success, result });
   } catch (err) {
     logger.error(`Config action ${actionId} failed for ${host}: ${errMsg(err)}`, { deviceId, context: { host, actionId } });

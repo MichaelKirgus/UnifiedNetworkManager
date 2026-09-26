@@ -15,8 +15,10 @@
  *   4. SAFE LIVE CYCLE on a STOPPED VM without a display (state never changes):
  *        USB attach (plan workflow) → verify via GET /vms extra.devices → detach → verify gone
  *        NIC attach (bridge, hot-pluggable) → verify new row in inventory    → detach → verify gone
- *        DISPLAY attach (VNC)       → verify + appliance-assigned port      → detach → verify gone
- *   5. NEGATIVE: display attach on a VM that ALREADY has one must fail with the
+ *        DISPLAY attach (VNC)       → verify + appliance-assigned port      → detach → verify gone   4b. EDIT CYCLES (generic edit contract — vms.device-get prefill + partial-merge
+        vms.device-update, verified via GET /vms detail, always restored):
+        NIC bridge swap on the freshly attached NIC; DISPLAY resolution change
+        on the VM's existing console. *   5. NEGATIVE: display attach on a VM that ALREADY has one must fail with the
  *      "already has a display" error (appliance rule, enforced pre-RPC).
  *   Every plan created is deleted at the end; no appliance state survives.
  *
@@ -95,7 +97,7 @@ async function main(): Promise<void> {
   const catRes = await authed('GET', `/plugins/${PLUGIN_ID}/actions`);
   check('GET /plugins/:id/actions → 200', catRes.status === 200, { status: catRes.status });
   const catalog = ((await catRes.json()) as { actions?: Array<{ id: string; riskLevel: string }> }).actions ?? [];
-  for (const [id, risk] of [['vms.device-types', 'read'], ['vms.disk-choices', 'read'], ['vms.pci-choices', 'read'], ['vms.usb-choices', 'read'], ['vms.nic-choices', 'read'], ['vms.disk-attach', 'write'], ['vms.display-attach', 'write'], ['vms.pci-attach', 'write'], ['vms.usb-attach', 'write'], ['vms.nic-attach', 'write'], ['vms.cdrom-attach', 'write']] as const) {
+  for (const [id, risk] of [['vms.device-types', 'read'], ['vms.disk-choices', 'read'], ['vms.pci-choices', 'read'], ['vms.usb-choices', 'read'], ['vms.nic-choices', 'read'], ['vms.device-get', 'read'], ['vms.disk-attach', 'write'], ['vms.display-attach', 'write'], ['vms.pci-attach', 'write'], ['vms.usb-attach', 'write'], ['vms.nic-attach', 'write'], ['vms.cdrom-attach', 'write'], ['vms.device-update', 'write']] as const) {
     const entry = catalog.find((a) => a.id === id);
     check(`catalog has ${id} (${risk})`, Boolean(entry) && entry!.riskLevel === risk, entry ?? `missing`);
   }
@@ -122,6 +124,16 @@ async function main(): Promise<void> {
   const diskType = types.find((t) => dtypeOf(t) === 'DISK');
   check('every descriptor carries an inputSchema with fields', types.every((t) => t['inputSchema'] && typeof t['inputSchema'] === 'object' && Object.keys(t['inputSchema'] as object).length > 0));
   check('DISK descriptor has mode enum existing|new-zvol', Array.isArray((diskType?.['inputSchema'] as Record<string, { enum?: unknown[] }> | undefined)?.['mode']?.enum) && (diskType!['inputSchema'] as Record<string, { enum: string[] }>)['mode'].enum!.includes('new-zvol'));
+
+  // Edit contract — every editable type carries a non-empty editInputSchema; PCI does not.
+  const editKeys = (t: Record<string, unknown> | undefined): string[] => Object.keys((t?.['editInputSchema'] ?? {}) as object);
+  check('DISK descriptor has editInputSchema with diskType', editKeys(diskType).includes('diskType'), editKeys(diskType));
+  const displayType = types.find((t) => dtypeOf(t) === 'DISPLAY');
+  check('DISPLAY descriptor has editInputSchema (resolution/port/password/web)', ['resolution', 'port', 'password', 'web'].every((f) => editKeys(displayType).includes(f)), editKeys(displayType));
+  check('NIC descriptor has editInputSchema with nicAttach + mac', editKeys(nicType).includes('nicAttach') && editKeys(nicType).includes('mac'), editKeys(nicType));
+  check('USB descriptor has editInputSchema with controllerType', editKeys(usbType).includes('controllerType'), editKeys(usbType));
+  check('CDROM descriptor has editInputSchema (source/repoFileId/dataset/path)', ['source', 'repoFileId', 'dataset', 'path'].every((f) => editKeys(cdromType).includes(f)), editKeys(cdromType));
+  check('PCI descriptor is NOT editable in place (no editInputSchema)', pciType !== undefined && !pciType['editInputSchema'], { hasEdit: Boolean(pciType?.['editInputSchema']) });
 
   // vms.disk-choices — normalized existing-disk picker list.
   const diskRes = await authed('POST', `/plugins/${PLUGIN_ID}/actions/execute`, { deviceId, actionId: 'vms.disk-choices', input: {} });
@@ -322,6 +334,40 @@ async function main(): Promise<void> {
 
           // The NEW row is the one whose id we have not seen before.
           const attachedNic = nicsNow.find((d) => typeof d.id === 'number' && !knownNicIds.has(d.id)) ?? nicsNow[nicCountBefore];
+
+          // 3a2b. EDIT cycle on the freshly attached NIC (generic edit contract):
+          // vms.device-get prefill → vms.device-update bridge swap → verify via
+          // GET /vms detail → restore the original bridge before detaching.
+          if (!attachedNic?.id) {
+            skip('NIC edit cycle', 'no integer device id on the attached NIC row');
+          } else {
+            const getRes = await authed('POST', `/plugins/${PLUGIN_ID}/actions/execute`, { deviceId, actionId: 'vms.device-get', input: { name: vm.name, deviceId: attachedNic.id } });
+            check('vms.device-get → 200', getRes.status === 200, { status: getRes.status });
+            const got = ((await getRes.json()) as { details?: { dtype?: string; values?: Record<string, unknown> } }).details ?? {};
+            check('device-get prefills nicAttach with the attached bridge', got.dtype === 'NIC' && String(got.values?.['nicAttach'] ?? '') === bridge, got);
+
+            const otherBridge = (bridges.find((b) => b !== bridge)) ?? null;
+            if (!otherBridge) {
+              skip('NIC device-update cycle', 'only one bridge on this appliance — nothing to swap to');
+            } else {
+              console.log(`  INFO NIC edit: ${bridge} → ${otherBridge}`);
+              const updPlan = await runPlan('vms.device-update', { name: vm.name, deviceId: attachedNic.id, fields: { nicAttach: otherBridge } });
+              check('device-update (NIC bridge swap) plan succeeded', updPlan.status === 'succeeded', { status: updPlan.status, error: updPlan.error, steps: (updPlan.steps ?? []).map((s) => `${s.actionId}:${s.status}`) });
+              const updDetails = stepResult(updPlan, 'vms.device-update')?.['details'] as Record<string, unknown> | undefined;
+              check('device-update result reports the updated field + verified', Array.isArray(updDetails?.['updated']) && (updDetails!['updated'] as string[]).includes('nicAttach') && updPlan.status === 'succeeded', updDetails);
+
+              rows = await settleVms((rs) => devicesOf(rs.find((r) => r.name === vm.name)!).some((d) => d.dtype === 'NIC' && d.id === attachedNic.id && String(d.detail ?? '').includes(otherBridge)));
+              const vmAfterEdit = rows.find((r) => r.name === vm.name)!;
+              check('GET /vms detail shows the NEW bridge after edit', devicesOf(vmAfterEdit).some((d) => d.dtype === 'NIC' && d.id === attachedNic.id && String(d.detail ?? '').includes(otherBridge)), devicesOf(vmAfterEdit));
+
+              // Restore the original bridge (partial merge — only nicAttach changes).
+              const restorePlan = await runPlan('vms.device-update', { name: vm.name, deviceId: attachedNic.id, fields: { nicAttach: bridge } });
+              check('device-update (restore original bridge) plan succeeded', restorePlan.status === 'succeeded', { status: restorePlan.status, error: restorePlan.error });
+              rows = await settleVms((rs) => devicesOf(rs.find((r) => r.name === vm.name)!).some((d) => d.dtype === 'NIC' && d.id === attachedNic.id && String(d.detail ?? '').includes(bridge)));
+              const vmAfterRestore = rows.find((r) => r.name === vm.name)!;
+              check('GET /vms detail shows the ORIGINAL bridge after restore', devicesOf(vmAfterRestore).some((d) => d.dtype === 'NIC' && d.id === attachedNic.id && String(d.detail ?? '').includes(bridge)), devicesOf(vmAfterRestore));
+            }
+          }
           if (!attachedNic?.id) {
             skip('nic detach', 'no integer device id on the attached NIC row — LEAK: detach manually!');
           } else {
@@ -330,6 +376,41 @@ async function main(): Promise<void> {
             rows = await settleVms((rs) => devicesOf(rs.find((r) => r.name === vm.name)!).filter((d) => d.dtype === 'NIC').length <= nicCountBefore);
             const vmAfterNicDet = rows.find((r) => r.name === vm.name)!;
             check('NIC device gone after detach', (devicesOf(vmAfterNicDet).filter((d) => d.dtype === 'NIC')).length <= nicCountBefore, devicesOf(vmAfterNicDet));
+          }
+        }
+
+        // 3a3. DISPLAY edit cycle on the VM's EXISTING console (partial merge):
+        // vms.device-get prefill → change resolution via vms.device-update →
+        // verify via GET /vms detail → restore the original resolution.
+        rows = await refreshVms();
+        const vmForDispEdit = rows.find((r) => r.name === vm.name)!;
+        const existingDisplay = devicesOf(vmForDispEdit).find((d) => d.dtype === 'DISPLAY' && typeof d.id === 'number');
+        if (!existingDisplay?.id) {
+          skip('display edit cycle', `${vm.name} has no display device with an integer id`);
+        } else {
+          const getRes2 = await authed('POST', `/plugins/${PLUGIN_ID}/actions/execute`, { deviceId, actionId: 'vms.device-get', input: { name: vm.name, deviceId: existingDisplay.id } });
+          check('vms.device-get (DISPLAY) → 200', getRes2.status === 200, { status: getRes2.status });
+          const got2 = ((await getRes2.json()) as { details?: { dtype?: string; values?: Record<string, unknown> } }).details ?? {};
+          check('device-get prefills DISPLAY resolution/port/password/web', got2.dtype === 'DISPLAY' && typeof got2.values?.['resolution'] === 'string' && typeof got2.values?.['port'] === 'number' && typeof got2.values?.['password'] === 'string' && typeof got2.values?.['web'] === 'boolean', got2);
+          const origResolution = String(got2.values?.['resolution'] ?? '');
+          if (!/^\d+x\d+$/.test(origResolution)) {
+            skip('display device-update cycle', `unexpected resolution format "${origResolution}"`);
+          } else {
+            const [w, h] = origResolution.split('x').map(Number);
+            const newRes = `${Math.max(640, w - 320)}x${Math.max(480, h - 180)}`; // e.g. 1920x1080 → 1600x900
+            console.log(`  INFO display edit: ${origResolution} → ${newRes}`);
+            const dispUpdPlan = await runPlan('vms.device-update', { name: vm.name, deviceId: existingDisplay.id, fields: { resolution: newRes } });
+            check('device-update (DISPLAY resolution) plan succeeded', dispUpdPlan.status === 'succeeded', { status: dispUpdPlan.status, error: dispUpdPlan.error, steps: (dispUpdPlan.steps ?? []).map((s) => `${s.actionId}:${s.status}`) });
+
+            rows = await settleVms((rs) => devicesOf(rs.find((r) => r.name === vm.name)!).some((d) => d.dtype === 'DISPLAY' && String(d.detail ?? '').includes(newRes)));
+            const vmAfterDispEdit = rows.find((r) => r.name === vm.name)!;
+            check('GET /vms detail shows the NEW resolution after edit', devicesOf(vmAfterDispEdit).some((d) => d.dtype === 'DISPLAY' && String(d.detail ?? '').includes(newRes)), devicesOf(vmAfterDispEdit));
+
+            const restoreDispPlan = await runPlan('vms.device-update', { name: vm.name, deviceId: existingDisplay.id, fields: { resolution: origResolution } });
+            check('device-update (restore original resolution) plan succeeded', restoreDispPlan.status === 'succeeded', { status: restoreDispPlan.status, error: restoreDispPlan.error });
+            rows = await settleVms((rs) => devicesOf(rs.find((r) => r.name === vm.name)!).some((d) => d.dtype === 'DISPLAY' && String(d.detail ?? '').includes(origResolution)));
+            const vmAfterDispRestore = rows.find((r) => r.name === vm.name)!;
+            check('GET /vms detail shows the ORIGINAL resolution after restore', devicesOf(vmAfterDispRestore).some((d) => d.dtype === 'DISPLAY' && String(d.detail ?? '').includes(origResolution)), devicesOf(vmAfterDispRestore));
           }
         }
 
