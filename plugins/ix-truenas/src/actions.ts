@@ -12,7 +12,7 @@
  * "initiated").
  */
 
-import { ActionDescriptor, ActionResult, compareVersions, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, pickNumber, pickString, pollUntil, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { ActionDescriptor, ActionResult, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, pickNumber, pickString, pollUntil, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
 import { hostSshPort, normalizeVmDevice, sshPool } from './enrich';
 import { fsSftpPool } from './index';
@@ -25,6 +25,8 @@ export interface TruenasActionContext {
   host?: string;
   /** UNM's device id for this step — recorded in audit trails (e.g. file-repo usage rows). */
   deviceId?: string | null;
+  /** UNM's device display name (sent by the API on /config) — labels artifacts like config backups. */
+  deviceName?: string | null;
   /** The request's raw `credentials` body (primary secret + bound slots) — needed by actions that use a slot distinct from the primary (e.g. SSH for container logs). */
   rawCredentials?: Record<string, unknown> | null;
   /** Plugin option `uploadViaSftp` (default true) — stream file-repo uploads over SFTP instead of /_upload when an ssh slot is bound. */
@@ -364,15 +366,40 @@ const configBackupDownloadAction: ActionDescriptor<TruenasActionContext> = {
     }
     if (data.length === 0) return { success: false, details: { jobId, error: 'Appliance returned an empty backup file' } };
 
+    // Store the backup in UNM's central file repository so it is downloadable /
+    // archivable from the Files page — no more base64 blobs buried in step results.
+    // Named with the shared SDK convention (<device>__config-backup-<UTC-ts>.db).
+    const fileName = configBackupFileName({ device: ctx.deviceName, host: ctx.host, ext: 'db' });
+    let repoFileId: string | null = null;
+    try {
+      const entry = await fileRepo().upload(data, { name: fileName, category: 'config-backup' }, 120_000);
+      repoFileId = entry.id;
+      void fileRepo().recordUse(entry.id, { deviceId: ctx.deviceId ?? undefined, note: `config backup of ${ctx.host ?? 'appliance'} (config.save)` }).catch(() => undefined);
+    } catch (e) {
+      // The repo is a convenience — a failed store must not fail the backup itself.
+      return {
+        success: true,
+        verified: true,
+        details: {
+          sizeBytes: data.length,
+          fileName,
+          options,
+          warning: `Backup downloaded but could NOT be stored in the UNM file repository: ${e instanceof Error ? e.message : String(e)}`,
+          // Fallback so a restore can still reference the bytes (legacy contract).
+          backupBase64: data.toString('base64'),
+        },
+      };
+    }
+
     return {
       success: true,
       verified: true,
       details: {
         sizeBytes: data.length,
-        // Base64 so the binary survives JSON transport; the plan executor stores it in step results.
-        backupBase64: data.toString('base64'),
-        fileName: 'truenas-config-backup',
+        fileName,
         options,
+        // Reference the stored backup by repo id — restore it with config.restore {repoFileId}.
+        repoFileId,
       },
     };
   },
@@ -382,7 +409,7 @@ const configRestoreAction: ActionDescriptor<TruenasActionContext> = {
   id: 'config.restore',
   label: 'Restore configuration from backup file',
   description:
-    "DANGEROUS — replaces the appliance's ENTIRE configuration database with the given backup file (TrueNAS `config.upload` via the /_upload multipart endpoint, exactly what the Web UI's Manage Configuration → Upload does). The box reboots into the restored configuration afterwards. Pair with config.backup.download as a rollback point. The file is passed as base64 in `fileBase64`. The appliance is unreachable while it reboots — verification is impossible by design.",
+    "DANGEROUS — replaces the appliance's ENTIRE configuration database with the given backup file (TrueNAS `config.upload` via the /_upload multipart endpoint, exactly what the Web UI's Manage Configuration → Upload does). The box reboots into the restored configuration afterwards. Pair with config.backup.download as a rollback point. Source: a UNM file-repo id in `repoFileId` (preferred — e.g. ${steps[N].result.details.repoFileId} from an earlier backup step) or raw base64 in `fileBase64`. The appliance is unreachable while it reboots — verification is impossible by design.",
   module: 'System',
   riskLevel: 'dangerous' as const,
   deviceCount: 1 as const,
@@ -391,12 +418,29 @@ const configRestoreAction: ActionDescriptor<TruenasActionContext> = {
   // overwrite the config DB again and reboot). The socket drop is expected.
   retryOnDispatchFailure: false,
   inputSchema: {
-    fileBase64: { type: 'string', required: true, minLength: 8, description: 'The configuration backup file (as produced by config.backup.download or the Web UI) as base64' },
+    repoFileId: { type: 'string', required: false, minLength: 1, description: 'UNM file-repo id of a backup (e.g. from config.backup.download details.repoFileId) — preferred over fileBase64' },
+    fileBase64: { type: 'string', required: false, minLength: 8, description: 'The configuration backup file as base64 (legacy path; use repoFileId when the file is in the UNM repository)' },
     fileName: { type: 'string', required: false, maxLength: 200, description: 'Original file name (informational only)' },
   },
   async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
-    const payload = decodeFilePayload(input);
-    if ('error' in payload) return { success: false, details: { error: payload.error } };
+    // Preferred source: a backup already in UNM's central file repository.
+    const repoFileId = str(input, 'repoFileId');
+    let payload: { data: Buffer; fileName: string };
+    if (repoFileId) {
+      try {
+        const meta = await fileRepo().getMeta(repoFileId);
+        if (!meta) return { success: false, details: { error: `Unknown file-repo id ${repoFileId}` } };
+        payload = { data: await fileRepo().get(repoFileId), fileName: str(input, 'fileName') ?? meta.name };
+      } catch (e) {
+        return { success: false, details: { error: `Could not fetch repo file ${repoFileId}: ${e instanceof Error ? e.message : String(e)}` } };
+      }
+    } else {
+      const b64 = typeof input.fileBase64 === 'string' ? (input.fileBase64 as string) : '';
+      if (!b64.trim()) return { success: false, details: { error: 'Either repoFileId or fileBase64 is required' } };
+      const decoded = decodeFilePayload(input);
+      if ('error' in decoded) return { success: false, details: { error: decoded.error } };
+      payload = decoded;
+    }
 
     let jobId: number | null = null;
     try {

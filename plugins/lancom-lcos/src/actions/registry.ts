@@ -12,7 +12,7 @@
 
 import http from 'http';
 import https from 'https';
-import { createRegistry, ianaZoneToOffsetMinutes } from '@unm/plugin-sdk';
+import { configBackupFileName, createFileRepoClient, FileRepoClient, ianaZoneToOffsetMinutes, createRegistry } from '@unm/plugin-sdk';
 import { snmpGet, snmpSet, snmpWalk, SnmpValue } from '@unm/snmp-client';
 import { SETUP, SETUP_TIME, lcosMinutesToTimezoneEnum } from '../lcosOids';
 import { ActionContext, ActionDescriptor, ActionResult } from './types';
@@ -177,12 +177,19 @@ function collect(res: http.IncomingMessage): Promise<Buffer> {
 
 // --- Actions ----------------------------------------------------------------------------
 
+/** Lazily-built shared UNM file-repo client (the SDK's ONE implementation). */
+let repoClient: FileRepoClient | null = null;
+function fileRepo(): FileRepoClient {
+  if (!repoClient) repoClient = createFileRepoClient();
+  return repoClient;
+}
+
 /** Download the router's running configuration backup over the web UI. */
 const configBackupDownload: ActionDescriptor = {
   id: 'config.backup.download',
   label: 'Download configuration backup',
   description:
-    "Downloads the router's running configuration via its web UI (HTTP + Basic auth from the `web` credential slot). The file is returned base64-encoded in details — use it as a rollback point before risky changes. Read-only on the device. Requires the `backupPath` option to be set to the router's backup endpoint.",
+    "Downloads the router's running configuration via its web UI (HTTP + Basic auth from the `web` credential slot) and stores it in UNM's central file repository — downloadable/archivable from the Files page. Named with the shared convention (<device>__config-backup-<UTC-ts>.cfg). Use as a rollback point before risky changes; reference it later via details.repoFileId. Read-only on the device. Requires the `backupPath` option to be set to the router's backup endpoint.",
   module: 'System',
   riskLevel: 'read',
   deviceCount: 1,
@@ -204,10 +211,35 @@ const configBackupDownload: ActionDescriptor = {
     if (data.length === 0) {
       return { success: false, error: 'Router returned an empty backup — check the `backupPath` option and web-UI credentials.' };
     }
-    return {
-      success: true,
-      details: { sizeBytes: data.length, backupBase64: data.toString('base64') },
-    };
+
+    // Store the backup in UNM's central file repository so it is downloadable /
+    // archivable from the Files page — no more base64 blobs buried in step results.
+    const fileName = configBackupFileName({ device: ctx.deviceName, host: ctx.host, ext: 'cfg' });
+    try {
+      const entry = await fileRepo().upload(data, { name: fileName, category: 'config-backup' }, 120_000);
+      void fileRepo().recordUse(entry.id, { deviceId: ctx.deviceId ?? undefined, note: `config backup of ${ctx.host} (web-UI)` }).catch(() => undefined);
+      return {
+        success: true,
+        details: {
+          sizeBytes: data.length,
+          fileName,
+          // Reference the stored backup by repo id.
+          repoFileId: entry.id,
+        },
+      };
+    } catch (e) {
+      // The repo is a convenience — a failed store must not fail the backup itself.
+      return {
+        success: true,
+        details: {
+          sizeBytes: data.length,
+          fileName,
+          warning: `Backup downloaded but could NOT be stored in the UNM file repository: ${e instanceof Error ? e.message : String(e)}`,
+          // Fallback so the bytes are still available (legacy contract).
+          backupBase64: data.toString('base64'),
+        },
+      };
+    }
   },
 };
 

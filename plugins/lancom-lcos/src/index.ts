@@ -805,6 +805,7 @@ async function buildActionContext(args: {
   host: string;
   address: string;
   deviceId?: string;
+  deviceName?: string;
   credentials: StepCredentials;
   settings: Record<string, unknown>;
 }): Promise<ActionContext> {
@@ -813,6 +814,7 @@ async function buildActionContext(args: {
     host: args.host,
     address: args.address,
     deviceId: args.deviceId,
+    deviceName: args.deviceName,
     credentials: args.credentials,
     opts,
     webTransport: webTransportOf(args.settings),
@@ -882,6 +884,7 @@ app.post('/config', async (req, res) => {
       host: hostFromAddress(managementAddress),
       address: managementAddress,
       deviceId: typeof deviceId === 'string' ? deviceId : undefined,
+      deviceName: typeof body.deviceName === 'string' && body.deviceName !== '' ? body.deviceName : undefined,
       credentials: stepCredentials,
       settings,
     });

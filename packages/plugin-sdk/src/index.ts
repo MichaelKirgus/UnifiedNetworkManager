@@ -45,6 +45,10 @@ export type { ApiClientOptions } from './apiClient';
 // the API's /plugin/files/* contract — list/get/upload/remove/recordUse. See fileRepo.ts.
 export { createFileRepoClient } from './fileRepo';
 export type { FileRepoEntry, FileRepoClient, FileRepoClientOptions } from './fileRepo';
+// Shared config-backup naming convention (all vendors store backups in the same
+// <device>__config-backup-<UTC-timestamp>.<ext> pattern). See configBackup.ts.
+export { configBackupFileName, sanitizeBackupDevicePart, backupTimestamp } from './configBackup';
+export type { ConfigBackupNameOptions } from './configBackup';
 export { createPluginLogger, warnOnce, LOG_LEVELS } from './logging';
 export type { PluginLogger, PluginLoggerOptions, PluginLogEntry, LogLevel, LogCallOptions } from './logging';
 export { createNotifier, NOTIFICATION_SEVERITIES } from './notifications';

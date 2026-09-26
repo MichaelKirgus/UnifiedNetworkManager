@@ -47,6 +47,8 @@ export interface ActionContext {
   platform: SwosPlatform;
   host: string;
   deviceId?: string;
+  /** UNM's device display name (sent by the API on /config) — labels artifacts like config backups. */
+  deviceName?: string;
   /** Effective plugin settings (global or per-device) — e.g. firmwareChannel. */
   settings?: Record<string, unknown>;
 }

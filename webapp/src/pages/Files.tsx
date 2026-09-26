@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { Database, Download, FileUp, FolderOpen, History, Loader2, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
+import { DataTable, DataTableColumn } from '../components/DataTable';
 import { formatBytes } from '../components/formatMetric';
 import { api, ApiError, FileRepoEntry, FileRepoUse } from '../api/client';
 import { can } from '../auth/permissions';
@@ -189,6 +190,82 @@ export default function Files() {
 
   const totalBytes = files.reduce((sum, f) => sum + (f.sizeBytes ?? 0), 0);
 
+  // DataTable columns — the Repository column only exists when multiple file-repo
+  // backends are registered; SHA-256 is available but hidden by default.
+  const columns: DataTableColumn<FileRepoEntry>[] = [
+    {
+      header: 'Name',
+      key: 'name',
+      width: 320,
+      render: (row) => <span className="block truncate font-mono text-xs text-secondary" title={row.name}>{row.name}</span>,
+    },
+    {
+      header: 'Category',
+      key: 'category',
+      width: 110,
+      render: (row) => (
+        <span className="rounded border border-border bg-background px-1.5 py-0.5 text-[11px] text-secondary">{row.category}</span>
+      ),
+    },
+    {
+      header: 'Size',
+      key: 'sizeBytes',
+      width: 100,
+      sortAccessor: (row) => row.sizeBytes,
+      render: (row) => <span className="font-mono text-xs text-secondary">{formatBytes(row.sizeBytes)}</span>,
+    },
+    {
+      header: 'SHA-256',
+      key: 'sha256',
+      width: 180,
+      hiddenByDefault: true,
+      render: (row) => <span className="block truncate font-mono text-[11px] text-faint" title={row.sha256}>{row.sha256}</span>,
+    },
+    ...(multiRepo ? [
+      {
+        header: 'Repository',
+        key: 'providerId',
+        width: 140,
+        sortAccessor: (row: FileRepoEntry) => providerName(row),
+        render: (row: FileRepoEntry) => <span className="block truncate text-xs text-secondary" title={providerName(row)}>{providerName(row)}</span>,
+      } satisfies DataTableColumn<FileRepoEntry>,
+    ] : []),
+    {
+      header: 'Uploaded by',
+      key: 'uploadedBy',
+      width: 120,
+      sortAccessor: (row) => row.uploadedByName ?? row.uploadedBy ?? 'plugin',
+      render: (row) => <span className="text-xs text-secondary">{row.uploadedByName ?? row.uploadedBy ?? 'plugin'}</span>,
+    },
+    {
+      header: 'Uploaded at',
+      key: 'createdAt',
+      width: 170,
+      sortAccessor: (row) => new Date(row.createdAt).getTime(),
+      render: (row) => <span className="whitespace-nowrap text-xs text-secondary" title={new Date(row.createdAt).toISOString()}>{formatDateTime(row.createdAt)}</span>,
+    },
+    {
+      header: 'Actions',
+      key: 'actions',
+      sortable: false,
+      filterable: false,
+      excludeFromExport: true,
+      width: 130,
+      render: (row) => (
+        <div className="flex items-center justify-end gap-0.5">
+          <button type="button" aria-label={`Download ${row.name}`} title="Download" onClick={() => void download(row)}
+            className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><Download size={14} /></button>
+          <button type="button" aria-label={`Usage history of ${row.name}`} title="Usage history" onClick={() => setUsesEntry(row)}
+            className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><History size={14} /></button>
+          {canWrite && (
+            <button type="button" aria-label={`Delete ${row.name}`} title="Delete" onClick={() => remove(row)} disabled={deleteMutation.isPending}
+              className="rounded-md p-1.5 text-danger-fg hover:bg-muted hover:text-danger-fg disabled:opacity-40"><Trash2 size={13} /></button>
+          )}
+        </div>
+      ),
+    },
+  ];
+
   return (
     <Layout title="Files">
       <div className="flex h-full min-h-0 flex-col gap-3">
@@ -296,61 +373,23 @@ export default function Files() {
         )}
 
         {/* File table */}
-        <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-border bg-card">
-          {filesQuery.isLoading ? (
+        {filesQuery.isLoading ? (
+          <div className="min-h-0 flex-1 rounded-lg border border-border bg-card">
             <p className="px-4 py-6 text-sm text-muted-foreground">Loading repository…</p>
-          ) : files.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
-              <FolderOpen size={28} className="text-faint" />
-              <p className="text-sm text-secondary">The repository is empty{category ? ` for category "${category}"` : ''}.</p>
-              {canWrite && <p className="text-xs text-faint">Upload an ISO, firmware image or config backup — it becomes available to every device and plugin through the API.</p>}
-            </div>
-          ) : (
-            <table className="w-full border-collapse text-sm">
-              <thead className="sticky top-0 bg-background">
-                <tr className="border-b border-border text-left text-xs text-faint">
-                  <th className="px-4 py-2 font-medium">Name</th>
-                  <th className="px-3 py-2 font-medium">Category</th>
-                  <th className="px-3 py-2 font-medium">Size</th>
-                  <th className="hidden px-3 py-2 font-medium lg:table-cell">SHA-256</th>
-                  {multiRepo && <th className="hidden px-3 py-2 font-medium xl:table-cell">Repository</th>}
-                  <th className="hidden px-3 py-2 font-medium md:table-cell">Uploaded by</th>
-                  <th className="px-3 py-2 font-medium">Uploaded at</th>
-                  <th className="px-3 py-2 text-right font-medium">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {files.map((f) => (
-                  <tr key={f.id} className="border-b border-border/60 hover:bg-muted/40">
-                    <td className="max-w-[320px] truncate px-4 py-2 font-mono text-xs text-secondary" title={f.name}>{f.name}</td>
-                    <td className="px-3 py-2">
-                      <span className="rounded border border-border bg-background px-1.5 py-0.5 text-[11px] text-secondary">{f.category}</span>
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-secondary">{formatBytes(f.sizeBytes)}</td>
-                    <td className="hidden max-w-[160px] truncate px-3 py-2 font-mono text-[11px] text-faint lg:table-cell" title={f.sha256}>{f.sha256}</td>
-                    {multiRepo && (
-                      <td className="hidden max-w-[180px] truncate px-3 py-2 text-xs text-secondary xl:table-cell" title={providerName(f)}>{providerName(f)}</td>
-                    )}
-                    <td className="hidden px-3 py-2 text-xs text-secondary md:table-cell">{f.uploadedByName ?? f.uploadedBy ?? 'plugin'}</td>
-                    <td className="whitespace-nowrap px-3 py-2 text-xs text-secondary" title={new Date(f.createdAt).toISOString()}>{formatDateTime(f.createdAt)}</td>
-                    <td className="px-3 py-2">
-                      <div className="flex items-center justify-end gap-0.5">
-                        <button type="button" aria-label={`Download ${f.name}`} title="Download" onClick={() => void download(f)}
-                          className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><Download size={14} /></button>
-                        <button type="button" aria-label={`Usage history of ${f.name}`} title="Usage history" onClick={() => setUsesEntry(f)}
-                          className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><History size={14} /></button>
-                        {canWrite && (
-                          <button type="button" aria-label={`Delete ${f.name}`} title="Delete" onClick={() => remove(f)} disabled={deleteMutation.isPending}
-                            className="rounded-md p-1.5 text-danger-fg hover:bg-muted hover:text-danger-fg disabled:opacity-40"><Trash2 size={13} /></button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+          </div>
+        ) : (
+          <div className="min-h-0 flex-1">
+            <DataTable
+              columns={columns}
+              rows={files}
+              rowKey={(row) => row.id}
+              storageKey="files"
+              fillHeight
+              searchPlaceholder="Search files…"
+              emptyMessage={`The repository is empty${category ? ` for category "${category}"` : ''}.${canWrite ? ' Upload an ISO, firmware image or config backup — it becomes available to every device and plugin through the API.' : ''}`}
+            />
+          </div>
+        )}
 
         {usesEntry && <UsesDialog entry={usesEntry} onClose={() => setUsesEntry(null)} />}
       </div>

@@ -69,6 +69,8 @@ export interface ActionContext {
   /** Full management address as given by the API (may carry scheme/port) — used by web-UI actions. */
   address: string;
   deviceId?: string;
+  /** UNM's device display name (sent by the API on /config) — labels artifacts like config backups. */
+  deviceName?: string;
   credentials: StepCredentials;
   /** Effective transport options (timeout/retries/port). */
   opts: TransportOptions;

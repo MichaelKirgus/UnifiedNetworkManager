@@ -116,6 +116,9 @@ async function processJob(jobId: string): Promise<void> {
       `${plugin.endpoint.replace(/\/$/, '')}/config`,
       {
         deviceId: device.id,
+        // The UNM display name — plugins use it to label artifacts they create
+        // (e.g. config backups stored in the central file repo).
+        deviceName: device.name,
         managementAddress: device.managementAddress,
         ipAddresses,
         credentials,

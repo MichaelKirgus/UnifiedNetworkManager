@@ -11,7 +11,7 @@
  * changes are applied and persisted immediately by the switch.
  */
 
-import { createRegistry, pollUntil } from '@unm/plugin-sdk';
+import { configBackupFileName, createFileRepoClient, createRegistry, FileRepoClient, pollUntil } from '@unm/plugin-sdk';
 import { buildPostArray, buildPostData, encodeHexString, encodeIpLe, encodePortMask } from '../swosClient';
 import { getField, hasField } from '../platform';
 import { decodeFilePayload, FIRMWARE_MAX_BYTES, rebootSwitch, restoreConfig, runFirmwareUpgrade } from '../firmware';
@@ -22,6 +22,13 @@ import { ActionContext, ActionDescriptor } from './types';
 // after applying and confirms the write persisted (ActionResult.verified). The
 // switch applies POSTs immediately, so one bounded re-GET of the same endpoint
 // comparing exactly the fields we sent is sufficient — no long polling needed.
+
+/** Lazily-built shared UNM file-repo client (the SDK's ONE implementation). */
+let repoClient: FileRepoClient | null = null;
+function fileRepo(): FileRepoClient {
+  if (!repoClient) repoClient = createFileRepoClient();
+  return repoClient;
+}
 
 /** Deep-equal for the wire values we deal with (scalars + flat arrays of scalars). */
 function wireEqual(a: unknown, b: unknown): boolean {
@@ -134,7 +141,7 @@ const backupDownloadAction: ActionDescriptor = {
   id: 'swos.backup.download',
   label: 'Download configuration backup (.swb)',
   description:
-    'Downloads the switch\'s complete binary configuration backup (proprietary .swb format). The file is returned base64-encoded in details — use it as a rollback point before risky changes or to clone a config. Read-only on the device.',
+    "Downloads the switch's complete binary configuration backup (proprietary .swb format) and stores it in UNM's central file repository — downloadable/archivable from the Files page. Named with the shared convention (<device>__config-backup-<UTC-ts>.swb). Use as a rollback point before risky changes or to clone a config; restore it later via swos.config.restore {repoFileId}. Read-only on the device.",
   module: 'System',
   riskLevel: 'read',
   deviceCount: 1,
@@ -143,14 +150,35 @@ const backupDownloadAction: ActionDescriptor = {
   async execute(ctx) {
     const data = await ctx.client.getRaw('backup.swb');
     if (data.length === 0) throw new Error('Switch returned an empty backup (default configuration — nothing to save)');
-    return {
-      success: true,
-      details: {
-        sizeBytes: data.length,
-        // Base64 so the binary survives JSON transport; the plan executor stores it in step results.
-        backupBase64: data.toString('base64'),
-      },
-    };
+
+    // Store the .swb in UNM's central file repository so it is downloadable /
+    // archivable from the Files page — no more base64 blobs buried in step results.
+    const fileName = configBackupFileName({ device: ctx.deviceName, host: ctx.host, ext: 'swb' });
+    try {
+      const entry = await fileRepo().upload(data, { name: fileName, category: 'config-backup' }, 120_000);
+      void fileRepo().recordUse(entry.id, { deviceId: ctx.deviceId ?? undefined, note: `config backup of ${ctx.host} (backup.swb)` }).catch(() => undefined);
+      return {
+        success: true,
+        details: {
+          sizeBytes: data.length,
+          fileName,
+          // Reference the stored backup by repo id — restore it with swos.config.restore {repoFileId}.
+          repoFileId: entry.id,
+        },
+      };
+    } catch (e) {
+      // The repo is a convenience — a failed store must not fail the backup itself.
+      return {
+        success: true,
+        details: {
+          sizeBytes: data.length,
+          fileName,
+          warning: `Backup downloaded but could NOT be stored in the UNM file repository: ${e instanceof Error ? e.message : String(e)}`,
+          // Fallback so a restore can still reference the bytes (legacy contract).
+          backupBase64: data.toString('base64'),
+        },
+      };
+    }
   },
 };
 
@@ -639,7 +667,7 @@ const configRestoreAction: ActionDescriptor = {
   id: 'swos.config.restore',
   label: 'Restore configuration from backup (.swb)',
   description:
-    'DANGEROUS — replaces the switch\'s ENTIRE running configuration with the given .swb backup file and reboots it (the switch\'s own "Restore Backup" behavior). Pair with swos.backup.download as a rollback point. The file is passed as base64 in `fileBase64`. The switch is unreachable while it reboots — verification is impossible by design.',
+    'DANGEROUS — replaces the switch\'s ENTIRE running configuration with the given .swb backup file and reboots it (the switch\'s own "Restore Backup" behavior). Pair with swos.backup.download as a rollback point. Source: a UNM file-repo id in `repoFileId` (preferred) or raw base64 in `fileBase64`. The switch is unreachable while it reboots — verification is impossible by design.',
   module: 'System',
   riskLevel: 'dangerous',
   deviceCount: 1,
@@ -648,11 +676,27 @@ const configRestoreAction: ActionDescriptor = {
   // would overwrite the switch's config again and reboot).
   retryOnDispatchFailure: false,
   inputSchema: {
-    fileBase64: { type: 'string', required: true, description: 'Configuration backup (.swb), base64-encoded' },
+    repoFileId: { type: 'string', required: false, minLength: 1, description: 'UNM file-repo id of a .swb backup (e.g. from swos.backup.download details.repoFileId) — preferred over fileBase64' },
+    fileBase64: { type: 'string', required: false, description: 'Configuration backup (.swb), base64-encoded (legacy path; use repoFileId when the file is in the UNM repository)' },
     fileName: { type: 'string', pattern: '^\\S{1,255}$', description: 'File name for the upload (e.g. <identity>_2.19.swb)' },
   },
   async execute(ctx, input) {
-    const backup = decodeFilePayload(String(input.fileBase64), FIRMWARE_MAX_BYTES);
+    // Preferred source: a backup already in UNM's central file repository.
+    const repoFileId = typeof input.repoFileId === 'string' && input.repoFileId !== '' ? input.repoFileId : null;
+    let backup: Buffer;
+    if (repoFileId) {
+      try {
+        const meta = await fileRepo().getMeta(repoFileId);
+        if (!meta) return { success: false, error: `Unknown file-repo id ${repoFileId}` };
+        backup = await fileRepo().get(repoFileId);
+      } catch (e) {
+        return { success: false, error: `Could not fetch repo file ${repoFileId}: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    } else {
+      const b64 = typeof input.fileBase64 === 'string' ? input.fileBase64 : '';
+      if (!b64.trim()) return { success: false, error: 'Either repoFileId or fileBase64 is required' };
+      backup = decodeFilePayload(b64, FIRMWARE_MAX_BYTES);
+    }
     const fileName = String(input.fileName ?? '').trim() || 'backup.swb';
     await restoreConfig(ctx.client, backup, fileName);
     return {

@@ -2690,6 +2690,8 @@ function isTransientConfigError(e: unknown): boolean {
 app.post('/config', async (req, res) => {
   const body = req.body ?? {};
   const deviceId = typeof body.deviceId === 'string' ? body.deviceId : null;
+  // The UNM display name — labels artifacts the action creates (e.g. config backups in the file repo).
+  const deviceName = typeof body.deviceName === 'string' && body.deviceName !== '' ? body.deviceName : null;
   const host = applianceHost(body.managementAddress);
 
   // Registry shape preferred; legacy `{action, payload}` maps onto it.
@@ -2746,8 +2748,9 @@ app.post('/config', async (req, res) => {
 
     // host + rawCredentials let slot-based actions (e.g. containers.logs.read over SSH)
     // reach the appliance on a different channel than the RPC socket; deviceId feeds
-    // audit trails (file-repo usage rows); uploadViaSftp gates the SFTP upload fallback.
-    const ctx: TruenasActionContext = { client: getClient(host, transport, timeoutMs, ports), creds, host, deviceId, rawCredentials: body.credentials as Record<string, unknown> | null, uploadViaSftp: settings.uploadViaSftp !== false };
+    // audit trails (file-repo usage rows); deviceName labels created artifacts;
+    // uploadViaSftp gates the SFTP upload fallback.
+    const ctx: TruenasActionContext = { client: getClient(host, transport, timeoutMs, ports), creds, host, deviceId, deviceName, rawCredentials: body.credentials as Record<string, unknown> | null, uploadViaSftp: settings.uploadViaSftp !== false };
     const result = await action.execute(ctx, input);
     res.status(200).json({ success: result.success, result });
   } catch (err) {

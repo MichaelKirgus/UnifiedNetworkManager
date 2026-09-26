@@ -15,6 +15,7 @@
  *                         best-effort config.backup.download rollback prepended
  */
 import http from 'http';
+import { createHash } from 'crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 
 const MOCK_PORT = 48761;
@@ -397,13 +398,64 @@ wss.on('connection', (ws: WebSocket) => {
   });
 });
 
+// --- Mock UNM file-repo API (the /plugin/files/* contract the SDK client uses) ----
+const MOCK_API_PORT = 48763;
+interface RepoUpload { id: string; name: string; category?: string; data: Buffer }
+const repoUploads: RepoUpload[] = [];
+let repoSeq = 0;
+function startMockApi(): Promise<void> {
+  const srv = http.createServer((req, res) => {
+    // The real API mounts the plugin routes under /v1 — mirror that.
+    const url = (req.url ?? '').replace(/^\/v1/, '');
+    if (req.method === 'POST' && url === '/plugin/files') {
+      const chunks: Buffer[] = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const data = Buffer.concat(chunks);
+        const entry: RepoUpload = { id: `repo-${++repoSeq}`, name: String(req.headers['x-file-name'] ?? ''), category: String(req.headers['x-file-category'] ?? '') || undefined, data };
+        repoUploads.push(entry);
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: entry.id, name: entry.name, category: entry.category ?? 'other', sizeBytes: data.length, sha256: createHash('sha256').update(data).digest('hex'), uploadedBy: null, createdAt: new Date().toISOString(), providerId: null }));
+      });
+      return;
+    }
+    const metaMatch = url.match(/^\/plugin\/files\/([^/]+)$/);
+    if (req.method === 'GET' && metaMatch) {
+      const up = repoUploads.find((u) => u.id === decodeURIComponent(metaMatch[1]));
+      if (!up) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'not found' })); return; }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id: up.id, name: up.name, category: up.category ?? 'other', sizeBytes: up.data.length, sha256: createHash('sha256').update(up.data).digest('hex'), uploadedBy: null, createdAt: new Date().toISOString(), providerId: null }));
+      return;
+    }
+    const contentMatch = url.match(/^\/plugin\/files\/([^/]+)\/content$/);
+    if (req.method === 'GET' && contentMatch) {
+      const up = repoUploads.find((u) => u.id === decodeURIComponent(contentMatch[1]));
+      if (!up) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'not found' })); return; }
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': up.data.length });
+      res.end(up.data);
+      return;
+    }
+    if (req.method === 'POST' && /\/plugin\/files\/[^/]+\/use$/.test(url)) {
+      req.resume(); req.on('end', () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true })); });
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: `mock api: no route for ${req.method} ${url}` }));
+  });
+  return new Promise((r) => srv.listen(MOCK_API_PORT, () => r()));
+}
+
 // --- Test driver -----------------------------------------------------------------------
 
 async function main(): Promise<void> {
   await new Promise<void>((r) => httpServer.listen(MOCK_PORT, () => r()));
   console.log(`[smoke] mock TrueNAS (ws JSON-RPC) on :${MOCK_PORT}`);
 
+  // Point the plugin at a MOCK UNM file-repo API so config backups are stored
+  // through the SDK client exactly as in production.
+  await startMockApi();
   process.env.PORT = String(PLUGIN_PORT);
+  process.env.UNM_API_URL = `http://localhost:${MOCK_API_PORT}/v1`;
+  process.env.PLUGIN_API_KEY = 'smoke-key';
   await import('./src/index');
   await new Promise((r) => setTimeout(r, 300));
   console.log(`[smoke] plugin on :${PLUGIN_PORT}`);
@@ -563,12 +615,15 @@ async function main(): Promise<void> {
   console.log('\n== /config images.update ==');
   check('success true with pulled=1', cfgImg.status === 200 && cfgImgJson.success === true && ((cfgImgJson.result?.details as Record<string, unknown>)?.pulled === 1), cfgImgJson);
 
-  // --- /config (config.backup.download → job + token + HTTP file fetch) ------------------
-  const cfgBackup = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'config.backup.download', input: {} });
+  // --- /config (config.backup.download → job + token + HTTP file fetch → UNM file repo) --
+  const cfgBackup = await post('/config', { deviceId: 'dev-tnas', deviceName: 'KIRGUSBANDE', managementAddress: ADDR, credentials: creds, actionId: 'config.backup.download', input: {} });
   const cfgBackupJson = (await cfgBackup.json()) as { success?: boolean; result?: Record<string, unknown> };
   console.log('\n== /config config.backup.download ==');
-  check('success true with backup bytes base64-encoded', cfgBackup.status === 200 && cfgBackupJson.success === true && ((cfgBackupJson.result?.details as Record<string, unknown>)?.backupBase64 ?? '').toString() === MOCK_BACKUP_BYTES.toString('base64'), { size: (cfgBackupJson.result?.details as Record<string, unknown>)?.sizeBytes });
-  check('backup details carry size + file name', ((cfgBackupJson.result?.details as Record<string, unknown>)?.sizeBytes) === MOCK_BACKUP_BYTES.length && ((cfgBackupJson.result?.details as Record<string, unknown>)?.fileName) === 'truenas-config-backup', cfgBackupJson.result?.details);
+  check('success true with repoFileId in details', cfgBackup.status === 200 && cfgBackupJson.success === true && typeof (cfgBackupJson.result?.details as Record<string, unknown>)?.repoFileId === 'string' && ((cfgBackupJson.result?.details as Record<string, unknown>)?.repoFileId as string).length > 0, { size: (cfgBackupJson.result?.details as Record<string, unknown>)?.sizeBytes });
+  check('backup file name follows the shared convention', /^KIRGUSBANDE__config-backup-\d{8}-\d{6}\.db$/.test(String((cfgBackupJson.result?.details as Record<string, unknown>)?.fileName ?? '')), (cfgBackupJson.result?.details as Record<string, unknown>)?.fileName);
+  const bakUpload = repoUploads[repoUploads.length - 1];
+  check('mock UNM API received the backup upload (config-backup category)', !!bakUpload && bakUpload.category === 'config-backup' && bakUpload.data.equals(MOCK_BACKUP_BYTES), { name: bakUpload?.name, len: bakUpload?.data.length });
+  const bakRepoFileId = String((cfgBackupJson.result?.details as Record<string, unknown>)?.repoFileId ?? '');
 
   // --- /config (config.restore → multipart /_upload + reboot) ----------------------------
   const restoreB64 = MOCK_BACKUP_BYTES.toString('base64');
@@ -579,12 +634,24 @@ async function main(): Promise<void> {
   const up = capturedUploads[0];
   check('/_upload received multipart with data part FIRST (method config.upload)', !!up && up.method === 'config.upload' && JSON.stringify(up.params ?? []) === '[]', { method: up?.method });
   check('/_upload file part carries exact bytes + original name', !!up && up.fileName === 'backup-2026.db' && up.data.equals(MOCK_BACKUP_BYTES), { fileName: up?.fileName, len: up?.data.length });
-  check('/_upload authenticated with HTTP Basic (username/password creds)', !!up && up.auth.startsWith('Basic ') && Buffer.from(up.auth.slice(6), 'base64').toString() === 'root:truenas', up?.auth);
+  // The client mints a single-use session token for /_upload on BOTH credential
+  // kinds (TrueNAS 26+ revokes API keys over insecure transports; Basic is dead
+  // when OTP is enabled) — the mock answers auth.generate_token with 'mock-token-generic'.
+  check('/_upload authenticated with a minted session token', !!up && up.auth === 'Token mock-token-generic', up?.auth);
 
-  // --- /config (config.restore missing file → schema validation) --------------------------
+  // --- /config (config.restore via repoFileId — fetch from the UNM file repo → multipart) --
+  const cfgRestoreRepo = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'config.restore', input: { repoFileId: bakRepoFileId } });
+  const cfgRestoreRepoJson = (await cfgRestoreRepo.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config config.restore (repoFileId) ==');
+  check('success true restoring from the file repo', cfgRestoreRepo.status === 200 && cfgRestoreRepoJson.success === true, cfgRestoreRepoJson);
+  const upRepo = capturedUploads[1];
+  check('/_upload received the repo-stored backup bytes exactly', !!upRepo && upRepo.data.equals(MOCK_BACKUP_BYTES), { len: upRepo?.data.length });
+
+  // --- /config (config.restore missing file → validation) ------------------------------
   const cfgRestoreBad = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'config.restore', input: {} });
   const cfgRestoreBadJson = (await cfgRestoreBad.json()) as { success?: boolean; result?: Record<string, unknown> };
-  check('restore without fileBase64 rejected by schema validation', cfgRestoreBad.status === 200 && cfgRestoreBadJson.success === false && /fileBase64/.test(String(cfgRestoreBadJson.result?.error)), cfgRestoreBadJson);
+  // Action-level failures surface under result.details.error (schema errors under result.error).
+  check('restore without repoFileId/fileBase64 rejected', cfgRestoreBad.status === 200 && cfgRestoreBadJson.success === false && /repoFileId|fileBase64/.test(String((cfgRestoreBadJson.result as Record<string, unknown>)?.details ? ((cfgRestoreBadJson.result as { details: Record<string, unknown> }).details).error : (cfgRestoreBadJson.result as Record<string, unknown>)?.error)), cfgRestoreBadJson);
 
   // --- /config (config.reset → job id) ----------------------------------------------------
   const cfgReset = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'config.reset', input: {} });

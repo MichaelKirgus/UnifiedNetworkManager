@@ -405,14 +405,14 @@ app.post('/monitoring', async (req, res) => {
 });
 
 /** Builds the ActionContext for one /config step. */
-async function buildActionContext(args: { host: string; deviceId?: string; credentials: Record<string, unknown>; settings: Record<string, unknown> }): Promise<ActionContext> {
+async function buildActionContext(args: { host: string; deviceId?: string; deviceName?: string; credentials: Record<string, unknown>; settings: Record<string, unknown> }): Promise<ActionContext> {
   const username = typeof args.credentials.username === 'string' ? (args.credentials.username as string) : '';
   const password = typeof args.credentials.password === 'string' ? (args.credentials.password as string) : '';
   if (!username) throw new Error('Missing username in the assigned secret');
   const opts = resolveOptions(args.settings);
   const client = new SwosClient(args.host, { username, password }, opts.requestTimeoutMs, portsOf(args.settings));
   const platform = await createPlatform(client);
-  return { client, platform, host: args.host, deviceId: args.deviceId };
+  return { client, platform, host: args.host, deviceId: args.deviceId, deviceName: args.deviceName };
 }
 
 /**
@@ -455,7 +455,13 @@ app.post('/config', async (req, res) => {
     // the connection when the switch's key differs from UNM's inventory.
     await assertPinned(req, managementAddress, swosTransportOf(managementAddress), portsOf(settings));
 
-    const ctx = await buildActionContext({ host: managementAddress, deviceId: typeof deviceId === 'string' ? deviceId : undefined, credentials: creds, settings });
+    const ctx = await buildActionContext({
+      host: managementAddress,
+      deviceId: typeof deviceId === 'string' ? deviceId : undefined,
+      deviceName: typeof body.deviceName === 'string' && body.deviceName !== '' ? body.deviceName : undefined,
+      credentials: creds,
+      settings,
+    });
 
     // Validate input against the action's declared schema — the plugin is the
     // authority on what it accepts; the API only checks that the id exists.
