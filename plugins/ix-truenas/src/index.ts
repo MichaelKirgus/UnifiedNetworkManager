@@ -299,6 +299,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     description:
       'Collect virtual machines (vm.query) for the VMs page — including their NIC MAC addresses (inserted into the Hosts page with source "VM") and live guest IPs via `virsh domifaddr` over SSH when an ssh slot is bound. Disable on hosts whose VMs are monitored by another plugin: no vm.query RPC traffic is sent to the appliance and previously collected rows are cleared.',
   },
+  {
+    key: 'uploadViaSftp',
+    label: 'Upload files via SFTP',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Stream file-repo uploads (e.g. ISOs for VM CD-ROM attach) over the bound SSH slot instead of the appliance\'s /_upload HTTP endpoint — bypassing middlewared/nginx entirely, which stalls on some appliances (uploads killed after ~60 s, 0-byte files). Requires a bound "SSH" secret; without one the HTTP path is used. Disable to force the classic /_upload path.',
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -2738,8 +2746,8 @@ app.post('/config', async (req, res) => {
 
     // host + rawCredentials let slot-based actions (e.g. containers.logs.read over SSH)
     // reach the appliance on a different channel than the RPC socket; deviceId feeds
-    // audit trails (file-repo usage rows).
-    const ctx: TruenasActionContext = { client: getClient(host, transport, timeoutMs, ports), creds, host, deviceId, rawCredentials: body.credentials as Record<string, unknown> | null };
+    // audit trails (file-repo usage rows); uploadViaSftp gates the SFTP upload fallback.
+    const ctx: TruenasActionContext = { client: getClient(host, transport, timeoutMs, ports), creds, host, deviceId, rawCredentials: body.credentials as Record<string, unknown> | null, uploadViaSftp: settings.uploadViaSftp !== false };
     const result = await action.execute(ctx, input);
     res.status(200).json({ success: result.success, result });
   } catch (err) {
@@ -2910,8 +2918,9 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
 // Ops: list | read | stat | write | mkdir | rmdir | unlink | rename.
 // ---------------------------------------------------------------------------
 
-/** Process-wide SFTP session pool — one connection per host+root, reused across requests. */
-const fsSftpPool = createSftpPool();
+/** Process-wide SFTP session pool — one connection per host+root, reused across
+ *  requests (filesystem browser + file-repo upload fallback share rootless sessions). */
+export const fsSftpPool = createSftpPool();
 process.on('SIGTERM', () => fsSftpPool.closeAll());
 process.on('SIGINT', () => fsSftpPool.closeAll());
 

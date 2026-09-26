@@ -527,10 +527,12 @@ export class TruenasClient {
    * this is how `config.upload` receives the configuration backup. The multipart
    * layout is mandated by middlewared's FileApplication: part 1 MUST be a field
    * named `data` carrying `{"method": …, "params": []}`, part 2 MUST be a file
-   * field named `file`. Auth mirrors the appliance's own HTTP auth: Basic for
-   * username/password credentials (unavailable when OTP is enabled — pass
-   * `authToken` instead), Bearer for API keys. Returns the parsed JSON body
-   * (`{job_id}` on success).
+   * named `file`. Auth: an explicit `authToken` when supplied, otherwise a
+   * session token minted via auth.generate_token over the authenticated WS
+   * session — for BOTH credential kinds. API keys are NEVER sent as a static
+   * `Bearer <key>` header: TrueNAS 26+ auto-REVOKES the key when an API-key
+   * auth succeeds over a connection it classifies as insecure (see
+   * resolveUploadAuth). Returns the parsed JSON body (`{job_id}` on success).
    */
   async uploadFile(
     creds: TruenasCredentials,
@@ -551,16 +553,33 @@ export class TruenasClient {
     const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
     const body = Buffer.concat([head, fileData, tail]);
 
-    let authHeader: string;
-    if (authToken) {
-      authHeader = `Token ${authToken}`;
-    } else if (creds.kind === 'apiKey') {
-      authHeader = `Bearer ${creds.apiKey ?? ''}`;
-    } else {
-      authHeader = `Basic ${Buffer.from(`${creds.username ?? ''}:${creds.password ?? ''}`).toString('base64')}`;
-    }
-
     const url = `${this.httpBase()}/_upload`;
+    return await this.doHttpUpload(url, await this.resolveUploadAuth(creds, authToken), boundary, body);
+  }
+
+  /**
+   * Resolves the Authorization header for a /_upload request BEFORE any bytes
+   * are sent (the streaming variant cannot retry after a mid-stream 401 — its
+   * source stream is consumed):
+   * - explicit authToken → `Token <t>`;
+   * - API-key credentials → ALWAYS mint a session token up front. TrueNAS 26+
+   *   auto-revokes an API key when it is used over a connection the appliance
+   *   classifies as insecure — and its /_upload Bearer path is exactly such a
+   *   login (observed live: key "unm" revoked with reason "Attempt to use over
+   *   an insecure transport"). A session token has no revocation logic and works
+   *   on every version;
+   * - username/password → also minted up front: HTTP Basic is unavailable when
+   *   OTP is enabled, so the token path is the one that works everywhere.
+   */
+  private async resolveUploadAuth(creds: TruenasCredentials, authToken?: string): Promise<string> {
+    if (authToken) return `Token ${authToken}`;
+    const t = await this.mintUploadAuthToken(creds);
+    if (!t) throw new TruenasRpcError('Could not mint a session token for the file upload (auth.generate_token failed)' + (creds.kind === 'apiKey' ? ' — refusing to send the raw API key over HTTP because TrueNAS 26+ would revoke it' : ''));
+    return `Token ${t}`;
+  }
+
+  /** One POST of a pre-built multipart body to /_upload with the given Authorization header. */
+  private doHttpUpload(url: string, authHeader: string, boundary: string, body: Buffer): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       const lib = url.startsWith('https') ? https : http;
       const req = lib.request(
@@ -592,13 +611,32 @@ export class TruenasClient {
   }
 
   /**
+   * Mints a session token for HTTP file-endpoint auth over the (authenticated)
+   * WebSocket session — `auth.generate_token [null, {}]` returns a plain string
+   * token accepted by /_upload's `Token <t>` path on every TrueNAS version.
+   * Returns null when minting fails or yields no usable value. The WS RPC
+   * session itself is unaffected; only the HTTP file endpoints use this.
+   */
+  private async mintUploadAuthToken(creds: TruenasCredentials): Promise<string | null> {
+    try {
+      const t = await this.call<unknown>('auth.generate_token', [null, {}], creds);
+      return typeof t === 'string' && t.length > 0 ? t : null;
+    } catch (e) {
+      // Surface the reason in logs; callers throw a descriptive error on null.
+      void e;
+      return null;
+    }
+  }
+
+  /**
    * Streaming variant of uploadFile() for LARGE files (multi-GB ISOs / firmware
    * images) that must NOT be buffered in memory. Same multipart layout as the
    * appliance's FileApplication mandates (`data` field first, then `file`), but
    * the file part is piped from a readable stream with `Transfer-Encoding:
    * chunked` instead of a pre-built Content-Length body. The appliance's nginx
    * sets client_max_body_size 0 (no cap) and streams into the job's input pipe,
-   * so this works for arbitrarily large files. Returns `{job_id}` on success.
+   * so this works for arbitrarily large files. API-key credentials mint a session
+   * token first (never Bearer — see uploadFile). Returns `{job_id}` on success.
    */
   async uploadFileStream(
     creds: TruenasCredentials,
@@ -618,16 +656,16 @@ export class TruenasClient {
     );
     const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
 
-    let authHeader: string;
-    if (authToken) {
-      authHeader = `Token ${authToken}`;
-    } else if (creds.kind === 'apiKey') {
-      authHeader = `Bearer ${creds.apiKey ?? ''}`;
-    } else {
-      authHeader = `Basic ${Buffer.from(`${creds.username ?? ''}:${creds.password ?? ''}`).toString('base64')}`;
-    }
-
+    // Resolve auth BEFORE opening the stream — a mid-stream 401 could not be
+    // retried because the source stream is consumed.
     const url = `${this.httpBase()}/_upload`;
+    let authHeader: string;
+    try {
+      authHeader = await this.resolveUploadAuth(creds, authToken);
+    } catch (e) {
+      try { fileStream.destroy(); } catch { /* noop */ }
+      throw e;
+    }
     return new Promise((resolve, reject) => {
       const lib = url.startsWith('https') ? https : http;
       // No Content-Length — chunked transfer. The appliance streams the file into

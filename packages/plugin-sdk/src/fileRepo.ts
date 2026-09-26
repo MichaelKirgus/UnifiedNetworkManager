@@ -67,6 +67,12 @@ export interface FileRepoClient {
    * must not be buffered in memory. The caller pipes it into its native device
    * transport (e.g. TrueNAS /_upload multipart). Errors reject the promise;
    * mid-stream failures surface on the returned stream's 'error' event.
+   *
+   * `timeoutMs` is an OPTIONAL socket-inactivity limit for this download; by
+   * default there is NONE — axios applies its `timeout` as an idle timer, and a
+   * slow consumer (e.g. TrueNAS writing to a degraded pool) pauses our read via
+   * backpressure for longer than any sane fixed limit, which would abort the
+   * stream mid-transfer. The caller's plan-step budget bounds the operation.
    */
   getStream(fileId: string, timeoutMs?: number): Promise<Readable>;
   /** Adds a file to the repo. `name` is required; category defaults to 'other'. */
@@ -118,9 +124,14 @@ export function createFileRepoClient(opts: FileRepoClientOptions = {}): FileRepo
     },
 
     async getStream(fileId, timeoutMs) {
+      // NO idle timeout by default — the instance's 30s `timeout` is a
+      // socket-inactivity timer in axios and would abort multi-minute streams
+      // whenever backpressure pauses reads (observed live: TrueNAS filesystem.put
+      // writing to a degraded pool stalled >30s → "reading source: aborted").
+      // timeout: 0 disables it; pass an explicit timeoutMs only when wanted.
       const res = await http.get<Readable>(
         `/plugin/files/${encodeURIComponent(fileId)}/content`,
-        { responseType: 'stream', ...(timeoutMs ? { timeout: timeoutMs } : {}) }
+        { responseType: 'stream', timeout: timeoutMs ?? 0 }
       );
       return res.data as Readable;
     },

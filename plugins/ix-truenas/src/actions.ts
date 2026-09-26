@@ -14,7 +14,8 @@
 
 import { ActionDescriptor, ActionResult, compareVersions, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, pickNumber, pickString, pollUntil, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
-import { normalizeVmDevice, sshPool } from './enrich';
+import { hostSshPort, normalizeVmDevice, sshPool } from './enrich';
+import { fsSftpPool } from './index';
 
 /** Executor context for one /config step. */
 export interface TruenasActionContext {
@@ -26,6 +27,8 @@ export interface TruenasActionContext {
   deviceId?: string | null;
   /** The request's raw `credentials` body (primary secret + bound slots) — needed by actions that use a slot distinct from the primary (e.g. SSH for container logs). */
   rawCredentials?: Record<string, unknown> | null;
+  /** Plugin option `uploadViaSftp` (default true) — stream file-repo uploads over SFTP instead of /_upload when an ssh slot is bound. */
+  uploadViaSftp?: boolean;
 }
 
 function str(input: Record<string, unknown>, key: string): string | undefined {
@@ -400,21 +403,13 @@ const configRestoreAction: ActionDescriptor<TruenasActionContext> = {
       // Primary path: HTTP Basic auth (username/password credentials). On
       // OTP-enabled appliances the appliance rejects Basic — fall back to a
       // minted single-use token in that case.
+      // API-key credentials mint a session token inside uploadFile (never Bearer —
+      // TrueNAS 26+ would revoke the key on such an HTTP login); username/password
+      // uses Basic, which OTP-enabled appliances reject.
       const r = await ctx.client.uploadFile(ctx.creds, 'config.upload', payload.data, payload.fileName);
       if (typeof r['job_id'] === 'number') jobId = r['job_id'];
     } catch (e) {
-      const basicRejected = ctx.creds.kind === 'password' && e instanceof TruenasRpcError && /HTTP 401|unauthorized/i.test(e.message);
-      if (!basicRejected) throw e;
-      let authToken: string;
-      try {
-        const t = await ctx.client.call<unknown>('auth.generate_token', [null, {}], ctx.creds);
-        if (typeof t !== 'string' || t.length === 0) throw new Error('no token');
-        authToken = t;
-      } catch (te) {
-        return { success: false, details: { error: `Basic auth rejected (${e instanceof Error ? e.message : String(e)}) and no fallback token could be minted: ${te instanceof Error ? te.message : String(te)}` } };
-      }
-      const r = await ctx.client.uploadFile(ctx.creds, 'config.upload', payload.data, payload.fileName, authToken);
-      if (typeof r['job_id'] === 'number') jobId = r['job_id'];
+      return { success: false, details: { error: `config.upload failed: ${e instanceof Error ? e.message : String(e)}` } };
     }
     if (jobId === null) return { success: false, details: { error: 'config.upload did not return a job id' } };
 
@@ -640,24 +635,10 @@ const firmwareUpdateFileAction: ActionDescriptor<TruenasActionContext> = {
       const destination = str(input, 'destination');
       const fileParams = [{ ...(destination ? { destination } : {}) }];
       const startUpload = async (): Promise<number | null> => {
-        try {
-          const r = await ctx.client.uploadFile(ctx.creds, 'update.file', payload.data, payload.fileName || 'update-file', undefined, fileParams);
-          return typeof r['job_id'] === 'number' ? (r['job_id'] as number) : null;
-        } catch (e) {
-          const basicRejected = ctx.creds.kind === 'password' && e instanceof TruenasRpcError && /HTTP 401|unauthorized/i.test(e.message);
-          if (!basicRejected) throw e;
-          // OTP-enabled appliance rejects Basic → mint a single-use token and retry.
-          let authToken: string;
-          try {
-            const t = await ctx.client.call<unknown>('auth.generate_token', [null, {}], ctx.creds);
-            if (typeof t !== 'string' || t.length === 0) throw new Error('no token');
-            authToken = t;
-          } catch (te) {
-            throw new TruenasRpcError(`Basic auth rejected (${e instanceof Error ? e.message : String(e)}) and no fallback token could be minted: ${te instanceof Error ? te.message : String(te)}`);
-          }
-          const r = await ctx.client.uploadFile(ctx.creds, 'update.file', payload.data, payload.fileName || 'update-file', authToken, fileParams);
-          return typeof r['job_id'] === 'number' ? (r['job_id'] as number) : null;
-        }
+        // API-key credentials mint a session token inside uploadFile (never Bearer —
+        // TrueNAS 26+ would revoke the key on such an HTTP login).
+        const r = await ctx.client.uploadFile(ctx.creds, 'update.file', payload.data, payload.fileName || 'update-file', undefined, fileParams);
+        return typeof r['job_id'] === 'number' ? (r['job_id'] as number) : null;
       };
 
       const r = await runUpdateJobWithResume(ctx, startUpload, 'update.file', [{ resume: true }], 3_600_000);
@@ -1749,9 +1730,11 @@ const vmsNicDetachAction: ActionDescriptor<TruenasActionContext> = {
 //   vms.cdrom-attach   → vm.device.create(dtype CDROM) — or vm.device.update on
 //                        the VM's EXISTING CD-ROM, so re-attaching (ISO swap) is
 //                        idempotent instead of stacking drives. With repoFileId +
-//                        dataset it first ensures the ISO exists on the appliance
-//                        (streamed from UNM's file repo via filesystem.put when
-//                        missing), so "install OS from a repo ISO" is ONE step.
+//                        dataset it first ensures the ISO exists at the target path
+//                        (reused when already present at matching size — a single
+//                        stat, no appliance-wide search; streamed from UNM's file
+//                        repo via filesystem.put only when missing), so "install OS
+//                        from a repo ISO" is ONE step.
 //   vms.device-detach  → vm.device.delete(deviceId, {zvol?, force?}) — integer
 //                        device id from the inventory rows; removeStorage=true
 //                        destroys a DISK's backing zvol. Requires a STOPPED VM.
@@ -2082,6 +2065,26 @@ const vmsIsoChoicesAction: ActionDescriptor<TruenasActionContext> = {
 };
 
 /**
+ * Best-effort context for upload failures: if the dataset's parent POOL is not
+ * ONLINE, ZFS writes to it can stall behind a stuck/failing disk (a DEGRADED
+ * pool blocks every write until the bad disk responds or gives up) — which is
+ * what makes TrueNAS's nginx kill /_upload after 60s of no bytes. Returns a
+ * short prefix for error messages, or '' when the pool looks healthy/unknown.
+ */
+async function poolHealthNote(ctx: TruenasActionContext, dataset: string): Promise<string> {
+  try {
+    const root = (dataset ?? '').split('/')[0];
+    if (!root) return '';
+    const pools = await ctx.client.call<Record<string, unknown>[]>('pool.query', [[['name', '=', root]]], ctx.creds);
+    const p = (pools ?? [])[0];
+    // Same field fallback as parsePool in index.ts (v26 vs legacy naming).
+    const status = pickString(p, ['status', 'state']);
+    if (status && status !== 'ONLINE') return `Pool ${root} is ${status} — writes to it can stall behind a stuck disk. `;
+  } catch { /* best-effort only */ }
+  return '';
+}
+
+/**
  * Ensures a repo file exists at <mount>/<fileName> on the appliance — reuses it
  * when already present with matching size, otherwise streams it from UNM's file
  * repo into the `filesystem.put` JOB over /_upload (multi-GB safe). Returns the
@@ -2113,28 +2116,71 @@ async function ensureRepoFileOnAppliance(
     }
   } catch { /* missing → upload below */ }
 
-  let stream; // Readable from the SDK client (inferred type)
-  try {
-    stream = await fileRepo().getStream(repoFileId);
-  } catch (e) {
-    return { ok: false, error: `Could not open repo file for streaming: ${e instanceof Error ? e.message : String(e)}` };
+  // SFTP fallback (plugin option `uploadViaSftp`, default on): stream the file over
+  // the bound SSH slot — bypasses middlewared/nginx entirely. On appliances where
+  // /_upload stalls (nginx kills it after ~60 s, leaving 0-byte files) this is the
+  // reliable path; when SFTP isn't available (no ssh slot / auth failure) we fall
+  // through to the HTTP retry loop below.
+  let sftpError = ''; // surfaced in the final error when BOTH paths fail
+  if (ctx.uploadViaSftp !== false) {
+    const sftpResult = await uploadRepoFileViaSftp(ctx, repoFileId, targetPath, meta.sizeBytes);
+    if (sftpResult && sftpResult.ok === true) return { ok: true, path: targetPath, uploaded: true };
+    if (sftpResult && !sftpResult.ok) sftpError = `SFTP attempt failed (${sftpResult.error}); /_upload attempts: `;
   }
 
-  let r: Record<string, unknown>;
-  try {
-    // filesystem.put(path) — the /_upload body IS the job's input pipe; parent dirs are auto-created.
-    r = await ctx.client.uploadFileStream(ctx.creds, 'filesystem.put', stream, meta.name, undefined, [targetPath]);
-  } catch (e) {
-    return { ok: false, error: `Upload to ${dataset} failed: ${e instanceof Error ? e.message : String(e)}` };
-  }
+  // TrueNAS's nginx kills /_upload after ~60s without bytes flowing (the location
+  // sets no timeout → client_body_timeout default). A ZFS write stall — e.g. a
+  // DEGRADED pool whose stuck disk blocks every write to it — fills the put job's
+  // input pipe, pauses our send, and nginx answers "socket hang up" mid-transfer,
+  // leaving a PARTIAL file at the target (filesystem.put writes in place). Such
+  // stalls are often transient → retry the WHOLE upload with backoff: fresh repo
+  // stream + fresh session token each attempt. The plan-step budget (1h) bounds it.
+  const MAX_UPLOAD_ATTEMPTS = 3;
+  let lastError = '';
+  for (let attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      await new Promise((r2) => setTimeout(r2, attempt === 2 ? 5_000 : 15_000));
+      // A previous attempt may have left a partial file — filesystem.put rewrites
+      // it from byte 0 ('wb+'), so no cleanup needed; just verify the size below.
+    }
+    let stream;
+    try {
+      stream = await fileRepo().getStream(repoFileId);
+    } catch (e) {
+      return { ok: false, error: `Could not open repo file for streaming: ${e instanceof Error ? e.message : String(e)}` };
+    }
 
-  const jobId = typeof r['job_id'] === 'number' ? (r['job_id'] as number) : null;
-  if (jobId !== null) {
-    const w = await waitForJob(ctx, jobId, 3_540_000);
-    if (w.state && w.state !== 'SUCCESS' && w.state !== 'FINISHED') {
-      return { ok: false, error: w.error ?? `filesystem.put job ended in state ${w.state}` };
+    let r: Record<string, unknown>;
+    try {
+      // filesystem.put(path) — the /_upload body IS the job's input pipe; parent dirs are auto-created.
+      // API-key credentials mint a session token inside uploadFileStream (never Bearer —
+      // TrueNAS 26+ would revoke the key on such an HTTP login).
+      r = await ctx.client.uploadFileStream(ctx.creds, 'filesystem.put', stream, meta.name, undefined, [targetPath]);
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+      continue; // transport failure — retry with a fresh stream + token
+    }
+
+    const jobId = typeof r['job_id'] === 'number' ? (r['job_id'] as number) : null;
+    if (jobId !== null) {
+      const w = await waitForJob(ctx, jobId, 3_540_000);
+      if (w.state && w.state !== 'SUCCESS' && w.state !== 'FINISHED') {
+        return { ok: false, error: `${await poolHealthNote(ctx, dataset)}filesystem.put job ended in state ${w.state}: ${w.error ?? ''}`.trim() };
+      }
+    }
+
+    // Verify by re-reading — a killed upload leaves a PARTIAL file at the target.
+    try {
+      const st = await ctx.client.call<Record<string, unknown>>('filesystem.stat', [targetPath], ctx.creds);
+      if (typeof st['size'] === 'number' && (st['size'] as number) === meta.sizeBytes) {
+        break; // complete — done
+      }
+      lastError = `file at ${targetPath} is ${(st['size'] as number)} bytes, expected ${meta.sizeBytes} (partial upload)`;
+    } catch {
+      lastError = 'filesystem.put reported success but the file is missing at the target';
     }
   }
+  if (lastError) return { ok: false, error: `${await poolHealthNote(ctx, dataset)}${sftpError}Upload to ${dataset} failed after ${MAX_UPLOAD_ATTEMPTS} /_upload attempts: ${lastError}`.trim() };
 
   // Audit trail — which file was uploaded where/when (best-effort).
   try {
@@ -2144,11 +2190,64 @@ async function ensureRepoFileOnAppliance(
   return { ok: true, path: targetPath, uploaded: true };
 }
 
+/**
+ * Streams a repo file onto the appliance over SFTP (the bound ssh slot) — the
+ * fallback for appliances whose /_upload endpoint stalls. Returns `ok: true`
+ * when the transfer completed AND verified at full size; `null` when SFTP is not
+ * usable on this device (no ssh slot, no management address) so the caller can
+ * fall back to HTTP; `{ ok: false }` when SFTP was attempted and failed.
+ */
+async function uploadRepoFileViaSftp(
+  ctx: TruenasActionContext,
+  repoFileId: string,
+  targetPath: string,
+  expectedBytes: number | null,
+): Promise<{ ok: true } | { ok: false; error: string } | null> {
+  const sshCreds = resolveSshCredentials(ctx.rawCredentials ?? undefined, { slotOnly: true });
+  if (!sshCreds) return null; // no bound ssh slot — HTTP path only
+
+  const host = (ctx.host ?? '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  if (!host) return null;
+
+  let stream;
+  try {
+    stream = await fileRepo().getStream(repoFileId);
+  } catch (e) {
+    return { ok: false, error: `Could not open repo file for SFTP streaming: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  try {
+    // Rootless session — absolute appliance paths; shares the pool with the Storage
+    // page's file browser (same host|port key). The dynamic host-key verifier pins
+    // the SSH handshake against UNM's inventory, same as every other SSH channel.
+    const session = await fsSftpPool.get(host, hostSshPort(host), sshCreds, {
+      timeoutMs: 30_000,
+      hostKeyVerifier: dynamicSshHostVerifier(host, hostSshPort(host)),
+    });
+    // writeStream truncates the target first — a leftover partial/0-byte file from
+    // an earlier killed /_upload is simply overwritten.
+    await session.writeStream(targetPath, stream, sshCreds);
+  } catch (e) {
+    return { ok: false, error: `SFTP upload to ${targetPath} failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  // Verify by re-reading — never trust the transport alone.
+  try {
+    const st = await ctx.client.call<Record<string, unknown>>('filesystem.stat', [targetPath], ctx.creds);
+    if (typeof st['size'] === 'number' && (expectedBytes == null || (st['size'] as number) === expectedBytes)) {
+      return { ok: true };
+    }
+    return { ok: false, error: `SFTP upload reported success but the file is ${(st['size'] as number)} bytes, expected ${expectedBytes}` };
+  } catch (e) {
+    return { ok: false, error: `SFTP upload finished but filesystem.stat failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
 const vmsCdromAttachAction: ActionDescriptor<TruenasActionContext> = {
   id: 'vms.cdrom-attach',
   label: 'Attach CD-ROM (ISO) to VM',
   description:
-    'Attaches a CD-ROM drive pointing at an ISO on the appliance (vm.device.create dtype CDROM — path must live under /mnt/). When the VM already has a CD-ROM device it is UPDATED in place, so swapping the installed ISO is idempotent. With repoFileId + dataset the ISO is first streamed from UNM\'s file repo when missing — "install OS from a repo ISO" in one step.',
+    'Attaches a CD-ROM drive pointing at an ISO on the appliance (vm.device.create dtype CDROM — path must live under /mnt/). When the VM already has a CD-ROM device it is UPDATED in place, so swapping the installed ISO is idempotent. With repoFileId + dataset the ISO is first checked at its target path and reused when already present at matching size; only when missing is it streamed from UNM\'s file repo — "install OS from a repo ISO" in one step.',
   module: 'VMs',
   riskLevel: 'write' as const,
   deviceCount: 1 as const,
@@ -2170,6 +2269,9 @@ const vmsCdromAttachAction: ActionDescriptor<TruenasActionContext> = {
     if (!path && repoFileId) {
       const dataset = str(input, 'dataset');
       if (!dataset) return { success: false, details: { error: 'repoFileId requires a target dataset' } };
+
+      // ensureRepoFileOnAppliance stats the exact target path FIRST and reuses an
+      // existing copy at matching size — no upload, no appliance-wide search.
       const ensured = await ensureRepoFileOnAppliance(ctx, dataset, repoFileId);
       if (!ensured.ok) return { success: false, details: { error: ensured.error } };
       path = ensured.path;
@@ -2177,6 +2279,17 @@ const vmsCdromAttachAction: ActionDescriptor<TruenasActionContext> = {
     }
     if (!path || !path.startsWith('/mnt/')) {
       return { success: false, details: { error: 'Either a /mnt/ ISO path or repoFileId + dataset is required' } };
+    }
+
+    // Fail fast when the resolved ISO is missing/empty — vm.device.create would only
+    // reject it after ~60s of appliance-side validation.
+    try {
+      const st = await ctx.client.call<Record<string, unknown>>('filesystem.stat', [path], ctx.creds, 20_000);
+      if (typeof st['size'] !== 'number' || (st['size'] as number) === 0) {
+        return { success: false, details: { error: `ISO ${path} is missing or empty on the appliance — nothing to attach` } };
+      }
+    } catch {
+      return { success: false, details: { error: `ISO ${path} does not exist on the appliance (filesystem.stat failed)` } };
     }
 
     const vms = await listVms(ctx);
@@ -2193,16 +2306,26 @@ const vmsCdromAttachAction: ActionDescriptor<TruenasActionContext> = {
       break;
     }
 
+    let rpcError: string | null = null;
     try {
       const v26 = await usesV26VmDeviceApi(ctx);
       if (cdromId !== null) {
         // vm.device.update keeps the [id, {attributes}] shape on both API generations.
-        await ctx.client.call('vm.device.update', [cdromId, { attributes: { dtype: 'CDROM', path } }], ctx.creds);
+        await ctx.client.call('vm.device.update', [cdromId, { attributes: { dtype: 'CDROM', path } }], ctx.creds, 120_000);
       } else {
-        await ctx.client.call('vm.device.create', [vmDeviceCreateArg(v26, vm.id, { dtype: 'CDROM', path })], ctx.creds, 30_000);
+        // Observed live (KIRGUSBANDE, 26.0.0-BETA.2): vm.device.create for a CDROM takes
+        // ~60s EVEN VIA THE WEB UI — the appliance-side work is just slow there, and the
+        // Web UI only survives it because its WS session has no per-call timeout. Give
+        // this call 120s of headroom; if it still times out we fall through to re-read.
+        await ctx.client.call('vm.device.create', [vmDeviceCreateArg(v26, vm.id, { dtype: 'CDROM', path })], ctx.creds, 120_000);
       }
     } catch (e) {
-      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+      const msg = e instanceof Error ? e.message : String(e);
+      // A TIMEOUT does not mean the device wasn't created — the appliance may simply be
+      // slow validating the ISO on a degraded pool. Fall through to re-read: if the CDROM
+      // shows up, report success with a note; only fail when it's genuinely absent.
+      if (/timed out/i.test(msg)) rpcError = msg;
+      else return { success: false, details: { error: `${await poolHealthNote(ctx, path.replace(/^\/mnt\//, ''))}CD-ROM attach failed: ${msg}`.trim() } };
     }
 
     // Verify by re-reading the VM's devices — a CDROM with this path must exist.
@@ -2223,9 +2346,23 @@ const vmsCdromAttachAction: ActionDescriptor<TruenasActionContext> = {
         }
       },
       (found) => found === true,
-      { timeoutMs: 30_000, intervalMs: 2_000 },
+      { timeoutMs: 45_000, intervalMs: 2_000 },
     );
-    return { success: true, applied: true, verified: wait.ok, details: { name, path, ...(uploadedFromRepo ? { uploadedFromRepo: true } : {}), ...(cdromId !== null ? { updatedDeviceId: cdromId } : {}) } };
+    if (!wait.ok && rpcError !== null) {
+      return { success: false, details: { error: `${await poolHealthNote(ctx, path.replace(/^\/mnt\//, ''))}CD-ROM attach timed out and the device is not present on the VM: ${rpcError}`.trim() } };
+    }
+    return {
+      success: true,
+      applied: true,
+      verified: wait.ok,
+      details: {
+        name,
+        path,
+        ...(uploadedFromRepo ? { uploadedFromRepo: true } : {}),
+        ...(cdromId !== null ? { updatedDeviceId: cdromId } : {}),
+        ...(rpcError !== null ? { note: `The RPC reported "${rpcError}" but the CD-ROM IS attached — the appliance was just slow (likely I/O on a degraded pool).` } : {}),
+      },
+    };
   },
 };
 

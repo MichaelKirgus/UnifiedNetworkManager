@@ -36,6 +36,7 @@
  *     path can never walk out of the dataset/volume it was scoped to.
  */
 
+import { Readable } from 'node:stream';
 import { Client as Ssh2Client, type ConnectConfig, type SFTPWrapper } from 'ssh2';
 import {
   SshError,
@@ -485,6 +486,53 @@ export class SftpSession {
         // 'close' fires after the final flush is acknowledged.
       });
       ws.on('close', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Streams a readable into the target file (creates or truncates it) — the
+   * multi-GB-safe counterpart of writeFile(): nothing is buffered in memory.
+   * Resolves when the final flush is acknowledged by the server. The session's
+   * timeoutMs acts as an IDLE timer (cleared on every chunk); a stalled transfer
+   * closes the session so the pool can replace it with a fresh connection.
+   */
+  async writeStream(path: string, source: Readable, creds: SftpCredentials): Promise<void> {
+    const abs = resolvePath(path, this.opts.root);
+    const sftp = await this.ensure(creds);
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const fail = (e: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { source.destroy(); } catch { /* noop */ }
+        this.close(); // a broken stream poisons the session — force a fresh one next time
+        reject(e);
+      };
+      const timer = setTimeout(() => {
+        fail(new SshTimeoutError(`SFTP write ${abs} stalled (no data for ${this.opts.timeoutMs} ms)`));
+      }, Math.max(3000, this.opts.timeoutMs));
+
+      const ws = sftp.createWriteStream(abs);
+      ws.on('error', (err: Error) => fail(new SshError(`SFTP write ${abs} failed: ${err.message}`)));
+      source.on('data', (chunk: Buffer | string) => {
+        clearTimeout(timer); // bytes are flowing — reset the idle timer
+        if (!ws.write(chunk)) {
+          // Backpressure: pause the source until the SFTP window drains.
+          source.pause();
+          ws.once('drain', () => { try { source.resume(); } catch { /* noop */ } });
+        }
+      });
+      source.on('error', (err: Error) => fail(new SshError(`reading source for ${abs} failed: ${err.message}`)));
+      source.on('end', () => {
+        ws.end(() => { /* 'close' fires after the final flush is acknowledged */ });
+      });
+      ws.on('close', () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         resolve();
       });
