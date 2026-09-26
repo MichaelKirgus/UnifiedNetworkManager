@@ -11,6 +11,7 @@ import {
   openRepoFile,
   recordRepoFileUse,
 } from '../fileRepo';
+import { listFileRepoProviders } from '../fileRepoBroker';
 
 /**
  * Central file repository routes.
@@ -45,6 +46,13 @@ function readCategoryHeader(req: Request): string | undefined {
   return c.length > 0 ? c.slice(0, 40) : undefined;
 }
 
+/** Optional explicit file-repo provider id (multi-segment repos). Omitted = default. */
+function readProviderHeader(req: Request): string | null {
+  const raw = req.headers['x-file-provider'];
+  const p = Array.isArray(raw) ? (raw[0] ?? '') : String(raw ?? '').trim();
+  return p.length > 0 ? p.slice(0, 128) : null;
+}
+
 function isJsonBody(req: Request): boolean {
   const ct = String(req.headers['content-type'] ?? '');
   return ct.includes('application/json');
@@ -62,6 +70,19 @@ filesRouter.get('/files', requireAuth, requirePermission('files:read'), async (r
     const category = typeof req.query.category === 'string' && req.query.category !== '' ? req.query.category : undefined;
     const files = await listRepoFiles(category);
     res.status(200).json({ files });
+  } catch (err) {
+    if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });
+    throw err;
+  }
+});
+
+// GET /files/providers — the registered file-repo backends + online state.
+// Feeds a future multi-repo picker on the Files page (upload into a specific
+// segment via the x-file-provider header). Read-only, no extra permission beyond files:read.
+filesRouter.get('/files/providers', requireAuth, requirePermission('files:read'), async (_req: Request, res: Response) => {
+  try {
+    const providers = await listFileRepoProviders();
+    res.status(200).json({ providers });
   } catch (err) {
     if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });
     throw err;
@@ -88,11 +109,13 @@ filesRouter.post('/files', requireAuth, requirePermission('files:write'), async 
   try {
     const uploadedBy = typeof req.user?.sub === 'string' ? req.user.sub : null;
     // Stream the request body straight into storage (no in-memory buffering).
+    // An optional x-file-provider header targets a specific file-repo instance.
     const { entry, deduplicated } = await addRepoFile({
       data: req as unknown as Readable,
       name,
       category: readCategoryHeader(req),
       uploadedBy,
+      providerId: readProviderHeader(req),
     });
     res.status(201).json({ file: entry, deduplicated });
   } catch (err) {

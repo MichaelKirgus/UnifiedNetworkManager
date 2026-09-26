@@ -36,10 +36,14 @@ services:
       - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-http://localhost:5173}
       # How many days of plugin log entries are kept before the retention sweep deletes them.
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
-      # Central file repository (ISOs, firmware images, config backups, scripts).
-      # Only the api container mounts this volume — plugins reach it through the
-      # API's /plugin/files/* routes and never see the filesystem. Set to a host
-      # path (e.g. /opt/unm/file-repo) instead of the named volume if you prefer.
+      # Central file repository metadata lives in Postgres; the BYTES live in a
+      # file-repo plugin (capability `fileRepo`). FILE_REPO_PLUGIN_ID names the
+      # default provider for new uploads; if unset or offline the API falls back
+      # to its own local volume (legacy rows with no providerId always read from it).
+      - FILE_REPO_PLUGIN_ID=${FILE_REPO_PLUGIN_ID:-00000000-0000-4000-8000-000000000011}
+      # Legacy api-local file-repo volume (fallback + pre-plugin rows). Only the
+      # api container mounts it — plugins reach files through the API's
+      # /plugin/files/* routes and never see any filesystem.
       - FILE_REPO_PATH=${FILE_REPO_PATH:-/data/file-repo}
       # Secrets provider selection (the API is a pure secrets broker).
       # SECRETS_PLUGIN_ID names the active secrets provider plugin; if unset or
@@ -49,12 +53,42 @@ services:
       # Docker bridge networks). Ensures the provider plugins are registered.
       # All plugins listen on the conventional internal port 4080 (see
       # docs/PLUGIN-DEVELOPMENT.md); compose maps distinct HOST ports to it.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080,http://openwrt-plugin:4080,http://generic-ssh-plugin:4080,http://generic-http-plugin:4080,http://generic-ntp-plugin:4080,http://mailcow-plugin:4080,http://zabbix-plugin:4080}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://file-repo-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080,http://openwrt-plugin:4080,http://generic-ssh-plugin:4080,http://generic-http-plugin:4080,http://generic-ntp-plugin:4080,http://mailcow-plugin:4080,http://zabbix-plugin:4080}
     volumes:
-      # Central file repository — the ONLY container that may touch this volume.
+      # Legacy api-local file-repo volume (fallback + pre-plugin rows). The
+      # active byte store is the file-repo plugin's own volume below.
       - filerepo:/data/file-repo
     depends_on:
       - postgres
+    restart: unless-stopped
+
+  # File-repository storage backend (capability `fileRepo`). STATELESS with
+  # respect to UNM metadata — it stores only raw bytes, content-addressed by
+  # SHA-256, on its own volume. The API owns all repo_files/repo_file_uses rows
+  # in Postgres and brokers every read/write here (see api/src/fileRepoBroker.ts).
+  # Mount FILE_REPO_PLUGIN_PATH at a host path or named volume to persist bytes;
+  # run multiple instances (PLUGIN_INSTANCE_ID) for repos in different segments.
+  file-repo-plugin:
+    build:
+      context: .
+      dockerfile: plugins/file-repo/Dockerfile
+    ports:
+      - "4020:4080"
+    environment:
+      - PORT=4080
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://file-repo-plugin:4080
+      # Base URL of the API's internal endpoints (plugin -> API) — log shipping.
+      - UNM_API_URL=http://api:3000/v1
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+      # On-disk store root inside this container (the ONLY mount that holds bytes).
+      - FILE_REPO_PATH=/data/file-repo
+    volumes:
+      # The byte store. Named volume by default; set to a host path (e.g.
+      # /opt/unm/file-repo) or another named volume per instance if preferred.
+      - ${FILE_REPO_PLUGIN_VOLUME:-filerepo-plugin}:/data/file-repo
+    depends_on:
+      - api
     restart: unless-stopped
 
   opnsense-plugin:
@@ -609,6 +643,9 @@ services:
 
 volumes:
   pgdata:
-  # Central file repository (ISOs/firmware/config backups/scripts). Mounted on
+  # Legacy api-local file-repo volume (fallback + pre-plugin rows). Mounted on
   # the api service ONLY — plugins access files through the API, never directly.
   filerepo:
+  # Active file-repo byte store — mounted on the file-repo-plugin service only.
+  # Override with FILE_REPO_PLUGIN_VOLUME=<other-volume-or-host-path> in .env.
+  filerepo-plugin:

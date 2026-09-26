@@ -7,19 +7,22 @@ import { Readable } from 'stream';
 import { desc, eq } from 'drizzle-orm';
 import { db } from './db';
 import * as schema from './db/schema';
+import { deleteBlobViaProvider, openBlobFromProvider, resolveFileRepoProvider, storeBlobViaProvider } from './fileRepoBroker';
 
 /**
  * Central file repository — storage layer.
  *
- * The repo is a DEVICE-INDEPENDENT store owned by the UNM API: files (ISOs,
- * firmware images, config backups, scripts) live on a volume that ONLY the api
- * container mounts (`FILE_REPO_PATH`, default /data/file-repo), and their
- * metadata lives in Postgres (`repo_files` + `repo_file_uses`). No plugin ever
- * sees this volume — plugins do repo CRUD through the API's internal
- * `/plugin/files/*` routes (SDK createFileRepoClient) and push files onto
- * devices via their own native transport.
+ * The repo is a DEVICE-INDEPENDENT store owned by the UNM API: metadata (name,
+ * category, size, sha256, who uploaded it, when) lives in Postgres
+ * (`repo_files` + `repo_file_uses`). The BYTES live either on the api-local
+ * volume (`FILE_REPO_PATH`, default /data/file-repo — legacy rows with
+ * `providerId = NULL`) or in a file-repo PLUGIN (capability `fileRepo`) that
+ * stores them content-addressed by sha256. No device plugin ever sees any of
+ * this — plugins do repo CRUD through the API's internal `/plugin/files/*`
+ * routes (SDK createFileRepoClient) and push files onto devices via their own
+ * native transport. The broker (fileRepoBroker.ts) resolves which provider owns
+ * a file's bytes; this module keeps the metadata + local-fallback logic.
  *
- * On-disk layout is human-readable: `<root>/<category>/<YYYY-MM-DD>/<name>`.
  * Content identity is the SHA-256 of the bytes — re-uploading identical content
  * dedupes (the existing row/file is returned), and a same-name/different-content
  * upload gets a `-1`, `-2`, … suffix so nothing is ever silently overwritten.
@@ -43,6 +46,8 @@ export interface RepoFileEntry {
   sha256: string;
   uploadedBy: string | null;
   createdAt: string;
+  /** The file-repo plugin storing the bytes (null = api-local volume, legacy). */
+  providerId: string | null;
 }
 
 /** One usage record (audit trail — which file was used, for what device, when). */
@@ -81,6 +86,9 @@ function toEntry(row: typeof schema.repoFiles.$inferSelect): RepoFileEntry {
     sha256: row.sha256,
     uploadedBy: row.uploadedBy,
     createdAt: row.createdAt,
+    // Which file-repo plugin stores the bytes (null = api-local volume). The
+    // webapp uses this to show a per-file repo badge; device plugins ignore it.
+    providerId: row.providerId ?? null,
   };
 }
 
@@ -114,75 +122,98 @@ export function storagePathFor(storagePath: string): string {
 }
 
 /**
- * Adds a file to the repo. Streams `data` through SHA-256 into a temp file in
- * the target directory, then renames it into place (atomic on the same volume).
- * Identical content (same sha256) is deduped — the existing entry is returned
- * with `deduplicated: true`. Same name + different content gets a numeric suffix.
+ * Adds a file to the repo. The BYTES go either to a file-repo provider (when one
+ * is online — content-addressed by sha256) or to the api-local volume (legacy /
+ * no-provider fallback). Identical content (same sha256) is deduped — the
+ * existing entry is returned with `deduplicated: true`. Same name + different
+ * content gets a numeric suffix so nothing is ever silently overwritten.
  */
 export async function addRepoFile(args: {
   data: Readable | Buffer;
   name: string;
   category?: string;
   uploadedBy?: string | null;
+  /** Explicit file-repo provider id (e.g. from an x-file-provider header). Omitted = default provider or local fallback. */
+  providerId?: string | null;
 }): Promise<{ entry: RepoFileEntry; deduplicated: boolean }> {
-  const root = repoRoot();
   const category = sanitizeCategory(args.category);
-  const dateDir = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const dir = path.join(root, category, dateDir);
-  await fsp.mkdir(dir, { recursive: true });
+  const base = sanitizeFileName(args.name);
 
-  // Hash + write to a temp file in the SAME directory (rename is atomic).
-  const tmpPath = path.join(dir, `.upload-${randomUUID()}`);
-  const hash = createHash('sha256');
+  // Resolve where the bytes live. An explicit provider is honored even if it's a
+  // different instance (multi-segment repos); otherwise the default, else local.
+  const provider = await resolveFileRepoProvider(args.providerId ?? null);
+
+  let sha256: string;
   let sizeBytes = 0;
-  try {
-    if (Buffer.isBuffer(args.data)) {
-      await fsp.writeFile(tmpPath, args.data);
-      hash.update(args.data);
-      sizeBytes = args.data.length;
-    } else {
-      const out = fs.createWriteStream(tmpPath);
-      for await (const chunk of args.data) {
-        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        hash.update(buf);
-        sizeBytes += buf.length;
-        if (!out.write(buf)) await new Promise<void>((r) => out.once('drain', r));
+  let storagePath: string;
+  let rowProviderId: string | null = null;
+
+  if (provider) {
+    // Provider path — the plugin hashes + stores content-addressed and reports
+    // back the identity. The API never buffers or re-hashes the bytes.
+    const stored = await storeBlobViaProvider(provider, args.data as Readable);
+    sha256 = stored.sha256;
+    sizeBytes = stored.sizeBytes;
+    rowProviderId = provider.id;
+    // Informational only — providers key by sha256, not this path. Kept for a
+    // human-readable "where it would have lived" hint in the metadata.
+    storagePath = path.posix.join(category, new Date().toISOString().slice(0, 10), base);
+  } else {
+    // Local fallback — api-local volume (legacy layout + hashing).
+    const root = repoRoot();
+    const dateDir = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const dir = path.join(root, category, dateDir);
+    await fsp.mkdir(dir, { recursive: true });
+
+    const tmpPath = path.join(dir, `.upload-${randomUUID()}`);
+    const hash = createHash('sha256');
+    try {
+      if (Buffer.isBuffer(args.data)) {
+        await fsp.writeFile(tmpPath, args.data);
+        hash.update(args.data);
+        sizeBytes = args.data.length;
+      } else {
+        const out = fs.createWriteStream(tmpPath);
+        for await (const chunk of args.data) {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          hash.update(buf);
+          sizeBytes += buf.length;
+          if (!out.write(buf)) await new Promise<void>((r) => out.once('drain', r));
+        }
+        await new Promise<void>((resolve, reject) => {
+          out.end(() => resolve());
+          out.on('error', reject);
+        });
       }
-      await new Promise<void>((resolve, reject) => {
-        out.end(() => resolve());
-        out.on('error', reject);
-      });
+    } catch (e) {
+      await fsp.unlink(tmpPath).catch(() => undefined);
+      throw new FileRepoError(500, `Failed writing upload: ${(e as Error).message}`);
     }
-  } catch (e) {
-    await fsp.unlink(tmpPath).catch(() => undefined);
-    throw new FileRepoError(500, `Failed writing upload: ${(e as Error).message}`);
+
+    sha256 = hash.digest('hex');
+
+    // Choose a non-colliding disk name in this day directory.
+    let diskName = base;
+    for (let i = 1; ; i++) {
+      const candidate = path.join(dir, diskName);
+      try {
+        await fsp.access(candidate);
+        const dot = base.lastIndexOf('.');
+        diskName = dot > 0 ? `${base.slice(0, dot)}-${i}${base.slice(dot)}` : `${base}-${i}`;
+      } catch {
+        break; // free
+      }
+    }
+    await fsp.rename(tmpPath, path.join(dir, diskName));
+    storagePath = path.posix.join(category, dateDir, diskName);
   }
 
-  const sha256 = hash.digest('hex');
-
-  // Dedupe — identical content already stored.
+  // Dedupe — identical content already stored (in ANY repo). The bytes are
+  // idempotent either way; we just return the existing row.
   const existing = await findRepoFileBySha256(sha256);
   if (existing) {
-    await fsp.unlink(tmpPath).catch(() => undefined);
     return { entry: existing, deduplicated: true };
   }
-
-  // Choose a non-colliding disk name in this day directory.
-  const base = sanitizeFileName(args.name);
-  let diskName = base;
-  for (let i = 1; ; i++) {
-    const candidate = path.join(dir, diskName);
-    try {
-      await fsp.access(candidate);
-      // Exists — split name/ext and append a counter.
-      const dot = base.lastIndexOf('.');
-      diskName = dot > 0 ? `${base.slice(0, dot)}-${i}${base.slice(dot)}` : `${base}-${i}`;
-    } catch {
-      break; // free
-    }
-  }
-
-  await fsp.rename(tmpPath, path.join(dir, diskName));
 
   const id = randomUUID();
   const createdAt = new Date().toISOString();
@@ -192,9 +223,10 @@ export async function addRepoFile(args: {
     category,
     sizeBytes,
     sha256,
-    storagePath: path.posix.join(category, dateDir, diskName),
+    storagePath,
     uploadedBy: args.uploadedBy ?? null,
     createdAt,
+    providerId: rowProviderId,
   });
 
   const stored = await db.query.repoFiles.findFirst({ where: (t) => eq(t.id, id) });
@@ -206,6 +238,17 @@ export async function addRepoFile(args: {
 export async function openRepoFile(id: string): Promise<{ entry: RepoFileEntry; stream: Readable } | null> {
   const row = await db.query.repoFiles.findFirst({ where: (t) => eq(t.id, id) });
   if (!row) return null;
+
+  // Provider-backed bytes — route to the plugin that owns them by sha256.
+  if (row.providerId) {
+    const provider = await resolveFileRepoProvider(row.providerId);
+    if (!provider) return null; // owning repo gone — treat as missing content
+    const stream = await openBlobFromProvider(provider, row.sha256);
+    if (!stream) return null; // 404 from the provider — bytes missing from that volume
+    return { entry: toEntry(row), stream };
+  }
+
+  // Legacy local-volume read.
   let abs: string;
   try {
     abs = storagePathFor(row.storagePath);
@@ -224,13 +267,24 @@ export async function openRepoFile(id: string): Promise<{ entry: RepoFileEntry; 
 export async function deleteRepoFile(id: string): Promise<void> {
   const row = await db.query.repoFiles.findFirst({ where: (t) => eq(t.id, id) });
   if (!row) throw new FileRepoError(404, 'File not found');
-  let abs: string;
+
+  // Remove the bytes from wherever they live. Tolerate failures — metadata is
+  // dropped regardless and orphaned blobs are harmless + idempotent.
   try {
-    abs = storagePathFor(row.storagePath);
-  } catch {
-    abs = ''; // malformed path — just drop the metadata
-  }
-  if (abs) await fsp.unlink(abs).catch(() => undefined);
+    if (row.providerId) {
+      const provider = await resolveFileRepoProvider(row.providerId);
+      if (provider) await deleteBlobViaProvider(provider, row.sha256);
+    } else {
+      let abs: string;
+      try {
+        abs = storagePathFor(row.storagePath);
+      } catch {
+        abs = ''; // malformed path — just drop the metadata
+      }
+      if (abs) await fsp.unlink(abs).catch(() => undefined);
+    }
+  } catch { /* best-effort content removal */ }
+
   // Usage records are audit data — keep them (they reference the file by id).
   await db.delete(schema.repoFiles).where(eq(schema.repoFiles.id, id));
 }

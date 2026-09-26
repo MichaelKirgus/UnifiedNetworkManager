@@ -13,6 +13,7 @@ setup:
 	  (cd plugins/opnsense && npm install) & \
 	  (cd plugins/basic-auth && npm install) & \
 	  (cd plugins/secrets-provider && npm install) & \
+	  (cd plugins/file-repo && npm install) & \
 	  (cd plugins/icmp && npm install) & \
 	  (cd plugins/generic-snmp && npm install) & \
 	  (cd plugins/lancom-lx && npm install) & \
@@ -47,7 +48,7 @@ build:
 	@echo "Building @unm/lancom-shared..."
 	cd packages/lancom-shared && npm run build
 	@echo "Refreshing file:-linked copies in dependent plugins + api..."
-	for p in icmp generic-snmp lancom-lx lancom-sx lancom-lcos opnsense mikrotik-swos fbox ix-truenas mikrotik-routeros docker openwrt generic-ssh generic-http generic-ntp mailcow zabbix basic-auth secrets-provider; do \
+	for p in icmp generic-snmp lancom-lx lancom-sx lancom-lcos opnsense mikrotik-swos fbox ix-truenas mikrotik-routeros docker openwrt generic-ssh generic-http generic-ntp mailcow zabbix basic-auth secrets-provider file-repo; do \
 	  rm -rf plugins/$$p/node_modules/@unm/plugin-sdk; \
 	  cp -r packages/plugin-sdk plugins/$$p/node_modules/@unm/plugin-sdk; \
 	done
@@ -71,6 +72,7 @@ build:
 	  (cd plugins/lancom-lcos && npm run build) & \
 	  (cd plugins/basic-auth && npm run build) & \
 	  (cd plugins/secrets-provider && npm run build) & \
+	  (cd plugins/file-repo && npm run build) & \
 	  (cd plugins/mikrotik-swos && npm run build) & \
 	  (cd plugins/fbox && npm run build) & \
 	  (cd plugins/ix-truenas && npm run build) & \
@@ -96,9 +98,9 @@ test:
 up:
 	@echo "Starting infrastructure..."
 	@if command -v docker-compose &> /dev/null; then \
-		docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-lcos-plugin mikrotik-swos-plugin fbox-plugin ix-truenas-plugin mikrotik-routeros-plugin docker-plugin openwrt-plugin generic-ssh-plugin mailcow-plugin zabbix-plugin mcp; \
+		docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin file-repo-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-lcos-plugin mikrotik-swos-plugin fbox-plugin ix-truenas-plugin mikrotik-routeros-plugin docker-plugin openwrt-plugin generic-ssh-plugin mailcow-plugin zabbix-plugin mcp; \
 	else \
-		docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-lcos-plugin mikrotik-swos-plugin fbox-plugin ix-truenas-plugin mikrotik-routeros-plugin docker-plugin openwrt-plugin generic-ssh-plugin mailcow-plugin zabbix-plugin mcp; \
+		docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin file-repo-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-lcos-plugin mikrotik-swos-plugin fbox-plugin ix-truenas-plugin mikrotik-routeros-plugin docker-plugin openwrt-plugin generic-ssh-plugin mailcow-plugin zabbix-plugin mcp; \
 	fi
 	@echo "Infrastructure is up."
 

@@ -51,6 +51,10 @@ export interface DiscoveryExtras {
   identityProvider?: { flow: string; redirectUrl?: string };
   /** Secrets-provider plugins: algorithm + the secret types served. */
   secretsProvider?: Record<string, unknown>;
+  /** File-repo storage backends: backend kind (e.g. 'local-filesystem'). The API
+   *  broker only needs the `fileRepo` capability on /discover; this field is
+   *  informational for the webapp's repo picker. */
+  fileRepo?: Record<string, unknown>;
 }
 
 export interface PluginServerOptions {
@@ -101,6 +105,7 @@ export function buildDiscoverPayload(identity: PluginIdentity, extras?: Discover
     ...(e.credentialSlots !== undefined ? { credentialSlots: e.credentialSlots } : {}),
     ...(e.identityProvider !== undefined ? { identityProvider: e.identityProvider } : {}),
     ...(e.secretsProvider !== undefined ? { secretsProvider: e.secretsProvider } : {}),
+    ...(e.fileRepo !== undefined ? { fileRepo: e.fileRepo } : {}),
   };
 }
 

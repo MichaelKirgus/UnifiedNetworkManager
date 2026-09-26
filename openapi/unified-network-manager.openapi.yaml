@@ -3103,6 +3103,36 @@ paths:
         '401':
           description: Authentication required (requires files:write)
 
+  /files/providers:
+    get:
+      tags: [Files]
+      summary: List file-repo storage backends
+      description: >-
+        The registered file-repo plugins (capability `fileRepo`) with their online
+        state. Files are stored by a plugin; the API keeps all metadata in Postgres.
+        Requires permission `files:read`. Feeds a multi-repo picker — uploads can
+        target a specific backend via the optional `x-file-provider` header on POST /files.
+      responses:
+        '200':
+          description: File-repo backends (online first)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providers:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, endpoint, online]
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        endpoint: { type: string }
+                        online: { type: boolean }
+        '401':
+          description: Authentication required (requires files:read)
+
   /files/{id}:
     get:
       tags: [Files]
@@ -8429,6 +8459,7 @@ components:
         sha256: { type: string, description: "SHA-256 hex of the stored content (integrity + dedupe)" }
         uploadedBy: { type: string, nullable: true, description: "Username that uploaded it; null for plugin uploads" }
         createdAt: { type: string, format: date-time, description: "When the file was uploaded" }
+        providerId: { type: string, nullable: true, description: "File-repo plugin storing the bytes (capability `fileRepo`); null = api-local volume (legacy)" }
 
     FileRepoUse:
       type: object

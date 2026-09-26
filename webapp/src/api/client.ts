@@ -1753,6 +1753,16 @@ export interface FileRepoEntry {
   sha256: string;
   uploadedBy: string | null;
   createdAt: string;
+  /** File-repo plugin storing the bytes (capability `fileRepo`); null = api-local volume (legacy). */
+  providerId?: string | null;
+}
+
+/** A registered file-repo storage backend (GET /files/providers). */
+export interface FileRepoProvider {
+  id: string;
+  name: string;
+  endpoint: string;
+  online: boolean;
 }
 
 /** One usage record of a repo file (audit trail — which device, when). */
@@ -2808,10 +2818,13 @@ export const api = {
     const suffix = category ? `?category=${encodeURIComponent(category)}` : '';
     return apiFetch<{ files: FileRepoEntry[] }>(`/files${suffix}`);
   },
+  /** Lists the registered file-repo storage backends + online state. */
+  fileRepoProviders: () => apiFetch<{ providers: FileRepoProvider[] }>('/files/providers'),
   /** Uploads a file to the repo. RAW octet-stream body + x-file-name header —
    * multi-GB ISOs stream through without base64/buffering. Identical content is
-   * deduplicated (existing entry returned, deduplicated: true). */
-  uploadRepoFile: async (file: File, category?: string): Promise<{ file: FileRepoEntry; deduplicated: boolean }> => {
+   * deduplicated (existing entry returned, deduplicated: true). `providerId`
+   * optionally targets a specific file-repo backend (multi-segment repos). */
+  uploadRepoFile: async (file: File, category?: string, providerId?: string): Promise<{ file: FileRepoEntry; deduplicated: boolean }> => {
     const token = getToken();
     const res = await fetch(`${BASE}/files`, {
       method: 'POST',
@@ -2819,6 +2832,7 @@ export const api = {
         'Content-Type': 'application/octet-stream',
         'x-file-name': file.name,
         ...(category ? { 'x-file-category': category } : {}),
+        ...(providerId ? { 'x-file-provider': providerId } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: file,

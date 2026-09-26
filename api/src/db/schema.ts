@@ -1903,10 +1903,13 @@ export const documentedNetworks = pgTable(
   }
 );
 
-// Central file repository (see src/fileRepo.ts). DEVICE-INDEPENDENT store owned
-// by the API: files live on a volume only the api container mounts, metadata here.
-// `storagePath` is RELATIVE to the repo root and human-readable
-// (`<category>/<YYYY-MM-DD>/<name>`); content identity is sha256 (dedupe).
+// Central file repository (see src/fileRepo.ts + src/fileRepoBroker.ts). The API
+// owns ALL metadata here; the BYTES live either on the api-local volume (legacy,
+// `providerId` null) or in a file-repo plugin (capability `fileRepo`) named by
+// `providerId`. Content identity is sha256 — it doubles as the content-addressed
+// key inside a provider. `storagePath` is RELATIVE to the repo root and
+// human-readable (`<category>/<YYYY-MM-DD>/<name>`) for local-volume rows; for
+// provider-backed rows it records where the bytes would have lived (informational).
 export const repoFiles = pgTable(
   'repo_files',
   {
@@ -1916,18 +1919,23 @@ export const repoFiles = pgTable(
     // Open category set, e.g. 'iso' | 'firmware' | 'config-backup' | 'script' | 'other'.
     category: text('category').notNull().default('other'),
     sizeBytes: bigint('sizeBytes', { mode: 'number' }).notNull().default(0),
-    // SHA-256 hex of the stored content (integrity + dedupe).
+    // SHA-256 hex of the stored content (integrity + dedupe; provider blob key).
     sha256: text('sha256').notNull(),
     // Relative path under the repo root (category/date/name) — human-readable.
     storagePath: text('storagePath').notNull(),
     // Username that uploaded it (null for plugin uploads without a user context).
     uploadedBy: text('uploadedBy'),
     createdAt: text('createdAt').notNull(),
+    // The file-repo PLUGIN id that stores this file's bytes (capability `fileRepo`).
+    // NULL = legacy row on the api-local volume (FILE_REPO_PATH) — read path falls
+    // back to local storage. Set for every new upload when a provider is online.
+    providerId: text('providerId'),
   },
   (table) => {
     return {
       uqRepoFilesSha256: uniqueIndex('uq_repo_files_sha256').on(table.sha256),
       idxRepoFilesCategory: index('idx_repo_files_category').on(table.category),
+      idxRepoFilesProvider: index('idx_repo_files_provider').on(table.providerId),
     };
   }
 );

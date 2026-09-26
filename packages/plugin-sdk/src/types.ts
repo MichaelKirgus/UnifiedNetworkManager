@@ -77,6 +77,13 @@ export const CAPABILITIES = [
   // shared. Rows with status 'ok' are dropped by the API (findings-only table).
   'securityChecks',
   'secretsProvider',
+  // Stores the BYTES of UNM's central file repository (ISOs, firmware images,
+  // config backups). The API owns ALL metadata in Postgres and brokers every
+  // read/write here; the plugin is stateless w.r.t. UNM — it only serves a
+  // content-addressed blob store (PUT/GET/DELETE by sha256) on its own volume.
+  // Multiple instances (PLUGIN_INSTANCE_ID) = repos in different network
+  // segments; an S3/cloud backend would be another plugin with this capability.
+  'fileRepo',
   'identityProvider',
   // Reserved for future log-forwarder plugins (syslog daemon, OpenSearch, ...).
   // Regular plugins do NOT advertise this — they ship logs via createPluginLogger.

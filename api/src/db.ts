@@ -1218,6 +1218,10 @@ export async function initDb(): Promise<void> {
       "createdAt" TEXT NOT NULL
     )`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_repo_files_category ON repo_files (category)`);
+  // File-repo broker: which file-repo PLUGIN stores a row's bytes. NULL = legacy
+  // api-local volume (FILE_REPO_PATH). Added after the table existed in prod.
+  await pool.query(`ALTER TABLE repo_files ADD COLUMN IF NOT EXISTS "providerId" TEXT`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_repo_files_provider ON repo_files ("providerId")`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS repo_file_uses (
       id TEXT PRIMARY KEY,
