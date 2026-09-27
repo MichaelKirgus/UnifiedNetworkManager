@@ -73,6 +73,7 @@ import {
   type ProbeVmState,
   type ProbeVmStat,
   type ServiceNetDetail,
+  buildVirshPreamble,
 } from './enrich';
 import { alertDedupeKey, registry as actionRegistry, TruenasActionContext } from './actions';
 import { collectServices } from './services';
@@ -265,7 +266,17 @@ const identity = resolvePluginIdentity({
   // re-read verification; early cross-field checks mirror the appliance's own
   // validation (min_memory ≤ memory, pin_vcpus ⇒ cpuset, cpu_mode/CUSTOM ⇒
   // cpu_model) so failures carry a clear message instead of an appliance error.
-  version: '0.21.0',
+  // 0.22.0 — VM serial console over the GENERIC console chain: new read action
+  // vms.serial-consoles lists every VM (name + state) so the webapp can gate its
+  // per-row "Serial console" quick action on catalog availability like everything
+  // else; a NEW plugin-owned console context kind {kind:'vm-serial', name} rides
+  // the existing ticket → WS proxy → /console path and attaches to the guest's
+  // PTY-backed serial0 via `virsh console <uuid>` (TrueNAS SCALE names libvirt
+  // domains by UUID — resolved from vm.query; the shared socket-detection
+  // preamble handles TrueNAS's non-standard libvirt socket). No webapp/API
+  // changes needed for the transport: a future hypervisor plugin maps the same
+  // context kind to its own mechanism.
+  version: '0.22.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -551,16 +562,25 @@ const knownAlertsByHost = new Map<string, Set<string>>();
 
 // ---------------------------------------------------------------------------
 // Interactive SSH console (/console WebSocket, capability 'sshConsole').
-// The webapp's DeviceDetail "Shell" button and the Containers page per-container
-// consoles drive this: a full xterm.js terminal that talks to the appliance like
-// PuTTY would. Two attach modes via the plugin-owned `context`:
+// The webapp's DeviceDetail "Shell" button, the Containers page per-container
+// consoles and the VMs page per-VM serial consoles drive this: a full xterm.js
+// terminal that talks to the appliance like PuTTY would. Three attach modes via
+// the plugin-owned `context`:
 //   { kind: 'host' }                        → login shell on the host (openShell)
 //   { kind: 'container', name?, service? }  → docker exec -it into a container;
 //                                             the docker NAME is resolved live from
 //                                             `docker ps` against candidate names
 //                                             (the webapp knows compose service
 //                                             names, not necessarily docker names).
-// Requires a bound ssh slot. The SDK's makeConsoleUpgrade handles the WS protocol
+//   { kind: 'vm-serial', name }             → virsh console <uuid> — the guest's
+//                                             PTY-backed serial0. The VM NAME is
+//                                             resolved to its libvirt domain UUID
+//                                             via vm.query (SCALE names domains by
+//                                             uuid, not by name); the shared
+//                                             socket-detection preamble finds
+//                                             TrueNAS's non-standard libvirt sock.
+// Requires a bound ssh slot (vm-serial additionally needs the primary credential
+// for the one-shot vm.query). The SDK's makeConsoleUpgrade handles the WS protocol
 // (binary = raw I/O, text = control JSON); this plugin only maps context → session.
 // ---------------------------------------------------------------------------
 
@@ -575,7 +595,10 @@ async function openConsoleSession(
   host: string,
   sshCreds: SshCredentials,
   context: Record<string, unknown> | undefined,
-  sshPort = 22
+  sshPort = 22,
+  settings?: Record<string, unknown>,
+  mgmtAddress?: string,
+  rawCredentials?: Record<string, unknown>
 ): Promise<SshTerminalSession> {
   // UNM certificate pinning — resolves the freshest trusted fingerprint at
   // handshake time (pooled sessions outlive single requests). A mismatch
@@ -613,6 +636,46 @@ async function openConsoleSession(
     return conn.openExec(`docker exec -it ${dockerName} /bin/sh`, sshCreds);
   }
 
+  if (kind === 'vm-serial') {
+    // Guest serial console — attach to the libvirt domain's PTY-backed serial0
+    // (every TrueNAS VM gets `-chardev pty,id=charserial0` on its QEMU cmdline,
+    // verified live). TrueNAS SCALE names its domains by UUID, NOT by VM name
+    // (verified: `virsh list` shows uuids; the middleware's vm.get_console return
+    // value is a QEMU device id, not a domain), so resolve name → uuid over the
+    // appliance RPC first — same primary-credential path as /probe's uuid map.
+    const name = pickString(ctx, ['name']);
+    if (!name) throw new Error('vm-serial context requires a "name"');
+
+    let domainUuid: string | null = null;
+    try {
+      const apiKeyUsername = typeof settings?.['apiKeyUsername'] === 'string' ? (settings['apiKeyUsername'] as string).trim() : '';
+      const credRes = resolveCredentials(rawCredentials, apiKeyUsername);
+      if (!credRes.creds) throw new Error(credRes.error ?? 'Missing appliance credentials — cannot resolve the VM');
+      // Full host:port for the RPC socket (sshHostOf strips it — wrong here).
+      const rpcHost = mgmtAddress ? applianceHost(mgmtAddress) : '';
+      if (!rpcHost) throw new Error('Missing management address');
+      const client = getClient(rpcHost, transportOf(settings ?? {}), 10_000, portsOf(settings ?? {}));
+      await client.login(credRes.creds);
+      const rawVms = await client.call<Record<string, unknown>[]>('vm.query', [], credRes.creds, 8_000);
+      const vm = (rawVms ?? []).find((v) => pickString(v, ['name']) === name);
+      if (!vm) throw new Error(`VM "${name}" not found on this appliance`);
+      domainUuid = pickString(vm, ['uuid']) ?? null;
+    } catch (e) {
+      // Wrap so the terminal shows ONE clear line instead of a raw RPC/transport error.
+      throw new Error(e instanceof Error ? `Serial console unavailable: ${e.message}` : String(e));
+    }
+    if (!domainUuid || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(domainUuid)) {
+      throw new Error(`VM "${name}" has no libvirt uuid — cannot attach a serial console`);
+    }
+
+    // The shared socket-detection preamble finds TrueNAS's non-standard libvirt
+    // socket (stock virsh hardcodes /var/run/libvirt, which doesn't exist on
+    // SCALE). A stopped guest has no live PTY — virsh fails fast and the error
+    // surfaces on the terminal; the webapp disables the button for STOPPED rows.
+    const cmd = [buildVirshPreamble(), `run_virsh console ${domainUuid}`].join('\n');
+    return conn.openExec(cmd, sshCreds);
+  }
+
   // Default (and kind: 'host') — a plain login shell on the appliance.
   return conn.openShell(sshCreds);
 }
@@ -631,7 +694,18 @@ const consoleUpgrade = makeConsoleUpgrade({
     // the API in the console hello frame so a per-device override is honored.
     const sshPort = resolveSshPort(hello.settings?.['sshPort']);
     setHostSshPort(host, sshPort);
-    return openConsoleSession(host, sshCreds, hello.context, sshPort);
+    return openConsoleSession(
+      host,
+      sshCreds,
+      hello.context,
+      sshPort,
+      hello.settings,
+      // The vm-serial kind resolves name → libvirt uuid over the appliance RPC —
+      // that needs the PRIMARY credential (username/password or API key), which
+      // rides the hello frame's credentials body exactly like /monitoring.
+      hello.managementAddress,
+      hello.credentials as Record<string, unknown> | undefined,
+    );
   },
 });
 

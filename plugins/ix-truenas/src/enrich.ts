@@ -847,8 +847,9 @@ const vmInFlight = new Set<string>();
  * `-c` URI overrides in some positions AND the LIBVIRT_DEFAULT_URI env var — but
  * the query-parameter form `qemu+unix:///system?socket=<path>` works (verified
  * live on 26.0 BETA). Every combined command that shells out to virsh starts
- * with this block so it finds a working daemon first. */
-function buildVirshPreamble(): string {
+ * with this block so it finds a working daemon first. Exported: the VM serial
+ * console (index.ts) needs the same detection for its `virsh console` attach. */
+export function buildVirshPreamble(): string {
   const candidates = LIBVIRT_SOCKET_CANDIDATES.map((s) => `'${s}'`).join(' ');
   return [
     // run_virsh: plain `virsh` when its stock socket works, otherwise the

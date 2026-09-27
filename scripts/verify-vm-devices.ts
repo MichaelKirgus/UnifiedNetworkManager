@@ -19,7 +19,12 @@
  *   4b. EDIT CYCLES (generic edit contract — vms.device-get prefill + partial-merge
         vms.device-update, verified via GET /vms detail, always restored):
         NIC bridge swap on the freshly attached NIC; DISPLAY resolution change
-        on the VM's existing console. *   5. NEGATIVE: display attach on a VM that ALREADY has one must fail with the
+        on the VM's existing console.
+ *   4c. SERIAL CONSOLE (generic console chain — context {kind:'vm-serial', name}):
+        vms.serial-consoles read action returns ≥1 {name, state}; a live WS round-trip
+        through the REAL ticket + proxy path attaches to a RUNNING VM's PTY-backed
+        serial0 and asserts the 'ready' control frame + virsh attach banner.
+ *   5. NEGATIVE: display attach on a VM that ALREADY has one must fail with the
  *      "already has a display" error (appliance rule, enforced pre-RPC).
  *   Every plan created is deleted at the end; no appliance state survives.
  *
@@ -98,7 +103,7 @@ async function main(): Promise<void> {
   const catRes = await authed('GET', `/plugins/${PLUGIN_ID}/actions`);
   check('GET /plugins/:id/actions → 200', catRes.status === 200, { status: catRes.status });
   const catalog = ((await catRes.json()) as { actions?: Array<{ id: string; riskLevel: string }> }).actions ?? [];
-  for (const [id, risk] of [['vms.device-types', 'read'], ['vms.disk-choices', 'read'], ['vms.pci-choices', 'read'], ['vms.usb-choices', 'read'], ['vms.nic-choices', 'read'], ['vms.device-get', 'read'], ['vms.vm-edit-schema', 'read'], ['vms.vm-get', 'read'], ['vms.disk-attach', 'write'], ['vms.display-attach', 'write'], ['vms.pci-attach', 'write'], ['vms.usb-attach', 'write'], ['vms.nic-attach', 'write'], ['vms.cdrom-attach', 'write'], ['vms.device-update', 'write'], ['vms.vm-update', 'write']] as const) {
+  for (const [id, risk] of [['vms.device-types', 'read'], ['vms.disk-choices', 'read'], ['vms.pci-choices', 'read'], ['vms.usb-choices', 'read'], ['vms.nic-choices', 'read'], ['vms.device-get', 'read'], ['vms.vm-edit-schema', 'read'], ['vms.vm-get', 'read'], ['vms.serial-consoles', 'read'], ['vms.disk-attach', 'write'], ['vms.display-attach', 'write'], ['vms.pci-attach', 'write'], ['vms.usb-attach', 'write'], ['vms.nic-attach', 'write'], ['vms.cdrom-attach', 'write'], ['vms.device-update', 'write'], ['vms.vm-update', 'write']] as const) {
     const entry = catalog.find((a) => a.id === id);
     check(`catalog has ${id} (${risk})`, Boolean(entry) && entry!.riskLevel === risk, entry ?? `missing`);
   }
@@ -184,6 +189,62 @@ async function main(): Promise<void> {
 
   const stoppedVm = rows.find((r) => r.state === 'STOPPED');
   const withDisplay = rows.find((r) => devicesOf(r).some((d) => d.dtype === 'DISPLAY'));
+
+  // --- Serial console (generic console chain, context {kind:'vm-serial'}) --------
+  // Read action: the availability list that gates the webapp's Guest Actions button.
+  const serialRes = await authed('POST', `/plugins/${PLUGIN_ID}/actions/execute`, { deviceId, actionId: 'vms.serial-consoles', input: {} });
+  check('vms.serial-consoles → 200', serialRes.status === 200, { status: serialRes.status });
+  const serialDetails = ((await serialRes.json()) as { details?: { consoles?: Array<{ name: string; state: string }> } }).details ?? {};
+  check('serial-consoles returns ≥1 console with name+state', Array.isArray(serialDetails.consoles) && (serialDetails.consoles?.length ?? 0) > 0 && serialDetails.consoles!.every((c) => typeof c.name === 'string' && typeof c.state === 'string'), serialDetails);
+
+  // Live WS round-trip: mint a ticket for a RUNNING VM and attach through the REAL
+  // proxy path (the same one the webapp's ConsoleDialog uses). Expect the control
+  // 'ready' frame, then guest output on the PTY-backed serial0.
+  const runningVm = rows.find((r) => r.state === 'RUNNING');
+  if (!runningVm) {
+    skip('serial console WS attach', 'no RUNNING VM in inventory');
+  } else {
+    // Session credential for purpose=console — auto-use the default (or sole candidate).
+    const scRes = await authed('GET', `/devices/${deviceId}/session-credentials?purpose=console`);
+    check('session-credentials(console) → 200', scRes.status === 200, { status: scRes.status });
+    const sc = (await scRes.json()) as { candidates?: Array<{ id: string }>; defaultSecretId?: string | null };
+    const secretId = sc.defaultSecretId ?? sc.candidates?.[0]?.id;
+
+    if (!secretId) {
+      check('console credential available', false, 'no eligible session credential for purpose=console');
+    } else {
+      const tRes = await authed('POST', `/devices/${deviceId}/console`, { pluginId: PLUGIN_ID, secretId, context: { kind: 'vm-serial', name: runningVm.name } });
+      check(`mint console ticket (vm-serial ${runningVm.name}) → 201`, tRes.status === 201, { status: tRes.status });
+      const tBody = (await tRes.json()) as { ticket?: string };
+      if (!tBody.ticket) check('ticket present', false, tBody);
+
+      // The API's WS proxy — Node `ws` delivers text frames as Buffers too, so
+      // JSON-parse first and fall back to raw output.
+      const WebSocket = apiRequire('ws');
+      const wsBase = API.replace(/^http/, 'ws');
+      const ws = new WebSocket(`${wsBase}/devices/${deviceId}/console/ws?ticket=${encodeURIComponent(tBody.ticket ?? '')}`);
+      let ready = false;
+      let output = '';
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => { ws.terminate(); resolve(); }, 30_000); // generous: vm.query + SSH handshake + virsh attach
+        ws.on('message', (data: Buffer) => {
+          const text = data.toString('utf8');
+          try {
+            const msg = JSON.parse(text) as { type?: string };
+            if (msg.type === 'ready') ready = true;
+            else if (msg.type === 'error') output += `\n[control error] ${JSON.stringify(msg)}`;
+            return; // control frame — not guest output
+          } catch { /* binary/raw text = terminal I/O */ }
+          output += text;
+        });
+        ws.on('close', () => { clearTimeout(timer); resolve(); });
+        ws.on('error', (e: Error) => { check(`serial console WS open (${runningVm.name})`, false, e.message); clearTimeout(timer); resolve(); });
+      });
+      check(`serial console ready frame (${runningVm.name})`, ready, output.slice(0, 200));
+      // The attach banner proves the PTY reached the guest's serial0.
+      check('serial console attached to domain (banner in output)', /Connected to domain/i.test(output), output.slice(0, 300));
+    }
+  }
 
   // --- Plan workflow helpers (mirror webapp createAndExecutePlan) -----------------
   const createdPlans: string[] = [];

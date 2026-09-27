@@ -3624,6 +3624,36 @@ const vmsVmUpdateAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+/**
+ * vms.serial-consoles — read-only availability list for the webapp's per-row
+ * "Serial console" quick action (Guest Actions column on the VMs page). The
+ * actual attach rides the generic console chain (capability 'sshConsole',
+ * context {kind:'vm-serial', name}) — this action only tells the UI which rows
+ * may offer it, so a hypervisor plugin that cannot serve serial consoles simply
+ * never advertises the id and the button stays hidden. Every VM is listed with
+ * its current state; the webapp decides per-state eligibility (attach works on
+ * RUNNING/SUSPENDED guests — a stopped guest has no live PTY to attach to).
+ */
+const vmsSerialConsolesAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.serial-consoles',
+  label: 'List VM serial consoles',
+  description:
+    'Read-only list of the VMs whose guest serial console can be attached to (name + current state). Drives the webapp\'s per-row "Serial console" quick action; the attach itself uses the generic console chain with context {kind:"vm-serial", name}.',
+  module: 'VMs',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  async execute(ctx: TruenasActionContext): Promise<ActionResult> {
+    let vms: VmInfo[];
+    try {
+      vms = await listVms(ctx);
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+    return { success: true, details: { consoles: vms.map((v) => ({ name: v.name, state: v.state })) } };
+  },
+};
+
 const vmsPciChoicesAction: ActionDescriptor<TruenasActionContext> = {
   id: 'vms.pci-choices',
   label: 'List PCIe passthrough devices',
@@ -5807,6 +5837,7 @@ export const registry = createRegistry<TruenasActionContext>([
   vmsVmEditSchemaAction,
   vmsVmGetAction,
   vmsVmUpdateAction,
+  vmsSerialConsolesAction,
   vmsDeviceTypesAction,
   vmsDiskChoicesAction,
   vmsPciChoicesAction,

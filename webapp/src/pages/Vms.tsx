@@ -1,7 +1,8 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { CheckCircle2, EyeOff, Loader2, Monitor, Pencil, Pause, Play, Plus, RefreshCw, RotateCw, Square, Trash2, Unplug, X, Zap } from 'lucide-react';
+import { CheckCircle2, EyeOff, Loader2, Monitor, Pencil, Pause, Play, Plus, RefreshCw, RotateCw, Square, Terminal, Trash2, Unplug, X, Zap } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { ConsoleDialog } from '../components/ConsoleDialog';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
@@ -2219,6 +2220,10 @@ export default function Vms() {
   // Generic Edit-VM dialog — form rendered from the plugin's vms.vm-edit-schema
   // catalog, prefilled via vms.vm-get, submitted as a partial-merge vms.vm-update.
   const [editVmRow, setEditVmRow] = useState<VmRow | null>(null);
+  // Serial console (Guest Actions) — the generic ConsoleDialog with the plugin-owned
+  // context {kind:'vm-serial', name}; NO plan is involved (a live attach, like the
+  // container consoles on the Containers page).
+  const [serialConsoleRow, setSerialConsoleRow] = useState<VmRow | null>(null);
 
   function detachDevice(node: VmNode) {
     const row = node.row;
@@ -2444,10 +2449,54 @@ export default function Vms() {
       render: (node) => (node.row ? <span className="text-xs text-secondary">{formatDateTime(node.row.collectedAt)}</span> : null),
     },
     {
+      // Quick per-row actions on the GUEST itself — no plan involved (a live
+      // attach / read-only peek). Availability is GENERIC like the management
+      // column: a button only renders when the row's plugin advertises the
+      // matching action id, so any future hypervisor plugin gets this column free.
+      // Today: Serial console (vms.serial-consoles) — more quick actions can join.
+      header: 'Guest Actions',
+      key: 'guestActions',
+      width: 90,
+      sortable: false,
+      excludeFromExport: true,
+      render: (node) => {
+        const r = node.row;
+        if (!r || node.kind !== 'vm') return null;
+        const state = effectiveState(r);
+        const readOnly = mode === 'readonly';
+
+        // Serial console — attach to the guest's PTY-backed serial port over the
+        // generic console chain (context {kind:'vm-serial', name}). Only makes
+        // sense while the guest is up: a stopped VM has no live PTY to attach to.
+        const serialAvailable = hasAction(r.pluginId, 'vms.serial-consoles') && !readOnly;
+        const serialEligible = RUNNING_STATES.has(state) || SUSPENDED_STATES.has(state);
+
+        return (
+          <div className="flex items-center gap-0.5">
+            {serialAvailable && (
+              <button
+                type="button"
+                aria-label={`Serial console ${r.name}`}
+                title={readOnly ? READONLY_MESSAGE : serialEligible ? `Open the guest's serial console` : `Not applicable in state ${state.toLowerCase()} — start the VM first`}
+                disabled={!serialEligible}
+                onClick={() => setSerialConsoleRow(r)}
+                className={clsx(
+                  'rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground',
+                  !serialEligible && 'cursor-not-allowed opacity-30',
+                )}
+              >
+                <Terminal size={14} />
+              </button>
+            )}
+          </div>
+        );
+      },
+    },
+    {
       // One-click per-row actions. Availability is GENERIC — a button only
       // renders when the row's plugin advertises that action id in its catalog,
       // so any future hypervisor plugin (libvirt, Proxmox…) gets this column free.
-      header: 'Actions',
+      header: 'Management Actions',
       key: 'actions',
       width: 200,
       sortable: false,
@@ -2653,6 +2702,19 @@ export default function Vms() {
             row={editVmRow}
             stopped={STOPPED_STATES.has(effectiveState(editVmRow))}
             onClose={() => setEditVmRow(null)}
+          />
+        )}
+
+        {/* Serial console — the generic ConsoleDialog with the plugin-owned context;
+            a live attach (no plan), like the container consoles on the Containers page. */}
+        {serialConsoleRow && (
+          <ConsoleDialog
+            deviceId={serialConsoleRow.deviceId}
+            pluginId={serialConsoleRow.pluginId}
+            context={{ kind: 'vm-serial', name: serialConsoleRow.name }}
+            title={`Serial console — ${serialConsoleRow.name}`}
+            subtitle={effectiveState(serialConsoleRow).toLowerCase()}
+            onClose={() => setSerialConsoleRow(null)}
           />
         )}
 
