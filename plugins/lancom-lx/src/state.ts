@@ -48,6 +48,10 @@ export function buildLxState(parsed: ParsedLcosConfig): DeviceStateResponse {
         actions: [
           { actionId: 'system.name.set', prefill: { name } },
           { actionId: 'system.comment.set', prefill: { comment: comment ?? '' } },
+          // Backup/restore — the GetConfig text document is the full config;
+          // backups land in UNM's central file repo (Files page).
+          { actionId: 'config.backup.download' },
+          { actionId: 'config.restore' },
         ],
       },
     ],

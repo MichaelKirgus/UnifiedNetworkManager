@@ -5,9 +5,12 @@
  * what makes the Config page's "execute directly" flow work — a 1-step plan for
  * one AP, created + executed immediately by the webapp.
  *
- * No rollback steps: LX has no config-backup transport yet (the GetConfig text
- * could serve as one later). Writes are single-cell updates verified by re-read,
- * and flash persistence is an explicit separate step (`config.persist`).
+ * Rollback point: every plan that mutates the AP gets a best-effort
+ * `config.backup.download` (GetConfig text → UNM file repo — read-only on the
+ * device) prepended per dirty device. A failed backup never blocks the plan;
+ * the step result carries details.repoFileId for a later config.restore.
+ * Writes are single-cell updates verified by re-read, and flash persistence is
+ * an explicit separate step (`config.persist`).
  */
 
 import { finalizePlan, PlanningError, Plan, PlanRequest } from '@unm/plugin-sdk';
@@ -35,5 +38,7 @@ export async function buildPlan(req: PlanRequest): Promise<Plan> {
   // Single-device fan-out — one step per device, same input.
   const rawSteps = devices.map((d) => ({ deviceId: d.deviceId, actionId, input: { ...(inputs ?? {}) } }));
 
-  return finalizePlan(actionId, devices, [], rawSteps, isDirtyStep);
+  return finalizePlan(actionId, devices, [], rawSteps, isDirtyStep, {
+    rollbackStep: () => ({ actionId: 'config.backup.download', input: {} }),
+  });
 }

@@ -73,7 +73,11 @@ const identity = resolvePluginIdentity({
   // networks/radios/encryption profiles, interface VLANs and WLC/CAPWAP.
   // Writes are single-cell updates verified by re-read; flash persistence is an
   // explicit separate step. No destructive actions (reset/reboot) are exposed.
-  version: '0.3.0',
+  // 0.4.0 — Configuration backup/restore: config.backup.download (GetConfig text
+  // → UNM central file repo, read-only on the device) and config.restore
+  // (dangerous SetConfig overwrite from a repo id or base64). Every mutating
+  // plan now gets a best-effort backup step prepended per dirty device.
+  version: '0.4.0',
   vendors: ['lancom'],
   // monitoring + inventory over the LCOS-LX MIB, plus an interactive SSH console
   // ('sshConsole') — LX access points expose a CLI shell over SSH (port 22).
@@ -843,6 +847,8 @@ app.post('/config', async (req, res) => {
       host: hostFromAddress(managementAddress) ?? '',
       address: managementAddress,
       deviceId: typeof deviceId === 'string' ? deviceId : undefined,
+      // The UNM display name — labels artifacts the plugin creates (config backups).
+      deviceName: typeof body.deviceName === 'string' && body.deviceName !== '' ? body.deviceName : null,
       web,
       timeoutMs: clampInt(settings.timeoutMs, 1_000, 30_000, 5_000),
     };

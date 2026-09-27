@@ -45,6 +45,17 @@ export interface UbusCmdResult {
   val?: unknown;
 }
 
+/**
+ * Per-command errortags that mean "accepted": 0 = applied, 1020 = the value
+ * already equals the requested one (no-op write). Verified live against an
+ * LX-6500: a no-op setScalar keeps the TOP-LEVEL transaction ErrorTag at 0 and
+ * reports cmd errortag 1020 — the vendor SPA only checks the top-level tag, so
+ * it shows such saves as success. 101 = not-found / bad OID / read-only object.
+ */
+export function isWriteOk(errortag: number): boolean {
+  return errortag === 0 || errortag === 1020;
+}
+
 /** Parsed transaction outcome — one entry per submitted command, in order. */
 export interface TransactionOutcome {
   /** True when every command reported errortag 0. */
@@ -201,7 +212,9 @@ export class LcosWebClient {
         let inner = payload.Descr;
         if (typeof inner === 'string') { try { inner = JSON.parse(inner); } catch { /* keep raw */ } }
         const cmdResults: UbusCmdResult[] = Array.isArray(inner?.transaction?.cmd) ? inner.transaction.cmd : [];
-        const ok = Number(payload.ErrorTag ?? 0) === 0 && cmdResults.every((c) => c.errortag === 0);
+        // Top-level ErrorTag must be 0 AND every per-command tag accepted
+        // (1020 = no-op "value unchanged" is fine — see isWriteOk).
+        const ok = Number(payload.ErrorTag ?? 0) === 0 && cmdResults.every((c) => isWriteOk(c.errortag));
         return { expired: false, outcome: { ok, results: cmdResults, descr: ok ? undefined : (typeof payload.Descr === 'string' ? payload.Descr : JSON.stringify(inner).slice(0, 400)) } };
       } catch (err) {
         const msg = (err as Error).message;
@@ -284,6 +297,19 @@ export class LcosWebClient {
     const cfg = body?.result?.[1]?.config;
     if (typeof cfg !== 'string' || cfg.length === 0) throw new Error('GetConfig returned no configuration text');
     return cfg;
+  }
+
+  /**
+   * Replaces the ENTIRE running configuration with the given LCOS text
+   * (`SetConfig` — the same call the web UI's config import performs).
+   * `noflash=false` (default) also writes it to flash so it survives a reboot.
+   */
+  async setConfigText(config: string, noflash = false): Promise<void> {
+    const sid = await this.sid();
+    const { body } = await this.call([sid, 'lxcd', 'SetConfig', { config, noflash: noflash ? 1 : 0 }]);
+    // SetConfig answers with a transaction-style result; surface any error tag.
+    const errtag = Number(body?.result?.[1]?.errortag ?? body?.result?.[1]?.ErrorTag ?? 0);
+    if (errtag !== 0) throw new Error(`SetConfig failed with errortag ${errtag}`);
   }
 
   /** Reads a device file (metadata.json, sysinfo.json, …). */

@@ -1,15 +1,18 @@
 /**
- * E2E check for the lancom-lx web-UI (ubus) configuration transport — READ-ONLY.
+ * E2E check for the lancom-lx web-UI (ubus) configuration transport.
  *
  * Drives the live stack against AP_Wohnzimmer (10.25.1.2, production device):
- *   login (2FA) → verify /discover catalog v0.3.0 (actions + `web` slot)
+ *   login (2FA) → verify /discover catalog v0.4.0 (actions + `web` slot)
  *   → bind the web credential slot to the assignment (UNM-side only)
  *   → GET /devices/:id/state (Config page document — sections + items)
  *   → plan + execute a READ action (wlan.networks.read) through the full
- *     config-job path.
+ *     config-job path (no rollback step for read-only plans)
+ *   → plan + execute a MINIMAL write (system.name.set to the device's CURRENT
+ *     name — effectively a no-op on the AP) to verify that every mutating
+ *     plan gets a best-effort config.backup.download step prepended and that
+ *     the backup lands in UNM's central file repository.
  *
- * NO writes are performed on the AP (user requirement: avoid destructive or
- * mutating actions on production hardware for now).
+ * NO destructive actions are performed (no restore, no reset/reboot).
  *
  * Usage (from the repo root): ./node_modules/.bin/tsx scripts/e2e-lx-webapi.ts
  */
@@ -64,7 +67,7 @@ async function main(): Promise<void> {
   const plugins = ((await authed('GET', '/plugins').then((r) => r.json())) as Array<Record<string, any>>).find((p) => p.id === LX_PLUGIN_ID);
   check('plugin registered', Boolean(plugins), { id: LX_PLUGIN_ID });
   if (!plugins) throw new Error('plugin not registered');
-  check('version is 0.3.0', plugins.version === '0.3.0', plugins.version);
+  check('version is 0.4.0', plugins.version === '0.4.0', plugins.version);
   const caps: string[] = Array.isArray(plugins.capabilities) ? plugins.capabilities : [];
   for (const c of ['configuration', 'planning', 'deviceState']) {
     check(`capability "${c}" advertised`, caps.includes(c), caps);
@@ -76,11 +79,14 @@ async function main(): Promise<void> {
   check('action catalog endpoint reachable', actsRes.status === 200, { status: actsRes.status });
   const actions: Array<{ id?: string; riskLevel?: string }> = ((await actsRes.json()) as { actions?: Array<{ id?: string }> }).actions ?? [];
   const actionIds = new Set(actions.map((a) => a.id));
-  for (const id of ['config.read', 'wlan.networks.read', 'radios.read', 'encryption.profiles.read', 'ip.interfaces.read', 'wlc.read', 'system.name.set', 'radio.channel.set', 'ssid.vlan.set', 'wlan.network.add', 'wlc.address.set', 'config.persist']) {
+  for (const id of ['config.read', 'wlan.networks.read', 'radios.read', 'encryption.profiles.read', 'ip.interfaces.read', 'wlc.read', 'system.name.set', 'radio.channel.set', 'ssid.vlan.set', 'wlan.network.add', 'wlc.address.set', 'config.persist', 'config.backup.download', 'config.restore']) {
     check(`action "${id}" in catalog`, actionIds.has(id), [...actionIds]);
   }
+  // config.restore must be flagged dangerous (explicit user choice only).
+  const restoreAction = actions.find((a) => a.id === 'config.restore');
+  check('config.restore is riskLevel dangerous', restoreAction?.riskLevel === 'dangerous', restoreAction);
   // Destructive device actions must NOT be exposed.
-  for (const id of ['system.reset', 'system.reboot', 'config.restore']) {
+  for (const id of ['system.reset', 'system.reboot']) {
     check(`destructive action "${id}" absent from catalog`, !actionIds.has(id));
   }
 
@@ -155,8 +161,8 @@ async function main(): Promise<void> {
   if (!finalPlan) throw new Error('plan did not finish in time');
 
   // Step result envelope: the plugin's ActionResult is nested under `result`.
-  const steps = (finalPlan.steps ?? []) as Array<{ actionId: string; status: string; result?: Record<string, any> | null }>;
-  check('one step', steps.length === 1, steps);
+  const steps = (finalPlan.steps ?? []) as Array<{ actionId: string; status: string; bestEffort?: boolean; result?: Record<string, any> | null }>;
+  check('read plan has exactly one step (no rollback for read-only)', steps.length === 1, steps);
   const s0 = steps[0] ?? {};
   const inner = (s0.result?.result ?? {}) as Record<string, unknown>; // ActionResult
   check('read step succeeded', s0.status === 'succeeded' && (inner.success === true || s0.result?.success === true), { status: s0.status, keys: Object.keys(s0.result ?? {}) });
@@ -165,9 +171,70 @@ async function main(): Promise<void> {
   const networks = Array.isArray(details.networks) ? (details.networks as Array<Record<string, unknown>>) : [];
   check('at least one SSID row with a name', networks.some((n) => typeof n.ssid === 'string' && (n.ssid as string).length > 0), { count: networks.length });
 
+  // --- 5. mutating plan → best-effort backup step + file-repo round-trip -----------------
+  // system.name.set to the AP's CURRENT name — a write transaction that LCOS
+  // accepts as a no-op (per-command errortag 1020, top-level ErrorTag 0), so
+  // nothing actually changes on the production device.
+  const liveName = String(sys?.items?.[0]?.fields?.Name ?? '');
+  check('live device name known from /state', liveName.length > 0 && liveName !== '—', { name: liveName });
+  if (liveName.length === 0 || liveName === '—') throw new Error('could not determine the current device name');
+
+  const created2 = await authed('POST', '/plans', {
+    pluginId: LX_PLUGIN_ID,
+    intentActionId: 'system.name.set',
+    inputs: { name: liveName },
+    devices: [{ deviceId: DEVICE_ID }],
+  });
+  const plan2Body = (await created2.json()) as Record<string, any>;
+  check('write plan created', created2.status === 201 && Boolean(plan2Body.id), { status: created2.status, body: plan2Body?.error ?? null });
+  if (!plan2Body.id) throw new Error('no write plan id');
+
+  const plan2 = (await authed('GET', `/plans/${plan2Body.id}`).then((r) => r.json())) as Record<string, any>;
+  const steps2: Array<{ actionId?: string; bestEffort?: boolean }> = plan2.steps ?? [];
+  check('write plan has two steps (backup + write)', steps2.length === 2, { count: steps2.length });
+  check('step 0 is the best-effort config.backup.download', steps2[0]?.actionId === 'config.backup.download' && steps2[0]?.bestEffort === true, steps2[0]);
+  check('step 1 is system.name.set', steps2[1]?.actionId === 'system.name.set', steps2[1]);
+
+  const exec2 = await authed('POST', `/plans/${plan2Body.id}/execute`);
+  check('write plan execution started (202)', exec2.status === 202, { status: exec2.status });
+
+  let finalPlan2: Record<string, unknown> | null = null;
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 2_000));
+    const detail = (await authed('GET', `/plans/${plan2Body.id}`).then((r) => r.json())) as Record<string, unknown>;
+    if (detail && ['succeeded', 'failed', 'cancelled'].includes(String(detail.status))) {
+      finalPlan2 = detail;
+      break;
+    }
+  }
+  check('write plan finished', Boolean(finalPlan2), finalPlan2?.status);
+  const steps2f = ((finalPlan2?.steps ?? []) as Array<{ actionId: string; status: string; result?: Record<string, any> | null }>);
+  const backupStep = steps2f.find((s) => s.actionId === 'config.backup.download') ?? {};
+  check('backup step succeeded', backupStep.status === 'succeeded', { status: backupStep.status, result: backupStep.result });
+  const backupInner = ((backupStep.result?.result ?? backupStep.result) ?? {}) as Record<string, unknown>;
+  const repoFileId = typeof backupInner.details?.repoFileId === 'string' ? (backupInner.details.repoFileId as string) : null;
+  check('backup step returned a file-repo id', Boolean(repoFileId), { keys: Object.keys(backupInner.details ?? {}) });
+  const writeStep = steps2f.find((s) => s.actionId === 'system.name.set') ?? {};
+  check('write step succeeded (no-op name set)', writeStep.status === 'succeeded', { status: writeStep.status, result: writeStep.result });
+
+  // The backup must be visible in UNM's central file repository (Files page).
+  if (repoFileId) {
+    const filesRes = await authed('GET', '/files?category=config-backup');
+    check('file repo lists config backups', filesRes.status === 200, { status: filesRes.status });
+    const files: Array<{ id?: string; name?: string }> = (((await filesRes.json()) as Record<string, any>)?.files ?? []);
+    const entry = files.find((f) => f.id === repoFileId);
+    check('backup file present in repo with canonical name', Boolean(entry) && typeof entry.name === 'string' && /__config-backup-\d{8}-\d{6}\.cfg$/.test(entry.name), { found: entry?.name ?? null, expectedId: repoFileId });
+  }
+
   // --- cleanup ------------------------------------------------------------------------
   const del = await authed('DELETE', `/plans/${plan.id}`);
-  check('plan deleted (cleanup)', del.status === 200 || del.status === 204, { status: del.status });
+  check('read plan deleted (cleanup)', del.status === 200 || del.status === 204, { status: del.status });
+  const del2 = await authed('DELETE', `/plans/${plan2Body.id}`);
+  check('write plan deleted (cleanup)', del2.status === 200 || del2.status === 204, { status: del2.status });
+  if (repoFileId) {
+    const delFile = await authed('DELETE', `/files/${repoFileId}`);
+    check('backup file deleted from repo (cleanup)', delFile.status === 200 || delFile.status === 204, { status: delFile.status });
+  }
 
   pool.end();
   console.log(failures ? `\n${failures} FAILURES` : '\nALL CHECKS PASSED');

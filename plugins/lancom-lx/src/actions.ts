@@ -9,15 +9,19 @@
  * numeric enum indices, so it is not used for display data.
  *
  * Safety policy (user requirement: no destructive actions on production APs):
- *  - NO factory reset (13.4.1), NO reboot (13.4.2), NO config restore/overwrite.
+ *  - NO factory reset (13.4.1), NO reboot (13.4.2).
  *  - Writes are single-scalar / single-row updates only, each verified by a
  *    re-read after the transaction.
  *  - Flash persistence is an EXPLICIT separate action (`config.persist`) — a
  *    plan that changes settings does not silently make them permanent.
+ *  - `config.restore` (full-config overwrite via SetConfig) IS exposed but only
+ *    as riskLevel 'dangerous' with retryOnDispatchFailure=false — it must be an
+ *    explicit user choice, never a re-dispatched step. Every mutating plan gets
+ *    a best-effort `config.backup.download` rollback point prepended (plan.ts).
  */
 
-import { ActionResult, ActionDescriptor, createRegistry } from '@unm/plugin-sdk';
-import { LcosWebClient, parseLcosConfigText, redactConfig, tableCell, type ParsedLcosConfig } from './webapi';
+import { ActionResult, ActionDescriptor, configBackupFileName, createFileRepoClient, createRegistry, FileRepoClient } from '@unm/plugin-sdk';
+import { isWriteOk, LcosWebClient, parseLcosConfigText, redactConfig, tableCell, type ParsedLcosConfig } from './webapi';
 
 // --- Context ------------------------------------------------------------------
 
@@ -26,6 +30,8 @@ export interface LxActionContext {
   host: string;
   address: string;
   deviceId?: string;
+  /** UNM device display name (sent by the API on /config) — labels artifacts like config backups. */
+  deviceName?: string | null;
   /** Decrypted `web` credential slot (username/password for the ubus login). */
   web: { username: string; password: string };
   timeoutMs: number;
@@ -33,6 +39,15 @@ export interface LxActionContext {
 
 function client(ctx: LxActionContext): LcosWebClient {
   return new LcosWebClient(ctx.address, ctx.web.username, ctx.web.password, { timeoutMs: ctx.timeoutMs });
+}
+
+// Shared UNM file-repo client (SDK) — config backups land in the central repo
+// so they are downloadable/archivable from the Files page and referenceable by
+// id from a later restore step. One instance per plugin process is fine.
+let repoClient: FileRepoClient | null = null;
+function fileRepo(): FileRepoClient {
+  if (!repoClient) repoClient = createFileRepoClient();
+  return repoClient;
 }
 
 /** Reads the full running config once and parses it (shared by read actions). */
@@ -242,7 +257,7 @@ const systemNameSet: ActionDescriptor<LxActionContext> = {
     try {
       const before = await c.getScalar('13.2.1');
       const tag = await c.setScalar('13.2.1', name);
-      if (tag !== 0) return { success: false, error: `setScalar 13.2.1 failed with errortag ${tag}` };
+      if (!isWriteOk(tag)) return { success: false, error: `setScalar 13.2.1 failed with errortag ${tag}` };
       const after = await c.getScalar('13.2.1');
       return { success: true, applied: true, verified: after === name, details: { before, after } };
     } finally {
@@ -259,7 +274,10 @@ const systemCommentSet: ActionDescriptor<LxActionContext> = {
   riskLevel: 'write' as const,
   deviceCount: 1 as const,
   inputSchema: {
-    comment: { type: 'string', required: true, maxLength: 64, description: 'Free-text comment (max 64 chars; empty string clears it)' },
+    // Setting the CURRENT value is accepted as a no-op (per-command errortag
+    // 1020, top-level ErrorTag stays 0). Clearing via an empty string is not
+    // verified on hardware — keep minLength 1.
+    comment: { type: 'string', required: true, minLength: 1, maxLength: 64, description: 'Free-text comment (max 64 chars)' },
   },
   execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
     const comment = String(input.comment);
@@ -267,7 +285,7 @@ const systemCommentSet: ActionDescriptor<LxActionContext> = {
     try {
       const before = await c.getScalar('13.2.11.1');
       const tag = await c.setScalar('13.2.11.1', comment);
-      if (tag !== 0) return { success: false, error: `setScalar 13.2.11.1 failed with errortag ${tag}` };
+      if (!isWriteOk(tag)) return { success: false, error: `setScalar 13.2.11.1 failed with errortag ${tag}` };
       const after = await c.getScalar('13.2.11.1');
       return { success: true, applied: true, verified: (after ?? '') === comment, details: { before, after } };
     } finally {
@@ -299,7 +317,7 @@ const radioChannelSet: ActionDescriptor<LxActionContext> = {
 
       const before = tableCell(p, '13.2.20.8', '8', rowIndex) ?? 'auto';
       const tag = await c.updateTableRow('13.2.20.8', rowIndex, { 8: channel });
-      if (tag !== 0) return { success: false, error: `updateTableRow 13.2.20.8 failed with errortag ${tag}` };
+      if (!isWriteOk(tag)) return { success: false, error: `updateTableRow 13.2.20.8 failed with errortag ${tag}` };
 
       const p2 = parseLcosConfigText(await c.getConfigText());
       const after = tableCell(p2, '13.2.20.8', '8', rowIndex) ?? null;
@@ -337,7 +355,7 @@ const radioPowerSet: ActionDescriptor<LxActionContext> = {
       const cells: Record<string, string | number> = { 33: mode };
       if (mode === 'Manual' && eirp != null) cells[34] = eirp;
       const tag = await c.updateTableRow('13.2.20.8', rowIndex, cells);
-      if (tag !== 0) return { success: false, error: `updateTableRow 13.2.20.8 failed with errortag ${tag}` };
+      if (!isWriteOk(tag)) return { success: false, error: `updateTableRow 13.2.20.8 failed with errortag ${tag}` };
 
       const p2 = parseLcosConfigText(await c.getConfigText());
       const after = tableCell(p2, '13.2.20.8', '33', rowIndex) ?? null;
@@ -370,7 +388,7 @@ const ssidVlanSet: ActionDescriptor<LxActionContext> = {
 
       const before = tableCell(p, '13.2.20.1', '200', rowIndex) ?? '0';
       const tag = await c.updateTableRow('13.2.20.1', rowIndex, { 200: vlanId });
-      if (tag !== 0) return { success: false, error: `updateTableRow 13.2.20.1 failed with errortag ${tag}` };
+      if (!isWriteOk(tag)) return { success: false, error: `updateTableRow 13.2.20.1 failed with errortag ${tag}` };
 
       const p2 = parseLcosConfigText(await c.getConfigText());
       const after = tableCell(p2, '13.2.20.1', '200', rowIndex) ?? null;
@@ -416,7 +434,7 @@ const wlanNetworkAdd: ActionDescriptor<LxActionContext> = {
       const networkName = `NETWORK-${n}`;
 
       const tag = await c.addTableRow('13.2.20.1', { 1: networkName, 2: ssidName, 4: closedNetwork, 102: encryptionProfile, 200: vlanId });
-      if (tag !== 0) return { success: false, error: `addTableRow 13.2.20.1 failed with errortag ${tag}` };
+      if (!isWriteOk(tag)) return { success: false, error: `addTableRow 13.2.20.1 failed with errortag ${tag}` };
 
       const p2 = parseLcosConfigText(await c.getConfigText());
       const createdIdx = findRowByIndex(p2, '13.2.20.1', networkName);
@@ -458,12 +476,12 @@ const wlcAddressSet: ActionDescriptor<LxActionContext> = {
       } else {
         tag = await c.addTableRow('13.2.59.1', cells);
       }
-      if (tag !== 0) return { success: false, error: `WLC table update failed with errortag ${tag}` };
+      if (!isWriteOk(tag)) return { success: false, error: `WLC table update failed with errortag ${tag}` };
 
       let opTag: number | null = null;
       if (operating != null) {
         opTag = await c.setScalar('13.2.59.2', operating);
-        if (opTag !== 0) return { success: false, error: `setScalar 13.2.59.2 failed with errortag ${opTag}` };
+        if (!isWriteOk(opTag)) return { success: false, error: `setScalar 13.2.59.2 failed with errortag ${opTag}` };
       }
 
       const p2 = parseLcosConfigText(await c.getConfigText());
@@ -488,8 +506,171 @@ const configPersist: ActionDescriptor<LxActionContext> = {
     const c = client(ctx);
     try {
       const tag = await c.makePersistent();
-      if (tag !== 0) return { success: false, error: `setFlashMode failed with errortag ${tag}` };
+      if (!isWriteOk(tag)) return { success: false, error: `setFlashMode failed with errortag ${tag}` };
       return { success: true, applied: true, verified: true, details: { persisted: true } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+// --- Configuration backup / restore ---------------------------------------------------------
+// The LCOS-LX web API has no separate "backup file" endpoint — the running
+// configuration IS a text document (GetConfig, ~32 KB). A backup is that text
+// stored in UNM's central file repository; a restore pushes it back with
+// SetConfig (the same call the vendor UI's config import performs).
+
+const MAX_CONFIG_BYTES = 4 * 1024 * 1024; // LCOS configs are tens of KB — bound the payload anyway.
+
+/** Decodes a base64 file payload from plan input (same contract as SwOS/TrueNAS restore actions). */
+function decodeFilePayload(input: Record<string, unknown>): { data: Buffer; fileName: string } | { error: string } {
+  const b64 = input['fileBase64'];
+  if (typeof b64 !== 'string' || b64.length === 0) return { error: 'fileBase64 is required — the configuration backup as base64' };
+  let data: Buffer;
+  try {
+    data = Buffer.from(b64, 'base64');
+  } catch (e) {
+    return { error: `Invalid base64 in fileBase64: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (data.length === 0) return { error: 'fileBase64 decoded to an empty file' };
+  if (data.length > MAX_CONFIG_BYTES) return { error: `File is ${(data.length / 1024).toFixed(0)} KB — exceeds the ${MAX_CONFIG_BYTES / 1024} KB limit for LCOS configs` };
+  const fileName = typeof input['fileName'] === 'string' && (input.fileName as string).length > 0 ? (input.fileName as string) : 'config-backup';
+  return { data, fileName };
+}
+
+const configBackupDownload: ActionDescriptor<LxActionContext> = {
+  id: 'config.backup.download',
+  label: 'Download configuration backup',
+  description:
+    "Fetches the AP's complete running configuration (GetConfig — the same LCOS text document the vendor web UI exports) and stores it in UNM's central file repository, downloadable/archivable from the Files page. Named with the shared convention (<device>__config-backup-<UTC-ts>.cfg). Read-only on the device; use as a rollback point before risky changes — reference it later via details.repoFileId.",
+  module: 'Configuration',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {},
+  execute: async (ctx: LxActionContext): Promise<ActionResult> => {
+    const c = client(ctx);
+    let text: string;
+    try {
+      text = await c.getConfigText();
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+
+    // Store the backup in UNM's central file repository so it is downloadable /
+    // archivable from the Files page — no base64 blobs buried in step results.
+    const fileName = configBackupFileName({ device: ctx.deviceName, host: ctx.host, ext: 'cfg' });
+    let repoFileId: string | null = null;
+    try {
+      const entry = await fileRepo().upload(Buffer.from(text, 'utf8'), { name: fileName, category: 'config-backup' }, 120_000);
+      repoFileId = entry.id;
+      void fileRepo().recordUse(entry.id, { deviceId: ctx.deviceId ?? undefined, note: `config backup of ${ctx.host} (GetConfig)` }).catch(() => undefined);
+    } catch (e) {
+      // The repo is a convenience — a failed store must not fail the backup itself.
+      return {
+        success: true,
+        verified: true,
+        details: {
+          sizeBytes: Buffer.byteLength(text, 'utf8'),
+          fileName,
+          warning: `Backup fetched but could NOT be stored in the UNM file repository: ${e instanceof Error ? e.message : String(e)}`,
+          // Fallback so a restore can still reference the bytes (legacy contract).
+          backupBase64: Buffer.from(text, 'utf8').toString('base64'),
+        },
+      };
+    }
+
+    return {
+      success: true,
+      verified: true,
+      details: {
+        sizeBytes: Buffer.byteLength(text, 'utf8'),
+        fileName,
+        // Reference the stored backup by repo id — restore it with config.restore {repoFileId}.
+        repoFileId,
+      },
+    };
+  },
+};
+
+const configRestore: ActionDescriptor<LxActionContext> = {
+  id: 'config.restore',
+  label: 'Restore configuration from backup file',
+  description:
+    "DANGEROUS — replaces the AP's ENTIRE running configuration with the given LCOS text document (ubus SetConfig, exactly what the vendor web UI's config import does). Every setting not present in the file reverts to defaults; WLAN clients disconnect while the radio stack re-initializes. Pair with config.backup.download as a rollback point first. Source: a UNM file-repo id in `repoFileId` (preferred — e.g. ${steps[N].result.details.repoFileId} from an earlier backup step) or raw base64 in `fileBase64`. The AP stays reachable over the web UI afterwards; verification re-reads the device name.",
+  module: 'Configuration',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000, // SetConfig of a ~32 KB document + re-read; radio stack re-init is async on the AP
+  // Flapping guard — a failed restore must never be re-dispatched (it would
+  // overwrite the running config again). The socket drop after SetConfig is expected.
+  retryOnDispatchFailure: false,
+  inputSchema: {
+    repoFileId: { type: 'string', required: false, minLength: 1, description: 'UNM file-repo id of a backup (e.g. from config.backup.download details.repoFileId) — preferred over fileBase64' },
+    fileBase64: { type: 'string', required: false, minLength: 8, description: 'The LCOS configuration text as base64 (legacy path; use repoFileId when the file is in the UNM repository)' },
+    fileName: { type: 'string', required: false, maxLength: 200, description: 'Original file name (informational only)' },
+    persist: { type: 'boolean', required: false, default: true, description: 'Also write the restored config to flash so it survives a reboot (default true; SetConfig with noflash=0 already persists — kept for explicitness)' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    // Preferred source: a backup already in UNM's central file repository.
+    const repoFileId = typeof input.repoFileId === 'string' && input.repoFileId.length > 0 ? input.repoFileId : null;
+    let payload: { data: Buffer; fileName: string };
+    if (repoFileId) {
+      try {
+        const meta = await fileRepo().getMeta(repoFileId);
+        if (!meta) return { success: false, error: `Unknown file-repo id ${repoFileId}` };
+        payload = { data: await fileRepo().get(repoFileId), fileName: (typeof input.fileName === 'string' && input.fileName.length > 0 ? input.fileName : meta.name) as string };
+      } catch (e) {
+        return { success: false, error: `Could not fetch repo file ${repoFileId}: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    } else {
+      const decoded = decodeFilePayload(input);
+      if ('error' in decoded) return { success: false, error: decoded.error };
+      payload = decoded;
+    }
+
+    // Sanity-check the document before pushing it — a truncated or non-LCOS file
+    // would leave the AP with an unusable config.
+    const text = payload.data.toString('utf8');
+    if (!/^\s*13\.2\.\d/m.test(text)) {
+      return { success: false, error: 'The backup does not look like an LCOS configuration document (no 13.2.* OIDs found) — refusing to restore' };
+    }
+
+    const c = client(ctx);
+    try {
+      // Capture the current name for post-restore verification + reporting.
+      const beforeName = await c.getScalar('13.2.1');
+      try {
+        await c.setConfigText(text, false);
+      } catch (e) {
+        return { success: false, error: `SetConfig failed: ${e instanceof Error ? e.message : String(e)} — the AP's running config was NOT replaced` };
+      }
+
+      // Verification: re-read the device name and compare it with the one the
+      // restored document declares. The radio stack may still be re-initializing
+      // on the AP; a transport blip here must not be reported as a failed restore
+      // (the SetConfig itself succeeded).
+      const expectedName = (/^\s*13\.2\.1\s*=\s*(.+)$/m.exec(text)?.[1] ?? '').trim();
+      let afterName: string | null = null;
+      try {
+        afterName = await c.getScalar('13.2.1');
+      } catch { /* AP briefly unreachable while re-initializing — expected */ }
+
+      if (repoFileId) void fileRepo().recordUse(repoFileId, { deviceId: ctx.deviceId ?? undefined, note: `restored on ${ctx.host} (SetConfig)` }).catch(() => undefined);
+
+      return {
+        success: true,
+        applied: true,
+        verified: afterName != null && (expectedName === '' || afterName === expectedName),
+        details: {
+          source: repoFileId ?? 'fileBase64',
+          fileName: payload.fileName,
+          sizeBytes: payload.data.length,
+          deviceNameBefore: beforeName,
+          deviceNameAfter: afterName,
+          note: afterName == null ? 'SetConfig succeeded but the AP was not reachable for verification (radio stack re-initializing) — check it shortly.' : undefined,
+        },
+      };
     } finally {
       await c.destroy().catch(() => undefined);
     }
@@ -513,4 +694,6 @@ export const registry = createRegistry<LxActionContext>([
   wlanNetworkAdd,
   wlcAddressSet,
   configPersist,
+  configBackupDownload,
+  configRestore,
 ]);
