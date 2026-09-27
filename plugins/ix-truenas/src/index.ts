@@ -276,7 +276,18 @@ const identity = resolvePluginIdentity({
   // preamble handles TrueNAS's non-standard libvirt socket). No webapp/API
   // changes needed for the transport: a future hypervisor plugin maps the same
   // context kind to its own mechanism.
-  version: '0.22.0',
+  // 0.23.0 — docker image management aligned with the GENERIC contract the
+  // Containers page image panel is built on (same ids + input shapes as the
+  // generic-ssh and Docker plugins): NEW images.pull {refs[]} via app.image.pull
+  // jobs (now also pulls refs NOT in the local store); images.update now takes
+  // {refs[], restart?} — after re-pulling it REDEPLOYS every RUNNING app that
+  // has a container using one of the refs (app.redeploy = stop+pull+start;
+  // stopped apps are skipped, not started as a side effect); NEW images.prune
+  // {all?} removes dangling images (or all unused ones — in-use set derived from
+  // app.query's container_details) via app.image.delete force=false, so docker's
+  // own in-use protection still applies on the appliance. The Updates page's
+  // docker-image rows now apply through refs[] too.
+  version: '0.23.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -1721,7 +1732,10 @@ function buildUpdateRows(input: {
       available: true,
       rebootRequired: false,
       applyActionId: 'images.update',
-      applyInput: { images: [realTags[0]] },
+      // Generic image contract — restart:false keeps the Updates page's semantics
+      // (refresh the local store only; apps pick up the new version via their own
+      // upgrade row / containers.upgrade, which redeploys them).
+      applyInput: { refs: [realTags[0]], restart: false },
     });
   }
 

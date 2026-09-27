@@ -4930,89 +4930,241 @@ const imagesDeleteAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
-/**
- * Re-pull docker images (TrueNAS `app.image.pull` job — one per image ref).
- * Used by the Updates page for local images whose upstream tag moved (the
- * appliance flags them via app.image.query's update_available). Pulling is a
- * no-op when the digest already matches, so re-running is safe. Verification:
- * after all pulls settle, re-query app.image.query — an image that still shows
- * update_available=true did not actually change.
- */
-const imagesUpdateAction: ActionDescriptor<TruenasActionContext> = {
-  id: 'images.update',
-  label: 'Pull updated image(s)',
+// --- Generic docker image management contract ---------------------------------
+// Same action ids + input shapes as the generic-ssh (docker CLI) and Docker
+// plugin (Engine API) implementations, so the Containers page's image panel —
+// per-row Pull/Update/Delete buttons, bulk actions and the "Pull image" dialog
+// — works identically on TrueNAS hosts. Native middleware methods used:
+//   app.image.pull({image})  — pulls ANY ref (job; falls back to saved registry creds)
+//   app.redeploy(name)       — stop + pull latest images + start ONE app (job)
+//   app.image.query / delete — image inventory + removal (force=false, so docker's
+//                              own in-use protection still applies on the appliance)
+
+/** Pulls one ref via the `app.image.pull` job and waits for it to settle. */
+async function pullImageRef(ctx: TruenasActionContext, ref: string): Promise<{ ok: boolean; note?: string; error?: string }> {
+  try {
+    // app.image.pull is a JOB method — it returns the job id immediately.
+    // Transport-tolerant — re-pulling an image whose digest already matches upstream is a no-op, so a lost response can be re-dispatched blindly (the pull itself proves the outcome).
+    const dr = await dispatchWrite(ctx, 'app.image.pull', [{ image: ref }], { idempotentRetry: true });
+    let jobId: number | undefined;
+    const r = dr.value;
+    if (typeof r === 'number') jobId = r;
+    else if (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number') jobId = (r as Record<string, unknown>)['id'] as number;
+    if (jobId !== undefined) {
+      const wait = await waitForJob(ctx, jobId, 840_000);
+      if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') return { ok: false, note: dr.note, error: wait.error ?? `Pull job ended in state ${wait.state}` };
+    }
+    return { ok: true, ...(dr.note ? { note: dr.note } : {}) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+const imagesPullAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'images.pull',
+  label: 'Pull image(s)',
   description:
-    'Re-pulls the selected docker images from their registries (app.image.pull, one job per image). Safe to re-run — a pull is a no-op when the local digest already matches upstream.',
+    'Pulls docker image references into the appliance (app.image.pull, one job per ref). Works for refs that are NOT in the local store yet — new images are downloaded, existing tags refreshed to the registry version. Saved registry credentials are used automatically when available.',
   module: 'Containers',
   riskLevel: 'write' as const,
   deviceCount: 1 as const,
   timeoutMs: 900_000, // large image pulls dominate — give the plan executor a 15-min budget
   inputSchema: {
-    images: { type: 'array', required: true, items: { type: 'string', minLength: 2 }, description: 'Image references to pull (registry/repository:tag)' },
+    refs: { type: 'array', required: true, items: { type: 'string', minLength: 2 }, description: 'Image references to pull (e.g. "nginx:latest", "ghcr.io/org/app:v1")' },
   },
   async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
-    const refs = strArray(input, 'images');
+    const refs = strArray(input, 'refs');
     if (refs.length === 0) return { success: false, details: { error: 'No image references provided' } };
 
-    // Known images up front — a ref that is not in the local store at all is
-    // reported as missing instead of failing the whole step.
-    const rows = await callWithRetry<Record<string, unknown>[]>(ctx, 'app.image.query', []);
-    const knownRefs = new Set<string>();
-    for (const r of rows ?? []) {
-      for (const t of Array.isArray(r['repo_tags']) ? (r['repo_tags'] as unknown[]) : []) {
-        if (typeof t === 'string' && t.length > 0) knownRefs.add(t);
-      }
-    }
-
-    let pulled = 0;
+    // One pull per ref — sequential so a single huge image cannot starve the rest.
+    const pulled: string[] = [];
     const notes: Record<string, string> = {};
-    const missing: string[] = [];
     const errors: Record<string, string> = {};
     for (const ref of refs) {
-      if (!knownRefs.has(ref)) {
-        missing.push(ref); // not in the local store — nothing to update
-        continue;
-      }
+      const r = await pullImageRef(ctx, ref);
+      if (r.note) notes[ref] = r.note;
+      if (!r.ok) errors[ref] = r.error ?? 'pull failed';
+      else pulled.push(ref);
+    }
+
+    // Verify: re-query the image store — every pulled ref must now exist locally.
+    let verified: boolean | undefined;
+    if (Object.keys(errors).length === 0 && pulled.length > 0) {
       try {
-        // app.image.pull is a JOB method — it returns the job id immediately.
-        // Transport-tolerant — re-pulling an image whose digest already matches upstream is a no-op, so a lost response can be re-dispatched blindly (the final update_available check below still proves the outcome).
-        const dr = await dispatchWrite(ctx, 'app.image.pull', [{ image: ref }], { idempotentRetry: true });
-        if (dr.note) notes[ref] = dr.note;
-        const r = dr.value;
+        const after = await callWithRetry<Record<string, unknown>[]>(ctx, 'app.image.query', []);
+        const localRefs = new Set<string>();
+        for (const row of after ?? []) {
+          for (const t of Array.isArray(row['repo_tags']) ? (row['repo_tags'] as unknown[]) : []) {
+            if (typeof t === 'string' && t.length > 0) localRefs.add(t);
+          }
+        }
+        verified = refs.every((ref) => localRefs.has(ref));
+      } catch { /* verification is best-effort — the pull jobs themselves succeeded */ }
+    }
+
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { pulled, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const imagesUpdateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'images.update',
+  label: 'Update image(s)',
+  description:
+    'Re-pulls the given image references (app.image.pull, one job per ref) and — by default — REDEPLOYS every RUNNING app that has a container using one of those refs so it picks up the new version (app.redeploy = stop + pull + start). Stopped apps are NOT started as a side effect. Set restart=false to only refresh the local store.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 1_800_000, // pulls + per-app redeploy jobs — give the plan executor a 30-min budget
+  inputSchema: {
+    refs: { type: 'array', required: true, items: { type: 'string', minLength: 2 }, description: 'Image references to update (e.g. "nginx:latest")' },
+    restart: { type: 'boolean', required: false, default: true, description: 'Redeploy running apps that use the updated images (default true)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const refs = strArray(input, 'refs');
+    if (refs.length === 0) return { success: false, details: { error: 'No image references provided' } };
+    const restart = input['restart'] !== false; // default true
+
+    // 1) Refresh the local store.
+    const pulled: string[] = [];
+    const notes: Record<string, string> = {};
+    const errors: Record<string, string> = {};
+    for (const ref of refs) {
+      const r = await pullImageRef(ctx, ref);
+      if (r.note) notes[ref] = r.note;
+      if (!r.ok) errors[ref] = r.error ?? 'pull failed';
+      else pulled.push(ref);
+    }
+
+    if (!restart || Object.keys(errors).length > 0) {
+      return { success: Object.keys(errors).length === 0, applied: true, verified: Object.keys(errors).length === 0, details: { updated: pulled, restarted: [], ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
+    }
+
+    // 2) Find every app that has a container using one of the refs. ONE pass over
+    // app.query — each row's container_details[].image is exactly the ref string
+    // used at creation, so a tag update ("nginx:latest") matches containers started
+    // from that same ref. Digest-pinned / short-id creations are not matched (same
+    // documented limitation as the other two implementations).
+    const apps = await callWithRetry<Record<string, unknown>[]>(ctx, 'app.query', []);
+    const byName = new Map<string, Record<string, unknown>>();
+    for (const a of apps ?? []) {
+      const n = pickString(a, ['name']);
+      if (n) byName.set(n, a);
+    }
+    const usingApps = new Set<string>();
+    for (const [name, a] of byName) {
+      const details = Array.isArray(a['container_details']) ? (a['container_details'] as Record<string, unknown>[]) : [];
+      if (details.some((d) => { const img = pickString(d, ['image']); return typeof img === 'string' && refs.includes(img); })) usingApps.add(name);
+    }
+
+    // 3) Redeploy the RUNNING ones — app.redeploy is a job; stopped apps are
+    // skipped (redeploy would START them, which is not what "update" means here).
+    const restarted: string[] = [];
+    const skipped: Record<string, string> = {};
+    for (const name of Array.from(usingApps).sort()) {
+      const st = normState(pickString(byName.get(name) ?? {}, ['state']));
+      if (st !== 'RUNNING') { skipped[name] = st.toLowerCase() || 'unknown'; continue; }
+      try {
+        const dr = await dispatchWrite(ctx, 'app.redeploy', [name], { verify: appStateVerify(ctx, name, new Set(['RUNNING']), new Set()) });
+        if (dr.note) notes[name] = dr.note;
         let jobId: number | undefined;
+        const r = dr.value;
         if (typeof r === 'number') jobId = r;
         else if (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number') jobId = (r as Record<string, unknown>)['id'] as number;
         if (jobId !== undefined) {
-          const wait = await waitForJob(ctx, jobId, 840_000);
-          if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') {
-            errors[ref] = wait.error ?? `Pull job ended in state ${wait.state}`;
-            continue;
-          }
+          const wait = await waitForJob(ctx, jobId, 600_000);
+          if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') { errors[name] = wait.error ?? `Redeploy job ended in state ${wait.state}`; continue; }
+        } else if (dr.unconfirmed) {
+          errors[name] = 'Redeploy could not be confirmed (transport drop, state unreadable) — re-run the step';
+          continue;
         }
-        pulled++;
+        restarted.push(name);
       } catch (e) {
-        errors[ref] = e instanceof Error ? e.message : String(e);
+        errors[name] = e instanceof Error ? e.message : String(e);
       }
     }
 
-    // Verify: re-query the image store — a successfully pulled image must no
-    // longer be flagged update_available.
+    // Verify: every redeployed app must be RUNNING again.
     let verified: boolean | undefined;
-    if (Object.keys(errors).length === 0 && pulled > 0) {
-      try {
-        const after = await callWithRetry<Record<string, unknown>[]>(ctx, 'app.image.query', []);
-        const stillStale = new Set<string>();
-        for (const r of after ?? []) {
-          if (r['update_available'] !== true) continue;
-          for (const t of Array.isArray(r['repo_tags']) ? (r['repo_tags'] as unknown[]) : []) {
-            if (typeof t === 'string') stillStale.add(t);
-          }
-        }
-        verified = refs.every((ref) => !stillStale.has(ref));
-      } catch { /* verification is best-effort — the pulls themselves succeeded */ }
+    if (Object.keys(errors).length === 0 && restarted.length > 0) {
+      try { verified = await verifyAppStates(ctx, restarted, new Set(['RUNNING'])); } catch { /* best-effort */ }
+    } else if (Object.keys(errors).length === 0) {
+      verified = true; // nothing to restart — the pulls are the whole job
     }
 
-    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { pulled, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
+    return { success: Object.keys(errors).length === 0, applied: true, verified, details: { updated: pulled, restarted, ...(Object.keys(skipped).length ? { skipped } : {}), ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const imagesPruneAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'images.prune',
+  label: 'Prune unused images',
+  description:
+    'Removes UNUSED docker images from the appliance (app.image.delete, force=false). With all=false only dangling (<none>) images are removed; with all=true every image no installed app references is removed — including stopped apps\' images. Docker\'s own in-use protection still applies on the appliance, so an image a container actually needs cannot be deleted.',
+  module: 'Containers',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 600_000,
+  inputSchema: {
+    all: { type: 'boolean', required: false, default: false, description: 'Prune ALL unused images (not just dangling). Default false.' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const all = input['all'] === true;
+
+    // Which refs are in use by any container of an installed app? ONE pass over
+    // app.query — container_details covers every state (a stopped app still
+    // references its images). Images used by containers OUTSIDE the app system
+    // are invisible here, but force=false below makes docker refuse to delete them.
+    const inUse = new Set<string>();
+    if (all) {
+      const apps = await callWithRetry<Record<string, unknown>[]>(ctx, 'app.query', []);
+      for (const a of apps ?? []) {
+        const details = Array.isArray(a['container_details']) ? (a['container_details'] as Record<string, unknown>[]) : [];
+        for (const d of details) {
+          const img = pickString(d, ['image']);
+          if (img) inUse.add(img);
+        }
+      }
+    }
+
+    // Walk the image store and delete what is unused.
+    const rows = await callWithRetry<Record<string, unknown>[]>(ctx, 'app.image.query', []);
+    let deleted = 0;
+    let freedBytes = 0;
+    const errors: Record<string, string> = {};
+    for (const r of rows ?? []) {
+      const id = pickString(r, ['id']);
+      if (!id) continue;
+      const tags = Array.isArray(r['repo_tags']) ? (r['repo_tags'] as unknown[]).filter((t): t is string => typeof t === 'string' && t !== '<none>:<none>') : [];
+      const dangling = r['dangling'] === true || tags.length === 0;
+      if (!all && !dangling) continue; // dangling-only mode keeps everything tagged
+      if (all && !dangling && tags.some((t) => inUse.has(t))) continue; // referenced by an app container
+
+      const label = tags[0] ?? id.slice(0, 12);
+      try {
+        // Same transport-tolerant delete as images.delete — a lost response is
+        // confirmed by re-querying (the image must be GONE).
+        const dr = await dispatchWrite(ctx, 'app.image.delete', [id, { force: false }], {
+          verify: async () => {
+            try {
+              const after = await ctx.client.call<Record<string, unknown>[]>('app.image.query', [], ctx.creds);
+              return !(after ?? []).some((row) => pickString(row, ['id']) === id); // gone — applied; still present — not applied
+            } catch {
+              return null;
+            }
+          },
+        });
+        if (dr.unconfirmed) errors[label] = 'Delete could not be confirmed (transport drop, state unreadable)';
+        else {
+          deleted++;
+          const size = typeof r['size'] === 'number' ? (r['size'] as number) : 0;
+          freedBytes += size > 0 ? size : 0;
+        }
+      } catch (e) {
+        errors[label] = e instanceof Error ? e.message : String(e); // e.g. "image is in use" — docker protected it
+      }
+    }
+
+    return { success: Object.keys(errors).length === 0, applied: true, verified: true, details: { all, deleted, freedBytes, ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
 
@@ -5862,8 +6014,10 @@ export const registry = createRegistry<TruenasActionContext>([
   iscsiTargetDeleteAction,
   nvmeofSubsystemCreateAction,
   nvmeofSubsystemDeleteAction,
-  imagesDeleteAction,
+  imagesPullAction,
   imagesUpdateAction,
+  imagesPruneAction,
+  imagesDeleteAction,
   composeConfigReadAction,
   containersLogsReadAction,
   containersUpdateAction,

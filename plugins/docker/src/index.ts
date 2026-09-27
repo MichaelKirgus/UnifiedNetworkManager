@@ -69,7 +69,12 @@ const identity = resolvePluginIdentity({
   // states (/containers/json?all=true) instead of just the running set, and
   // honors an optional `names` selection so a page can watch specific
   // containers at a tighter cadence (e.g. right after start/stop).
-  version: '0.5.1',
+  // 0.6.0 — image management for the Containers page image panel: images.pull
+  // {refs[]} (POST /images/create), images.update {refs[], restart?} (re-pull +
+  // optionally restart every running container using one of those refs) and
+  // images.prune {all?} (POST /images/prune). Same generic contract as the
+  // Generic SSH plugin — the webapp's image buttons are catalog-gated.
+  version: '0.6.0',
   vendors: ['generic'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'probe'],
 });

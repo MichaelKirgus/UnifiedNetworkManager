@@ -594,6 +594,215 @@ const imagesDeleteAction: ActionDescriptor = {
   },
 };
 
+// --- Image management (pull / update / prune) ------------------------------------
+// Generic contract for the Containers page's image panel — any plugin that can
+// manage images advertises these ids and gets the same UI buttons for free:
+//   images.pull    { refs[] }            pull new/updated tags into the local store
+//   images.update  { refs[], restart? }  re-pull + (optionally) restart containers using them
+//   images.prune   { all? }              remove unused images (dangling, or ALL unused with all=true)
+
+/** Validates an image reference for safe shell embedding (docker ref charset). */
+function isValidImageRef(ref: string): boolean {
+  return ref.length > 0 && ref.length <= 512 && /^[a-zA-Z0-9_./:@\-]+$/.test(ref);
+}
+
+const PULL_TIMEOUT_MS = 600_000; // image pulls dominate (same budget as deploy)
+
+// --- images.pull ------------------------------------------------------------------
+const imagesPullAction: ActionDescriptor = {
+  id: 'images.pull',
+  label: 'Pull image(s)',
+  description:
+    'Pulls docker image references into the local store (docker pull). Existing tags are refreshed to the registry version; new ones are downloaded. May take several minutes for large images.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: PULL_TIMEOUT_MS,
+  inputSchema: {
+    refs: { type: 'array', required: true, items: { type: 'string', minLength: 2 }, description: 'Image references to pull (e.g. "nginx:latest", "ghcr.io/org/app:v1")' },
+  },
+  async execute(ctx, input): Promise<ActionResult> {
+    const refs = strArray(input, 'refs');
+    if (refs.length === 0) return failResult('No image references provided');
+    for (const ref of refs) {
+      if (!isValidImageRef(ref)) return failResult(`Invalid image reference "${ref}"`);
+    }
+
+    // One remote script: each pull is marker-delimited; only the LAST lines per
+    // pull are kept (progress output can be huge — stdout truncates at 256 KB).
+    const lines: string[] = ['set -u'];
+    for (const ref of refs) {
+      lines.push(`echo "UNM_PULL:${ref}:BEGIN"`);
+      lines.push(`out=$(docker pull ${shq(ref)} 2>&1); rc=$?`);
+      lines.push('if [ $rc -eq 0 ]; then echo "OK|${#out}"; else echo "ERR|$rc|$(echo "$out" | tail -n 5)"; fi');
+      lines.push(`echo "UNM_PULL:${ref}:END"`);
+    }
+    let r;
+    try {
+      r = await ctx.backend.exec(lines.join('\n'), PULL_TIMEOUT_MS - 30_000);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/timed out/i.test(msg)) return okResult({ pulled: [], note: 'Pull dispatched — the SSH session timed out while images downloaded; check the host.' });
+      throw e;
+    }
+
+    // Parse marker sections → per-ref outcome.
+    const results = new Map<string, { ok: boolean; error?: string }>();
+    let current: string | null = null;
+    for (const line of (r.stdout ?? '').split('\n')) {
+      const m = line.match(/^UNM_PULL:(.+?):(BEGIN|END)$/);
+      if (m) {
+        if (current !== null && m[2] === 'END') current = null;
+        else if (m[2] === 'BEGIN') current = m[1];
+        continue;
+      }
+      if (current === null) continue;
+      if (line.startsWith('OK|')) results.set(current, { ok: true });
+      else if (line.startsWith('ERR|')) {
+        const parts = line.split('|');
+        results.set(current, { ok: false, error: `${parts.slice(2).join('|')}`.trim().slice(-300) || `exit ${parts[1] ?? '?'}` });
+      }
+    }
+
+    const pulled: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const ref of refs) {
+      const res = results.get(ref);
+      if (!res) { errors[ref] = 'no output received (SSH session may have dropped mid-pull)'; continue; }
+      if (res.ok) pulled.push(ref);
+      else errors[ref] = res.error ?? 'pull failed';
+    }
+    return okResult({ pulled, ...(Object.keys(errors).length ? { errors } : {}) }, Object.keys(errors).length === 0);
+  },
+};
+
+// --- images.update ----------------------------------------------------------------
+const imagesUpdateAction: ActionDescriptor = {
+  id: 'images.update',
+  label: 'Update image(s)',
+  description:
+    'Re-pulls the given image references (refreshing them to the registry version) and — by default — restarts every RUNNING container that uses one of those images so it picks up the new version. Set restart=false to only refresh the local store.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: PULL_TIMEOUT_MS + 60_000, // pulls + graceful restarts
+  inputSchema: {
+    refs: { type: 'array', required: true, items: { type: 'string', minLength: 2 }, description: 'Image references to update (e.g. "nginx:latest")' },
+    restart: { type: 'boolean', required: false, default: true, description: 'Restart running containers that use the updated images (default true)' },
+  },
+  async execute(ctx, input): Promise<ActionResult> {
+    const refs = strArray(input, 'refs');
+    if (refs.length === 0) return failResult('No image references provided');
+    for (const ref of refs) {
+      if (!isValidImageRef(ref)) return failResult(`Invalid image reference "${ref}"`);
+    }
+    const restart = input['restart'] !== false; // default true
+
+    // 1) Refresh the local store.
+    const pullRes = await imagesPullAction.execute(ctx, { refs });
+    if (!pullRes.success) return failResult(`Image update failed: ${pullRes.error ?? 'pull errors'}`);
+    const pulled = Array.isArray((pullRes.details as Record<string, unknown> | undefined)?.['pulled']) ? (pullRes.details as Record<string, unknown>)['pulled'] as string[] : [];
+
+    if (!restart) {
+      return okResult({ updated: pulled, restarted: [], note: 'Images refreshed — no containers were restarted (restart=false).' }, true);
+    }
+
+    // 2) Find every RUNNING container whose image matches one of the refs. ONE
+    // pass: `docker ps` reports each running container's .Image exactly as it was
+    // specified at creation (the repo:tag string), so a tag update ("nginx:latest")
+    // matches containers started from that same ref. Digest-pinned / short-id
+    // creations are not matched — they must be restarted manually.
+    const matchR = await ctx.backend.exec(
+      "command -v docker >/dev/null 2>&1 && docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}' 2>/dev/null || true",
+      30_000,
+    ).catch(() => null);
+
+    const matched: Array<{ id: string; name: string }> = [];
+    if (matchR) {
+      for (const line of (matchR.stdout ?? '').split('\n')) {
+        const t = line.trim();
+        if (!t.includes('|')) continue;
+        // Split into exactly 3 fields — the image ref may itself contain '|'.
+        const parts = t.split('|');
+        if (parts.length < 3) continue;
+        const id = parts[0] ?? '';
+        const name = (parts[1] ?? '').replace(/^\/+/, '');
+        const img = parts.slice(2).join('|').trim();
+        if (!id || !name || !img) continue;
+        if (refs.includes(img) && !matched.some((m) => m.id === id)) matched.push({ id, name });
+      }
+    }
+
+    let restarted: string[] = [];
+    const errors: Record<string, string> = {};
+    if (matched.length > 0) {
+      // Restart by id — names are never interpolated into the script.
+      const rl: string[] = ['set -u'];
+      for (const m of matched) {
+        rl.push(`out=$(docker restart ${shq(m.id)} 2>&1); rc=$?`);
+        rl.push('if [ $rc -eq 0 ]; then echo "OK|' + m.name + '"; else echo "ERR|' + m.name + '|$(echo "$out" | tail -c 300)"; fi');
+      }
+      const rr = await ctx.backend.exec(rl.join('\n'), 120_000).catch(() => null);
+      if (!rr) {
+        errors['restart'] = 'SSH exec failed while restarting containers';
+      } else {
+        for (const line of (rr.stdout ?? '').split('\n')) {
+          const t = line.trim();
+          if (t.startsWith('OK|')) restarted.push(t.slice(3));
+          else if (t.startsWith('ERR|')) {
+            const parts = t.split('|');
+            errors[parts[1] ?? 'container'] = `${parts.slice(2).join('|')}`.trim().slice(-300);
+          }
+        }
+      }
+
+      // Verify: every restarted container must be running again (a restart is a
+      // no-op ack until the process is actually up). verifyStates matches by NAME.
+      const members = matched.map((m) => ({ Id: m.id, Names: [m.name] })) as DockerContainerRaw[];
+      const v = await verifyStates(ctx.backend, members, new Set(['running']));
+      if (!v.ok) {
+        for (const [n, s] of Object.entries(v.after)) {
+          if (s !== 'running') errors[`verify:${n}`] = `container is ${s} after restart`;
+        }
+      }
+    }
+
+    return okResult(
+      { updated: pulled, restarted, ...(Object.keys(errors).length ? { errors } : {}) },
+      Object.keys(errors).length === 0,
+    );
+  },
+};
+
+// --- images.prune -----------------------------------------------------------------
+const imagesPruneAction: ActionDescriptor = {
+  id: 'images.prune',
+  label: 'Prune unused images',
+  description:
+    'Removes UNUSED docker images (docker image prune). With all=false only dangling (<none>) layers are removed; with all=true every image no container references is removed — including stopped containers\' images. DESTRUCTIVE for the local store.',
+  module: 'Containers',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    all: { type: 'boolean', required: false, default: false, description: 'Prune ALL unused images (not just dangling). Default false.' },
+  },
+  async execute(ctx, input): Promise<ActionResult> {
+    const all = input['all'] === true;
+    const flag = all ? '--all' : '';
+    // -f skips the interactive confirmation prompt.
+    const r = await ctx.backend.exec(`docker image prune ${flag} -f 2>&1 || true`, 240_000).catch(() => null);
+    if (!r) return failResult('Could not run docker image prune: SSH exec failed');
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+    if (/command not found|cannot execute/i.test(out)) return failResult('docker CLI not available on this host');
+
+    // "Total reclaimed space: 1.2GB" — the humanized size docker reports.
+    const m = out.match(/Total reclaimed space:\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGTP]?i?B)/i);
+    const freedBytes = m ? Math.round(parseFloat(m[1]) * (m[2].toUpperCase().startsWith('T') ? 1024 ** 4 : m[2].toUpperCase().startsWith('G') ? 1024 ** 3 : m[2].toUpperCase().startsWith('M') ? 1024 ** 2 : m[2].toUpperCase().startsWith('K') ? 1024 : 1)) : null;
+    return okResult({ all, freedBytes, note: out.trim().slice(-300) }, true);
+  },
+};
+
 export const DOCKER_ACTIONS: ActionDescriptor[] = [
   containersStartAction,
   containersStopAction,
@@ -604,4 +813,7 @@ export const DOCKER_ACTIONS: ActionDescriptor[] = [
   composeConfigReadAction,
   containersLogsReadAction,
   imagesDeleteAction,
+  imagesPullAction,
+  imagesUpdateAction,
+  imagesPruneAction,
 ];

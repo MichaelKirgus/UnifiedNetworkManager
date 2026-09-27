@@ -116,7 +116,7 @@ const KIND_LABELS: Record<string, string> = {
 
 /** Merges the per-row apply inputs of one kind-group into a single bulk input.
  * Array-valued fields are concatenated (TrueNAS `containers.upgrade` takes
- * `names: string[]`, `images.update` takes `images: string[]`). Scalar fields
+ * `names: string[]`, `images.update` takes `refs: string[]`). Scalar fields
  * keep their value when every row agrees (`system.firmware.update` carries
  * `{ version }`) and are DROPPED when rows disagree — e.g. the per-package
  * `package` name of a generic-ssh host, where an empty input means "upgrade

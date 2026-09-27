@@ -79,7 +79,13 @@ const identity = resolvePluginIdentity({
   // /opt/compose/<name>), containers.update + compose.config.read (edit YAML),
   // containers.logs.read and images.delete. All over the host's `docker` CLI;
   // hosts without docker simply yield no container data (keys omitted).
-  version: '0.2.0',
+  // 0.3.0 — Image management for the Containers page image panel: images.pull
+  // {refs[]} (refresh/download tags), images.update {refs[], restart?} (re-pull +
+  // optionally restart every running container that uses one of those refs) and
+  // images.prune {all?} (remove unused images — dangling by default, ALL unused
+  // with all=true). Generic contract: any plugin advertising these ids gets the
+  // same UI buttons.
+  version: '0.3.0',
   vendors: ['linux'],
   // monitoring + inventory: two-tier cadence collection over SSH (live metrics
   // every poll; interfaces/ARP/routes/filesystems/disks at the 15-min interval).

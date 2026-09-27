@@ -1,6 +1,6 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ArrowUpCircle, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Container, EyeOff, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Container, Download, EyeOff, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { ConsoleDialog } from '../components/ConsoleDialog';
 import { ContainerLogsView } from '../components/ContainerLogs';
@@ -307,6 +307,118 @@ function YamlEditorDialog({ app, onClose }: { app: ContainerRow; onClose: () => 
           onSuccess={async () => { setReauth(false); await save(); }}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * PullImageDialog — pull one or more arbitrary image references on a device via
+ * the generic `images.pull` action (plan workflow, 2FA-gated). Offered from the
+ * images panel header whenever ANY plugin assigned to that device advertises
+ * `images.pull`; any future container backend gets this for free.
+ */
+function PullImageDialog({ deviceId, deviceName, pluginId, onClose }: { deviceId: string; deviceName?: string | null; pluginId: string; onClose: () => void }) {
+  const { mode } = useExecutionMode();
+  const isPlanMode = mode === 'plan';
+  const isReadOnly = mode === 'readonly';
+  const [refs, setRefs] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [reauth, setReauth] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  async function submit() {
+    if (isReadOnly) return; // Read-Only — the button is disabled; safety net.
+    const list = refs.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    if (list.length === 0) { setError('Enter at least one image reference.'); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      await createAndExecutePlan(pluginId, 'images.pull', [{ deviceId, input: { refs: list } }], mode);
+      if (isPlanMode) { setSaved(true); return; }
+      onClose();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth(true);
+      else setError(err instanceof Error ? err.message : String(err));
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
+      <div className="mt-12 w-full max-w-lg rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <header className="flex items-center justify-between border-b border-border px-4 py-3">
+          <div>
+            <h2 className="text-base font-semibold text-foreground">Pull image</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Pulls on {deviceName ?? deviceId} via the plan workflow. One reference per line (or comma-separated).
+            </p>
+          </div>
+          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
+            <X size={16} />
+          </button>
+        </header>
+
+        {saved ? (
+          <>
+            <div className="space-y-3 p-4">
+              <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+                <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+                Pull saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
+              </div>
+            </div>
+            <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+              <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover">Close</button>
+            </footer>
+          </>
+        ) : (
+          <>
+            <div className="space-y-3 p-4">
+              {isReadOnly && (
+                <div className="flex items-start gap-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+                  <EyeOff className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  Read-only mode is active — this action cannot be saved or applied. Switch to Plan or Execute in the top bar.
+                </div>
+              )}
+              {error && (
+                <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
+              )}
+              <textarea
+                value={refs}
+                onChange={(e) => setRefs(e.target.value)}
+                spellCheck={false}
+                rows={4}
+                placeholder={'nginx:alpine\nghcr.io/your-org/app:1.2.3'}
+                className="w-full resize-y rounded-md border border-border bg-background p-3 font-mono text-xs leading-relaxed focus:border-focus-ring focus:outline-none"
+              />
+            </div>
+            <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+              <button type="button" onClick={onClose} disabled={saving} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background disabled:opacity-40">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void submit()}
+                disabled={saving || isReadOnly}
+                title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
+                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-40"
+              >
+                {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                <Download size={14} />
+                {isPlanMode ? 'Save as plan' : 'Pull'}
+              </button>
+            </footer>
+          </>
+        )}
+
+        {reauth && (
+          <ReauthDialog
+            contextLabel={`Pull image on ${deviceName ?? deviceId}`}
+            onClose={() => setReauth(false)}
+            onSuccess={async () => { setReauth(false); await submit(); }}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -1139,6 +1251,8 @@ export default function Containers() {
   const [yamlApp, setYamlApp] = useState<ContainerRow | null>(null);
   const [logsApp, setLogsApp] = useState<ContainerRow | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  /** Device target of the "Pull image" dialog (null = closed). */
+  const [pullTarget, setPullTarget] = useState<{ deviceId: string; deviceName?: string | null; pluginId: string } | null>(null);
   /** Dismissible status banner (info / error only — plan execution itself is
    * surfaced globally by the top-bar plans icon, not per page). */
   const [notice, setNotice] = useState<{ kind: 'ok' | 'info' | 'error'; text: string } | null>(null);
@@ -1493,6 +1607,55 @@ export default function Containers() {
     );
   }
 
+  /** One-click PER-IMAGE action — runs a single-image plan for the row's ref and
+   * tracks it so the device auto-refreshes when execution settles. Same 401 →
+   * reauth flow as container actions; `input` carries the generic image contract
+   * (`refs[]`, optional `restart`). */
+  async function singleImage(row: DockerImageRow, actionId: string, label: string, input: Record<string, unknown>) {
+    const attempt = async () => {
+      if (mode === 'readonly') { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
+      const planId = await createAndExecutePlan(row.pluginId, actionId, [{ deviceId: row.deviceId, input }], mode);
+      if (mode === 'plan') {
+        setNotice({ kind: 'ok', text: `${label} ${row.name}: saved as a plan — not executed. Open the Plans center to run it later.` });
+        return;
+      }
+      trackPlan(planId, [row.deviceId], []);
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth({ label: `${label} — ${row.name}`, retry: attempt });
+      else setNotice({ kind: 'error', text: `${label} failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  }
+
+  /** Image bulk pull/update — groups selected images per device by their ref.
+   * Rows whose plugin does not advertise the action (or dangling rows for
+   * pull/update) are skipped so mixed selections never create invalid steps. */
+  function imageBulkRefs(actionId: string, label: string, rows: DockerImageRow[], extra?: Record<string, unknown>) {
+    const eligible = rows.filter((r) => hasAction(r.pluginId, actionId) && !r.dangling);
+    if (eligible.length === 0) return;
+    runBulk(label, () =>
+      Array.from(groupByDevice(eligible, (r) => ({ pluginId: r.pluginId, deviceId: r.deviceId }), (r) => r.name).values()).map(
+        (g) => ({ pluginId: g.pluginId, actionId, steps: [{ deviceId: g.deviceId, input: { refs: Array.from(new Set(g.values)), ...extra } }] }),
+      ),
+    );
+  }
+
+  /** Image bulk prune — one step per device that advertises `images.prune`
+   * (prune is a host-wide operation; the selection only picks the devices). */
+  function imageBulkPrune(rows: DockerImageRow[], all: boolean) {
+    const eligible = rows.filter((r) => hasAction(r.pluginId, 'images.prune'));
+    if (eligible.length === 0) return;
+    const devices = Array.from(new Set(eligible.map((r) => `${r.pluginId}|${r.deviceId}`))).map((k) => {
+      const [pluginId, deviceId] = k.split('|');
+      return { pluginId: pluginId!, deviceId: deviceId! };
+    });
+    runBulk(all ? 'Prune all unused images' : 'Prune dangling images', () =>
+      devices.map((d) => ({ pluginId: d.pluginId, actionId: 'images.prune', steps: [{ deviceId: d.deviceId, input: { all } }] })),
+    );
+  }
+
   // Horizontal splitter: container table (top) vs image panel (bottom). The
   // table gets a fixed share of the page height; collapsing the images below
   // gives its space back to the table — same pattern as the Storage page.
@@ -1826,6 +1989,62 @@ export default function Containers() {
         <DeviceChip deviceName={row.deviceName} managementAddress={row.managementAddress} pluginName={row.pluginName} siteName={row.siteName} interfaces={[]} />
       ),
     },
+    {
+      // Per-image actions — GENERIC over the image contract: a button only
+      // renders when the row's plugin advertises that action id, so any future
+      // container backend (TrueNAS, Proxmox, …) gets this column for free.
+      header: 'Actions',
+      key: 'actions',
+      width: 120,
+      sortable: false,
+      filterable: false,
+      excludeFromExport: true,
+      render: (row) => {
+        const readOnly = mode === 'readonly';
+        // Dangling images have no pullable ref — only delete applies.
+        const actions: { id: string; label: string; icon: ReactNode; available: boolean; danger?: boolean }[] = [
+          { id: 'images.pull', label: 'Pull (re-fetch)', icon: <Download size={14} />, available: hasAction(row.pluginId, 'images.pull') && !row.dangling },
+          { id: 'images.update', label: 'Update image + restart containers using it', icon: <ArrowUpCircle size={14} />, available: hasAction(row.pluginId, 'images.update') && !row.dangling },
+          { id: 'images.delete', label: 'Delete image', icon: <Trash2 size={13} />, available: hasAction(row.pluginId, 'images.delete'), danger: true },
+        ];
+        return (
+          <div className="flex items-center gap-0.5">
+            {actions.map((a) => {
+              if (!a.available) return null;
+              const blockedByReadOnly = readOnly;
+              const enabled = !blockedByReadOnly;
+              return (
+                <button
+                  key={a.id}
+                  type="button"
+                  aria-label={`${a.label} ${row.name}`}
+                  title={enabled ? a.label : 'Read-only mode — switch to Plan or Execute to make changes'}
+                  disabled={!enabled}
+                  onClick={() => {
+                    if (a.id === 'images.pull') void singleImage(row, 'images.pull', `Pull image`, { refs: [row.name] });
+                    else if (a.id === 'images.update') {
+                      if (!window.confirm(`Update ${row.name} and RESTART every running container that uses it?`)) return;
+                      void singleImage(row, 'images.update', `Update image`, { refs: [row.name], restart: true });
+                    } else if (a.id === 'images.delete') {
+                      const id = typeof extraOf(row)['id'] === 'string' ? (extraOf(row)['id'] as string) : row.name;
+                      if (!window.confirm(`Permanently delete image ${row.name}?`)) return;
+                      void singleImage(row, 'images.delete', `Delete image`, { ids: [id] });
+                    }
+                  }}
+                  className={clsx(
+                    'rounded-md p-1.5 hover:bg-muted',
+                    a.danger ? 'text-danger-fg hover:text-danger-fg' : 'text-secondary hover:text-foreground',
+                    !enabled && 'cursor-not-allowed opacity-30',
+                  )}
+                >
+                  {a.icon}
+                </button>
+              );
+            })}
+          </div>
+        );
+      },
+    },
   ];
 
   return (
@@ -1957,20 +2176,40 @@ export default function Containers() {
               mounted when collapsed so it can be re-opened. */}
           <div className={clsx('shrink-0 min-h-0 pl-1', imagesOpen && 'flex-1')}>
             <div className="flex h-full min-h-0 flex-col rounded-lg border border-border bg-card">
-              <button
-                type="button"
-                onClick={() => setImagesOpen((o) => !o)}
-                className="flex w-full shrink-0 items-center justify-between px-4 py-3 text-left"
-                aria-expanded={imagesOpen}
-              >
-                <span className="flex items-center gap-2 text-sm font-semibold text-secondary">
-                  <Container size={16} className="text-muted-foreground" />
-                  Docker images{containersQuery.data ? ` (${images.length})` : ''}
-                </span>
-                {/* Expanded panel → chevron points DOWN (click collapses it);
-                    collapsed → UP (click expands). */}
-                {imagesOpen ? <ChevronDown size={18} className="text-faint" /> : <ChevronUp size={18} className="text-faint" />}
-              </button>
+              {/* Header row — the title + chevron toggle collapse; the Pull button
+                  lives beside them (a nested <button> inside a <button> is invalid). */}
+              <div className="flex w-full shrink-0 items-center gap-2 px-4 py-3 text-left">
+                <button
+                  type="button"
+                  onClick={() => setImagesOpen((o) => !o)}
+                  className="flex min-w-0 flex-1 items-center justify-between"
+                  aria-expanded={imagesOpen}
+                >
+                  <span className="flex items-center gap-2 text-sm font-semibold text-secondary">
+                    <Container size={16} className="text-muted-foreground" />
+                    Docker images{containersQuery.data ? ` (${images.length})` : ''}
+                  </span>
+                  {/* Expanded panel → chevron points DOWN (click collapses it);
+                      collapsed → UP (click expands). */}
+                  {imagesOpen ? <ChevronDown size={18} className="text-faint" /> : <ChevronUp size={18} className="text-faint" />}
+                </button>
+                {/* Pull image — offered when ANY device's plugin advertises the
+                    generic `images.pull` action; pick a target device in the dialog. */}
+                {devicesQuery.data?.some((d) => (d.plugins ?? []).some((p) => hasAction(p.pluginId, 'images.pull'))) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const d = devicesQuery.data!.find((x) => (x.plugins ?? []).some((p) => hasAction(p.pluginId, 'images.pull')));
+                      if (!d) return;
+                      const p = (d.plugins ?? []).find((pp) => hasAction(pp.pluginId, 'images.pull'));
+                      setPullTarget({ deviceId: d.id, deviceName: d.name, pluginId: p!.pluginId });
+                    }}
+                    className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs font-medium text-secondary hover:bg-muted"
+                  >
+                    <Download size={13} /> Pull image
+                  </button>
+                )}
+              </div>
               {imagesOpen && containersQuery.data && (
                 <div className="min-h-0 flex-1 border-t border-border p-3">
                   <DataTable<DockerImageRow>
@@ -1983,6 +2222,23 @@ export default function Containers() {
                     searchPlaceholder="Search images…"
                     selectable
                     bulkActions={[
+                      {
+                        label: 'Pull',
+                        enabled: (rows) => rows.some((r) => hasAction(r.pluginId, 'images.pull') && !r.dangling),
+                        onClick: (rows) => imageBulkRefs('images.pull', `Pull ${rows.length} image(s)`, rows),
+                      },
+                      {
+                        label: 'Update + restart',
+                        confirm: (count) => `Re-pull ${count} image(s) and RESTART every running container that uses them?`,
+                        enabled: (rows) => rows.some((r) => hasAction(r.pluginId, 'images.update') && !r.dangling),
+                        onClick: (rows) => imageBulkRefs('images.update', `Update ${rows.length} image(s)`, rows, { restart: true }),
+                      },
+                      {
+                        label: 'Prune unused',
+                        confirm: () => 'Remove all dangling images on the selected device(s)? Images in use are never removed.',
+                        enabled: (rows) => rows.some((r) => hasAction(r.pluginId, 'images.prune')),
+                        onClick: (rows) => imageBulkPrune(rows, false),
+                      },
                       {
                         label: 'Delete',
                         confirm: (count) => `Permanently delete ${count} image(s) from the appliance? Images in use by a running app may fail to remove.`,
@@ -2044,6 +2300,11 @@ export default function Containers() {
           "Duplicate existing" source picker + clone prefill. */}
       {createOpen && createCandidates.length > 0 && (
         <CreateAppDialog candidates={createCandidates} apps={containersQuery.data?.containers ?? []} onSubmit={(c, mode, input) => runInstall(c, mode, input)} onClose={() => setCreateOpen(false)} readOnly={mode === 'readonly'} />
+      )}
+
+      {/* Pull image — arbitrary refs on one device via the generic images.pull action. */}
+      {pullTarget && (
+        <PullImageDialog deviceId={pullTarget.deviceId} deviceName={pullTarget.deviceName} pluginId={pullTarget.pluginId} onClose={() => setPullTarget(null)} />
       )}
     </Layout>
   );

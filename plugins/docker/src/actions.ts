@@ -50,6 +50,8 @@ interface RawContainer {
   Id?: string;
   Names?: string[];
   State?: string; // running | exited | created | restarting | paused | dead | removing
+  /** Image ref exactly as used at creation (e.g. "nginx:latest") — /containers/json only. */
+  Image?: string;
   Labels?: Record<string, string>;
 }
 
@@ -823,6 +825,142 @@ const containersLogsReadAction: ActionDescriptor<DockerActionContext> = {
   },
 };
 
+// --- Image management (pull / update / prune) ------------------------------------
+// The generic contract the Containers page image panel is built on — same action
+// ids + input shapes as the Generic SSH plugin's docker-over-SSH implementation.
+
+/** Validates an image reference for safe embedding in a URL path/query. */
+function isValidImageRef(ref: string): boolean {
+  return ref.length > 0 && ref.length <= 512 && /^[a-zA-Z0-9_./:@\-]+$/.test(ref);
+}
+
+// --- images.pull ------------------------------------------------------------------
+const imagesPullAction: ActionDescriptor<DockerActionContext> = {
+  id: 'images.pull',
+  label: 'Pull image(s)',
+  description:
+    'Pulls docker image references into the local store (POST /images/create). Existing tags are refreshed to the registry version; new ones are downloaded. May take several minutes for large images.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: PULL_TIMEOUT_MS,
+  inputSchema: {
+    refs: { type: 'array', required: true, items: { type: 'string', minLength: 2 }, description: 'Image references to pull (e.g. "nginx:latest", "ghcr.io/org/app:v1")' },
+  },
+  async execute(ctx, input): Promise<ActionResult> {
+    const refs = strArray(input, 'refs');
+    if (refs.length === 0) return { success: false, details: { error: 'No image references provided' } };
+    for (const ref of refs) {
+      if (!isValidImageRef(ref)) return { success: false, details: { error: `Invalid image reference "${ref}"` } };
+    }
+
+    // One pull per ref — sequential so a single huge image cannot starve the rest.
+    const pulled: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const ref of refs) {
+      const { fromImage, tag } = splitImageRef(ref);
+      const pullPath = `/images/create?fromImage=${encodeURIComponent(fromImage)}${tag ? `&tag=${encodeURIComponent(tag)}` : ''}`;
+      const r = await dockerRequest<unknown>(ctx.opts, 'POST', pullPath, undefined, PULL_TIMEOUT_MS);
+      if (r.ok || r.status === 204) pulled.push(ref);
+      else errors[ref] = r.error || `HTTP ${r.status}`;
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, verified: Object.keys(errors).length === 0, details: { pulled, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+// --- images.update ----------------------------------------------------------------
+const imagesUpdateAction: ActionDescriptor<DockerActionContext> = {
+  id: 'images.update',
+  label: 'Update image(s)',
+  description:
+    'Re-pulls the given image references (refreshing them to the registry version) and — by default — restarts every RUNNING container that uses one of those refs so it picks up the new version. Set restart=false to only refresh the local store.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: PULL_TIMEOUT_MS + 60_000, // pulls + graceful restarts
+  inputSchema: {
+    refs: { type: 'array', required: true, items: { type: 'string', minLength: 2 }, description: 'Image references to update (e.g. "nginx:latest")' },
+    restart: { type: 'boolean', required: false, default: true, description: 'Restart running containers that use the updated images (default true)' },
+  },
+  async execute(ctx, input): Promise<ActionResult> {
+    const refs = strArray(input, 'refs');
+    if (refs.length === 0) return { success: false, details: { error: 'No image references provided' } };
+    for (const ref of refs) {
+      if (!isValidImageRef(ref)) return { success: false, details: { error: `Invalid image reference "${ref}"` } };
+    }
+    const restart = input['restart'] !== false; // default true
+
+    // 1) Refresh the local store.
+    const pullRes = await imagesPullAction.execute(ctx, { refs });
+    if (!pullRes.success) return { success: false, details: { error: `Image update failed: ${pullRes.error ?? 'pull errors'}` } };
+    const pulled = Array.isArray((pullRes.details as Record<string, unknown> | undefined)?.['pulled']) ? (pullRes.details as Record<string, unknown>)['pulled'] as string[] : [];
+
+    if (!restart) {
+      return { success: true, applied: true, verified: true, details: { updated: pulled, restarted: [], note: 'Images refreshed — no containers were restarted (restart=false).' } };
+    }
+
+    // 2) Find every RUNNING container whose image matches one of the refs. ONE
+    // pass over /containers/json?all=true&limit=500 — each entry's `Image` field is
+    // exactly the ref string used at creation, so a tag update ("nginx:latest")
+    // matches containers started from that same ref. Digest-pinned / short-id
+    // creations are not matched — they must be restarted manually.
+    const list = await listContainers(ctx.opts);
+    if (!list.ok || !Array.isArray(list.data)) {
+      return { success: true, applied: true, verified: false, details: { updated: pulled, restarted: [], note: 'Images refreshed — could not read the container list to restart users.' } };
+    }
+
+    const matched = (list.data as RawContainer[]).filter((c) => c.State === 'running' && typeof c.Image === 'string' && refs.includes(c.Image));
+
+    let restarted: string[] = [];
+    const errors: Record<string, string> = {};
+    if (matched.length > 0) {
+      // Restart in parallel — each op is independent.
+      const results = await Promise.all(matched.map(async (m) => {
+        const r = await drive(ctx.opts, m.Id ?? nameOf(m), 'restart');
+        return { id: m.Id ?? '', name: nameOf(m), ...r };
+      }));
+      for (const x of results) {
+        if (x.ok) restarted.push(x.name);
+        else errors[x.name] = x.error ?? 'restart failed';
+      }
+
+      // Verify: every restarted container must be running again.
+      const v = await verifyStates(ctx.opts, matched, new Set(['running']));
+      if (!v.ok) {
+        for (const [n, s] of Object.entries(v.after)) {
+          if (s !== 'running') errors[`verify:${n}`] = `container is ${s} after restart`;
+        }
+      }
+    }
+
+    return { success: Object.keys(errors).length === 0, applied: true, verified: Object.keys(errors).length === 0, details: { updated: pulled, restarted, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+// --- images.prune -----------------------------------------------------------------
+const imagesPruneAction: ActionDescriptor<DockerActionContext> = {
+  id: 'images.prune',
+  label: 'Prune unused images',
+  description:
+    'Removes UNUSED docker images (POST /images/prune). With all=false only dangling (<none>) layers are removed; with all=true every image no container references is removed — including stopped containers\' images. DESTRUCTIVE for the local store.',
+  module: 'Containers',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    all: { type: 'boolean', required: false, default: false, description: 'Prune ALL unused images (not just dangling). Default false.' },
+  },
+  async execute(ctx, input): Promise<ActionResult> {
+    const all = input['all'] === true;
+    // The Engine API's prune endpoint returns { ImagesDeleted: [...], SpaceReclaimed: bytes }.
+    const r = await dockerRequest<{ ImagesDeleted?: string[]; SpaceReclaimed?: number }>(ctx.opts, 'POST', `/images/prune?all=${all ? 'true' : 'false'}`);
+    if (!r.ok) return { success: false, details: { error: `Image prune failed: ${r.error || `HTTP ${r.status}`}` } };
+    const deleted = Array.isArray(r.data?.ImagesDeleted) ? r.data.ImagesDeleted.length : 0;
+    const freedBytes = typeof r.data?.SpaceReclaimed === 'number' ? r.data.SpaceReclaimed : null;
+    return { success: true, applied: true, verified: true, details: { all, deleted, freedBytes } };
+  },
+};
+
 export const registry = createRegistry<DockerActionContext>([
   containersStartAction,
   containersStopAction,
@@ -836,5 +974,8 @@ export const registry = createRegistry<DockerActionContext>([
   containersRunImageAction,
   containersDeployComposeAction,
   imagesDeleteAction,
+  imagesPullAction,
+  imagesUpdateAction,
+  imagesPruneAction,
   containersLogsReadAction,
 ]);

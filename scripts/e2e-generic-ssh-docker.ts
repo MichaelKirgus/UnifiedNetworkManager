@@ -4,14 +4,15 @@
  * Runs against the LIVE dev stack (setup.sh) and uses MAIL04 — a mailcow host that runs
  * docker compose — as the target device (already assigned to the generic-ssh plugin with
  * root credentials). Verifies:
- *   1. plugin catalog carries all nine new action ids (version 0.2.0)
+ *   1. plugin catalog carries all twelve docker action ids (version 0.3.0, incl. images.pull/update/prune)
  *   2. containers.deploy-compose via plan → app row appears in GET /containers after refresh
  *   3. the compose YAML is saved byte-exact into the USER-CHOSEN workdir (filesystem read)
  *   4. compose.config.read returns yaml + resolved workdir (read-only execute route)
  *   5. probe keys containerStates/containerStats report the member container live
  *   6. containers.stop / start round-trip flips the row state STOPPED → RUNNING
- *   7. containers.delete removes the app from GET /containers after refresh
- *   8. cleanup: workdir files removed via filesystem ops (best-effort)
+ *   7. images.pull / images.update (+restart of using containers) / images.prune work via plans
+ *   8. containers.delete removes the app from GET /containers after refresh
+ *   9. cleanup: workdir files removed via filesystem ops (best-effort)
  *
  * Usage (from the repo root):
  *   ./node_modules/.bin/tsx scripts/e2e-generic-ssh-docker.ts
@@ -96,14 +97,14 @@ async function main(): Promise<void> {
   const plugins = (await authed<Array<{ id: string; name?: string; version?: string }>>('GET', '/plugins')).data ?? [];
   const sshPlugin = plugins.find((p) => p.id === SSH_PLUGIN_ID);
   check('generic-ssh plugin discovered', Boolean(sshPlugin), sshPlugin?.name);
-  check('plugin version is 0.2.0', sshPlugin?.version === '0.2.0', sshPlugin?.version);
+  check('plugin version is 0.3.0', sshPlugin?.version === '0.3.0', sshPlugin?.version);
 
   const catalog = ((await authed<{ actions?: Array<{ id: string }> }>('GET', `/plugins/${SSH_PLUGIN_ID}/actions`)).data?.actions) ?? [];
   const ids = new Set(catalog.map((a) => a.id));
   for (const want of [
     'containers.start', 'containers.stop', 'containers.restart', 'containers.delete',
     'containers.deploy-compose', 'containers.update', 'compose.config.read',
-    'containers.logs.read', 'images.delete',
+    'containers.logs.read', 'images.delete', 'images.pull', 'images.update', 'images.prune',
   ]) {
     check(`catalog has ${want}`, ids.has(want));
   }
@@ -244,6 +245,31 @@ async function main(): Promise<void> {
     return row && (row.state ?? '').toUpperCase() === 'RUNNING' ? row : null;
   }, 90_000, 5_000);
   check('app row RUNNING after start', Boolean(restartedRow), restartedRow?.state);
+
+  // 9b. Image management (generic contract: images.pull / update / prune).
+  console.log('\n[images] pull');
+  const imgPull = await runPlan('images.pull', { refs: ['nginx:alpine'] }, 600_000);
+  check('pull plan terminal (succeeded/unverified)', TERMINAL.includes(imgPull.status ?? ''), (imgPull.steps ?? []).map((s) => `${s.actionId}:${s.status}`));
+  const pullDetails = stepDetails(imgPull, 'images.pull');
+  check('pull details list the ref', Array.isArray(pullDetails?.['pulled']) && (pullDetails!['pulled'] as string[]).includes('nginx:alpine'), pullDetails);
+
+  console.log('\n[images] update (+restart)');
+  const imgUpdate = await runPlan('images.update', { refs: ['nginx:alpine'], restart: true }, 900_000);
+  check('update plan terminal (succeeded/unverified)', TERMINAL.includes(imgUpdate.status ?? ''), (imgUpdate.steps ?? []).map((s) => `${s.actionId}:${s.status}`));
+  const updDetails = stepDetails(imgUpdate, 'images.update');
+  check('update restarted the member container', Array.isArray(updDetails?.['restarted']) && (updDetails!['restarted'] as string[]).includes(member), updDetails);
+  await refresh();
+  const afterUpdateRow = await waitFor('row RUNNING after image update', async () => {
+    const row = await getRow(appName);
+    return row && (row.state ?? '').toUpperCase() === 'RUNNING' ? row : null;
+  }, 90_000, 5_000);
+  check('app row RUNNING after image update', Boolean(afterUpdateRow), afterUpdateRow?.state);
+
+  console.log('\n[images] prune (dangling only)');
+  const imgPrune = await runPlan('images.prune', { all: false }, 300_000);
+  check('prune plan terminal (succeeded/unverified)', TERMINAL.includes(imgPrune.status ?? ''), (imgPrune.steps ?? []).map((s) => `${s.actionId}:${s.status}`));
+  const pruneDetails = stepDetails(imgPrune, 'images.prune');
+  check('prune reports freedBytes', typeof pruneDetails?.['freedBytes'] === 'number' || pruneDetails?.['freedBytes'] === null, pruneDetails);
 
   // 10. Delete → row gone from the inventory.
   console.log('\n[delete]');
