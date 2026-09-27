@@ -3242,6 +3242,388 @@ const vmsDeviceGetAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// VM-level EDIT — the generic contract for editing a VM's OWN settings (not its
+// attached devices): name/description/autostart/boot method/system clock/NUMA
+// node/CPU topology/memory. Same shape as the device edit contract:
+//   vms.vm-edit-schema (read) → details.fields[] — one entry per editable field,
+//     each carrying its form property + `requiresStopped` (the appliance only
+//     allows a NAME change while the VM is inactive; every other field is a
+//     datastore write that takes effect at the next boot).
+//   vms.vm-get    (read)  → current values of those fields for ONE VM name
+//                            (prefill; the webapp never parses appliance attrs).
+//   vms.vm-update (write) → partial-merge vm.update with ONLY the changed
+//                            fields, verified by re-reading the VM row.
+// TrueNAS's vm.update is a PARTIAL MERGE (`new = old.copy(); new.update(data)`
+// in middleware plugins/vm/vms.py do_update — verified on 26.0 BETA), so
+// untouched attributes are preserved; `devices`/`status` are stripped by the
+// appliance itself, never sent here. A future Proxmox plugin implementing the
+// same three ids gets the webapp's Edit-VM dialog for free.
+// ---------------------------------------------------------------------------
+
+/** One editable VM-level field as advertised in vms.vm-edit-schema details.fields[]. */
+interface VmEditField {
+  /** Generic field name (matches the keys of vms.vm-get values / vms.vm-update fields). */
+  key: string;
+  label: string;
+  description?: string;
+  type: 'string' | 'number' | 'boolean';
+  required?: boolean;
+  default?: unknown;
+  enum?: (string | number)[];
+  min?: number;
+  max?: number;
+  pattern?: string;
+  /** True when the appliance only accepts this change while the VM is inactive. */
+  requiresStopped: boolean;
+  /**
+   * True for optional strings where an EMPTY value is a legitimate change
+   * (clearing the setting) rather than "keep current" — the webapp renders
+   * these as plain inputs that keep '' as a real value and sends it through.
+   */
+  clearable?: boolean;
+}
+
+/** The full editable-VM-settings catalog for this hypervisor — static per plugin. */
+const VM_EDIT_FIELDS: VmEditField[] = [
+  { key: 'name', label: 'Name', type: 'string', required: true, pattern: '^[a-zA-Z_0-9]+$', description: 'Guest name (alphanumeric + underscore). Renaming requires a STOPPED VM — the appliance enforces it.', requiresStopped: true },
+  { key: 'description', label: 'Description', type: 'string', required: false, clearable: true, description: 'Free-text guest description shown on the VMs page. Leave empty to remove it.', requiresStopped: false },
+  { key: 'autostart', label: 'Start after boot (autostart)', type: 'boolean', default: false, description: 'Start this VM automatically when the appliance boots.', requiresStopped: false },
+  { key: 'bootloader', label: 'Boot method (firmware)', type: 'string', required: true, enum: ['UEFI', 'UEFI_CSM'], default: 'UEFI', description: 'UEFI = modern firmware; UEFI_CSM = legacy BIOS compatibility mode.', requiresStopped: false },
+  { key: 'time', label: 'System clock (guest time source)', type: 'string', required: true, enum: ['UTC', 'LOCAL'], default: 'UTC', description: 'UTC — the guest keeps UTC; LOCAL — the appliance passes its local timezone to the guest.', requiresStopped: false },
+  { key: 'nodeset', label: 'NUMA node (nodeset)', type: 'string', required: false, clearable: true, pattern: '^\\d+(?:-\\d+)?(?:,\\d+(?:-\\d+)?)?$', description: 'Pin the VM to specific NUMA nodes — e.g. "0", "1" or "0-1". Leave empty for no restriction (appliance default).', requiresStopped: false },
+  { key: 'cpuset', label: 'CPU pinning (cpuset)', type: 'string', required: false, clearable: true, pattern: '^\\d+(?:-\\d+)?(?:,\\d+(?:-\\d+)?)?$', description: 'Pin vCPUs to specific host CPUs — e.g. "0-3" or "0,2". Leave empty for no pinning (appliance default).', requiresStopped: false },
+  { key: 'cores', label: 'Cores per package', type: 'number', required: true, min: 1, max: 64, description: 'CPU cores per socket. Total vCPUs = sockets × cores × threads.', requiresStopped: false },
+  { key: 'threads', label: 'Threads per core', type: 'number', required: true, min: 1, max: 8, description: 'Threads (hyperthreading) per core.', requiresStopped: false },
+  { key: 'memoryMiB', label: 'Memory (MiB)', type: 'number', required: true, min: 20, description: 'Maximum guest RAM in MiB. Takes effect at the next boot.', requiresStopped: false },
+  { key: 'minMemoryMiB', label: 'Minimum memory (MiB)', type: 'number', required: false, clearable: true, min: 0, description: 'Optional minimum RAM for ballooning — must be ≤ maximum memory. Leave empty to disable.', requiresStopped: false },
+  { key: 'pinVcpus', label: 'Pin vCPUs (strict CPU pinning)', type: 'boolean', default: false, description: 'Require the cpuset above to cover exactly one host CPU per vCPU (sockets × cores × threads). The appliance rejects a mismatch.', requiresStopped: false },
+  { key: 'shutdownTimeoutSec', label: 'Shutdown timeout (seconds)', type: 'number', required: true, min: 0, max: 3600, description: 'Seconds the appliance waits for a clean guest shutdown before forcing poweroff. Default 90.', requiresStopped: false },
+  { key: 'suspendOnSnapshot', label: 'Suspend on snapshot', type: 'boolean', default: false, description: 'Automatically pause (suspend) this VM when a TrueNAS snapshot is taken.', requiresStopped: false },
+  { key: 'hideFromMsr', label: 'Hide KVM from MSR discovery', type: 'boolean', default: false, description: 'Hides the KVM hypervisor from standard MSR-based guest discovery (anti-VM-detection).', requiresStopped: false },
+  { key: 'ensureDisplayDevice', label: 'Ensure display device', type: 'boolean', default: true, description: 'Guarantees the guest always has a video device even when no console is attached.', requiresStopped: false },
+  { key: 'trustedPlatformModule', label: 'Trusted Platform Module (TPM)', type: 'boolean', default: false, description: 'Attach a virtual TPM to this VM. Requires UEFI firmware and a reboot of the guest to use it.', requiresStopped: false },
+  { key: 'hypervEnlightenments', label: 'Hyper-V enlightenments', type: 'boolean', default: false, description: 'Enable a subset of predefined Hyper-V enlightenments — recommended for Windows guests.', requiresStopped: false },
+  { key: 'cpuMode', label: 'CPU mode', type: 'string', required: true, enum: ['HOST-PASSTHROUGH', 'CUSTOM'], default: 'HOST-PASSTHROUGH', description: 'HOST-PASSTHROUGH exposes the host CPU model to the guest; CUSTOM lets you pick a specific CPU model.', requiresStopped: false },
+  { key: 'cpuModel', label: 'CPU model (when mode = CUSTOM)', type: 'string', required: false, clearable: true, description: 'Specific CPU model presented to the guest — only valid when CPU mode is CUSTOM. Leave empty for HOST-PASSTHROUGH.', requiresStopped: false },
+  { key: 'commandLineArgs', label: 'Command line arguments (QEMU)', type: 'string', required: false, clearable: true, description: 'Extra raw QEMU command-line arguments appended to the guest launch. Advanced — leave empty unless you know what you are doing.', requiresStopped: false },
+];
+
+const vmsVmEditSchemaAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.vm-edit-schema',
+  label: 'List editable VM settings',
+  description:
+    'Read-only descriptor of every VM-level setting this hypervisor can edit in place — field name, form property (type/enum/pattern/min/max) and whether the appliance requires a STOPPED VM for it. Drives the webapp\'s generic "Edit VM" dialog; no appliance round-trip.',
+  module: 'VMs',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  async execute(): Promise<ActionResult> {
+    return { success: true, details: { fields: VM_EDIT_FIELDS } };
+  },
+};
+
+/**
+ * vms.vm-get — read the CURRENT values of a VM's editable settings (the subset
+ * named in VM_EDIT_FIELDS). The webapp's Edit-VM dialog prefills its form from
+ * this, so it never has to parse appliance attribute names itself. Field keys
+ * match VM_EDIT_FIELDS: name/description/autostart/bootloader/time/nodeset/
+ * cpuset/cores/threads/memoryMiB/minMemoryMiB/pinVcpus/shutdownTimeoutSec/
+ * suspendOnSnapshot/hideFromMsr/ensureDisplayDevice/trustedPlatformModule/
+ * hypervEnlightenments/cpuMode/cpuModel/commandLineArgs.
+ */
+const vmsVmGetAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.vm-get',
+  label: 'Read VM settings values',
+  description:
+    'Read-only — returns the current editable setting values of ONE VM (prefill for the Edit-VM dialog). Field names match vms.vm-edit-schema.',
+  module: 'VMs',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'VM name' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'VM name is required' } };
+
+    let vms: VmInfo[];
+    try {
+      vms = await listVms(ctx);
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+    const vm = vms.find((v) => v.name === name);
+    if (!vm) return { success: false, details: { error: `VM "${name}" not found on this appliance` } };
+
+    // Re-read the raw row — listVms normalizes away most of the settings.
+    let row: Record<string, unknown> | null = null;
+    try {
+      const rows = await ctx.client.call<Record<string, unknown>[]>('vm.query', [[['name', '=', name]]], ctx.creds);
+      row = (rows ?? [])[0] ?? null;
+    } catch { /* fall through — the values below degrade to what listVms knew */ }
+
+    const cores = typeof row?.['cores'] === 'number' ? (row['cores'] as number) : 1;
+    const threads = typeof row?.['threads'] === 'number' ? (row['threads'] as number) : 1;
+    return {
+      success: true,
+      details: {
+        name,
+        state: vm.state,
+        values: {
+          name: vm.name,
+          description: typeof row?.['description'] === 'string' ? (row['description'] as string) : '',
+          autostart: row?.['autostart'] === true,
+          bootloader: pickString(row ?? {}, ['bootloader']) ?? 'UEFI',
+          time: pickString(row ?? {}, ['time']) ?? 'UTC',
+          nodeset: typeof row?.['nodeset'] === 'string' ? (row['nodeset'] as string) : '',
+          cpuset: typeof row?.['cpuset'] === 'string' ? (row['cpuset'] as string) : '',
+          cores,
+          threads,
+          memoryMiB: typeof row?.['memory'] === 'number' ? (row['memory'] as number) : undefined,
+          minMemoryMiB: typeof row?.['min_memory'] === 'number' ? (row['min_memory'] as number) : '',
+          pinVcpus: row?.['pin_vcpus'] === true,
+          shutdownTimeoutSec: typeof row?.['shutdown_timeout'] === 'number' ? (row['shutdown_timeout'] as number) : 90,
+          suspendOnSnapshot: row?.['suspend_on_snapshot'] === true,
+          hideFromMsr: row?.['hide_from_msr'] === true,
+          ensureDisplayDevice: row?.['ensure_display_device'] !== false, // appliance default is true
+          trustedPlatformModule: row?.['trusted_platform_module'] === true,
+          hypervEnlightenments: row?.['hyperv_enlightenments'] === true,
+          cpuMode: pickString(row ?? {}, ['cpu_mode']) ?? 'HOST-PASSTHROUGH',
+          cpuModel: typeof row?.['cpu_model'] === 'string' ? (row['cpu_model'] as string) : '',
+          commandLineArgs: typeof row?.['command_line_args'] === 'string' ? (row['command_line_args'] as string) : '',
+        },
+      },
+    };
+  },
+};
+
+/**
+ * vms.vm-update — edit a VM's OWN settings in place. Partial-merge vm.update
+ * with ONLY the changed fields (names match VM_EDIT_FIELDS), verified by
+ * re-reading the VM row. A name change requires an INACTIVE VM (appliance rule,
+ * enforced here pre-RPC); every other field is accepted in any state — most take
+ * effect at the guest's next boot.
+ */
+const vmsVmUpdateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'vms.vm-update',
+  label: 'Edit VM settings',
+  description:
+    'Updates ONE VM\'s own settings in place (vm.update, partial merge) — name/description/autostart/boot method/system clock/NUMA node/CPU pinning + strict vCPU pinning/CPU topology/memory (+ minimum)/shutdown timeout/snapshot suspend/MSR hiding/display guarantee/TPM/Hyper-V enlightenments/CPU mode & model/QEMU command-line args. Only fields named by vms.vm-edit-schema are accepted; everything else keeps its current value. A NAME change requires a STOPPED VM.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'Current VM name (lookup key)' },
+    fields: { type: 'object', required: true, properties: {}, description: 'Changed settings (names match vms.vm-edit-schema; empty string clears cpuset/nodeset/description/cpuModel/commandLineArgs/minMemoryMiB)' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name');
+    if (!name) return { success: false, details: { error: 'VM name is required' } };
+    const fieldsRaw = input['fields'];
+    if (!fieldsRaw || typeof fieldsRaw !== 'object' || Array.isArray(fieldsRaw)) {
+      return { success: false, details: { error: 'fields (object) is required' } };
+    }
+    const fields = fieldsRaw as Record<string, unknown>;
+
+    let vms: VmInfo[];
+    try {
+      vms = await listVms(ctx);
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+    const vm = vms.find((v) => v.name === name);
+    if (!vm) return { success: false, details: { error: `VM "${name}" not found on this appliance` } };
+
+    // Raw row — needed for cross-field validation (cpuset/cpu_mode/memory the
+    // normalized VmInfo doesn't carry).
+    let row: Record<string, unknown> | null = null;
+    try {
+      const rows = await ctx.client.call<Record<string, unknown>[]>('vm.query', [[['name', '=', name]]], ctx.creds);
+      row = (rows ?? [])[0] ?? null;
+    } catch { /* fall through — cross-field checks degrade to patch-only */ }
+
+    // Map the generic field names onto appliance attributes (partial merge).
+    const patch: Record<string, unknown> = {};
+    const updated: string[] = [];
+    for (const f of VM_EDIT_FIELDS) {
+      if (!(f.key in fields)) continue;
+      switch (f.key) {
+        case 'name':
+          if (typeof fields['name'] === 'string' && fields['name'] !== '') { patch['name'] = fields['name']; updated.push('name'); }
+          break;
+        case 'description':
+          // Empty string CLEARS the description — a legitimate change.
+          if (typeof fields['description'] === 'string') { patch['description'] = fields['description']; updated.push('description'); }
+          break;
+        case 'autostart':
+          if (typeof fields['autostart'] === 'boolean') { patch['autostart'] = fields['autostart']; updated.push('autostart'); }
+          break;
+        case 'bootloader':
+          if (typeof fields['bootloader'] === 'string' && fields['bootloader'] !== '') { patch['bootloader'] = fields['bootloader']; updated.push('bootloader'); }
+          break;
+        case 'time':
+          if (typeof fields['time'] === 'string' && fields['time'] !== '') { patch['time'] = fields['time']; updated.push('time'); }
+          break;
+        case 'nodeset':
+          // Empty string CLEARS the NUMA restriction → null on the appliance.
+          if (typeof fields['nodeset'] === 'string') { patch['nodeset'] = fields['nodeset'] === '' ? null : fields['nodeset']; updated.push('nodeset'); }
+          break;
+        case 'cpuset':
+          // Empty string CLEARS the CPU pinning → null on the appliance.
+          if (typeof fields['cpuset'] === 'string') { patch['cpuset'] = fields['cpuset'] === '' ? null : fields['cpuset']; updated.push('cpuset'); }
+          break;
+        case 'cores':
+          if (typeof fields['cores'] === 'number' && fields['cores'] >= 1) { patch['cores'] = fields['cores']; updated.push('cores'); }
+          break;
+        case 'threads':
+          if (typeof fields['threads'] === 'number' && fields['threads'] >= 1) { patch['threads'] = fields['threads']; updated.push('threads'); }
+          break;
+        case 'memoryMiB':
+          if (typeof fields['memoryMiB'] === 'number' && fields['memoryMiB'] > 0) { patch['memory'] = fields['memoryMiB']; updated.push('memoryMiB'); }
+          break;
+        case 'minMemoryMiB':
+          // Empty string CLEARS the ballooning floor → null on the appliance.
+          if (typeof fields['minMemoryMiB'] === 'string' && fields['minMemoryMiB'] === '') { patch['min_memory'] = null; updated.push('minMemoryMiB'); }
+          else if (typeof fields['minMemoryMiB'] === 'number' && fields['minMemoryMiB'] >= 0) { patch['min_memory'] = fields['minMemoryMiB']; updated.push('minMemoryMiB'); }
+          break;
+        case 'pinVcpus':
+          if (typeof fields['pinVcpus'] === 'boolean') { patch['pin_vcpus'] = fields['pinVcpus']; updated.push('pinVcpus'); }
+          break;
+        case 'shutdownTimeoutSec':
+          if (typeof fields['shutdownTimeoutSec'] === 'number' && fields['shutdownTimeoutSec'] >= 0) { patch['shutdown_timeout'] = Math.round(fields['shutdownTimeoutSec']); updated.push('shutdownTimeoutSec'); }
+          break;
+        case 'suspendOnSnapshot':
+          if (typeof fields['suspendOnSnapshot'] === 'boolean') { patch['suspend_on_snapshot'] = fields['suspendOnSnapshot']; updated.push('suspendOnSnapshot'); }
+          break;
+        case 'hideFromMsr':
+          if (typeof fields['hideFromMsr'] === 'boolean') { patch['hide_from_msr'] = fields['hideFromMsr']; updated.push('hideFromMsr'); }
+          break;
+        case 'ensureDisplayDevice':
+          if (typeof fields['ensureDisplayDevice'] === 'boolean') { patch['ensure_display_device'] = fields['ensureDisplayDevice']; updated.push('ensureDisplayDevice'); }
+          break;
+        case 'trustedPlatformModule':
+          if (typeof fields['trustedPlatformModule'] === 'boolean') { patch['trusted_platform_module'] = fields['trustedPlatformModule']; updated.push('trustedPlatformModule'); }
+          break;
+        case 'hypervEnlightenments':
+          if (typeof fields['hypervEnlightenments'] === 'boolean') { patch['hyperv_enlightenments'] = fields['hypervEnlightenments']; updated.push('hypervEnlightenments'); }
+          break;
+        case 'cpuMode':
+          if (typeof fields['cpuMode'] === 'string' && fields['cpuMode'] !== '') { patch['cpu_mode'] = fields['cpuMode']; updated.push('cpuMode'); }
+          break;
+        case 'cpuModel':
+          // Empty string CLEARS the model → null on the appliance.
+          if (typeof fields['cpuModel'] === 'string') { patch['cpu_model'] = fields['cpuModel'] === '' ? null : fields['cpuModel']; updated.push('cpuModel'); }
+          break;
+        case 'commandLineArgs':
+          // Empty string is a legitimate value — it clears the extra args.
+          if (typeof fields['commandLineArgs'] === 'string') { patch['command_line_args'] = fields['commandLineArgs']; updated.push('commandLineArgs'); }
+          break;
+      }
+    }
+
+    // Cross-field rules the appliance enforces anyway — fail early with a clear message.
+    const effectiveMemory = typeof patch['memory'] === 'number' ? (patch['memory'] as number) : (typeof row?.['memory'] === 'number' ? (row['memory'] as number) : null);
+    if (typeof patch['min_memory'] === 'number' && effectiveMemory !== null && patch['min_memory'] > effectiveMemory) {
+      return { success: false, details: { error: `Minimum memory (${patch['min_memory']} MiB) must not exceed the maximum memory (${effectiveMemory} MiB).` } };
+    }
+    const effectiveCpuset: string | null = typeof patch['cpuset'] === 'string' || patch['cpuset'] === null
+      ? (patch['cpuset'] as string | null)
+      : (typeof row?.['cpuset'] === 'string' ? (row['cpuset'] as string) : null);
+    if ((patch['pin_vcpus'] ?? false) === true && !effectiveCpuset) {
+      return { success: false, details: { error: 'Pin vCPUs requires a CPU pinning (cpuset) — set the cpuset to one host CPU per vCPU first.' } };
+    }
+    const effectiveCpuMode = typeof patch['cpu_mode'] === 'string' ? (patch['cpu_mode'] as string) : pickString(row ?? {}, ['cpu_mode']) ?? 'HOST-PASSTHROUGH';
+    if (effectiveCpuMode !== 'CUSTOM') {
+      // The appliance validates the MERGED VM — a leftover cpu_model with a non-CUSTOM
+      // mode is rejected, so clear it whenever one is present.
+      const currentModel = typeof row?.['cpu_model'] === 'string' ? (row['cpu_model'] as string) : null;
+      if (patch['cpu_model']) {
+        return { success: false, details: { error: 'CPU model can only be set when CPU mode is CUSTOM — switch the CPU mode first.' } };
+      }
+      if (currentModel && patch['cpu_model'] !== null) patch['cpu_model'] = null;
+    } else if (!patch['cpu_model']) {
+      const currentModel = typeof row?.['cpu_model'] === 'string' ? (row['cpu_model'] as string) : null;
+      // Only complain when the switch to CUSTOM happens in THIS patch and no model
+      // exists yet — an already-CUSTOM VM with a model needs nothing.
+      if (!currentModel) {
+        return { success: false, details: { error: 'CPU mode CUSTOM requires a CPU model — pick one (or switch back to HOST-PASSTHROUGH).' } };
+      }
+    }
+
+    if (updated.length === 0) {
+      return { success: true, applied: false, verified: true, details: { name, updated: [], note: 'No changes to apply' } };
+    }
+
+    // Appliance rule — a NAME change is only allowed while the VM is inactive.
+    if (updated.includes('name') && vm.state !== 'STOPPED') {
+      return { success: false, details: { error: `Renaming requires a STOPPED VM — "${name}" is ${vm.state.toLowerCase()}. Stop it first, then retry.` } };
+    }
+
+    // Verify predicate — every patched attribute must read back with the new value.
+    const expected: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(patch)) {
+      if (k === 'name') continue; // handled below via the lookup-by-name
+      expected[k] = v;
+    }
+    const newName = typeof patch['name'] === 'string' ? (patch['name'] as string) : null;
+    const readVm = async (): Promise<Record<string, unknown> | null> => {
+      try {
+        // After a rename the OLD name is gone — look up by whichever exists.
+        const rows = await ctx.client.call<Record<string, unknown>[]>('vm.query', [], ctx.creds);
+        return (rows ?? []).find((r) => r['name'] === newName || r['name'] === name) ?? null;
+      } catch {
+        return null;
+      }
+    };
+    const appliedCheck = async (): Promise<boolean | null> => {
+      const row = await readVm();
+      if (!row) return null; // VM gone — can't confirm either way
+      if (newName && row['name'] !== newName) return false; // rename not visible yet
+      for (const [k, want] of Object.entries(expected)) {
+        const got = row[k];
+        if (want === null) {
+          if (got !== null && got !== undefined) return false;
+          continue;
+        }
+        if (got === undefined || got === null) return null; // field not readable yet — unknown
+        if (typeof want === 'string') {
+          if (String(got).toLowerCase() !== want.toLowerCase()) return false;
+        } else if (got !== want) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    // Transport-tolerant — a lost response is confirmed by re-reading the row.
+    let note: string | undefined;
+    try {
+      const r = await dispatchWrite(ctx, 'vm.update', [vm.id, patch], {
+        timeoutMs: 60_000,
+        verify: appliedCheck,
+      });
+      note = r.note;
+    } catch (e) {
+      // A partial merge is IDEMPOTENT — re-sending the same fields is harmless, so a
+      // transport-level failure that survived dispatchWrite's own retry is safe to let
+      // the plan executor re-dispatch per its retry policy. Method errors stay hard.
+      const msg = e instanceof Error ? e.message : String(e);
+      return { success: false, details: { error: msg, ...(isTransportError(e) ? { retryable: true } : {}) } };
+    }
+
+    // Final arbiter — the appliance may apply the change a moment after the RPC.
+    const wait = await pollUntil(appliedCheck, (ok) => ok === true, { timeoutMs: 45_000, intervalMs: 2_000 });
+    if (!wait.ok && note) {
+      // Unconfirmed after a transport drop — the merge is idempotent, so let the plan
+      // executor re-dispatch instead of failing the step outright.
+      return { success: false, details: { error: `VM update reported "${note}" and the new values are not visible on the appliance yet — retrying`, retryable: true } };
+    }
+    return { success: true, applied: true, verified: wait.ok, details: { name, ...(newName ? { newName } : {}), updated, ...(note ? { note } : {}) } };
+  },
+};
+
 const vmsPciChoicesAction: ActionDescriptor<TruenasActionContext> = {
   id: 'vms.pci-choices',
   label: 'List PCIe passthrough devices',
@@ -5422,6 +5804,9 @@ export const registry = createRegistry<TruenasActionContext>([
   vmsDeviceDetachAction,
   vmsDeviceUpdateAction,
   vmsDeviceGetAction,
+  vmsVmEditSchemaAction,
+  vmsVmGetAction,
+  vmsVmUpdateAction,
   vmsDeviceTypesAction,
   vmsDiskChoicesAction,
   vmsPciChoicesAction,

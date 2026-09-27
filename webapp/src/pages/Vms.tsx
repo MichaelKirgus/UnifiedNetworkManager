@@ -1662,6 +1662,299 @@ function EditDeviceDialog({ target, stopped, onClose }: { target: DeviceEditTarg
 }
 
 // ---------------------------------------------------------------------------
+// Edit-VM dialog — generic over the plugin's vms.vm-edit-schema field catalog:
+// the form is rendered from that catalog (name/description/autostart/boot
+// method/system clock/NUMA/CPU pinning/topology/memory), prefilled via
+// vms.vm-get, and submitted as a partial-merge vms.vm-update through the plan
+// workflow. A future hypervisor plugin implementing those ids gets this dialog
+// for free — same contract as EditDeviceDialog, one level up (the VM itself).
+// ---------------------------------------------------------------------------
+
+/** One editable VM-level field as advertised in vms.vm-edit-schema details.fields[]. */
+interface VmEditField {
+  key: string;
+  label: string;
+  description?: string;
+  type: 'string' | 'number' | 'boolean';
+  required?: boolean;
+  default?: unknown;
+  enum?: (string | number)[];
+  min?: number;
+  max?: number;
+  pattern?: string;
+  /** True when the appliance only accepts this change while the VM is inactive. */
+  requiresStopped: boolean;
+  /** Optional strings where '' is a real value (clears the setting), not "keep current". */
+  clearable?: boolean;
+}
+
+function EditVmDialog({ row, stopped, onClose }: { row: VmRow; stopped: boolean; onClose: () => void }) {
+  const { mode } = useExecutionMode();
+  const isPlanMode = mode === 'plan';
+  const isReadOnly = mode === 'readonly';
+
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [fields, setFields] = useState<VmEditField[]>([]);
+  const [values, setValues] = useState<Record<string, unknown>>({});
+  /** The values vms.vm-get reported — the diff baseline for submit. */
+  const [originals, setOriginals] = useState<Record<string, unknown>>({});
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [reauth, setReauth] = useState(false);
+  // Plan mode: the edit plan was saved without executing.
+  const [saved, setSaved] = useState(false);
+
+  // Load the field catalog + the VM's current values (prefill).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.executePluginAction(row.pluginId, { deviceId: row.deviceId, actionId: 'vms.vm-edit-schema', input: {} });
+        if (cancelled) return;
+        const raw = Array.isArray(res.details.fields) ? (res.details.fields as VmEditField[]) : [];
+        setFields(raw);
+        const getRes = await api.executePluginAction(row.pluginId, { deviceId: row.deviceId, actionId: 'vms.vm-get', input: { name: row.name } });
+        if (cancelled) return;
+        const vals = (getRes.details.values && typeof getRes.details.values === 'object' ? getRes.details.values : {}) as Record<string, unknown>;
+        setOriginals(vals);
+        // Prefill — schema defaults first, then the appliance's current values.
+        const merged: Record<string, unknown> = {};
+        for (const f of raw) if (f.default !== undefined) merged[f.key] = f.default;
+        for (const [k, v] of Object.entries(vals)) {
+          // '' is a REAL value for clearable fields (cleared setting) — keep it.
+          const field = raw.find((x) => x.key === k);
+          if (v !== undefined && (field?.clearable || v !== '')) merged[k] = v;
+        }
+        setValues(merged);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [row.pluginId, row.deviceId, row.name]);
+
+  // Only CHANGED fields ride along — the appliance merges, so unchanged keys are omitted.
+  const changedKeys = useMemo(() => {
+    const out: string[] = [];
+    for (const f of fields) {
+      const v = values[f.key];
+      const o = originals[f.key];
+      if (f.clearable) {
+        // '' is a real value here — clearing the setting counts as a change.
+        // Numbers compare via String() so 0 vs '0' and '' vs null don't false-positive.
+        if (String(v ?? '') !== String(o ?? '')) out.push(f.key);
+        continue;
+      }
+      if (v === undefined || v === null || v === '') continue; // empty = "keep current"
+      if (String(v) !== String(o ?? '')) out.push(f.key);
+    }
+    return out;
+  }, [fields, values, originals]);
+
+  const fieldByKey = useMemo(() => new Map(fields.map((f) => [f.key, f])), [fields]);
+  // A changed requiresStopped field (the name) on a non-stopped VM blocks saving.
+  const needsStopped = !stopped && changedKeys.some((k) => fieldByKey.get(k)?.requiresStopped === true);
+  // Appliance rule — strict vCPU pinning needs a cpuset covering every vCPU.
+  const pinVcpusBroken = values['pinVcpus'] === true && String(values['cpuset'] ?? '') === '';
+
+  async function submit() {
+    if (isReadOnly || needsStopped) return; // safety net — the button is disabled
+    const errors: Record<string, string> = {};
+    for (const f of fields) {
+      const v = values[f.key];
+      if (f.clearable) {
+        // '' clears the setting — a real value, nothing to validate. Non-empty
+        // values still get their type validation.
+        if (v === '') continue;
+        if (f.type === 'number') {
+          const n = typeof v === 'string' ? Number(v) : v;
+          if (typeof n !== 'number' || !Number.isFinite(n)) errors[f.key] = 'Must be a number';
+          else if (f.min !== undefined && n < f.min) errors[f.key] = `Must be >= ${f.min}`;
+        } else if (typeof v === 'string' && f.pattern) {
+          try { if (!new RegExp(f.pattern).test(v)) errors[f.key] = `Invalid format — e.g. "0", "1" or "0-3"`; } catch { /* ignore */ }
+        }
+        continue;
+      }
+      if (v === undefined || v === null || v === '') {
+        if (f.required) errors[f.key] = 'Required';
+        continue;
+      }
+      if (f.type === 'number') {
+        // Clearable numbers: '' is a real value (clears the setting), not "empty".
+        if (f.clearable && v === '') continue;
+        const n = typeof v === 'string' ? Number(v) : v;
+        if (typeof n !== 'number' || !Number.isFinite(n)) errors[f.key] = 'Must be a number';
+        else if (f.min !== undefined && n < f.min) errors[f.key] = `Must be >= ${f.min}`;
+        else if (f.max !== undefined && n > f.max) errors[f.key] = `Must be <= ${f.max}`;
+      } else if (typeof v === 'string' && f.pattern) {
+        try { if (!new RegExp(f.pattern).test(v)) errors[f.key] = `Does not match pattern ${f.pattern}`; } catch { /* ignore */ }
+      }
+    }
+    setFieldErrors(errors);
+    if (Object.keys(errors).length > 0) return;
+
+    const fieldsPayload: Record<string, unknown> = {};
+    for (const k of changedKeys) fieldsPayload[k] = values[k];
+
+    setSaving(true);
+    setError(null);
+    const attempt = async () => {
+      await createAndExecutePlan(row.pluginId, 'vms.vm-update', [{ deviceId: row.deviceId, input: { name: row.name, fields: fieldsPayload } }], mode);
+      if (isPlanMode) { setSaved(true); return; }
+      onClose();
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth(true);
+      else setError(err instanceof Error ? err.message : String(err));
+      setSaving(false);
+    }
+  }
+
+  // Plan mode: the plan was saved without executing — offer to close.
+  if (saved) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
+        <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
+          <header className="flex items-center justify-between border-b border-border px-4 py-3">
+            <h2 className="text-base font-semibold text-foreground">Edit VM — {row.name}</h2>
+            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted"><X size={16} /></button>
+          </header>
+          <div className="space-y-3 px-4 py-4">
+            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+              VM edit saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
+            </div>
+          </div>
+          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
+          </footer>
+        </div>
+      </div>
+    );
+  }
+
+  /** Renders ONE catalog field (same styling as SchemaForm) — clearable strings keep '' as a real value. */
+  function renderField(f: VmEditField) {
+    const v = values[f.key];
+    const set = (val: unknown) => { setValues({ ...values, [f.key]: val }); setFieldErrors({}); };
+    return (
+      <div key={f.key}>
+        <label className="mb-1 flex items-center gap-2 text-sm font-medium text-secondary">
+          {f.label}
+          {f.required && !f.clearable && <span className="text-danger-fg">*</span>}
+        </label>
+        {f.description && <p className="mb-1 text-xs text-faint">{f.description}</p>}
+        {f.enum && f.enum.length > 0 ? (
+          <select value={v === undefined || v === null ? '' : String(v)} onChange={(e) => set(e.target.value === '' ? undefined : e.target.value)}
+            className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm focus:border-focus-ring focus:ring-1 focus:ring-focus-ring">
+            <option value="" disabled>— select —</option>
+            {f.enum.map((opt) => (<option key={String(opt)} value={String(opt)}>{String(opt)}</option>))}
+          </select>
+        ) : f.type === 'boolean' ? (
+          <div className="flex items-center gap-2">
+            <input type="checkbox" checked={v === true} onChange={(e) => set(e.target.checked)}
+              className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring" />
+            <span className="text-sm text-muted-foreground">{v === true ? 'Enabled' : 'Disabled'}</span>
+          </div>
+        ) : f.type === 'number' ? (
+          <input type="number" step="any" inputMode="decimal" value={v === undefined || v === null ? '' : String(v)}
+            onChange={(e) => set(e.target.value === '' ? (f.clearable ? '' : undefined) : Number(e.target.value))}
+            className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm focus:border-focus-ring focus:ring-1 focus:ring-focus-ring" />
+        ) : (
+          <input type="text" value={v === undefined || v === null ? '' : String(v)}
+            onChange={(e) => set(f.clearable ? e.target.value : (e.target.value === '' ? undefined : e.target.value))}
+            className={`w-full rounded-md border border-border px-2.5 py-1.5 text-sm focus:border-focus-ring focus:ring-1 focus:ring-focus-ring ${f.key === 'nodeset' || f.key === 'cpuset' ? 'font-mono' : ''}`} />
+        )}
+        {fieldErrors[f.key] && <p className="mt-1 text-xs text-danger-fg">{fieldErrors[f.key]}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
+      <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <header className="flex items-center justify-between border-b border-border px-4 py-3">
+          <div>
+            <h2 className="text-base font-semibold text-foreground">Edit VM — {row.name}</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">Unchanged fields keep their current value; applies via the plan workflow on {row.deviceName ?? row.deviceId}. Most changes take effect at the guest's next boot.</p>
+          </div>
+          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted"><X size={16} /></button>
+        </header>
+
+        <div className="space-y-4 px-4 py-4">
+          {isReadOnly && (
+            <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+              <EyeOff size={14} className="mt-0.5 shrink-0" />
+              Read-only mode is active — this change cannot be saved or applied. Switch to Plan or Execute in the top bar.
+            </div>
+          )}
+          {loading && (
+            <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 size={14} className="animate-spin" /> Loading current VM settings…</p>
+          )}
+          {error && !reauth && (
+            <div className="rounded border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
+          )}
+
+          {!loading && !error && fields.length > 0 && (
+            <>
+              {needsStopped && (
+                <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+                  <EyeOff size={14} className="mt-0.5 shrink-0" />
+                  Renaming requires a STOPPED VM — stop “{row.name}” first, then reopen this dialog. (All other fields can be changed in any state.)
+                </div>
+              )}
+
+              {pinVcpusBroken && (
+                <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+                  <EyeOff size={14} className="mt-0.5 shrink-0" />
+                  Pin vCPUs requires a CPU pinning (cpuset) — set it to one host CPU per vCPU, or untick the option.
+                </div>
+              )}
+
+              {fields.map(renderField)}
+
+              {changedKeys.length === 0 && !isReadOnly && (
+                <p className="text-xs text-faint">No changes yet — adjust a field above to enable saving.</p>
+              )}
+            </>
+          )}
+        </div>
+
+        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
+          <button
+            type="button"
+            disabled={saving || isReadOnly || needsStopped || pinVcpusBroken || changedKeys.length === 0}
+            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : needsStopped ? 'Stop the VM first (renaming requires it)' : pinVcpusBroken ? 'Set a cpuset for Pin vCPUs, or untick it' : undefined}
+            onClick={() => void submit()}
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {saving && <Loader2 size={12} className="animate-spin" />}
+            {isPlanMode ? 'Save as plan' : 'Edit VM'}
+          </button>
+        </footer>
+
+        {reauth && (
+          <ReauthDialog
+            contextLabel={`Edit VM ${row.name}`}
+            onClose={() => setReauth(false)}
+            onSuccess={async () => {
+              setReauth(false);
+              try { await submit(); } catch { /* dialog stays open */ }
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page component
 // ---------------------------------------------------------------------------
 
@@ -1923,6 +2216,9 @@ export default function Vms() {
   // Generic Edit-device dialog — form rendered from the type's editInputSchema,
   // prefilled via vms.device-get, submitted as a partial-merge vms.device-update.
   const [editTarget, setEditTarget] = useState<DeviceEditTarget | null>(null);
+  // Generic Edit-VM dialog — form rendered from the plugin's vms.vm-edit-schema
+  // catalog, prefilled via vms.vm-get, submitted as a partial-merge vms.vm-update.
+  const [editVmRow, setEditVmRow] = useState<VmRow | null>(null);
 
   function detachDevice(node: VmNode) {
     const row = node.row;
@@ -1982,6 +2278,11 @@ export default function Vms() {
     const row = node.row;
     if (!row || node.devId === undefined || !node.dtype) return;
     setEditTarget({ row, devId: node.devId, dtype: node.dtype });
+  }
+
+  /** Opens the generic Edit-VM dialog for this VM row (its own settings). */
+  function editVm(row: VmRow) {
+    setEditVmRow(row);
   }
 
   // --- Display tree -----------------------------------------------------------------
@@ -2148,7 +2449,7 @@ export default function Vms() {
       // so any future hypervisor plugin (libvirt, Proxmox…) gets this column free.
       header: 'Actions',
       key: 'actions',
-      width: 170,
+      width: 200,
       sortable: false,
       excludeFromExport: true,
       render: (node) => {
@@ -2178,6 +2479,10 @@ export default function Vms() {
           // plugin advertises them via vms.device-types; per-type stopped/one-per-
           // VM rules are enforced inside it).
           { id: 'vms.device-types', label: `Add device to ${r.name}`, icon: <Plus size={14} />, available: hasAction(r.pluginId, 'vms.device-types') && !readOnly, eligible: true },
+          // Generic Edit-VM — the VM's OWN settings (name/description/autostart/
+          // boot method/system clock/NUMA/CPU/memory); per-field stopped rules are
+          // enforced inside the dialog.
+          { id: 'vms.vm-edit-schema', label: `Edit ${r.name}`, icon: <Pencil size={13} />, available: hasAction(r.pluginId, 'vms.vm-edit-schema') && !readOnly, eligible: true },
         ];
 
         return (
@@ -2194,6 +2499,7 @@ export default function Vms() {
                   disabled={!enabled}
                   onClick={() => {
                     if (a.id === 'vms.device-types') setAttachTarget({ row: r });
+                    else if (a.id === 'vms.vm-edit-schema') editVm(r);
                     else if (a.id === 'vms.delete') {
                       if (!window.confirm(`Permanently delete VM "${r.name}"? This is destructive.`)) return;
                       void singleVm(r, a.id, `Delete ${r.name}`);
@@ -2338,6 +2644,15 @@ export default function Vms() {
             target={editTarget}
             stopped={STOPPED_STATES.has(effectiveState(editTarget.row))}
             onClose={() => setEditTarget(null)}
+          />
+        )}
+
+        {/* Generic Edit-VM dialog — form from the plugin's vms.vm-edit-schema, prefilled via vms.vm-get */}
+        {editVmRow && (
+          <EditVmDialog
+            row={editVmRow}
+            stopped={STOPPED_STATES.has(effectiveState(editVmRow))}
+            onClose={() => setEditVmRow(null)}
           />
         )}
 

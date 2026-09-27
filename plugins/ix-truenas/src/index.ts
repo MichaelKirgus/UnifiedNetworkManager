@@ -243,7 +243,29 @@ const identity = resolvePluginIdentity({
   // middleware source), so untouched attributes are preserved. Editable: NIC
   // (bridge/MAC + MAC), DISK (VIRTIO/AHCI type), DISPLAY (resolution/port/
   // password/web — protocol fixed), USB (controller type), CDROM (ISO source).
-  version: '0.19.0',
+  // 0.20.0 — Generic VM-level EDIT (the webapp's pencil button on the VM row
+  // itself): vms.vm-edit-schema advertises every editable VM setting with its
+  // form property + requiresStopped flag; vms.vm-get returns the current values
+  // (form prefill); vms.vm-update sends ONLY the changed fields as a partial-
+  // merge vm.update, verified by re-read. Editable: name (STOPPED only —
+  // appliance rule), description, autostart, boot method (UEFI/UEFI_CSM),
+  // system clock (UTC/LOCAL), NUMA nodeset + CPU cpuset pinning, cores ×
+  // threads topology and memory. TrueNAS's vm.update is a partial merge
+  // (`new = old.copy(); new.update(data)` — verified in the middleware source on
+  // 26.0 BETA); only the name change requires an inactive VM, everything else
+  // takes effect at the guest's next boot.
+  // 0.21.0 — The VM edit catalog now covers EVERY field of the TrueNAS GUI's
+  // VM settings form (the goal: a generic "edit VM" abstraction). Added to
+  // vms.vm-edit-schema / vm-get / vm-update: minimum memory (ballooning,
+  // clearable), strict vCPU pinning toggle (pin_vcpus — cross-validated with
+  // the cpuset), shutdown timeout, suspend-on-snapshot, hide-from-MSR, ensure-
+  // display-device, TPM, Hyper-V enlightenments, CPU mode (HOST-PASSTHROUGH/
+  // CUSTOM) + CPU model (only valid in CUSTOM — auto-cleared otherwise), and
+  // raw QEMU command-line args. All ride the same partial-merge vm.update with
+  // re-read verification; early cross-field checks mirror the appliance's own
+  // validation (min_memory ≤ memory, pin_vcpus ⇒ cpuset, cpu_mode/CUSTOM ⇒
+  // cpu_model) so failures carry a clear message instead of an appliance error.
+  version: '0.21.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });

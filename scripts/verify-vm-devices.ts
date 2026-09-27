@@ -15,7 +15,8 @@
  *   4. SAFE LIVE CYCLE on a STOPPED VM without a display (state never changes):
  *        USB attach (plan workflow) → verify via GET /vms extra.devices → detach → verify gone
  *        NIC attach (bridge, hot-pluggable) → verify new row in inventory    → detach → verify gone
- *        DISPLAY attach (VNC)       → verify + appliance-assigned port      → detach → verify gone   4b. EDIT CYCLES (generic edit contract — vms.device-get prefill + partial-merge
+ *        DISPLAY attach (VNC)       → verify + appliance-assigned port      → detach → verify gone
+ *   4b. EDIT CYCLES (generic edit contract — vms.device-get prefill + partial-merge
         vms.device-update, verified via GET /vms detail, always restored):
         NIC bridge swap on the freshly attached NIC; DISPLAY resolution change
         on the VM's existing console. *   5. NEGATIVE: display attach on a VM that ALREADY has one must fail with the
@@ -97,10 +98,25 @@ async function main(): Promise<void> {
   const catRes = await authed('GET', `/plugins/${PLUGIN_ID}/actions`);
   check('GET /plugins/:id/actions → 200', catRes.status === 200, { status: catRes.status });
   const catalog = ((await catRes.json()) as { actions?: Array<{ id: string; riskLevel: string }> }).actions ?? [];
-  for (const [id, risk] of [['vms.device-types', 'read'], ['vms.disk-choices', 'read'], ['vms.pci-choices', 'read'], ['vms.usb-choices', 'read'], ['vms.nic-choices', 'read'], ['vms.device-get', 'read'], ['vms.disk-attach', 'write'], ['vms.display-attach', 'write'], ['vms.pci-attach', 'write'], ['vms.usb-attach', 'write'], ['vms.nic-attach', 'write'], ['vms.cdrom-attach', 'write'], ['vms.device-update', 'write']] as const) {
+  for (const [id, risk] of [['vms.device-types', 'read'], ['vms.disk-choices', 'read'], ['vms.pci-choices', 'read'], ['vms.usb-choices', 'read'], ['vms.nic-choices', 'read'], ['vms.device-get', 'read'], ['vms.vm-edit-schema', 'read'], ['vms.vm-get', 'read'], ['vms.disk-attach', 'write'], ['vms.display-attach', 'write'], ['vms.pci-attach', 'write'], ['vms.usb-attach', 'write'], ['vms.nic-attach', 'write'], ['vms.cdrom-attach', 'write'], ['vms.device-update', 'write'], ['vms.vm-update', 'write']] as const) {
     const entry = catalog.find((a) => a.id === id);
     check(`catalog has ${id} (${risk})`, Boolean(entry) && entry!.riskLevel === risk, entry ?? `missing`);
   }
+
+  // VM-level edit contract — the field catalog that drives the webapp's Edit-VM dialog.
+  const vmSchemaRes = await authed('POST', `/plugins/${PLUGIN_ID}/actions/execute`, { deviceId, actionId: 'vms.vm-edit-schema', input: {} });
+  check('vms.vm-edit-schema → 200', vmSchemaRes.status === 200, { status: vmSchemaRes.status });
+  const vmFields = (((await vmSchemaRes.json()) as { details?: { fields?: Array<Record<string, unknown>> } }).details?.fields) ?? [];
+  const vmFieldKeys = vmFields.map((f) => String(f['key'] ?? ''));
+  check('vm-edit-schema covers the full GUI field set (21 fields)', ['name', 'description', 'autostart', 'bootloader', 'time', 'nodeset', 'cpuset', 'cores', 'threads', 'memoryMiB', 'minMemoryMiB', 'pinVcpus', 'shutdownTimeoutSec', 'suspendOnSnapshot', 'hideFromMsr', 'ensureDisplayDevice', 'trustedPlatformModule', 'hypervEnlightenments', 'cpuMode', 'cpuModel', 'commandLineArgs'].every((k) => vmFieldKeys.includes(k)), vmFieldKeys);
+  const cpuModeField = vmFields.find((f) => f['key'] === 'cpuMode');
+  check('vm-edit-schema: cpuMode enum HOST-PASSTHROUGH|CUSTOM', Array.isArray(cpuModeField?.['enum']) && (cpuModeField!['enum'] as string[]).join(',') === 'HOST-PASSTHROUGH,CUSTOM', cpuModeField);
+  const nameField = vmFields.find((f) => f['key'] === 'name');
+  check('vm-edit-schema: name is the ONLY requiresStopped field', nameField?.['requiresStopped'] === true && vmFields.every((f) => (f['key'] === 'name') === (f['requiresStopped'] === true)), vmFields.map((f) => `${String(f['key'])}:${Boolean(f['requiresStopped'])}`));
+  const bootloaderField = vmFields.find((f) => f['key'] === 'bootloader');
+  check('vm-edit-schema: bootloader enum UEFI|UEFI_CSM', Array.isArray(bootloaderField?.['enum']) && (bootloaderField!['enum'] as string[]).join(',') === 'UEFI,UEFI_CSM', bootloaderField);
+  const timeField = vmFields.find((f) => f['key'] === 'time');
+  check('vm-edit-schema: time enum UTC|LOCAL', Array.isArray(timeField?.['enum']) && (timeField!['enum'] as string[]).join(',') === 'UTC,LOCAL', timeField);
 
   // --- 2. Read actions through the real webapp path -----------------------------
   // vms.device-types — the descriptor that drives the webapp dialog.
@@ -477,6 +493,144 @@ async function main(): Promise<void> {
             }
           }
         }
+      }
+    }
+  }
+
+  // --- 4c. VM-level EDIT CYCLE (generic vm-edit contract — vms.vm-get prefill +
+  // partial-merge vms.vm-update, always restored): description/autostart/time on
+  // the stopped live-cycle VM, a rename-of-running negative test, then a full
+  // rename round-trip as the final step.
+  if (!stoppedVm) {
+    skip('VM edit cycle', 'no STOPPED VM on this appliance');
+  } else {
+    const vm = stoppedVm;
+
+    // Prefill — vms.vm-get must report every catalog field with a sane type.
+    const getRes = await authed('POST', `/plugins/${PLUGIN_ID}/actions/execute`, { deviceId, actionId: 'vms.vm-get', input: { name: vm.name } });
+    check('vms.vm-get → 200', getRes.status === 200, { status: getRes.status });
+    const got = ((await getRes.json()) as { details?: { state?: string; values?: Record<string, unknown> } }).details ?? {};
+    const vals = (got.values ?? {}) as Record<string, unknown>;
+    check('vm-get prefills name/description/autostart/bootloader/time', String(vals['name'] ?? '') === vm.name && typeof vals['description'] === 'string' && typeof vals['autostart'] === 'boolean' && ['UEFI', 'UEFI_CSM'].includes(String(vals['bootloader'])) && ['UTC', 'LOCAL'].includes(String(vals['time'])), got);
+    check('vm-get prefills cores/threads/memoryMiB as numbers', typeof vals['cores'] === 'number' && typeof vals['threads'] === 'number' && typeof vals['memoryMiB'] === 'number', { cores: vals['cores'], threads: vals['threads'], memoryMiB: vals['memoryMiB'] });
+    check('vm-get prefills the extended GUI fields with sane types', (typeof vals['minMemoryMiB'] === 'number' || vals['minMemoryMiB'] === '') && typeof vals['pinVcpus'] === 'boolean' && typeof vals['shutdownTimeoutSec'] === 'number' && typeof vals['suspendOnSnapshot'] === 'boolean' && typeof vals['hideFromMsr'] === 'boolean' && typeof vals['ensureDisplayDevice'] === 'boolean' && typeof vals['trustedPlatformModule'] === 'boolean' && typeof vals['hypervEnlightenments'] === 'boolean' && ['HOST-PASSTHROUGH', 'CUSTOM'].includes(String(vals['cpuMode'])) && (typeof vals['cpuModel'] === 'string') && typeof vals['commandLineArgs'] === 'string', { minMemoryMiB: vals['minMemoryMiB'], pinVcpus: vals['pinVcpus'], shutdownTimeoutSec: vals['shutdownTimeoutSec'], suspendOnSnapshot: vals['suspendOnSnapshot'], cpuMode: vals['cpuMode'], cpuModel: vals['cpuModel'] });
+
+    const origDescription = String(vals['description'] ?? '');
+    const origAutostart = vals['autostart'] === true;
+    const origTime = String(vals['time']);
+    const newTime = origTime === 'UTC' ? 'LOCAL' : 'UTC';
+    console.log(`  INFO vm edit: description "${origDescription}" → "UNM E2E edit test", autostart ${origAutostart} → !, time ${origTime} → ${newTime}`);
+
+    const updPlan = await runPlan('vms.vm-update', { name: vm.name, fields: { description: 'UNM E2E edit test', autostart: !origAutostart, time: newTime } });
+    check('vm-update (description/autostart/time) plan succeeded', updPlan.status === 'succeeded', { status: updPlan.status, error: updPlan.error, steps: (updPlan.steps ?? []).map((s) => `${s.actionId}:${s.status}`) });
+    const updDetails = stepResult(updPlan, 'vms.vm-update')?.['details'] as Record<string, unknown> | undefined;
+    check('vm-update result reports the updated fields + verified', Array.isArray(updDetails?.['updated']) && ['description', 'autostart', 'time'].every((f) => (updDetails!['updated'] as string[]).includes(f)), updDetails);
+
+    // Verify via a fresh vms.vm-get (live appliance read — no inventory lag).
+    const getRes2 = await authed('POST', `/plugins/${PLUGIN_ID}/actions/execute`, { deviceId, actionId: 'vms.vm-get', input: { name: vm.name } });
+    const vals2 = (((await getRes2.json()) as { details?: { values?: Record<string, unknown> } }).details?.values ?? {}) as Record<string, unknown>;
+    check('vm-get shows the NEW description/autostart/time after edit', String(vals2['description']) === 'UNM E2E edit test' && vals2['autostart'] === !origAutostart && String(vals2['time']) === newTime, vals2);
+
+    // The persisted inventory (GET /vms) must carry the new description + autostart too.
+    rows = await settleVms((rs) => { const r = rs.find((x) => x.name === vm.name); return String(r?.extra?.['description'] ?? '') === 'UNM E2E edit test' && (r?.extra?.['autostart'] as boolean | undefined) === !origAutostart; });
+    const invRow = rows.find((r) => r.name === vm.name)!;
+    check('GET /vms extra shows the NEW description + autostart', String(invRow.extra?.['description']) === 'UNM E2E edit test' && (invRow.extra?.['autostart'] as boolean | undefined) === !origAutostart, { description: invRow.extra?.['description'], autostart: invRow.extra?.['autostart'] });
+
+    // Restore the original settings.
+    const restorePlan = await runPlan('vms.vm-update', { name: vm.name, fields: { description: origDescription, autostart: origAutostart, time: origTime } });
+    check('vm-update (restore original settings) plan succeeded', restorePlan.status === 'succeeded', { status: restorePlan.status, error: restorePlan.error });
+    const getRes3 = await authed('POST', `/plugins/${PLUGIN_ID}/actions/execute`, { deviceId, actionId: 'vms.vm-get', input: { name: vm.name } });
+    const vals3 = (((await getRes3.json()) as { details?: { values?: Record<string, unknown> } }).details?.values ?? {}) as Record<string, unknown>;
+    check('vm-get shows the ORIGINAL description/autostart/time after restore', String(vals3['description']) === origDescription && vals3['autostart'] === origAutostart && String(vals3['time']) === origTime, vals3);
+
+    // EXTENDED edit cycle — the 0.21.0 GUI fields: min memory (halved or set to
+    // 512), shutdown timeout (+/- 30s) and two booleans flipped. Always restored.
+    const origMinMem = vals['minMemoryMiB'];
+    const newMinMem = typeof origMinMem === 'number' && origMinMem > 0 ? Math.max(512, Math.floor(origMinMem / 2)) : 512;
+    const origTimeout = Number(vals['shutdownTimeoutSec'] ?? 90);
+    const newTimeout = origTimeout >= 3600 ? origTimeout - 30 : origTimeout + 30;
+    const origSuspend = vals['suspendOnSnapshot'] === true;
+    const origHideMsr = vals['hideFromMsr'] === true;
+    console.log(`  INFO vm edit (extended): minMemory ${JSON.stringify(origMinMem)} → ${newMinMem}, shutdownTimeout ${origTimeout} → ${newTimeout}, suspendOnSnapshot ${origSuspend} → !, hideFromMsr ${origHideMsr} → !`);
+
+    const extPlan = await runPlan('vms.vm-update', { name: vm.name, fields: { minMemoryMiB: newMinMem, shutdownTimeoutSec: newTimeout, suspendOnSnapshot: !origSuspend, hideFromMsr: !origHideMsr } });
+    check('vm-update (extended GUI fields) plan succeeded', extPlan.status === 'succeeded', { status: extPlan.status, error: extPlan.error, steps: (extPlan.steps ?? []).map((s) => `${s.actionId}:${s.status}`) });
+    const extDetails = stepResult(extPlan, 'vms.vm-update')?.['details'] as Record<string, unknown> | undefined;
+    check('vm-update (extended) result reports the updated fields', Array.isArray(extDetails?.['updated']) && ['minMemoryMiB', 'shutdownTimeoutSec', 'suspendOnSnapshot', 'hideFromMsr'].every((f) => (extDetails!['updated'] as string[]).includes(f)), extDetails);
+
+    const getRes4 = await authed('POST', `/plugins/${PLUGIN_ID}/actions/execute`, { deviceId, actionId: 'vms.vm-get', input: { name: vm.name } });
+    const vals4 = (((await getRes4.json()) as { details?: { values?: Record<string, unknown> } }).details?.values ?? {}) as Record<string, unknown>;
+    check('vm-get shows the NEW extended values after edit', Number(vals4['minMemoryMiB']) === newMinMem && Number(vals4['shutdownTimeoutSec']) === newTimeout && vals4['suspendOnSnapshot'] === !origSuspend && vals4['hideFromMsr'] === !origHideMsr, { minMemoryMiB: vals4['minMemoryMiB'], shutdownTimeoutSec: vals4['shutdownTimeoutSec'], suspendOnSnapshot: vals4['suspendOnSnapshot'], hideFromMsr: vals4['hideFromMsr'] });
+
+    // NEGATIVE — minimum memory ABOVE the maximum must be rejected pre-RPC.
+    const maxMem = Number(vals['memoryMiB']);
+    if (Number.isFinite(maxMem) && maxMem > 0) {
+      const negMemPlan = await runPlan('vms.vm-update', { name: vm.name, fields: { minMemoryMiB: maxMem + 1 } });
+      check('vm-update min_memory > memory FAILED (not succeeded)', negMemPlan.status === 'failed', { status: negMemPlan.status });
+      const negMemDetails = stepResult(negMemPlan, 'vms.vm-update')?.['details'] as Record<string, unknown> | undefined;
+      check('failure message names the minimum/maximum memory rule', /minimum memory/i.test(String(negMemDetails?.['error'] ?? '')), negMemDetails);
+    } else {
+      skip('min_memory > memory negative test', 'no numeric maximum memory reported');
+    }
+
+    // Restore the extended fields.
+    const extRestorePlan = await runPlan('vms.vm-update', { name: vm.name, fields: { minMemoryMiB: origMinMem === '' ? '' : (origMinMem as number), shutdownTimeoutSec: origTimeout, suspendOnSnapshot: origSuspend, hideFromMsr: origHideMsr } });
+    check('vm-update (restore extended GUI fields) plan succeeded', extRestorePlan.status === 'succeeded', { status: extRestorePlan.status, error: extRestorePlan.error });
+    const getRes5 = await authed('POST', `/plugins/${PLUGIN_ID}/actions/execute`, { deviceId, actionId: 'vms.vm-get', input: { name: vm.name } });
+    const vals5 = (((await getRes5.json()) as { details?: { values?: Record<string, unknown> } }).details?.values ?? {}) as Record<string, unknown>;
+    check('vm-get shows the ORIGINAL extended values after restore', (origMinMem === '' ? String(vals5['minMemoryMiB']) : Number(vals5['minMemoryMiB'])) === origMinMem && Number(vals5['shutdownTimeoutSec']) === origTimeout && vals5['suspendOnSnapshot'] === origSuspend && vals5['hideFromMsr'] === origHideMsr, { minMemoryMiB: vals5['minMemoryMiB'], shutdownTimeoutSec: vals5['shutdownTimeoutSec'], suspendOnSnapshot: vals5['suspendOnSnapshot'], hideFromMsr: vals5['hideFromMsr'] });
+
+    // NEGATIVE — renaming a RUNNING VM must fail with the stopped-VM rule (no
+    // appliance state changes: the SAME name is sent, so even a broken guard would
+    // be a no-op merge).
+    const runningVm = rows.find((r) => r.state === 'RUNNING');
+    if (!runningVm) {
+      skip('rename-while-running negative test', 'no RUNNING VM on this appliance');
+    } else {
+      const negPlan = await runPlan('vms.vm-update', { name: runningVm.name, fields: { name: runningVm.name } });
+      check('vm-update rename of a RUNNING VM FAILED (not succeeded)', negPlan.status === 'failed', { status: negPlan.status });
+      const negDetails = stepResult(negPlan, 'vms.vm-update')?.['details'] as Record<string, unknown> | undefined;
+      check('failure message names the STOPPED-VM rule', /STOPPED/i.test(String(negDetails?.['error'] ?? '')), negDetails);
+    }
+
+    // RENAME round-trip on the stopped VM (final step — everything above already
+    // used the original name). Restore is guaranteed via try/finally with a direct
+    // RPC fallback if the plan workflow fails.
+    const renamed = `${vm.name}_E2E`;
+    let renameDone = false;
+    try {
+      const renPlan = await runPlan('vms.vm-update', { name: vm.name, fields: { name: renamed } });
+      check('vm-update (rename) plan succeeded', renPlan.status === 'succeeded', { status: renPlan.status, error: renPlan.error, steps: (renPlan.steps ?? []).map((s) => `${s.actionId}:${s.status}`) });
+      const getNew = await authed('POST', `/plugins/${PLUGIN_ID}/actions/execute`, { deviceId, actionId: 'vms.vm-get', input: { name: renamed } });
+      check('vm-get finds the VM under its NEW name', getNew.status === 200 && String((((await getNew.json()) as { details?: { values?: Record<string, unknown> } }).details?.values ?? {})['name']) === renamed, null);
+      const getOld = await authed('POST', `/plugins/${PLUGIN_ID}/actions/execute`, { deviceId, actionId: 'vms.vm-get', input: { name: vm.name } });
+      // Direct-execute returns 409 with the error at top level on action failure.
+      const oldBody = (await getOld.json()) as { error?: string; details?: { error?: string } };
+      check('vm-get no longer finds the OLD name', /not found/i.test(String(oldBody.error ?? oldBody.details?.error ?? '')), null);
+      renameDone = true;
+    } finally {
+      if (renameDone) {
+        let restored = false;
+        try {
+          const backPlan = await runPlan('vms.vm-update', { name: renamed, fields: { name: vm.name } });
+          restored = backPlan.status === 'succeeded';
+          check('vm-update (restore original name) plan succeeded', restored, { status: backPlan.status, error: backPlan.error });
+        } catch (e) {
+          console.error(`  FAIL rename restore via plan failed — trying direct RPC:`, e instanceof Error ? e.message : String(e));
+        }
+        if (!restored && tClient && tCreds) {
+          try {
+            const vmsRaw = await directRpc('vm.query', []) as Record<string, unknown>[];
+            const row2 = (vmsRaw ?? []).find((r) => r['name'] === renamed);
+            if (row2 && typeof row2['id'] === 'number') {
+              await directRpc('vm.update', [row2['id'], { name: vm.name }]);
+              restored = Boolean(((await directRpc('vm.query', [])) as Record<string, unknown>[])?.find((r) => r['name'] === vm.name));
+            }
+          } catch (e) {
+            console.error(`  FAIL rename restore via direct RPC failed — MANUAL FIX NEEDED on ${renamed}:`, e instanceof Error ? e.message : String(e));
+          }
+        }
+        check('restore: original VM name back', restored);
       }
     }
   }
