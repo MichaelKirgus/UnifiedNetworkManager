@@ -24,6 +24,8 @@ import {
   resolveHttpPort,
   resolveSshPort,
   quickActionHandler,
+  stateHandler,
+  validateInput,
   buildWebUiUrl,
   warnOnce,
   catalogFirmwareRow,
@@ -35,6 +37,10 @@ import { LcosOptions, getLcosInventory, readLcosClock, walkLcosCounters } from '
 import { deriveSecurityChecks } from './security';
 import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 import { DEVICE_MODELS } from './deviceModels';
+import { LcosWebClient, parseLcosConfigText } from './webapi';
+import { registry as actionRegistry, type LxActionContext } from './actions';
+import { buildPlan, PlanningError } from './plan';
+import { buildLxState } from './state';
 
 /** Every firmware line known across the LCOS-LX catalog — the Updates page
  * compares a device's live swVersion against this set (always in sync with
@@ -61,13 +67,19 @@ const identity = resolvePluginIdentity({
   // row from the live swVersion vs the static LCOS-LX release catalog
   // (available-without-apply — LANCOM MIBs are read-only, OS updates go through
   // the web UI).
-  version: '0.2.0',
+  // 0.3.0 — Configuration over the vendor web-UI API (ubus JSON-RPC at POST
+  // /ubus): 'configuration' + 'planning' + 'deviceState' capabilities, a `web`
+  // credential slot, and an action catalog covering system identity, WLAN
+  // networks/radios/encryption profiles, interface VLANs and WLC/CAPWAP.
+  // Writes are single-cell updates verified by re-read; flash persistence is an
+  // explicit separate step. No destructive actions (reset/reboot) are exposed.
+  version: '0.3.0',
   vendors: ['lancom'],
   // monitoring + inventory over the LCOS-LX MIB, plus an interactive SSH console
   // ('sshConsole') — LX access points expose a CLI shell over SSH (port 22).
   // securityChecks: WiFi cipher strength + PSK brute-force attempts derived from
   // the already-collected snapshot (no extra SNMP walks).
-  capabilities: ['monitoring', 'inventory', 'sshConsole', 'updates', 'quickActions', 'securityChecks'],
+  capabilities: ['monitoring', 'inventory', 'sshConsole', 'updates', 'quickActions', 'securityChecks', 'configuration', 'planning', 'deviceState'],
 });
 
 /**
@@ -257,9 +269,16 @@ const server = createPluginServer({
     // username/password over SSH — no public keys.
     credentialSlots: [
       { name: 'ssh', secretType: 'usernamePassword', required: false, description: 'SSH login (port 22) for the interactive web console — username/password only' },
+      // Web-UI login for configuration (ubus JSON-RPC at POST /ubus). The
+      // primary SNMP secret cannot authenticate there — a separate slot is bound.
+      { name: 'web', secretType: 'usernamePassword', required: false, description: 'Web-UI login (HTTPS port 443) for configuration over the vendor ubus API — username/password' },
     ],
     metrics: DISCOVER_METRICS,
     options: PLUGIN_OPTIONS,
+    // The full action catalog (single-device actions) + module grouping. One
+    // registry serves /discover, /plan and /config — see src/actions.ts.
+    actions: actionRegistry.listCatalog(),
+    modules: actionRegistry.listModules(),
     // Quick actions for the Devices page "Device Actions" column. The web-UI URL
     // is resolved by THIS plugin (port = the configured httpsPort option);
     // shell reuses the existing console dialog.
@@ -742,6 +761,174 @@ app.post('/monitoring', async (req, res) => {
     return fail('critical', (err as Error).message);
   }
 });
+
+/** Resolves the bound `web` credential slot (ubus login). */
+function resolveWebCredentials(credentials: Record<string, unknown>): { web?: { username: string; password: string }; error?: string } {
+  const slots = (credentials.slots && typeof credentials.slots === 'object' ? credentials.slots : {}) as Record<string, Record<string, string>>;
+  const slot = slots['web'];
+  if (!slot || typeof slot.username !== 'string' || slot.username.length === 0) {
+    return { error: 'No web credential bound — bind a usernamePassword secret to the assignment\'s "web" slot for configuration.' };
+  }
+  return { web: { username: slot.username, password: typeof slot.password === 'string' ? slot.password : '' } };
+}
+
+/** True when an error is a transient transport failure (worth re-dispatching). */
+function isTransientTransportError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /timed out|timeout|ECONNREFUSED|ECONNRESET|ENETUNREACH|EAI_AGAIN|socket hang up/i.test(msg);
+}
+
+/**
+ * Executes ONE action step against one AP. This is the unit of work the API's
+ * config-job worker dispatches — either a single-device job (legacy shape:
+ * `{action, payload}`) or one step of a multi-device plan (registry shape:
+ * `{actionId, input, credentials}`). The plugin owns ALL logic: it validates
+ * the input against the action's schema and runs the executor. The API only
+ * propagates — it never interprets payloads.
+ */
+app.post('/config', async (req, res) => {
+  const body = req.body ?? {};
+  const deviceId = typeof body.deviceId === 'string' ? body.deviceId : null;
+  const managementAddress = typeof body.managementAddress === 'string' ? body.managementAddress : '';
+
+  // Registry shape preferred; legacy `{action, payload}` maps onto it.
+  const actionId: string | undefined = typeof body.actionId === 'string' ? body.actionId : (typeof body.action === 'string' ? body.action : undefined);
+  const input: Record<string, unknown> =
+    body.input && typeof body.input === 'object'
+      ? (body.input as Record<string, unknown>)
+      : body.payload && typeof body.payload === 'object'
+        ? (body.payload as Record<string, unknown>)
+        : {};
+
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+  if (!actionId) {
+    res.status(400).json({ success: false, result: { error: 'Missing actionId (or legacy "action")' } });
+    return;
+  }
+  if (!managementAddress) {
+    res.status(400).json({ success: false, result: { error: 'Missing managementAddress' } });
+    return;
+  }
+
+  const action = actionRegistry.getAction(actionId);
+  if (!action) {
+    res.status(400).json({ success: false, result: { error: `Unknown action "${actionId}"` } });
+    return;
+  }
+
+  // Credentials: the bound `web` slot carries the ubus login (the primary SNMP
+  // secret cannot authenticate against /ubus).
+  const credsFields = (body.credentials && typeof body.credentials === 'object' ? body.credentials : {}) as Record<string, unknown>;
+  const { web, error } = resolveWebCredentials(credsFields);
+  if (error || !web) {
+    res.status(200).json({ success: false, result: { error: error ?? 'Missing web credentials.' } });
+    return;
+  }
+
+  // Validate input against the action's declared schema — the plugin is the
+  // authority on what it accepts; the API only checks that the id exists.
+  const issues = validateInput(action.inputSchema, input);
+  if (issues.length > 0) {
+    res.status(200).json({ success: false, result: { error: `Invalid input for ${actionId}: ${issues.map((i) => `${i.path}: ${i.message}`).join('; ')}` } });
+    return;
+  }
+
+  try {
+    // Certificate pinning — a config action transmits real credentials; refuse
+    // the connection when the AP's key differs from UNM's inventory.
+    await assertPinned(req, managementAddress, 'auto', portsOf(settings));
+
+    const ctx: LxActionContext = {
+      host: hostFromAddress(managementAddress) ?? '',
+      address: managementAddress,
+      deviceId: typeof deviceId === 'string' ? deviceId : undefined,
+      web,
+      timeoutMs: clampInt(settings.timeoutMs, 1_000, 30_000, 5_000),
+    };
+
+    const result = await action.execute(ctx, input);
+    if (!result.success) {
+      logger.warn(`Config action ${actionId} reported failure for ${managementAddress}: ${typeof result.error === 'string' ? result.error : JSON.stringify(result)}`, { deviceId: typeof deviceId === 'string' ? deviceId : null, context: { host: managementAddress, actionId } });
+    }
+    res.status(200).json({ success: result.success, result: { ...result } });
+  } catch (err) {
+    logger.error(`Config action ${actionId} failed for ${managementAddress}: ${(err as Error).message}`, { deviceId: typeof deviceId === 'string' ? deviceId : null, context: { host: managementAddress, actionId } });
+    // Transport-level failures (AP down / not ready yet) are transient — the plan
+    // executor re-dispatches them per the plan's retry policy. Protocol errors
+    // already come back as ok:false results and stay hard.
+    const retryable = isTransientTransportError(err);
+    res.status(200).json({ success: false, result: { error: (err as Error).message, ...(retryable ? { retryable: true } : {}) } });
+  }
+});
+
+/**
+ * Plans a multi-device intent (or fans out a single action across a batch).
+ * The plugin does ALL the planning — v1 is pure fan-out, one step per device.
+ *
+ * Body: { intent: { actionId, inputs }, devices: [{ deviceId, managementAddress, credentials }] }
+ */
+app.post('/plan', async (req, res) => {
+  const body = req.body ?? {};
+  logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
+
+  const planReq = {
+    intent: {
+      actionId: typeof body.intent?.actionId === 'string' ? body.intent.actionId : '',
+      inputs: (body.intent?.inputs && typeof body.intent.inputs === 'object' ? body.intent.inputs : {}) as Record<string, unknown>,
+    },
+    devices: Array.isArray(body.devices)
+      ? (body.devices as Array<Record<string, unknown>>).map((d) => ({
+          deviceId: String(d.deviceId),
+          managementAddress: String(d.managementAddress ?? ''),
+          credentials: (d.credentials && typeof d.credentials === 'object' ? d.credentials : {}) as Record<string, unknown>,
+        }))
+      : [],
+  };
+
+  try {
+    const plan = await buildPlan(planReq);
+    res.status(200).json({ plan });
+  } catch (err) {
+    if (err instanceof PlanningError) {
+      logger.error(`Planning ${planReq.intent.actionId} failed: ${err.message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    logger.error(`Planning ${planReq.intent.actionId} failed unexpectedly: ${(err as Error).message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+/**
+ * POST /state — the dynamic device-state document for the UNM Config page.
+ * Fetches the running configuration via the bound `web` slot and parses it into
+ * typed sections (System, WLAN Networks, Radios, Encryption Profiles,
+ * Interfaces & VLANs, WLC/CAPWAP). The stateHandler wrapper guarantees an
+ * Express-4-safe JSON error envelope.
+ */
+app.post(
+  '/state',
+  stateHandler(async (body, req) => {
+    const settings = readSettings(req, PLUGIN_OPTIONS);
+    logger.setEnabled(settings.logToApi === true);
+
+    if (!body.managementAddress) throw new Error('Missing managementAddress');
+
+    // Certificate pinning — /state reads live data with credentials; verify first.
+    await assertPinned(req, body.managementAddress, 'auto', portsOf(settings));
+
+    const { web, error } = resolveWebCredentials((body.credentials ?? {}) as Record<string, unknown>);
+    if (error || !web) throw new Error(error ?? 'Missing web credentials.');
+
+    const c = new LcosWebClient(body.managementAddress, web.username, web.password, { timeoutMs: clampInt(settings.timeoutMs, 1_000, 30_000, 5_000) });
+    try {
+      return buildLxState(parseLcosConfigText(await c.getConfigText()));
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  }, 'lancom-lx-plugin')
+);
 
 // listen() binds the conventional plugin port (4080 by default) and starts
 // mDNS advertising — both handled by @unm/plugin-sdk.
