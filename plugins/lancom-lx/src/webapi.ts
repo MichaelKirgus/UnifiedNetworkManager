@@ -277,11 +277,37 @@ export class LcosWebClient {
     return out.results[0]?.errortag ?? -1;
   }
 
-  /** Deletes one table row (delTableRow) — identified by its index-column value(s). */
-  async delTableRow(tableOid: string, rowIndex: string | number): Promise<number> {
-    const param = [{ oid: `${tableOid}.${rowIndex}.1`, val: String(rowIndex) }];
+  /**
+   * Deletes one table row (delTableRow) — identified by its index-column value(s).
+   * `indexCells` overrides the default single-index addressing for multi-column-
+   * index tables (e.g. Untagged-VLAN 13.2.70.8, keyed by Port + VLAN): pass
+   * `{ '1': 'ETH1', '2': '5' }` to address the composite row explicitly.
+   */
+  async delTableRow(tableOid: string, rowIndex: string | number, indexCells?: Record<string, string>): Promise<number> {
+    const param = indexCells
+      ? Object.entries(indexCells).map(([col, val]) => ({ oid: `${tableOid}.${rowIndex}.${col}`, val }))
+      : [{ oid: `${tableOid}.${rowIndex}.1`, val: String(rowIndex) }];
     const out = await this.transact([{ func: 'delTableRow', param: [tableOid, param] }]);
     return out.results[0]?.errortag ?? -1;
+  }
+
+  /**
+   * Reads a LIVE status table (13.1.x) via getTable — these OIDs are NOT part of
+   * the GetConfig text dump. Returns rows as `{ indexPath, cells }` where
+   * `indexPath` is the dot-joined values of all idx-flagged columns in header
+   * order and `cells` maps column oid → string value (empty for missing).
+   */
+  async getStatusTable(tableOid: string): Promise<{ indexPath: string; cells: Map<string, string> }[] | null> {
+    const t = await this.getTable(tableOid);
+    if (!t) return null;
+    // Header order defines the index-path segment order.
+    const idxCols = t.header.filter((h) => h.idx).map((h) => String(h.oid));
+    return t.rows.map((row: any[]) => {
+      const cells = new Map<string, string>();
+      for (const c of row ?? []) cells.set(String(c.oid), c.val == null ? '' : String(c.val));
+      const indexPath = idxCols.length > 0 ? idxCols.map((c) => cells.get(c) ?? '').join('.') : '1';
+      return { indexPath, cells };
+    });
   }
 
   /** Persists the running config to flash (makeChangesPermanent). */

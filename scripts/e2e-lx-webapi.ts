@@ -2,7 +2,7 @@
  * E2E check for the lancom-lx web-UI (ubus) configuration transport.
  *
  * Drives the live stack against AP_Wohnzimmer (10.25.1.2, production device):
- *   login (2FA) → verify /discover catalog v0.4.0 (actions + `web` slot)
+ *   login (2FA) → verify /discover catalog v0.5.0 (actions + `web` slot)
  *   → bind the web credential slot to the assignment (UNM-side only)
  *   → GET /devices/:id/state (Config page document — sections + items)
  *   → plan + execute a READ action (wlan.networks.read) through the full
@@ -67,7 +67,7 @@ async function main(): Promise<void> {
   const plugins = ((await authed('GET', '/plugins').then((r) => r.json())) as Array<Record<string, any>>).find((p) => p.id === LX_PLUGIN_ID);
   check('plugin registered', Boolean(plugins), { id: LX_PLUGIN_ID });
   if (!plugins) throw new Error('plugin not registered');
-  check('version is 0.4.0', plugins.version === '0.4.0', plugins.version);
+  check('version is 0.5.0', plugins.version === '0.5.0', plugins.version);
   const caps: string[] = Array.isArray(plugins.capabilities) ? plugins.capabilities : [];
   for (const c of ['configuration', 'planning', 'deviceState']) {
     check(`capability "${c}" advertised`, caps.includes(c), caps);
@@ -81,6 +81,15 @@ async function main(): Promise<void> {
   const actionIds = new Set(actions.map((a) => a.id));
   for (const id of ['config.read', 'wlan.networks.read', 'radios.read', 'encryption.profiles.read', 'ip.interfaces.read', 'wlc.read', 'system.name.set', 'radio.channel.set', 'ssid.vlan.set', 'wlan.network.add', 'wlc.address.set', 'config.persist', 'config.backup.download', 'config.restore']) {
     check(`action "${id}" in catalog`, actionIds.has(id), [...actionIds]);
+  }
+  // v0.5.0 — switch/protocol reads + writes.
+  for (const id of ['ports.read', 'ntp.read', 'snmp.read', 'stp.read', 'lacp.read', 'ntp.server.add', 'ntp.server.remove', 'ntp.server.set-active', 'ntp.operating.set', 'snmp.settings.set', 'snmp.community.add', 'stp.settings.set', 'stp.port.set', 'lacp.bundle.set', 'lacp.port.set', 'vlan.untagged.set', 'l2m.port.set', 'poe.passthrough.set']) {
+    check(`v0.5 action "${id}" in catalog`, actionIds.has(id), [...actionIds]);
+  }
+  // New writes must be riskLevel write (never dangerous/read).
+  for (const id of ['ntp.server.add', 'stp.settings.set', 'vlan.untagged.set', 'l2m.port.set']) {
+    const a = actions.find((x) => x.id === id);
+    check(`v0.5 action "${id}" is riskLevel write`, a?.riskLevel === 'write', a);
   }
   // config.restore must be flagged dangerous (explicit user choice only).
   const restoreAction = actions.find((a) => a.id === 'config.restore');
@@ -134,6 +143,42 @@ async function main(): Promise<void> {
     check('WLC controller address populated', typeof fields.Address === 'string' && fields.Address.length > 0, fields);
   }
 
+  // v0.5.0 — switch ports + protocol sections.
+  const sw = byId.get('switch-ports');
+  check('Switch Ports section present (kind=switch)', Boolean(sw) && sw.kind === 'switch', { ids: [...byId.keys()], kind: sw?.kind });
+  if (sw?.items) {
+    const portTitles = sw.items.map((i: any) => i.title);
+    check('Switch Ports lists ETH1 and ETH2', portTitles.includes('ETH1') && portTitles.includes('ETH2'), portTitles);
+    const eth1 = sw.items.find((i: any) => i.title === 'ETH1');
+    // Live AP: ETH1 is up in BUNDLE-0 (LACP, Degraded while the partner link is down).
+    check('ETH1 item shows live link state', typeof eth1?.fields?.Link === 'string' && eth1.fields.Link.length > 0, eth1?.fields);
+    check('ETH1 item carries per-port actions', Array.isArray(eth1?.actions) && eth1.actions.some((a: any) => a.actionId === 'vlan.untagged.set') && eth1.actions.some((a: any) => a.actionId === 'l2m.port.set'), eth1?.actions);
+    check('Switch Ports section carries ports.read action', Array.isArray(sw.actions) && sw.actions.some((a: any) => a.actionId === 'ports.read'), sw.actions);
+  }
+
+  const ntpSec = byId.get('ntp');
+  check('NTP section present with agent item', Boolean(ntpSec?.items?.[0]), { ids: [...byId.keys()] });
+  if (ntpSec?.items) {
+    // Live AP has NTP enabled with ≥1 active server.
+    const servers = ntpSec.items.slice(1);
+    check('NTP section lists configured servers', servers.length >= 1, { count: servers.length });
+    check('NTP server items carry set-active + remove actions', servers.every((i: any) => Array.isArray(i.actions) && i.actions.some((a: any) => a.actionId === 'ntp.server.set-active') && i.actions.some((a: any) => a.actionId === 'ntp.server.remove')), { count: servers.length });
+  }
+
+  const snmpSec = byId.get('snmp');
+  check('SNMP section present with agent item', Boolean(snmpSec?.items?.[0]), { ids: [...byId.keys()] });
+  if (snmpSec?.items) {
+    // Live AP runs the default "public" community.
+    const comm = snmpSec.items.find((i: any) => i.title === 'public');
+    check('SNMP section lists the public community', Boolean(comm), { titles: snmpSec.items.map((i: any) => i.title) });
+  }
+
+  const stpSec = byId.get('stp');
+  check('STP section present with bridge item + per-port rows', Boolean(stpSec?.items?.[0]) && (stpSec.items.length ?? 0) >= 3, { count: stpSec?.items?.length });
+
+  const lacpSec = byId.get('lacp');
+  check('LACP section present with BUNDLE-0', Boolean(lacpSec?.items?.some((i: any) => i.title === 'BUNDLE-0')), { titles: lacpSec?.items?.map((i: any) => i.title) });
+
   // --- 4. plan + execute a READ action through the full config-job path ---------------
   const created = await authed('POST', '/plans', {
     pluginId: LX_PLUGIN_ID,
@@ -170,6 +215,42 @@ async function main(): Promise<void> {
   check('wlan.networks.read returned a count field', typeof details.count === 'number' && (details.count as number) > 0, { keys: Object.keys(details), count: details.count });
   const networks = Array.isArray(details.networks) ? (details.networks as Array<Record<string, unknown>>) : [];
   check('at least one SSID row with a name', networks.some((n) => typeof n.ssid === 'string' && (n.ssid as string).length > 0), { count: networks.length });
+
+  // --- 4b. ports.read — live switch status through the full config-job path --------------
+  const createdPorts = await authed('POST', '/plans', {
+    pluginId: LX_PLUGIN_ID,
+    intentActionId: 'ports.read',
+    inputs: {},
+    devices: [{ deviceId: DEVICE_ID }],
+  });
+  const portsPlan = (await createdPorts.json()) as { id?: string };
+  check('ports.read plan created', createdPorts.status === 201 && Boolean(portsPlan.id), { status: createdPorts.status });
+
+  if (portsPlan.id) {
+    await authed('POST', `/plans/${portsPlan.id}/execute`);
+    let finalPorts: Record<string, unknown> | null = null;
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 2_000));
+      const detail = (await authed('GET', `/plans/${portsPlan.id}`).then((r) => r.json())) as Record<string, unknown>;
+      if (detail && ['succeeded', 'failed', 'cancelled'].includes(String(detail.status))) { finalPorts = detail; break; }
+    }
+    check('ports.read plan finished', Boolean(finalPorts), finalPorts?.status);
+    const pSteps = ((finalPorts?.steps ?? []) as Array<{ actionId: string; status: string; result?: Record<string, any> | null }>);
+    const pStep = pSteps.find((s) => s.actionId === 'ports.read') ?? {};
+    check('ports.read step succeeded', pStep.status === 'succeeded', { status: pStep.status, result: pStep.result });
+    const pInner = ((pStep.result?.result ?? pStep.result) ?? {}) as Record<string, unknown>;
+    const pDetails = ((pInner.details ?? {}) as Record<string, any>);
+    const pPorts: Array<Record<string, any>> = Array.isArray(pDetails.ports) ? pDetails.ports : [];
+    check('ports.read returned ETH1 + ETH2', pPorts.some((p) => p.port === 'ETH1') && pPorts.some((p) => p.port === 'ETH2'), { ports: pPorts.map((p) => p.port) });
+    const eth1 = pPorts.find((p) => p.port === 'ETH1');
+    check('ETH1 has live link state + LACP membership', Boolean(eth1?.linkActive === true && eth1?.lacp?.bundle), { eth1: JSON.stringify(eth1).slice(0, 300) });
+    const bundles: Array<Record<string, any>> = Array.isArray(pDetails.bundles) ? pDetails.bundles : [];
+    check('ports.read reports BUNDLE-0 with members', bundles.some((b) => b.bundle === 'BUNDLE-0' && Array.isArray(b.ports) && b.ports.length >= 1), { bundles: JSON.stringify(bundles).slice(0, 300) });
+    check('ports.read reports PoE input type', typeof pDetails.poe?.inputType === 'string' && (pDetails.poe.inputType as string).length > 0, pDetails.poe);
+
+    const delPorts = await authed('DELETE', `/plans/${portsPlan.id}`);
+    check('ports.read plan deleted (cleanup)', delPorts.status === 200 || delPorts.status === 204, { status: delPorts.status });
+  }
 
   // --- 5. mutating plan → best-effort backup step + file-repo round-trip -----------------
   // system.name.set to the AP's CURRENT name — a write transaction that LCOS

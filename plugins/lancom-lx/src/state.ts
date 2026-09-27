@@ -1,12 +1,36 @@
 /**
  * Builds the dynamic device-state document for the UNM Config page from a
- * parsed LCOS GetConfig dump (see webapi.ts). Every section maps to one of the
- * plugin's catalog actions — item `actions` carry prefill so the webapp's
- * ActionDialog opens with the right values.
+ * parsed LCOS GetConfig dump (see webapi.ts) plus optional LIVE status data
+ * (port link state, LACP bundle state, counters — OIDs that are NOT in the
+ * config text). Every section maps to one of the plugin's catalog actions —
+ * item `actions` carry prefill so the webapp's ActionDialog opens with the
+ * right values.
  */
 
 import { DeviceStateResponse, StateSection } from '@unm/plugin-sdk';
 import { tableCell, type ParsedLcosConfig } from './webapi';
+
+/** Live status rows fetched via getTable (13.1.x OIDs — not in GetConfig text). */
+export interface LxLiveStatus {
+  /** 13.1.5.99 Ports: cells 1 Port, 2 Link-Active, 3 Connector, 4 MAC. */
+  ports: { indexPath: string; cells: Map<string, string> }[] | null;
+  /** 13.1.5.44 LACP status: cells 1 Bundle, 2 State, 3 Speed, 6 Local-MAC, 8 Partner-MAC, 10 Local-Ports, 11 Bundle-State. */
+  lacpStatus: { indexPath: string; cells: Map<string, string> }[] | null;
+  /** 13.1.5.52 ByteTransport: cells 1 Port, 2 Tx-Bytes, 3 Rx-Bytes, 4 Rx-CRC-Errors. */
+  counters: { indexPath: string; cells: Map<string, string> }[] | null;
+  /** 13.1.47.42.1 — the PoE input type of this (PoE-powered) device. */
+  poeInputType: string | null;
+}
+
+/** Human-readable byte counter (KB/MB/GB). */
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n)) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = n;
+  let u = 0;
+  while (v >= 1024 && u < units.length - 1) { v /= 1024; u++; }
+  return `${v.toFixed(v >= 100 || u === 0 ? 0 : 1)} ${units[u]}`;
+}
 
 /** The row-index path of the i-th parsed row of a table (from its cell keys). */
 function rowIndexPath(parsed: ParsedLcosConfig, tableOid: string, i: number): string {
@@ -23,7 +47,7 @@ function rowIndexPath(parsed: ParsedLcosConfig, tableOid: string, i: number): st
   return '0';
 }
 
-export function buildLxState(parsed: ParsedLcosConfig): DeviceStateResponse {
+export function buildLxState(parsed: ParsedLcosConfig, live?: LxLiveStatus | null): DeviceStateResponse {
   const sections: StateSection[] = [];
 
   // --- System -----------------------------------------------------------------
@@ -160,6 +184,228 @@ export function buildLxState(parsed: ParsedLcosConfig): DeviceStateResponse {
         },
       };
     }),
+  });
+
+  // --- Switch ports (virtual switch face) -------------------------------------------------
+  // Live link state comes from the status OIDs (live?.ports); when unavailable
+  // (e.g. a read-only probe without getTable access) fall back to the config-side
+  // port lists so the section still renders.
+  const livePorts = live?.ports ?? null;
+  const lacpStatusRows = live?.lacpStatus ?? [];
+  const counterRows = live?.counters ?? [];
+
+  // LACP membership: bundle → member ports (status col 10 "ETH2, ETH1").
+  const portBundle = new Map<string, { bundle: string; state: string; bundleState: string }>();
+  for (const r of lacpStatusRows) {
+    const members = (r.cells.get('10') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    for (const m of members) portBundle.set(m, { bundle: r.cells.get('1') ?? '', state: r.cells.get('2') || 'down', bundleState: r.cells.get('11') ?? '' });
+  }
+
+  // Config-side per-port facts.
+  const untaggedByPort = new Map<string, number[]>();
+  for (let i = 0; i < (parsed.tables.get('13.2.70.8')?.length ?? 0); i++) {
+    const idx = rowIndexPath(parsed, '13.2.70.8', i);
+    const port = tableCell(parsed, '13.2.70.8', '1', idx) ?? '';
+    if (!untaggedByPort.has(port)) untaggedByPort.set(port, []);
+    untaggedByPort.get(port)!.push(Number(tableCell(parsed, '13.2.70.8', '2', idx) ?? 0));
+  }
+  const l2mPorts = new Set<string>();
+  for (let i = 0; i < (parsed.tables.get('13.2.11.50.2')?.length ?? 0); i++) {
+    const idx = rowIndexPath(parsed, '13.2.11.50.2', i);
+    if ((tableCell(parsed, '13.2.11.50.2', '2', idx) ?? '0') === '1') l2mPorts.add(tableCell(parsed, '13.2.11.50.2', '1', idx) ?? '');
+  }
+
+  const portNames: string[] = livePorts && livePorts.length > 0
+    ? livePorts.map((r) => r.cells.get('1') ?? '').filter(Boolean)
+    : [...new Set([...l2mPorts, ...(parsed.tables.get('13.2.62.2') ?? []).map((_, i) => tableCell(parsed, '13.2.62.2', '1', rowIndexPath(parsed, '13.2.62.2', i)) ?? '')])].filter(Boolean);
+
+  const poeInputType = live?.poeInputType ?? null;
+  const poeNote = poeInputType ? ` PoE input (device power feed): ${poeInputType}.` : '';
+  sections.push({
+    id: 'switch-ports',
+    label: 'Switch Ports',
+    description: `Physical ethernet ports with live link state, LACP membership and VLAN assignments.${poeNote} LLDP is not configurable on LX devices.`,
+    kind: 'switch',
+    layout: { groups: [{ id: 'row-1', label: null, portKeys: portNames.map((n) => `port-${n}`) }] },
+    items: portNames.map((name) => {
+      const liveRow = livePorts?.find((r) => r.cells.get('1') === name);
+      const counter = counterRows.find((r) => r.cells.get('1') === name);
+      const bundle = portBundle.get(name);
+      const linkActive = liveRow ? liveRow.cells.get('2') === '1' : null;
+      const untagged = (untaggedByPort.get(name) ?? []).filter((v) => v > 0);
+      const lacpLabel = bundle
+        ? `${bundle.bundle}${bundle.state !== 'up' ? ' (' + bundle.state + ')' : ''}`
+        : l2mPorts.has(name)
+          ? 'LAN bridge (L2M)'
+          : '—';
+      return {
+        key: `port-${name}`,
+        title: name,
+        subtitle: bundle ? `${bundle.bundle} (${bundle.state})` : l2mPorts.has(name) ? 'LAN bridge' : null,
+        status: (linkActive == null ? 'ok' : linkActive ? (bundle && bundle.bundleState === 'Degraded' ? 'degraded' : 'up') : 'down') as string,
+        fields: {
+          Link: liveRow ? (linkActive ? 'active' : 'inactive') : '—',
+          Connector: liveRow?.cells.get('3') || null, // numeric enum index — vendor does not publish the label mapping
+          MAC: ((liveRow?.cells.get('4') ?? '').replace(/^0+$/, '') || null) as string | null,
+          LACP: lacpLabel,
+          'Untagged VLANs': untagged.length > 0 ? untagged.map((v) => String(v)) : null,
+          'Tx / Rx': counter ? `${formatBytes(Number(counter.cells.get('2') ?? 0))} / ${formatBytes(Number(counter.cells.get('3') ?? 0))}` : null,
+        },
+        actions: [
+          { actionId: 'vlan.untagged.set', prefill: { port: name } },
+          { actionId: 'l2m.port.set', prefill: { port: name } },
+          { actionId: 'stp.port.set', prefill: { port: name } },
+          { actionId: 'lacp.port.set', prefill: { port: name } },
+        ],
+      };
+    }),
+    actions: [
+      { actionId: 'ports.read' },
+      { actionId: 'poe.passthrough.set' },
+    ],
+  });
+
+  // --- NTP -----------------------------------------------------------------------------
+  const ntpRows = parsed.tables.get('13.2.14.21.3') ?? [];
+  sections.push({
+    id: 'ntp',
+    label: 'NTP',
+    description: 'Time synchronization — operating state and configured servers.',
+    items: [
+      {
+        key: 'ntp-agent',
+        title: `NTP agent (${(parsed.scalars.get('13.2.14.21.1') ?? '0') === '1' ? 'enabled' : 'disabled'})`,
+        status: ((parsed.scalars.get('13.2.14.21.1') ?? '0') === '1' ? 'enabled' : 'disabled') as string,
+        fields: { Servers: ntpRows.length > 0 ? `${ntpRows.length} configured` : 'none' },
+        actions: [
+          { actionId: 'ntp.operating.set', prefill: { operating: (parsed.scalars.get('13.2.14.21.1') ?? '0') === '1' } },
+          { actionId: 'ntp.server.add' },
+        ],
+      },
+      ...ntpRows.map((_, i) => {
+        const idx = rowIndexPath(parsed, '13.2.14.21.3', i);
+        const server = tableCell(parsed, '13.2.14.21.3', '1', idx) ?? '';
+        const active = (tableCell(parsed, '13.2.14.21.3', '2', idx) ?? '0') === '1';
+        return {
+          key: `ntp-${idx}`,
+          title: server || '(unnamed)',
+          status: (active ? 'enabled' : 'disabled') as string,
+          fields: { Active: active ? 'yes' : 'no' },
+          actions: [
+            { actionId: 'ntp.server.set-active', prefill: { server, active } },
+            { actionId: 'ntp.server.remove', prefill: { server } },
+          ],
+        };
+      }),
+    ],
+  });
+
+  // --- SNMP -----------------------------------------------------------------------------
+  const snmpCommunities = parsed.tables.get('13.2.9.27') ?? [];
+  sections.push({
+    id: 'snmp',
+    label: 'SNMP',
+    description: 'SNMP agent — operating state, traps and communities (v3 user passwords are never shown).',
+    items: [
+      {
+        key: 'snmp-agent',
+        title: `SNMP agent (${(parsed.scalars.get('13.2.9.41') ?? '0') === '1' ? 'enabled' : 'disabled'})`,
+        status: ((parsed.scalars.get('13.2.9.41') ?? '0') === '1' ? 'enabled' : 'disabled') as string,
+        fields: {
+          Port: parsed.scalars.get('13.2.9.21') ?? '—',
+          Traps: (parsed.scalars.get('13.2.9.1') ?? '0') === '1' ? 'on' : 'off',
+          'Admitted protocols': parsed.scalars.get('13.2.9.37') ?? '—', // bitmask: 0=v1, 1=v2c, 2=v3 (observed)
+        },
+        actions: [
+          { actionId: 'snmp.settings.set', prefill: { operating: (parsed.scalars.get('13.2.9.41') ?? '0') === '1' } },
+          { actionId: 'snmp.community.add' },
+        ],
+      },
+      ...snmpCommunities.map((_, i) => {
+        const idx = rowIndexPath(parsed, '13.2.9.27', i);
+        return {
+          key: `snmp-comm-${idx}`,
+          title: tableCell(parsed, '13.2.9.27', '1', idx) ?? '(unnamed)',
+          subtitle: tableCell(parsed, '13.2.9.27', '3', idx) || null,
+          status: ((tableCell(parsed, '13.2.9.27', '8', idx) ?? '0') === '1' ? 'enabled' : 'disabled') as string,
+          fields: { 'Security name': tableCell(parsed, '13.2.9.27', '3', idx) ?? '—' },
+        };
+      }),
+    ],
+  });
+
+  // --- STP -----------------------------------------------------------------------------
+  const stpPortRows = parsed.tables.get('13.2.62.3.2') ?? [];
+  sections.push({
+    id: 'stp',
+    label: 'Spanning Tree (STP)',
+    description: 'Bridge settings and per-port STP data.',
+    items: [
+      {
+        key: 'stp-bridge',
+        title: `STP bridge (${(parsed.scalars.get('13.2.62.3.1') ?? '0') === '1' ? 'enabled' : 'disabled'})`,
+        status: ((parsed.scalars.get('13.2.62.3.1') ?? '0') === '1' ? 'enabled' : 'disabled') as string,
+        fields: {
+          'Bridge priority': parsed.scalars.get('13.2.62.3.3') ?? '—',
+          'Protocol version': `${parsed.scalars.get('13.2.62.3.4') ?? '—'} (enum index)`,
+          Timers: `fd ${parsed.scalars.get('13.2.62.3.5') ?? '—'} / hello ${parsed.scalars.get('13.2.62.3.6') ?? '—'} / max-age ${parsed.scalars.get('13.2.62.3.7') ?? '—'}`,
+        },
+        actions: [
+          {
+            actionId: 'stp.settings.set',
+            prefill: {
+              operating: (parsed.scalars.get('13.2.62.3.1') ?? '0') === '1',
+              bridgePriority: Number(parsed.scalars.get('13.2.62.3.3') ?? 8),
+              protocolVersionIndex: parsed.scalars.get('13.2.62.3.4') != null ? Number(parsed.scalars.get('13.2.62.3.4')) : undefined,
+            },
+          },
+        ],
+      },
+      ...stpPortRows.map((_, i) => {
+        const idx = rowIndexPath(parsed, '13.2.62.3.2', i);
+        return {
+          key: `stp-port-${idx}`,
+          title: tableCell(parsed, '13.2.62.3.2', '1', idx) ?? '(port)',
+          status: 'ok' as string,
+          fields: {
+            Priority: tableCell(parsed, '13.2.62.3.2', '2', idx) ?? '—',
+            'Edge port': (tableCell(parsed, '13.2.62.3.2', '3', idx) ?? '0') === '1' ? 'yes' : 'no',
+          },
+          actions: [
+            { actionId: 'stp.port.set', prefill: { port: tableCell(parsed, '13.2.62.3.2', '1', idx) ?? '' } },
+          ],
+        };
+      }),
+    ],
+  });
+
+  // --- LACP -----------------------------------------------------------------------------
+  const lacpBundleRows = parsed.tables.get('13.2.62.1') ?? [];
+  sections.push({
+    id: 'lacp',
+    label: 'LACP Bundles',
+    description: 'Link aggregation — configured bundles and their live state.',
+    items: lacpBundleRows.length > 0 ? lacpBundleRows.map((_, i) => {
+      const idx = rowIndexPath(parsed, '13.2.62.1', i);
+      const name = tableCell(parsed, '13.2.62.1', '1', idx) ?? '';
+      const statusRow = lacpStatusRows.find((r) => r.cells.get('1') === name);
+      const members = (statusRow?.cells.get('10') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+      const memberNote = members.length > 0 ? ` — ${members.join(', ')}` : '';
+      return {
+        key: `lacp-${idx}`,
+        title: name,
+        subtitle: statusRow ? `${statusRow.cells.get('2') || 'down'}${memberNote}` : null,
+        status: (statusRow?.cells.get('11') === 'Degraded' ? 'degraded' : ((tableCell(parsed, '13.2.62.1', '2', idx) ?? '0') === '1' ? 'enabled' : 'disabled')) as string,
+        fields: {
+          Priority: tableCell(parsed, '13.2.62.1', '3', idx) ?? '—',
+          Members: members.length > 0 ? members : null,
+          'Bundle state': statusRow?.cells.get('11') || null,
+        },
+        actions: [
+          { actionId: 'lacp.bundle.set', prefill: { bundle: name, operating: (tableCell(parsed, '13.2.62.1', '2', idx) ?? '0') === '1' } },
+        ],
+      };
+    }) : [{ key: 'lacp-none', title: 'No LACP bundles configured', status: 'disabled' as string, fields: {} }],
   });
 
   // --- WLC / CAPWAP ---------------------------------------------------------------------

@@ -77,7 +77,7 @@ const identity = resolvePluginIdentity({
   // → UNM central file repo, read-only on the device) and config.restore
   // (dangerous SetConfig overwrite from a repo id or base64). Every mutating
   // plan now gets a best-effort backup step prepended per dirty device.
-  version: '0.4.0',
+  version: '0.5.0',
   vendors: ['lancom'],
   // monitoring + inventory over the LCOS-LX MIB, plus an interactive SSH console
   // ('sshConsole') — LX access points expose a CLI shell over SSH (port 22).
@@ -910,8 +910,11 @@ app.post('/plan', async (req, res) => {
  * POST /state — the dynamic device-state document for the UNM Config page.
  * Fetches the running configuration via the bound `web` slot and parses it into
  * typed sections (System, WLAN Networks, Radios, Encryption Profiles,
- * Interfaces & VLANs, WLC/CAPWAP). The stateHandler wrapper guarantees an
- * Express-4-safe JSON error envelope.
+ * Interfaces & VLANs, Switch Ports, NTP, SNMP, STP, LACP, WLC/CAPWAP). The
+ * switch-ports section additionally reads LIVE status OIDs (13.1.x — link
+ * state, LACP bundle state, traffic counters) that are not part of the config
+ * text; a failure there degrades gracefully to config-only data. The
+ * stateHandler wrapper guarantees an Express-4-safe JSON error envelope.
  */
 app.post(
   '/state',
@@ -929,7 +932,15 @@ app.post(
 
     const c = new LcosWebClient(body.managementAddress, web.username, web.password, { timeoutMs: clampInt(settings.timeoutMs, 1_000, 30_000, 5_000) });
     try {
-      return buildLxState(parseLcosConfigText(await c.getConfigText()));
+      // Config text is the hard requirement; live status tables are best-effort.
+      const [configText, ports, lacpStatus, counters] = await Promise.all([
+        c.getConfigText(),
+        c.getStatusTable('13.1.5.99').catch(() => null),
+        c.getStatusTable('13.1.5.44').catch(() => null),
+        c.getStatusTable('13.1.5.52').catch(() => null),
+      ]);
+      const poeInputType = await c.getScalar('13.1.47.42.1').catch(() => null);
+      return buildLxState(parseLcosConfigText(configText), { ports, lacpStatus, counters, poeInputType });
     } finally {
       await c.destroy().catch(() => undefined);
     }

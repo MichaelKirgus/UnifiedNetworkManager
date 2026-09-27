@@ -21,7 +21,7 @@
  */
 
 import { ActionResult, ActionDescriptor, configBackupFileName, createFileRepoClient, createRegistry, FileRepoClient } from '@unm/plugin-sdk';
-import { isWriteOk, LcosWebClient, parseLcosConfigText, redactConfig, tableCell, type ParsedLcosConfig } from './webapi';
+import { isWriteOk, LcosWebClient, parseLcosConfigText, REDACTED, redactConfig, tableCell, type ParsedLcosConfig } from './webapi';
 
 // --- Context ------------------------------------------------------------------
 
@@ -236,6 +236,250 @@ const wlcRead: ActionDescriptor<LxActionContext> = {
         })),
       },
     };
+  },
+};
+
+// --- Switch / protocol read actions -------------------------------------------------------
+// Physical port status lives in LIVE status OIDs (13.1.x) that are NOT part of the
+// GetConfig text dump — they come from getTable (see LcosWebClient.getStatusTable).
+// Config-side facts (untagged VLANs, LAN-bridge membership, NTP/SNMP/STP/LACP settings)
+// come from the parsed config. Enum columns store NUMERIC indices on this platform
+// (verified live: NoYes → 0/1, SnmpStatus "Active" → 1, StpVersion "Rapid" → 1).
+
+const portsRead: ActionDescriptor<LxActionContext> = {
+  id: 'ports.read',
+  label: 'Read switch port status',
+  description:
+    'Live per-port link state, connector type, MAC address and traffic counters (status OIDs), plus LACP bundle membership/state, untagged VLAN assignments, LAN-bridge (L2M) membership and the PoE input type. LLDP is not configurable on LX devices — it only appears as a status column.',
+  module: 'Network',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  execute: async (ctx: LxActionContext): Promise<ActionResult> => {
+    const c = client(ctx);
+    try {
+      const [portRows, lacpRows, counterRows] = await Promise.all([
+        c.getStatusTable('13.1.5.99'), // Ports: 1 Port, 2 Link-Active, 3 Connector, 4 MAC
+        c.getStatusTable('13.1.5.44'), // LACP status: 1 Bundle, 2 State, 3 Speed, 4 Priority, 6 Local-MAC, 8 Partner-MAC, 10 Local-Ports, 11 Bundle-State
+        c.getStatusTable('13.1.5.52'), // ByteTransport: 1 Port, 2 Tx-Bytes, 3 Rx-Bytes, 4 Rx-CRC-Errors
+      ]);
+      const poeInputType = await c.getScalar('13.1.47.42.1');
+      const p = parseLcosConfigText(await c.getConfigText());
+
+      // LACP membership: bundle row → set of member ports (col 10 "ETH2, ETH1").
+      const bundles = (lacpRows ?? []).map((r) => {
+        const members = (r.cells.get('10') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+        return {
+          bundle: r.cells.get('1') ?? '',
+          state: r.cells.get('2') || 'down',
+          speed: r.cells.get('3') || null,
+          priority: r.cells.get('4') || null,
+          localMac: r.cells.get('6') || null,
+          partnerMac: r.cells.get('8') || null,
+          bundleState: r.cells.get('11') || null,
+          ports: members,
+        };
+      });
+      const portBundle = new Map<string, { bundle: string; state: string }>();
+      for (const b of bundles) for (const m of b.ports) portBundle.set(m, { bundle: b.bundle, state: b.state });
+
+      // Config-side per-port facts.
+      const untaggedByPort = new Map<string, number[]>();
+      for (let i = 0; i < (p.tables.get('13.2.70.8')?.length ?? 0); i++) {
+        const idx = rowIndexPath(p, '13.2.70.8', i);
+        const port = tableCell(p, '13.2.70.8', '1', idx) ?? '';
+        const vlan = Number(tableCell(p, '13.2.70.8', '2', idx) ?? 0);
+        if (!untaggedByPort.has(port)) untaggedByPort.set(port, []);
+        untaggedByPort.get(port)!.push(vlan);
+      }
+      const l2mByPort = new Map<string, string>(); // port → Active (stored '1'/'0')
+      for (let i = 0; i < (p.tables.get('13.2.11.50.2')?.length ?? 0); i++) {
+        const idx = rowIndexPath(p, '13.2.11.50.2', i);
+        l2mByPort.set(tableCell(p, '13.2.11.50.2', '1', idx) ?? '', tableCell(p, '13.2.11.50.2', '2', idx) ?? '');
+      }
+
+      const ports = (portRows ?? []).map((r) => {
+        const name = r.cells.get('1') ?? '';
+        const counters = counterRows?.find((x) => x.cells.get('1') === name);
+        return {
+          port: name,
+          linkActive: r.cells.get('2') === '1',
+          connector: r.cells.get('3') || null, // numeric enum index — label mapping not published by the vendor
+          macAddress: (r.cells.get('4') ?? '').replace(/^0+$/, '') || null,
+          txBytes: counters ? Number(counters.cells.get('2') ?? 0) : null,
+          rxBytes: counters ? Number(counters.cells.get('3') ?? 0) : null,
+          rxCrcErrors: counters ? Number(counters.cells.get('4') ?? 0) : null,
+          lacp: portBundle.get(name) ?? null,
+          untaggedVlans: untaggedByPort.get(name) ?? [],
+          lanBridgeMember: l2mByPort.has(name) ? l2mByPort.get(name) === '1' : false,
+        };
+      });
+
+      return {
+        success: true,
+        details: {
+          count: ports.length,
+          ports,
+          bundles,
+          poe: {
+            // The LX-6500 is a PoE INPUT device — it reports the type of its own power feed.
+            inputType: poeInputType ?? null,
+            passthroughConfigured: p.scalars.has('13.2.11.130') ? p.scalars.get('13.2.11.130') : null,
+          },
+        },
+      };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const ntpRead: ActionDescriptor<LxActionContext> = {
+  id: 'ntp.read',
+  label: 'Read NTP settings',
+  description: 'Shows the NTP operating state and all configured time servers with their active flag.',
+  module: 'Network',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  execute: async (ctx: LxActionContext): Promise<ActionResult> => {
+    const p = await loadConfig(ctx);
+    const rows = p.tables.get('13.2.14.21.3') ?? [];
+    return {
+      success: true,
+      details: {
+        operating: (p.scalars.get('13.2.14.21.1') ?? '0') === '1',
+        servers: rows.map((_, i) => {
+          const idx = rowIndexPath(p, '13.2.14.21.3', i);
+          return { server: tableCell(p, '13.2.14.21.3', '1', idx) ?? '', active: (tableCell(p, '13.2.14.21.3', '2', idx) ?? '0') === '1' };
+        }),
+      },
+    };
+  },
+};
+
+const snmpRead: ActionDescriptor<LxActionContext> = {
+  id: 'snmp.read',
+  label: 'Read SNMP settings',
+  description: 'Shows the SNMP operating state, traps, port and admitted protocols, plus communities and v3 users. User passwords are redacted.',
+  module: 'Network',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  execute: async (ctx: LxActionContext): Promise<ActionResult> => {
+    const p = await loadConfig(ctx);
+    const communities = (p.tables.get('13.2.9.27') ?? []).map((_, i) => {
+      const idx = rowIndexPath(p, '13.2.9.27', i);
+      return { name: tableCell(p, '13.2.9.27', '1', idx) ?? '', securityName: tableCell(p, '13.2.9.27', '3', idx) ?? '', statusIndex: tableCell(p, '13.2.9.27', '8', idx) ?? '' };
+    });
+    const users = (p.tables.get('13.2.9.32') ?? []).map((_, i) => {
+      const idx = rowIndexPath(p, '13.2.9.32', i);
+      return {
+        username: tableCell(p, '13.2.9.32', '2', idx) ?? '',
+        authProtocolIndex: tableCell(p, '13.2.9.32', '5', idx) ?? '',
+        authPassword: REDACTED, // never returned — see webapi.ts SENSITIVE handling
+        privProtocolIndex: tableCell(p, '13.2.9.32', '8', idx) ?? '',
+        privPassword: REDACTED,
+      };
+    });
+    return {
+      success: true,
+      details: {
+        operating: (p.scalars.get('13.2.9.41') ?? '0') === '1',
+        sendTraps: (p.scalars.get('13.2.9.1') ?? '0') === '1',
+        port: Number(p.scalars.get('13.2.9.21') ?? 161),
+        admittedProtocolsBitmask: p.scalars.get('13.2.9.37') ?? null, // bit 0=v1, 1=v2c, 2=v3 (observed)
+        allowAdmins: (p.scalars.get('13.2.9.38') ?? '0') === '1',
+        communities,
+        users,
+      },
+    };
+  },
+};
+
+const stpRead: ActionDescriptor<LxActionContext> = {
+  id: 'stp.read',
+  label: 'Read STP settings',
+  description: 'Shows the spanning-tree operating state, bridge priority, protocol version and timers, plus per-port STP data.',
+  module: 'Network',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  execute: async (ctx: LxActionContext): Promise<ActionResult> => {
+    const p = await loadConfig(ctx);
+    return {
+      success: true,
+      details: {
+        operating: (p.scalars.get('13.2.62.3.1') ?? '0') === '1',
+        bridgePriority: Number(p.scalars.get('13.2.62.3.3') ?? 8),
+        protocolVersionIndex: p.scalars.get('13.2.62.3.4') ?? null, // numeric enum (observed: 1 = Rapid) — label mapping not published
+        forwardDelay: Number(p.scalars.get('13.2.62.3.5') ?? 15),
+        helloTime: Number(p.scalars.get('13.2.62.3.6') ?? 2),
+        maxAge: Number(p.scalars.get('13.2.62.3.7') ?? 20),
+        transmitHoldCount: Number(p.scalars.get('13.2.62.3.8') ?? 6),
+        ports: (p.tables.get('13.2.62.3.2') ?? []).map((_, i) => {
+          const idx = rowIndexPath(p, '13.2.62.3.2', i);
+          return {
+            port: tableCell(p, '13.2.62.3.2', '1', idx) ?? '',
+            priority: Number(tableCell(p, '13.2.62.3.2', '2', idx) ?? 8),
+            edgePort: (tableCell(p, '13.2.62.3.2', '3', idx) ?? '0') === '1',
+            pathCostOverride: Number(tableCell(p, '13.2.62.3.2', '4', idx) ?? 0),
+          };
+        }),
+      },
+    };
+  },
+};
+
+const lacpRead: ActionDescriptor<LxActionContext> = {
+  id: 'lacp.read',
+  label: 'Read LACP settings',
+  description: 'Shows configured LACP bundles (priority, distribution policy), per-port LACP advertisement settings and the live bundle status.',
+  module: 'Network',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  execute: async (ctx: LxActionContext): Promise<ActionResult> => {
+    const c = client(ctx);
+    try {
+      const p = parseLcosConfigText(await c.getConfigText());
+      const lacpStatus = await c.getStatusTable('13.1.5.44');
+
+      const bundles = (p.tables.get('13.2.62.1') ?? []).map((_, i) => {
+        const idx = rowIndexPath(p, '13.2.62.1', i);
+        return {
+          name: tableCell(p, '13.2.62.1', '1', idx) ?? '',
+          operating: (tableCell(p, '13.2.62.1', '2', idx) ?? '0') === '1',
+          priority: Number(tableCell(p, '13.2.62.1', '3', idx) ?? 32768),
+          distributionPolicyIndex: tableCell(p, '13.2.62.1', '4', idx) ?? '', // numeric enum — pass back unchanged to keep it
+        };
+      });
+      const ports = (p.tables.get('13.2.62.2') ?? []).map((_, i) => {
+        const idx = rowIndexPath(p, '13.2.62.2', i);
+        return {
+          port: tableCell(p, '13.2.62.2', '1', idx) ?? '',
+          advertisedRates: tableCell(p, '13.2.62.2', '2', idx) ?? '', // LinkRatesBitSet — raw value (observed "auto"/"0")
+          powerSaving: (tableCell(p, '13.2.62.2', '3', idx) ?? '0') === '1',
+        };
+      });
+
+      return {
+        success: true,
+        details: {
+          bundles,
+          ports,
+          status: (lacpStatus ?? []).map((r) => ({
+            bundle: r.cells.get('1') ?? '',
+            state: r.cells.get('2') || 'down',
+            speed: r.cells.get('3') || null,
+            localPorts: (r.cells.get('10') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+            bundleState: r.cells.get('11') || null, // e.g. "Degraded" when one member is down
+          })),
+        },
+      };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
   },
 };
 
@@ -514,6 +758,510 @@ const configPersist: ActionDescriptor<LxActionContext> = {
   },
 };
 
+// --- Switch / protocol write actions --------------------------------------------------------
+// Same safety policy as the WLAN writes: single-cell updates, verified by re-read.
+// Enum/NoYes cells store NUMERIC indices on this platform (verified live) — inputs
+// are therefore 0/1 flags or raw enum indices that get passed back unchanged.
+
+/** Finds the row-index path of a table row matching ALL given index-column values (dual-index tables). */
+function findRowByIndexCells(parsed: ParsedLcosConfig, tableOid: string, cells: Record<string, string>): string | null {
+  const rows = parsed.tables.get(tableOid);
+  if (!rows) return null;
+  for (let i = 0; i < rows.length; i++) {
+    const idx = rowIndexPath(parsed, tableOid, i);
+    let match = true;
+    for (const [col, val] of Object.entries(cells)) {
+      if ((tableCell(parsed, tableOid, col, idx) ?? '') !== val) { match = false; break; }
+    }
+    if (match) return idx;
+  }
+  return null;
+}
+
+/** Validates a port name against the live status Ports table (13.1.5.99). */
+async function assertPortExists(c: LcosWebClient, port: string): Promise<string | null> {
+  const rows = await c.getStatusTable('13.1.5.99');
+  if (!rows) return 'Could not read the port status table (13.1.5.99) — check web credentials';
+  if (!rows.some((r) => r.cells.get('1') === port)) {
+    return `Port "${port}" does not exist on this device (known: ${rows.map((r) => r.cells.get('1')).join(', ') || 'none'})`;
+  }
+  return null;
+}
+
+const ntpServerAdd: ActionDescriptor<LxActionContext> = {
+  id: 'ntp.server.add',
+  label: 'Add NTP server',
+  description: 'Adds a time server to the NTP configuration (table 13.2.14.21.3). Additive only — never modifies existing servers.',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    server: { type: 'string', required: true, minLength: 1, maxLength: 64, description: 'NTP server IP address or DNS name' },
+    active: { type: 'boolean', default: false, description: 'Mark the server active immediately (default false)' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const server = String(input.server);
+    const c = client(ctx);
+    try {
+      const p = parseLcosConfigText(await c.getConfigText());
+      if ((p.tables.get('13.2.14.21.3') ?? []).some((_, i) => tableCell(p, '13.2.14.21.3', '1', rowIndexPath(p, '13.2.14.21.3', i)) === server)) {
+        return { success: false, error: `NTP server "${server}" already exists` };
+      }
+      const tag = await c.addTableRow('13.2.14.21.3', { 1: server, 2: input.active ? '1' : '0' });
+      if (!isWriteOk(tag)) return { success: false, error: `addTableRow 13.2.14.21.3 failed with errortag ${tag}` };
+      const p2 = parseLcosConfigText(await c.getConfigText());
+      const idx = findRowByIndex(p2, '13.2.14.21.3', server);
+      return { success: true, applied: true, verified: idx != null, details: { server } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const ntpServerRemove: ActionDescriptor<LxActionContext> = {
+  id: 'ntp.server.remove',
+  label: 'Remove NTP server',
+  description: 'Removes a time server from the NTP configuration (table 13.2.14.21.3).',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    server: { type: 'string', required: true, minLength: 1, description: 'NTP server name/IP to remove (see ntp.read)' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const server = String(input.server);
+    const c = client(ctx);
+    try {
+      const p = parseLcosConfigText(await c.getConfigText());
+      const rowIndex = findRowByIndex(p, '13.2.14.21.3', server);
+      if (rowIndex == null) return { success: false, error: `NTP server "${server}" not found` };
+      const tag = await c.delTableRow('13.2.14.21.3', rowIndex);
+      if (!isWriteOk(tag)) return { success: false, error: `delTableRow 13.2.14.21.3 failed with errortag ${tag}` };
+      const p2 = parseLcosConfigText(await c.getConfigText());
+      const stillThere = findRowByIndex(p2, '13.2.14.21.3', server) != null;
+      return { success: true, applied: true, verified: !stillThere, details: { server } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const ntpServerSetActive: ActionDescriptor<LxActionContext> = {
+  id: 'ntp.server.set-active',
+  label: 'Set NTP server active flag',
+  description: 'Enables or disables an existing time server (table 13.2.14.21.3, Active column).',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    server: { type: 'string', required: true, minLength: 1, description: 'NTP server name/IP (see ntp.read)' },
+    active: { type: 'boolean', required: true, description: 'Active = true or false' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const server = String(input.server);
+    const c = client(ctx);
+    try {
+      const p = parseLcosConfigText(await c.getConfigText());
+      const rowIndex = findRowByIndex(p, '13.2.14.21.3', server);
+      if (rowIndex == null) return { success: false, error: `NTP server "${server}" not found` };
+      const before = tableCell(p, '13.2.14.21.3', '2', rowIndex) ?? '0';
+      const tag = await c.updateTableRow('13.2.14.21.3', rowIndex, { 2: input.active ? '1' : '0' });
+      if (!isWriteOk(tag)) return { success: false, error: `updateTableRow 13.2.14.21.3 failed with errortag ${tag}` };
+      const p2 = parseLcosConfigText(await c.getConfigText());
+      const after = tableCell(p2, '13.2.14.21.3', '2', rowIndex) ?? null;
+      return { success: true, applied: true, verified: after === (input.active ? '1' : '0'), details: { server, before, after } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const ntpOperatingSet: ActionDescriptor<LxActionContext> = {
+  id: 'ntp.operating.set',
+  label: 'Enable/disable NTP',
+  description: 'Toggles the global NTP operating state (scalar 13.2.14.21.1).',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    operating: { type: 'boolean', required: true, description: 'true = NTP enabled, false = disabled' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const c = client(ctx);
+    try {
+      const before = await c.getScalar('13.2.14.21.1');
+      const tag = await c.setScalar('13.2.14.21.1', input.operating ? '1' : '0');
+      if (!isWriteOk(tag)) return { success: false, error: `setScalar 13.2.14.21.1 failed with errortag ${tag}` };
+      const after = await c.getScalar('13.2.14.21.1');
+      return { success: true, applied: true, verified: (after ?? '0') === (input.operating ? '1' : '0'), details: { before, after } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const snmpSettingsSet: ActionDescriptor<LxActionContext> = {
+  id: 'snmp.settings.set',
+  label: 'Set SNMP settings',
+  description: 'Updates the global SNMP scalars — operating state, trap sending, UDP port and admitted-protocols bitmask (bit 0=v1, bit 1=v2c, bit 2=v3). Only provided fields change.',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    operating: { type: 'boolean', description: 'Enable/disable the SNMP agent (scalar 13.2.9.41)' },
+    sendTraps: { type: 'boolean', description: 'Send traps (scalar 13.2.9.1)' },
+    port: { type: 'number', min: 1, max: 65535, description: 'SNMP UDP port (scalar 13.2.9.21)' },
+    admittedProtocolsBitmask: { type: 'number', min: 0, max: 7, description: 'Admitted protocol versions bitmask (scalar 13.2.9.37); e.g. 5 = v1+v2c' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const c = client(ctx);
+    try {
+      const before: Record<string, string | null> = {};
+      const after: Record<string, string | null> = {};
+      const writes: Array<[string, string]> = [];
+      if (input.operating != null) writes.push(['13.2.9.41', input.operating ? '1' : '0']);
+      if (input.sendTraps != null) writes.push(['13.2.9.1', input.sendTraps ? '1' : '0']);
+      if (input.port != null) writes.push(['13.2.9.21', String(Number(input.port))]);
+      if (input.admittedProtocolsBitmask != null) writes.push(['13.2.9.37', String(Number(input.admittedProtocolsBitmask))]);
+      if (writes.length === 0) return { success: false, error: 'Nothing to change — provide at least one of operating/sendTraps/port/admittedProtocolsBitmask' };
+
+      for (const [oid] of writes) before[oid] = await c.getScalar(oid);
+      for (const [oid, val] of writes) {
+        const tag = await c.setScalar(oid, val);
+        if (!isWriteOk(tag)) return { success: false, error: `setScalar ${oid} failed with errortag ${tag}` };
+      }
+      for (const [oid] of writes) after[oid] = await c.getScalar(oid);
+      const verified = writes.every(([oid, val]) => (after[oid] ?? '') === val);
+      return { success: true, applied: true, verified, details: { before, after } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const snmpCommunityAdd: ActionDescriptor<LxActionContext> = {
+  id: 'snmp.community.add',
+  label: 'Add SNMP community',
+  description: 'Adds an SNMPv1/v2c community (table 13.2.9.27). Additive only.',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, maxLength: 32, description: 'Community string (row index)' },
+    securityName: { type: 'string', required: true, minLength: 1, maxLength: 32, description: 'Security name; default = same as the community' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const name = String(input.name);
+    const securityName = typeof input.securityName === 'string' && input.securityName.length > 0 ? String(input.securityName) : name;
+    const c = client(ctx);
+    try {
+      const p = parseLcosConfigText(await c.getConfigText());
+      if ((p.tables.get('13.2.9.27') ?? []).some((_, i) => tableCell(p, '13.2.9.27', '1', rowIndexPath(p, '13.2.9.27', i)) === name)) {
+        return { success: false, error: `SNMP community "${name}" already exists` };
+      }
+      const tag = await c.addTableRow('13.2.9.27', { 1: name, 3: securityName });
+      if (!isWriteOk(tag)) return { success: false, error: `addTableRow 13.2.9.27 failed with errortag ${tag}` };
+      const p2 = parseLcosConfigText(await c.getConfigText());
+      const idx = findRowByIndex(p2, '13.2.9.27', name);
+      return { success: true, applied: true, verified: idx != null && tableCell(p2, '13.2.9.27', '3', idx) === securityName, details: { name } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const stpSettingsSet: ActionDescriptor<LxActionContext> = {
+  id: 'stp.settings.set',
+  label: 'Set STP settings',
+  description: 'Updates the spanning-tree scalars — operating state, bridge priority (multiple of 4096), protocol version index and timers. Only provided fields change.',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    operating: { type: 'boolean', description: 'Enable/disable STP (scalar 13.2.62.3.1)' },
+    bridgePriority: { type: 'number', min: 0, max: 65535, description: 'Bridge priority — multiples of 4096 (default 8 on this platform)' },
+    protocolVersionIndex: { type: 'number', min: 0, max: 255, description: 'Protocol version enum index; pass back the value from stp.read to keep it (observed: 1 = Rapid)' },
+    forwardDelay: { type: 'number', min: 4, max: 30, description: 'Forward delay in seconds' },
+    helloTime: { type: 'number', min: 1, max: 10, description: 'Hello time in seconds' },
+    maxAge: { type: 'number', min: 6, max: 40, description: 'Max age in seconds' },
+    transmitHoldCount: { type: 'number', min: 1, max: 6, description: 'Transmit hold count' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const c = client(ctx);
+    try {
+      const before: Record<string, string | null> = {};
+      const after: Record<string, string | null> = {};
+      const writes: Array<[string, string]> = [];
+      if (input.operating != null) writes.push(['13.2.62.3.1', input.operating ? '1' : '0']);
+      if (input.bridgePriority != null) writes.push(['13.2.62.3.3', String(Number(input.bridgePriority))]);
+      if (input.protocolVersionIndex != null) writes.push(['13.2.62.3.4', String(Number(input.protocolVersionIndex))]);
+      if (input.forwardDelay != null) writes.push(['13.2.62.3.5', String(Number(input.forwardDelay))]);
+      if (input.helloTime != null) writes.push(['13.2.62.3.6', String(Number(input.helloTime))]);
+      if (input.maxAge != null) writes.push(['13.2.62.3.7', String(Number(input.maxAge))]);
+      if (input.transmitHoldCount != null) writes.push(['13.2.62.3.8', String(Number(input.transmitHoldCount))]);
+      if (writes.length === 0) return { success: false, error: 'Nothing to change — provide at least one STP field' };
+
+      for (const [oid] of writes) before[oid] = await c.getScalar(oid);
+      for (const [oid, val] of writes) {
+        const tag = await c.setScalar(oid, val);
+        if (!isWriteOk(tag)) return { success: false, error: `setScalar ${oid} failed with errortag ${tag}` };
+      }
+      for (const [oid] of writes) after[oid] = await c.getScalar(oid);
+      const verified = writes.every(([oid, val]) => (after[oid] ?? '') === val);
+      return { success: true, applied: true, verified, details: { before, after } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const stpPortSet: ActionDescriptor<LxActionContext> = {
+  id: 'stp.port.set',
+  label: 'Set STP port data',
+  description: 'Updates per-port STP settings (table 13.2.62.3.2) — priority, edge-port flag and path-cost override for one physical port.',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    port: { type: 'string', required: true, description: 'Physical port name (e.g. ETH1 — see ports.read)' },
+    priority: { type: 'number', min: 0, max: 255, description: 'Port STP priority' },
+    edgePort: { type: 'boolean', description: 'Edge-port (portfast) flag' },
+    pathCostOverride: { type: 'number', min: 0, max: 2147483647, description: 'Path cost override; 0 = automatic' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const port = String(input.port);
+    const c = client(ctx);
+    try {
+      const badPort = await assertPortExists(c, port);
+      if (badPort) return { success: false, error: badPort };
+
+      const p = parseLcosConfigText(await c.getConfigText());
+      let rowIndex = findRowByIndex(p, '13.2.62.3.2', port);
+      const cells: Record<string, string | number> = {};
+      if (input.priority != null) cells[2] = Number(input.priority);
+      if (input.edgePort != null) cells[3] = input.edgePort ? '1' : '0';
+      if (input.pathCostOverride != null) cells[4] = Number(input.pathCostOverride);
+      if (Object.keys(cells).length === 0) return { success: false, error: 'Nothing to change — provide at least one of priority/edgePort/pathCostOverride' };
+
+      let tag: number;
+      if (rowIndex != null) {
+        tag = await c.updateTableRow('13.2.62.3.2', rowIndex, cells);
+      } else {
+        // Port has no STP row yet — create it with the port as index.
+        tag = await c.addTableRow('13.2.62.3.2', { 1: port, ...cells });
+      }
+      if (!isWriteOk(tag)) return { success: false, error: `STP port update failed with errortag ${tag}` };
+
+      const p2 = parseLcosConfigText(await c.getConfigText());
+      const idx2 = findRowByIndex(p2, '13.2.62.3.2', port);
+      const verified = idx2 != null && Object.entries(cells).every(([col, val]) => (tableCell(p2, '13.2.62.3.2', col, idx2) ?? '') === String(val));
+      return { success: true, applied: true, verified, details: { port } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const lacpBundleSet: ActionDescriptor<LxActionContext> = {
+  id: 'lacp.bundle.set',
+  label: 'Set LACP bundle settings',
+  description: 'Updates an existing LACP bundle (table 13.2.62.1) — operating state, priority and distribution-policy index. Port membership is managed by the LAN-bridge (L2M) table — see l2m.port.set.',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    bundle: { type: 'string', required: true, description: 'Bundle name (row index; e.g. BUNDLE-0 — see lacp.read)' },
+    operating: { type: 'boolean', description: 'Enable/disable the bundle' },
+    priority: { type: 'number', min: 1, max: 65535, description: 'LACP system priority (default 32768)' },
+    distributionPolicyIndex: { type: 'number', min: 0, max: 255, description: 'Distribution policy enum index; pass back the value from lacp.read to keep it' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const bundle = String(input.bundle);
+    const c = client(ctx);
+    try {
+      const p = parseLcosConfigText(await c.getConfigText());
+      const rowIndex = findRowByIndex(p, '13.2.62.1', bundle);
+      if (rowIndex == null) return { success: false, error: `LACP bundle "${bundle}" not found` };
+
+      const cells: Record<string, string | number> = {};
+      if (input.operating != null) cells[2] = input.operating ? '1' : '0';
+      if (input.priority != null) cells[3] = Number(input.priority);
+      if (input.distributionPolicyIndex != null) cells[4] = Number(input.distributionPolicyIndex);
+      if (Object.keys(cells).length === 0) return { success: false, error: 'Nothing to change — provide at least one of operating/priority/distributionPolicyIndex' };
+
+      const tag = await c.updateTableRow('13.2.62.1', rowIndex, cells);
+      if (!isWriteOk(tag)) return { success: false, error: `updateTableRow 13.2.62.1 failed with errortag ${tag}` };
+
+      const p2 = parseLcosConfigText(await c.getConfigText());
+      const idx2 = findRowByIndex(p2, '13.2.62.1', bundle);
+      const verified = idx2 != null && Object.entries(cells).every(([col, val]) => (tableCell(p2, '13.2.62.1', col, idx2) ?? '') === String(val));
+      return { success: true, applied: true, verified, details: { bundle } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const lacpPortSet: ActionDescriptor<LxActionContext> = {
+  id: 'lacp.port.set',
+  label: 'Set LACP port advertisement',
+  description: 'Updates per-port LACP settings (table 13.2.62.2) — advertised link rates and power-saving for one physical port.',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    port: { type: 'string', required: true, description: 'Physical port name (e.g. ETH1 — see ports.read)' },
+    advertisedRates: { type: 'string', minLength: 1, maxLength: 32, description: 'Advertised link rates (LinkRatesBitSet); pass back the value from lacp.read to keep it' },
+    powerSaving: { type: 'boolean', description: 'Enable/disable LACP power saving on this port' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const port = String(input.port);
+    const c = client(ctx);
+    try {
+      const badPort = await assertPortExists(c, port);
+      if (badPort) return { success: false, error: badPort };
+
+      const p = parseLcosConfigText(await c.getConfigText());
+      let rowIndex = findRowByIndex(p, '13.2.62.2', port);
+      const cells: Record<string, string | number> = {};
+      if (input.advertisedRates != null) cells[2] = String(input.advertisedRates);
+      if (input.powerSaving != null) cells[3] = input.powerSaving ? '1' : '0';
+      if (Object.keys(cells).length === 0) return { success: false, error: 'Nothing to change — provide at least one of advertisedRates/powerSaving' };
+
+      let tag: number;
+      if (rowIndex != null) {
+        tag = await c.updateTableRow('13.2.62.2', rowIndex, cells);
+      } else {
+        tag = await c.addTableRow('13.2.62.2', { 1: port, ...cells });
+      }
+      if (!isWriteOk(tag)) return { success: false, error: `LACP port update failed with errortag ${tag}` };
+
+      const p2 = parseLcosConfigText(await c.getConfigText());
+      const idx2 = findRowByIndex(p2, '13.2.62.2', port);
+      const verified = idx2 != null && Object.entries(cells).every(([col, val]) => (tableCell(p2, '13.2.62.2', col, idx2) ?? '') === String(val));
+      return { success: true, applied: true, verified, details: { port } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const vlanUntaggedSet: ActionDescriptor<LxActionContext> = {
+  id: 'vlan.untagged.set',
+  label: 'Add/remove untagged VLAN on port',
+  description: 'Manages the Untagged-VLAN table (13.2.70.8, dual-indexed by Port + VLAN) — assigns or removes an untagged VLAN on a physical port.',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    port: { type: 'string', required: true, description: 'Physical port name (e.g. ETH1 — see ports.read)' },
+    vlanId: { type: 'number', required: true, min: 1, max: 4094, description: 'VLAN ID to assign untagged on the port' },
+    remove: { type: 'boolean', default: false, description: 'true = remove the assignment instead of adding it' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const port = String(input.port);
+    const vlanId = Number(input.vlanId);
+    const c = client(ctx);
+    try {
+      const badPort = await assertPortExists(c, port);
+      if (badPort) return { success: false, error: badPort };
+
+      const p = parseLcosConfigText(await c.getConfigText());
+      const rowIndex = findRowByIndexCells(p, '13.2.70.8', { 1: port, 2: String(vlanId) });
+
+      let tag: number;
+      if (input.remove) {
+        if (rowIndex == null) return { success: false, error: `Port ${port} has no untagged VLAN ${vlanId}` };
+        // Dual-index row — address it with BOTH index cells explicitly.
+        tag = await c.delTableRow('13.2.70.8', rowIndex, { 1: port, 2: String(vlanId) });
+      } else {
+        if (rowIndex != null) return { success: false, error: `Port ${port} already has untagged VLAN ${vlanId}` };
+        tag = await c.addTableRow('13.2.70.8', { 1: port, 2: vlanId });
+      }
+      if (!isWriteOk(tag)) return { success: false, error: `Untagged-VLAN update failed with errortag ${tag}` };
+
+      const p2 = parseLcosConfigText(await c.getConfigText());
+      const stillThere = findRowByIndexCells(p2, '13.2.70.8', { 1: port, 2: String(vlanId) }) != null;
+      return { success: true, applied: true, verified: input.remove ? !stillThere : stillThere, details: { port, vlanId, removed: !!input.remove } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const l2mPortSet: ActionDescriptor<LxActionContext> = {
+  id: 'l2m.port.set',
+  label: 'Add/remove port to LAN bridge (L2M)',
+  description:
+    'Manages the Layer-2-mesh interface table (13.2.11.50.2) — the ports that make up the device\'s LAN bridge (on this AP: BUNDLE-0 / br-lan). Removing a port from the bridge takes it out of LACP and the default VLAN — use with care.',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    port: { type: 'string', required: true, description: 'Physical port name (e.g. ETH2 — see ports.read)' },
+    remove: { type: 'boolean', default: false, description: 'true = remove the port from the LAN bridge' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const port = String(input.port);
+    const c = client(ctx);
+    try {
+      const badPort = await assertPortExists(c, port);
+      if (badPort) return { success: false, error: badPort };
+
+      const p = parseLcosConfigText(await c.getConfigText());
+      const rowIndex = findRowByIndex(p, '13.2.11.50.2', port);
+
+      let tag: number;
+      if (input.remove) {
+        if (rowIndex == null) return { success: false, error: `Port ${port} is not a LAN-bridge member` };
+        tag = await c.delTableRow('13.2.11.50.2', rowIndex);
+      } else {
+        if (rowIndex != null) {
+          // Already present — make sure it is active.
+          const active = tableCell(p, '13.2.11.50.2', '2', rowIndex) ?? '0';
+          if (active === '1') return { success: true, applied: false, verified: true, details: { port, note: 'Port is already an active LAN-bridge member' } };
+          tag = await c.updateTableRow('13.2.11.50.2', rowIndex, { 2: '1' });
+        } else {
+          tag = await c.addTableRow('13.2.11.50.2', { 1: port, 2: '1' });
+        }
+      }
+      if (!isWriteOk(tag)) return { success: false, error: `L2M update failed with errortag ${tag}` };
+
+      const p2 = parseLcosConfigText(await c.getConfigText());
+      const idx2 = findRowByIndex(p2, '13.2.11.50.2', port);
+      const verified = input.remove ? idx2 == null : idx2 != null && (tableCell(p2, '13.2.11.50.2', '2', idx2) ?? '') === '1';
+      return { success: true, applied: true, verified, details: { port, removed: !!input.remove } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const poePassthroughSet: ActionDescriptor<LxActionContext> = {
+  id: 'poe.passthrough.set',
+  label: 'Set PoE passthrough',
+  description: 'Sets the PoE passthrough scalar (13.2.11.130) — forwards received PoE power to a connected device. The LX-6500 is a PoE INPUT device; this AP reports its input type via ports.read (poe.inputType).',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    enabled: { type: 'boolean', required: true, description: 'true = passthrough on, false = off' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const c = client(ctx);
+    try {
+      const before = await c.getScalar('13.2.11.130');
+      if (before == null) return { success: false, error: 'The PoE passthrough OID (13.2.11.130) is not available on this device — it may lack the hardware feature' };
+      const tag = await c.setScalar('13.2.11.130', input.enabled ? '1' : '0');
+      if (!isWriteOk(tag)) return { success: false, error: `setScalar 13.2.11.130 failed with errortag ${tag}` };
+      const after = await c.getScalar('13.2.11.130');
+      return { success: true, applied: true, verified: (after ?? '0') === (input.enabled ? '1' : '0'), details: { before, after } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
 // --- Configuration backup / restore ---------------------------------------------------------
 // The LCOS-LX web API has no separate "backup file" endpoint — the running
 // configuration IS a text document (GetConfig, ~32 KB). A backup is that text
@@ -686,6 +1434,11 @@ export const registry = createRegistry<LxActionContext>([
   encryptionProfilesRead,
   ipInterfacesRead,
   wlcRead,
+  portsRead,
+  ntpRead,
+  snmpRead,
+  stpRead,
+  lacpRead,
   systemNameSet,
   systemCommentSet,
   radioChannelSet,
@@ -693,6 +1446,19 @@ export const registry = createRegistry<LxActionContext>([
   ssidVlanSet,
   wlanNetworkAdd,
   wlcAddressSet,
+  ntpServerAdd,
+  ntpServerRemove,
+  ntpServerSetActive,
+  ntpOperatingSet,
+  snmpSettingsSet,
+  snmpCommunityAdd,
+  stpSettingsSet,
+  stpPortSet,
+  lacpBundleSet,
+  lacpPortSet,
+  vlanUntaggedSet,
+  l2mPortSet,
+  poePassthroughSet,
   configPersist,
   configBackupDownload,
   configRestore,
