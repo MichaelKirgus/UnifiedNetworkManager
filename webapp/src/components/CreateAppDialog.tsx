@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Boxes, ChevronDown, CopyPlus, Container as ContainerIcon, EyeOff, FileCode2, Image as ImageIcon, Loader2, Plus, Search, X } from 'lucide-react';
 import clsx from 'clsx';
 import { SchemaForm, validateSchema } from './SchemaForm';
-import { api, ContainerRow, InputSchema } from '../api/client';
+import { api, CatalogEntry, ContainerRow, InputSchema } from '../api/client';
 
 /**
  * CreateAppDialog — creates a NEW app on one device. GENERIC by design: the set
@@ -138,6 +138,8 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
 
   // --- Compose state -------------------------------------------------------------
   const [composeString, setComposeString] = useState('');
+  /** Working directory for the saved docker-compose.yml (SSH-host compose mode). */
+  const [workingDir, setWorkingDir] = useState('');
 
   // --- Image-run state ------------------------------------------------------------
   const [imageRef, setImageRef] = useState('');
@@ -159,6 +161,30 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
     [apps, candidate?.deviceId],
   );
 
+  // The compose-mode install action's input schema — fetched from the plugin's
+  // persisted catalog (react-query caches it). Drives the optional "Working
+  // directory" field: it only renders when the action DECLARES a `workdir`
+  // property (the generic-ssh deploy-compose does; TrueNAS containers.install
+  // doesn't), so no per-backend UI code is needed.
+  const [composeActionInput, setComposeActionInput] = useState<Record<string, unknown> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!candidate || mode !== 'compose' || candidate.actions['compose'] !== 'containers.deploy-compose') {
+      setComposeActionInput(null);
+      return;
+    }
+    api.pluginActions(candidate.pluginId)
+      .then((res: { actions?: CatalogEntry[] }) => {
+        const entry = (res.actions ?? []).find((a) => a.id === 'containers.deploy-compose');
+        if (!cancelled) setComposeActionInput(entry?.inputSchema ?? null);
+      })
+      .catch(() => { if (!cancelled) setComposeActionInput(null); });
+    return () => { cancelled = true; };
+  }, [candidate, mode]);
+
+  /** True when the selected deploy action accepts a `workdir` input. */
+  const hasWorkdirField = composeActionInput?.['workdir'] !== undefined;
+
   // Reset device-dependent state when the selected device changes.
   useEffect(() => {
     setSelectedTpl(null);
@@ -170,6 +196,7 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
     setCloneAppKey(null);
     setCloneNotice(null);
     clonePendingValues.current = null;
+    setWorkingDir('');
     const c = candidates[deviceIdx];
     if (c) setMode(c.modes.includes('catalog') ? 'catalog' : c.modes[0] ?? 'compose');
   }, [deviceIdx, candidates]);
@@ -269,6 +296,29 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
     setCloneNotice(null);
     (async () => {
       try {
+        // SSH-host compose mode — the plugin serves `compose.config.read` (the
+        // saved docker-compose.yml from its working dir), so ANY app can be
+        // cloned: read the YAML and prefill the Compose tab.
+        if (!candidate.modes.includes('catalog') && candidate.actions['compose'] === 'containers.deploy-compose') {
+          const res = await api.executePluginAction(candidate.pluginId, {
+            deviceId: candidate.deviceId,
+            actionId: 'compose.config.read',
+            input: { name: app.name },
+          });
+          if (cancelled) return;
+          const yaml = typeof res.details?.['yaml'] === 'string' ? (res.details['yaml'] as string) : '';
+          if (!yaml.trim()) {
+            setCloneNotice(`No editable compose file found for “${app.name}” — it may be a standalone container.`);
+            return;
+          }
+          setMode('compose');
+          setComposeString(yaml);
+          const wd = typeof res.details?.['workdir'] === 'string' ? (res.details['workdir'] as string) : '';
+          setWorkingDir(wd);
+          setName(slugify(app.name));
+          return;
+        }
+
         // Docker host — no compose-YAML access over the Engine API. Single-container
         // apps prefill from inventory data; multi-service projects can't be cloned.
         if (!candidate.modes.includes('catalog')) {
@@ -385,6 +435,7 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
       setDetails(null);
       setFormValues({});
       setComposeString('');
+      setWorkingDir('');
       setImageRef('');
       setPorts([]);
       setEnvs([]);
@@ -427,10 +478,19 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
         setSubmitError('Compose YAML is required.');
         return;
       }
-      // TrueNAS containers.install takes mode=custom + composeString; the Docker
-      // plugin's deploy-compose takes name + composeString directly.
+      // TrueNAS containers.install takes mode=custom + composeString; the SSH
+      // deploy-compose takes name + composeString (+ optional workdir — only sent
+      // when the action's schema declares it and the user filled it in).
       const actionId = candidate.actions['compose'];
-      input = actionId === 'containers.deploy-compose' ? { name: slug, composeString } : { name: slug, mode: 'custom', composeString };
+      if (actionId === 'containers.deploy-compose') {
+        input = {
+          name: slug,
+          composeString,
+          ...(hasWorkdirField && workingDir.trim() !== '' ? { workdir: workingDir.trim() } : {}),
+        };
+      } else {
+        input = { name: slug, mode: 'custom', composeString };
+      }
     } else {
       // image mode
       if (imageRef.trim() === '') {
@@ -733,17 +793,39 @@ export function CreateAppDialog({ candidates, apps = [], onSubmit, onClose, read
             </div>
           ) : mode === 'compose' ? (
             /* Compose stack tab */
-            <label className="block text-sm font-medium text-secondary">
-              Docker Compose YAML
-              <textarea
-                value={composeString}
-                onChange={(e) => setComposeString(e.target.value)}
-                rows={12}
-                spellCheck={false}
-                placeholder={'services:\n  my-service:\n    image: nginx:latest\n    ports:\n      - "8080:80"'}
-                className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-xs focus:border-focus-ring"
-              />
-            </label>
+            <div className="space-y-3">
+              <label className="block text-sm font-medium text-secondary">
+                Docker Compose YAML
+                <textarea
+                  value={composeString}
+                  onChange={(e) => setComposeString(e.target.value)}
+                  rows={12}
+                  spellCheck={false}
+                  placeholder={'services:\n  my-service:\n    image: nginx:latest\n    ports:\n      - "8080:80"'}
+                  className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-xs focus:border-focus-ring"
+                />
+              </label>
+
+              {/* Working directory — only offered when the deploy action's schema
+                  declares a `workdir` input (generic-ssh over SSH). The YAML is
+                  saved there on the host so it persists for later edits. */}
+              {hasWorkdirField && (
+                <label className="block text-sm font-medium text-secondary">
+                  Working directory on the host
+                  <input
+                    type="text"
+                    value={workingDir}
+                    onChange={(e) => setWorkingDir(e.target.value)}
+                    placeholder="/opt/compose/<name>  (default)"
+                    spellCheck={false}
+                    className="mt-1 w-full rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-xs focus:border-focus-ring"
+                  />
+                  <span className="mt-0.5 block text-[11px] leading-snug text-faint">
+                    Absolute path where docker-compose.yml is saved (created if missing). Leave empty for the default.
+                  </span>
+                </label>
+              )}
+            </div>
           ) : (
             /* Run-image tab — Engine API only, no SSH needed */
             <div className="space-y-3">

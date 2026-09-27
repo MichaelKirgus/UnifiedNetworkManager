@@ -17,6 +17,7 @@
 import { INVENTORY_INTERVAL_MS, buildDeviceTimeInfo, listUpgradablePackages } from '@unm/plugin-sdk';
 import type { MetricDescriptor, UpdateRow } from '@unm/plugin-sdk';
 import type { CommandRunner } from './client/privilege';
+import { collectDockerInventory } from './containers';
 import type {
   BoardInfo,
   DiskRow,
@@ -114,6 +115,15 @@ export async function getUpdates(hostKey: string, backend: CommandRunner): Promi
   updatesCache.set(hostKey, { at: Date.now(), rows });
   return rows;
 }
+
+// --- Container inventory (Containers page) ------------------------------------
+// Collected FRESH on every inventory-due poll and forced refresh — no TTL cache.
+// `collectInventory=true` only arrives ~15 min apart plus manual "Check now"
+// calls, so one extra SSH exec per such poll is cheap; caching would instead
+// serve stale state right after a deploy/stop (the exact moment the user hits
+// refresh). collectDockerInventory never throws: docker absent or SSH failure →
+// `{ containers: null }` → the caller omits BOTH keys entirely (absent = no
+// wipe, per the ingestion contract). A present-but-EMPTY array IS authoritative.
 
 // --- Module-level baselines (survive per-request backend instances) -----------
 
@@ -715,6 +725,13 @@ export async function collectMonitoring(
       } catch {
         /* unreachable or transient — keep previously stored rows */
       }
+      // Containers + images (Containers page): fresh on every inventory poll.
+      // null = no docker CLI / SSH failure → omit BOTH keys entirely (absent =
+      // no wipe). A present-but-empty array is authoritative (the host genuinely
+      // runs none) and wipes stale rows at ingest.
+      const cont = await collectDockerInventory(backend);
+      if (cont.containers !== null) metrics['containers'] = cont.containers;
+      if (cont.images !== null) metrics['images'] = cont.images;
       metrics['arp'] = inventory.arp;
       if (inventory.ndp.length > 0) metrics['ndp'] = inventory.ndp;
       metrics['routes'] = inventory.routes;

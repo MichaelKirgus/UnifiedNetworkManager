@@ -18,6 +18,7 @@ import { SNAPSHOT_ACTIONS } from './backup';
 import { WIREGUARD_ACTIONS } from './wireguard';
 import { PACKAGES_ACTIONS } from './packages';
 import { SECURITY_ACTIONS } from './security';
+import { DOCKER_ACTIONS } from './docker';
 
 const ALL_ACTIONS: SdkActionDescriptor<ActionContext>[] = [
   ...SYSTEM_ACTIONS,
@@ -26,6 +27,9 @@ const ALL_ACTIONS: SdkActionDescriptor<ActionContext>[] = [
   ...WIREGUARD_ACTIONS,
   ...PACKAGES_ACTIONS,
   ...SECURITY_ACTIONS,
+  // Docker / Compose (Containers page) — only meaningful on hosts that run a
+  // docker daemon; the actions degrade to clear errors elsewhere.
+  ...DOCKER_ACTIONS,
 ];
 
 export const registry = createRegistry<ActionContext>(ALL_ACTIONS);

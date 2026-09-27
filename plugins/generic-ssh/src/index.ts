@@ -47,6 +47,7 @@ import type { ProbeRequestBody, StateRequestBody } from '@unm/plugin-sdk';
 import { SshBackend, closeSshPools, resolveGenericSshCredentials } from './client/sshClient';
 import { createElevatedBackend } from './client/privilege';
 import { collectLive, collectMonitoring, getInventory } from './monitoring';
+import { collectProbeStates, collectProbeStats, type ProbeContainerStat, type ProbeContainerState } from './containers';
 import { stateStore } from './stateStore';
 import { collectSecurityChecks, DEFAULT_WATCHED_FILES, type SecuritySettings } from './security';
 import { buildPlan, listCatalogWithIntents, PlanningError } from './plan';
@@ -69,7 +70,16 @@ export const PLUGIN_NAME = 'Generic SSH Plugin (Linux)';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
-  version: '0.1.0',
+  // 0.2.0 — Docker / Docker Compose support (Containers page): emits the generic
+  // containers[] + images[] metrics at the inventory cadence (one row per "App"
+  // = compose project, same grouping as the Docker plugin), serves probe keys
+  // containerStates/containerStats over SSH, and adds the action catalog:
+  // containers.start/stop/restart/delete, containers.deploy-compose (with a
+  // USER-CHOSEN working dir for the saved docker-compose.yml — default
+  // /opt/compose/<name>), containers.update + compose.config.read (edit YAML),
+  // containers.logs.read and images.delete. All over the host's `docker` CLI;
+  // hosts without docker simply yield no container data (keys omitted).
+  version: '0.2.0',
   vendors: ['linux'],
   // monitoring + inventory: two-tier cadence collection over SSH (live metrics
   // every poll; interfaces/ARP/routes/filesystems/disks at the 15-min interval).
@@ -415,9 +425,15 @@ app.post('/monitoring', async (req, res) => {
 //   - 'systemStats' (default): CPU %, load averages, memory + swap — /proc reads.
 //   - 'traffic': per-interface byte counters (/sys/class/net statistics).
 //   - 'deviceTime': device clock for the Time page's on-demand refresh.
+//   - 'containerStates': live docker state of every container (one cheap
+//     `docker ps -a` pass with stable template accessors) — feeds the
+//     Containers page's State badges + settle watch; honors an optional
+//     `names` selection.
+//   - 'containerStats': per-container CPU/RAM/I-O from ONE bounded
+//     `docker stats --no-stream` pass (the same source the TrueNAS plugin uses).
 // Unknown keys are ignored; an empty/absent list means "the default set".
 // ---------------------------------------------------------------------------
-const PROBE_KEYS = new Set(['systemStats', 'traffic', 'deviceTime']);
+const PROBE_KEYS = new Set(['systemStats', 'traffic', 'deviceTime', 'containerStates', 'containerStats']);
 
 app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   const settings = readSettings(req, PLUGIN_OPTIONS);
@@ -434,7 +450,28 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
   const want = (k: string): boolean => keys.includes(k);
 
   const metrics: Record<string, unknown> = {};
-  if (want('deviceTime')) {
+  if (want('containerStates') || want('containerStats')) {
+    // Container live data — one cheap `docker ps -a` (+ one bounded docker stats
+    // pass). null = transport failure → throw (webapp keeps last good data); an
+    // EMPTY map is a valid answer (no containers at all) and must reach the caller.
+    const nameSel = Array.isArray(body.names) && body.names.length > 0 ? body.names : undefined;
+    const [states, stats] = await Promise.all([
+      want('containerStates') ? collectProbeStates(backend, nameSel) : Promise.resolve(null),
+      want('containerStats') ? collectProbeStats(backend) : Promise.resolve(null),
+    ]);
+    if (want('containerStates')) {
+      if (!states) throw new Error('Docker states probe returned no data');
+      const flat: Record<string, ProbeContainerState> = {};
+      for (const [name, s] of states) flat[name] = s;
+      metrics['containerStates'] = flat;
+    }
+    if (want('containerStats')) {
+      if (!stats) throw new Error('Docker stats probe returned no data');
+      const flat: Record<string, ProbeContainerStat> = {};
+      for (const [name, s] of stats) flat[name] = s;
+      metrics['containerStats'] = flat;
+    }
+  } else if (want('deviceTime')) {
     // Cheap single read — the clock is the only thing a Time-page refresh needs.
     const sections = await backend.runSections([
       { name: 'date', cmd: "date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z" },
