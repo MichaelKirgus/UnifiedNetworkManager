@@ -77,7 +77,7 @@ const identity = resolvePluginIdentity({
   // → UNM central file repo, read-only on the device) and config.restore
   // (dangerous SetConfig overwrite from a repo id or base64). Every mutating
   // plan now gets a best-effort backup step prepended per dirty device.
-  version: '0.5.0',
+  version: '0.6.0',
   vendors: ['lancom'],
   // monitoring + inventory over the LCOS-LX MIB, plus an interactive SSH console
   // ('sshConsole') — LX access points expose a CLI shell over SSH (port 22).

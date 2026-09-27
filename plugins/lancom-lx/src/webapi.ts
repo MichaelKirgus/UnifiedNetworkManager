@@ -475,6 +475,7 @@ const SENSITIVE_CELLS = new Set([
   `${'13.2.102.2'}.3`,    // LMC proxy password
   `${'13.2.20.133.3'}.3`, // LEPS per-user PSK
   `${'13.2.61.1'}.5`,     // L2TP password
+  `${'13.2.30.11'}.4`,    // 802.1X LAN supplicant password
 ]);
 
 export const REDACTED = '••••••••';

@@ -67,7 +67,7 @@ async function main(): Promise<void> {
   const plugins = ((await authed('GET', '/plugins').then((r) => r.json())) as Array<Record<string, any>>).find((p) => p.id === LX_PLUGIN_ID);
   check('plugin registered', Boolean(plugins), { id: LX_PLUGIN_ID });
   if (!plugins) throw new Error('plugin not registered');
-  check('version is 0.5.0', plugins.version === '0.5.0', plugins.version);
+  check('version is 0.6.0', plugins.version === '0.6.0', plugins.version);
   const caps: string[] = Array.isArray(plugins.capabilities) ? plugins.capabilities : [];
   for (const c of ['configuration', 'planning', 'deviceState']) {
     check(`capability "${c}" advertised`, caps.includes(c), caps);
@@ -91,9 +91,19 @@ async function main(): Promise<void> {
     const a = actions.find((x) => x.id === id);
     check(`v0.5 action "${id}" is riskLevel write`, a?.riskLevel === 'write', a);
   }
+  // v0.6.0 — AP self-IP configuration (addressing / gateway+DNS / 802.1X supplicant).
+  for (const id of ['ip.interface.set', 'ip.parameters.set', 'ip.supplicant.set']) {
+    check(`v0.6 action "${id}" in catalog`, actionIds.has(id), [...actionIds]);
+  }
   // config.restore must be flagged dangerous (explicit user choice only).
   const restoreAction = actions.find((a) => a.id === 'config.restore');
   check('config.restore is riskLevel dangerous', restoreAction?.riskLevel === 'dangerous', restoreAction);
+  // The IP write actions can lock the operator out of the management address —
+  // they must be flagged dangerous (and never retried on dispatch failure).
+  for (const id of ['ip.interface.set', 'ip.parameters.set', 'ip.supplicant.set']) {
+    const a = actions.find((x) => x.id === id);
+    check(`v0.6 action "${id}" is riskLevel dangerous`, a?.riskLevel === 'dangerous', a);
+  }
   // Destructive device actions must NOT be exposed.
   for (const id of ['system.reset', 'system.reboot']) {
     check(`destructive action "${id}" absent from catalog`, !actionIds.has(id));
@@ -134,6 +144,15 @@ async function main(): Promise<void> {
 
   const ifcs = byId.get('interfaces');
   check('Interfaces & VLANs section has ≥1 item', Boolean(ifcs?.items?.length >= 1), { count: ifcs?.items?.length });
+  // v0.6.0 — interface items expose the IP write actions (prefilled) and gateway/DNS fields.
+  if (ifcs?.items) {
+    const withIpActions = ifcs.items.filter((i: any) => Array.isArray(i.actions) && i.actions.some((a: any) => a.actionId === 'ip.interface.set') && i.actions.some((a: any) => a.actionId === 'ip.parameters.set') && i.actions.some((a: any) => a.actionId === 'ip.supplicant.set'));
+    check('interface items carry the three IP actions', ifcs.items.length === 0 || withIpActions.length === ifcs.items.length, { total: ifcs.items.length, withIpActions: withIpActions.length });
+    const prefilled = (ifcs.items[0]?.actions ?? []).find((a: any) => a.actionId === 'ip.interface.set');
+    check('ip.interface.set prefill carries the interface name', typeof prefilled?.prefill?.interface === 'string' && prefilled.prefill.interface.length > 0, prefilled);
+    const fields = ifcs.items[0]?.fields ?? {};
+    check('interface item exposes Gateway + DNS + IPv6 fields', 'Gateway' in fields && 'DNS' in fields && 'IPv6' in fields, Object.keys(fields));
+  }
 
   const wlc = byId.get('wlc');
   check('WLC section present with controller row', Boolean(wlc?.items?.[0]), wlc);

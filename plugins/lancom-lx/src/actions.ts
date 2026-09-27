@@ -199,15 +199,40 @@ const ipInterfacesRead: ActionDescriptor<LxActionContext> = {
   execute: async (ctx: LxActionContext): Promise<ActionResult> => {
     const p = await loadConfig(ctx);
     const rows = p.tables.get('13.2.70.6') ?? [];
+    // Gateway/DNS parameters are a separate table keyed by the same interface name.
+    const paramsByName = new Map<string, Record<string, string | null>>();
+    for (let i = 0; i < (p.tables.get('13.2.70.4')?.length ?? 0); i++) {
+      const idx = rowIndexPath(p, '13.2.70.4', i);
+      paramsByName.set(tableCell(p, '13.2.70.4', '1', idx) ?? '', {
+        ipv4Gateway: tableCell(p, '13.2.70.4', '2', idx) || null,
+        ipv6Gateway: (tableCell(p, '13.2.70.4', '3', idx) ?? '').replace(/^:+$/, '') || null,
+        primaryIpv4Dns: tableCell(p, '13.2.70.4', '4', idx) || null,
+        secondaryIpv4Dns: tableCell(p, '13.2.70.4', '5', idx) || null,
+      });
+    }
+    // 802.1X LAN supplicant — password is NEVER returned.
+    const supplicantByName = new Map<string, { methodIndex: string; username: string | null }>();
+    for (let i = 0; i < (p.tables.get('13.2.30.11')?.length ?? 0); i++) {
+      const idx = rowIndexPath(p, '13.2.30.11', i);
+      supplicantByName.set(tableCell(p, '13.2.30.11', '1', idx) ?? '', {
+        methodIndex: tableCell(p, '13.2.30.11', '2', idx) ?? '', // numeric enum — label mapping not published by the vendor
+        username: tableCell(p, '13.2.30.11', '3', idx) || null,
+      });
+    }
     const interfaces = rows.map((_, i) => {
       const idx = rowIndexPath(p, '13.2.70.6', i);
+      const name = tableCell(p, '13.2.70.6', '1', idx) ?? '';
       return {
-        name: tableCell(p, '13.2.70.6', '1', idx) ?? '',
+        name,
         ifname: tableCell(p, '13.2.70.6', '2', idx) || '—',
         vlanId: (tableCell(p, '13.2.70.6', '3', idx) === '0' ? null : tableCell(p, '13.2.70.6', '3', idx)) ?? null,
-        ipv4Source: tableCell(p, '13.2.70.6', '4', idx) || 'DHCP',
-        staticIpv4: tableCell(p, '13.2.70.6', '6', idx) || null,
+        ipv4SourceIndex: tableCell(p, '13.2.70.6', '4', idx) ?? '', // numeric enum (observed on this platform: 2 = static) — pass back unchanged to keep it
+        ipv6SourceIndex: tableCell(p, '13.2.70.6', '5', idx) ?? '', // numeric enum (observed: 1 = auto/SLAAC)
+        staticIpv4: tableCell(p, '13.2.70.6', '6', idx) || null, // CIDR notation, e.g. "10.25.1.2/16"
+        staticIpv6: (tableCell(p, '13.2.70.6', '7', idx) ?? '').replace(/^:+$/, '') || null,
         comment: tableCell(p, '13.2.70.6', '9', idx) || null,
+        parameters: paramsByName.get(name) ?? null,
+        supplicant: supplicantByName.get(name) ?? null, // password redacted by design
       };
     });
     return { success: true, details: { count: interfaces.length, interfaces } };
@@ -752,6 +777,212 @@ const configPersist: ActionDescriptor<LxActionContext> = {
       const tag = await c.makePersistent();
       if (!isWriteOk(tag)) return { success: false, error: `setFlashMode failed with errortag ${tag}` };
       return { success: true, applied: true, verified: true, details: { persisted: true } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+// --- IP addressing write actions --------------------------------------------------------------
+// These change the AP's OWN management interface (table 13.2.70.6 + parameters
+// 13.2.70.4 + 802.1X supplicant 13.2.30.11). A wrong or unreachable result
+// locks you out of the web UI, so all three are riskLevel 'dangerous' with
+// retryOnDispatchFailure=false — an explicit user choice that is never re-run.
+// Verification is best-effort: when the management IP itself changed, the AP is
+// no longer reachable at the old address and a failed re-read is EXPECTED (the
+// write was accepted by the device) — it is reported as verified:false with a
+// note instead of a failure.
+
+/** Best-effort post-write config re-read: retries while the AP may be re-initializing its network stack. */
+async function rereadConfigBestEffort(c: LcosWebClient, attempts = 5, delayMs = 2_000): Promise<ParsedLcosConfig | null> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return parseLcosConfigText(await c.getConfigText());
+    } catch {
+      if (i === attempts - 1) return null;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  return null;
+}
+
+const ipInterfaceSet: ActionDescriptor<LxActionContext> = {
+  id: 'ip.interface.set',
+  label: 'Set interface IP addressing (DANGEROUS)',
+  description:
+    "Changes the AP's OWN management addressing on a LAN interface (table 13.2.70.6) — IPv4/IPv6 address source and static addresses. DANGEROUS: if you change the address of the interface the web UI is reached over, the AP becomes unreachable at its old address afterwards; verify from the NEW address. Source values are numeric enum indices (observed on this platform: v4 2 = static — pass back the value from ip.interfaces.read to keep it). Only provided fields change.",
+  module: 'Network',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 90_000, // re-read retries while the network stack re-initializes
+  retryOnDispatchFailure: false,
+  inputSchema: {
+    interface: { type: 'string', required: true, description: 'Interface name (row index; e.g. INTRANET — see ip.interfaces.read)' },
+    ipv4SourceIndex: { type: 'number', min: 0, max: 255, description: 'IPv4 address source enum index (observed: 2 = static); pass back the read value to keep it' },
+    staticIpv4: { type: 'string', minLength: 7, maxLength: 18, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}(\\/\\d{1,2})?$', description: 'Static IPv4 address in CIDR notation (e.g. 10.25.1.2/16)' },
+    ipv6SourceIndex: { type: 'number', min: 0, max: 255, description: 'IPv6 address source enum index (observed: 1 = auto); pass back the read value to keep it' },
+    staticIpv6: { type: 'string', minLength: 3, maxLength: 80, description: 'Static IPv6 address in CIDR notation (e.g. 2003:e9::5/64)' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const iface = String(input.interface);
+    const c = client(ctx);
+    try {
+      const p = parseLcosConfigText(await c.getConfigText());
+      const rowIndex = findRowByIndex(p, '13.2.70.6', iface);
+      if (rowIndex == null) return { success: false, error: `Interface "${iface}" not found in table 13.2.70.6` };
+
+      const cells: Record<string, string | number> = {};
+      if (input.ipv4SourceIndex != null) cells[4] = Number(input.ipv4SourceIndex);
+      if (typeof input.staticIpv4 === 'string' && input.staticIpv4.length > 0) cells[6] = String(input.staticIpv4);
+      if (input.ipv6SourceIndex != null) cells[5] = Number(input.ipv6SourceIndex);
+      if (typeof input.staticIpv6 === 'string' && input.staticIpv6.length > 0) cells[7] = String(input.staticIpv6);
+      if (Object.keys(cells).length === 0) return { success: false, error: 'Nothing to change — provide at least one of ipv4SourceIndex/staticIpv4/ipv6SourceIndex/staticIpv6' };
+
+      const before: Record<string, string | null> = {};
+      for (const col of Object.keys(cells)) before[col] = tableCell(p, '13.2.70.6', col, rowIndex) ?? null;
+
+      const tag = await c.updateTableRow('13.2.70.6', rowIndex, cells);
+      if (!isWriteOk(tag)) return { success: false, error: `updateTableRow 13.2.70.6 failed with errortag ${tag}` };
+
+      // Best-effort verification — a changed management IP makes the AP unreachable at the old address.
+      const p2 = await rereadConfigBestEffort(c);
+      if (p2 == null) {
+        return {
+          success: true, applied: true, verified: false,
+          details: { interface: iface, before, note: 'Write accepted by the device, but the AP was not reachable for verification — expected when the management address itself changed. Verify from the NEW address.' },
+        };
+      }
+      const idx2 = findRowByIndex(p2, '13.2.70.6', iface);
+      const verified = idx2 != null && Object.entries(cells).every(([col, val]) => (tableCell(p2, '13.2.70.6', col, idx2) ?? '') === String(val));
+      return { success: true, applied: true, verified, details: { interface: iface, before } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const ipParametersSet: ActionDescriptor<LxActionContext> = {
+  id: 'ip.parameters.set',
+  label: 'Set interface gateway/DNS (DANGEROUS)',
+  description:
+    "Changes the AP's OWN management routing parameters on a LAN interface (table 13.2.70.4) — IPv4/IPv6 gateways and primary/secondary DNS. DANGEROUS: wrong values can make the AP unreachable; this action is never re-dispatched automatically. Only provided fields change.",
+  module: 'Network',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 90_000,
+  retryOnDispatchFailure: false,
+  inputSchema: {
+    interface: { type: 'string', required: true, description: 'Interface name (row index; e.g. INTRANET — see ip.interfaces.read)' },
+    ipv4Gateway: { type: 'string', minLength: 7, maxLength: 15, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'IPv4 default gateway' },
+    ipv6Gateway: { type: 'string', minLength: 2, maxLength: 39, description: 'IPv6 default gateway (full address)' },
+    primaryIpv4Dns: { type: 'string', minLength: 7, maxLength: 15, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'Primary IPv4 DNS server' },
+    secondaryIpv4Dns: { type: 'string', minLength: 7, maxLength: 15, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'Secondary IPv4 DNS server' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const iface = String(input.interface);
+    const c = client(ctx);
+    try {
+      const p = parseLcosConfigText(await c.getConfigText());
+      let rowIndex = findRowByIndex(p, '13.2.70.4', iface);
+
+      const cells: Record<string, string | number> = {};
+      if (typeof input.ipv4Gateway === 'string' && input.ipv4Gateway.length > 0) cells[2] = String(input.ipv4Gateway);
+      if (typeof input.ipv6Gateway === 'string' && input.ipv6Gateway.length > 0) cells[3] = String(input.ipv6Gateway);
+      if (typeof input.primaryIpv4Dns === 'string' && input.primaryIpv4Dns.length > 0) cells[4] = String(input.primaryIpv4Dns);
+      if (typeof input.secondaryIpv4Dns === 'string' && input.secondaryIpv4Dns.length > 0) cells[5] = String(input.secondaryIpv4Dns);
+      if (Object.keys(cells).length === 0) return { success: false, error: 'Nothing to change — provide at least one of ipv4Gateway/ipv6Gateway/primaryIpv4Dns/secondaryIpv4Dns' };
+
+      const before: Record<string, string | null> = {};
+      if (rowIndex != null) for (const col of Object.keys(cells)) before[col] = tableCell(p, '13.2.70.4', col, rowIndex) ?? null;
+
+      let tag: number;
+      if (rowIndex != null) {
+        tag = await c.updateTableRow('13.2.70.4', rowIndex, cells);
+      } else {
+        // No parameter row yet — create it keyed by the interface name.
+        tag = await c.addTableRow('13.2.70.4', { 1: iface, ...cells });
+      }
+      if (!isWriteOk(tag)) return { success: false, error: `Static-Parameters update failed with errortag ${tag}` };
+
+      const p2 = await rereadConfigBestEffort(c);
+      if (p2 == null) {
+        return {
+          success: true, applied: true, verified: false,
+          details: { interface: iface, before, note: 'Write accepted by the device, but the AP was not reachable for verification — expected when routing/DNS changes break reachability. Verify from the network side.' },
+        };
+      }
+      const idx2 = findRowByIndex(p2, '13.2.70.4', iface);
+      const verified = idx2 != null && Object.entries(cells).every(([col, val]) => (tableCell(p2, '13.2.70.4', col, idx2) ?? '') === String(val));
+      return { success: true, applied: true, verified, details: { interface: iface, before } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
+const ipSupplicantSet: ActionDescriptor<LxActionContext> = {
+  id: 'ip.supplicant.set',
+  label: 'Set 802.1X LAN supplicant (DANGEROUS)',
+  description:
+    "Configures the AP's OWN 802.1X client on a LAN interface (table 13.2.30.11) — method, username and password for port-based network authentication. DANGEROUS: wrong credentials can drop the management link; never re-dispatched automatically. The password is write-only — it is never returned by any read action.",
+  module: 'Network',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 90_000,
+  retryOnDispatchFailure: false,
+  inputSchema: {
+    interface: { type: 'string', required: true, description: 'Interface name (row index; e.g. INTRANET — see ip.interfaces.read)' },
+    methodIndex: { type: 'number', min: 0, max: 255, description: 'Supplicant method enum index (LanSupplicantMethodInpSet); pass back the read value to keep it' },
+    username: { type: 'string', minLength: 1, maxLength: 64, description: '802.1X username' },
+    password: { type: 'string', minLength: 1, maxLength: 128, description: '802.1X password (write-only — never returned)' },
+    remove: { type: 'boolean', default: false, description: 'true = remove the supplicant configuration from this interface' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const iface = String(input.interface);
+    const c = client(ctx);
+    try {
+      const p = parseLcosConfigText(await c.getConfigText());
+      const rowIndex = findRowByIndex(p, '13.2.30.11', iface);
+
+      let tag: number;
+      if (input.remove) {
+        if (rowIndex == null) return { success: false, error: `Interface "${iface}" has no 802.1X supplicant configuration` };
+        tag = await c.delTableRow('13.2.30.11', rowIndex);
+      } else {
+        const cells: Record<string, string | number> = {};
+        if (input.methodIndex != null) cells[2] = Number(input.methodIndex);
+        if (typeof input.username === 'string' && input.username.length > 0) cells[3] = String(input.username);
+        if (typeof input.password === 'string' && input.password.length > 0) cells[4] = String(input.password);
+        if (Object.keys(cells).length === 0) return { success: false, error: 'Nothing to change — provide at least one of methodIndex/username/password (or remove=true)' };
+        if (rowIndex != null) {
+          tag = await c.updateTableRow('13.2.30.11', rowIndex, cells);
+        } else {
+          // New row needs a usable method — the vendor default is not published.
+          if (input.methodIndex == null) return { success: false, error: 'methodIndex is required when creating a new supplicant entry (no existing value to keep)' };
+          tag = await c.addTableRow('13.2.30.11', { 1: iface, ...cells });
+        }
+      }
+      if (!isWriteOk(tag)) return { success: false, error: `LAN-Supplicant update failed with errortag ${tag}` };
+
+      const p2 = await rereadConfigBestEffort(c);
+      if (p2 == null) {
+        return {
+          success: true, applied: true, verified: false,
+          details: { interface: iface, removed: !!input.remove, note: 'Write accepted by the device, but the AP was not reachable for verification — expected when 802.1X changes break the management link.' },
+        };
+      }
+      const idx2 = findRowByIndex(p2, '13.2.30.11', iface);
+      let verified: boolean;
+      if (input.remove) {
+        verified = idx2 == null;
+      } else {
+        // Verify only the non-secret cells — the password is never compared/returned.
+        const checkable: Record<string, string> = {};
+        if (input.methodIndex != null) checkable[2] = String(input.methodIndex);
+        if (typeof input.username === 'string' && input.username.length > 0) checkable[3] = String(input.username);
+        verified = idx2 != null && Object.entries(checkable).every(([col, val]) => (tableCell(p2, '13.2.30.11', col, idx2) ?? '') === val);
+      }
+      return { success: true, applied: true, verified, details: { interface: iface, removed: !!input.remove } };
     } finally {
       await c.destroy().catch(() => undefined);
     }
@@ -1446,6 +1677,9 @@ export const registry = createRegistry<LxActionContext>([
   ssidVlanSet,
   wlanNetworkAdd,
   wlcAddressSet,
+  ipInterfaceSet,
+  ipParametersSet,
+  ipSupplicantSet,
   ntpServerAdd,
   ntpServerRemove,
   ntpServerSetActive,

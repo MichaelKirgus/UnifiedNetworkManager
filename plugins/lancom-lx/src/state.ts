@@ -171,17 +171,43 @@ export function buildLxState(parsed: ParsedLcosConfig, live?: LxLiveStatus | nul
     items: ifRows.map((_, i) => {
       const idx = rowIndexPath(parsed, '13.2.70.6', i);
       const vlanRaw = tableCell(parsed, '13.2.70.6', '3', idx);
+      const ifName = tableCell(parsed, '13.2.70.6', '1', idx) ?? '';
+      // Gateway/DNS from the Static-Parameters table (same interface name).
+      let params: Record<string, string | null> | null = null;
+      for (let j = 0; j < (parsed.tables.get('13.2.70.4')?.length ?? 0); j++) {
+        const pidx = rowIndexPath(parsed, '13.2.70.4', j);
+        if ((tableCell(parsed, '13.2.70.4', '1', pidx) ?? '') === ifName) {
+          params = {
+            Gateway: tableCell(parsed, '13.2.70.4', '2', pidx) || null,
+            DNS: [tableCell(parsed, '13.2.70.4', '4', pidx), tableCell(parsed, '13.2.70.4', '5', pidx)].filter(Boolean).join(', ') || null,
+          };
+          break;
+        }
+      }
+      const supplicant = (parsed.tables.get('13.2.30.11') ?? []).some((_, j) => {
+        const sidx = rowIndexPath(parsed, '13.2.30.11', j);
+        return (tableCell(parsed, '13.2.30.11', '1', sidx) ?? '') === ifName;
+      });
       return {
         key: `ifc-${idx}`,
-        title: tableCell(parsed, '13.2.70.6', '1', idx) ?? `Interface ${i + 1}`,
+        title: ifName || `Interface ${i + 1}`,
         subtitle: tableCell(parsed, '13.2.70.6', '2', idx) || null,
         status: 'ok',
         fields: {
           Interface: tableCell(parsed, '13.2.70.6', '2', idx) ?? '—',
           VLAN: vlanRaw === '0' ? 'untagged' : `VLAN ${vlanRaw}`,
           IPv4: `${tableCell(parsed, '13.2.70.6', '4', idx) || 'DHCP'}${(tableCell(parsed, '13.2.70.6', '6', idx) ?? '') !== '' ? ` (${tableCell(parsed, '13.2.70.6', '6', idx)})` : ''}`,
+          IPv6: `${tableCell(parsed, '13.2.70.6', '5', idx) || '—'}${(tableCell(parsed, '13.2.70.6', '7', idx) ?? '').replace(/^:+$/, '') !== '' ? ` (${tableCell(parsed, '13.2.70.6', '7', idx)})` : ''}`,
+          Gateway: params?.Gateway ?? null,
+          DNS: params?.DNS ?? null,
+          '802.1X': supplicant ? 'configured' : null,
           Comment: tableCell(parsed, '13.2.70.6', '9', idx) || null,
         },
+        actions: [
+          { actionId: 'ip.interface.set', prefill: { interface: ifName } },
+          { actionId: 'ip.parameters.set', prefill: { interface: ifName } },
+          { actionId: 'ip.supplicant.set', prefill: { interface: ifName } },
+        ],
       };
     }),
   });
