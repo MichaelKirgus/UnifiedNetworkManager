@@ -18,6 +18,7 @@ import {
   readSettings,
   resolvePluginIdentity,
   resolveSshCredentials,
+  createSftpPool,
   TtlCache,
   createPinningGuard,
   dynamicSshHostVerifier,
@@ -70,7 +71,12 @@ const identity = resolvePluginIdentity({
   // 0.2.0 — Updates page support (capability 'updates'): firmware `updates[]` row
   // from the live swVersion vs the static LCOS release catalog (available-without-
   // apply — LANCOM MIBs are read-only, OS updates go through the web UI).
-  version: '0.2.0',
+  // 0.3.0 — SSH/SFTP config management: backup/restore over the LCOS virtual
+  // `/config` SFTP file (the same LCF document as `readconfig`) + interactive-CLI
+  // actions (`set <path> <value>` with read-back verification) for device name,
+  // timezone and WLAN SSID settings. The web-UI backup path is kept only as a
+  // legacy fallback — the LCOS web UI locks out repeated failed POSTs.
+  version: '0.3.0',
   vendors: ['lancom'],
   // All four capabilities: monitoring (SNMP walks), inventory (networks/hosts),
   // configuration (SNMP SET actions) + planning (multi-device fan-out). Plus an
@@ -197,8 +203,15 @@ const assertPinned = createPinningGuard();
 // the bound `ssh` credential slot. LCOS's PRIMARY secret is SNMP (a community string
 // cannot log into a shell), so an explicit ssh slot MUST be bound — hence slotOnly.
 const termPool = createTerminalPool();
-process.on('SIGTERM', () => termPool.closeAll());
-process.on('SIGINT', () => termPool.closeAll());
+
+// SFTP pool for the config backup/restore actions — LCOS exposes the running
+// configuration as a virtual `/config` file over SFTP (read AND write), which is
+// the same LCF document `readconfig` prints. One pooled session per host; the
+// pool keys by host|port|username so credential rotation never leaks into it.
+const sftpPool = createSftpPool();
+
+process.on('SIGTERM', () => { termPool.closeAll(); sftpPool.closeAll(); });
+process.on('SIGINT', () => { termPool.closeAll(); sftpPool.closeAll(); });
 
 const consoleUpgrade = makeConsoleUpgrade({
   expectedApiKey: () => process.env.PLUGIN_API_KEY ?? null,
@@ -259,18 +272,19 @@ const server = createPluginServer({
   discovery: {
     // Primary credential = the existing 'snmp' secret type (community for v1/v2c, USM fields for v3).
     requiredSecretType: 'snmp',
-    // Additional named credential slot: a separate web-UI login used ONLY by the
-    // backup/restore actions. This is exactly what the plugin credential-slot
-    // system was designed for — one device, two distinct credentials (SNMP primary + web UI).
+    // Additional named credential slots: SSH (config backup/restore over the
+    // virtual /config SFTP file + CLI actions + interactive console) and a legacy
+    // web-UI login (kept for the old HTTP backup fallback). One device, several
+    // distinct credentials — exactly what the plugin slot system is designed for.
     credentialSlots: [
-      { name: 'web', secretType: 'usernamePassword', required: false, description: 'Web-UI login for config backup/restore' },
       {
         name: 'ssh',
         secretTypes: ['usernamePassword', 'sshKeyPair'],
         required: false,
         description:
-          "Optional SSH access (port 22) for the interactive web console — a full LCOS CLI shell, like PuTTY. The primary SNMP credential cannot log into a shell, so bind a usernamePassword or sshKeyPair secret here to enable the Shell button on the device page.",
+          "SSH access (port 22) used by config backup/restore (the LCOS virtual /config SFTP file), the CLI setting actions and the interactive web console. The primary SNMP credential cannot log into a shell — bind a usernamePassword or sshKeyPair secret here to enable these features.",
       },
+      { name: 'web', secretType: 'usernamePassword', required: false, description: 'Legacy web-UI login (HTTP backup fallback only)' },
     ],
     metrics: DISCOVER_METRICS,
     options: PLUGIN_OPTIONS,
@@ -821,6 +835,9 @@ async function buildActionContext(args: {
     backupPath: backupPathOf(args.settings),
     httpsPort: resolveHttpsPort(args.settings.httpsPort),
     httpPort: resolveHttpPort(args.settings.httpPort),
+    sftpPool,
+    terminalPool: termPool,
+    sshPort: resolveSshPort(args.settings.sshPort),
   };
 }
 

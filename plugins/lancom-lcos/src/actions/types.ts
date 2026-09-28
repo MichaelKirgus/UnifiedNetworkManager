@@ -1,5 +1,5 @@
 import { SnmpCredentials, TransportOptions } from '@unm/snmp-client';
-import type { ActionDescriptor as SdkActionDescriptor } from '@unm/plugin-sdk';
+import type { ActionDescriptor as SdkActionDescriptor, TerminalPool } from '@unm/plugin-sdk';
 import { isValidInput, validateInput } from '@unm/plugin-sdk';
 import type {
   ActionResult,
@@ -76,12 +76,18 @@ export interface ActionContext {
   opts: TransportOptions;
   /** Web-UI transport preference ('auto' | 'http' | 'https'). */
   webTransport: 'auto' | 'http' | 'https';
-  /** Configured backup endpoint path (see the `backupPath` option). */
+  /** Configured backup endpoint path (see the `backupPath` option) — legacy web fallback only. */
   backupPath: string;
   /** Configured HTTPS management port (default 443) — used by web-UI actions. */
   httpsPort?: number;
   /** Configured plain-HTTP management port (default 80) — used by web-UI fallbacks. */
   httpPort?: number;
+  /** Process-wide SFTP pool (SDK createSftpPool) — config backup/restore over the LCOS virtual `/config` file. */
+  sftpPool: import('@unm/plugin-sdk').SftpPool;
+  /** Process-wide terminal pool (SDK createTerminalPool) — interactive CLI actions (`set`, `readconfig`). */
+  terminalPool: TerminalPool;
+  /** Configured SSH port (default 22) — used by the SFTP/CLI transports. */
+  sshPort?: number;
 }
 
 /** Declares what durable credentials a multi-device intent needs (called by the planner). */
