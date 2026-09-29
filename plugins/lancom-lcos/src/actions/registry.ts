@@ -31,6 +31,7 @@ import { snmpGet, snmpSet, snmpWalk, SnmpValue } from '@unm/snmp-client';
 import { SETUP, SETUP_TIME, SYS, WLAN_NET, WLAN_RADIO, WLAN_SETUP, lcosMinutesToTimezoneEnum, wlanIfcToEnum } from '../lcosOids';
 import { runLcosCliCommands, stripCommandEcho } from '../lcosCli';
 import { isLcfDocument, lcfScalar, parseLcf } from '../lcf';
+import { NETWORK_INTENT_ACTIONS } from './networkIntents';
 import { ActionContext, ActionDescriptor, ActionResult } from './types';
 
 // --- SSH/SFTP helpers -----------------------------------------------------------
@@ -1053,6 +1054,8 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   wlanRadiosRead,
   radioChannelSet,
   radioPowerSet,
+  // Canonical fleet intents (network.create / network.delete + vlan.networks.read).
+  ...NETWORK_INTENT_ACTIONS,
 ];
 
 /** The shared registry factory (@unm/plugin-sdk) — one source for /discover, /plan and /config. */

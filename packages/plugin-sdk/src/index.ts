@@ -32,6 +32,8 @@ export { INVENTORY_INTERVAL_MS, errorDescriptor, modelFirmwareDescriptors, gauge
 export { validateInput, isValidInput, createRegistry } from './actions';
 export type { ValidationIssue, ActionDescriptor, ActionRegistry } from './actions';
 export { PlanningError, STEP_TOKEN_PATTERN, shiftStepTokens, finalizePlan } from './planning';
+// Canonical fleet intents (cross-vendor network rollout contract). See intents.ts.
+export { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, CANONICAL_INTENTS, isCanonicalIntent, NETWORK_CREATE_SCHEMA, NETWORK_DELETE_SCHEMA, CANONICAL_INTENT_SCHEMAS } from './intents';
 export { pollUntil, stateEquals } from './verification';
 export type { PollUntilOptions, PollUntilResult } from './verification';
 export type { FinalizePlanOptions } from './planning';

@@ -149,7 +149,9 @@ export function createRegistry<Context = unknown>(actions: ActionDescriptor<Cont
         description: a.description,
         module: a.module,
         riskLevel: a.riskLevel,
-        deviceCount: 1 as const,
+        // Pass through verbatim — 'N' marks fan-out intents (any device count);
+        // the plan API enforces exact counts only for numeric values.
+        deviceCount: a.deviceCount,
         timeoutMs: a.timeoutMs,
         retryOnDispatchFailure: a.retryOnDispatchFailure,
         inputSchema: a.inputSchema,

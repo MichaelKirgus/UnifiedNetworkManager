@@ -1,8 +1,11 @@
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { Globe } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { IpGroupChips } from '../components/IpGroups';
+import { NetworkRolloutDialog } from '../components/NetworkRolloutDialog';
 import { api, NetworkRow } from '../api/client';
 import { useTimeFormat } from '../utils/time';
 
@@ -22,6 +25,7 @@ function VersionBadge({ version }: { version?: string | null }) {
 
 export default function Networks() {
   const { formatDateTime } = useTimeFormat();
+  const [showRollout, setShowRollout] = useState(false);
   // The API polls plugins every 30s and upserts these rows — refresh at the
   // same cadence so the view tracks live inventory.
   const networksQuery = useQuery({
@@ -113,7 +117,22 @@ export default function Networks() {
   ];
 
   return (
-    <Layout title="Networks">
+    <Layout
+      title="Networks"
+      actions={
+        <>
+          <button
+            type="button"
+            onClick={() => setShowRollout(true)}
+            className="flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
+          >
+            <Globe className="h-4 w-4" /> Roll out network
+          </button>
+        </>
+      }
+    >
+
+      {showRollout && <NetworkRolloutDialog onClose={() => setShowRollout(false)} />}
 
       {networksQuery.isLoading && <p className="text-sm text-muted-foreground">Loading networks...</p>}
       {networksQuery.isError && (
