@@ -86,3 +86,59 @@ export const CANONICAL_INTENT_SCHEMAS: Record<string, InputSchema> = {
   [INTENT_NETWORK_CREATE]: NETWORK_CREATE_SCHEMA,
   [INTENT_NETWORK_DELETE]: NETWORK_DELETE_SCHEMA,
 };
+
+// ---------------------------------------------------------------------------
+// Preflight — per-device best-guess resolution (the "smart" half of rollout)
+// ---------------------------------------------------------------------------
+/**
+ * The canonical PREFLIGHT contract. Before a fleet intent is planned, the webapp
+ * asks every supporting plugin to RESOLVE best-guess values for each target
+ * device against its live state — so the user sees and confirms concrete,
+ * per-device settings (which interface carries the VLAN on THIS router, which
+ * L3 address fits, which SSID slot is free) instead of one generic field.
+ *
+ * Transport: POST /preflight on the plugin with { intentActionId, device } —
+ * the SAME body shape as a single-device step dispatch (host + full credentials
+ * incl. bound slots), so resolvers may do READ-ONLY live probes (SNMP walks,
+ * CLI `dir`). Resolvers MUST NOT write anything; they return suggestions only.
+ *
+ * The result is deliberately GENERIC: `values` carries the suggested input
+ * fields (a subset of the intent's input schema, keyed by the SAME names —
+ * e.g. `interface`, `cidr`, `dhcpPool`, `ssid.slot`) and each field gets a
+ * confidence + human note so the UI can show WHY a value was chosen and how
+ * sure the plugin is. The webapp renders values generically (string/number/
+ * object) and lets the user override any of them; overrides ride back in
+ * PlanRequest.deviceInputs.
+ */
+export type PreflightConfidence = 'high' | 'medium' | 'low';
+
+/** One suggested input field for one device. */
+export interface PreflightValue {
+  /** The intent input key this value fills (e.g. `interface`, `cidr`). */
+  key: string;
+  /** Suggested value — same shape as the corresponding intent input field. */
+  value: unknown;
+  /** How confident the resolver is in this suggestion. */
+  confidence: PreflightConfidence;
+  /** Human explanation (e.g. "only LAN-1 exists on this device", "row already present — left untouched"). */
+  note?: string;
+}
+
+/** The preflight result for ONE device of ONE plugin. */
+export interface PreflightResult {
+  deviceId: string;
+  /** Suggested input fields (merged over the shared intent inputs at plan time). */
+  values: PreflightValue[];
+  /** True when the resolver could not inspect the device (offline, no creds…). */
+  degraded?: boolean;
+  /** Why it is degraded (shown in the UI; the device can still be planned with defaults). */
+  error?: string;
+}
+
+/** Body of POST /preflight on a plugin. */
+export interface PreflightRequest {
+  intentActionId: string;
+  /** The shared intent inputs the user entered (name, vlanId, …) — resolvers use them to tailor suggestions. */
+  inputs?: Record<string, unknown>;
+  device: { deviceId: string; managementAddress: string; credentials: Record<string, unknown> };
+}

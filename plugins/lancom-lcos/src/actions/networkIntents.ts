@@ -41,7 +41,7 @@ import { ActionContext, ActionDescriptor, ActionResult } from './types';
 // --- Shared CLI table helpers ------------------------------------------------------
 
 /** Resolves the bound `ssh` slot (same contract as registry.ts). */
-function sshCreds(ctx: ActionContext): SshCredentials | undefined {
+export function sshCreds(ctx: ActionContext): SshCredentials | undefined {
   return resolveSshCredentials(ctx.credentials as Record<string, unknown>, { slotOnly: true });
 }
 
@@ -58,7 +58,7 @@ function q(v: string): string {
  * Data rows start at column 0; header/separator lines are indented or made of
  * '='/'-'; prompt lines contain '@'.
  */
-async function cliTableRows(ctx: ActionContext, creds: SshCredentials, tablePath: string): Promise<string[]> {
+export async function cliTableRows(ctx: ActionContext, creds: SshCredentials, tablePath: string): Promise<string[]> {
   const results = await runLcosCliCommands(
     ctx.terminalPool,
     { host: ctx.address, port: ctx.sshPort ?? 22, creds },
@@ -361,7 +361,7 @@ const networkDelete: ActionDescriptor = {
 // --- vlan.networks.read (SNMP status — verification + discovery) ----------------------
 
 /** Decodes a length-prefixed decimal-octet text index ("6.87.76.…" → "WLAN-1"). */
-function decodeTextIndex(idx: string[]): string | null {
+export function decodeTextIndex(idx: string[]): string | null {
   if (idx.length < 2) return null;
   const len = Number(idx[0]);
   if (!Number.isInteger(len) || len <= 0 || len !== idx.length - 1) return null;

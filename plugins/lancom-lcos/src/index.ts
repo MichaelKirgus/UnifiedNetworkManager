@@ -48,6 +48,7 @@ import { DEVICE_MODELS } from './deviceModels';
 import { getAction, listCatalog, listModules } from './actions/registry';
 import { ActionContext, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest } from './plan';
+import { PREFLIGHT_RESOLVERS } from './actions/preflight';
 
 /** Every firmware line known across the LCOS catalog — the Updates page compares
  * a device's live swVersion against this set (always in sync with /discover). */
@@ -962,6 +963,10 @@ app.post('/plan', async (req, res) => {
           credentials: (d.credentials && typeof d.credentials === 'object' ? d.credentials : {}) as Record<string, unknown>,
         }))
       : [],
+    // Per-device input overrides (rollout wizard's confirmed preflight values).
+    deviceInputs: body.deviceInputs && typeof body.deviceInputs === 'object'
+      ? (body.deviceInputs as PlanRequest['deviceInputs'])
+      : undefined,
   };
 
   try {
@@ -973,6 +978,64 @@ app.post('/plan', async (req, res) => {
       return;
     }
     res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+/**
+ * POST /preflight — resolve best-guess per-device values for a canonical fleet
+ * intent BEFORE planning (the "smart" half of the rollout wizard). Body:
+ * { intentActionId, inputs?, device: { deviceId, managementAddress, credentials } }
+ * READ-ONLY by contract: resolvers probe live state (SNMP walks, CLI `dir -a`)
+ * and return suggestions; they never write. The webapp shows the values with
+ * confidence + notes and lets the user override them before plan creation.
+ */
+app.post('/preflight', async (req, res) => {
+  const body = req.body ?? {};
+  const intentActionId: string | undefined = typeof body.intentActionId === 'string' ? body.intentActionId : undefined;
+  const inputs: Record<string, unknown> =
+    body.inputs && typeof body.inputs === 'object' ? (body.inputs as Record<string, unknown>) : {};
+  const dev = body.device ?? {};
+  const managementAddress: string | undefined = typeof dev.managementAddress === 'string' ? dev.managementAddress : undefined;
+
+  if (!intentActionId || !managementAddress) {
+    res.status(400).json({ error: 'intentActionId and device.managementAddress are required' });
+    return;
+  }
+  const resolver = PREFLIGHT_RESOLVERS[intentActionId];
+  if (!resolver) {
+    res.status(400).json({ error: `No preflight resolver for intent "${intentActionId}"` });
+    return;
+  }
+
+  // Same credential assembly as /config — the primary secret fields plus bound
+  // slots under credentials.slots.<name> (SSH is needed for CLI-based reads).
+  const credsFields = (dev.credentials && typeof dev.credentials === 'object' ? dev.credentials : {}) as Record<string, unknown>;
+  const { creds, error } = resolveCredentials(credsFields);
+  if (error || !creds) {
+    res.status(200).json({ result: { deviceId: String(dev.deviceId ?? ''), values: [], degraded: true, error: error ?? 'Missing SNMP credentials.' } });
+    return;
+  }
+  const stepCredentials: StepCredentials = {
+    snmp: creds,
+    ...(typeof credsFields.slots === 'object' && credsFields.slots !== null ? { slots: credsFields.slots as Record<string, Record<string, string>> } : {}),
+    ...credsFields,
+  };
+
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  try {
+    const ctx = await buildActionContext({
+      host: hostFromAddress(managementAddress),
+      address: managementAddress,
+      deviceId: typeof dev.deviceId === 'string' ? dev.deviceId : undefined,
+      credentials: stepCredentials,
+      settings,
+    });
+    const result = await resolver(ctx, inputs);
+    res.status(200).json({ result });
+  } catch (err) {
+    // Preflight is advisory — a probe failure degrades the suggestion, it must
+    // never block planning. The UI shows the device as degraded.
+    res.status(200).json({ result: { deviceId: String(dev.deviceId ?? ''), values: [], degraded: true, error: (err as Error).message } });
   }
 });
 

@@ -8,6 +8,8 @@ import { requireAuth, requirePermission, require2FA } from '../auth/middleware';
 import { allowedDeviceIds } from '../deviceAccess';
 import { getSecret, generateSecret, regenerateSecret, deleteSecret } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
+import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
+import { parseExtraCredentials } from '../types/credentialSlots';
 import { enqueuePlanExecution } from '../workers/planExecutor';
 import type { CatalogEntry as SdkCatalogEntry } from '@unm/plugin-sdk';
 import { validateInput, type InputSchema } from '../utils/inputSchema';
@@ -337,6 +339,102 @@ async function assertPlanAccess(req: Request, res: Response, planId: string): Pr
 
 // --- Routes -----------------------------------------------------------------
 
+/** One preflight result as returned by a plugin's POST /preflight. */
+interface PreflightResultDto {
+  deviceId: string;
+  values: Array<{ key: string; value: unknown; confidence: 'high' | 'medium' | 'low'; note?: string }>;
+  degraded?: boolean;
+  error?: string;
+}
+
+// POST /plans/preflight — READ-ONLY best-guess resolution for a fleet intent.
+// The rollout wizard calls this after the user picks scope + shared inputs:
+// for every target device the API resolves the assignment's credentials (primary
+// secret + bound slots, same shape as plan steps) and asks the plugin to probe
+// live state and suggest per-device values (interface, L3, SSID slot, …).
+// Nothing is written — a failing/degraded device still gets a result entry so
+// the UI can show it and fall back to defaults.
+router.post(
+  '/plans/preflight',
+  requireAuth,
+  requirePermission('devices:read'),
+  async (req, res) => {
+    const body = req.body ?? {};
+    const pluginId = typeof body.pluginId === 'string' ? body.pluginId : '';
+    const intentActionId = typeof body.intentActionId === 'string' ? body.intentActionId : '';
+    const inputs = isPlainObject(body.inputs) ? (body.inputs as Record<string, unknown>) : {};
+    const deviceIds: string[] = Array.isArray(body.deviceIds)
+      ? (body.deviceIds as unknown[]).filter((d): d is string => typeof d === 'string').slice(0, 200)
+      : [];
+
+    if (!pluginId || !intentActionId) {
+      res.status(400).json({ error: 'pluginId and intentActionId are required' });
+      return;
+    }
+    if (deviceIds.length === 0) {
+      res.status(400).json({ error: 'At least one deviceId is required' });
+      return;
+    }
+
+    const plugin = await db.query.plugins.findFirst({ where: (plugins, { eq }) => eq(plugins.id, pluginId) });
+    if (!plugin) {
+      res.status(404).json({ error: 'Plugin not found' });
+      return;
+    }
+    const preflightUrl = `${plugin.endpoint.replace(/\/$/, '')}/preflight`;
+
+    const allowed = await allowedDeviceIds(req);
+    const results: PreflightResultDto[] = [];
+
+    // Resolve credentials per device (assignment + primary secret + bound slots)
+    // — identical to what a plan step would carry, so resolvers see the same SSH/SNMP access.
+    const targets: Array<{ deviceId: string; managementAddress: string; credentials: Record<string, unknown> }> = [];
+    for (const deviceId of deviceIds) {
+      if (allowed !== null && !allowed.has(deviceId)) continue; // out-of-scope → skip silently
+      const device = await db.query.devices.findFirst({ where: (devices, { eq }) => eq(devices.id, deviceId) });
+      if (!device) continue;
+      const assignment = await resolveAssignment(deviceId, pluginId);
+      if (!assignment) {
+        results.push({ deviceId, values: [], degraded: true, error: `No ${plugin.name} assignment on this device` });
+        continue;
+      }
+      let credentials: Record<string, unknown> = {};
+      try {
+        if (assignment.secretId) credentials = { ...(await getSecret(assignment.secretId)).fields };
+        credentials = withSlots(credentials, await decryptCredentialSlots(parseExtraCredentials(assignment.extraCredentials)));
+      } catch (err) {
+        results.push({ deviceId, values: [], degraded: true, error: `Could not load device credentials: ${(err as Error).message}` });
+        continue;
+      }
+      targets.push({ deviceId, managementAddress: device.managementAddress, credentials });
+    }
+
+    // Fan out with bounded concurrency (live probes are slow-ish; keep the API responsive).
+    const CONCURRENCY = 5;
+    let cursor = 0;
+    async function worker(): Promise<void> {
+      while (cursor < targets.length) {
+        const t = targets[cursor++];
+        try {
+          const r = await axios.post(preflightUrl, {
+            intentActionId, inputs, device: t,
+          }, { timeout: 45_000 });
+          const result = (r.data?.result ?? {}) as PreflightResultDto;
+          results.push({ deviceId: t.deviceId, values: Array.isArray(result.values) ? result.values : [], degraded: !!result.degraded, error: result.error });
+        } catch (err) {
+          const e = err as { response?: { status?: number; data?: { error?: string } }; message?: string };
+          results.push({ deviceId: t.deviceId, values: [], degraded: true, error: e.response?.data?.error ?? `Preflight failed: ${e.message ?? 'unreachable'}` });
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
+
+    // Preserve the caller's device order.
+    const byId = new Map(results.map((r) => [r.deviceId, r]));
+    res.status(200).json({ results: deviceIds.map((id) => byId.get(id)).filter((r): r is PreflightResultDto => !!r) });
+  }
+);
+
 // POST /plans — plan an intent across devices via the plugin's /plan endpoint,
 // fulfil its provisionRequests (secrets are created NOW), persist everything.
 router.post(
@@ -349,6 +447,15 @@ router.post(
     const pluginId = typeof body.pluginId === 'string' ? body.pluginId : '';
     const intentActionId = typeof body.intentActionId === 'string' ? body.intentActionId : '';
     const inputs = isPlainObject(body.inputs) ? (body.inputs as Record<string, unknown>) : {};
+    // Optional per-device input overrides for fan-out intents (deviceCount 'N') —
+    // the rollout wizard's confirmed preflight values. Merged over `inputs` by
+    // the plugin when building each device's step.
+    const deviceInputs: Record<string, Record<string, unknown>> = {};
+    if (isPlainObject(body.deviceInputs)) {
+      for (const [k, v] of Object.entries(body.deviceInputs as Record<string, unknown>)) {
+        if (isPlainObject(v)) deviceInputs[k] = v as Record<string, unknown>;
+      }
+    }
     const devicesRaw = Array.isArray(body.devices) ? body.devices : [];
 
     if (!pluginId || !intentActionId) {
@@ -448,7 +555,7 @@ router.post(
     try {
       const response = await axios.post(
         `${plugin.endpoint.replace(/\/$/, '')}/plan`,
-        { intent: { actionId: intentActionId, inputs }, devices: planDevices },
+        { intent: { actionId: intentActionId, inputs }, devices: planDevices, ...(Object.keys(deviceInputs).length > 0 ? { deviceInputs } : {}) },
         { timeout: 20_000, headers }
       );
       plan = response.data?.plan;

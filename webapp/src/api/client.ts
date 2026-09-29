@@ -2131,6 +2131,22 @@ export interface InputSchemaProperty {
 export type InputSchema = Record<string, InputSchemaProperty>;
 
 /** One entry of a plugin's action catalog (from /discover `actions`). */
+/** One suggested input field from a plugin preflight probe. */
+export interface PreflightValueDto {
+  key: string;
+  value: unknown;
+  confidence: 'high' | 'medium' | 'low';
+  note?: string;
+}
+
+/** The preflight result for one device of one plugin (POST /plans/preflight). */
+export interface PreflightResultDto {
+  deviceId: string;
+  values: PreflightValueDto[];
+  degraded?: boolean;
+  error?: string;
+}
+
 export interface CatalogEntry {
   id: string;
   label: string;
@@ -3054,9 +3070,20 @@ export const api = {
     intentActionId: string;
     inputs?: Record<string, unknown>;
     devices: { deviceId: string }[];
+    /** Optional per-device input overrides for fan-out intents — the rollout
+     * wizard's confirmed preflight values (merged over `inputs` per device). */
+    deviceInputs?: Record<string, Record<string, unknown>>;
     /** Optional per-plan retry override; wins over the plugin's suggestion and the global defaults. */
     retryPolicy?: PlanRetryPolicy | null;
   }) => apiFetch<PlanDetail>('/plans', { method: 'POST', body: JSON.stringify(body) }),
+  /** Read-only best-guess resolution for a fleet intent — one result per device
+   * (suggested values + confidence + notes from the plugin's live-state probe). */
+  plansPreflight: (body: {
+    pluginId: string;
+    intentActionId: string;
+    inputs?: Record<string, unknown>;
+    deviceIds: string[];
+  }) => apiFetch<{ results: PreflightResultDto[] }>('/plans/preflight', { method: 'POST', body: JSON.stringify(body) }),
   getPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}`),
   /** Update plan-level settings (currently: the per-plan retry policy). Draft/ready/scheduled only. */
   updatePlan: (id: string, body: { retryPolicy?: PlanRetryPolicy | null }) =>

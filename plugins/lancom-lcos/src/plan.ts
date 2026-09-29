@@ -40,14 +40,18 @@ export function buildPlan(req: PlanRequest): Plan {
     throw new PlanningError(`Invalid action input: ${issues.map((i) => `${i.path}: ${i.message}`).join('; ')}`);
   }
 
-  // Fan-out: one step per device with the same inputs. The shared finalizePlan
+  // Fan-out: one step per device. Shared inputs are the base; optional
+  // per-device overrides (PlanRequest.deviceInputs — the rollout wizard's
+  // confirmed preflight values, e.g. a different interface or L3 address per
+  // router) merge on top for that device only. The shared finalizePlan
   // (@unm/plugin-sdk) prepends a best-effort config backup per dirty device —
   // the downloaded config is the rollback point (restoring it is a manual
   // web-UI operation; the step fails harmlessly when no `web` slot is bound).
+  const overrides = req.deviceInputs ?? {};
   const rawSteps = devices.map((d) => ({
     deviceId: d.deviceId,
     actionId: action.id,
-    input: { ...(inputs ?? {}) },
+    input: { ...(inputs ?? {}), ...(overrides[d.deviceId] ?? {}) },
   }));
 
   return finalizePlan(

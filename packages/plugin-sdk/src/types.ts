@@ -445,6 +445,14 @@ export interface PlanDevice<Credentials extends object = Record<string, unknown>
 export interface PlanRequest<Credentials extends object = Record<string, unknown>> {
   intent: { actionId: string; inputs: Record<string, unknown> };
   devices: PlanDevice<Credentials>[];
+  /**
+   * Optional per-device input OVERRIDES for fan-out intents (deviceCount 'N').
+   * Merged over the shared `intent.inputs` when building each device's step
+   * input — this is how a rollout wizard carries preflight-resolved, user-
+   * confirmed values (interface, L3 address, DHCP pool, SSID slot) that differ
+   * per device. Absent/empty = every device gets the shared inputs verbatim.
+   */
+  deviceInputs?: Record<string, Record<string, unknown>>;
 }
 
 /** The result an action executor returns. `verified` = plugin re-read state post-apply.
