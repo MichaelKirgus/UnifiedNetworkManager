@@ -320,6 +320,19 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     help:
       'The file-repo plugin (capability `fileRepo`) that stores new uploads by default — the Files page preselects it so you normally never have to pick a repo per upload. Empty = auto-resolve (the built-in local-storage repo, or the first online provider). Individual uploads can still override this from the Files page.',
   },
+
+  // Fleet rollout safety net (network.create plans).
+  {
+    key: 'rolloutOverlapMode',
+    label: 'Rollout overlap mode',
+    type: 'string',
+    category: 'Execution',
+    default: 'warn',
+    envVar: 'UNM_ROLLOUT_OVERLAP_MODE',
+    pattern: '^(warn|block)$',
+    help:
+      'How the server-side network-overlap check treats a rollout whose name, subnet or VLAN ID collides with an already-detected live network. "warn" (default): plan creation proceeds — NAT\'d remote sites and multi-site designs legitimately reuse names/subnets/VLAN ids. "block": such rollouts are REJECTED at plan creation until the overlap is resolved or this setting is switched back to warn.',
+  },
 ];
 
 const BY_KEY: Record<string, SettingDescriptor> = Object.fromEntries(
@@ -419,7 +432,7 @@ async function loadEffectiveValues(): Promise<Record<string, SettingValue>> {
   return values;
 }
 
-async function getEffectiveValues(): Promise<Record<string, SettingValue>> {
+export async function getEffectiveValues(): Promise<Record<string, SettingValue>> {
   const now = Date.now();
   if (cache && now - cache.cachedAt < CACHE_TTL_MS) return cache.values;
   const values = await loadEffectiveValues();

@@ -13,6 +13,7 @@ import { parseExtraCredentials } from '../types/credentialSlots';
 import { enqueuePlanExecution } from '../workers/planExecutor';
 import type { CatalogEntry as SdkCatalogEntry } from '@unm/plugin-sdk';
 import { validateInput, type InputSchema } from '../utils/inputSchema';
+import { networkChecksForDevices, networkCheck, assertRolloutAllowed } from '../utils/networkCheck';
 
 const router = Router();
 
@@ -347,6 +348,38 @@ interface PreflightResultDto {
   error?: string;
 }
 
+/** Server-side overlap check attached to each preflight result (network.create only). */
+interface PreflightCheckDto {
+  /** true when the live inventory already shows this network on the device. */
+  deployed: boolean;
+  /** Overlap warnings relevant to THIS device's live rows (name/subnet/vlan). */
+  warnings: Array<{ kind: 'name' | 'subnet' | 'vlan'; message: string; networkKey: string }>;
+}
+
+// POST /plans/network-check — on-demand server-side overlap check for a rollout.
+// The dialog calls this (debounced) while the user types, BEFORE any preflight
+// fan-out: warnings + per-device deployed/new status + free-range suggestions,
+// all computed against the live inventory in ONE query. Read-only; devices:read.
+router.post(
+  '/plans/network-check',
+  requireAuth,
+  requirePermission('devices:read'),
+  async (req, res) => {
+    const body = req.body ?? {};
+    const inputs = isPlainObject(body.inputs) ? (body.inputs as Record<string, unknown>) : {};
+    const deviceIds: string[] = Array.isArray(body.deviceIds)
+      ? (body.deviceIds as unknown[]).filter((d): d is string => typeof d === 'string').slice(0, 200)
+      : [];
+
+    try {
+      res.status(200).json(await networkCheck(inputs, deviceIds));
+    } catch (err) {
+      const e = err as { status?: number; message?: string };
+      res.status(e.status ?? 500).json({ error: e.message ?? 'Network check failed' });
+    }
+  }
+);
+
 // POST /plans/preflight — READ-ONLY best-guess resolution for a fleet intent.
 // The rollout wizard calls this after the user picks scope + shared inputs:
 // for every target device the API resolves the assignment's credentials (primary
@@ -384,7 +417,8 @@ router.post(
     const preflightUrl = `${plugin.endpoint.replace(/\/$/, '')}/preflight`;
 
     const allowed = await allowedDeviceIds(req);
-    const results: PreflightResultDto[] = [];
+    type PreflightEntry = PreflightResultDto & { check?: PreflightCheckDto };
+    const results: PreflightEntry[] = [];
 
     // Resolve credentials per device (assignment + primary secret + bound slots)
     // — identical to what a plan step would carry, so resolvers see the same SSH/SNMP access.
@@ -428,6 +462,21 @@ router.post(
       }
     }
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
+
+    // Server-side overlap check (network.create only): per-device "already
+    // deployed" flag + this device's live-row warnings. One inventory load for
+    // the whole batch; failures degrade to no-check (advisory feature).
+    if (intentActionId === 'network.create') {
+      try {
+        const checks = await networkChecksForDevices(inputs, targets.map((t) => t.deviceId));
+        for (const r of results) {
+          const c = checks[r.deviceId];
+          if (c) r.check = { deployed: c.deployed, warnings: c.warnings };
+        }
+      } catch {
+        // Check is advisory — never fail the preflight because of it.
+      }
+    }
 
     // Preserve the caller's device order.
     const byId = new Map(results.map((r) => [r.deviceId, r]));
@@ -530,6 +579,28 @@ router.post(
         return;
       }
       planDevices.push({ deviceId: device.id, managementAddress: device.managementAddress, credentials });
+    }
+
+    // Server-side rollout safety net: in "block" mode a network.create whose
+    // name/subnet/VLAN collides with the live inventory is rejected BEFORE any
+    // plugin call. Each device is checked with ITS OWN effective inputs (shared
+    // + per-device overrides) against the FULL live inventory — a collision on
+    // ANY device matters, not just the targets. Advisory by default — see the
+    // `rolloutOverlapMode` system setting.
+    if (intentActionId === 'network.create') {
+      try {
+        const perDevice = planDevices.map((d) => ({
+          deviceId: d.deviceId,
+          inputs: deviceInputs[d.deviceId] ? { ...inputs, ...deviceInputs[d.deviceId] } : { ...inputs },
+        }));
+        const blockError = await assertRolloutAllowed(intentActionId, perDevice);
+        if (blockError) {
+          res.status(409).json({ error: blockError });
+          return;
+        }
+      } catch {
+        // Check is a safety net — never fail plan creation because of it.
+      }
     }
 
     // Ask the plugin to build the plan. Settings (transport/edition/backend)

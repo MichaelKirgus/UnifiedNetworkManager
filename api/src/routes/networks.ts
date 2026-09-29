@@ -5,6 +5,7 @@ import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { allowedDeviceIds } from '../deviceAccess';
 import { ipScope, subnetOf } from '@unm/plugin-sdk';
+import { suggestFreeRanges } from '../utils/networkCheck';
 import { buildFirewallInventoryIndex, enrichFirewallAddress, getCachedFirewallIndex } from '../utils/firewallEnrichment';
 import type { FirewallAddressResolution } from '../utils/firewallEnrichment';
 
@@ -489,6 +490,21 @@ router.get('/networks', requireAuth, requirePermission('networks:read'), async (
         }),
       }))
     );
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// GET /networks/suggestions - Free-range suggestions computed from gaps in the
+// live inventory (next free /24 after the highest observed v4 subnet, lowest
+// unused VLAN id). Powers the rollout dialog's one-click "suggest" fills.
+router.get('/networks/suggestions', requireAuth, requirePermission('networks:read'), async (_req, res: Response) => {
+  try {
+    // No freshness filter — the telemetry worker sweeps stale rows; what is in
+    // the table IS the current view (same data GET /networks renders).
+    const rows = await db.query.networks.findMany();
+    res.status(200).json(suggestFreeRanges(mergeNetworkRows(rows)));
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

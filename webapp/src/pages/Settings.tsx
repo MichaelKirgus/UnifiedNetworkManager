@@ -44,6 +44,18 @@ function fmtValue(v: number | string | boolean, unit?: string | null): string {
   }
 }
 
+/**
+ * Extracts the option list from an enum-style pattern like `^(warn|block)$`.
+ * Returns null for free-form strings (no such pattern) — those keep a text input.
+ */
+function enumOptions(pattern?: string | null): string[] | null {
+  if (!pattern) return null;
+  const m = pattern.match(/^\^?\(([^()]+)\)\$$/);
+  if (!m) return null;
+  const opts = m[1].split('|').map((s) => s.trim()).filter(Boolean);
+  return opts.length >= 2 ? opts : null;
+}
+
 const CATEGORY_STYLES: Record<string, string> = {
   Telemetry: 'bg-info text-info-fg',
   Retention: 'bg-warning text-warning-fg',
@@ -71,6 +83,7 @@ function SettingEditor({
   }
 
   const isInt = setting.type === 'integer';
+  const opts = enumOptions(setting.pattern); // enum-style string settings render as a dropdown
   const parsed = Number(draft);
   const dirty = draft !== String(setting.value);
   const invalid = isInt && (!Number.isFinite(parsed) || (setting.min != null && parsed < setting.min) || (setting.max != null && parsed > setting.max));
@@ -88,6 +101,15 @@ function SettingEditor({
           onChange={(e) => setDraft(e.target.value)}
           className="w-40 rounded-md border border-border bg-card px-3 py-1.5 text-sm focus:border-focus-ring focus:outline-none disabled:bg-background"
         />
+      ) : opts ? (
+        <select
+          value={draft}
+          disabled={saving || invalid}
+          onChange={(e) => setDraft(e.target.value)}
+          className="w-48 rounded-md border border-border bg-card px-3 py-1.5 text-sm focus:border-focus-ring focus:outline-none disabled:bg-background"
+        >
+          {opts.map((o) => (<option key={o} value={o}>{o}</option>))}
+        </select>
       ) : (
         <input
           type="text"

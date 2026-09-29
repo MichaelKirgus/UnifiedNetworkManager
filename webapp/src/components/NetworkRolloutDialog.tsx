@@ -1,10 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Globe, X } from 'lucide-react';
 import clsx from 'clsx';
-import { api, CatalogEntry, Device, DocumentedNetwork, NetworkLayer, NetworkRow, PreflightResultDto, Site, TopologyResponse } from '../api/client';
-import { cidrsOverlap } from '../utils/ip';
+import { api, CatalogEntry, Device, DocumentedNetwork, NetworkCheckResultDto, NetworkLayer, PreflightResultDto, Site, TopologyResponse } from '../api/client';
 import { useExecutionMode } from '../executionMode';
 
 /**
@@ -76,10 +75,10 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
   const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: api.sites });
   const layersQuery = useQuery({ queryKey: ['layers'], queryFn: api.layers });
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
-  // Documented networks — prefill selector + name-collision warnings.
+  // Documented networks — prefill selector (name collisions are checked server-side).
   const docNetsQuery = useQuery({ queryKey: ['documentedNetworks'], queryFn: () => api.documentedNetworks() });
-  // Live logical network inventory — overlap warnings + "already deployed" hints.
-  const liveNetsQuery = useQuery({ queryKey: ['networks'], queryFn: () => api.networks() as Promise<NetworkRow[]> });
+  // Free-range suggestions from gaps in the live inventory (one-click fills).
+  const suggestionsQuery = useQuery({ queryKey: ['networksSuggestions'], queryFn: api.networksSuggestions, staleTime: 60_000 });
   // Topology gives the RESOLVED layer per device (override > suggestion > heuristic).
   const topologyQuery = useQuery({ queryKey: ['topology'], queryFn: () => api.topology() as Promise<TopologyResponse> });
 
@@ -186,64 +185,32 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
     if (n.layerId) setLayerId(n.layerId);
   }
 
-  // --- Overlap warnings against the live inventory -------------------------------
-  // Name / subnet / VLAN collisions with ALREADY-DETECTED networks. These are
-  // warnings, not blockers: NAT'd remote sites legitimately reuse names and
-  // subnets, and a rollout may intentionally extend an existing network.
-  const overlapWarnings = useMemo(() => {
-    const out: string[] = [];
-    const live = liveNetsQuery.data ?? [];
-    const docNets = (docNetsQuery.data ?? []).filter((d) => d.id !== docNetId);
+  // --- Server-side overlap check (debounced while typing) ------------------------
+  // The authoritative checks run in the API (POST /plans/network-check): name /
+  // subnet / VLAN collisions against the live AND documented inventory, per-
+  // device deployed/new status, and free-range suggestions. Advisory by default;
+  // strict mode (`rolloutOverlapMode=block`) makes them block plan creation.
+  const [checkResult, setCheckResult] = useState<NetworkCheckResultDto | null>(null);
+  const [checking, setChecking] = useState(false);
+  const checkSeq = useRef(0);
+  const targetDeviceIds = useMemo(() => targetDevices.map((d) => d.id), [targetDevices]);
 
-    // 1. Name collision — same name, different network.
-    if (name.trim()) {
-      const nm = name.trim().toLowerCase();
-      for (const n of live) {
-        if (n.name.toLowerCase() !== nm || cidr.trim()) continue;
-        const where =
-          (n.subnets ?? []).join(', ') ||
-          `VLAN ${n.vlanId ?? '?'} on ${Array.from(new Set(n.devices.map((d) => d.deviceName))).slice(0, 3).join(', ')}…`;
-        out.push(`Name "${n.name}" already exists in the live inventory (${where}).`);
+  useEffect(() => {
+    if (step !== 1) return;
+    const seq = ++checkSeq.current;
+    setChecking(true);
+    const t = window.setTimeout(async () => {
+      try {
+        const r = await api.plansNetworkCheck({ inputs: sharedInputs, deviceIds: targetDeviceIds });
+        if (seq === checkSeq.current) setCheckResult(r);
+      } catch {
+        // Advisory feature — a transient failure must not block the wizard.
+      } finally {
+        if (seq === checkSeq.current) setChecking(false);
       }
-      for (const n of docNets) if (n.name.toLowerCase() === nm && !cidr.trim()) out.push(`Documented network "${n.name}" already uses this name.`);
-    }
-
-    // 2. Subnet overlap — the target CIDR intersects an existing live subnet.
-    const tCidr = cidr.trim();
-    if (tCidr) {
-      for (const n of live) {
-        const hit = (n.subnets ?? []).find((s) => s.includes('/') && cidrsOverlap(tCidr, s));
-        if (!hit) continue;
-        const devs = Array.from(new Set(n.devices.map((d) => d.deviceName))).slice(0, 4).join(', ');
-        out.push(`Subnet ${tCidr} overlaps existing live network "${n.name}" (${hit}) on ${devs}${n.devices.length > 4 ? ` +${n.devices.length - 4}` : ''}. Fine for NAT'd remote sites — otherwise pick a free range.`);
-      }
-    }
-
-    // 3. VLAN reuse — same VLAN ID, different (non-overlapping) subnet.
-    const v = Number(vlanId);
-    if (Number.isInteger(v) && v >= 1 && v <= 4094) {
-      for (const n of live) {
-        if (n.vlanId !== v) continue;
-        const sameSubnet = tCidr ? (n.subnets ?? []).some((s) => s.includes('/') && cidrsOverlap(tCidr, s)) : false;
-        if (!sameSubnet) out.push(`VLAN ${v} is already used by live network "${n.name}" (${(n.subnets ?? []).join(', ') || 'no subnet known'}) — extending it on more devices is usually intended; a different subnet with the same VLAN ID will not route between sites.`);
-      }
-    }
-
-    // De-duplicate (a row can hit both name and subnet).
-    return Array.from(new Set(out)).slice(0, 6);
-  }, [name, cidr, vlanId, docNetId, liveNetsQuery.data, docNetsQuery.data]);
-
-  /** True when the live inventory already shows this network on the device. */
-  function isDeployedOn(deviceId: string): boolean {
-    const tCidr = cidr.trim();
-    const v = Number(vlanId);
-    for (const n of liveNetsQuery.data ?? []) {
-      if (!n.devices.some((m) => m.deviceId === deviceId)) continue;
-      if (tCidr && (n.subnets ?? []).some((s) => s.includes('/') && cidrsOverlap(tCidr, s))) return true;
-      if (!tCidr && Number.isInteger(v) && v >= 1 && n.vlanId === v) return true;
-    }
-    return false;
-  }
+    }, 400);
+    return () => window.clearTimeout(t);
+  }, [step, name, vlanId, cidr, sharedInputs, targetDeviceIds]);
 
   // --- Step 2: preflight ---------------------------------------------------------
   const preflightQuery = useMutation({
@@ -419,11 +386,23 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
                   <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="NET_XY" className="w-full rounded-md border border-border px-3 py-2 text-sm" />
                 </label>
                 <label className="block text-sm">
-                  <span className="mb-1 block font-medium text-secondary">VLAN ID (optional)</span>
-                  <input type="number" min={1} max={4094} value={vlanId} onChange={(e) => setVlanId(e.target.value)} placeholder="42 — omit for L3-only on default VLAN" className="w-full rounded-md border border-border px-3 py-2 text-sm" />
+                  <span className="mb-1 flex items-center justify-between font-medium text-secondary">VLAN ID (optional)
+                    {suggestionsQuery.data?.lowestFreeVlanId != null && (
+                      <button type="button" onClick={() => setVlanId(String(suggestionsQuery.data!.lowestFreeVlanId))} className="text-xs font-normal text-primary hover:underline">
+                        suggest free ({suggestionsQuery.data.lowestFreeVlanId})
+                      </button>
+                    )}
+                  </span>
+                  <input type="number" min={1} max={4094} value={vlanId} onChange={(e) => setVlanId(e.target.value)} placeholder="42 — omit for L3-only on default VLAN" className="w-full rounded-md border border-border px-2 py-2 text-sm" />
                 </label>
                 <label className="block text-sm">
-                  <span className="mb-1 block font-medium text-secondary">L3 address (CIDR, optional)</span>
+                  <span className="mb-1 flex items-center justify-between font-medium text-secondary">L3 address (CIDR, optional)
+                    {suggestionsQuery.data?.nextFreeSubnetV4 && (
+                      <button type="button" onClick={() => setCidr(suggestionsQuery.data!.nextFreeSubnetV4!)} className="text-xs font-normal text-primary hover:underline">
+                        suggest free ({suggestionsQuery.data.nextFreeSubnetV4})
+                      </button>
+                    )}
+                  </span>
                   <input type="text" value={cidr} onChange={(e) => setCidr(e.target.value)} placeholder="10.42.0.1/24 — per-device override in step 2" className="w-full rounded-md border border-border px-3 py-2 text-sm" />
                 </label>
                 <div className="grid grid-cols-2 gap-3">
@@ -442,11 +421,11 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
               </p>
             </section>
 
-            {overlapWarnings.length > 0 && (
+            {(checkResult?.warnings.length ?? 0) > 0 && (
               <div className="rounded-md border border-warning/40 bg-warning/10 p-3">
                 <h3 className="mb-1 text-sm font-semibold text-warning-fg">Possible overlap with existing networks</h3>
                 <ul className="list-disc space-y-1 pl-4 text-xs text-secondary">
-                  {overlapWarnings.map((w) => (<li key={w}>{w}</li>))}
+                  {checkResult!.warnings.map((w) => (<li key={w.kind + w.networkKey}>{w.message}</li>))}
                 </ul>
                 <p className="mt-2 text-xs text-faint">
                   Warnings only — NAT'd remote sites and multi-site designs legitimately reuse names, subnets or VLAN IDs. Continue when the overlap is intentional; step 2 shows what already exists on each device.
@@ -458,6 +437,7 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
               <button type="submit" disabled={preflightQuery.isPending || isReadOnly || groups.size === 0} className={clsx('rounded-md px-4 py-2 text-sm font-semibold text-white', isReadOnly ? 'bg-muted opacity-50' : 'bg-primary hover:bg-primary-hover disabled:opacity-50')}>
                 {preflightQuery.isPending ? 'Resolving…' : `Resolve per-device settings (${totalTargets})`}
               </button>
+              {checking && (checkResult?.warnings.length ?? 0) === 0 && <span className="text-xs text-faint">Checking inventory for overlaps…</span>}
             </div>
           </form>
         )}
@@ -482,7 +462,7 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
                         <div key={d.id} className="rounded-md border border-border p-2">
                           <div className="mb-1.5 flex items-center gap-2 text-sm">
                             <span className="font-medium text-foreground">{d.name}</span>
-                            {isDeployedOn(d.id) && (
+                            {(r?.check?.deployed ?? checkResult?.devices.find((x) => x.deviceId === d.id)?.status === 'deployed') && (
                               <span title="The live inventory already shows this network on the device — the step will be a no-op there." className="rounded-full bg-success/15 px-2 py-0.5 text-xs text-success">already deployed</span>
                             )}
                             {r?.degraded && (
@@ -514,6 +494,23 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
                 </section>
               );
             })}
+
+            {/* Rollout diff summary — what will happen per device before anything is written. */}
+            {checkResult && checkResult.devices.length > 0 && (() => {
+              const deployed = checkResult.devices.filter((d) => d.status === 'deployed');
+              const fresh = checkResult.devices.filter((d) => d.status === 'new');
+              return (
+                <section className="rounded-md border border-border bg-background p-3">
+                  <h3 className="mb-2 text-sm font-semibold text-secondary">Rollout summary</h3>
+                  {deployed.length > 0 && (
+                    <p className="text-xs text-success">No-op (already deployed): {deployed.map((d) => d.deviceName).join(', ')}</p>
+                  )}
+                  <p className={clsx('mt-1 text-xs', fresh.length > 0 ? 'text-secondary' : 'text-faint')}>
+                    Will create: {fresh.length > 0 ? fresh.map((d) => d.deviceName).join(', ') : '— (nothing new)'}
+                  </p>
+                </section>
+              );
+            })()}
 
             <div className="flex items-center gap-3">
               <button type="button" onClick={handleBack} className="rounded-md border border-border px-4 py-2 text-sm font-medium text-secondary hover:bg-muted">← Back</button>

@@ -162,6 +162,31 @@ export function ipInCidr(addr: string, cidr: string): boolean {
   return !!a && !!n && v6PrefixMatch(a, n, s.prefix);
 }
 
+/**
+ * True when the two CIDR networks intersect (one contains part of the other).
+ * Families must match; malformed inputs never overlap. The wider prefix wins:
+ * two networks intersect iff the narrower one's network address falls inside
+ * the wider one — i.e. they share their top `min(prefixA, prefixB)` bits.
+ */
+export function cidrsOverlap(a: string, b: string): boolean {
+  const sa = splitCidr(a);
+  const sb = splitCidr(b);
+  if (!sa || !sb) return false;
+  const aV4 = !sa.net.includes(':');
+  const bV4 = !sb.net.includes(':');
+  if (aV4 !== bV4) return false; // different families never intersect
+  const wide = sa.prefix <= sb.prefix ? sa : sb;
+  const narrow = sa.prefix <= sb.prefix ? sb : sa;
+  if (wide.net.includes(':')) {
+    const w = ipv6ToWords(wide.net);
+    const n = ipv6ToWords(narrow.net);
+    return !!w && !!n && v6PrefixMatch(w, n, wide.prefix);
+  }
+  const w = ipv4ToInt(wide.net);
+  const n = ipv4ToInt(narrow.net);
+  return w !== null && n !== null && v4PrefixMatch(w, n, wide.prefix);
+}
+
 /** True when the two IPv4 ints share their top `prefix` bits. */
 export function v4PrefixMatch(a: number, n: number, prefix: number): boolean {
   const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;

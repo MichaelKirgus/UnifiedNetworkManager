@@ -2139,12 +2139,47 @@ export interface PreflightValueDto {
   note?: string;
 }
 
+/** Server-side overlap finding (name/subnet/vlan collision with the live inventory). */
+export interface NetworkCheckWarningDto {
+  kind: 'name' | 'subnet' | 'vlan';
+  message: string;
+  networkKey: string;
+}
+
+/** Per-device server check attached to a preflight result (network.create only). */
+export interface PreflightNetworkCheckDto {
+  /** true when the live inventory already shows this network on the device. */
+  deployed: boolean;
+  warnings: NetworkCheckWarningDto[];
+}
+
 /** The preflight result for one device of one plugin (POST /plans/preflight). */
 export interface PreflightResultDto {
   deviceId: string;
   values: PreflightValueDto[];
   degraded?: boolean;
   error?: string;
+  check?: PreflightNetworkCheckDto;
+}
+
+/** Free-range suggestions from gaps in the live inventory (GET /networks/suggestions). */
+export interface NetworkSuggestions {
+  nextFreeSubnetV4: string | null;
+  lowestFreeVlanId: number | null;
+}
+
+/** Per-device rollout outcome from the server-side network check. */
+export interface NetworkCheckDeviceDto {
+  deviceId: string;
+  deviceName: string;
+  status: 'deployed' | 'new';
+}
+
+/** Server-side overlap-check result (POST /plans/network-check). */
+export interface NetworkCheckResultDto {
+  warnings: NetworkCheckWarningDto[];
+  devices: NetworkCheckDeviceDto[];
+  suggestions: NetworkSuggestions;
 }
 
 export interface CatalogEntry {
@@ -2653,6 +2688,8 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<NetworkRow[]>(`/networks${suffix}`);
   },
+  /** Free-range suggestions from gaps in the live inventory (rollout dialog one-click fills). */
+  networksSuggestions: () => apiFetch<NetworkSuggestions>('/networks/suggestions'),
   hosts: (params?: { deviceId?: string; siteId?: string; source?: 'arp' | 'ndp' | 'dhcp' | 'wlan' }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);
@@ -3084,6 +3121,10 @@ export const api = {
     inputs?: Record<string, unknown>;
     deviceIds: string[];
   }) => apiFetch<{ results: PreflightResultDto[] }>('/plans/preflight', { method: 'POST', body: JSON.stringify(body) }),
+  /** Server-side network-overlap check for a rollout (warnings + per-device
+   * deployed/new status + free-range suggestions). Read-only, no 2FA. */
+  plansNetworkCheck: (body: { inputs?: Record<string, unknown>; deviceIds?: string[] }) =>
+    apiFetch<NetworkCheckResultDto>('/plans/network-check', { method: 'POST', body: JSON.stringify(body) }),
   getPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}`),
   /** Update plan-level settings (currently: the per-plan retry policy). Draft/ready/scheduled only. */
   updatePlan: (id: string, body: { retryPolicy?: PlanRetryPolicy | null }) =>

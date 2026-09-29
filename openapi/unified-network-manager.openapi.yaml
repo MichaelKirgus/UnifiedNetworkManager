@@ -1820,8 +1820,51 @@ paths:
           description: Missing required permission
         '404':
           description: Plugin or device not found
+        '409':
+          description: >-
+            network.create only, strict mode (`rolloutOverlapMode=block`): the rollout's
+            name/subnet/VLAN overlaps an already-detected live network and plan creation
+            was blocked by the server-side overlap check.
         '502':
           description: Plugin unreachable or secret provisioning failed
+
+  /plans/network-check:
+    post:
+      tags: [Plans]
+      summary: Server-side network-overlap check for a rollout (read-only)
+      description: >-
+        Requires permission `devices:read` (no 2FA — nothing is written). Computes the
+        advisory overlap warnings (name collisions with live AND documented networks,
+        subnet/VLAN collisions with already-detected live networks), the per-device
+        deployed/new status, and free-range suggestions from gaps in the inventory. The
+        rollout dialog calls this debounced while typing; plan creation additionally
+        enforces it in strict mode (`rolloutOverlapMode=block`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                inputs:
+                  type: object
+                  additionalProperties: true
+                  description: "Shared network.create intent inputs (name, vlanId, cidr)"
+                deviceIds:
+                  type: array
+                  maxItems: 200
+                  items: { type: string }
+      responses:
+        '200':
+          description: Warnings + per-device status + free-range suggestions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkCheckResult'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
 
   /plans/preflight:
     post:
@@ -3395,6 +3438,26 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/NetworkRow'
+        '401':
+          description: Authentication required
+
+  /networks/suggestions:
+    get:
+      tags: [Inventory]
+      summary: Free-range suggestions from gaps in the live inventory
+      description: >-
+        Computes one-click fill candidates for the network rollout dialog: the next
+        free /24 after the highest observed v4 subnet (skipping loopback/link-local/
+        multicast/reserved space) and the lowest unused VLAN id. Based on the same
+        live inventory rows GET /networks renders (stale rows are swept by the
+        telemetry worker).
+      responses:
+        '200':
+          description: Suggested free ranges
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkSuggestions'
         '401':
           description: Authentication required
 
@@ -8730,6 +8793,69 @@ components:
               note: { type: string, description: "Human-readable explanation of how the value was derived" }
         degraded: { type: boolean, description: "true when the probe failed — defaults apply" }
         error: { type: string, description: "Reason for degradation (when degraded)" }
+        check:
+          $ref: '#/components/schemas/PreflightNetworkCheck'
+
+    PreflightNetworkCheck:
+      type: object
+      required: [deployed]
+      properties:
+        deployed:
+          type: boolean
+          description: >-
+            true when the live inventory already shows this network on the device —
+            the intent step will be a no-op there (idempotency hint).
+        warnings:
+          type: array
+          description: >-
+            Server-side overlap findings against THIS device's live rows (name / subnet /
+            VLAN collisions with already-detected networks). Advisory by default; in strict
+            mode (`rolloutOverlapMode=block`) they block plan creation.
+          items:
+            $ref: '#/components/schemas/NetworkCheckWarning'
+
+    NetworkCheckWarning:
+      type: object
+      required: [kind, message, networkKey]
+      properties:
+        kind: { type: string, enum: [name, subnet, vlan] }
+        message: { type: string, description: "Human-readable explanation (shown verbatim in the UI)" }
+        networkKey: { type: string, description: "The live network row this finding refers to (its GET /networks key)" }
+
+    NetworkSuggestions:
+      type: object
+      required: [nextFreeSubnetV4, lowestFreeVlanId]
+      properties:
+        nextFreeSubnetV4:
+          type: string
+          nullable: true
+          description: "Next free /24 after the highest observed v4 subnet (skipping loopback/link-local/multicast/reserved), or null when none fits"
+        lowestFreeVlanId:
+          type: integer
+          nullable: true
+          description: "Lowest unused VLAN id (1..4094) not present in the live inventory, or null when all are used"
+
+    NetworkCheckResult:
+      type: object
+      required: [warnings, devices, suggestions]
+      properties:
+        warnings:
+          type: array
+          description: "Advisory overlap findings against the full live inventory (max 12)"
+          items:
+            $ref: '#/components/schemas/NetworkCheckWarning'
+        devices:
+          type: array
+          description: "Per-device rollout outcome for the diff summary table"
+          items:
+            type: object
+            required: [deviceId, deviceName, status]
+            properties:
+              deviceId: { type: string }
+              deviceName: { type: string }
+              status: { type: string, enum: [deployed, new], description: "deployed = live inventory already shows this network on the device (no-op)" }
+        suggestions:
+          $ref: '#/components/schemas/NetworkSuggestions'
 
     PlanStepCreateRequest:
       type: object
