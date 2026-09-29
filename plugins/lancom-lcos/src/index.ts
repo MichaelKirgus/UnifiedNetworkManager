@@ -29,6 +29,7 @@ import {
   resolveSshPort,
   buildDeviceTimeInfo,
   parseLooseDeviceDatetime,
+  splitCidr,
   warnOnce,
   catalogFirmwareRow,
   CertificateRow,
@@ -700,6 +701,15 @@ app.post('/monitoring', async (req, res) => {
       if (mac) row['mac'] = mac;
       return row;
     });
+    // Dual-stack: LCOS keeps v6 in a separate tree, so the v4 NET_LIST walk
+    // above never sees it. The Status/IPv6 Prefix table is the only v6 source
+    // with real prefix lengths (the Addresses table has none) — emit one row
+    // per advertised/delegated prefix as ip=<network address>, version='v6'.
+    for (const p of snapshot.ipv6Prefixes) {
+      const split = splitCidr(p.cidr);
+      if (!split) continue;
+      networks.push({ name: p.name, ip: split.net, prefix: split.prefix, version: 'v6', status: null });
+    }
     // Safety net for the API's upsert key (name, ip): never emit two rows with
     // that key in one snapshot — Postgres would reject the whole batch.
     const emittedNetKeys = new Set<string>();

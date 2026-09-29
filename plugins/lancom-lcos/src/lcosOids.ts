@@ -171,6 +171,35 @@ export const DHCP = {
 } as const;
 
 /* ------------------------------------------------------------------ *
+ * IPv6 status — 11.1.77 (Status/IPv6 runtime tree)
+ *
+ * LCOS keeps v4 and v6 in SEPARATE config trees (Setup/TCP-IP vs
+ * Setup/IPv6); this is the SNMP-readable STATUS mirror of the v6 side.
+ * Both tables use a COMPOSITE length-prefixed text index [name, value] —
+ * verified live on LCOS 10.x hardware (2026-09):
+ *   .77.1 Addresses: index [networkName, address], col 2 = full host
+ *         address WITHOUT prefix length (SLAAC addresses have no mask).
+ *   .77.2 Prefixes:  index [networkName, cidr], col 2 = the CIDR itself —
+ *         the ONLY v6 table that carries real prefix lengths. Sparse by
+ *         design: one row per advertised/delegated prefix (RA), not per
+ *         address. That is exactly what inventory needs for subnet checks.
+ * ------------------------------------------------------------------ */
+
+/** lcsStatusIpv6AddressesTable (TABLE node 11.1.77.1) — all v6 addresses. */
+export const IPV6_ADDRESSES = {
+  base: `${LCOS_BASE}.1.77.1`, // index: [networkName text, address text] (both length-prefixed)
+  COL_NAME: 1, // DisplayString — network name (echoes the index)
+  COL_ADDRESS: 2, // DisplayString — full v6 host address, NO prefix length
+} as const;
+
+/** lcsStatusIpv6PrefixTable (TABLE node 11.1.77.2) — advertised/delegated prefixes. */
+export const IPV6_PREFIX = {
+  base: `${LCOS_BASE}.1.77.2`, // index: [networkName text, cidr text] (both length-prefixed)
+  COL_NAME: 1, // DisplayString — network name (echoes the index)
+  COL_CIDR: 2, // DisplayString — full CIDR with prefix length (e.g. "fdf8:f53b:70e4:1::/64")
+} as const;
+
+/* ------------------------------------------------------------------ *
  * VPN status — 11.1.26 (per-connection)
  * ------------------------------------------------------------------ */
 

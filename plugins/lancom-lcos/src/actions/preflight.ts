@@ -57,6 +57,30 @@ async function readL3Networks(ctx: ActionContext): Promise<Array<{ name: string;
   return out;
 }
 
+/** True when a v6 row for this network name exists in either Setup/IPv6 table. */
+async function hasExistingV6Rows(ctx: ActionContext, name: string): Promise<boolean> {
+  const creds = sshCreds(ctx);
+  if (!creds) return false;
+  try {
+    const [lanIfc, addrs] = await Promise.all([
+      cliTableRows(ctx, creds, 'IPv6/LAN-Interfaces'),
+      cliTableRows(ctx, creds, 'IPv6/Network/Addresses'),
+    ]);
+    // Same first-token extraction as tableHasName (quoted or bare), case-insensitive.
+    const has = (rows: string[]) => {
+      const needle = name.toUpperCase();
+      for (const row of rows) {
+        const m = /^"([^"]+)"|^\S+/.exec(row.trim());
+        if (!m) continue;
+        if ((m[1] ?? m[0]).toUpperCase() === needle) return true;
+      }
+      return false;
+    };
+    return has(lanIfc) || has(addrs);
+  } catch { /* no SSH slot or CLI failed */ }
+  return false;
+}
+
 /** Reads the VLAN/Networks table rows via CLI (read-only `dir -a`). */
 async function readVlanRows(ctx: ActionContext): Promise<Array<{ name: string; vlanId: number | null; ports: string }>> {
   const creds = sshCreds(ctx);
@@ -147,6 +171,7 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
   const vlanId = typeof inputs.vlanId === 'number' ? Math.floor(inputs.vlanId as number) : NaN;
   const hasVlan = Number.isInteger(vlanId);
   const wantsSsid = Boolean(inputs.ssid && typeof (inputs.ssid as Record<string, unknown>).name === 'string');
+  const cidrV6 = typeof inputs.cidrV6 === 'string' ? inputs.cidrV6.trim() : '';
 
   // Existing state for this name/VLAN — idempotency hints.
   let vlanRows: Array<{ name: string; vlanId: number | null; ports: string }> = [];
@@ -178,6 +203,20 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
   // is involved (or always, so the user can pin it per device).
   const l3 = await readL3Networks(ctx);
   values.push(suggestInterface(vlanRows, l3));
+
+  // Dual-stack hint — LCOS keeps IPv6 in a separate tree; when the rollout
+  // carries a v6 CIDR tell the user what already exists for this name.
+  if (cidrV6) {
+    const existing = await hasExistingV6Rows(ctx, name);
+    values.push({
+      key: 'cidrV6',
+      value: cidrV6,
+      confidence: existing ? 'high' : 'medium',
+      note: existing
+        ? `an IPv6 row for "${name}" already exists on this device — the v6 tables will be left untouched`
+        : `no IPv6 rows for "${name}" yet — will create Setup/IPv6/LAN-Interfaces + Network/Addresses rows`,
+    });
+  }
 
   // SSID slot suggestion.
   if (wantsSsid) {

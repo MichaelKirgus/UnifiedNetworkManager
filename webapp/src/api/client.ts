@@ -2165,6 +2165,8 @@ export interface PreflightResultDto {
 /** Free-range suggestions from gaps in the live inventory (GET /networks/suggestions). */
 export interface NetworkSuggestions {
   nextFreeSubnetV4: string | null;
+  /** Next free ULA /64 — only when the fleet already uses IPv6. */
+  nextFreeSubnetV6: string | null;
   lowestFreeVlanId: number | null;
 }
 

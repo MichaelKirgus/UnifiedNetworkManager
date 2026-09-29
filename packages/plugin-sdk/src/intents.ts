@@ -42,17 +42,20 @@ export function isCanonicalIntent(id: string): boolean {
 /**
  * Canonical input schema for `network.create`. Every field except `name` is
  * optional so a plugin can advertise the subset it supports:
- *   - LCOS: name, vlanId?, cidr|ip+netmask, interface, dhcpPool{start,end}, ssid{name}
+ *   - LCOS: name, vlanId?, cidr|ip+netmask, cidrV6, interface, dhcpPool{start,end}, ssid{name}
  *     (no vlanId → no dedicated L2 VLAN row; L3/DHCP bind to default VLAN 1)
  *   - OPNsense: name, vlanId (→ staged vlan.add + reconfigure)
- * `cidr` and `ip`/`netmask` are alternative forms of the same L3 address — a
- * plugin accepts whichever it understands. A rollout must provide at least one
- * of vlanId / cidr|ip+netmask / ssid so there is something to create.
+ * `cidr` and `ip`/`netmask` are alternative forms of the same IPv4 L3 address —
+ * a plugin accepts whichever it understands. `cidrV6` is the DUAL-STACK half:
+ * an optional IPv6 CIDR that rides alongside `cidr` (both set = dual-stack).
+ * A rollout must provide at least one of vlanId / cidr|ip+netmask / cidrV6 /
+ * ssid so there is something to create.
  */
 export const NETWORK_CREATE_SCHEMA: InputSchema = {
   name: { type: 'string', required: true, minLength: 1, maxLength: 64, description: 'Network name (unique per device)' },
   vlanId: { type: 'number', min: 1, max: 4094, description: 'VLAN ID to create/attach (optional — omit for an L3-only network on the default VLAN)' },
   cidr: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}/\\d{1,2}$', description: 'L3 address as CIDR (e.g. 10.42.0.1/24) — alternative to ip+netmask' },
+  cidrV6: { type: 'string', pattern: '^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*/\\d{1,3}$', description: 'Optional IPv6 L3 address as CIDR (e.g. fd00:42::1/64) — dual-stack when set alongside cidr' },
   ip: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'L3 address (alternative to cidr)' },
   netmask: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'Netmask for `ip`' },
   interface: { type: 'string', maxLength: 64, description: 'Device-local L2 interface to attach the VLAN to (e.g. LAN-1)' },

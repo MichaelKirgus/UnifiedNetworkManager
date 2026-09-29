@@ -19,13 +19,13 @@
 import { SnmpCredentials, SnmpValue, TransportOptions, snmpGet, snmpWalkMulti, suffixOf, normalizeMac } from '@unm/snmp-client';
 import { CounterTracker } from '@unm/plugin-sdk';
 import {
-  splitRow, decodeSingleText, decodeIpIndex, decodeIpTextIndex, label, toInt, netmaskToPrefix,
+  splitRow, decodeSingleText, decodePrefixedText, decodeIpIndex, decodeIpTextIndex, label, toInt, netmaskToPrefix,
   createSnapshotCaches, runSlowPath, accumulateRate, LcosLogSink, ProbeOutcome,
 } from '@unm/lancom-shared';
 import {
   LCOS_BASE, SYS, HW, FIRMWARE, LAN_IF, LAN_BYTES, WAN_BYTES, WAN_IP,
   NET_LIST, ARP, DHCP, VPN_CONN, IP_ROUTES, IP_CIDR_ROUTES, WLAN_NET, WLAN_RADIO, WLAN_STATION, TEMP_EXTREMES,
-  TIME, lcosTimezoneToMinutes,
+  IPV6_PREFIX, TIME, lcosTimezoneToMinutes,
 } from './lcosOids';
 
 /* ------------------------------------------------------------------ *
@@ -61,6 +61,12 @@ export interface LcosNetwork {
   prefix: number | null; // derived from netmask
   vlanId: number | null;
   ifcLabel: string; // 'LAN-1' etc., '' when unknown
+}
+
+/** One advertised/delegated IPv6 prefix from lcsStatusIpv6PrefixTable. */
+export interface LcosIpv6Prefix {
+  name: string; // network name, e.g. "NET_INTRANET"
+  cidr: string; // full CIDR with prefix length, e.g. "fdf8:f53b:70e4:1::/64"
 }
 
 /** One ARP cache row. */
@@ -168,6 +174,7 @@ export interface LcosRouterSnapshot {
   lanPorts: LcosLanPort[];
   wanIps: LcosWanIp[];
   networks: LcosNetwork[];
+  ipv6Prefixes: LcosIpv6Prefix[]; // advertised/delegated v6 prefixes (Status/IPv6) — sparse by design
   arp: LcosArpEntry[];
   dhcpLeases: LcosDhcpLease[];
   vpnConnections: LcosVpnConn[];
@@ -264,6 +271,7 @@ const INVENTORY_WALKS: string[] = [
   LAN_IF.base, // per-port link state + connector + MACs
   WAN_IP.base, // WAN IP configuration mirror
   NET_LIST.base, // configured networks (LAN/VLAN IPs)
+  IPV6_PREFIX.base, // advertised/delegated v6 prefixes (Status/IPv6 — sparse; the Addresses table is deliberately NOT walked: no prefix lengths + link-local noise)
   ARP.base, // ARP cache → hosts inventory
   DHCP.base, // active DHCP leases → hosts inventory
   IP_ROUTES.base, // active routing table (static + OSPF/BGP/RIP) → routes inventory
@@ -397,6 +405,25 @@ function parseLcosStatus(out: Map<string, SnmpValue>): LcosRouterSnapshot {
       case NET_LIST.COL_NETMASK: n.prefix = netmaskToPrefix(value); break;
       case NET_LIST.COL_VLAN: n.vlanId = toInt(value); break;
       case NET_LIST.COL_IFC: n.ifcLabel = decodeNetIfc(value); break;
+    }
+  }
+
+  // --- IPv6 prefixes (Status/IPv6 Prefix table, index: [name, cidr] text) --
+  // Sparse by design — one row per advertised/delegated prefix, not per
+  // address. These are the only v6 rows with real prefix lengths, so they are
+  // what feeds the networks inventory (subnet overlap checks + suggestions).
+  const ipv6Prefixes: LcosIpv6Prefix[] = [];
+  for (const [oid] of out) {
+    const row = splitRow(oid, IPV6_PREFIX.base);
+    if (!row || row.col !== IPV6_PREFIX.COL_NAME) continue; // one row per index pair
+    const d1 = decodePrefixedText(row.idx, 0);
+    if (!d1) continue;
+    const d2 = decodePrefixedText(row.idx, d1.next);
+    if (!d2 || d2.next !== row.idx.length) continue; // composite [name, cidr] — both parts required
+    const name = d1.text;
+    const cidr = d2.text;
+    if (cidr.includes('/') && !ipv6Prefixes.some((p) => p.name === name && p.cidr === cidr)) {
+      ipv6Prefixes.push({ name, cidr });
     }
   }
 
@@ -642,6 +669,7 @@ function parseLcosStatus(out: Map<string, SnmpValue>): LcosRouterSnapshot {
     lanPorts: [...lanPorts.entries()].map(([name, p]) => ({ name, ...p } as LcosLanPort)),
     wanIps: [...wanIps.entries()].map(([peer, w]) => ({ peer, ...w } as LcosWanIp)),
     networks,
+    ipv6Prefixes,
     arp,
     dhcpLeases,
     vpnConnections,

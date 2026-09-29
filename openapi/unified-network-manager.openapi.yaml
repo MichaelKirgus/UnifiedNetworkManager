@@ -1849,7 +1849,7 @@ paths:
                 inputs:
                   type: object
                   additionalProperties: true
-                  description: "Shared network.create intent inputs (name, vlanId, cidr)"
+                  description: "Shared network.create intent inputs (name, vlanId, cidr, cidrV6 — dual-stack when both CIDRs are set)"
                 deviceIds:
                   type: array
                   maxItems: 200
@@ -8824,12 +8824,16 @@ components:
 
     NetworkSuggestions:
       type: object
-      required: [nextFreeSubnetV4, lowestFreeVlanId]
+      required: [nextFreeSubnetV4, nextFreeSubnetV6, lowestFreeVlanId]
       properties:
         nextFreeSubnetV4:
           type: string
           nullable: true
           description: "Next free /24 after the highest observed v4 subnet (skipping loopback/link-local/multicast/reserved), or null when none fits"
+        nextFreeSubnetV6:
+          type: string
+          nullable: true
+          description: "Next free ULA /64 (fc00::/7) after the highest observed v6 subnet — only suggested when the fleet already uses IPv6, else null"
         lowestFreeVlanId:
           type: integer
           nullable: true

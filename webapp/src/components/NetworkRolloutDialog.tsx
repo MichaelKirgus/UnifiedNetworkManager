@@ -10,8 +10,10 @@ import { useExecutionMode } from '../executionMode';
  * NetworkRolloutDialog — the fleet abstraction for "create Network XY with VLAN
  * ID on all devices at site/tag/LAYER". Two steps:
  *   1. SCOPE + shared inputs: pick targets by site, tags, TOPOLOGY LAYER or
- *      manually; enter the network (name/VLAN/L3/SSID). No generic interface
+ *      manually; enter the network (name/VLAN/L3 v4+v6). No generic interface
  *      field — interfaces differ per device and are resolved in step 2.
+ *      (WLAN SSID rollout is intentionally NOT here — it gets a dedicated
+ *      dialog on the WiFi page later.)
  *   2. PREFLIGHT: each supporting plugin probes its devices' live state
  *      (read-only) and returns best-guess values with confidence + notes
  *      (which LAN port carries L3 here, which SSID slot is free…). The user
@@ -61,8 +63,8 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
   const [vlanId, setVlanId] = useState(initialNetwork?.vlanId != null ? String(initialNetwork.vlanId) : '');
   // First IPv4 subnet becomes the L3 address (v6-only rows leave it empty).
   const [cidr, setCidr] = useState(() => initialNetwork?.subnets.find((s) => s.includes('/') && !s.includes(':')) ?? '');
-  const [ssidName, setSsidName] = useState('');
-  const [passphrase, setPassphrase] = useState('');
+  // Dual-stack: optional IPv6 CIDR alongside the v4 one.
+  const [cidrV6, setCidrV6] = useState(() => initialNetwork?.subnets.find((s) => s.includes('/') && s.includes(':')) ?? '');
 
   // --- Step 2: per-device overrides (keyed `${pluginId}:${deviceId}`) -----------
   const [overrides, setOverrides] = useState<Record<string, Record<string, string>>>({});
@@ -167,9 +169,9 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
     if (name.trim()) out.name = name.trim();
     if (vlanId.trim() && Number.isInteger(Number(vlanId))) out.vlanId = Number(vlanId);
     if (cidr.trim()) out.cidr = cidr.trim();
-    if (ssidName.trim()) out.ssid = { name: ssidName.trim(), ...(passphrase ? { passphrase } : {}) };
+    if (cidrV6.trim()) out.cidrV6 = cidrV6.trim();
     return out;
-  }, [name, vlanId, cidr, ssidName, passphrase]);
+  }, [name, vlanId, cidr, cidrV6]);
 
   /** Copies the selected documented network's fields into the form. */
   function applyDocumentedNetwork(id: string) {
@@ -181,6 +183,8 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
     // First IPv4 subnet becomes the L3 address (v6-only rows leave it empty).
     const v4 = n.subnets.find((s) => s.includes('/') && !s.includes(':'));
     setCidr(v4 ?? '');
+    const v6 = n.subnets.find((s) => s.includes('/') && s.includes(':'));
+    setCidrV6(v6 ?? '');
     if (n.siteId) setSiteId(n.siteId);
     if (n.layerId) setLayerId(n.layerId);
   }
@@ -222,6 +226,9 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
       }
       return perPlugin;
     },
+    // The whole point of the mutation is to advance the wizard — without this
+    // onSuccess the UI stays on step 1 forever ("resolve does nothing").
+    onSuccess: () => setStep(2),
   });
 
   const [formError, setFormError] = useState<string | null>(null);
@@ -232,8 +239,8 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
     if (vlanId.trim() !== '') {
       const v = Number(vlanId);
       if (!Number.isInteger(v) || v < 1 || v > 4094) { setFormError('VLAN ID must be an integer 1..4094.'); return; }
-    } else if (!cidr.trim() && !ssidName.trim()) {
-      setFormError('Provide at least one of VLAN ID, L3 address or SSID — there is nothing to create otherwise.');
+    } else if (!cidr.trim() && !cidrV6.trim()) {
+      setFormError('Provide at least one of VLAN ID or L3 address (v4/v6) — there is nothing to create otherwise.');
       return;
     }
     if (groups.size === 0) { setFormError('No target device has a plugin that implements network.create.'); return; }
@@ -258,6 +265,7 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
           if (ov.vlanId !== undefined && ov.vlanId !== '' && Number.isInteger(Number(ov.vlanId))) perDevice['vlanId'] = Number(ov.vlanId);
           if (ov.interface !== undefined && ov.interface !== '') perDevice['interface'] = ov.interface;
           if (ov.cidr !== undefined && ov.cidr !== '') perDevice['cidr'] = ov.cidr;
+          if (ov.cidrV6 !== undefined && ov.cidrV6 !== '') perDevice['cidrV6'] = ov.cidrV6;
           if (Object.keys(perDevice).length > 0) deviceInputs[d.id] = perDevice;
         }
       }
@@ -396,7 +404,7 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
                   <input type="number" min={1} max={4094} value={vlanId} onChange={(e) => setVlanId(e.target.value)} placeholder="42 — omit for L3-only on default VLAN" className="w-full rounded-md border border-border px-2 py-2 text-sm" />
                 </label>
                 <label className="block text-sm">
-                  <span className="mb-1 flex items-center justify-between font-medium text-secondary">L3 address (CIDR, optional)
+                  <span className="mb-1 flex items-center justify-between font-medium text-secondary">L3 address IPv4 (CIDR, optional)
                     {suggestionsQuery.data?.nextFreeSubnetV4 && (
                       <button type="button" onClick={() => setCidr(suggestionsQuery.data!.nextFreeSubnetV4!)} className="text-xs font-normal text-primary hover:underline">
                         suggest free ({suggestionsQuery.data.nextFreeSubnetV4})
@@ -405,16 +413,16 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
                   </span>
                   <input type="text" value={cidr} onChange={(e) => setCidr(e.target.value)} placeholder="10.42.0.1/24 — per-device override in step 2" className="w-full rounded-md border border-border px-3 py-2 text-sm" />
                 </label>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="block text-sm">
-                    <span className="mb-1 block font-medium text-secondary">WLAN SSID (optional)</span>
-                    <input type="text" value={ssidName} onChange={(e) => setSsidName(e.target.value)} placeholder="XY-WIFI" className="w-full rounded-md border border-border px-3 py-2 text-sm" />
-                  </label>
-                  <label className="block text-sm">
-                    <span className="mb-1 block font-medium text-secondary">WPA2 passphrase</span>
-                    <input type="text" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder="min. 8 chars" className="w-full rounded-md border border-border px-3 py-2 text-sm" />
-                  </label>
-                </div>
+                <label className="block text-sm">
+                  <span className="mb-1 flex items-center justify-between font-medium text-secondary">L3 address IPv6 (CIDR, optional)
+                    {suggestionsQuery.data?.nextFreeSubnetV6 && (
+                      <button type="button" onClick={() => setCidrV6(suggestionsQuery.data!.nextFreeSubnetV6!)} className="text-xs font-normal text-primary hover:underline">
+                        suggest free ({suggestionsQuery.data.nextFreeSubnetV6})
+                      </button>
+                    )}
+                  </span>
+                  <input type="text" value={cidrV6} onChange={(e) => setCidrV6(e.target.value)} placeholder="fd00:42::1/64 — dual-stack when both are set" className="w-full rounded-md border border-border px-3 py-2 text-sm" />
+                </label>
               </div>
               <p className="mt-2 text-xs text-faint">
                 No generic interface field on purpose — each router decides its own L2 port. Step 2 resolves the best-guess per device from live state and lets you override it.
@@ -479,6 +487,9 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
                             )}
                             {(!r || !r.values.some((v) => v.key === 'cidr')) && (
                               <PreflightField label="cidr (override)" initial={ov.cidr ?? sharedInputs.cidr ?? ''} onCommit={(val) => setOv('cidr', val)} />
+                            )}
+                            {(!r || !r.values.some((v) => v.key === 'cidrV6')) && (
+                              <PreflightField label="cidrV6 (override)" initial={ov.cidrV6 ?? sharedInputs.cidrV6 ?? ''} onCommit={(val) => setOv('cidrV6', val)} />
                             )}
                             {(!r || !r.values.some((v) => v.key === 'interface')) && (
                               <PreflightField label="interface (override)" initial={ov.interface ?? ''} onCommit={(val) => setOv('interface', val)} />

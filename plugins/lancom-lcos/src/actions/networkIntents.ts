@@ -23,6 +23,21 @@
  *                                 Broadcast-Address Gateway DNS-Default DNS-Backup
  *                                 Operating Broadcast-Bit Master..4th Loopback Cache
  *                                 Adaption Cluster Max.-Lease Def.-Lease Suppress-ARP-check
+ *
+ * IPv6 lives in a SEPARATE config tree (NOT under TCP-IP) — verified live on
+ * both devices 2026-09-29 (`cd /Setup/IPv6` + `dir -a`, write-probed on WLC01):
+ *   Setup/IPv6/LAN-Interfaces    tab Interface-Name Interface-ID VLAN-ID Rtg-tag
+ *                                 Autoconf Accept-RA Identifier-Mode Interface-Status
+ *                                 Forwarding MTU Firewall DaD-Attempts RS-Count ND-Proxy Comment
+ *                                add "NAME" <ifId> <vlanId> 0 Yes Yes EUI-64 Up Yes 1500 No 1 3 No ""
+ *   Setup/IPv6/Network/Addresses tab Interface-Name IPv6-Address-Prefixlength
+ *                                 Address-Type Network-Group Comment
+ *                                add "NAME" <addr>/<prefix> Unicast "" ""
+ * Both v6 tables are single-key (Interface-Name = the network name, same key as
+ * the v4 tables) — one row per family per name. A dual-stack network therefore
+ * gets its v4 row in TCP-IP/Network-list AND both v6 rows; each table is
+ * idempotent by name independently.
+ *
  *   Setup/Interfaces/WLAN/Network  per-slot rows (WLAN-N / WLAN-N-M) — SSID slots
  *                                 are FIXED; a slot is configured via targeted
  *                                 `set <path> <col> <value>` commands.
@@ -30,7 +45,7 @@
  *   del Setup/VLAN/Networks/<name>
  */
 
-import { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, resolveSshCredentials } from '@unm/plugin-sdk';
+import { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, resolveSshCredentials, splitCidr, ipv6ToWords, ipv6FromWords } from '@unm/plugin-sdk';
 import type { SshCredentials } from '@unm/plugin-sdk';
 import { snmpWalk } from '@unm/snmp-client';
 import { NET_LIST } from '../lcosOids';
@@ -55,8 +70,14 @@ function q(v: string): string {
 
 /**
  * Runs `cd <table>` + `dir -a` and returns the DATA rows (one string each).
- * Data rows start at column 0; header/separator lines are indented or made of
- * '='/'-'; prompt lines contain '@'.
+ *
+ * LCOS `dir -a` layout is fixed: an OID banner line, then the column-header
+ * names, then a bracketed legend ("[1] [2] …"), then ONE separator line made of
+ * '='/'-', and only AFTER that do data rows begin. The header/legend lines are
+ * NOT indented (so whitespace filtering alone can't drop them) — but they always
+ * precede the first separator, so we gate on position: accept a column-0 line
+ * only once the separator has been seen. This is content-independent, so it
+ * also works for network names that contain hyphens or other odd characters.
  */
 export async function cliTableRows(ctx: ActionContext, creds: SshCredentials, tablePath: string): Promise<string[]> {
   const results = await runLcosCliCommands(
@@ -67,12 +88,19 @@ export async function cliTableRows(ctx: ActionContext, creds: SshCredentials, ta
   if (!results[1]?.completed) return [];
   const text = stripCommandEcho(results[1].raw, 'dir -a');
   const rows: string[] = [];
+  let seenSeparator = false;
   for (const line of text.split('\n')) {
     const l = line.replace(/\r/g, '').trimEnd();
     if (l.length === 0) continue;
-    if (/^\s/.test(l)) continue; // header / separator indentation
+    if (/^[=|-]+$/.test(l.trim())) { seenSeparator = true; continue; } // the header/data divider
+    if (!seenSeparator) continue; // OID banner / column-header / legend — all before the separator
     if (l.includes('@')) continue; // prompt lines
-    if (/^[=|-]+$/.test(l.trim())) continue;
+    // LCOS wraps long rows: continuation lines are indented. Merge them into
+    // the previous data row so each logical row is one string again.
+    if (/^\s/.test(l) && rows.length > 0) {
+      rows[rows.length - 1] = `${rows[rows.length - 1]} ${l.trim()}`;
+      continue;
+    }
     rows.push(l);
   }
   return rows;
@@ -152,13 +180,24 @@ function cidrToIpMask(cidr: string): [string, string] | null {
   return [m[1], parts.join('.')];
 }
 
+/** Validates an IPv6 CIDR and returns the canonical "addr/prefix" form. */
+function parseCidrV6(cidr: string): { addr: string; prefix: number } | null {
+  const s = splitCidr(cidr);
+  if (!s || !s.net.includes(':')) return null;
+  if (s.prefix < 1 || s.prefix > 126) return null;
+  // Re-serialize through the SDK parser to canonicalize '::' compression.
+  const words = ipv6ToWords(s.net);
+  if (!words) return null;
+  return { addr: ipv6FromWords(words), prefix: s.prefix };
+}
+
 // --- network.create ------------------------------------------------------------------
 
 const networkCreate: ActionDescriptor = {
   id: INTENT_NETWORK_CREATE,
-  label: 'Create network (VLAN + L3 + DHCP + optional SSID)',
+  label: 'Create network (VLAN + L3 v4/v6 + DHCP + optional SSID)',
   description:
-    "Canonical fleet intent — creates a named VLAN on this device and, when given, its L3 address (TCP-IP Network-list), an optional DHCP pool, and an optional WLAN SSID slot. Idempotent: existing rows are left untouched. Transport: LCOS CLI over SSH (SNMP SET cannot create these table rows; SFTP /config is empty on physical devices).",
+    "Canonical fleet intent — creates a named VLAN on this device and, when given, its L3 address (TCP-IP Network-list for IPv4; the separate Setup/IPv6 LAN-Interfaces + Network/Addresses tables for IPv6 — dual-stack when both are set), an optional DHCP pool, and an optional WLAN SSID slot. Idempotent per table: existing rows are left untouched. Transport: LCOS CLI over SSH (SNMP SET cannot create these table rows; SFTP /config is empty on physical devices).",
   module: 'Network',
   riskLevel: 'write',
   deviceCount: 'N' as const,
@@ -167,6 +206,7 @@ const networkCreate: ActionDescriptor = {
     name: { type: 'string', required: true, minLength: 1, maxLength: 64, description: 'Network name (unique per device)' },
     vlanId: { type: 'number', min: 1, max: 4094, description: 'VLAN ID to create/attach (optional — omit for an L3-only network on default VLAN 1)' },
     cidr: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}/\\d{1,2}$', description: 'L3 address as CIDR (e.g. 10.42.0.1/24) — alternative to ip+netmask' },
+    cidrV6: { type: 'string', pattern: '^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*/\\d{1,3}$', description: 'Optional IPv6 L3 address as CIDR (e.g. fd00:42::1/64) — dual-stack when set alongside cidr; writes the separate Setup/IPv6 tables' },
     ip: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'L3 address (alternative to cidr)' },
     netmask: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'Netmask for `ip`' },
     interface: { type: 'string', maxLength: 64, default: 'LAN-1', description: 'Device-local L2 interface to attach the VLAN to (e.g. LAN-1)' },
@@ -218,6 +258,14 @@ const networkCreate: ActionDescriptor = {
       l3Mask = input.netmask;
     }
 
+    // L3 address v6 — separate config tree on LCOS (Setup/IPv6/*).
+    let l3V6: { addr: string; prefix: number } | null = null;
+    if (typeof input.cidrV6 === 'string' && input.cidrV6.trim()) {
+      const parsed = parseCidrV6(input.cidrV6.trim());
+      if (!parsed) return { success: false, error: `Invalid IPv6 CIDR '${input.cidrV6}' (expected e.g. fd00:42::1/64).` };
+      l3V6 = parsed;
+    }
+
     const steps: string[] = [];
     let applied = false;
 
@@ -245,6 +293,48 @@ const networkCreate: ActionDescriptor = {
         // Columns: Name IP-Address IP-Netmask VLAN-ID Interface Src-check Type Rtg-tag Comment.
         const r = await cliAddRow(ctx, creds, 'TCP-IP/Network-list', [q(name), l3Ip, l3Mask, String(vlanId), iface, 'loose', 'Intranet', '0', q('')], name);
         if (!r.ok) return { success: false, error: `VLAN network created but L3 address failed: ${r.detail}` };
+        steps.push(r.detail);
+        applied = true;
+      }
+    }
+
+    // 2b. IPv6 — LCOS keeps v6 in a SEPARATE tree (Setup/IPv6/*), one row per
+    //     name per table. Both rows are needed for a working dual-stack L3:
+    //     LAN-Interfaces enables v6 on the network's bridge, Addresses carries
+    //     the actual prefix.
+    if (l3V6) {
+      const lanIfcRows = await cliTableRows(ctx, creds, 'IPv6/LAN-Interfaces');
+      if (tableHasName(lanIfcRows, name)) {
+        steps.push(`IPv6/LAN-Interfaces: row ${name} already exists — left untouched`);
+      } else {
+        // Interface-ID = the bridge carrying this VLAN. Copy the most common
+        // value from existing rows (read-only); fall back to BRG-2, the default
+        // LAN bridge on LCOS routers (verified on both WLC01 and GW_Ralf).
+        const counts = new Map<string, number>();
+        for (const row of lanIfcRows) {
+          const m = /^\S+\s+(\S+)/.exec(row.trim());
+          if (!m || !m[1]) continue;
+          counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
+        }
+        let ifId = 'BRG-2';
+        let best = 0;
+        for (const [k, c] of counts.entries()) if (c > best) { best = c; ifId = k; }
+        // Columns in tab-header order: Name Interface-ID VLAN-ID Rtg-tag Autoconf
+        // Accept-RA Identifier-Mode Interface-Status Forwarding MTU Firewall
+        // DaD-Attempts RS-Count ND-Proxy Comment.
+        const r = await cliAddRow(ctx, creds, 'IPv6/LAN-Interfaces', [q(name), ifId, String(vlanId), '0', 'Yes', 'Yes', 'EUI-64', 'Up', 'Yes', '1500', 'No', '1', '3', 'No', q('')], name);
+        if (!r.ok) return { success: false, error: `Network created but IPv6 LAN-Interfaces row failed: ${r.detail}` };
+        steps.push(r.detail);
+        applied = true;
+      }
+
+      const addrRows = await cliTableRows(ctx, creds, 'IPv6/Network/Addresses');
+      if (tableHasName(addrRows, name)) {
+        steps.push(`IPv6/Network/Addresses: row ${name} already exists — left untouched`);
+      } else {
+        // Columns: Interface-Name IPv6-Address-Prefixlength Address-Type Network-Group Comment.
+        const r = await cliAddRow(ctx, creds, 'IPv6/Network/Addresses', [q(name), `${l3V6.addr}/${l3V6.prefix}`, 'Unicast', q(''), q('')], name);
+        if (!r.ok) return { success: false, error: `Network created but IPv6 address row failed: ${r.detail}` };
         steps.push(r.detail);
         applied = true;
       }
@@ -316,7 +406,7 @@ const networkCreate: ActionDescriptor = {
       success: true,
       applied,
       verified: true,
-      details: { name, vlanId, dedicatedVlan: hasVlan, interface: iface, l3: l3Ip ? `${l3Ip}/${l3Mask}` : null, steps },
+      details: { name, vlanId, dedicatedVlan: hasVlan, interface: iface, l3: l3Ip ? `${l3Ip}/${l3Mask}` : null, l3v6: l3V6 ? `${l3V6.addr}/${l3V6.prefix}` : null, steps },
     };
   },
 };
@@ -325,9 +415,9 @@ const networkCreate: ActionDescriptor = {
 
 const networkDelete: ActionDescriptor = {
   id: INTENT_NETWORK_DELETE,
-  label: 'Delete network (VLAN + L3 + DHCP rows)',
+  label: 'Delete network (VLAN + L3 v4/v6 + DHCP rows)',
   description:
-    "Canonical fleet intent — removes the named network's rows from VLAN/Networks, TCP-IP/Network-list and DHCP/Network-list. Idempotent: missing rows are skipped. Transport: LCOS CLI over SSH (`del Setup/<table>/<name>`). NOTE: WLAN SSID slots are fixed hardware slots and are NOT touched by this intent.",
+    "Canonical fleet intent — removes the named network's rows from VLAN/Networks, TCP-IP/Network-list, DHCP/Network-list and the IPv6 tables (IPv6/LAN-Interfaces, IPv6/Network/Addresses). Idempotent: missing rows are skipped. Transport: LCOS CLI over SSH (`del Setup/<table>/<name>`). NOTE: WLAN SSID slots are fixed hardware slots and are NOT touched by this intent.",
   module: 'Network',
   riskLevel: 'dangerous',
   deviceCount: 'N' as const,
@@ -344,8 +434,9 @@ const networkDelete: ActionDescriptor = {
       return { success: false, error: '`name` must be 1..64 chars of [A-Za-z0-9_-] (LCOS table names).' };
     }
 
-    // L3 + DHCP first (they reference the VLAN), then the L2 row.
-    const tables = ['TCP-IP/Network-list', 'DHCP/Network-list', 'VLAN/Networks'];
+    // L3 + DHCP first (they reference the VLAN), then the L2 row. The v6
+    // address row goes before its LAN-Interfaces enabler, mirroring create.
+    const tables = ['IPv6/Network/Addresses', 'TCP-IP/Network-list', 'DHCP/Network-list', 'IPv6/LAN-Interfaces', 'VLAN/Networks'];
     const steps: string[] = [];
     let removedAny = false;
     for (const t of tables) {
@@ -420,4 +511,64 @@ const vlanNetworksRead: ActionDescriptor = {
   },
 };
 
-export const NETWORK_INTENT_ACTIONS: ActionDescriptor[] = [networkCreate, networkDelete, vlanNetworksRead];
+/** First quoted/bare token of a CLI table row (the row's key). */
+function firstToken(row: string): string | null {
+  const m = /^"([^"]+)"|^\S+/.exec(row.trim());
+  return m ? (m[1] ?? m[0]) : null;
+}
+
+/** Reads the IPv6 setup tables via CLI `dir -a` (read-only). */
+const ipv6NetworksRead: ActionDescriptor = {
+  id: 'ipv6.networks.read',
+  label: 'Read configured IPv6 networks',
+  description:
+    "CLI read of Setup/IPv6/LAN-Interfaces and Setup/IPv6/Network/Addresses (the separate LCOS v6 config tree): every v6-enabled network with its bridge, VLAN id, status and address prefix. Read-only — use to verify a dual-stack network.create rollout.",
+  module: 'Network',
+  riskLevel: 'read',
+  deviceCount: 1,
+  timeoutMs: 30_000,
+  inputSchema: {},
+  async execute(ctx): Promise<ActionResult> {
+    const creds = sshCreds(ctx);
+    if (!creds) return { success: false, error: NO_SSH_SLOT_ERROR };
+
+    // LAN-Interfaces columns (tab-header order): Name Interface-ID VLAN-ID Rtg-tag
+    // Autoconf Accept-RA Identifier-Mode Interface-Status Forwarding MTU Firewall
+    // DaD-Attempts RS-Count ND-Proxy Comment.
+    const lanIfc: Array<{ name: string; interfaceId: string | null; vlanId: number | null; status: string | null }> = [];
+    try {
+      for (const row of await cliTableRows(ctx, creds, 'IPv6/LAN-Interfaces')) {
+        const parts = row.trim().split(/\s+/);
+        if (parts.length < 8) continue;
+        lanIfc.push({
+          name: firstToken(row) ?? '',
+          interfaceId: parts[1] ?? null,
+          vlanId: Number.isInteger(Number(parts[2])) ? Number(parts[2]) : null,
+          status: parts[7] ?? null,
+        });
+      }
+    } catch { /* no v6 tree on this model — empty */ }
+
+    // Addresses columns: Name IPv6-Address-Prefixlength Address-Type Network-Group Comment.
+    const addresses: Array<{ name: string; prefix: string | null; type: string | null }> = [];
+    try {
+      for (const row of await cliTableRows(ctx, creds, 'IPv6/Network/Addresses')) {
+        const parts = row.trim().split(/\s+/);
+        if (parts.length < 2) continue;
+        addresses.push({ name: firstToken(row) ?? '', prefix: parts[1] ?? null, type: parts[2] ?? null });
+      }
+    } catch { /* no v6 tree on this model — empty */ }
+
+    return {
+      success: true,
+      details: {
+        lanInterfacesCount: lanIfc.length,
+        addressesCount: addresses.length,
+        lanInterfaces: lanIfc,
+        addresses,
+      },
+    };
+  },
+};
+
+export const NETWORK_INTENT_ACTIONS: ActionDescriptor[] = [networkCreate, networkDelete, vlanNetworksRead, ipv6NetworksRead];

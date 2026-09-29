@@ -1,6 +1,6 @@
 import { db } from '../db';
 import * as schema from '../db/schema';
-import { cidrsOverlap, ipScope, ipv4ToInt, splitCidr } from '@unm/plugin-sdk';
+import { cidrsOverlap, ipScope, ipv4ToInt, ipv6ToBigInt, ipv6FromBigInt, splitCidr } from '@unm/plugin-sdk';
 import { mergeNetworkRows } from '../routes/networks';
 import { getEffectiveValues } from '../systemSettings';
 
@@ -39,6 +39,8 @@ export interface NetworkCheckDeviceStatus {
 export interface NetworkCheckSuggestions {
   /** Next free /24 after the highest observed v4 subnet, or null when none fits. */
   nextFreeSubnetV4: string | null;
+  /** Next free ULA /64 (fd00::/8) after the highest observed v6 subnet, or null when none fits. */
+  nextFreeSubnetV6: string | null;
   /** Lowest unused VLAN id (1..4094) not present in the live inventory. */
   lowestFreeVlanId: number | null;
 }
@@ -54,6 +56,8 @@ interface CheckInputs {
   name?: string;
   vlanId?: number | null;
   cidr?: string;
+  /** Dual-stack half — optional IPv6 CIDR alongside `cidr`. */
+  cidrV6?: string;
 }
 
 /** True for subnets that do not identify a real network (loopback/link-local). */
@@ -133,6 +137,11 @@ export function runNetworkChecks(
 
   const name = (inputs.name ?? '').trim();
   const tCidr = (inputs.cidr ?? '').trim();
+  const tCidrV6 = (inputs.cidrV6 ?? '').trim();
+  // The target subnets to check — v4 and v6 are independent families.
+  const targets: Array<{ cidr: string; label: string }> = [];
+  if (tCidr) targets.push({ cidr: tCidr, label: 'IPv4' });
+  if (tCidrV6) targets.push({ cidr: tCidrV6, label: 'IPv6' });
   const v = inputs.vlanId;
   const hasVlan = Number.isInteger(v as number) && (v as number) >= 1 && (v as number) <= 4094;
 
@@ -140,9 +149,9 @@ export function runNetworkChecks(
   if (name) {
     const nm = name.toLowerCase();
     for (const n of live) {
-      // With a CIDR the subnet check below is the precise one; without it the
-      // name match alone flags a possible duplicate.
-      if (tCidr || n.name.toLowerCase() !== nm) continue;
+      // With any CIDR the subnet check below is the precise one; without it
+      // the name match alone flags a possible duplicate.
+      if (targets.length > 0 || n.name.toLowerCase() !== nm) continue;
       const where =
         n.subnets.join(', ') || `VLAN ${n.vlanId ?? '?'} on ${Array.from(new Set(n.devices.map((d) => d.deviceId))).slice(0, 3).join(', ')}…`;
       push({ kind: 'name', networkKey: `live:${n.key}`, message: `Name "${n.name}" already exists in the live inventory (${where}).` });
@@ -156,13 +165,15 @@ export function runNetworkChecks(
     }
   }
 
-  // 2. Subnet overlap — the target CIDR intersects an existing live subnet.
-  if (tCidr) {
+  // 2. Subnet overlap — a target CIDR intersects an existing live subnet.
+  //    Families never cross (cidrsOverlap is family-aware), so each target
+  //    only ever matches same-family subnets.
+  for (const t of targets) {
     for (const n of live) {
-      const hit = n.subnets.find((s) => s.includes('/') && !isNonNetworkSubnet(s) && cidrsOverlap(tCidr, s));
+      const hit = n.subnets.find((s) => s.includes('/') && !isNonNetworkSubnet(s) && cidrsOverlap(t.cidr, s));
       if (!hit) continue;
       const devs = Array.from(new Set(n.devices.map((d) => d.deviceId))).slice(0, 4).join(', ');
-      push({ kind: 'subnet', networkKey: n.key, message: `Subnet ${tCidr} overlaps existing live network "${n.name}" (${hit}) on ${devs}. Fine for NAT'd remote sites — otherwise pick a free range.` });
+      push({ kind: 'subnet', networkKey: n.key, message: `Subnet ${t.cidr} (${t.label}) overlaps existing live network "${n.name}" (${hit}) on ${devs}. Fine for NAT'd remote sites — otherwise pick a free range.` });
     }
   }
 
@@ -170,7 +181,7 @@ export function runNetworkChecks(
   if (hasVlan) {
     for (const n of live) {
       if (n.vlanId !== v) continue;
-      const sameSubnet = tCidr ? n.subnets.some((s) => s.includes('/') && cidrsOverlap(tCidr, s)) : false;
+      const sameSubnet = targets.some((t) => n.subnets.some((s) => s.includes('/') && cidrsOverlap(t.cidr, s)));
       if (!sameSubnet) push({ kind: 'vlan', networkKey: n.key, message: `VLAN ${v} is already used by live network "${n.name}" (${n.subnets.join(', ') || 'no subnet known'}) — extending it on more devices is usually intended; a different subnet with the same VLAN ID will not route between sites.` });
     }
   }
@@ -182,8 +193,9 @@ export function runNetworkChecks(
     let deployed = false;
     for (const n of live) {
       if (!n.devices.some((m) => m.deviceId === id)) continue;
-      if (tCidr && n.subnets.some((s) => s.includes('/') && cidrsOverlap(tCidr, s))) { deployed = true; break; }
-      if (!tCidr && hasVlan && n.vlanId === v) { deployed = true; break; }
+      // Dual-stack: ANY matching family counts as already present there.
+      if (targets.some((t) => n.subnets.some((s) => s.includes('/') && cidrsOverlap(t.cidr, s)))) { deployed = true; break; }
+      if (targets.length === 0 && hasVlan && n.vlanId === v) { deployed = true; break; }
     }
     devices.push({ deviceId: id, deviceName: '', status: deployed ? 'deployed' : 'new' });
   }
@@ -195,6 +207,8 @@ export function runNetworkChecks(
  * Suggests free ranges from gaps in the live inventory.
  *   - nextFreeSubnetV4: the /24 directly after the highest observed v4 subnet
  *     (skipping loopback/link-local/multicast/reserved space).
+ *   - nextFreeSubnetV6: the ULA /64 (fd00::/8) directly after the highest
+ *     observed v6 subnet.
  *   - lowestFreeVlanId: the smallest VLAN id 1..4094 not present in inventory.
  */
 export function suggestFreeRanges(
@@ -239,6 +253,54 @@ export function suggestFreeRanges(
     }
   }
 
+  // --- next free ULA /64 (fc00::/7) --------------------------------------------
+  // Only suggested when the fleet ALREADY uses IPv6 — a v4-only inventory gets
+  // no v6 suggestion. Same walk as the v4 case, in 128-bit space: find the
+  // exclusive upper bound of the highest observed ULA subnet (public prefixes
+  // are ignored for the walk but still count as "fleet uses v6"), align up to a
+  // /64 boundary, then scan forward while staying inside fc00::/7 (ULA).
+  const ULA_BASE = ipv6ToBigInt('fc00::')!;
+  const ULA_END = ipv6ToBigInt('fe00::')!; // exclusive end of fc00::/7 (top bit set, second bit clear)
+  let v6HighestEnd: bigint | null = null; // highest END among observed ULA subnets only
+  let anyV6Observed = false; // fleet uses IPv6 at all (ULA or public) → gate for the suggestion
+  for (const n of live) {
+    for (const s of n.subnets) {
+      if (!s.includes('/') || !s.includes(':')) continue;
+      const scope = ipScope(s);
+      if (scope === 'loopback' || scope === 'link-local' || scope === 'multicast' || scope === 'reserved') continue;
+      const split = splitCidr(s);
+      if (!split) continue;
+      const netBig = ipv6ToBigInt(split.net);
+      if (netBig === null) continue;
+      anyV6Observed = true;
+      // Only ULA subnets feed the "next free" walk — a public 2003::/… prefix
+      // is far above fc00::/7 and scanning forward from it would never re-enter
+      // ULA space. Public-only fleets still get a suggestion (from ULA start).
+      if (netBig < ULA_BASE || netBig >= ULA_END) continue;
+      const prefix = BigInt(split.prefix);
+      const size = 1n << (128n - prefix);
+      const mask = ((1n << 128n) - 1n) ^ ((1n << (128n - prefix)) - 1n);
+      const endExclusive = (netBig & mask) + size;
+      if (v6HighestEnd === null || endExclusive > v6HighestEnd) v6HighestEnd = endExclusive;
+    }
+  }
+
+  let nextFreeSubnetV6: string | null = null;
+  if (anyV6Observed) {
+    const BLOCK = 1n << 64n; // one /64 block
+    let base = v6HighestEnd ?? ULA_BASE; // no ULA yet → start of ULA space
+    const misalign = base & (BLOCK - 1n);
+    if (misalign !== 0n) base += BLOCK - misalign;
+    for (let i = 0; i < 256; i++) { // at most one /8 of ULA space to scan
+      const netBig = base & (((1n << 128n) - 1n) ^ (BLOCK - 1n)); // clear the low 64 bits → /64 network address
+      if (netBig >= ULA_BASE && netBig < ULA_END) {
+        nextFreeSubnetV6 = `${ipv6FromBigInt(netBig)}/64`;
+        break;
+      }
+      base += BLOCK;
+    }
+  }
+
   // --- lowest free VLAN id ----------------------------------------------------
   const used = new Set<number>();
   for (const n of live) if (n.vlanId !== null && Number.isInteger(n.vlanId)) used.add(n.vlanId);
@@ -247,7 +309,7 @@ export function suggestFreeRanges(
     if (!used.has(id)) { lowestFreeVlanId = id; break; }
   }
 
-  return { nextFreeSubnetV4, lowestFreeVlanId };
+  return { nextFreeSubnetV4, nextFreeSubnetV6, lowestFreeVlanId };
 }
 
 /**
@@ -278,6 +340,7 @@ function parseCheckInputs(inputs: Record<string, unknown>): CheckInputs {
   if (typeof inputs.name === 'string') parsed.name = inputs.name;
   if (inputs.vlanId !== undefined && inputs.vlanId !== null) parsed.vlanId = Number(inputs.vlanId);
   if (typeof inputs.cidr === 'string') parsed.cidr = inputs.cidr;
+  if (typeof inputs.cidrV6 === 'string') parsed.cidrV6 = inputs.cidrV6;
   return parsed;
 }
 
