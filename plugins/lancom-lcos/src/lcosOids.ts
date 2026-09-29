@@ -213,6 +213,53 @@ export const WLAN_RADIO = {
   COL_UTILIZATION: 28, // Integer32 % (channel utilization) — gapped numbering!
 } as const;
 
+/**
+ * Writable WLAN SETUP tree (11.2.23.20) — the config mirror of the status
+ * tables above, same table/column numbering as the LCF `Setup/Interfaces/WLAN`
+ * cells (`(1.2.23.20.<table>.<ifcEnum>.<col>)`). SNMP-READABLE (verified live on
+ * a 1803VAW-5G) but NOT SNMP-writable — a no-op SET returns NoAccess, so writes
+ * go through the SFTP `/config` LCF round-trip instead. The ifc index is the
+ * INTEGER enum from the CLI help: WLAN-1=1, WLAN-2=2, WLAN-1-N=16..21 (N=2..7),
+ * WLAN-2-N=32..37 (N=2..7).
+ */
+export const WLAN_SETUP = {
+  base: `${LCOS_BASE}.2.23.20`, // LCF family "1.2.23.20"
+  /** The same tree as written in the LCF config document (no enterprise prefix). */
+  lcfFamily: '1.2.23.20',
+  /** Network table — per-SSID config rows. */
+  networkTable: 1,
+  NET_COL_OPERATING: 8, // eNo(0)/eYes(1) — verified live: operating SSIDs read 1 (the CLI help's "Yes(0), No(1)" is inverted/wrong)
+  /** Radio-Settings table — per-radio RF config rows (ifc 1/2 only). */
+  radioTable: 8,
+  RADIO_COL_CHANNEL: 8, // Integer32 0..255 (0 = auto)
+  RADIO_COL_POWER_SETTING: 33, // Automatic(0)/Manual(1)
+  RADIO_COL_EIRP: 34, // dBm as a numeric string ("0020" = 20)
+} as const;
+
+/**
+ * Maps a WLAN ifc name to its LCF/CLI integer enum, or null when the name is not
+ * a valid LCOS WLAN interface: "WLAN-1"→1, "WLAN-2"→2, "WLAN-1-N"→16+(N-2),
+ * "WLAN-2-N"→32+(N-2) (N=2..7). Verified against the CLI `set Network ?` help.
+ */
+export function wlanIfcToEnum(name: string): number | null {
+  const m = /^WLAN-(\d)(?:-(\d))?$/.exec(name.trim());
+  if (!m) return null;
+  const radio = Number(m[1]);
+  const n = m[2] ? Number(m[2]) : 1;
+  if (radio === 1 && n >= 1 && n <= 7) return n === 1 ? 1 : 14 + n; // WLAN-1=1, WLAN-1-N=16..21
+  if (radio === 2 && n >= 1 && n <= 7) return n === 1 ? 2 : 30 + n; // WLAN-2=2, WLAN-2-N=32..37
+  return null;
+}
+
+/** Inverse of wlanIfcToEnum: enum → ifc name (null for unknown enums). */
+export function wlanEnumToIfc(v: number): string | null {
+  if (v === 1) return 'WLAN-1';
+  if (v === 2) return 'WLAN-2';
+  if (v >= 16 && v <= 21) return `WLAN-1-${v - 14}`;
+  if (v >= 32 && v <= 37) return `WLAN-2-${v - 30}`;
+  return null;
+}
+
 /** lcsStatusWlanStationTableTable (TABLE node 11.1.3.32) — per-client stations. */
 export const WLAN_STATION = {
   base: `${LCOS_BASE}.1.3.32`, // index: plain Integer32 (0..65535)

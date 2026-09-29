@@ -146,8 +146,12 @@ async function main(): Promise<void> {
 
   // Read-only discovery: menu tree + help texts. Each group in its own shell.
   const groups: Array<[string[], string, number?]> = [
-    [['cd Setup/Interfaces/WLAN', 'dir -a'], 'gw_ifc_wlan_dir.txt', 60_000],
-    [['cd Setup/Interfaces/WLAN', 'set Network ?'], 'gw_set_network.txt', 90_000],
+    [['cd Setup/Interfaces/WLAN', 'set Radio-Settings ?'], 'gw_set_radio.txt', 90_000],
+    [['cd Setup/Interfaces/WLAN', 'set Encryption ?'], 'gw_set_encryption.txt', 90_000],
+    [['cd Setup/WLAN', 'dir -a'], 'gw_wlan_setup_dir_a.txt', 60_000],
+    [['cd Setup/WLAN', 'set VLAN-Groupkey-Mapping ?'], 'gw_set_vlanmap.txt', 90_000],
+    [['cd Setup/Interfaces/WLAN', 'print Network WLAN-1'], 'gw_print_network_wlan1.txt', 60_000],
+    [['cd Setup/Interfaces/WLAN', 'print Radio-Settings WLAN-1'], 'gw_print_radio_wlan1.txt', 60_000],
   ];
 
   for (const [cmds, file, timeout] of groups) {

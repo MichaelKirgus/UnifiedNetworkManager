@@ -76,7 +76,14 @@ const identity = resolvePluginIdentity({
   // actions (`set <path> <value>` with read-back verification) for device name,
   // timezone and WLAN SSID settings. The web-UI backup path is kept only as a
   // legacy fallback — the LCOS web UI locks out repeated failed POSTs.
-  version: '0.3.0',
+  // 0.4.0 — WiFi parity round 1 (lancom-lx feature set): read actions over the
+  // status MIBs (wlan.networks.read, wlan.radios.read) + write actions for radio
+  // channel/power via single-cell LCF replacement over SFTP /config (the WLAN
+  // setup tree is SNMP-read-only — NoAccess on SET). The former wlan.ssid.state.set
+  // was removed: per-SSID operating state is runtime-only, not expressible in the
+  // config document. SSID name changes remain unsupported — broadcast names are
+  // stored nowhere in the LCF (verified exhaustively), only in the status MIB.
+  version: '0.4.0',
   vendors: ['lancom'],
   // All four capabilities: monitoring (SNMP walks), inventory (networks/hosts),
   // configuration (SNMP SET actions) + planning (multi-device fan-out). Plus an

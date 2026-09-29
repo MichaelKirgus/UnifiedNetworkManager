@@ -28,7 +28,7 @@ import {
 } from '@unm/plugin-sdk';
 import type { SshCredentials } from '@unm/plugin-sdk';
 import { snmpGet, snmpSet, snmpWalk, SnmpValue } from '@unm/snmp-client';
-import { SETUP, SETUP_TIME, SYS, WLAN_NET, lcosMinutesToTimezoneEnum } from '../lcosOids';
+import { SETUP, SETUP_TIME, SYS, WLAN_NET, WLAN_RADIO, WLAN_SETUP, lcosMinutesToTimezoneEnum, wlanIfcToEnum } from '../lcosOids';
 import { runLcosCliCommands, stripCommandEcho } from '../lcosCli';
 import { isLcfDocument, lcfScalar, parseLcf } from '../lcf';
 import { ActionContext, ActionDescriptor, ActionResult } from './types';
@@ -101,6 +101,87 @@ async function readScalar(ctx: ActionContext, oid: string): Promise<SnmpValue | 
   } catch {
     return null;
   }
+}
+
+/** Decodes a length-prefixed decimal-octet text index ("6.87.76.…" → "WLAN-1"). */
+function decodeTextIndex(idx: string[]): string | null {
+  if (idx.length < 2) return null;
+  const len = Number(idx[0]);
+  if (!Number.isInteger(len) || len <= 0 || len !== idx.length - 1) return null;
+  try {
+    return Buffer.from(idx.slice(1, 1 + len).map(Number)).toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+/** Reads the running LCF configuration from the SFTP virtual `/config` file. */
+async function readConfigFile(ctx: ActionContext): Promise<Buffer> {
+  const creds = sshCreds(ctx);
+  if (!creds) throw new Error(NO_SSH_SLOT_ERROR);
+  const session = await sftpSession(ctx, creds);
+  return session.readFile('/config', creds, MAX_CONFIG_BYTES);
+}
+
+/** Writes the LCF configuration back to the SFTP virtual `/config` file (applied live by LCOS). */
+async function writeConfigFile(ctx: ActionContext, data: Buffer): Promise<void> {
+  const creds = sshCreds(ctx)!;
+  const session = await sftpSession(ctx, creds);
+  await session.writeFile('/config', data, creds);
+}
+
+/**
+ * Replaces the value of ONE LCF table cell — `(oid) = old` → `(oid) = new` — in
+ * the raw document text. Line endings (CRLF), indentation and every other byte
+ * are preserved; when the cell line is absent (the agent omits cells at their
+ * default value) it is inserted right after the row's first column line, which
+ * always exists. Returns { text, replaced } or an error string. Exported for
+ * offline verification against captured configs.
+ */
+export function replaceLcfCell(
+  raw: string,
+  oid: string,
+  expectedOld: string | null,
+  newValue: string
+): { text: string; replaced: boolean } | { error: string } {
+  const esc = (s: string) => s.replace(/\./g, '\\.');
+  const lines = raw.split('\r\n');
+  const re = new RegExp(`^(\\s*\\(${esc(oid)}\\)\\s*=\\s*)(.*)$`);
+  let found = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (re.test(lines[i])) { found = i; break; }
+  }
+
+  if (found >= 0) {
+    const m = re.exec(lines[found])!;
+    const cur = m[2].trim();
+    if (expectedOld !== null && cur !== expectedOld) {
+      return { error: `Concurrent-change guard: cell ${oid} is "${cur}" on the device, expected "${expectedOld}" — aborting without writing.` };
+    }
+    lines[found] = `${m[1]}${newValue}`;
+    return { text: lines.join('\r\n'), replaced: true };
+  }
+
+  // Cell absent (the agent omits cells at their default value) — insert it right
+  // after the row's first column line. The cell OID is <family>.<table>.<rowIdx>.<col>;
+  // dropping the last segment yields the row prefix, whose col .1 always exists.
+  const parts = oid.split('.');
+  if (parts.length < 4) return { error: `Cell OID ${oid} does not look like a table cell (<family>.<table>.<row>.<col>).` };
+  const firstColOid = `${parts.slice(0, -1).join('.')}.1`;
+  const firstColRe = new RegExp(`^(\\s*\\(${esc(firstColOid)}\\)\\s*=\\s*)(.*)$`);
+  let anchor = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (firstColRe.test(lines[i])) { anchor = i; break; }
+  }
+  if (anchor < 0) return { error: `Cell ${oid} and its row's first column (${firstColOid}) are both absent — the table row does not exist in this configuration.` };
+  const indentMatch = /^(\s*)/.exec(lines[anchor])!;
+  lines.splice(anchor + 1, 0, `${indentMatch[1]}(${oid}) = ${newValue}`);
+  return { text: lines.join('\r\n'), replaced: false };
+}
+
+/** Reads one LCF table cell value ("" when the agent omitted it as default). */
+function lcfCell(doc: ReturnType<typeof parseLcf>, oid: string): string {
+  return doc.cells.get(oid) ?? '';
 }
 
 /** Reads the current NTP server list (column .1 rows of the RqAddress table). */
@@ -520,62 +601,12 @@ const systemTimezoneCliSet: ActionDescriptor = {
 };
 
 /** Enable/disable a WLAN SSID via CLI (`cd Setup/Interfaces/WLAN` + `set Network <ifc> <Yes|No>`). */
-const wlanSsidStateSet: ActionDescriptor = {
-  id: 'wlan.ssid.state.set',
-  label: 'Enable / disable WLAN SSID',
-  description:
-    "Toggles the Operating state of a WLAN network (SSID) via the interactive CLI (`cd Setup/Interfaces/WLAN` + `set Network <ifc> Yes|No`). Only works on models with a WLAN radio — routers without one will report the path as wrong. Changes apply live and persist to flash.",
-  module: 'Wireless',
-  riskLevel: 'write',
-  deviceCount: 1,
-  timeoutMs: 90_000,
-  inputSchema: {
-    ifc: { type: 'string', description: "WLAN interface name (e.g. 'WLAN-1' or 'WLAN-2-1').", pattern: '^WLAN-\\d(-\\d)?$' },
-    enabled: { type: 'boolean', description: 'true = SSID operating, false = disabled.' },
-  },
-  async execute(ctx, input) {
-    const creds = sshCreds(ctx);
-    if (!creds) return { success: false, error: NO_SSH_SLOT_ERROR };
-    const ifc = String(input.ifc ?? '').trim();
-    if (!/^WLAN-\d(-\d)?$/.test(ifc)) return { success: false, error: '`ifc` must look like WLAN-1 or WLAN-2-1.' };
-    const enabled = Boolean(input.enabled);
-    // The CLI takes the enum NAME; the MIB value is eNo(0)/eYes(1) — "Yes" enables.
-    const value = enabled ? 'Yes' : 'No';
-
-    try {
-      const cmd = `set Network ${ifc} ${value}`;
-      const results = await runLcosCliCommands(ctx.terminalPool, { host: ctx.address, port: ctx.sshPort ?? 22, creds }, ['cd Setup/Interfaces/WLAN', cmd]);
-      if (!results[0]?.completed || !results[1]?.completed) return { success: false, error: 'CLI session timed out before the command finished.' };
-      // On a radio-less model even `cd Setup/Interfaces/WLAN` fails.
-      const cdRaw = stripCommandEcho(results[0].raw, 'cd Setup/Interfaces/WLAN');
-      if (/Path name wrong/i.test(cdRaw)) {
-        return { success: false, error: 'LCOS reports "Path name wrong" for Setup/Interfaces/WLAN — this model has no WLAN radio.' };
-      }
-      const raw = stripCommandEcho(results[1].raw, cmd);
-      if (/Path name wrong/i.test(raw)) {
-        return { success: false, error: `LCOS reports "Path name wrong" for WLAN ${ifc} — the SSID does not exist on this radio.` };
-      }
-    } catch (e) {
-      return { success: false, error: `CLI set failed: ${e instanceof Error ? e.message : String(e)}` };
-    }
-
-    // Best-effort verification via the WLAN network table (SNMP, column-first rows).
-    let verified = false;
-    try {
-      const m = await snmpWalk(ctx.host, ctx.credentials.snmp, [`${WLAN_NET.base}.1.${WLAN_NET.COL_OPERATING}`], ctx.opts);
-      for (const [oid, v] of m) {
-        if (!oid.startsWith(`${WLAN_NET.base}.1.${WLAN_NET.COL_OPERATING}.`)) continue;
-        const idx = oid.slice(`${WLAN_NET.base}.1.${WLAN_NET.COL_OPERATING}.`.length).split('.');
-        // Index is a length-prefixed text run ("6.87.76.65.78.45.49" → "WLAN-1").
-        const len = Number(idx[0]);
-        const name = idx.slice(1, 1 + len).map((p) => String.fromCharCode(Number(p))).join('');
-        if (name === ifc) verified = Number(v) === (enabled ? 1 : 0);
-      }
-    } catch { /* SNMP verification is best-effort */ }
-
-    return { success: true, details: { ifc, enabled, cliValue: value, snmpVerified: verified } };
-  },
-};
+// NOTE (v0.4): the former `wlan.ssid.state.set` CLI action was removed — its
+// premise was wrong. The LCF Network table's Operating cell is 1 for ALL SSIDs
+// (verified: an operating and a non-operating SSID have byte-identical config
+// rows), so per-SSID enable/disable is runtime state, not expressible in the
+// configuration document. Per-SSID state can only be read via the status MIB
+// (wlan.networks.read).
 
 /** Set the NTP server list + operating flag over SNMP. */
 const ntpServersSet: ActionDescriptor = {
@@ -724,6 +755,248 @@ const networkStateRead: ActionDescriptor = {
   },
 };
 
+// --- WLAN (built-in radios only) ------------------------------------------------------
+
+/** Walks one column-first status table and groups values by decoded text index. */
+async function walkWlanTable(ctx: ActionContext, base: string): Promise<Map<string, Map<number, string>>> {
+  const out = new Map<string, Map<number, string>>();
+  try {
+    const m = await snmpWalk(ctx.host, ctx.credentials.snmp, [base], ctx.opts);
+    for (const [oid, value] of m) {
+      if (!oid.startsWith(`${base}.1.`)) continue;
+      const rel = oid.slice(`${base}.1.`.length).split('.'); // <col>.<idx…>
+      const col = Number(rel[0]);
+      const key = decodeTextIndex(rel.slice(1));
+      if (key === null || !Number.isInteger(col)) continue;
+      let row = out.get(key);
+      if (!row) { row = new Map(); out.set(key, row); }
+      row.set(col, String(value));
+    }
+  } catch { /* no WLAN tree on this model — empty result */ }
+  return out;
+}
+
+/** Read all WLAN networks (SSIDs): broadcast name, operating state, stations, BSSID, VLAN. */
+const wlanNetworksRead: ActionDescriptor = {
+  id: 'wlan.networks.read',
+  label: 'Read WLAN networks (SSIDs)',
+  description:
+    "Reads every WLAN network from lcsStatusWlanNetworksTable (SNMP): broadcast SSID name, operating state, connected-station count, BSSID and VLAN. Read-only; empty on models without a built-in radio. NOTE the broadcast names exist ONLY in this status MIB — they are not stored anywhere in the LCF config document.",
+  module: 'Wireless',
+  riskLevel: 'read',
+  deviceCount: 1,
+  timeoutMs: 30_000,
+  inputSchema: {},
+  async execute(ctx) {
+    const rows = await walkWlanTable(ctx, WLAN_NET.base);
+    const networks = [...rows.entries()].map(([ifc, cols]) => ({
+      ifc,
+      name: cols.get(WLAN_NET.COL_NAME) ?? '',
+      operating: cols.has(WLAN_NET.COL_OPERATING) ? Number(cols.get(WLAN_NET.COL_OPERATING)) === 1 : null,
+      stations: cols.has(WLAN_NET.COL_STATIONS) ? Number(cols.get(WLAN_NET.COL_STATIONS)) : null,
+      bssid: (cols.get(WLAN_NET.COL_BSSID) ?? '').trim(),
+      vlanId: cols.has(WLAN_NET.COL_VLAN) ? Number(cols.get(WLAN_NET.COL_VLAN)) : null,
+    }));
+    return { success: true, details: { count: networks.length, networks } };
+  },
+};
+
+/** Read per-radio RF state: band, channel, mode, bandwidth, TX power / EIRP. */
+const wlanRadiosRead: ActionDescriptor = {
+  id: 'wlan.radios.read',
+  label: 'Read WLAN radio RF state',
+  description:
+    "Reads every built-in radio from lcsStatusWlanRadiosTable (SNMP): band, current channel (0 = auto), mode enum, channel bandwidth, TX power and EIRP as reported by the agent. Read-only; empty on models without a built-in radio.",
+  module: 'Wireless',
+  riskLevel: 'read',
+  deviceCount: 1,
+  timeoutMs: 30_000,
+  inputSchema: {},
+  async execute(ctx) {
+    const rows = await walkWlanTable(ctx, WLAN_RADIO.base);
+    const radios = [...rows.entries()].map(([ifc, cols]) => ({
+      ifc,
+      band: cols.has(WLAN_RADIO.COL_BAND) ? Number(cols.get(WLAN_RADIO.COL_BAND)) : null, // 1=2.4GHz, 2=5GHz
+      channel: cols.has(WLAN_RADIO.COL_CHANNEL) ? Number(cols.get(WLAN_RADIO.COL_CHANNEL)) : null,
+      mode: cols.has(WLAN_RADIO.COL_MODE) ? Number(cols.get(WLAN_RADIO.COL_MODE)) : null, // raw enum — mapping not stable across firmware
+      bandwidth: cols.has(WLAN_RADIO.COL_BANDWIDTH) ? Number(cols.get(WLAN_RADIO.COL_BANDWIDTH)) : null, // 0=20MHz, 1=40MHz, 2=80MHz
+      txPower: (cols.get(WLAN_RADIO.COL_TX_POWER) ?? '').trim(),
+      eirp: (cols.get(WLAN_RADIO.COL_EIRP) ?? '').trim(),
+    }));
+    return { success: true, details: { count: radios.length, radios } };
+  },
+};
+
+/**
+ * Sets a radio's channel by replacing ONE cell in the LCF config over SFTP
+ * `/config` (the proven v0.3.0 transport). The WLAN setup tree is SNMP-read-only
+ * (NoAccess on SET) and the interactive-CLI table-set grammar for column
+ * targeting could not be determined safely, so a single-cell text replacement —
+ * everything else byte-identical — is used instead of a whole-config restore.
+ */
+const radioChannelSet: ActionDescriptor = {
+  id: 'wlan.radio.channel.set',
+  label: 'Set WLAN radio channel',
+  description:
+    "Pins a built-in radio to a fixed channel (0 = automatic) by updating the Radio-Settings table's Radio-Channel cell in the LCF config over SFTP /config. Reads the current value first (no-op when unchanged), writes back, then verifies via an LCF re-read and the status MIB. Applies live; persists to flash.",
+  module: 'Wireless',
+  riskLevel: 'write',
+  deviceCount: 1,
+  timeoutMs: 90_000,
+  inputSchema: {
+    ifc: { type: 'string', required: true, pattern: '^WLAN-[12]$', description: 'Radio interface (WLAN-1 or WLAN-2 — physical radios only)' },
+    channel: { type: 'number', required: true, min: 0, max: 255, description: 'Channel number; 0 = automatic' },
+  },
+  async execute(ctx, input) {
+    const ifc = String(input.ifc ?? '').trim();
+    const channel = typeof input.channel === 'number' ? Math.floor(input.channel as number) : NaN;
+    if (!/^(WLAN-1|WLAN-2)$/.test(ifc)) return { success: false, error: '`ifc` must be WLAN-1 or WLAN-2 (physical radios).' };
+    if (!Number.isInteger(channel) || channel < 0 || channel > 255) return { success: false, error: '`channel` must be an integer 0..255.' };
+
+    const rowIdx = wlanIfcToEnum(ifc)!; // 1 or 2
+    const oid = `${WLAN_SETUP.lcfFamily}.${WLAN_SETUP.radioTable}.${rowIdx}.${WLAN_SETUP.RADIO_COL_CHANNEL}`;
+
+    let raw: string;
+    try {
+      const doc = parseLcf((await readConfigFile(ctx)).toString('utf8'));
+      if (!doc.complete) return { success: false, error: 'The /config document is truncated (missing [END: LCF]) — refusing to modify it.' };
+      raw = doc.raw;
+    } catch (e) {
+      return { success: false, error: `Could not read the current configuration: ${e instanceof Error ? e.message : String(e)}` };
+    }
+
+    const before = lcfCell(parseLcf(raw), oid);
+    if (before === String(channel)) {
+      return { success: true, applied: false, verified: true, details: { ifc, channel, note: 'Already set — no change.' } };
+    }
+
+    const res = replaceLcfCell(raw, oid, before || null, String(channel));
+    if ('error' in res) return { success: false, error: res.error };
+    try {
+      await writeConfigFile(ctx, Buffer.from(res.text, 'utf8'));
+    } catch (e) {
+      return { success: false, error: `Writing /config failed: ${e instanceof Error ? e.message : String(e)}` };
+    }
+
+    // Verify: LCF re-read + status MIB.
+    await new Promise((r) => setTimeout(r, 3_000));
+    let lcfAfter: string | null = null;
+    try {
+      const doc2 = parseLcf((await readConfigFile(ctx)).toString('utf8'));
+      lcfAfter = lcfCell(doc2, oid);
+    } catch { /* best-effort */ }
+
+    let mibChannel: number | null = null;
+    try {
+      const idx = [ifc.length, ...[...ifc].map((c) => c.charCodeAt(0))].join('.');
+      const v = await readScalar(ctx, `${WLAN_RADIO.base}.1.${WLAN_RADIO.COL_CHANNEL}.${idx}`);
+      mibChannel = v === null ? null : Number(v);
+    } catch { /* best-effort */ }
+
+    const verified = lcfAfter !== null && Number(lcfAfter) === channel;
+    return {
+      success: verified,
+      applied: true,
+      verified,
+      details: { ifc, channel, before: before || '(default/auto)', lcfAfter, statusMibChannel: mibChannel },
+    };
+  },
+};
+
+/** Sets a radio's power mode (Automatic) or manual EIRP via the same LCF single-cell transport. */
+const radioPowerSet: ActionDescriptor = {
+  id: 'wlan.radio.power.set',
+  label: 'Set WLAN radio transmit power',
+  description:
+    "Sets automatic or manual EIRP for a built-in radio by updating the Radio-Settings table's Power-Setting (and, when Manual, EIRP) cells in the LCF config over SFTP /config. Reads current values first (no-op when unchanged), writes back, verifies via LCF re-read + status MIB. Applies live; persists to flash.",
+  module: 'Wireless',
+  riskLevel: 'write',
+  deviceCount: 1,
+  timeoutMs: 90_000,
+  inputSchema: {
+    ifc: { type: 'string', required: true, pattern: '^WLAN-[12]$', description: 'Radio interface (WLAN-1 or WLAN-2)' },
+    mode: { type: 'string', required: true, enum: ['Automatic', 'Manual'], description: 'Power control mode' },
+    eirpDbm: { type: 'number', min: 0, max: 36, description: 'EIRP in dBm (required when mode = Manual)' },
+  },
+  async execute(ctx, input) {
+    const ifc = String(input.ifc ?? '').trim();
+    const mode = String(input.mode ?? '');
+    const eirp = input.eirpDbm == null ? undefined : Number(input.eirpDbm);
+    if (!/^(WLAN-1|WLAN-2)$/.test(ifc)) return { success: false, error: '`ifc` must be WLAN-1 or WLAN-2 (physical radios).' };
+    if (mode !== 'Automatic' && mode !== 'Manual') return { success: false, error: '`mode` must be "Automatic" or "Manual".' };
+    if (mode === 'Manual' && (!Number.isInteger(eirp) || (eirp as number) < 0 || (eirp as number) > 36)) {
+      return { success: false, error: '`eirpDbm` is required when mode = Manual (integer 0..36).' };
+    }
+
+    const rowIdx = wlanIfcToEnum(ifc)!; // 1 or 2
+    const powerOid = `${WLAN_SETUP.lcfFamily}.${WLAN_SETUP.radioTable}.${rowIdx}.${WLAN_SETUP.RADIO_COL_POWER_SETTING}`;
+    const eirpOid = `${WLAN_SETUP.lcfFamily}.${WLAN_SETUP.radioTable}.${rowIdx}.${WLAN_SETUP.RADIO_COL_EIRP}`;
+
+    let raw: string;
+    try {
+      const doc = parseLcf((await readConfigFile(ctx)).toString('utf8'));
+      if (!doc.complete) return { success: false, error: 'The /config document is truncated (missing [END: LCF]) — refusing to modify it.' };
+      raw = doc.raw;
+    } catch (e) {
+      return { success: false, error: `Could not read the current configuration: ${e instanceof Error ? e.message : String(e)}` };
+    }
+
+    const beforePower = lcfCell(parseLcf(raw), powerOid);
+    const targetPower = mode === 'Automatic' ? '0' : '1';
+    // EIRP is stored as a plain number in the LCF (the CLI shows it 4-digit zero-padded).
+    const eirpStr = eirp != null ? String(eirp) : '';
+
+    if (beforePower === targetPower && (mode !== 'Manual' || lcfCell(parseLcf(raw), eirpOid) === eirpStr)) {
+      return { success: true, applied: false, verified: true, details: { ifc, mode, eirpDbm: eirp ?? null, note: 'Already set — no change.' } };
+    }
+
+    let text = raw;
+    const r1 = replaceLcfCell(text, powerOid, beforePower || null, targetPower);
+    if ('error' in r1) return { success: false, error: r1.error };
+    text = r1.text;
+    if (mode === 'Manual') {
+      // The EIRP cell's current value comes from the ORIGINAL document — after
+      // replacing the power cell it is unchanged.
+      const beforeEirp = lcfCell(parseLcf(raw), eirpOid);
+      const r2 = replaceLcfCell(text, eirpOid, beforeEirp || null, eirpStr);
+      if ('error' in r2) return { success: false, error: r2.error };
+      text = r2.text;
+    }
+
+    try {
+      await writeConfigFile(ctx, Buffer.from(text, 'utf8'));
+    } catch (e) {
+      return { success: false, error: `Writing /config failed: ${e instanceof Error ? e.message : String(e)}` };
+    }
+
+    // Verify: LCF re-read + status MIB EIRP.
+    await new Promise((r) => setTimeout(r, 3_000));
+    let lcfPower: string | null = null;
+    let lcfEirp: string | null = null;
+    try {
+      const doc2 = parseLcf((await readConfigFile(ctx)).toString('utf8'));
+      lcfPower = lcfCell(doc2, powerOid);
+      lcfEirp = lcfCell(doc2, eirpOid);
+    } catch { /* best-effort */ }
+
+    let mibEirp: string | null = null;
+    try {
+      const idx = [ifc.length, ...[...ifc].map((c) => c.charCodeAt(0))].join('.');
+      const v = await readScalar(ctx, `${WLAN_RADIO.base}.1.${WLAN_RADIO.COL_EIRP}.${idx}`);
+      mibEirp = v === null ? null : String(v).trim();
+    } catch { /* best-effort */ }
+
+    const verified = lcfPower !== null && Number(lcfPower) === (mode === 'Automatic' ? 0 : 1)
+      && (mode !== 'Manual' || (lcfEirp !== null && Number(lcfEirp) === eirp));
+    return {
+      success: verified,
+      applied: true,
+      verified,
+      details: { ifc, mode, eirpDbm: eirp ?? null, beforePower: beforePower || '(default)', lcfPower, lcfEirp, statusMibEirp: mibEirp },
+    };
+  },
+};
+
 /** Set the router's timezone — a whole-hour UTC offset over SNMP SET. */
 const systemTimezoneSet: ActionDescriptor = {
   id: 'system.timezone.set',
@@ -771,12 +1044,15 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   cliParamRead,
   systemNameSet,
   systemTimezoneCliSet,
-  wlanSsidStateSet,
   ntpServersSet,
   dnsServersSet,
   lanIfcStateSet,
   networkStateRead,
   systemTimezoneSet,
+  wlanNetworksRead,
+  wlanRadiosRead,
+  radioChannelSet,
+  radioPowerSet,
 ];
 
 /** The shared registry factory (@unm/plugin-sdk) — one source for /discover, /plan and /config. */
