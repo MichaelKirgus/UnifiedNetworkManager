@@ -3,6 +3,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Archive, CircleCheck, CircleX, DatabaseZap, GitMerge, Globe, NotebookPen, Pencil, Plus, Tag, Trash2, Upload, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { NetworkRolloutDialog } from '../components/NetworkRolloutDialog';
 import { ChipInput } from '../components/ChipInput';
 import { api, DocumentedNetwork, DocumentedNetworkRequest, NetworkLayer, Site } from '../api/client';
 import { can } from '../auth/permissions';
@@ -1366,6 +1367,8 @@ export default function DocumentedNetworks() {
   const [editing, setEditing] = useState<DocumentedNetwork | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [inventoryImportOpen, setInventoryImportOpen] = useState(false);
+  // Fleet rollout pre-filled from one documented network ("Roll out…").
+  const [rolloutTarget, setRolloutTarget] = useState<DocumentedNetwork | null>(null);
   // Imperative handle into the table's selection (one-click duplicate select).
   const tableSelection = useRef<((keys: string[]) => void) | null>(null);
 
@@ -1866,6 +1869,11 @@ export default function DocumentedNetworks() {
                     },
                   },
                   {
+                    label: 'Roll out…',
+                    enabled: (rows) => rows.length === 1 && can('configs:apply'),
+                    onClick: async (selected) => setRolloutTarget(selected[0]),
+                  },
+                  {
                     label: 'Delete selected',
                     confirm: (count) => `Delete ${count} documented network${count === 1 ? '' : 's'}? This cannot be undone.`,
                     onClick: async (selected: DocumentedNetwork[]) => {
@@ -1911,6 +1919,10 @@ export default function DocumentedNetworks() {
           layers={layersQuery.data ?? []}
           onClose={() => setPlacementPicker(null)}
         />
+      )}
+
+      {rolloutTarget && (
+        <NetworkRolloutDialog initialNetwork={rolloutTarget} onClose={() => setRolloutTarget(null)} />
       )}
     </Layout>
   );

@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Globe, X } from 'lucide-react';
 import clsx from 'clsx';
-import { api, CatalogEntry, Device, NetworkLayer, PreflightResultDto, Site, TopologyResponse } from '../api/client';
+import { api, CatalogEntry, Device, DocumentedNetwork, NetworkLayer, NetworkRow, PreflightResultDto, Site, TopologyResponse } from '../api/client';
+import { cidrsOverlap } from '../utils/ip';
 import { useExecutionMode } from '../executionMode';
 
 /**
@@ -21,6 +22,8 @@ import { useExecutionMode } from '../executionMode';
 
 interface NetworkRolloutDialogProps {
   onClose: () => void;
+  /** Optional documented network to pre-fill the shared inputs from (e.g. "Roll out" on the Documented Networks page). */
+  initialNetwork?: DocumentedNetwork | null;
 }
 
 const INTENT_ID = 'network.create';
@@ -42,21 +45,23 @@ function PreflightField({ label, initial, onCommit }: { label: string; initial: 
   );
 }
 
-export function NetworkRolloutDialog({ onClose }: NetworkRolloutDialogProps) {
+export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRolloutDialogProps) {
   const navigate = useNavigate();
   const { mode } = useExecutionMode();
   const isReadOnly = mode === 'readonly';
 
   // --- Step 1: scope -----------------------------------------------------------
-  const [siteId, setSiteId] = useState('');
+  const [siteId, setSiteId] = useState(initialNetwork?.siteId ?? '');
   const [tagInput, setTagInput] = useState('');
-  const [layerId, setLayerId] = useState('');
+  const [layerId, setLayerId] = useState(initialNetwork?.layerId ?? '');
   const tags = useMemo(() => tagInput.split(',').map((t) => t.trim()).filter(Boolean), [tagInput]);
 
   // --- Step 1: shared intent inputs (canonical network.create schema) -----------
-  const [name, setName] = useState('');
-  const [vlanId, setVlanId] = useState('');
-  const [cidr, setCidr] = useState('');
+  // Pre-filled from the selected documented network when one was passed in.
+  const [name, setName] = useState(initialNetwork?.name ?? '');
+  const [vlanId, setVlanId] = useState(initialNetwork?.vlanId != null ? String(initialNetwork.vlanId) : '');
+  // First IPv4 subnet becomes the L3 address (v6-only rows leave it empty).
+  const [cidr, setCidr] = useState(() => initialNetwork?.subnets.find((s) => s.includes('/') && !s.includes(':')) ?? '');
   const [ssidName, setSsidName] = useState('');
   const [passphrase, setPassphrase] = useState('');
 
@@ -64,10 +69,17 @@ export function NetworkRolloutDialog({ onClose }: NetworkRolloutDialogProps) {
   const [overrides, setOverrides] = useState<Record<string, Record<string, string>>>({});
   const [step, setStep] = useState<1 | 2>(1);
 
+  // Documented network to pre-fill from (the selector in the Network section).
+  const [docNetId, setDocNetId] = useState(initialNetwork?.id ?? '');
+
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
   const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: api.sites });
   const layersQuery = useQuery({ queryKey: ['layers'], queryFn: api.layers });
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
+  // Documented networks — prefill selector + name-collision warnings.
+  const docNetsQuery = useQuery({ queryKey: ['documentedNetworks'], queryFn: () => api.documentedNetworks() });
+  // Live logical network inventory — overlap warnings + "already deployed" hints.
+  const liveNetsQuery = useQuery({ queryKey: ['networks'], queryFn: () => api.networks() as Promise<NetworkRow[]> });
   // Topology gives the RESOLVED layer per device (override > suggestion > heuristic).
   const topologyQuery = useQuery({ queryKey: ['topology'], queryFn: () => api.topology() as Promise<TopologyResponse> });
 
@@ -159,6 +171,79 @@ export function NetworkRolloutDialog({ onClose }: NetworkRolloutDialogProps) {
     if (ssidName.trim()) out.ssid = { name: ssidName.trim(), ...(passphrase ? { passphrase } : {}) };
     return out;
   }, [name, vlanId, cidr, ssidName, passphrase]);
+
+  /** Copies the selected documented network's fields into the form. */
+  function applyDocumentedNetwork(id: string) {
+    setDocNetId(id);
+    const n = (docNetsQuery.data ?? []).find((x) => x.id === id);
+    if (!n) return;
+    setName(n.name);
+    setVlanId(n.vlanId != null ? String(n.vlanId) : '');
+    // First IPv4 subnet becomes the L3 address (v6-only rows leave it empty).
+    const v4 = n.subnets.find((s) => s.includes('/') && !s.includes(':'));
+    setCidr(v4 ?? '');
+    if (n.siteId) setSiteId(n.siteId);
+    if (n.layerId) setLayerId(n.layerId);
+  }
+
+  // --- Overlap warnings against the live inventory -------------------------------
+  // Name / subnet / VLAN collisions with ALREADY-DETECTED networks. These are
+  // warnings, not blockers: NAT'd remote sites legitimately reuse names and
+  // subnets, and a rollout may intentionally extend an existing network.
+  const overlapWarnings = useMemo(() => {
+    const out: string[] = [];
+    const live = liveNetsQuery.data ?? [];
+    const docNets = (docNetsQuery.data ?? []).filter((d) => d.id !== docNetId);
+
+    // 1. Name collision — same name, different network.
+    if (name.trim()) {
+      const nm = name.trim().toLowerCase();
+      for (const n of live) {
+        if (n.name.toLowerCase() !== nm || cidr.trim()) continue;
+        const where =
+          (n.subnets ?? []).join(', ') ||
+          `VLAN ${n.vlanId ?? '?'} on ${Array.from(new Set(n.devices.map((d) => d.deviceName))).slice(0, 3).join(', ')}…`;
+        out.push(`Name "${n.name}" already exists in the live inventory (${where}).`);
+      }
+      for (const n of docNets) if (n.name.toLowerCase() === nm && !cidr.trim()) out.push(`Documented network "${n.name}" already uses this name.`);
+    }
+
+    // 2. Subnet overlap — the target CIDR intersects an existing live subnet.
+    const tCidr = cidr.trim();
+    if (tCidr) {
+      for (const n of live) {
+        const hit = (n.subnets ?? []).find((s) => s.includes('/') && cidrsOverlap(tCidr, s));
+        if (!hit) continue;
+        const devs = Array.from(new Set(n.devices.map((d) => d.deviceName))).slice(0, 4).join(', ');
+        out.push(`Subnet ${tCidr} overlaps existing live network "${n.name}" (${hit}) on ${devs}${n.devices.length > 4 ? ` +${n.devices.length - 4}` : ''}. Fine for NAT'd remote sites — otherwise pick a free range.`);
+      }
+    }
+
+    // 3. VLAN reuse — same VLAN ID, different (non-overlapping) subnet.
+    const v = Number(vlanId);
+    if (Number.isInteger(v) && v >= 1 && v <= 4094) {
+      for (const n of live) {
+        if (n.vlanId !== v) continue;
+        const sameSubnet = tCidr ? (n.subnets ?? []).some((s) => s.includes('/') && cidrsOverlap(tCidr, s)) : false;
+        if (!sameSubnet) out.push(`VLAN ${v} is already used by live network "${n.name}" (${(n.subnets ?? []).join(', ') || 'no subnet known'}) — extending it on more devices is usually intended; a different subnet with the same VLAN ID will not route between sites.`);
+      }
+    }
+
+    // De-duplicate (a row can hit both name and subnet).
+    return Array.from(new Set(out)).slice(0, 6);
+  }, [name, cidr, vlanId, docNetId, liveNetsQuery.data, docNetsQuery.data]);
+
+  /** True when the live inventory already shows this network on the device. */
+  function isDeployedOn(deviceId: string): boolean {
+    const tCidr = cidr.trim();
+    const v = Number(vlanId);
+    for (const n of liveNetsQuery.data ?? []) {
+      if (!n.devices.some((m) => m.deviceId === deviceId)) continue;
+      if (tCidr && (n.subnets ?? []).some((s) => s.includes('/') && cidrsOverlap(tCidr, s))) return true;
+      if (!tCidr && Number.isInteger(v) && v >= 1 && n.vlanId === v) return true;
+    }
+    return false;
+  }
 
   // --- Step 2: preflight ---------------------------------------------------------
   const preflightQuery = useMutation({
@@ -315,6 +400,19 @@ export function NetworkRolloutDialog({ onClose }: NetworkRolloutDialogProps) {
 
             <section className="rounded-md border border-border bg-background p-3">
               <h3 className="mb-2 text-sm font-semibold text-secondary">Network</h3>
+              {(docNetsQuery.data ?? []).length > 0 && (
+                <label className="mb-3 block text-sm">
+                  <span className="mb-1 block font-medium text-secondary">Pre-fill from documented network (optional)</span>
+                  <select value={docNetId} onChange={(e) => applyDocumentedNetwork(e.target.value)} className="w-full rounded-md border border-border px-2 py-2 text-sm">
+                    <option value="">— none —</option>
+                    {(docNetsQuery.data ?? []).map((n) => (
+                      <option key={n.id} value={n.id}>
+                        {n.name}{n.vlanId != null ? ` · VLAN ${n.vlanId}` : ''}{(n.subnets.find((s) => s.includes('/')) ? ` · ${n.subnets.find((s) => s.includes('/')!)}` : '')}{!n.isActive ? ' (stale)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <label className="block text-sm">
                   <span className="mb-1 block font-medium text-secondary">Name *</span>
@@ -344,6 +442,18 @@ export function NetworkRolloutDialog({ onClose }: NetworkRolloutDialogProps) {
               </p>
             </section>
 
+            {overlapWarnings.length > 0 && (
+              <div className="rounded-md border border-warning/40 bg-warning/10 p-3">
+                <h3 className="mb-1 text-sm font-semibold text-warning-fg">Possible overlap with existing networks</h3>
+                <ul className="list-disc space-y-1 pl-4 text-xs text-secondary">
+                  {overlapWarnings.map((w) => (<li key={w}>{w}</li>))}
+                </ul>
+                <p className="mt-2 text-xs text-faint">
+                  Warnings only — NAT'd remote sites and multi-site designs legitimately reuse names, subnets or VLAN IDs. Continue when the overlap is intentional; step 2 shows what already exists on each device.
+                </p>
+              </div>
+            )}
+
             <div className="flex items-center gap-3">
               <button type="submit" disabled={preflightQuery.isPending || isReadOnly || groups.size === 0} className={clsx('rounded-md px-4 py-2 text-sm font-semibold text-white', isReadOnly ? 'bg-muted opacity-50' : 'bg-primary hover:bg-primary-hover disabled:opacity-50')}>
                 {preflightQuery.isPending ? 'Resolving…' : `Resolve per-device settings (${totalTargets})`}
@@ -372,6 +482,9 @@ export function NetworkRolloutDialog({ onClose }: NetworkRolloutDialogProps) {
                         <div key={d.id} className="rounded-md border border-border p-2">
                           <div className="mb-1.5 flex items-center gap-2 text-sm">
                             <span className="font-medium text-foreground">{d.name}</span>
+                            {isDeployedOn(d.id) && (
+                              <span title="The live inventory already shows this network on the device — the step will be a no-op there." className="rounded-full bg-success/15 px-2 py-0.5 text-xs text-success">already deployed</span>
+                            )}
                             {r?.degraded && (
                               <span title={r.error} className="rounded-full bg-danger/15 px-2 py-0.5 text-xs text-danger-fg">probe failed — defaults apply</span>
                             )}
