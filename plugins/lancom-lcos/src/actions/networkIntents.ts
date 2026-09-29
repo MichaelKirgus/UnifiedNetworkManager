@@ -165,7 +165,7 @@ const networkCreate: ActionDescriptor = {
   timeoutMs: 180_000,
   inputSchema: {
     name: { type: 'string', required: true, minLength: 1, maxLength: 64, description: 'Network name (unique per device)' },
-    vlanId: { type: 'number', required: true, min: 1, max: 4094, description: 'VLAN ID to create/attach' },
+    vlanId: { type: 'number', min: 1, max: 4094, description: 'VLAN ID to create/attach (optional — omit for an L3-only network on default VLAN 1)' },
     cidr: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}/\\d{1,2}$', description: 'L3 address as CIDR (e.g. 10.42.0.1/24) — alternative to ip+netmask' },
     ip: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'L3 address (alternative to cidr)' },
     netmask: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'Netmask for `ip`' },
@@ -193,13 +193,17 @@ const networkCreate: ActionDescriptor = {
     if (!creds) return { success: false, error: NO_SSH_SLOT_ERROR };
 
     const name = String(input.name ?? '').trim();
-    const vlanId = typeof input.vlanId === 'number' ? Math.floor(input.vlanId as number) : NaN;
+    const rawVlanId = typeof input.vlanId === 'number' ? Math.floor(input.vlanId as number) : NaN;
     if (name.length === 0 || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) {
       return { success: false, error: '`name` must be 1..64 chars of [A-Za-z0-9_-] (LCOS table names).' };
     }
-    if (!Number.isInteger(vlanId) || vlanId < 1 || vlanId > 4094) {
+    // vlanId is optional — when omitted there is NO dedicated L2 VLAN row and
+    // the L3/DHCP rows bind to default VLAN 1.
+    const hasVlan = Number.isInteger(rawVlanId) && rawVlanId >= 1 && rawVlanId <= 4094;
+    if (input.vlanId !== undefined && !hasVlan) {
       return { success: false, error: '`vlanId` must be an integer 1..4094.' };
     }
+    const vlanId = hasVlan ? rawVlanId : 1;
     const iface = String(input.interface ?? 'LAN-1').trim() || 'LAN-1';
 
     // L3 address — cidr or ip+netmask.
@@ -217,8 +221,8 @@ const networkCreate: ActionDescriptor = {
     const steps: string[] = [];
     let applied = false;
 
-    // 1. L2 VLAN network (always).
-    {
+    // 1. L2 VLAN network (only when a vlanId was requested).
+    if (hasVlan) {
       const rows = await cliTableRows(ctx, creds, 'VLAN/Networks');
       if (tableHasName(rows, name)) {
         steps.push(`VLAN/Networks: row ${name} already exists — left untouched`);
@@ -228,6 +232,8 @@ const networkCreate: ActionDescriptor = {
         steps.push(r.detail);
         applied = true;
       }
+    } else {
+      steps.push('no vlanId given — no dedicated L2 VLAN row (L3/DHCP bind to default VLAN 1)');
     }
 
     // 2. L3 address (optional).
@@ -310,7 +316,7 @@ const networkCreate: ActionDescriptor = {
       success: true,
       applied,
       verified: true,
-      details: { name, vlanId, interface: iface, l3: l3Ip ? `${l3Ip}/${l3Mask}` : null, steps },
+      details: { name, vlanId, dedicatedVlan: hasVlan, interface: iface, l3: l3Ip ? `${l3Ip}/${l3Mask}` : null, steps },
     };
   },
 };

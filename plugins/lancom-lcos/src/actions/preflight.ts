@@ -145,7 +145,7 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
 
   const name = String(inputs.name ?? '').trim();
   const vlanId = typeof inputs.vlanId === 'number' ? Math.floor(inputs.vlanId as number) : NaN;
-  const hasL3 = Boolean((typeof inputs.cidr === 'string' && inputs.cidr) || (typeof inputs.ip === 'string' && inputs.ip));
+  const hasVlan = Number.isInteger(vlanId);
   const wantsSsid = Boolean(inputs.ssid && typeof (inputs.ssid as Record<string, unknown>).name === 'string');
 
   // Existing state for this name/VLAN — idempotency hints.
@@ -154,7 +154,7 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
     vlanRows = await readVlanRows(ctx);
   } catch { /* no SSH slot */ }
 
-  if (name && Number.isInteger(vlanId)) {
+  if (name && hasVlan) {
     const existing = vlanRows.find((v) => v.name.toUpperCase() === name.toUpperCase());
     if (existing) {
       values.push({ key: 'vlanId', value: existing.vlanId, confidence: 'high', note: `VLAN network "${name}" already exists with VLAN ${existing.vlanId} — left untouched` });
@@ -162,13 +162,22 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
     } else {
       values.push({ key: 'vlanId', value: vlanId, confidence: 'high', note: `no existing VLAN network named "${name}" — will be created` });
     }
+  } else if (name && !hasVlan) {
+    const existing = vlanRows.find((v) => v.name.toUpperCase() === name.toUpperCase());
+    values.push({
+      key: 'vlanId',
+      value: null,
+      confidence: 'medium',
+      note: existing
+        ? `no VLAN ID requested — L3/DHCP will bind to default VLAN 1 (a VLAN network named "${name}" already exists with VLAN ${existing.vlanId})`
+        : 'no VLAN ID requested — no dedicated L2 VLAN row, L3/DHCP bind to default VLAN 1. Set a value here to create one.',
+    });
   }
 
-  // Interface suggestion (only meaningful when an L3 address is attached).
-  if (hasL3) {
-    const l3 = await readL3Networks(ctx);
-    values.push(suggestInterface(vlanRows, l3));
-  }
+  // Interface suggestion — the L2 port matters whenever an L3 address or SSID
+  // is involved (or always, so the user can pin it per device).
+  const l3 = await readL3Networks(ctx);
+  values.push(suggestInterface(vlanRows, l3));
 
   // SSID slot suggestion.
   if (wantsSsid) {

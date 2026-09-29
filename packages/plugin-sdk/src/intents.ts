@@ -40,16 +40,18 @@ export function isCanonicalIntent(id: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Canonical input schema for `network.create`. Every field except `name` and
- * `vlanId` is optional so a plugin can advertise the subset it supports:
- *   - LCOS: name, vlanId, cidr|ip+netmask, interface, dhcpPool{start,end}, ssid{name}
+ * Canonical input schema for `network.create`. Every field except `name` is
+ * optional so a plugin can advertise the subset it supports:
+ *   - LCOS: name, vlanId?, cidr|ip+netmask, interface, dhcpPool{start,end}, ssid{name}
+ *     (no vlanId → no dedicated L2 VLAN row; L3/DHCP bind to default VLAN 1)
  *   - OPNsense: name, vlanId (→ staged vlan.add + reconfigure)
  * `cidr` and `ip`/`netmask` are alternative forms of the same L3 address — a
- * plugin accepts whichever it understands.
+ * plugin accepts whichever it understands. A rollout must provide at least one
+ * of vlanId / cidr|ip+netmask / ssid so there is something to create.
  */
 export const NETWORK_CREATE_SCHEMA: InputSchema = {
   name: { type: 'string', required: true, minLength: 1, maxLength: 64, description: 'Network name (unique per device)' },
-  vlanId: { type: 'number', required: true, min: 1, max: 4094, description: 'VLAN ID to create/attach' },
+  vlanId: { type: 'number', min: 1, max: 4094, description: 'VLAN ID to create/attach (optional — omit for an L3-only network on the default VLAN)' },
   cidr: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}/\\d{1,2}$', description: 'L3 address as CIDR (e.g. 10.42.0.1/24) — alternative to ip+netmask' },
   ip: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'L3 address (alternative to cidr)' },
   netmask: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'Netmask for `ip`' },

@@ -10,6 +10,9 @@
  *      assert the persisted step input contains the merged override.
  *   4. Execute on WLC01, verify the network row exists, then clean up via
  *      network.delete (idempotent).
+ *   5. Optional vlanId: preflight + create an L3-only network (no VLAN ID) —
+ *      expect no dedicated L2 VLAN row and the L3 row bound to default VLAN 1;
+ *      cleanup again.
  *
  * Usage (from the repo root): ./node_modules/.bin/tsx scripts/e2e-lcos-v06-preflight.ts
  */
@@ -24,6 +27,7 @@ const DEVICE_WLC = '38cf30d7-e53e-47ae-9545-c79af2270751';
 const DEVICE_GWRALF = 'fb2f6114-f169-4ca0-b145-f741fec55f11';
 
 const NET_NAME = 'UNM_E2E_NET';
+const NET_L3ONLY = 'UNM_E2E_L3O'; // L3-only network (no vlanId)
 const VLAN_ID = 399;
 const CIDR = '10.249.0.2/24';
 
@@ -190,6 +194,56 @@ async function main(): Promise<void> {
   // Cleanup — idempotent delete.
   const del = await runStep('network.delete', { name: NET_NAME });
   check('cleanup: network.delete succeeded', del.planStatus === 'succeeded', { status: del.status, error: del.error });
+
+  // --- 5. optional vlanId: L3-only network on default VLAN ----------------------
+  console.log('\n[5] optional vlanId — preflight + create without a VLAN ID');
+  const pfNoVlan = await authed('POST', '/plans/preflight', { pluginId: LCOS_PLUGIN_ID, intentActionId: 'network.create', inputs: { name: NET_L3ONLY, cidr: CIDR }, deviceIds: [DEVICE_WLC] });
+  check('preflight (no vlanId) → HTTP 200', pfNoVlan.status === 200);
+  const noVlanRaw = await pfNoVlan.text();
+  let noVlanResults: PreflightResultDto[];
+  try {
+    noVlanResults = ((JSON.parse(noVlanRaw) as { results?: PreflightResultDto[] }).results) ?? [];
+  } catch {
+    console.error('     RAW BODY:', noVlanRaw.slice(0, 1500));
+    throw new Error('preflight (no vlanId) returned non-JSON body');
+  }
+  const nvR = noVlanResults.find((r) => r.deviceId === DEVICE_WLC);
+  check('preflight (no vlanId) → result for device', Boolean(nvR), noVlanResults);
+  if (nvR) {
+    console.log(`     values: ${JSON.stringify(nvR.values)}`);
+    const iface = nvR.values.find((v) => v.key === 'interface');
+    check('preflight (no vlanId) → interface still suggested', Boolean(iface), nvR.values.map((v) => v.key));
+    const hint = nvR.values.find((v) => v.key === 'vlanId');
+    check('preflight (no vlanId) → vlanId hint present (null value)', Boolean(hint) && hint.value === null, hint);
+  }
+
+  // Create L3-only: no vlanId in inputs.
+  const cNoVlan = await authed('POST', '/plans', { pluginId: LCOS_PLUGIN_ID, intentActionId: 'network.create', inputs: { name: NET_L3ONLY, cidr: CIDR }, devices: [{ deviceId: DEVICE_WLC }] });
+  check('create (no vlanId) → HTTP 201/200', cNoVlan.status === 201 || cNoVlan.status === 200);
+  const pNoVlan = ((await cNoVlan.json()) as { id?: string }) ?? {};
+  await authed('POST', `/plans/${pNoVlan.id}/execute`);
+  let noVlanDetail: Record<string, unknown> | null = null;
+  for (let i = 0; i < 90; i++) {
+    await new Promise((r) => setTimeout(r, 2_000));
+    const d = ((await authed('GET', `/plans/${pNoVlan.id}`).then((r) => r.json())) as Record<string, unknown>) ?? null;
+    if (d && ['succeeded', 'failed'].includes(String(d.status))) { noVlanDetail = d; break; }
+  }
+  const nvSteps = (noVlanDetail?.steps ?? []) as Array<{ actionId?: string; result?: { success?: boolean; result?: { details?: Record<string, unknown>; error?: string } | null } | null }>;
+  const nvStep = nvSteps.find((s) => s.actionId === 'network.create') ?? {};
+  check('create (no vlanId) plan succeeded', String(noVlanDetail?.status) === 'succeeded', { status: noVlanDetail?.status, error: nvStep.result?.result?.error });
+  const nvStepsLog = ((nvStep.result?.result?.details?.steps as string[]) ?? []);
+  console.log(`     steps: ${JSON.stringify(nvStepsLog)}`);
+  check('no dedicated L2 VLAN row created', nvStepsLog.some((s) => s.includes('no vlanId given')), nvStepsLog);
+
+  // Verify the L3 row exists bound to default VLAN 1.
+  const verifyNoVlan = await runStep('vlan.networks.read', {});
+  const rowsNoVlan = ((verifyNoVlan.details?.networks as Array<Record<string, unknown>>) ?? []);
+  const l3onlyRow = rowsNoVlan.find((r) => String(r.name).toUpperCase() === NET_L3ONLY);
+  check(`verify: ${NET_L3ONLY} L3 row exists on default VLAN 1`, Boolean(l3onlyRow) && Number(l3onlyRow.vlanId) === 1, { error: verifyNoVlan.error, rows: rowsNoVlan.slice(0, 6) });
+
+  // Cleanup.
+  const delNoVlan = await runStep('network.delete', { name: NET_L3ONLY });
+  check('cleanup: network.delete (L3-only) succeeded', delNoVlan.planStatus === 'succeeded', { status: delNoVlan.status, error: delNoVlan.error });
 
   await pool.end();
   console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

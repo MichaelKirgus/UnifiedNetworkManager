@@ -71,9 +71,11 @@ export function NetworkRolloutDialog({ onClose }: NetworkRolloutDialogProps) {
   // Topology gives the RESOLVED layer per device (override > suggestion > heuristic).
   const topologyQuery = useQuery({ queryKey: ['topology'], queryFn: () => api.topology() as Promise<TopologyResponse> });
 
+  // Topology device node ids are prefixed `device:<deviceId>` — strip it to
+  // key the map by the raw device id.
   const layerOfDevice = useMemo(() => {
     const m = new Map<string, string>();
-    for (const n of (topologyQuery.data?.nodes ?? [])) if (n.kind === 'device') m.set(n.id, n.layer);
+    for (const n of (topologyQuery.data?.nodes ?? [])) if (n.kind === 'device') m.set(n.id.replace(/^device:/, ''), n.layer);
     return m;
   }, [topologyQuery.data]);
 
@@ -175,8 +177,13 @@ export function NetworkRolloutDialog({ onClose }: NetworkRolloutDialogProps) {
   function handleResolve(e: React.FormEvent) {
     e.preventDefault();
     if (!name.trim()) { setFormError('Network name is required.'); return; }
-    const v = Number(vlanId);
-    if (!Number.isInteger(v) || v < 1 || v > 4094) { setFormError('VLAN ID must be an integer 1..4094.'); return; }
+    if (vlanId.trim() !== '') {
+      const v = Number(vlanId);
+      if (!Number.isInteger(v) || v < 1 || v > 4094) { setFormError('VLAN ID must be an integer 1..4094.'); return; }
+    } else if (!cidr.trim() && !ssidName.trim()) {
+      setFormError('Provide at least one of VLAN ID, L3 address or SSID — there is nothing to create otherwise.');
+      return;
+    }
     if (groups.size === 0) { setFormError('No target device has a plugin that implements network.create.'); return; }
     setOverrides({});
     preflightQuery.mutate();
@@ -196,6 +203,7 @@ export function NetworkRolloutDialog({ onClose }: NetworkRolloutDialogProps) {
           const ov = overrides[`${pid}:${d.id}`];
           if (!ov) continue;
           const perDevice: Record<string, unknown> = {};
+          if (ov.vlanId !== undefined && ov.vlanId !== '' && Number.isInteger(Number(ov.vlanId))) perDevice['vlanId'] = Number(ov.vlanId);
           if (ov.interface !== undefined && ov.interface !== '') perDevice['interface'] = ov.interface;
           if (ov.cidr !== undefined && ov.cidr !== '') perDevice['cidr'] = ov.cidr;
           if (Object.keys(perDevice).length > 0) deviceInputs[d.id] = perDevice;
@@ -313,8 +321,8 @@ export function NetworkRolloutDialog({ onClose }: NetworkRolloutDialogProps) {
                   <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="NET_XY" className="w-full rounded-md border border-border px-3 py-2 text-sm" />
                 </label>
                 <label className="block text-sm">
-                  <span className="mb-1 block font-medium text-secondary">VLAN ID *</span>
-                  <input type="number" min={1} max={4094} value={vlanId} onChange={(e) => setVlanId(e.target.value)} placeholder="42" className="w-full rounded-md border border-border px-3 py-2 text-sm" />
+                  <span className="mb-1 block font-medium text-secondary">VLAN ID (optional)</span>
+                  <input type="number" min={1} max={4094} value={vlanId} onChange={(e) => setVlanId(e.target.value)} placeholder="42 — omit for L3-only on default VLAN" className="w-full rounded-md border border-border px-3 py-2 text-sm" />
                 </label>
                 <label className="block text-sm">
                   <span className="mb-1 block font-medium text-secondary">L3 address (CIDR, optional)</span>
@@ -373,6 +381,9 @@ export function NetworkRolloutDialog({ onClose }: NetworkRolloutDialogProps) {
                             {r?.values.map((v) => (
                               <PreflightField key={v.key} label={`${v.key}${v.confidence !== 'high' ? ` (${v.confidence})` : ''}`} initial={ov[v.key] ?? v.value} onCommit={(val) => setOv(v.key, val)} />
                             ))}
+                            {(!r || !r.values.some((v) => v.key === 'vlanId')) && (
+                              <PreflightField label="vlanId (override)" initial={ov.vlanId ?? sharedInputs.vlanId ?? ''} onCommit={(val) => setOv('vlanId', val)} />
+                            )}
                             {(!r || !r.values.some((v) => v.key === 'cidr')) && (
                               <PreflightField label="cidr (override)" initial={ov.cidr ?? sharedInputs.cidr ?? ''} onCommit={(val) => setOv('cidr', val)} />
                             )}
