@@ -12,6 +12,8 @@ import { trafficshaperActions } from './trafficshaper';
 import { ntpdActions, syslogActions, monitActions } from './services';
 import { syncActions } from './sync';
 import { securityActions } from './security';
+import { l2TopologyAction } from './l2Topology';
+import { networkIntentActions } from './networkIntents';
 
 /**
  * The action registry — the single source of truth for everything this plugin
@@ -37,6 +39,8 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   ...monitActions,
   ...syncActions,
   ...securityActions,
+  l2TopologyAction,
+  ...networkIntentActions,
 ];
 
 const byId = new Map<string, ActionDescriptor>(ALL_ACTIONS.map((a) => [a.id, a]));

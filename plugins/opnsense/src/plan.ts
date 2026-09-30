@@ -384,7 +384,10 @@ export async function buildPlan(req: PlanRequest): Promise<Plan> {
         effectiveId = action.ceFallback;
       }
     }
-    rawSteps.push({ deviceId: device.deviceId, actionId: effectiveId, input: { ...(inputs ?? {}) } });
+    // Per-device overrides (PlanRequest.deviceInputs — the rollout wizard's
+    // confirmed preflight values, e.g. a different attach point or L3 address
+    // per appliance) merge on top of the shared inputs for that device only.
+    rawSteps.push({ deviceId: device.deviceId, actionId: effectiveId, input: { ...(inputs ?? {}), ...(req.deviceInputs?.[device.deviceId] ?? {}) } });
   }
 
   return finalizePlan(actionId, devices, [], rawSteps, isDirtyStep, { rollbackStep: () => ({ actionId: 'snapshot.create', input: {} }) });

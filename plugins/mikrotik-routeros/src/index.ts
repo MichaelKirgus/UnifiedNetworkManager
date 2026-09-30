@@ -24,9 +24,14 @@ import {
   quickActionHandler,
   buildWebUiUrl,
   catalogFirmwareRow,
+  isTransientTransportError,
   type QuickAction,
 } from '@unm/plugin-sdk';
-import { RouterOsAuthError } from './routerosClient';
+import { RouterOsAuthError, RouterOsClient } from './routerosClient';
+import { getAction } from './actions/registry';
+import { ActionContext, StepCredentials, validateInput } from './actions/types';
+import { buildPlan, PlanningError, PlanRequest } from './plan';
+import { PREFLIGHT_RESOLVERS } from './actions/preflight';
 import { DEFAULT_OPTIONS, MonitoringResult, RouterOsOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
 import { collectSecurityChecks, type SecuritySettings } from './security';
 import { DEVICE_MODELS } from './deviceModels';
@@ -58,13 +63,18 @@ const identity = resolvePluginIdentity({
   // row from the live RouterOS version vs the static release catalog
   // (available-without-apply — RouterOS OS updates go through the web UI /
   // package server, there is no safe programmatic update API).
-  version: '0.2.0',
+  // 0.3.0 — Configuration + planning: canonical fleet intents over the REST
+  // API (`l2.topology.read`, `network.create`, `network.delete`) with a
+  // /preflight resolver for per-device attach-point suggestions.
+  version: '0.3.0',
   vendors: ['mikrotik'],
   // monitoring + inventory over the REST API, plus an interactive SSH console
   // ('sshConsole') — RouterOS exposes a full CLI shell over SSH (port 22).
   // securityChecks: per-appliance security checks over the REST API (service
   // exposure of telnet/ftp/www, failed logins from /log/print) → Security page.
-  capabilities: ['monitoring', 'inventory', 'sshConsole', 'updates', 'quickActions', 'securityChecks'],
+  // configuration + planning (0.3.0): canonical fleet intents over the REST
+  // API — l2.topology.read / network.create / network.delete with preflight.
+  capabilities: ['monitoring', 'configuration', 'inventory', 'planning', 'sshConsole', 'updates', 'quickActions', 'securityChecks'],
 });
 
 /**
@@ -472,6 +482,216 @@ app.post('/monitoring', async (req, res) => {
     }
     logger.error(`RouterOS monitoring failed for ${managementAddress}: ${message}`, { deviceId, context: { host: managementAddress } });
     return fail('critical', `RouterOS monitoring failed: ${message}`);
+  }
+});
+
+/** Builds the ActionContext for a /config or /preflight call (REST client). */
+function buildActionContext(args: {
+  address: string;
+  deviceId?: string;
+  deviceName?: string;
+  credentials: StepCredentials;
+  settings: Record<string, unknown>;
+}): ActionContext {
+  const opts = resolveOptions(args.settings);
+  return {
+    client: new RouterOsClient(args.address, {
+      username: args.credentials.username,
+      password: args.credentials.password,
+      timeoutMs: Math.max(opts.requestTimeoutMs, 8_000), // config actions get a generous budget
+      insecureTls: opts.insecureTls,
+      schemeMode: opts.schemeMode,
+      httpsPort: opts.httpsPort,
+      httpPort: opts.httpPort,
+    }),
+    address: args.address,
+    deviceId: args.deviceId,
+    deviceName: args.deviceName,
+    credentials: args.credentials,
+  };
+}
+
+/**
+ * Executes ONE action step against one router — the unit of work the API's
+ * config-job worker dispatches (registry shape `{actionId, input, credentials}`).
+ * The plugin owns ALL logic: it validates the input against the action's schema
+ * and runs the executor. The API only propagates — it never interprets payloads.
+ */
+app.post('/config', async (req, res) => {
+  const body = req.body ?? {};
+  const { deviceId, managementAddress } = body;
+  // Registry shape preferred; legacy `{action, payload}` maps onto it.
+  const actionId: string | undefined = typeof body.actionId === 'string' ? body.actionId : (typeof body.action === 'string' ? body.action : undefined);
+  const input: Record<string, unknown> =
+    body.input && typeof body.input === 'object'
+      ? (body.input as Record<string, unknown>)
+      : body.payload && typeof body.payload === 'object'
+        ? (body.payload as Record<string, unknown>)
+        : {};
+
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+
+  if (!actionId) {
+    res.status(400).json({ success: false, result: { error: 'Missing actionId (or legacy "action")' } });
+    return;
+  }
+  if (typeof managementAddress !== 'string' || !managementAddress) {
+    res.status(400).json({ success: false, result: { error: 'Missing managementAddress' } });
+    return;
+  }
+
+  const action = getAction(actionId);
+  if (!action) {
+    res.status(400).json({ success: false, result: { error: `Unknown action "${actionId}"` } });
+    return;
+  }
+
+  // Credentials: the assignment's decrypted username/password fields (the SAME
+  // login as monitoring — RouterOS shares one credential set across REST + SSH).
+  const credsFields = (body.credentials && typeof body.credentials === 'object' ? body.credentials : {}) as Record<string, unknown>;
+  const { creds, error } = resolveCredentials({ credentials: credsFields });
+  if (error || !creds) {
+    res.status(200).json({ success: false, result: { error: error ?? 'Missing username/password credentials.' } });
+    return;
+  }
+  const stepCredentials: StepCredentials = {
+    username: creds.username,
+    password: creds.password,
+    ...credsFields,
+  };
+
+  try {
+    // Certificate pinning — a config action transmits real credentials; refuse
+    // the connection when the router's key differs from UNM's inventory.
+    await assertPinned(req, managementAddress, resolveOptions(settings).schemeMode, portsOf(settings));
+
+    const ctx = buildActionContext({
+      address: managementAddress,
+      deviceId: typeof deviceId === 'string' ? deviceId : undefined,
+      deviceName: typeof body.deviceName === 'string' && body.deviceName !== '' ? body.deviceName : undefined,
+      credentials: stepCredentials,
+      settings,
+    });
+
+    // Validate input against the action's declared schema — the plugin is the
+    // authority on what it accepts; the API only checks that the id exists.
+    const issues = validateInput(action.inputSchema, input);
+    if (issues.length > 0) {
+      res.status(200).json({
+        success: false,
+        result: { error: `Invalid input for ${actionId}: ${issues.map((i) => `${i.path}: ${i.message}`).join('; ')}` },
+      });
+      return;
+    }
+
+    const result = await action.execute(ctx, input);
+    res.status(200).json({ success: result.success, result: { ...result } });
+  } catch (err) {
+    logger.error(`Config action ${actionId} failed for ${managementAddress}: ${(err as Error).message}`, { deviceId: typeof deviceId === 'string' ? deviceId : null, context: { host: managementAddress, actionId } });
+    // Transport-level failures (router down / not ready yet) are transient — the
+    // plan executor re-dispatches them per the plan's retry policy. HTTP-level
+    // outcomes already come back as ok:false results above and stay hard.
+    const retryable = isTransientTransportError(err);
+    res.status(200).json({ success: false, result: { error: (err as Error).message, ...(retryable ? { retryable: true } : {}) } });
+  }
+});
+
+/**
+ * Plans a multi-device intent (or fans out a single action across a batch).
+ * The plugin does ALL the planning — RouterOS v1 is purely structural fan-out.
+ *
+ * Body: { intent: { actionId, inputs }, devices: [{ deviceId, managementAddress,
+ * credentials }], deviceInputs? }
+ */
+app.post('/plan', async (req, res) => {
+  const body = req.body ?? {};
+
+  const planReq: PlanRequest = {
+    intent: {
+      actionId: typeof body.intent?.actionId === 'string' ? body.intent.actionId : '',
+      inputs: (body.intent?.inputs && typeof body.intent.inputs === 'object' ? body.intent.inputs : {}) as Record<string, unknown>,
+    },
+    devices: Array.isArray(body.devices)
+      ? (body.devices as PlanRequest['devices']).map((d) => ({
+          deviceId: String(d.deviceId),
+          managementAddress: String(d.managementAddress ?? ''),
+          credentials: {
+            username: typeof d.credentials?.username === 'string' ? d.credentials.username : '',
+            password: typeof d.credentials?.password === 'string' ? d.credentials.password : '',
+          },
+        }))
+      : [],
+    // Per-device overrides from the rollout wizard's confirmed preflight values.
+    deviceInputs: body.deviceInputs && typeof body.deviceInputs === 'object'
+      ? (body.deviceInputs as PlanRequest['deviceInputs'])
+      : undefined,
+  };
+
+  try {
+    const plan = buildPlan(planReq);
+    res.status(200).json({ plan });
+  } catch (err) {
+    if (err instanceof PlanningError) {
+      logger.error(`Planning ${planReq.intent.actionId} failed: ${err.message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    logger.error(`Planning ${planReq.intent.actionId} failed unexpectedly: ${(err as Error).message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+/**
+ * POST /preflight — resolve best-guess per-device values for a canonical fleet
+ * intent BEFORE planning (the "smart" half of the rollout wizard). Body:
+ * { intentActionId, inputs?, device: { deviceId, managementAddress, credentials } }
+ * READ-ONLY by contract: resolvers probe live state (L2 topology batch) and
+ * return suggestions; they never write. The webapp shows the values with
+ * confidence + notes and lets the user override them before plan creation
+ * (overrides ride back in deviceInputs).
+ */
+app.post('/preflight', async (req, res) => {
+  const body = req.body ?? {};
+  const intentActionId: string | undefined = typeof body.intentActionId === 'string' ? body.intentActionId : undefined;
+  const inputs: Record<string, unknown> =
+    body.inputs && typeof body.inputs === 'object' ? (body.inputs as Record<string, unknown>) : {};
+  const dev = body.device ?? {};
+  const managementAddress: string | undefined = typeof dev.managementAddress === 'string' ? dev.managementAddress : undefined;
+
+  if (!intentActionId || !managementAddress) {
+    res.status(400).json({ error: 'intentActionId and device.managementAddress are required' });
+    return;
+  }
+  const resolver = PREFLIGHT_RESOLVERS[intentActionId];
+  if (!resolver) {
+    res.status(400).json({ error: `No preflight resolver for intent "${intentActionId}"` });
+    return;
+  }
+
+  // Same credential assembly as /config — the primary username/password fields.
+  const credsFields = (dev.credentials && typeof dev.credentials === 'object' ? dev.credentials : {}) as Record<string, unknown>;
+  const { creds, error } = resolveCredentials({ credentials: credsFields });
+  if (error || !creds) {
+    res.status(200).json({ result: { deviceId: String(dev.deviceId ?? ''), values: [], degraded: true, error: error ?? 'Missing username/password credentials.' } });
+    return;
+  }
+
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+  try {
+    const ctx = buildActionContext({
+      address: managementAddress,
+      deviceId: typeof dev.deviceId === 'string' ? dev.deviceId : undefined,
+      credentials: { username: creds.username, password: creds.password, ...credsFields },
+      settings,
+    });
+    const result = await resolver(ctx, inputs);
+    res.status(200).json({ result });
+  } catch (err) {
+    // Preflight is advisory — a probe failure degrades the suggestion, it must
+    // never block planning. The UI shows the device as degraded.
+    res.status(200).json({ result: { deviceId: String(dev.deviceId ?? ''), values: [], degraded: true, error: (err as Error).message } });
   }
 });
 

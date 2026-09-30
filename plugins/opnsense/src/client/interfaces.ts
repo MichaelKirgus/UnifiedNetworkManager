@@ -56,6 +56,28 @@ export const vlans = itemController('vlan_settings');
 export const laggs = itemController('lagg_settings');
 /** Bridges. */
 export const bridges = itemController('bridge_settings');
+
+// --- Interface assignments (per-interface IP config) ----------------------------
+// OPNsense 26.7+ exposes the `<interfaces>` config section as a proper REST model
+// (`/api/interfaces/assignment/*` — AssignmentController, added to master in June
+// 2026). On ≤26.4 there is NO REST endpoint for per-interface IPs (the UI saves
+// them via the legacy web form) — callers must fall back to SSH config editing.
+
+/** GET /api/interfaces/assignment/get — all interface assignments (26.7+ only; 404 before). */
+export function getAssignments(client: AxiosInstance): Promise<OpnsenseApiResult> {
+  return get(client, '/api/interfaces/assignment/get');
+}
+
+/** POST /api/interfaces/assignment/set_item/$ifname — update one interface's assignment (26.7+ only). */
+export function setAssignmentItem(client: AxiosInstance, ifname: string, item: Record<string, unknown>): Promise<OpnsenseApiResult> {
+  return post(client, `/api/interfaces/assignment/set_item/${encodeURIComponent(ifname)}`, { item });
+}
+
+/** POST /api/interfaces/assignment/reconfigure — apply staged assignment changes (26.7+ only). */
+export function reconfigureAssignments(client: AxiosInstance): Promise<OpnsenseApiResult> {
+  return post(client, '/api/interfaces/assignment/reconfigure', {});
+}
+
 /** Loopback interfaces. */
 export const loopbacks = itemController('loopback_settings');
 /** Virtual IPs (VIPs / CARP/PPPoE). */

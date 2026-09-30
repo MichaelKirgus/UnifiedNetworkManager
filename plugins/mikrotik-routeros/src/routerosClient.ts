@@ -181,7 +181,7 @@ export class RouterOsClient {
   }
 
   /** Executes one REST call across the candidate schemes. HTTP-level errors (auth/API) propagate immediately — only network/TLS failures trigger a scheme fallback. */
-  private async request<T>(path: string, method: 'GET' | 'POST', body?: Record<string, unknown>): Promise<T> {
+  private async request<T>(path: string, method: 'GET' | 'POST', body?: Record<string, unknown> | Array<Record<string, unknown>>): Promise<T> {
     const headers: Record<string, string> = {
       Authorization: basicAuthHeader(this.opts.username, this.opts.password),
       Accept: 'application/json',
@@ -214,8 +214,9 @@ export class RouterOsClient {
     return this.request<T>(path, 'GET');
   }
 
-  /** POST to a console command endpoint (e.g. /export) — used by later config actions. */
-  post<T = unknown>(path: string, body?: Record<string, unknown>): Promise<T> {
+  /** POST to a console command endpoint (e.g. /export) — used by later config actions.
+   * Body may be an object or an ARRAY of objects (RouterOS `/remove` takes `[{".id": ...}]`). */
+  post<T = unknown>(path: string, body?: Record<string, unknown> | Array<Record<string, unknown>>): Promise<T> {
     return this.request<T>(path, 'POST', body);
   }
 }

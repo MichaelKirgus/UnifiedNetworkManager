@@ -61,6 +61,7 @@ import { collectSecurityChecks, DEFAULT_WATCHED_FILES, type SecuritySettings } f
 import { getAction, listModules } from './actions/registry';
 import { ActionContext, ActionResult, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest, listCatalog } from './plan';
+import { PREFLIGHT_RESOLVERS } from './actions/preflight';
 import { InventorySnapshot } from './inventoryTypes';
 import { buildOpnsenseState } from './state';
 
@@ -1787,6 +1788,8 @@ app.post('/plan', async (req, res) => {
     editionOverride: strSetting(settings, 'editionOverride'),
     dnsBackend: (strSetting(settings, 'dnsBackend') ?? 'auto') as PlanRequest['dnsBackend'],
     dhcpBackend: (strSetting(settings, 'dhcpBackend') ?? 'auto') as PlanRequest['dhcpBackend'],
+    // Per-device overrides from the rollout wizard's confirmed preflight values.
+    deviceInputs: body.deviceInputs && typeof body.deviceInputs === 'object' ? (body.deviceInputs as Record<string, Record<string, unknown>>) : undefined,
   };
 
   try {
@@ -1800,6 +1803,62 @@ app.post('/plan', async (req, res) => {
     }
     logger.error(`Planning ${planReq.intent.actionId} failed unexpectedly: ${(err as Error).message}`, { context: { actionId: planReq.intent.actionId, deviceCount: planReq.devices.length } });
     res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+/**
+ * POST /preflight — resolve best-guess per-device values for a canonical fleet
+ * intent BEFORE planning (the "smart" half of the rollout wizard). Body:
+ * { intentActionId, inputs?, device: { deviceId, managementAddress, credentials } }
+ * READ-ONLY by contract: resolvers probe live state (interfaces_info, L2
+ * topology, an assignment-path GET) and return suggestions; they never write.
+ * The webapp shows the values with confidence + notes and lets the user
+ * override them before plan creation (overrides ride back in deviceInputs).
+ */
+app.post('/preflight', async (req, res) => {
+  const body = req.body ?? {};
+  const intentActionId: string | undefined = typeof body.intentActionId === 'string' ? body.intentActionId : undefined;
+  const inputs: Record<string, unknown> =
+    body.inputs && typeof body.inputs === 'object' ? (body.inputs as Record<string, unknown>) : {};
+  const dev = body.device ?? {};
+  const managementAddress: string | undefined = typeof dev.managementAddress === 'string' ? dev.managementAddress : undefined;
+
+  if (!intentActionId || !managementAddress) {
+    res.status(400).json({ error: 'intentActionId and device.managementAddress are required' });
+    return;
+  }
+  const resolver = PREFLIGHT_RESOLVERS[intentActionId];
+  if (!resolver) {
+    res.status(400).json({ error: `No preflight resolver for intent "${intentActionId}"` });
+    return;
+  }
+
+  // Same credential assembly as /config — the primary secret fields plus bound
+  // slots under credentials.slots.<name> (SSH is needed for ≤26.4 writes).
+  const credsFields = (dev.credentials && typeof dev.credentials === 'object' ? dev.credentials : {}) as Record<string, unknown>;
+  const stepCredentials: StepCredentials = {
+    apiKey: typeof credsFields['apiKey'] === 'string' ? (credsFields['apiKey'] as string) : '',
+    apiSecret: typeof credsFields['apiSecret'] === 'string' ? (credsFields['apiSecret'] as string) : '',
+    ...credsFields,
+  };
+
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+  try {
+    const ctx = await buildActionContext({
+      host: managementAddress,
+      deviceId: typeof dev.deviceId === 'string' ? dev.deviceId : undefined,
+      credentials: stepCredentials,
+      transport: transportOf(settings),
+      settings,
+      ports: portsOf(settings),
+    });
+    const result = await resolver(ctx, inputs);
+    res.status(200).json({ result });
+  } catch (err) {
+    // Preflight is advisory — a probe failure degrades the suggestion, it must
+    // never block planning. The UI shows the device as degraded.
+    res.status(200).json({ result: { deviceId: String(dev.deviceId ?? ''), values: [], degraded: true, error: (err as Error).message } });
   }
 });
 
