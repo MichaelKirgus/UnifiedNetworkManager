@@ -7,7 +7,9 @@
  * The write paths per appliance era (verified against stable/26.1 source and
  * live on OPNSENSE01/GWBN01, both 26.4):
  *   - VLAN CRUD: REST `vlan_settings` item controller (all versions), staged +
- *     reconfigured. The new device is named `vlan<NNNN>` (tag zero-padded to 4).
+ *     reconfigured. The firmware AUTO-NUMBERS the new device name (vlan01,
+ *     vlan02… — NOT derived from the tag; verified live on 26.4) — so after
+ *     add we read the row back by uuid and use its actual `vlanif`.
  *   - Assignment (identifier + IP): REST `/api/interfaces/assignment/*` on
  *     26.7+; SSH config.xml edit + rc.configure_interface on ≤26.4 (see
  *     assignmentSsh.ts — needs a bound `ssh` slot).
@@ -19,9 +21,10 @@ import { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE } from '@unm/plugin-sdk';
 import type { L2Topology } from '@unm/plugin-sdk';
 import { suggestL2AttachPoint } from '@unm/plugin-sdk';
 import * as ifaces from '../client/interfaces';
+import { opnsenseWriteOk } from '../client/interfaces';
 import { reconfigureDhcp } from '../client/dhcp';
 import { get, post } from '../client/http';
-import { removeInterfaceAssignment, writeInterfaceAssignment } from '../assignmentSsh';
+import { probeAssignmentCapability, removeInterfaceAssignment, resolveAssignmentPath, writeInterfaceAssignment } from '../assignmentSsh';
 import type { ActionContext, ActionDescriptor } from './types';
 import { readOpnsenseL2Topology } from './l2Topology';
 
@@ -37,9 +40,24 @@ interface IfcRowLite {
   ipv6?: Array<{ ipaddr?: string }>;
 }
 
+type VlanField = { value?: unknown; selected?: number | string } | string | null | undefined;
+
+/**
+ * Normalizes one vlan_settings field. The item controllers return form-encoded
+ * values — Option/TextField as `{value, selected, options}`, TextField often a
+ * plain string (verified live on 26.4: tag → {"value":"3998","selected":1},
+ * vlanif → "vlan3998", if → per-option map). Callers must not assume strings.
+ */
+function vlanFieldVal(f: VlanField): string | null {
+  if (f === null || f === undefined) return null;
+  if (typeof f === 'string') return f;
+  if (typeof f === 'object' && typeof (f as { value?: unknown }).value === 'string') return (f as { value: string }).value;
+  return null;
+}
+
 interface VlanRowLite {
-  tag?: string;
-  vlanif?: string;
+  tag?: VlanField;
+  vlanif?: VlanField;
 }
 
 function rowsOf(data: unknown): IfcRowLite[] {
@@ -94,11 +112,6 @@ function findNetworkRow(rows: IfcRowLite[], name: string): IfcRowLite | undefine
   return rows.find((r) => (r.description ?? '').toUpperCase() === needle || (r.config?.descr ?? '').toUpperCase() === needle);
 }
 
-/** The device a new VLAN with `tag` would get (OPNsense names them vlanNNNN). */
-function vlanDeviceName(tag: number): string {
-  return `vlan${String(tag).padStart(4, '0')}`;
-}
-
 // --- network.create -------------------------------------------------------------------
 
 const NETWORK_CREATE_INPUTS = {
@@ -150,6 +163,16 @@ export const networkCreateAction: ActionDescriptor = {
       return { success: true, details: { skipped: `network "${name}" already exists on ${existing.device} (${existing.identifier})` } };
     }
 
+    // 1b. Capability gate — BEFORE any device state is written. On 26.7.x the
+    // assignment REST endpoint exists but its model has no IP fields, so the
+    // write would be refused AFTER the VLAN was already created (orphaned).
+    if ((v4 || v6) && (await resolveAssignmentPath(ctx.client, ctx.credentials as Record<string, unknown>)) === 'rest') {
+      const cap = await probeAssignmentCapability(ctx.client);
+      if (!cap.restIpCapable) {
+        return { success: false, error: 'the assignment REST API on this firmware (26.7.x) can create interface nodes but CANNOT hold an L3 address — its model has no type4/ipaddr fields; bind an `ssh` credential slot for the ≤26.4-style config edit, or upgrade to a build with the full assignment model' };
+      }
+    }
+
     // 2. Attach point + VLAN device.
     const topo = await readOpnsenseL2Topology(ctx);
     let attach = typeof input.interface === 'string' && input.interface.trim() ? input.interface.trim() : null;
@@ -174,9 +197,9 @@ export const networkCreateAction: ActionDescriptor = {
       // Existing VLAN with that tag? Reuse it wherever it sits.
       const vlanMap = ((vlanRes.data as { vlan?: { vlan?: Record<string, VlanRowLite> } })?.vlan?.vlan ?? {});
       const vlanRows = Object.values(vlanMap);
-      const existingVlan = vlanRows.find((v) => Number(v.tag) === vlanId);
-      if (existingVlan?.vlanif) {
-        device = existingVlan.vlanif;
+      const existingVlan = vlanRows.find((v) => Number(vlanFieldVal(v.tag)) === vlanId && vlanFieldVal(v.vlanif));
+      if (existingVlan) {
+        device = vlanFieldVal(existingVlan.vlanif) as string;
         details.vlan = `reused existing VLAN ${vlanId} (${device})`;
       } else {
         // Create the VLAN on the attach point. Parent must be a physical or
@@ -185,10 +208,23 @@ export const networkCreateAction: ActionDescriptor = {
         const attachVlanRow = rows.find((r) => r.device === attach && r.vlan?.parent);
         if (attachVlanRow?.vlan?.parent) parent = attachVlanRow.vlan.parent;
         const addRes = await ifaces.vlans.add(ctx.client, { if: parent, tag: String(vlanId), descr: name });
-        if (!addRes.ok) return { success: false, error: `VLAN ${vlanId} creation failed: HTTP ${addRes.status}` };
+        // OPNsense answers validation failures with HTTP 200 + {"result":"failed","validations":{…}} — check the body.
+        if (!opnsenseWriteOk(addRes)) return { success: false, error: `VLAN ${vlanId} creation failed: ${JSON.stringify((addRes.data as Record<string, unknown>)?.validations ?? addRes.data).slice(0, 300)}` };
         const reconf = await ifaces.vlans.reconfigure(ctx.client);
-        if (!reconf.ok) return { success: false, error: `VLAN reconfigure failed: HTTP ${reconf.status}` };
-        device = vlanDeviceName(vlanId);
+        if (!opnsenseWriteOk(reconf)) return { success: false, error: `VLAN reconfigure failed: ${JSON.stringify(reconf.data).slice(0, 200)}` };
+        // The device name is NOT the tag — firmware auto-numbers (vlan01…). Read
+        // back the saved row by uuid and use its actual vlanif.
+        const newUuid = (addRes.data as { uuid?: string } | null)?.uuid;
+        let createdIfc: string | null = null;
+        if (newUuid) {
+          const afterAdd = await ifaces.vlans.get(ctx.client);
+          if (afterAdd.ok) {
+            const rowMap = ((afterAdd.data as { vlan?: { vlan?: Record<string, VlanRowLite> } })?.vlan?.vlan ?? {});
+            createdIfc = vlanFieldVal(rowMap[newUuid]?.vlanif);
+          }
+        }
+        if (!createdIfc) return { success: false, error: `VLAN ${vlanId} was saved but its device name could not be read back` };
+        device = createdIfc;
         details.vlan = `created VLAN ${vlanId} on ${parent} → ${device}`;
       }
     }
@@ -283,31 +319,33 @@ export const networkDeleteAction: ActionDescriptor = {
     const removed = await removeInterfaceAssignment(ctx.client, ctx.credentials as Record<string, unknown>, ctx.host, row.identifier, teardown, sshPort);
     details.assignment = removed.detail;
 
-    // 3. Orphaned VLAN cleanup — only when the device is a vlanNNNN and no
-    //    remaining assignment references it (shared VLANs stay).
-    const m = /^vlan(\d+)$/.exec(row.device);
-    if (m) {
-      const tag = parseInt(m[1], 10);
+    // 3. Orphaned VLAN cleanup — only when the device is a VLAN-family ifc
+    //    (vlanNN/qinqNN) and no remaining assignment references it (shared
+    //    VLANs stay). Match the vlan_settings row by its ACTUAL vlanif name,
+    //    not by parsing digits out of the name: firmware auto-numbers devices
+    //    (vlan01…), so the digits are NOT the tag.
+    if (/^(?:vlan|qinq)\d+$/.test(row.device)) {
       const afterRes = await ifaces.getInterfacesInfo(ctx.client);
       if (afterRes.ok) {
-        const stillUsed = rowsOf(afterRes.data).some((r) => r.config?.if === row.device || r.device === row.device && !!r.identifier);
+        const stillUsed = rowsOf(afterRes.data).some((r) => r.config?.if === row.device || (r.device === row.device && !!r.identifier));
         if (!stillUsed) {
           const vlanRes = await ifaces.vlans.get(ctx.client);
           if (vlanRes.ok) {
-            const vdata = vlanRes.data as { vlan?: { vlan?: Record<string, { tag?: string }> } };
+            const vdata = vlanRes.data as { vlan?: { vlan?: Record<string, VlanRowLite> } };
             for (const [uuid, v] of Object.entries(vdata?.vlan?.vlan ?? {})) {
-              if (Number(v.tag) === tag) {
+              if (vlanFieldVal(v.vlanif) === row.device) {
                 const del = await ifaces.vlans.del(ctx.client, uuid);
-                if (del.ok) {
+                // HTTP 200 alone is not proof — the body says deleted/failed.
+                if (opnsenseWriteOk(del)) {
                   await ifaces.vlans.reconfigure(ctx.client);
-                  details.vlan = `removed orphaned VLAN ${tag}`;
+                  details.vlan = `removed orphaned VLAN ${vlanFieldVal(v.tag) ?? row.device}`;
                 }
                 break;
               }
             }
           }
         } else {
-          details.vlanKept = `VLAN ${tag} still referenced by another network`;
+          details.vlanKept = `VLAN device ${row.device} still referenced by another network`;
         }
       }
     }

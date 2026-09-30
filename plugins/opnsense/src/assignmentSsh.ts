@@ -24,7 +24,7 @@
 
 import { resolveSshCredentials, resolveSshPort } from '@unm/plugin-sdk';
 import type { AxiosInstance } from 'axios';
-import { getAssignments, reconfigureAssignments, setAssignmentItem } from './client/interfaces';
+import { getAssignments, opnsenseWriteOk, reconfigureAssignments, setAssignmentItem } from './client/interfaces';
 import { post } from './client/http';
 
 /** How an interface assignment can be written on this appliance. */
@@ -53,6 +53,33 @@ export async function resolveAssignmentPath(client: AxiosInstance, credentials: 
   return ssh ? 'ssh' : null;
 }
 
+/**
+ * Whether the assignment REST model can hold an L3 ADDRESS (not just create a
+ * node). The endpoint exists on all of 26.7+, but the 26.7.x NetworkInterface
+ * model only carries `descr/identifier/if/lock` — no type4/ipaddr/subnet fields
+ * (verified against tag 26.7.1 source AND live on GWST04: set_item with an IP
+ * returns {"result":"saved"} yet the address never reaches config.xml). The full
+ * model landed on master only. Detection is field-based, not version-based:
+ * read one existing assignment row and look for an IP-related field.
+ */
+export async function probeAssignmentCapability(client: AxiosInstance): Promise<{ restPresent: boolean; restIpCapable: boolean }> {
+  try {
+    const r = await getAssignments(client);
+    if (!r.ok) return { restPresent: false, restIpCapable: false };
+    const rows = Object.values(((r.data as { interface?: { interface?: Record<string, unknown> } })?.interface?.interface ?? {}));
+    if (rows.length === 0) {
+      // No existing assignments to inspect — assume the full model (a device
+      // with zero interfaces is not a realistic write target anyway).
+      return { restPresent: true, restIpCapable: true };
+    }
+    const ipFields = new Set(['type4', 'type6', 'ipaddr', 'ipaddrv6', 'subnet', 'subnetv6']);
+    const capable = rows.some((row) => typeof row === 'object' && row !== null && Object.keys(row as Record<string, unknown>).some((k) => ipFields.has(k)));
+    return { restPresent: true, restIpCapable: capable };
+  } catch {
+    return { restPresent: false, restIpCapable: false };
+  }
+}
+
 /** PHP source that UPSERTs one `<interfaces><identifier>` node (idempotent). */
 function phpUpsertSource(payloadB64: string): string {
   return [
@@ -64,18 +91,24 @@ function phpUpsertSource(payloadB64: string): string {
     '$f = "/conf/config.xml"; $fp = fopen($f, "r+");',
     'if (!$fp) { fwrite(STDERR, "open failed\\n"); exit(2); }',
     'flock($fp, LOCK_EX);',
-    '$xml = simplexml_load_file($f);',
-    'if ($xml === false) { fwrite(STDERR, "parse failed\\n"); exit(3); }',
-    'if (!isset($xml->interfaces)) { $xml->addChild("interfaces"); }',
-    '$node = null;',
-    'if (isset($xml->interfaces->{$id})) { $node = $xml->interfaces->{$id}; } else { $node = $xml->interfaces->addChild($id); }',
-    'if ($node === null) { fwrite(STDERR, "create node failed\\n"); exit(5); }',
-    '$set = function ($parent, $name, $value) { $c = $parent->{$name}; if ($c === null || !is_object($c)) { $c = $parent->addChild($name); } $c[0] = (string)$value; };',
-    '$set($node, "if", $j["device"]);',
-    '$set($node, "descr", $j["descr"]);',
+    // Pure DOMDocument — no SimpleXML. config.xml contains SEVERAL <interfaces>
+    // elements (system/ssh allowlist, Netflow capture, FRR/BGP …) and the
+    // interface-ASSIGNMENTS section is the ROOT-level one; SimpleXML property
+    // access resolves to the first in document order (the ssh allowlist), and its
+    // asXML() round-trip has been observed dropping child elements on this
+    // appliance. DOMDocument targets the exact element and serializes verbatim.
+    '$dom = new DOMDocument("1.0"); $dom->preserveWhiteSpace = true;',
+    'if (!$dom->load($f)) { fwrite(STDERR, "parse failed\\n"); exit(3); }',
+    '$sec = null; foreach ($dom->documentElement->childNodes as $ch) { if ($ch instanceof DOMElement && $ch->tagName === "interfaces") { $sec = $ch; break; } }',
+    'if ($sec === null) { $sec = $dom->createElement("interfaces"); $dom->documentElement->appendChild($sec); }',
+    '$node = null; foreach ($sec->childNodes as $ch) { if ($ch instanceof DOMElement && $ch->tagName === $id) { $node = $ch; break; } }',
+    'if ($node === null) { $node = $dom->createElement($id); $sec->appendChild($node); }',
+    '$set = function (DOMElement $parent, string $name, string $value) use ($dom) { $c = null; foreach ($parent->childNodes as $ch) { if ($ch instanceof DOMElement && $ch->tagName === $name) { $c = $ch; break; } } if ($c === null) { $c = $dom->createElement($name); $parent->appendChild($c); } while ($c->firstChild) { $c->removeChild($c->firstChild); } $c->appendChild($dom->createTextNode($value)); };',
+    '$set($node, "if", (string)$j["device"]);',
+    '$set($node, "descr", (string)$j["descr"]);',
     '$set($node, "enable", "1");',
-    'foreach ([["ipaddr","ipaddr"],["subnet","subnet"],["ipaddrv6","ipaddrv6"],["subnetv6","subnetv6"]] as $pair) { if (!empty($j[$pair[0]])) { $set($node, $pair[1], $j[$pair[0]]); } }',
-    'if (!$xml->save($f)) { fwrite(STDERR, "save failed\\n"); exit(4); }',
+    'foreach ([["ipaddr","ipaddr"],["subnet","subnet"],["ipaddrv6","ipaddrv6"],["subnetv6","subnetv6"]] as $pair) { if (!empty($j[$pair[0]])) { $set($node, $pair[1], (string)$j[$pair[0]]); } }',
+    'if (!$dom->save($f)) { fwrite(STDERR, "save failed\\n"); exit(4); }',
     'echo "saved $id -> {$j["device"]}\\n";',
   ].join('\n');
 }
@@ -91,9 +124,15 @@ function phpRemoveSource(payloadB64: string): string {
     '$f = "/conf/config.xml"; $fp = fopen($f, "r+");',
     'if (!$fp) { fwrite(STDERR, "open failed\\n"); exit(2); }',
     'flock($fp, LOCK_EX);',
-    '$xml = simplexml_load_file($f);',
-    'if ($xml === false) { fwrite(STDERR, "parse failed\\n"); exit(3); }',
-    'if (isset($xml->interfaces->{$id})) { unset($xml->interfaces->{$id}); if (!$xml->save($f)) { fwrite(STDERR, "save failed\\n"); exit(4); } echo "removed $id\\n"; } else { echo "not present: $id (no-op)\\n"; }',
+    // Pure DOMDocument — see phpUpsertSource for why SimpleXML is not used here.
+    '$dom = new DOMDocument("1.0"); $dom->preserveWhiteSpace = true;',
+    'if (!$dom->load($f)) { fwrite(STDERR, "parse failed\\n"); exit(3); }',
+    '$sec = null; foreach ($dom->documentElement->childNodes as $ch) { if ($ch instanceof DOMElement && $ch->tagName === "interfaces") { $sec = $ch; break; } }',
+    '$node = null; if ($sec !== null) { foreach ($sec->childNodes as $ch) { if ($ch instanceof DOMElement && $ch->tagName === $id) { $node = $ch; break; } } }',
+    'if ($node === null) { echo "not present: $id (no-op)\\n"; exit(0); }',
+    '$sec->removeChild($node);',
+    'if (!$dom->save($f)) { fwrite(STDERR, "save failed\\n"); exit(4); }',
+    'echo "removed $id\\n";',
   ].join('\n');
 }
 
@@ -137,15 +176,24 @@ export async function writeInterfaceAssignment(
   const path = await resolveAssignmentPath(client, credentials);
 
   if (path === 'rest') {
-    // 26.7+ REST model — staged like every other item controller; reconfigure applies it.
+    // The endpoint existing is NOT enough: on 26.7.x the model has no IP fields,
+    // so set_item would "save" and silently drop the address. Refuse loudly.
+    const cap = await probeAssignmentCapability(client);
+    if (!cap.restIpCapable) {
+      throw new Error(
+        'the assignment REST API on this firmware (26.7.x) can create interface nodes but CANNOT hold an L3 address — its model has no type4/ipaddr fields; bind an `ssh` credential slot for the ≤26.4-style config edit, or upgrade to a build with the full assignment model',
+      );
+    }
+    // Full REST model (master/27.x+) — staged like every other item controller;
+    // reconfigure applies it.
     const item: Record<string, unknown> = { if: w.device, descr: w.descr };
-    if (w.ipaddr) { item.ipaddr = w.ipaddr; item.subnet = w.subnet ?? ''; }
-    if (w.ipaddrv6) { item.ipaddrv6 = w.ipaddrv6; item.subnetv6 = w.subnetv6 ?? ''; }
+    if (w.ipaddr) { item.ipaddr = `${w.ipaddr}/${w.subnet ?? 24}`; }
+    if (w.ipaddrv6) { item.ipaddrv6 = `${w.ipaddrv6}/${w.subnetv6 ?? 64}`; }
     const set = await setAssignmentItem(client, w.identifier, item);
-    if (!set.ok) throw new Error(`assignment REST set failed: HTTP ${set.status}`);
+    if (!set.ok || !opnsenseWriteOk(set)) throw new Error(`assignment REST set failed: HTTP ${set.status} ${JSON.stringify(set.data).slice(0, 200)}`);
     const reconf = await reconfigureAssignments(client);
-    if (!reconf.ok) throw new Error(`assignment REST reconfigure failed: HTTP ${reconf.status}`);
-    return { path, detail: `assigned ${w.identifier} → ${w.device} via REST (26.7+ model)` };
+    if (!reconf.ok || !opnsenseWriteOk(reconf)) throw new Error(`assignment REST reconfigure failed: HTTP ${reconf.status} ${JSON.stringify(reconf.data).slice(0, 200)}`);
+    return { path, detail: `assigned ${w.identifier} → ${w.device} via REST (full assignment model)` };
   }
 
   if (path !== 'ssh') {
@@ -180,12 +228,13 @@ export async function removeInterfaceAssignment(
   const path = await resolveAssignmentPath(client, credentials);
 
   if (path === 'rest') {
-    // 26.7+: del_item removes the node; reconfigure applies it (tears down addresses).
+    // del_item works on every build that has the endpoint (node removal is part
+    // of even the minimal 26.7.x model); reconfigure applies it.
     const del = await post(client, `/api/interfaces/assignment/del_item/${encodeURIComponent(identifier)}`, {});
-    if (!del.ok) throw new Error(`assignment REST delete failed: HTTP ${del.status}`);
+    if (!del.ok || !opnsenseWriteOk(del)) throw new Error(`assignment REST delete failed: HTTP ${del.status} ${JSON.stringify(del.data).slice(0, 200)}`);
     const reconf = await reconfigureAssignments(client);
-    if (!reconf.ok) throw new Error(`assignment REST reconfigure failed: HTTP ${reconf.status}`);
-    return { path, detail: `unassigned ${identifier} via REST (26.7+ model)` };
+    if (!reconf.ok || !opnsenseWriteOk(reconf)) throw new Error(`assignment REST reconfigure failed: HTTP ${reconf.status} ${JSON.stringify(reconf.data).slice(0, 200)}`);
+    return { path, detail: `unassigned ${identifier} via REST (assignment API)` };
   }
 
   if (path !== 'ssh') {

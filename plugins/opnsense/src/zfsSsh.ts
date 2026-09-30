@@ -318,7 +318,15 @@ export async function execViaSshSlot(
   const port = resolveSshPort(opts?.port);
   try {
     const client = await sshPool.get(host, port, creds, { hostKeyVerifier: dynamicSshHostVerifier(host, port) });
-    return await client.exec(command, creds, opts?.timeoutMs ?? 20_000);
+    // The SDK's exec() runs under the remote LOGIN shell — on OPNsense (FreeBSD)
+    // that is csh/tcsh, which rejects bash-isms our scripts use ($(…), $?, and
+    // `>/dev/null 2>&1` → "Ambiguous output redirect"). Force POSIX sh by piping
+    // a base64-encoded copy of the command into /bin/sh. The wrapper line itself
+    // is valid in BOTH csh and sh (echo + pipes + single quotes only), so it
+    // survives whichever shell parses it; the decoded script then runs under
+    // /bin/sh where all POSIX constructs are safe. Exit code = the script's.
+    const wrapped = `echo '${Buffer.from(command, 'utf8').toString('base64')}' | base64 -d | /bin/sh`;
+    return await client.exec(wrapped, creds, opts?.timeoutMs ?? 20_000);
   } catch {
     return null; // best-effort — no usable SSH path right now
   }

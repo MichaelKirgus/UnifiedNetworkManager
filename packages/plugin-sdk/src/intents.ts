@@ -82,6 +82,14 @@ export interface L2Topology {
   bundles: L2Bundle[];
   /** Logical interfaces that carry an L3 network (interface → network names; several networks may share one ifc). */
   l3Interfaces?: Record<string, string[]>;
+  /**
+   * Uplink / WAN interfaces — NEVER valid attach points for a new network.
+   * Attaching a test or secondary address to the uplink can break the device's
+   * own connectivity (and thus the management path). Vendors that know which
+   * of their L3-carrying interfaces is the uplink SHOULD list them here so
+   * `suggestL2AttachPoint` skips them.
+   */
+  uplinks?: string[];
 }
 
 /**
@@ -95,6 +103,9 @@ export interface L2Topology {
 export function suggestL2AttachPoint(topo: L2Topology, preferred?: string): { attach: string; reason: string } | null {
   if (!topo || (topo.bridges.length === 0 && topo.bundles.length === 0 && Object.keys(topo.l3Interfaces ?? {}).length === 0)) return null;
   const l3 = topo.l3Interfaces ?? {};
+  // Uplinks/WAN are never valid attach points — attaching a new address to the
+  // uplink can break the device's own connectivity (and the management path).
+  const uplinks = new Set(topo.uplinks ?? []);
   // 1. A bridge that already carries L3 networks — the device's main LAN domain.
   //    On LCOS the L3 address binds to the BRIDGE itself (NET_LIST Interface =
   //    BRG-x), so check the bridge name AND its members; other vendors may bind
@@ -116,7 +127,7 @@ export function suggestL2AttachPoint(topo: L2Topology, preferred?: string): { at
     topo.bridges.some((b) => b.name === ifc || b.members.includes(ifc)) ||
     topo.bundles.some((bu) => bu.operating !== false && (bu.name === ifc || bu.members.includes(ifc)));
   const direct = Object.entries(topo.l3Interfaces ?? {})
-    .filter(([ifc]) => !inActiveAgg(ifc))
+    .filter(([ifc]) => !inActiveAgg(ifc) && !uplinks.has(ifc))
     .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
   if (direct.length > 0) {
     const [ifc, names] = direct[0];
@@ -129,9 +140,9 @@ export function suggestL2AttachPoint(topo: L2Topology, preferred?: string): { at
   // 5. An active bundle (operating when the vendor reports it).
   const active = topo.bundles.filter((bu) => bu.members.length > 0 && bu.operating !== false);
   if (active.length > 0) return { attach: active[0].name, reason: `bundle ${active[0].name} (${(active[0].protocol ?? 'LACP').toLowerCase()}) aggregates ${active[0].members.join(', ')}` };
-  // 6. Caller's preference or the first physical assignment.
-  if (preferred && topo.physicalPorts.some((p) => p.assignment === preferred)) return { attach: preferred, reason: `requested interface ${preferred} exists on this device` };
-  const first = topo.physicalPorts.find((p) => p.assignment);
+  // 6. Caller's preference or the first physical assignment (never an uplink).
+  if (preferred && !uplinks.has(preferred) && topo.physicalPorts.some((p) => p.assignment === preferred)) return { attach: preferred, reason: `requested interface ${preferred} exists on this device` };
+  const first = topo.physicalPorts.find((p) => p.assignment && !uplinks.has(p.assignment));
   if (first?.assignment) return { attach: first.assignment, reason: `no bridges/bundles configured — using assigned port ${first.assignment}` };
   return null;
 }

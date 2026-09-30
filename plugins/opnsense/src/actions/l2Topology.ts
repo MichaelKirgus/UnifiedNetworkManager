@@ -122,7 +122,13 @@ export function buildOpnsenseL2Topology(
     if (!names.includes(name)) names.push(name);
   }
 
-  return { physicalPorts, bridges, bundles: laggs.map((l) => ({ name: l.ifc, protocol: l.protocol, members: l.members })), l3Interfaces };
+  // Uplinks — the WAN role(s). NEVER a valid attach point for a new network:
+  // binding an extra address to the uplink can break the appliance's own
+  // connectivity (and with it the management path). suggestL2AttachPoint skips
+  // everything listed here.
+  const uplinks = rows.filter((r) => r.device && /^wan\d*$/.test(r.identifier ?? '')).map((r) => r.device as string);
+
+  return { physicalPorts, bridges, bundles: laggs.map((l) => ({ name: l.ifc, protocol: l.protocol, members: l.members })), l3Interfaces, uplinks };
 }
 
 /** Reads the full L2 topology of one OPNsense appliance (read-only). */

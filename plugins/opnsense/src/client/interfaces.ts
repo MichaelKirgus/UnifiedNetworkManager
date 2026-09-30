@@ -32,6 +32,24 @@ export function reconfigureInterfaces(client: AxiosInstance): Promise<OpnsenseAp
 
 // --- Logical interfaces (shared CRUD shape) ------------------------------------
 
+/**
+ * OPNsense's model controllers return HTTP 200 for VALIDATION FAILURES too —
+ * the outcome rides in the body as `{"result":"failed","validations":{...}}`
+ * (ApiMutableModelControllerBase::addBase/setBase). Success values are
+ * `saved` / `deleted`; reconfigure endpoints report `{"status":"ok"}`. Callers
+ * must therefore check this helper, not just the HTTP status.
+ */
+export function opnsenseWriteOk(res: OpnsenseApiResult, successValues: string[] = ['saved', 'deleted']): boolean {
+  if (!res.ok) return false;
+  const d = res.data as { result?: unknown; status?: unknown } | null;
+  if (d && typeof d === 'object') {
+    if (typeof d.result === 'string') return successValues.includes(d.result);
+    if (typeof d.status === 'string') return d.status === 'ok';
+  }
+  // No recognizable outcome field — trust the HTTP status.
+  return true;
+}
+
 interface ItemOps {
   get: (client: AxiosInstance) => Promise<OpnsenseApiResult>;
   add: (client: AxiosInstance, item: Record<string, unknown>) => Promise<OpnsenseApiResult<{ uuid?: string }>>;
@@ -40,22 +58,28 @@ interface ItemOps {
   reconfigure: (client: AxiosInstance) => Promise<OpnsenseApiResult>;
 }
 
-function itemController(base: string): ItemOps {
+/**
+ * One of the logical-interface item controllers. `modelKey` is the controller's
+ * internal model name — add/set bodies must carry it as a TOP-LEVEL key
+ * (`{"vlan":{...}}`, not `{"item":{...}}`); with the wrong shape hasPost() fails
+ * and the call returns HTTP 200 + {"result":"failed"} (verified live on 26.4).
+ */
+function itemController(base: string, modelKey: string): ItemOps {
   return {
     get: (c) => get(c, `/api/interfaces/${base}/get`),
-    add: (c, item) => post(c, `/api/interfaces/${base}/add_item`, { item }),
-    set: (c, uuid, item) => post(c, `/api/interfaces/${base}/set_item/${encodeURIComponent(uuid)}`, { item }),
+    add: (c, item) => post(c, `/api/interfaces/${base}/add_item`, { [modelKey]: item }),
+    set: (c, uuid, item) => post(c, `/api/interfaces/${base}/set_item/${encodeURIComponent(uuid)}`, { [modelKey]: item }),
     del: (c, uuid) => post(c, `/api/interfaces/${base}/del_item/${encodeURIComponent(uuid)}`, {}),
     reconfigure: (c) => post(c, `/api/interfaces/${base}/reconfigure`, {}),
   };
 }
 
 /** VLANs. */
-export const vlans = itemController('vlan_settings');
+export const vlans = itemController('vlan_settings', 'vlan');
 /** LAGG (link aggregation). */
-export const laggs = itemController('lagg_settings');
+export const laggs = itemController('lagg_settings', 'lagg');
 /** Bridges. */
-export const bridges = itemController('bridge_settings');
+export const bridges = itemController('bridge_settings', 'bridge');
 
 // --- Interface assignments (per-interface IP config) ----------------------------
 // OPNsense 26.7+ exposes the `<interfaces>` config section as a proper REST model
@@ -68,9 +92,9 @@ export function getAssignments(client: AxiosInstance): Promise<OpnsenseApiResult
   return get(client, '/api/interfaces/assignment/get');
 }
 
-/** POST /api/interfaces/assignment/set_item/$ifname — update one interface's assignment (26.7+ only). */
+/** POST /api/interfaces/assignment/set_item/$ifname — update one interface's assignment (26.7+ only). Body key is `interface` (AssignmentController::setItemAction → setBase("interface", …)). */
 export function setAssignmentItem(client: AxiosInstance, ifname: string, item: Record<string, unknown>): Promise<OpnsenseApiResult> {
-  return post(client, `/api/interfaces/assignment/set_item/${encodeURIComponent(ifname)}`, { item });
+  return post(client, `/api/interfaces/assignment/set_item/${encodeURIComponent(ifname)}`, { interface: item });
 }
 
 /** POST /api/interfaces/assignment/reconfigure — apply staged assignment changes (26.7+ only). */
@@ -79,8 +103,8 @@ export function reconfigureAssignments(client: AxiosInstance): Promise<OpnsenseA
 }
 
 /** Loopback interfaces. */
-export const loopbacks = itemController('loopback_settings');
+export const loopbacks = itemController('loopback_settings', 'loopback');
 /** Virtual IPs (VIPs / CARP/PPPoE). */
-export const vips = itemController('vip_settings');
+export const vips = itemController('vip_settings', 'vip');
 /** GRE tunnels (source → destination point-to-point links). */
-export const gres = itemController('gre_settings');
+export const gres = itemController('gre_settings', 'gre');

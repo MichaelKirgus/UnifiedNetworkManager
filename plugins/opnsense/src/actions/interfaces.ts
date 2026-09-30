@@ -1,4 +1,5 @@
 import * as ifaces from '../client/interfaces';
+import { opnsenseWriteOk } from '../client/interfaces';
 import { ActionDescriptor } from './types';
 
 /**
@@ -44,7 +45,7 @@ export const interfaceActions: ActionDescriptor[] = [
     inputSchema: {},
     execute: async (ctx) => {
       const res = await ifaces.reconfigureInterfaces(ctx.client);
-      return { success: res.ok, applied: res.ok, details: dataOf(res) ?? {} };
+      return { success: opnsenseWriteOk(res), applied: opnsenseWriteOk(res), details: dataOf(res) ?? {} };
     },
   },
 
@@ -60,7 +61,7 @@ export const interfaceActions: ActionDescriptor[] = [
     inputSchema: { item: { type: 'object', required: true, description: 'VLAN object (interface, tag, description)' } },
     execute: async (ctx, input) => {
       const res = await ifaces.vlans.add(ctx.client, (input.item as Record<string, unknown>) ?? {});
-      return { success: res.ok, applied: false, details: dataOf(res) ?? {} };
+      return { success: opnsenseWriteOk(res), applied: false, details: dataOf(res) ?? {} };
     },
   },
   {
@@ -73,7 +74,7 @@ export const interfaceActions: ActionDescriptor[] = [
     inputSchema: { uuid: { type: 'string', required: true } },
     execute: async (ctx, input) => {
       const res = await ifaces.vlans.del(ctx.client, String(input.uuid));
-      return { success: res.ok, applied: false, details: dataOf(res) ?? {} };
+      return { success: opnsenseWriteOk(res), applied: false, details: dataOf(res) ?? {} };
     },
   },
   {
@@ -85,7 +86,7 @@ export const interfaceActions: ActionDescriptor[] = [
     inputSchema: {},
     execute: async (ctx) => {
       const res = await ifaces.vlans.reconfigure(ctx.client);
-      return { success: res.ok, applied: res.ok, details: dataOf(res) ?? {} };
+      return { success: opnsenseWriteOk(res), applied: opnsenseWriteOk(res), details: dataOf(res) ?? {} };
     },
   },
 
@@ -101,7 +102,7 @@ export const interfaceActions: ActionDescriptor[] = [
     inputSchema: { item: { type: 'object', required: true, description: 'LAGG object (members, protocol)' } },
     execute: async (ctx, input) => {
       const res = await ifaces.laggs.add(ctx.client, (input.item as Record<string, unknown>) ?? {});
-      return { success: res.ok, applied: false, details: dataOf(res) ?? {} };
+      return { success: opnsenseWriteOk(res), applied: false, details: dataOf(res) ?? {} };
     },
   },
   {
@@ -114,7 +115,7 @@ export const interfaceActions: ActionDescriptor[] = [
     inputSchema: { uuid: { type: 'string', required: true } },
     execute: async (ctx, input) => {
       const res = await ifaces.laggs.del(ctx.client, String(input.uuid));
-      return { success: res.ok, applied: false, details: dataOf(res) ?? {} };
+      return { success: opnsenseWriteOk(res), applied: false, details: dataOf(res) ?? {} };
     },
   },
   {
@@ -126,7 +127,7 @@ export const interfaceActions: ActionDescriptor[] = [
     inputSchema: {},
     execute: async (ctx) => {
       const res = await ifaces.laggs.reconfigure(ctx.client);
-      return { success: res.ok, applied: res.ok, details: dataOf(res) ?? {} };
+      return { success: opnsenseWriteOk(res), applied: opnsenseWriteOk(res), details: dataOf(res) ?? {} };
     },
   },
 ];
