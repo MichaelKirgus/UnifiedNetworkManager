@@ -1,10 +1,11 @@
 import { ReactNode, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Settings, X } from 'lucide-react';
+import { BookOpen, ExternalLink, Settings, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { OptionForm } from '../components/OptionForm';
-import { api, Plugin, PluginSelfMetricsSample } from '../api/client';
+import { Markdown } from '../components/Markdown';
+import { api, DeviceSupportProfile, Plugin, PluginSelfMetricsSample, SupportCondition } from '../api/client';
 import { can } from '../auth/permissions';
 
 // A plugin is considered online if it was seen within the last 5 minutes.
@@ -117,10 +118,163 @@ function PluginMetricsRow({ plugin }: { plugin: Plugin }) {
   );
 }
 
+/** Human-readable label for one support-matrix profile row. */
+function profileLabel(p: DeviceSupportProfile): string {
+  const parts: string[] = [];
+  if (p.vendor) parts.push(p.vendor);
+  if (p.model) parts.push(p.model);
+  else if (!p.vendor) parts.push('any model');
+  if (p.minFirmware || p.maxFirmware) parts.push(`firmware ${p.minFirmware ?? '*'}–${p.maxFirmware ?? '*'}`);
+  return parts.join(' / ');
+}
+
+/** Short tooltip text for a grant's gating conditions. */
+function conditionSummary(c?: SupportCondition): string {
+  if (!c) return '';
+  const bits: string[] = [];
+  if (c.requiresFeatures?.length) bits.push(`requires feature(s): ${c.requiresFeatures.join(', ')}`);
+  if (c.requiredSlots?.length) bits.push(`requires slot(s): ${c.requiredSlots.join(', ')}`);
+  if (c.minFirmware) bits.push(`firmware >= ${c.minFirmware}`);
+  if (c.maxFirmware) bits.push(`firmware <= ${c.maxFirmware}`);
+  return bits.join('; ');
+}
+
+/**
+ * Plugin details modal — license, help URL, built-in markdown documentation
+ * (fetched through the API's asset proxy and rendered safely), and the
+ * standardized supported-device matrix (profiles → capabilities + intents).
+ */
+function PluginDetailsModal({ pluginId, onClose }: { pluginId: string; onClose: () => void }) {
+  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
+  const plugin = (pluginsQuery.data ?? []).find((p) => p.id === pluginId);
+  // Which text asset is open in the viewer pane ('doc' | 'license' | null).
+  const [asset, setAsset] = useState<'doc' | 'license' | null>(null);
+
+  if (!plugin?.deviceSupport) return null;
+  const support = plugin.deviceSupport;
+
+  const assetPath =
+    asset === 'doc' ? support.docPath : asset === 'license' ? (support.license?.file ?? null) : null;
+  const assetQuery = useQuery({
+    queryKey: ['pluginAsset', pluginId, assetPath],
+    queryFn: () => api.pluginAsset(pluginId, assetPath),
+    enabled: !!assetPath,
+  });
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-primary/40 p-4 sm:items-center" onClick={onClose}>
+      <div className="w-full max-w-2xl rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <h2 className="text-base font-semibold text-foreground">
+            {plugin.name}
+            <span className="ml-2 text-xs font-normal text-faint">{plugin.version}</span>
+          </h2>
+          <button type="button" aria-label="Close details" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted hover:text-secondary">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="max-h-[70vh] overflow-y-auto px-4 py-3">
+          {/* License + help row */}
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+            {support.license && (
+              <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium" title={support.license.url ?? ''}>
+                License: {support.license.name}
+              </span>
+            )}
+            {support.helpUrl && (
+              <a href={support.helpUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-accent-indigo underline">
+                Help <ExternalLink className="h-3 w-3" />
+              </a>
+            )}
+            {support.docPath && (
+              <button
+                type="button"
+                onClick={() => setAsset(asset === 'doc' ? null : 'doc')}
+                className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium ${
+                  asset === 'doc' ? 'bg-accent-indigo/60 text-accent-indigo-fg' : 'bg-muted hover:bg-border'
+                }`}
+              >
+                <BookOpen className="h-3 w-3" /> Documentation
+              </button>
+            )}
+            {support.license?.file && (
+              <button
+                type="button"
+                onClick={() => setAsset(asset === 'license' ? null : 'license')}
+                className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium ${
+                  asset === 'license' ? 'bg-accent-indigo/60 text-accent-indigo-fg' : 'bg-muted hover:bg-border'
+                }`}
+              >
+                License full text
+              </button>
+            )}
+          </div>
+
+          {/* Built-in documentation / license viewer */}
+          {asset && assetPath && (
+            <div className="mb-4 max-h-80 overflow-y-auto rounded-md border border-border bg-muted/30 p-3">
+              {assetQuery.isLoading && <p className="text-sm text-faint">Loading…</p>}
+              {assetQuery.isError && <p className="text-sm text-danger-fg">{(assetQuery.error as Error).message}</p>}
+              {assetQuery.data && <Markdown text={assetQuery.data} />}
+            </div>
+          )}
+
+          {/* Default capabilities (effective on every device of this plugin) */}
+          {(support.defaultCapabilities?.length ?? 0) > 0 && (
+            <section className="mb-4">
+              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-faint">Default capabilities</h3>
+              <div className="flex flex-wrap gap-1.5">
+                {support.defaultCapabilities!.map((g) => (
+                  <span key={g.name} title={conditionSummary(g.conditions)} className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs">
+                    {g.label ?? g.name}
+                  </span>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* Supported-device matrix */}
+          {(support.profiles?.length ?? 0) > 0 && (
+            <section className="mb-2">
+              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-faint">Supported devices</h3>
+              <div className="space-y-2">
+                {support.profiles!.map((p, i) => (
+                  <div key={i} className="rounded-md border border-border p-2.5">
+                    <p className="mb-1.5 text-sm font-medium">{profileLabel(p)}</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {p.capabilities.map((g) => (
+                        <span key={g.name} title={conditionSummary(g.conditions)} className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs">
+                          {g.label ?? g.name}
+                        </span>
+                      ))}
+                      {(p.intents ?? []).map((g) => (
+                        <span
+                          key={g.actionId}
+                          title={`Intent ${g.actionId}${conditionSummary(g.conditions) ? ' — ' + conditionSummary(g.conditions) : ''}`}
+                          className="inline-flex items-center rounded-full bg-accent-indigo/40 px-2 py-0.5 text-xs"
+                        >
+                          {g.label ?? g.actionId}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Plugins() {
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
   // Plugin whose settings form is open in the modal (null = closed).
   const [configureId, setConfigureId] = useState<string | null>(null);
+  // Plugin whose details (license/help/docs/support matrix) are open (null = closed).
+  const [detailsId, setDetailsId] = useState<string | null>(null);
 
   const columns: DataTableColumn<Plugin>[] = [
     { header: 'Name', key: 'name' },
@@ -160,22 +314,34 @@ export default function Plugins() {
       header: 'Actions',
       key: 'actions',
       excludeFromExport: true,
-      width: 110,
+      width: 130,
       sortable: false,
-      render: (row) =>
-        can('plugins:manage') ? (
-          <button
-            type="button"
-            aria-label={`Configure ${row.name}`}
-            title="Configure plugin settings"
-            className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
-            onClick={() => setConfigureId(row.id)}
-          >
-            <Settings className="h-4 w-4" />
-          </button>
-        ) : (
-          <span aria-hidden />
-        ),
+      render: (row) => (
+        <div className="inline-flex items-center gap-1">
+          {row.deviceSupport && (
+            <button
+              type="button"
+              aria-label={`Details for ${row.name}`}
+              title="License, documentation & supported devices"
+              className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
+              onClick={() => setDetailsId(row.id)}
+            >
+              <BookOpen className="h-4 w-4" />
+            </button>
+          )}
+          {can('plugins:manage') && (
+            <button
+              type="button"
+              aria-label={`Configure ${row.name}`}
+              title="Configure plugin settings"
+              className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
+              onClick={() => setConfigureId(row.id)}
+            >
+              <Settings className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+      ),
     },
   ];
 
@@ -225,6 +391,9 @@ export default function Plugins() {
           </div>
         </div>
       )}
+
+      {/* Plugin details modal — license / help / built-in docs / support matrix. */}
+      {detailsId && <PluginDetailsModal pluginId={detailsId} onClose={() => setDetailsId(null)} />}
     </Layout>
   );
 }

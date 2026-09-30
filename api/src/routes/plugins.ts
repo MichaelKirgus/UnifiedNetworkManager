@@ -8,6 +8,7 @@ import { getRequiredSecretTypes } from '../secretsProvider';
 import { dispatchPluginAction } from '../utils/pluginDispatch';
 import { resolvePluginEndpoint } from '../utils/pluginEndpoint';
 import type { DeviceModelEntry } from '../types/deviceModels';
+import type { DeviceSupport } from '../types/deviceSupport';
 import { CredentialSlotDescriptor, normalizeCredentialSlots } from '../types/credentialSlots';
 import {
   SettingsValidationError,
@@ -24,6 +25,17 @@ function parseCredentialSlots(raw: unknown): CredentialSlotDescriptor[] | null {
   try {
     const parsed = normalizeCredentialSlots(JSON.parse(raw));
     return parsed ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Parses a stored deviceSupport JSON column (never throws). */
+function parseDeviceSupport(raw: unknown): DeviceSupport | null {
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as DeviceSupport) : null;
   } catch {
     return null;
   }
@@ -50,6 +62,7 @@ function serializePlugin(row: any) {
     iconUrl: row.iconUrl ?? null,
     deviceModels,
     credentialSlots: parseCredentialSlots(row.credentialSlots),
+    deviceSupport: parseDeviceSupport(row.deviceSupport),
     // Number of metric descriptors the plugin declared in /discover — the
     // "how many metrics can this plugin emit" figure for the Plugins page.
     declaredMetricCount: (() => {
@@ -127,6 +140,66 @@ router.get('/plugins/:id/icon', async (req, res) => {
     // eslint-disable-next-line no-console
     console.warn(`[plugins] icon proxy failed for ${id} (${path}):`, e.message);
     res.status(502).json({ error: 'Failed to fetch icon from plugin' });
+  }
+});
+
+// GET /plugins/:id/asset - Proxies a static TEXT asset served by the plugin
+// itself (LICENSE.md, docs/*.md — see deviceSupport.license.file / docPath).
+// Deliberately UNAUTHENTICATED like the icon proxy so <pre>/<img>-style loads
+// work without a token; the path is validated to stay within the plugin's own
+// origin and only text-ish content types are forwarded (no binary blobs).
+router.get('/plugins/:id/asset', async (req, res) => {
+  const { id } = req.params;
+  const row = await db.query.plugins.findFirst({
+    where: (plugins, { eq }) => eq(plugins.id, id),
+  });
+  if (!row) {
+    res.status(404).json({ error: 'Plugin not found' });
+    return;
+  }
+
+  const requested = typeof req.query.path === 'string' ? req.query.path : '';
+  // Default to the plugin's documented docPath when no explicit path is given.
+  let support: DeviceSupport | null = null;
+  if (typeof row.deviceSupport === 'string' && row.deviceSupport.length > 0) {
+    try {
+      const parsed = JSON.parse(row.deviceSupport);
+      support = parsed && typeof parsed === 'object' ? (parsed as DeviceSupport) : null;
+    } catch {
+      support = null;
+    }
+  }
+  const path = safeIconPath(requested || support?.docPath || '');
+  if (!path) {
+    res.status(404).json({ error: 'No asset requested (and the plugin advertises no default doc)' });
+    return;
+  }
+
+  try {
+    const endpoint = resolvePluginEndpoint(row.endpoint).replace(/\/+$/, '');
+    const upstream = await axios.get(`${endpoint}/assets${path}`, {
+      timeout: 5_000,
+      maxContentLength: 1_024 * 1_024, // docs are small; cap at 1 MiB
+    });
+    const contentType = (upstream.headers['content-type'] as string | undefined) ?? 'text/plain';
+    if (!/^text\//.test(contentType)) {
+      res.status(415).json({ error: `Asset is not text content (${contentType})` });
+      return;
+    }
+    // Static per plugin version — let the browser cache it.
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', 'public, max-age=300');
+    res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.status(200).send(upstream.data as string);
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    if (e.status === 404 || e.status === 403) {
+      res.status(404).json({ error: 'Asset not found on plugin' });
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.warn(`[plugins] asset proxy failed for ${id} (${path}):`, e.message);
+    res.status(502).json({ error: 'Failed to fetch asset from plugin' });
   }
 });
 

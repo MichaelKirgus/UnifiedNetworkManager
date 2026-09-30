@@ -38,6 +38,10 @@ export type { PreflightConfidence, PreflightValue, PreflightResult, PreflightReq
 // L2 topology abstraction (interface layering: ports → bundles/bridges). See intents.ts.
 export { INTENT_L2_TOPOLOGY_READ, suggestL2AttachPoint, suggestL2VlanPorts } from './intents';
 export type { L2PhysicalPort, L2Bridge, L2Bundle, L2Topology } from './intents';
+// Device support metadata + effective-capability evaluation (license/help/docs,
+// supported-device matrix with feature/slot/firmware gating). See deviceSupport.ts.
+export { DETECTED_FEATURES_METRIC_KEY, matchSupportProfile, describeProfile, evaluateDeviceSupport } from './deviceSupport';
+export type { PluginLicense, SupportCondition, SupportCapabilityGrant, SupportIntentGrant, DeviceSupportProfile, DeviceSupport, CapabilityEvaluation, DeviceSupportContext, DeviceSupportEvaluation } from './deviceSupport';
 export { pollUntil, stateEquals } from './verification';
 export type { PollUntilOptions, PollUntilResult } from './verification';
 export type { FinalizePlanOptions } from './planning';

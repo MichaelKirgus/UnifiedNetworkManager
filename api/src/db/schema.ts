@@ -282,6 +282,13 @@ export const plugins = pgTable('plugins', {
   // path?}, actionId?, prefill? }). Drives the Devices page "Device Actions"
   // column. NULL = no quick actions advertised.
   quickActions: text('quickActions'),
+  // Device support metadata declared by the plugin in /discover (JSON object:
+  // { license?: { name, url?, file? }, helpUrl?, docPath?, defaultCapabilities?,
+  // profiles: [{ vendor?, model?, minFirmware?, maxFirmware?, capabilities[],
+  // intents[] }] }). Drives the Plugins page metadata row and the per-device
+  // effective-capability evaluation (see types/deviceSupport.ts). NULL = no
+  // support matrix advertised.
+  deviceSupport: text('deviceSupport'),
   createdAt: text('createdAt').notNull(),
   lastSeenAt: text('lastSeenAt'),
 });

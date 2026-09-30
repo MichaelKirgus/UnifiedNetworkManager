@@ -26,10 +26,12 @@ import {
   parseLooseDeviceDatetime,
   tzAbbrToOffsetMinutes,
   warnOnce,
+  DETECTED_FEATURES_METRIC_KEY,
   type DeviceTimeInfo,
   type UpdateRow,
   type QuickAction,
 } from '@unm/plugin-sdk';
+import { OPNSENSE_DEVICE_SUPPORT } from './deviceSupport';
 import {
   getSystemStatus,
   getSystemResources,
@@ -156,6 +158,13 @@ const inventoryCache = new Map<string, InventorySnapshot>();
 /** In-flight cold collections per host — concurrent /monitoring calls share ONE
  * fetch instead of each starting its own (see getInventory). */
 const inventoryInFlight = new Map<string, Promise<InventorySnapshot>>();
+
+// Last known detected-features set per host (support matrix, see
+// deviceSupport.ts). Inventory keys only exist on inventory-due polls, so the
+// set is cached and re-emitted on metrics-only polls — the API evaluates
+// capabilities from the LATEST snapshot, which must therefore always carry the
+// key. Feature ids: 'zfs' (ZFS storage present) gates the zfsInventory capability.
+const lastDetectedFeatures = new Map<string, string[]>();
 
 // Certificate pinning guard: before ANY credentials are transmitted to an
 // appliance, the management endpoint's TLS certificate is verified against UNM's
@@ -1024,6 +1033,10 @@ const server = createPluginServer({
   // Static icon assets (plugin + per-model icons), advertised in /discover and
   // fetched by the API's icon proxy. dist/src/../../icons = <plugin root>/icons.
   iconsDir: path.join(__dirname, '../../icons'),
+  // Static doc/license assets served at /assets/* — the built-in documentation
+  // (docs/README.md) and LICENSE.md referenced from discovery.deviceSupport.
+  // dist/src/../.. = <plugin root>. Fetched by the API's asset proxy.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // The secret type this plugin expects for device credentials. The API
     // broker reads this to filter which secrets/providers are applicable to
@@ -1056,6 +1069,10 @@ const server = createPluginServer({
     quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/opnsense.svg',
     deviceModels: DEVICE_MODELS,
+    // Device support metadata — license/help/docs + the supported-device matrix
+    // (firmware-split write paths for the network intents, ssh-slot-gated ZFS
+    // inventory + security checks). See ./deviceSupport.ts.
+    deviceSupport: OPNSENSE_DEVICE_SUPPORT,
   },
 });
 const app = server.app;
@@ -1540,6 +1557,22 @@ app.post('/monitoring', async (req, res) => {
     // informational only; shown as text cards in the device detail view.
     if (selectedModel) metrics['system.model'] = selectedModel;
     if (selectedFirmware) metrics['system.firmwareVersion'] = selectedFirmware;
+
+    // Detected features for the support matrix (see deviceSupport.ts). Derived
+    // from THIS poll's inventory when available, otherwise re-emitted from the
+    // last known set — the API evaluates capabilities from the LATEST snapshot,
+    // which must therefore always carry this key. No metric descriptor on
+    // purpose: it is not a display metric.
+    const detectedFeatures = new Set(lastDetectedFeatures.get(managementAddress) ?? []);
+    if (collectInventory && Array.isArray(metrics['filesystems'])) {
+      // ZFS storage present? The inventory's filesystem rows carry the mapped
+      // type — 'zfs-pool' for the API's zfs root row and every SSH-enriched
+      // pool/dataset. Absent key = fetch failed → keep the previously known set.
+      const fsRows = metrics['filesystems'] as Record<string, unknown>[];
+      if (fsRows.some((f) => String(f['type']) === 'zfs-pool')) detectedFeatures.add('zfs');
+    }
+    lastDetectedFeatures.set(managementAddress, Array.from(detectedFeatures));
+    metrics[DETECTED_FEATURES_METRIC_KEY] = Array.from(detectedFeatures);
 
     // Updates page — LIVE firmware status from the appliance's own update
     // engine (System → Updates in its web UI): a fast GET of the cached check

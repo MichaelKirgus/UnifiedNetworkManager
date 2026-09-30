@@ -28,6 +28,7 @@ import {
   ProbeResponseBody,
   StateRequestBody,
 } from './types';
+import { DeviceSupport } from './deviceSupport';
 
 /** Extra /discover fields beyond the identity core (all optional). */
 export interface DiscoveryExtras {
@@ -47,6 +48,10 @@ export interface DiscoveryExtras {
   iconUrl?: string;
   deviceModels?: DeviceModelEntry[];
   credentialSlots?: CredentialSlotDescriptor[];
+  /** Device support metadata — license, help URL, built-in markdown docs path,
+   *  and the standardized supported-device matrix (profiles → capabilities +
+   *  intents with gating conditions). See deviceSupport.ts. */
+  deviceSupport?: DeviceSupport;
   /** Identity-provider plugins (basic-auth): flow + optional redirectUrl. */
   identityProvider?: { flow: string; redirectUrl?: string };
   /** Secrets-provider plugins: algorithm + the secret types served. */
@@ -65,6 +70,11 @@ export interface PluginServerOptions {
   jsonLimit?: string;
   /** Serve static icon assets at /icons from this directory (plugin-root relative path, e.g. path.join(__dirname, '../../icons')). */
   iconsDir?: string;
+  /** Serve static text assets (LICENSE.md, docs/*.md) at /assets from this
+   *  directory — the plugin root by default. The API's asset proxy fetches
+   *  these for the webapp's license/documentation viewers; only files under
+   *  this dir are reachable (express.static containment). */
+  assetsDir?: string;
   /** Extra /discover fields (see DiscoveryExtras). May be a function for dynamic catalogs. */
   discovery?: DiscoveryExtras | (() => DiscoveryExtras);
   /** Extra custom self-metrics gauges, merged into GET /metrics (see createSelfMetrics). */
@@ -103,6 +113,7 @@ export function buildDiscoverPayload(identity: PluginIdentity, extras?: Discover
     ...(e.iconUrl !== undefined ? { iconUrl: e.iconUrl } : {}),
     ...(e.deviceModels !== undefined ? { deviceModels: e.deviceModels } : {}),
     ...(e.credentialSlots !== undefined ? { credentialSlots: e.credentialSlots } : {}),
+    ...(e.deviceSupport !== undefined ? { deviceSupport: e.deviceSupport } : {}),
     ...(e.identityProvider !== undefined ? { identityProvider: e.identityProvider } : {}),
     ...(e.secretsProvider !== undefined ? { secretsProvider: e.secretsProvider } : {}),
     ...(e.fileRepo !== undefined ? { fileRepo: e.fileRepo } : {}),
@@ -145,6 +156,12 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
   if (opts.iconsDir) {
     // dist/src/../../icons = <plugin root>/icons (plugins compile with rootDir ".").
     app.use('/icons', express.static(path.join(opts.iconsDir)));
+  }
+
+  if (opts.assetsDir) {
+    // Static text assets (LICENSE.md, docs/*.md) — proxied by the API's
+    // GET /plugins/:id/asset route for the webapp's markdown viewers.
+    app.use('/assets', express.static(path.join(opts.assetsDir), { index: false }));
   }
 
   // Self-metrics: the UNM API polls GET /metrics per plugin and persists the

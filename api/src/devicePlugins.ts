@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from './db';
 import * as schema from './db/schema';
@@ -8,6 +8,8 @@ import {
   parseExtraCredentials,
   slotAcceptsType,
 } from './types/credentialSlots';
+import type { CapabilityEvaluation, DeviceSupport } from './types/deviceSupport';
+import { evaluateDeviceSupport } from '@unm/plugin-sdk';
 
 /**
  * Device ↔ plugin assignment broker.
@@ -76,6 +78,12 @@ export interface DevicePluginAssignmentView extends DevicePluginAssignment {
   secretLabel?: string | null;
   /** The plugin's declared slots with their bound secrets resolved for display. */
   credentialSlots?: BoundCredentialSlot[];
+  /** The plugin's device-support document (license/help/docs + support matrix). */
+  deviceSupport?: DeviceSupport | null;
+  /** Capabilities evaluated as effective for THIS device (feature/slot/firmware gating applied). */
+  effectiveCapabilities?: CapabilityEvaluation[];
+  /** Intents allowed on THIS device per the plugin's support matrix. */
+  effectiveIntents?: CapabilityEvaluation[];
 }
 
 /** Error carrying an HTTP status so routes can map it directly. */
@@ -240,17 +248,22 @@ export async function listAssignmentViews(deviceId: string): Promise<DevicePlugi
     for (const id of Object.values(a.extraCredentials)) secretIds.add(id);
   }
 
-  const [plugins, secrets] = await Promise.all([
+  const [plugins, secrets, device] = await Promise.all([
     db.query.plugins.findMany({ where: inArray(schema.plugins.id, pluginIds) }),
     secretIds.size > 0
       ? db.query.secrets.findMany({ where: inArray(schema.secrets.id, Array.from(secretIds)) })
       : [],
+    // The device row itself — vendor/model/firmwareVersion feed the support-matrix evaluation.
+    db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) }),
   ]);
 
   const now = Date.now();
-  return assignments.map((a) => {
-    const plugin = plugins.find((p) => p.id === a.pluginId);
-    const secret = secrets.find((s) => s.id === a.secretId);
+  // Async per assignment: the support-matrix evaluation reads each device's
+  // latest telemetry snapshot (detected features).
+  return Promise.all(
+    assignments.map(async (a) => {
+      const plugin = plugins.find((p) => p.id === a.pluginId);
+      const secret = secrets.find((s) => s.id === a.secretId);
     let credentialSlots: BoundCredentialSlot[] | undefined;
     if (plugin?.credentialSlots) {
       try {
@@ -306,6 +319,51 @@ export async function listAssignmentViews(deviceId: string): Promise<DevicePlugi
         /* malformed cache — skip quick-action display */
       }
     }
+    // Device-support evaluation: which of the plugin's capabilities/intents are
+    // EFFECTIVE for this specific device — gated by detected features (latest
+    // telemetry snapshot), bound credential slots, and firmware version.
+    let deviceSupport: DeviceSupport | null = null;
+    if (typeof plugin?.deviceSupport === 'string' && plugin.deviceSupport.length > 0) {
+      try {
+        const parsed = JSON.parse(plugin.deviceSupport);
+        deviceSupport = parsed && typeof parsed === 'object' ? (parsed as DeviceSupport) : null;
+      } catch {
+        /* malformed cache — skip support display */
+      }
+    }
+    let effectiveCapabilities: CapabilityEvaluation[] | undefined;
+    let effectiveIntents: CapabilityEvaluation[] | undefined;
+    if (deviceSupport && device) {
+      // Detected features from the newest telemetry snapshot of THIS assignment.
+      const latest = await db.query.telemetry.findFirst({
+        where: and(eq(schema.telemetry.deviceId, deviceId), eq(schema.telemetry.pluginId, a.pluginId)),
+        orderBy: [desc(schema.telemetry.collectedAt)],
+      });
+      let detectedFeatures: string[] = [];
+      if (latest?.metrics) {
+        try {
+          const m = typeof latest.metrics === 'string' ? JSON.parse(latest.metrics) : latest.metrics;
+          const raw = Array.isArray(m['detectedFeatures']) ? (m['detectedFeatures'] as unknown[]) : [];
+          detectedFeatures = raw.filter((f): f is string => typeof f === 'string');
+        } catch {
+          /* malformed snapshot — evaluate with no features */
+        }
+      }
+      // A slot counts as bound when a secret id is set on it (type validity was
+      // enforced at bind time by validateExtraCredentials).
+      const boundSlots: Record<string, boolean> = {};
+      for (const [slotName] of Object.entries(a.extraCredentials)) boundSlots[slotName] = true;
+      const evaluation = evaluateDeviceSupport(deviceSupport, {
+        vendor: device.vendor,
+        model: device.model,
+        firmwareVersion: device.firmwareVersion,
+        detectedFeatures,
+        boundSlots,
+      });
+      effectiveCapabilities = evaluation.capabilities;
+      effectiveIntents = evaluation.intents;
+    }
+
     return {
       ...a,
       pluginName: plugin?.name,
@@ -319,8 +377,12 @@ export async function listAssignmentViews(deviceId: string): Promise<DevicePlugi
         now - Date.parse(plugin.lastSeenAt) < ONLINE_WINDOW_MS,
       secretLabel: secret ? (secret.label ?? null) : null,
       credentialSlots,
+      deviceSupport,
+      effectiveCapabilities,
+      effectiveIntents,
     };
-  });
+    }),
+  );
 }
 
 /**

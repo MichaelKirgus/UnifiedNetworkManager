@@ -482,6 +482,7 @@ export default function DeviceDetail() {
               <tr className="border-b border-border text-xs uppercase tracking-wide text-faint">
                 <th className="py-2 pr-3 font-medium">Plugin</th>
                 <th className="py-2 pr-3 font-medium">Status</th>
+                <th className="py-2 pr-3 font-medium">Capabilities (this device)</th>
                 <th className="py-2 pr-3 font-medium">Credentials</th>
                 <th className="py-2 text-right font-medium">Actions</th>
               </tr>
@@ -506,6 +507,29 @@ export default function DeviceDetail() {
                       <span className="inline-flex items-center gap-1.5 text-faint">
                         <span className="h-2 w-2 rounded-full bg-status-neutral" /> offline
                       </span>
+                    )}
+                  </td>
+                  <td className="py-2 pr-3">
+                    {a.effectiveCapabilities && a.effectiveCapabilities.length > 0 ? (
+                      <div className="flex flex-wrap gap-1">
+                        {a.effectiveCapabilities.map((c) => (
+                          <span
+                            key={c.name}
+                            title={
+                              c.effective
+                                ? `${c.label ?? c.name} — effective on this device`
+                                : `${c.label ?? c.name} — unavailable: ${c.reasons.join('; ')}`
+                            }
+                            className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs ${
+                              c.effective ? 'bg-success/60 text-success-fg' : 'bg-muted text-faint line-through'
+                            }`}
+                          >
+                            {c.label ?? c.name}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-faint">—</span>
                     )}
                   </td>
                   <td className="py-2 pr-3">

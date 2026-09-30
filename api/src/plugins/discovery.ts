@@ -5,6 +5,13 @@ import { db } from '../db';
 import * as schema from '../db/schema';
 import type { PluginOptionDescriptor } from '../types/pluginOptions';
 import type { DeviceModelEntry } from '../types/deviceModels';
+import type {
+  DeviceSupport,
+  DeviceSupportProfile,
+  SupportCapabilityGrant,
+  SupportCondition,
+  SupportIntentGrant,
+} from '../types/deviceSupport';
 import { CredentialSlotDescriptor, normalizeCredentialSlots } from '../types/credentialSlots';
 import { getEffectiveSettingValue } from '../systemSettings';
 
@@ -36,6 +43,8 @@ export interface PluginIdentity {
   deviceModels?: DeviceModelEntry[];
   /** Additional named credential slots beyond the primary secret (see types/credentialSlots.ts). */
   credentialSlots?: CredentialSlotDescriptor[];
+  /** Device support metadata — license/help/docs + supported-device matrix (see types/deviceSupport.ts). */
+  deviceSupport?: DeviceSupport;
 }
 
 /**
@@ -65,6 +74,139 @@ function normalizeDeviceModels(raw: unknown): DeviceModelEntry[] | undefined {
     out.push(entry);
   }
   return out.length > 0 ? out : undefined;
+}
+
+/** Keeps only safe relative paths (no scheme, no traversal) — for doc/license file refs. */
+function safeAssetPath(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+  const p = raw.trim();
+  if (/^[a-z][a-z0-9+.-]*:/i.test(p) || p.startsWith('//') || p.includes('..')) return undefined;
+  return p.startsWith('/') ? p.slice(1) : p;
+}
+
+function strArray(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out = raw.filter((v): v is string => typeof v === 'string' && v.trim() !== '').map((v) => (v as string).trim());
+  return out.length > 0 ? out : undefined;
+}
+
+function strOrNull(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+  return raw.trim();
+}
+
+/** Normalizes one gating condition object, dropping empty fields. */
+function normalizeCondition(raw: unknown): SupportCondition | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const c = raw as Record<string, unknown>;
+  const out: SupportCondition = {};
+  const feats = strArray(c.requiresFeatures);
+  const slots = strArray(c.requiredSlots);
+  const minFw = strOrNull(c.minFirmware);
+  const maxFw = strOrNull(c.maxFirmware);
+  if (feats) out.requiresFeatures = feats;
+  if (slots) out.requiredSlots = slots;
+  if (minFw) out.minFirmware = minFw;
+  if (maxFw) out.maxFirmware = maxFw;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Normalizes a capability grant ({ name, label?, conditions? }). */
+function normalizeCapabilityGrant(raw: unknown): SupportCapabilityGrant | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const g = raw as Record<string, unknown>;
+  const id = strOrNull(g.name);
+  if (!id) return undefined;
+  const out: SupportCapabilityGrant = { name: id };
+  const label = strOrNull(g.label);
+  if (label) out.label = label;
+  const cond = normalizeCondition(g.conditions);
+  if (cond) out.conditions = cond;
+  return out;
+}
+
+/** Normalizes an intent grant ({ actionId, label?, conditions? }). */
+function normalizeIntentGrant(raw: unknown): SupportIntentGrant | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const g = raw as Record<string, unknown>;
+  const id = strOrNull(g.actionId);
+  if (!id) return undefined;
+  const out: SupportIntentGrant = { actionId: id };
+  const label = strOrNull(g.label);
+  if (label) out.label = label;
+  const cond = normalizeCondition(g.conditions);
+  if (cond) out.conditions = cond;
+  return out;
+}
+
+/**
+ * Defensively normalizes a raw `deviceSupport` object from /discover: keeps
+ * only well-formed fields, drops malformed profile/grant entries instead of
+ * failing discovery. The API persists the normalized document verbatim —
+ * evaluation against a device happens at read time (types/deviceSupport.ts).
+ */
+function normalizeDeviceSupport(raw: unknown): DeviceSupport | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const d = raw as Record<string, unknown>;
+  const out: DeviceSupport = {};
+
+  // License — { name (required), url?, file? }.
+  const lic = d.license;
+  if (lic && typeof lic === 'object') {
+    const l = lic as Record<string, unknown>;
+    const name = strOrNull(l.name);
+    if (name) {
+      out.license = { name };
+      const url = strOrNull(l.url);
+      if (url) out.license.url = url;
+      const file = safeAssetPath(l.file);
+      if (file) out.license.file = file;
+    }
+  }
+
+  const helpUrl = strOrNull(d.helpUrl);
+  if (helpUrl) out.helpUrl = helpUrl;
+  const docPath = safeAssetPath(d.docPath);
+  if (docPath) out.docPath = docPath;
+
+  // Default capabilities — grants effective on every device of this plugin.
+  if (Array.isArray(d.defaultCapabilities)) {
+    const caps = d.defaultCapabilities.map(normalizeCapabilityGrant).filter((g): g is SupportCapabilityGrant => !!g);
+    if (caps.length > 0) out.defaultCapabilities = caps;
+  }
+
+  // Profiles — the support matrix; first match wins at evaluation time.
+  const profiles: DeviceSupportProfile[] = [];
+  if (Array.isArray(d.profiles)) {
+    for (const p of d.profiles) {
+      if (!p || typeof p !== 'object') continue;
+      const pr = p as Record<string, unknown>;
+      const entry: DeviceSupportProfile = { capabilities: [] };
+      const vendor = strOrNull(pr.vendor);
+      if (vendor) entry.vendor = vendor;
+      const model = strOrNull(pr.model);
+      if (model) entry.model = model;
+      const minFw = strOrNull(pr.minFirmware);
+      if (minFw) entry.minFirmware = minFw;
+      const maxFw = strOrNull(pr.maxFirmware);
+      if (maxFw) entry.maxFirmware = maxFw;
+      const caps = Array.isArray(pr.capabilities)
+        ? pr.capabilities.map(normalizeCapabilityGrant).filter((g): g is SupportCapabilityGrant => !!g)
+        : [];
+      if (caps.length === 0 && !vendor && !model) continue; // a profile must grant something or match something
+      entry.capabilities = caps;
+      const intents = Array.isArray(pr.intents)
+        ? pr.intents.map(normalizeIntentGrant).filter((g): g is SupportIntentGrant => !!g)
+        : [];
+      if (intents.length > 0) entry.intents = intents;
+      profiles.push(entry);
+    }
+  }
+  if (profiles.length > 0) out.profiles = profiles;
+
+  // A document with nothing useful in it is treated as absent.
+  const hasContent = !!out.license || !!out.helpUrl || !!out.docPath || (out.defaultCapabilities?.length ?? 0) > 0 || profiles.length > 0;
+  return hasContent ? out : undefined;
 }
 
 /** Normalizes a raw icon path: must be a relative path (no scheme, no ".."). */
@@ -209,6 +351,7 @@ async function fetchIdentity(endpoint: string): Promise<PluginIdentity | null> {
       iconUrl: normalizeIconPath(data.iconUrl),
       deviceModels: normalizeDeviceModels(data.deviceModels),
       credentialSlots: normalizeCredentialSlots(data.credentialSlots),
+      deviceSupport: normalizeDeviceSupport(data.deviceSupport),
     };
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -248,6 +391,9 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
   // upsert must never wipe slot descriptors set by the HTTP polling path.
   const hasSlots = Array.isArray(identity.credentialSlots) && identity.credentialSlots.length > 0;
   const credentialSlotsJson = hasSlots ? JSON.stringify(identity.credentialSlots) : null;
+  // Device support metadata: same guard — only overwrite when this discovery
+  // source actually carries a document (the mDNS TXT path does not).
+  const deviceSupportJson = identity.deviceSupport ? JSON.stringify(identity.deviceSupport) : null;
 
   if (existing) {
     await db
@@ -266,6 +412,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
         ...(hasIcon ? { iconUrl } : {}),
         ...(hasModels ? { deviceModels: deviceModelsJson } : {}),
         ...(hasSlots ? { credentialSlots: credentialSlotsJson } : {}),
+        ...(deviceSupportJson !== null ? { deviceSupport: deviceSupportJson } : {}),
         lastSeenAt: now,
       })
       .where(eq(schema.plugins.id, identity.uuid));
@@ -285,6 +432,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
       iconUrl,
       deviceModels: deviceModelsJson,
       credentialSlots: credentialSlotsJson,
+      deviceSupport: deviceSupportJson,
       createdAt: now,
       lastSeenAt: now,
     });

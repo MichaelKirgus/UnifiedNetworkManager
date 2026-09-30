@@ -177,6 +177,9 @@ export async function initDb(): Promise<void> {
   await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "credentialSlots" TEXT`);
   // Quick actions for the Devices page (see schema.plugins.quickActions).
   await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "quickActions" TEXT`);
+  // Device support metadata — license/help/docs + supported-device matrix with
+  // capability/intent gating conditions (see schema.plugins.deviceSupport).
+  await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "deviceSupport" TEXT`);
   await pool.query(
     `ALTER TABLE device_plugins ADD COLUMN IF NOT EXISTS "extraCredentials" TEXT`
   );

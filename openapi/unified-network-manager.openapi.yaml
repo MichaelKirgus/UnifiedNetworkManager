@@ -2582,6 +2582,43 @@ paths:
         '502':
           description: The plugin could not be reached for the icon
 
+  /plugins/{id}/asset:
+    get:
+      tags: [Plugins]
+      summary: Fetch a plugin's static text asset (proxied from the plugin itself)
+      description: >-
+        Proxies a static TEXT asset served by the plugin — its built-in markdown
+        documentation (`deviceSupport.docPath`, e.g. docs/README.md) or the full
+        license text (`deviceSupport.license.file`, e.g. LICENSE.md). The default
+        is the plugin's advertised docPath; pass `path` to fetch another asset.
+        Deliberately UNAUTHENTICATED like the icon proxy so plain loads work
+        without a token; the path must be relative and cannot traverse outside
+        the plugin's own origin, and only text/* content types are forwarded.
+      security: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: path
+          required: false
+          allowReserved: true
+          schema: { type: string }
+          description: "Asset path relative to the plugin root (defaults to the plugin's deviceSupport.docPath)"
+      responses:
+        '200':
+          description: Asset text (content-type from the plugin, e.g. text/markdown)
+          content:
+            text/*:
+              schema: { type: string }
+        '404':
+          description: Plugin not found, or it does not serve the requested path
+        '415':
+          description: The asset is not a text content type
+        '502':
+          description: The plugin could not be reached for the asset
+
   /plugins/{id}/required-secret-type:
     get:
       tags: [Plugins]
@@ -6091,6 +6128,34 @@ components:
           items:
             $ref: '#/components/schemas/QuickAction'
           description: "The assigned plugin's quick actions for the Devices page 'Device Actions' column (list views only; absent when the plugin advertises none)"
+        deviceSupport:
+          type: object
+          allOf:
+            - $ref: '#/components/schemas/DeviceSupport'
+          nullable: true
+          description: "The assigned plugin's support metadata, echoed for convenience (list views only; null when the plugin advertises none)"
+        effectiveCapabilities:
+          type: array
+          items:
+            $ref: '#/components/schemas/CapabilityEvaluation'
+          description: "This device's evaluated capabilities for this assignment — each grant with its effective flag and machine-readable reasons (list views only; absent when the plugin advertises no support metadata)"
+        effectiveIntents:
+          type: array
+          items:
+            $ref: '#/components/schemas/CapabilityEvaluation'
+          description: "This device's evaluated intents for this assignment — same shape as effectiveCapabilities, keyed by catalog action id (list views only; absent when the plugin advertises no support metadata)"
+
+    CapabilityEvaluation:
+      type: object
+      required: [name, effective, reasons]
+      properties:
+        name: { type: string, description: "Capability or intent (action) id" }
+        label: { type: string, description: "Short human-readable label for UI display" }
+        effective: { type: boolean, description: "True when the grant matched AND every gating condition holds for this device" }
+        reasons:
+          type: array
+          items: { type: string }
+          description: "Human-readable reasons why it is NOT effective (empty when effective)"
 
     # A device address as presented to the UI and plugins (primary flag included).
     DeviceAddress:
@@ -9230,6 +9295,84 @@ components:
             $ref: '#/components/schemas/CredentialSlotDescriptor'
           description: "Additional named credential slots beyond the primary secret (null = none)"
         declaredMetricCount: { type: [integer, 'null'], description: "Number of metric descriptors the plugin declared in /discover (how many metrics it can emit); null when unknown" }
+        deviceSupport:
+          type: object
+          allOf:
+            - $ref: '#/components/schemas/DeviceSupport'
+          nullable: true
+          description: "Plugin metadata + supported-device matrix advertised in /discover (license, help URL, built-in docs path, capability/intent grants gated on detected features, bound credential slots and firmware ranges); null when the plugin advertises none"
+
+    DeviceSupport:
+      type: object
+      properties:
+        license:
+          type: object
+          required: [name]
+          properties:
+            name: { type: string, description: "SPDX-style identifier or display name (e.g. MIT)" }
+            url: { type: string, format: uri, description: "Link to the canonical license text / project page" }
+            file: { type: string, description: "Path of the bundled LICENSE.md relative to the plugin root (served via GET /plugins/{id}/asset)" }
+        helpUrl: { type: string, format: uri, description: "Vendor documentation / project page" }
+        docPath: { type: string, description: "Built-in markdown documentation path relative to the plugin root (e.g. docs/README.md), served via GET /plugins/{id}/asset" }
+        defaultCapabilities:
+          type: array
+          items:
+            $ref: '#/components/schemas/SupportCapabilityGrant'
+          description: "Capabilities effective on every device this plugin serves (applied on top of any matched profile)"
+        profiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeviceSupportProfile'
+          description: "Ordered support matrix — first matching profile wins (most specific first); optional"
+
+    SupportCondition:
+      type: object
+      properties:
+        requiresFeatures:
+          type: array
+          items: { type: string }
+          description: "Detected feature ids that MUST be present on the device (metrics['detectedFeatures'])"
+        requiredSlots:
+          type: array
+          items: { type: string }
+          description: "Credential slot names that MUST be bound to a secret of an allowed type"
+        minFirmware: { type: string, description: "Inclusive minimum firmware/software version" }
+        maxFirmware: { type: string, description: "Inclusive maximum firmware/software version" }
+
+    SupportCapabilityGrant:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, description: "Capability id (matches an advertised capability or feature key)" }
+        label: { type: string, description: "Short human-readable label for UI display" }
+        conditions:
+          $ref: '#/components/schemas/SupportCondition'
+
+    SupportIntentGrant:
+      type: object
+      required: [actionId]
+      properties:
+        actionId: { type: string, description: "Action id as declared in the plugin's /discover actions catalog" }
+        label: { type: string, description: "Short human-readable label for UI display" }
+        conditions:
+          $ref: '#/components/schemas/SupportCondition'
+
+    DeviceSupportProfile:
+      type: object
+      required: [capabilities]
+      properties:
+        vendor: { type: string, description: "Vendor key as used in UNM device records (wildcard when omitted)" }
+        model: { type: string, description: "Hardware model name, case-insensitive compare against devices.model (wildcard when omitted)" }
+        minFirmware: { type: string, description: "Inclusive minimum firmware/software version for this profile to apply" }
+        maxFirmware: { type: string, description: "Inclusive maximum firmware/software version" }
+        capabilities:
+          type: array
+          items:
+            $ref: '#/components/schemas/SupportCapabilityGrant'
+        intents:
+          type: array
+          items:
+            $ref: '#/components/schemas/SupportIntentGrant'
 
     DeviceModelEntry:
       type: object

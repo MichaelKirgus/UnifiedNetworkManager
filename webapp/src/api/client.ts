@@ -245,6 +245,12 @@ export interface DevicePluginAssignment {
   secretLabel?: string | null;
   /** The plugin's declared slots with their bound secrets resolved. */
   credentialSlots?: BoundCredentialSlot[];
+  /** The plugin's device-support document (license/help/docs + support matrix). */
+  deviceSupport?: DeviceSupport | null;
+  /** Capabilities evaluated as effective for THIS device (feature/slot/firmware gating applied). */
+  effectiveCapabilities?: CapabilityEvaluation[];
+  /** Intents allowed on THIS device per the plugin's support matrix. */
+  effectiveIntents?: CapabilityEvaluation[];
 }
 
 export interface DevicePluginAssignmentInput {
@@ -1960,6 +1966,76 @@ export function pluginIconUrl(pluginId: string, path?: string | null): string {
   return `${BASE}/plugins/${encodeURIComponent(pluginId)}/icon${p ? `?path=${p}` : ''}`;
 }
 
+/** Builds the URL of a plugin's static text asset (LICENSE.md, docs/*.md)
+ * through the API proxy. `path` defaults to the plugin's advertised docPath. */
+export function pluginAssetUrl(pluginId: string, path?: string | null): string {
+  const p = path ? `?path=${encodeURIComponent(path)}` : '';
+  return `${BASE}/plugins/${encodeURIComponent(pluginId)}/asset${p}`;
+}
+
+// ---------------------------------------------------------------------------
+// Device support metadata (mirrors @unm/plugin-sdk deviceSupport.ts)
+// ---------------------------------------------------------------------------
+
+/** License metadata a plugin propagates to UNM. */
+export interface PluginLicense {
+  name: string;
+  url?: string;
+  /** Path of the bundled LICENSE.md relative to the plugin root (API asset proxy). */
+  file?: string;
+}
+
+/** One gating condition on a capability/intent grant — all must hold. */
+export interface SupportCondition {
+  requiresFeatures?: string[];
+  requiredSlots?: string[];
+  minFirmware?: string;
+  maxFirmware?: string;
+}
+
+/** One capability grant with optional gating conditions. */
+export interface SupportCapabilityGrant {
+  name: string;
+  label?: string;
+  conditions?: SupportCondition;
+}
+
+/** One intent (catalog action id) grant with optional gating conditions. */
+export interface SupportIntentGrant {
+  actionId: string;
+  label?: string;
+  conditions?: SupportCondition;
+}
+
+/** One row of the plugin's supported-device matrix (first match wins). */
+export interface DeviceSupportProfile {
+  vendor?: string;
+  model?: string;
+  minFirmware?: string;
+  maxFirmware?: string;
+  capabilities: SupportCapabilityGrant[];
+  intents?: SupportIntentGrant[];
+}
+
+/** The full device-support document a plugin advertises in /discover. */
+export interface DeviceSupport {
+  license?: PluginLicense;
+  helpUrl?: string;
+  /** Path of the built-in markdown documentation (API asset proxy). */
+  docPath?: string;
+  defaultCapabilities?: SupportCapabilityGrant[];
+  profiles?: DeviceSupportProfile[];
+}
+
+/** One evaluated capability/intent: effective for this device or not, with reasons. */
+export interface CapabilityEvaluation {
+  name: string;
+  label?: string;
+  effective: boolean;
+  /** Human-readable reasons why it is NOT effective (empty when effective). */
+  reasons: string[];
+}
+
 /** One plugin's monitoring snapshot for a device. */
 export interface PluginTelemetrySnapshot {
   pluginId: string;
@@ -1991,6 +2067,8 @@ export interface Plugin {
   deviceModels?: DeviceModelEntry[] | null;
   /** Additional named credential slots beyond the primary secret (null = none). */
   credentialSlots?: CredentialSlotDescriptor[] | null;
+  /** Device support metadata — license/help/docs + supported-device matrix (null = not advertised). */
+  deviceSupport?: DeviceSupport | null;
   /** Number of metric descriptors declared in /discover (how many metrics it can emit); null when unknown. */
   declaredMetricCount?: number | null;
   lastSeenAt?: string | null;
@@ -3020,6 +3098,18 @@ export const api = {
     apiFetch<{ pluginId: string; latest: PluginSelfMetricsSample | null; history: PluginSelfMetricsSample[] }>(
       `/plugins/${pluginId}/self-metrics?limit=${limit}`
     ),
+  // Static text asset of a plugin (LICENSE.md, docs/*.md) via the API proxy.
+  // `path` defaults to the plugin's advertised docPath on the server side.
+  // Plain fetch (not apiFetch): the response is raw markdown/text, not JSON.
+  pluginAsset: async (pluginId: string, path?: string | null) => {
+    const p = path ? `?path=${encodeURIComponent(path)}` : '';
+    const token = getToken();
+    const res = await fetch(`${BASE}/plugins/${encodeURIComponent(pluginId)}/asset${p}`, {
+      headers: token ? { Authorization: 'Bearer ' + token } : {},
+    });
+    if (!res.ok) throw new Error(`Failed to load plugin asset (HTTP ${res.status})`);
+    return res.text();
+  },
   // Users + permission catalog.
   users: () => apiFetch<User[]>('/users'),
   createUser: (body: { username: string; password: string; roles?: string[]; permissions?: string[]; deviceScope?: DeviceScope }) =>

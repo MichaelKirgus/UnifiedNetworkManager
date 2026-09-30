@@ -25,8 +25,10 @@ import {
   buildWebUiUrl,
   catalogFirmwareRow,
   isTransientTransportError,
+  DETECTED_FEATURES_METRIC_KEY,
   type QuickAction,
 } from '@unm/plugin-sdk';
+import { ROUTEROS_DEVICE_SUPPORT } from './deviceSupport';
 import { RouterOsAuthError, RouterOsClient } from './routerosClient';
 import { getAction } from './actions/registry';
 import { ActionContext, StepCredentials, validateInput } from './actions/types';
@@ -287,6 +289,10 @@ const server = createPluginServer({
   // Interactive SSH console (capability 'sshConsole') — WS upgrades for /console.
   wsUpgrade: consoleUpgrade,
   iconsDir: ICONS_DIR,
+  // Static doc/license assets served at /assets/* — the built-in documentation
+  // (docs/README.md) and LICENSE.md referenced from discovery.deviceSupport.
+  // Fetched by the API's asset proxy.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // Credentials come from the existing 'usernamePassword' secret type — RouterOS
     // REST uses HTTP Basic authentication with a console username/password pair.
@@ -310,6 +316,10 @@ const server = createPluginServer({
     quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/routeros.svg',
     deviceModels: DEVICE_MODELS,
+    // Device support metadata — license/help/docs + the supported-device matrix
+    // (wifi gated on detected radios, ssh console always effective via primary-
+    // credential reuse). See ./deviceSupport.ts.
+    deviceSupport: ROUTEROS_DEVICE_SUPPORT,
   },
 });
 const app = server.app;
@@ -413,6 +423,19 @@ app.post('/monitoring', async (req, res) => {
     }
 
     const metrics = buildMetrics(s, selectedModel, selectedFirmware);
+
+    // Detected features for the support matrix (see deviceSupport.ts). Derived
+    // from the (possibly cached) snapshot on EVERY poll, so the API's
+    // latest-snapshot evaluation always sees this key. No metric descriptor on
+    // purpose: it is not a display metric. Feature ids: 'wifi' — the box has
+    // wireless radios (an interface of type wfi/wireless, or associated clients
+    // in the ROS 7 registration table). Wired-only hardware reports none.
+    const detectedFeatures = new Set<string>();
+    if (s.interfaces.some((i) => i.type === 'wfi' || i.type === 'wireless') || s.wlanClients.length > 0) {
+      detectedFeatures.add('wifi');
+    }
+    metrics[DETECTED_FEATURES_METRIC_KEY] = Array.from(detectedFeatures);
+
     // Updates page: firmware row from the live RouterOS version (e.g. "7.14")
     // vs the newest known release line — major.minor comparison. Available-
     // without-apply (no safe programmatic OS-update API).

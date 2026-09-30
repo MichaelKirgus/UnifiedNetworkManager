@@ -24,6 +24,12 @@ RUN cd plugins/mikrotik-routeros && npm run build \
 # Static icon assets served at /icons (proxied by the API's GET /plugins/:id/icon).
 COPY plugins/mikrotik-routeros/icons/ plugins/mikrotik-routeros/icons/
 
+# Static doc/license assets served at /assets/* (proxied by the API's
+# GET /plugins/:id/asset) — referenced from discovery.deviceSupport. Separate
+# COPYs: a multi-source COPY would flatten docs/ into the plugin root.
+COPY plugins/mikrotik-routeros/LICENSE.md plugins/mikrotik-routeros/
+COPY plugins/mikrotik-routeros/docs/ plugins/mikrotik-routeros/docs/
+
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: link in
 # node_modules resolve exactly like in local development.
 WORKDIR /app/plugins/mikrotik-routeros
