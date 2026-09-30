@@ -684,17 +684,34 @@ function parseLcosStatus(out: Map<string, SnmpValue>): LcosRouterSnapshot {
 }
 
 /**
- * Decodes the network-list interface enum (verified against the MIB):
- *   eLan1(256)…eLan16(271) → "LAN-<n-255>"
- *   eWlan1(512)/eWlan2(513) → "WLAN-1"/"WLAN-2" (higher WLAN/P2P values use an
- *   ambiguous radio/ifc encoding — return '' rather than guess a wrong label).
+ * Decodes the network-list interface enum. Verified live from the CLI table
+ * help (`cd /Setup/TCP-IP/Network-list` + `set ?`, LCOS 10.94, GW_Ralf):
+ *   LAN-1(256)…LAN-16(271)          eLan1…eLan16 (models expose a subset)
+ *   WLAN-1(512)/WLAN-2(513)         main radios
+ *   WLAN-1-N(1024..1029), WLAN-2-N(1031..1036)  SSID sub-slots (1030 gapped)
+ *   BRG-1(1536)…BRG-8(1543)         LAYER-2 BRIDGE GROUPS — the usual L3 attach point
+ *   BUNDLE-1(2048)/BUNDLE-2(2049)   LACP bundles (logical ifcs in their own right)
+ *   WLC-TUNNEL-1..32(1792..1823), WLC-TUNNEL-AUTOWDS(1824)
+ *   GRE-TUNNEL-1..8(2304..2311), L2TP-ETHERNET-1..16(2560..2575)
+ *   XDSL-1(2816), WWAN(2817), any(65535)
  */
-function decodeNetIfc(raw: SnmpValue | undefined): string {
+export function decodeNetIfc(raw: SnmpValue | undefined): string {
   const n = Number(raw ?? '');
   if (!Number.isInteger(n)) return '';
-  if (n >= 256 && n <= 511) return `LAN-${n - 255}`;
+  if (n >= 256 && n <= 271) return `LAN-${n - 255}`;
   if (n === 512 || n === 513) return `WLAN-${n - 511}`;
-  return '';
+  if (n >= 1024 && n <= 1029) return `WLAN-1-${n - 1022}`;
+  if (n >= 1031 && n <= 1036) return `WLAN-2-${n - 1029}`;
+  if (n >= 1536 && n <= 1543) return `BRG-${n - 1535}`;
+  if (n === 2048 || n === 2049) return `BUNDLE-${n - 2047}`;
+  if (n >= 1792 && n <= 1823) return `WLC-TUNNEL-${n - 1791}`;
+  if (n === 1824) return 'WLC-TUNNEL-AUTOWDS';
+  if (n >= 2304 && n <= 2311) return `GRE-TUNNEL-${n - 2303}`;
+  if (n >= 2560 && n <= 2575) return `L2TP-ETHERNET-${n - 2559}`;
+  if (n === 2816) return 'XDSL-1';
+  if (n === 2817) return 'WWAN';
+  if (n === 65535) return 'any';
+  return ''; // unknown enum — don't guess a wrong label
 }
 
 /* ------------------------------------------------------------------ *

@@ -45,12 +45,13 @@
  *   del Setup/VLAN/Networks/<name>
  */
 
-import { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, resolveSshCredentials, splitCidr, ipv6ToWords, ipv6FromWords } from '@unm/plugin-sdk';
-import type { SshCredentials } from '@unm/plugin-sdk';
+import { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, resolveSshCredentials, splitCidr, ipv6ToWords, ipv6FromWords, suggestL2AttachPoint, suggestL2VlanPorts } from '@unm/plugin-sdk';
+import type { L2Topology, SshCredentials } from '@unm/plugin-sdk';
 import { snmpWalk } from '@unm/snmp-client';
 import { NET_LIST } from '../lcosOids';
 import { runLcosCliCommands, stripCommandEcho } from '../lcosCli';
 import { readWlanTable, writeWlanSlot } from './wlanSlots';
+import { readLcosL2Topology } from './l2Topology';
 import { ActionContext, ActionDescriptor, ActionResult } from './types';
 
 // --- Shared CLI table helpers ------------------------------------------------------
@@ -66,6 +67,22 @@ const NO_SSH_SLOT_ERROR =
 /** Quotes an LCOS CLI value in double quotes. */
 function q(v: string): string {
   return `"${v}"`;
+}
+
+/**
+ * True when a `cd /Setup/<table>` result shows the shell actually landed in
+ * that directory. LCOS updates its OSC title escape (`\x1b]0;user@host:<cwd>\x07`)
+ * and the visible prompt line with the cwd on every command — a FAILED cd
+ * ("Path name wrong") leaves both at the OLD directory, so checking them (not
+ * the echoed command text) distinguishes success from failure. Without this
+ * guard, `dir -a` after a failed cd lists the parent directory and its entries
+ * would be parsed as table rows.
+ */
+function cdReached(raw: string, tablePath: string): boolean {
+  const target = `/Setup/${tablePath}`;
+  if (raw.includes(`${target}\u0007`)) return true; // OSC title escape carries the cwd verbatim
+  const esc = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`${esc}\\s*\\r?\\n>\\s*$`).test(raw); // trailing visible prompt line
 }
 
 /**
@@ -85,15 +102,27 @@ export async function cliTableRows(ctx: ActionContext, creds: SshCredentials, ta
     { host: ctx.address, port: ctx.sshPort ?? 22, creds },
     [`cd /Setup/${tablePath}`, 'dir -a']
   );
+  if (!results[0]?.completed || !cdReached(results[0].raw, tablePath)) return []; // no such table on this model
   if (!results[1]?.completed) return [];
   const text = stripCommandEcho(results[1].raw, 'dir -a');
+  return parseDirARows(text);
+}
+
+/** Parses one `dir -a` output buffer into data rows (see cliTableRows). */
+function parseDirARows(text: string): string[] {
   const rows: string[] = [];
   let seenSeparator = false;
   for (const line of text.split('\n')) {
     const l = line.replace(/\r/g, '').trimEnd();
     if (l.length === 0) continue;
+    // Our own pager marker inserted by LcosCli.run() — not table content.
+    if (/^-{3,}\s+page break\s+-{3,}$/.test(l.trim())) continue;
+    // LCOS re-emits the OID banner + column header + legend on EVERY page of a
+    // paginated `dir -a` — reset the gate so only this page's data rows (after
+    // its own separator) are accepted. No real row starts with an OID bracket.
+    if (/^\[\d+\.\d+\./.test(l.trim())) { seenSeparator = false; continue; }
     if (/^[=|-]+$/.test(l.trim())) { seenSeparator = true; continue; } // the header/data divider
-    if (!seenSeparator) continue; // OID banner / column-header / legend — all before the separator
+    if (!seenSeparator) continue; // column-header / legend — before this page's separator
     if (l.includes('@')) continue; // prompt lines
     // LCOS wraps long rows: continuation lines are indented. Merge them into
     // the previous data row so each logical row is one string again.
@@ -106,6 +135,39 @@ export async function cliTableRows(ctx: ActionContext, creds: SshCredentials, ta
   return rows;
 }
 
+/**
+ * Reads SEVERAL `dir -a` tables in ONE CLI session (one PTY open instead of N).
+ * LCOS vRouters drop concurrent SSH connections, and each fresh session costs a
+ * full login + 2.5s banner settle — batching is both required (no concurrency)
+ * and fast (~10-12s per table drops to ~3-4s after the first). Returns rows in
+ * input order; an unreadable table yields [] for its slot, not a throw.
+ */
+export async function cliTableRowsBatch(ctx: ActionContext, creds: SshCredentials, tablePaths: string[]): Promise<string[][]> {
+  const commands: string[] = [];
+  for (const t of tablePaths) commands.push(`cd /Setup/${t}`, 'dir -a');
+  let results;
+  try {
+    results = await runLcosCliCommands(ctx.terminalPool, { host: ctx.address, port: ctx.sshPort ?? 22, creds }, commands);
+  } catch (e) {
+    console.warn(`LCOS CLI batch read failed (${e instanceof Error ? e.message : String(e)})`);
+    return tablePaths.map(() => []);
+  }
+  return tablePaths.map((t, i) => {
+    const cd = results[2 * i];
+    const r = results[2 * i + 1];
+    // A failed `cd` ("Path name wrong") leaves the shell in the PREVIOUS dir —
+    // its `dir -a` would list that directory, so skip the slot entirely.
+    if (!cd?.completed || !cdReached(cd.raw, t)) return [];
+    if (!r?.completed) return [];
+    try {
+      return parseDirARows(stripCommandEcho(r.raw, 'dir -a'));
+    } catch (e) {
+      console.warn(`LCOS CLI batch read: table ${t} parse failed (${e instanceof Error ? e.message : String(e)})`);
+      return [];
+    }
+  });
+}
+
 /** True when a table has a row whose first quoted/bare token equals `name`.
  *  LCOS upper-cases network names in the TCP-IP/DHCP tables, so compare case-insensitively. */
 function tableHasName(rows: string[], name: string): boolean {
@@ -116,6 +178,44 @@ function tableHasName(rows: string[], name: string): boolean {
     if ((m[1] ?? m[0]).toUpperCase() === needle) return true;
   }
   return false;
+}
+
+/** Parses VLAN/Networks rows: "NAME" <vlanId> "<ports>" (LCOS upper-cases names). */
+export function parseVlanRows(rows: string[]): Array<{ name: string; vlanId: number | null; ports: string[] }> {
+  const out: Array<{ name: string; vlanId: number | null; ports: string[] }> = [];
+  for (const row of rows) {
+    // The Ports column is quoted and may contain spaces ("LAN-1, LAN-2"); the
+    // LLDP columns that follow are empty on most devices — cut at the closing quote.
+    const m = /^"([^"]+)"\s+(\d+)\s+"([^"]*)"/.exec(row.trim());
+    if (!m) continue;
+    out.push({ name: m[1], vlanId: Number(m[2]), ports: (m[3] ?? '').split(/[\s,]+/).filter(Boolean) });
+  }
+  return out;
+}
+
+/**
+ * Resolves the L3 attach point for a new network on this device. LCOS layers
+ * interfaces (ETH-x → LAN-x / BUNDLE-x(LACP) → BRG-x bridges): the L3 address
+ * binds to the BRIDGE or bundle, NOT to a physical port — so when no explicit
+ * `interface` was given, resolve it from the live topology (read-only). An
+ * explicit value always wins (the user confirmed it in preflight).
+ */
+function resolveAttach(topo: L2Topology | null, input: Record<string, unknown>, vlanRows: string[]): { attach: string; note: string } {
+  const explicit = typeof input.interface === 'string' ? input.interface.trim() : '';
+  if (explicit) return { attach: explicit, note: `using explicitly requested interface ${explicit}` };
+  if (!topo) return { attach: 'LAN-1', note: 'L2 topology unreadable — falling back to LAN-1' };
+  const s = suggestL2AttachPoint(topo);
+  if (s) return { attach: s.attach, note: `resolved L3 attach point ${s.attach} — ${s.reason}` };
+  return { attach: 'LAN-1', note: 'no bridges/bundles/assigned ports found in the L2 topology — falling back to LAN-1' };
+}
+
+/** Resolves the VLAN tag-port list for a new network (device convention). */
+function resolveVlanPorts(topo: L2Topology | null, attach: string, vlanRows: string[], explicit?: unknown): string[] {
+  if (Array.isArray(explicit) && explicit.length > 0) return explicit.map(String);
+  const existing = parseVlanRows(vlanRows).map((v) => ({ name: v.name, ports: v.ports }));
+  if (topo) return suggestL2VlanPorts(topo, attach, existing);
+  // No topology — keep the historical behavior: single requested interface.
+  return [attach];
 }
 
 /** Adds one row to a table and verifies it appeared. Returns { ok, detail }. */
@@ -209,7 +309,8 @@ const networkCreate: ActionDescriptor = {
     cidrV6: { type: 'string', pattern: '^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*/\\d{1,3}$', description: 'Optional IPv6 L3 address as CIDR (e.g. fd00:42::1/64) — dual-stack when set alongside cidr; writes the separate Setup/IPv6 tables' },
     ip: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'L3 address (alternative to cidr)' },
     netmask: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'Netmask for `ip`' },
-    interface: { type: 'string', maxLength: 64, default: 'LAN-1', description: 'Device-local L2 interface to attach the VLAN to (e.g. LAN-1)' },
+    interface: { type: 'string', maxLength: 64, description: 'L3 attach point — the device-local interface to bind the address to (bridge BRG-x / bundle BUNDLE-x / port LAN-x). Resolved per device from the live L2 topology when omitted; preflight suggests it.' },
+    vlanPorts: { type: 'array', items: { type: 'string' }, description: 'Optional explicit list of logical ports carrying the VLAN tag at L2 (e.g. ["LAN-1","LAN-2"]); the device\'s existing convention on the attach bridge is used when omitted' },
     dhcpPool: {
       type: 'object',
       description: 'Optional DHCP pool served on this network',
@@ -244,7 +345,21 @@ const networkCreate: ActionDescriptor = {
       return { success: false, error: '`vlanId` must be an integer 1..4094.' };
     }
     const vlanId = hasVlan ? rawVlanId : 1;
-    const iface = String(input.interface ?? 'LAN-1').trim() || 'LAN-1';
+
+    const steps: string[] = [];
+    let applied = false;
+
+    // L2 attach resolution — LCOS layers interfaces (ETH-x → LAN-x / BUNDLE-x
+    // LACP → BRG-x bridges): the L3 address binds to the bridge/bundle, NOT a
+    // physical port. Read the VLAN table once (feeds idempotency + resolution)
+    // and resolve the attach point from the live topology unless explicitly given.
+    const vlanRows = await cliTableRows(ctx, creds, 'VLAN/Networks');
+    let topo: L2Topology | null = null;
+    try { topo = await readLcosL2Topology(ctx); } catch { /* degraded — defaults apply */ }
+    const attachRes = resolveAttach(topo, input, vlanRows);
+    const iface = attachRes.attach;
+    steps.push(attachRes.note);
+    const vlanPortList = resolveVlanPorts(topo, iface, vlanRows, input.vlanPorts);
 
     // L3 address — cidr or ip+netmask.
     let l3Ip: string | null = null;
@@ -266,16 +381,15 @@ const networkCreate: ActionDescriptor = {
       l3V6 = parsed;
     }
 
-    const steps: string[] = [];
-    let applied = false;
-
-    // 1. L2 VLAN network (only when a vlanId was requested).
+    // 1. L2 VLAN network (only when a vlanId was requested). The Ports column
+    //    carries the member-port list (device convention), NOT the attach ifc —
+    //    on GW_Ralf e.g. "LAN-1, LAN-2, LAN-3, LAN-4" while the L3 address sits
+    //    on BRG-2.
     if (hasVlan) {
-      const rows = await cliTableRows(ctx, creds, 'VLAN/Networks');
-      if (tableHasName(rows, name)) {
+      if (tableHasName(vlanRows, name)) {
         steps.push(`VLAN/Networks: row ${name} already exists — left untouched`);
       } else {
-        const r = await cliAddRow(ctx, creds, 'VLAN/Networks', [q(name), String(vlanId), q(iface)], name);
+        const r = await cliAddRow(ctx, creds, 'VLAN/Networks', [q(name), String(vlanId), q(vlanPortList.join(', '))], name);
         if (!r.ok) return { success: false, error: `Failed to create VLAN network: ${r.detail}` };
         steps.push(r.detail);
         applied = true;
@@ -307,18 +421,9 @@ const networkCreate: ActionDescriptor = {
       if (tableHasName(lanIfcRows, name)) {
         steps.push(`IPv6/LAN-Interfaces: row ${name} already exists — left untouched`);
       } else {
-        // Interface-ID = the bridge carrying this VLAN. Copy the most common
-        // value from existing rows (read-only); fall back to BRG-2, the default
-        // LAN bridge on LCOS routers (verified on both WLC01 and GW_Ralf).
-        const counts = new Map<string, number>();
-        for (const row of lanIfcRows) {
-          const m = /^\S+\s+(\S+)/.exec(row.trim());
-          if (!m || !m[1]) continue;
-          counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
-        }
-        let ifId = 'BRG-2';
-        let best = 0;
-        for (const [k, c] of counts.entries()) if (c > best) { best = c; ifId = k; }
+        // Interface-ID = the SAME attach point as the v4 address (the bridge or
+        // bundle carrying this network) — resolved from the live L2 topology.
+        const ifId = iface;
         // Columns in tab-header order: Name Interface-ID VLAN-ID Rtg-tag Autoconf
         // Accept-RA Identifier-Mode Interface-Status Forwarding MTU Firewall
         // DaD-Attempts RS-Count ND-Proxy Comment.
@@ -406,7 +511,7 @@ const networkCreate: ActionDescriptor = {
       success: true,
       applied,
       verified: true,
-      details: { name, vlanId, dedicatedVlan: hasVlan, interface: iface, l3: l3Ip ? `${l3Ip}/${l3Mask}` : null, l3v6: l3V6 ? `${l3V6.addr}/${l3V6.prefix}` : null, steps },
+      details: { name, vlanId, dedicatedVlan: hasVlan, interface: iface, vlanPorts: vlanPortList, l3: l3Ip ? `${l3Ip}/${l3Mask}` : null, l3v6: l3V6 ? `${l3V6.addr}/${l3V6.prefix}` : null, steps },
     };
   },
 };
@@ -512,7 +617,7 @@ const vlanNetworksRead: ActionDescriptor = {
 };
 
 /** First quoted/bare token of a CLI table row (the row's key). */
-function firstToken(row: string): string | null {
+export function firstToken(row: string): string | null {
   const m = /^"([^"]+)"|^\S+/.exec(row.trim());
   return m ? (m[1] ?? m[0]) : null;
 }

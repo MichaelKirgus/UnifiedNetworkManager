@@ -12,25 +12,18 @@
  * plan creation (overrides ride back in PlanRequest.deviceInputs).
  */
 
-import type { PreflightConfidence, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
+import type { L2Bridge, L2Bundle, L2PhysicalPort, L2Topology, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
+import { suggestL2AttachPoint, suggestL2VlanPorts } from '@unm/plugin-sdk';
 import { snmpWalk } from '@unm/snmp-client';
 import { NET_LIST } from '../lcosOids';
+import { decodeNetIfc } from '../lcosClient';
 import type { ActionContext } from './types';
-import { cliTableRows, decodeTextIndex, sshCreds } from './networkIntents';
+import { cliTableRowsBatch, decodeTextIndex, firstToken, parseVlanRows, sshCreds } from './networkIntents';
 import { readWlanTable } from './wlanSlots';
 
-/** Decodes the network-list interface enum (same mapping as lcosClient.decodeNetIfc). */
-function netIfcLabel(raw: string | undefined): string {
-  const n = Number(raw ?? '');
-  if (!Number.isInteger(n)) return '';
-  if (n >= 256 && n <= 511) return `LAN-${n - 255}`;
-  if (n === 512 || n === 513) return `WLAN-${n - 511}`;
-  return '';
-}
-
-/** Reads the L3 network list via SNMP (read-only). */
-async function readL3Networks(ctx: ActionContext): Promise<Array<{ name: string; ip: string | null; netmask: string | null; vlanId: number | null; ifcLabel: string }>> {
-  const out: Array<{ name: string; ip: string | null; netmask: string | null; vlanId: number | null; ifcLabel: string }> = [];
+/** Reads the L3 network list via SNMP (read-only) — per-network attach ifc. */
+async function readL3Networks(ctx: ActionContext): Promise<Array<{ name: string; ifcLabel: string }>> {
+  const out: Array<{ name: string; ifcLabel: string }> = [];
   try {
     const m = await snmpWalk(ctx.host, ctx.credentials.snmp, [NET_LIST.base], ctx.opts);
     const rows = new Map<string, Record<number, string>>();
@@ -45,91 +38,166 @@ async function readL3Networks(ctx: ActionContext): Promise<Array<{ name: string;
       row[col] = String(value);
     }
     for (const [name, cols] of rows.entries()) {
-      out.push({
-        name,
-        ip: cols[NET_LIST.COL_IP] ?? null,
-        netmask: cols[NET_LIST.COL_NETMASK] ?? null,
-        vlanId: cols[NET_LIST.COL_VLAN] !== undefined ? Number(cols[NET_LIST.COL_VLAN]) : null,
-        ifcLabel: netIfcLabel(cols[NET_LIST.COL_IFC]),
-      });
+      out.push({ name, ifcLabel: decodeNetIfc(cols[NET_LIST.COL_IFC]) });
     }
   } catch { /* no status tree — empty */ }
   return out;
 }
 
 /** True when a v6 row for this network name exists in either Setup/IPv6 table. */
-async function hasExistingV6Rows(ctx: ActionContext, name: string): Promise<boolean> {
-  const creds = sshCreds(ctx);
-  if (!creds) return false;
-  try {
-    const [lanIfc, addrs] = await Promise.all([
-      cliTableRows(ctx, creds, 'IPv6/LAN-Interfaces'),
-      cliTableRows(ctx, creds, 'IPv6/Network/Addresses'),
-    ]);
-    // Same first-token extraction as tableHasName (quoted or bare), case-insensitive.
-    const has = (rows: string[]) => {
-      const needle = name.toUpperCase();
-      for (const row of rows) {
-        const m = /^"([^"]+)"|^\S+/.exec(row.trim());
-        if (!m) continue;
-        if ((m[1] ?? m[0]).toUpperCase() === needle) return true;
-      }
-      return false;
-    };
-    return has(lanIfc) || has(addrs);
-  } catch { /* no SSH slot or CLI failed */ }
-  return false;
-}
-
-/** Reads the VLAN/Networks table rows via CLI (read-only `dir -a`). */
-async function readVlanRows(ctx: ActionContext): Promise<Array<{ name: string; vlanId: number | null; ports: string }>> {
-  const creds = sshCreds(ctx);
-  if (!creds) return [];
-  try {
-    const rows = await cliTableRows(ctx, creds, 'VLAN/Networks');
-    const out: Array<{ name: string; vlanId: number | null; ports: string }> = [];
+function hasExistingV6Rows(name: string, lanIfcRows: string[], addrRows: string[]): boolean {
+  // Same first-token extraction as the executor's tableHasName (quoted or bare), case-insensitive.
+  const has = (rows: string[]) => {
+    const needle = name.toUpperCase();
     for (const row of rows) {
-      // Row shape: "NAME" <vlanId> "<ports>"  (LCOS upper-cases names).
-      const m = /^"([^"]+)"\s+(\d+)\s+(.*)$/.exec(row.trim());
+      const m = /^"([^"]+)"|^\S+/.exec(row.trim());
       if (!m) continue;
-      out.push({ name: m[1], vlanId: Number(m[2]), ports: (m[3] ?? '').replace(/^"|"$/g, '') });
+      if ((m[1] ?? m[0]).toUpperCase() === needle) return true;
     }
-    return out;
-  } catch { /* no SSH slot or CLI failed — empty */ }
-  return [];
+    return false;
+  };
+  return has(lanIfcRows) || has(addrRows);
 }
 
-/** Picks the best-guess L2 interface for a new VLAN on this device. */
-function suggestInterface(vlanRows: Array<{ name: string; vlanId: number | null; ports: string }>, l3: Array<{ ifcLabel: string }>): PreflightValue {
-  // Interfaces already used by existing VLAN networks (their Ports column).
-  const used = new Set<string>();
-  for (const v of vlanRows) for (const p of v.ports.split(/[\s,]+/)) if (p) used.add(p);
-
-  // LAN ports that carry an L3 network — the device's established routing ifcs.
-  const l3Ifcs = new Set(l3.map((n) => n.ifcLabel).filter(Boolean));
-
-  // Candidate order: L3-carrying LAN ports first (that's where this router
-  // routes), then any other known LAN port, then the LCOS default LAN-1.
-  const candidates: string[] = [];
-  for (const ifc of [...l3Ifcs].sort()) if (!candidates.includes(ifc)) candidates.push(ifc);
-  for (let i = 1; i <= 8; i++) {
-    const p = `LAN-${i}`;
-    if (!used.has(p) && !candidates.includes(p)) candidates.push(p);
+/**
+ * Reads every table the network.create preflight needs in ONE CLI session:
+ * VLAN/Networks (idempotency + tag-port convention), the three L2-topology
+ * tables and both Setup/IPv6 tables (v6 existence hint). LCOS vRouters drop
+ * concurrent SSH connections AND each fresh session costs a full login + 2.5s
+ * banner settle — five separate sessions would blow the API's 45s preflight
+ * budget on WLC01, so everything rides one batched `dir -a` run (~15-20s).
+ */
+async function readPreflightTables(ctx: ActionContext): Promise<{
+  vlanRows: Array<{ name: string; vlanId: number | null; ports: string[] }>;
+  topo: L2Topology | null;
+  v6LanIfcRows: string[];
+  v6AddrRows: string[];
+}> {
+  const creds = sshCreds(ctx);
+  if (!creds) return { vlanRows: [], topo: null, v6LanIfcRows: [], v6AddrRows: [] };
+  try {
+    const [vlanRaw, ethRows, bridgeRows, bundleRows, v6LanIfcRows, v6AddrRows] = await cliTableRowsBatch(
+      ctx, creds,
+      ['VLAN/Networks', 'Interfaces/Ethernet-Ports', 'LAN-Bridge/Port-Data', 'LAN/Interface-Bundling/Interfaces', 'IPv6/LAN-Interfaces', 'IPv6/Network/Addresses'],
+    );
+    // Shared parser (same as the executor) — cuts at the closing quote of the
+    // Ports column so trailing empty columns can't leak into `ports`.
+    const vlanRows = parseVlanRows(vlanRaw);
+    const l3Interfaces = await readL3NetworksAsMap(ctx); // SNMP — overlaps nothing, cheap
+    return {
+      vlanRows,
+      topo: { physicalPorts: parsePhysicalPortRows(ethRows), bridges: parseBridgeRows(bridgeRows), bundles: parseBundleRows(bundleRows), l3Interfaces },
+      v6LanIfcRows,
+      v6AddrRows,
+    };
+  } catch (e) {
+    console.warn(`Preflight table batch read failed (${e instanceof Error ? e.message : String(e)})`);
+    return { vlanRows: [], topo: null, v6LanIfcRows: [], v6AddrRows: [] };
   }
-  if (!candidates.includes('LAN-1')) candidates.unshift('LAN-1');
+}
 
-  const pick = candidates[0];
-  const confidence: PreflightConfidence = l3Ifcs.size === 1 ? 'high' : l3Ifcs.size > 1 || used.size > 0 ? 'medium' : 'low';
-  return {
+/** SNMP NET_LIST walk → interface label → network names (same data as readL3Networks). */
+async function readL3NetworksAsMap(ctx: ActionContext): Promise<Record<string, string[]>> {
+  const out: Record<string, string[]> = {};
+  for (const n of await readL3Networks(ctx)) {
+    if (!n.ifcLabel) continue;
+    let names = out[n.ifcLabel];
+    if (!names) { names = []; out[n.ifcLabel] = names; }
+    if (!names.includes(n.name)) names.push(n.name);
+  }
+  return out;
+}
+
+/** Ethernet-Ports rows → physical port map (same grammar as l2Topology.ts). */
+function parsePhysicalPortRows(rows: string[]): L2PhysicalPort[] {
+  const out: L2PhysicalPort[] = [];
+  for (const row of rows) {
+    const parts = row.trim().split(/\s+/);
+    if (parts.length < 2) continue;
+    const name = firstToken(row);
+    if (!name) continue;
+    out.push({ name, assignment: parts[1] === 'Idle' ? null : parts[1] });
+  }
+  return out;
+}
+
+/** LAN-Bridge/Port-Data rows → bridge groups (same grammar as l2Topology.ts). */
+function parseBridgeRows(rows: string[]): L2Bridge[] {
+  const byName = new Map<string, string[]>();
+  for (const row of rows) {
+    const parts = row.trim().split(/\s+/);
+    if (parts.length < 3) continue;
+    const port = firstToken(row);
+    const group = parts[2];
+    if (!port || !group || group === 'none') continue;
+    let members = byName.get(group);
+    if (!members) { members = []; byName.set(group, members); }
+    if (!members.includes(port)) members.push(port);
+  }
+  return [...byName.entries()].map(([name, members]) => ({ name, members }));
+}
+
+/** Interface-Bundling rows → bundles (same grammar as l2Topology.ts). */
+function parseBundleRows(rows: string[]): L2Bundle[] {
+  const out: L2Bundle[] = [];
+  for (const row of rows) {
+    const parts = row.trim().split(/\s+/);
+    if (parts.length < 3) continue;
+    const name = firstToken(row);
+    if (!name || !/^BUNDLE-\d+$/i.test(name)) continue;
+    out.push({
+      name,
+      protocol: parts[2] ?? null,
+      members: [parts[4], parts[5]].filter((m): m is string => !!m && m !== 'none'),
+      operating: parts[1] === 'Yes' ? true : parts[1] === 'No' ? false : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Resolves the L3 attach point + VLAN tag ports for a new network on this
+ * device. LCOS layers interfaces (ETH-x → LAN-x / BUNDLE-x(LACP) → BRG-x
+ * bridges): the L3 address binds to the BRIDGE or bundle, while VLAN tagging
+ * follows the member ports — so both are resolved from the live topology
+ * instead of hardcoding a port.
+ */
+function resolveAttachPoints(
+  topo: L2Topology | null,
+  vlanRows: Array<{ name: string; vlanId: number | null; ports: string[] }>,
+  l3: Array<{ name: string; ifcLabel: string }>,
+): PreflightValue[] {
+  const out: PreflightValue[] = [];
+  if (!topo) {
+    out.push({ key: 'interface', value: 'LAN-1', confidence: 'low', note: 'device not reachable for L2 inspection — defaulting to LAN-1 (override if needed)' });
+    return out;
+  }
+
+  const existing = vlanRows.map((v) => ({ name: v.name, ports: v.ports }));
+  const suggestion = suggestL2AttachPoint(topo);
+  if (!suggestion) {
+    out.push({ key: 'interface', value: 'LAN-1', confidence: 'low', note: 'no bridges/bundles/assigned ports found on this device — defaulting to LAN-1' });
+    return out;
+  }
+
+  // Enrich the reason with the actual network names riding the attach point.
+  const bridge = topo.bridges.find((b) => b.name === suggestion.attach);
+  const domainIfcs = new Set([suggestion.attach, ...(bridge?.members ?? [])]);
+  const netsOnAttach = l3.filter((n) => n.ifcLabel && domainIfcs.has(n.ifcLabel)).map((n) => n.name);
+
+  out.push({
     key: 'interface',
-    value: pick,
-    confidence,
-    note: l3Ifcs.size === 1
-      ? `only ${pick} carries an L3 network on this device`
-      : used.size > 0
-        ? `${[...used].join(', ')} already carry VLANs — ${pick} is the first free candidate (override if needed)`
-        : `no existing VLAN networks found — defaulting to ${pick}`,
-  };
+    value: suggestion.attach,
+    confidence: /carries existing L3/.test(suggestion.reason) ? 'high' : 'medium',
+    note: `${suggestion.reason}${netsOnAttach.length > 0 ? ` (${netsOnAttach.join(', ')})` : ''} — the L3 address (v4/v6) binds here`,
+  });
+
+  // VLAN tag ports follow the device's existing convention on this bridge.
+  const ports = suggestL2VlanPorts(topo, suggestion.attach, existing);
+  if (ports.length > 1) {
+    out.push({ key: 'vlanPorts', value: ports, confidence: 'medium', note: `VLAN tag follows the device's convention on ${suggestion.attach}: ${ports.join(', ')}` });
+  }
+  return out;
 }
 
 /** Suggests a free WLAN slot for an SSID (fixed slots — read-only check). */
@@ -165,7 +233,6 @@ async function suggestSsidSlot(ctx: ActionContext): Promise<PreflightValue | nul
  */
 export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<string, unknown>): Promise<PreflightResult> {
   const values: PreflightValue[] = [];
-  const notes: string[] = [];
 
   const name = String(inputs.name ?? '').trim();
   const vlanId = typeof inputs.vlanId === 'number' ? Math.floor(inputs.vlanId as number) : NaN;
@@ -173,17 +240,16 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
   const wantsSsid = Boolean(inputs.ssid && typeof (inputs.ssid as Record<string, unknown>).name === 'string');
   const cidrV6 = typeof inputs.cidrV6 === 'string' ? inputs.cidrV6.trim() : '';
 
-  // Existing state for this name/VLAN — idempotency hints.
-  let vlanRows: Array<{ name: string; vlanId: number | null; ports: string }> = [];
-  try {
-    vlanRows = await readVlanRows(ctx);
-  } catch { /* no SSH slot */ }
+  // ONE batched CLI session for every table this preflight needs (see
+  // readPreflightTables) — sequential per-table sessions would blow the API's
+  // 45s budget on LCOS vRouters.
+  const tables = await readPreflightTables(ctx);
+  const { vlanRows, topo } = tables;
 
   if (name && hasVlan) {
     const existing = vlanRows.find((v) => v.name.toUpperCase() === name.toUpperCase());
     if (existing) {
-      values.push({ key: 'vlanId', value: existing.vlanId, confidence: 'high', note: `VLAN network "${name}" already exists with VLAN ${existing.vlanId} — left untouched` });
-      if (existing.vlanId !== vlanId) notes.push(`requested VLAN ${vlanId} but existing row uses ${existing.vlanId}`);
+      values.push({ key: 'vlanId', value: existing.vlanId, confidence: 'high', note: `VLAN network "${name}" already exists with VLAN ${existing.vlanId} — left untouched${existing.vlanId !== vlanId ? ` (requested VLAN was ${vlanId})` : ''}` });
     } else {
       values.push({ key: 'vlanId', value: vlanId, confidence: 'high', note: `no existing VLAN network named "${name}" — will be created` });
     }
@@ -199,15 +265,17 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
     });
   }
 
-  // Interface suggestion — the L2 port matters whenever an L3 address or SSID
-  // is involved (or always, so the user can pin it per device).
-  const l3 = await readL3Networks(ctx);
-  values.push(suggestInterface(vlanRows, l3));
+  // Attach-point resolution — LCOS layers interfaces (ETH-x → LAN-x / BUNDLE-x
+  // LACP → BRG-x bridges), so resolve BOTH the L3 attach ifc and the VLAN tag
+  // ports from the live topology instead of hardcoding a port. The l3 list is
+  // reshaped from the topology's interface→names map (same SNMP data).
+  const l3 = Object.entries(topo?.l3Interfaces ?? {}).flatMap(([ifcLabel, names]) => names.map((n) => ({ name: n, ifcLabel })));
+  values.push(...resolveAttachPoints(topo, vlanRows, l3));
 
   // Dual-stack hint — LCOS keeps IPv6 in a separate tree; when the rollout
   // carries a v6 CIDR tell the user what already exists for this name.
   if (cidrV6) {
-    const existing = await hasExistingV6Rows(ctx, name);
+    const existing = hasExistingV6Rows(name, tables.v6LanIfcRows, tables.v6AddrRows);
     values.push({
       key: 'cidrV6',
       value: cidrV6,
@@ -224,7 +292,11 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
     if (slot) values.push(slot);
   }
 
-  return { deviceId: ctx.deviceId ?? '', values, ...(notes.length > 0 ? { degraded: false } : {}) };
+  return {
+    deviceId: ctx.deviceId ?? '',
+    values,
+    ...(topo === null ? { degraded: true, error: 'L2 topology could not be read (no SSH slot or CLI failed) — attach point defaults to LAN-1' } : {}),
+  };
 }
 
 /** Registry of preflight resolvers per canonical intent id. */

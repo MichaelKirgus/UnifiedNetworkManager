@@ -30,6 +30,142 @@ export const INTENT_NETWORK_DELETE = 'network.delete' as const;
 /** All canonical intent ids, in rollout order. */
 export const CANONICAL_INTENTS: readonly string[] = [INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE];
 
+// ---------------------------------------------------------------------------
+// L2 topology — the cross-vendor abstraction for interface layering
+// ---------------------------------------------------------------------------
+/**
+ * Canonical READ-ONLY action id for a device's L2 interface hierarchy.
+ *
+ * Routers layer interfaces in vendor-specific ways (LCOS: ETH-x → LAN-x /
+ * BUNDLE-x(LACP) → BRG-x bridges; OPNsense: re0..reN + lagg + vlan; RouterOS:
+ * ether → bridge/bonding/vrrp). Fleet intents that attach a network to an
+ * interface (`network.create.interface`) must RESOLVE the right layer per
+ * device — never hardcode a port. Plugins SHOULD implement this read action so
+ * preflight resolvers (and future topology views) can see: which physical
+ * ports exist, how they map onto logical interfaces, which bridges/bundles
+ * group them, and which interface already carries L3 networks.
+ */
+export const INTENT_L2_TOPOLOGY_READ = 'l2.topology.read' as const;
+
+/** One physical port of a device (e.g. ETH-1, WAN, SFP-1). */
+export interface L2PhysicalPort {
+  /** Vendor-local name (e.g. "ETH-4", "WAN"). */
+  name: string;
+  /** The logical interface this port is assigned to (null = idle/unassigned). */
+  assignment: string | null;
+}
+
+/** One bridge group — a layer-2 domain that can carry networks/VLANs. */
+export interface L2Bridge {
+  /** Vendor-local name (e.g. "BRG-2"). */
+  name: string;
+  /** Logical interfaces bridged into this group (member ports, bundles, radios…). */
+  members: string[];
+}
+
+/** One link-aggregation bundle (LACP/802.3ad or static). */
+export interface L2Bundle {
+  /** Vendor-local name (e.g. "BUNDLE-1"). */
+  name: string;
+  /** Protocol label ("LACP", "static", …) when known. */
+  protocol?: string | null;
+  /** Member logical interfaces (e.g. ["LAN-1","LAN-2"]). */
+  members: string[];
+  /** Whether the bundle is currently operating (false = configured but inactive). Unknown → undefined/null. */
+  operating?: boolean | null;
+}
+
+/** The full L2 hierarchy of one device — the result of `l2.topology.read`. */
+export interface L2Topology {
+  physicalPorts: L2PhysicalPort[];
+  bridges: L2Bridge[];
+  bundles: L2Bundle[];
+  /** Logical interfaces that carry an L3 network (interface → network names; several networks may share one ifc). */
+  l3Interfaces?: Record<string, string[]>;
+}
+
+/**
+ * Suggests the best-guess ATTACH POINT for a new network on one device — the
+ * single interface a plugin should bind the L3 address to. Preference order is
+ * vendor-specific but generally: the bridge carrying existing LAN networks >
+ * a bundle carrying them > a plain port carrying them directly > any configured
+ * bridge > an active bundle > the first assigned physical port. Returned by
+ * preflight resolvers as the suggested `interface` value (with confidence + note).
+ */
+export function suggestL2AttachPoint(topo: L2Topology, preferred?: string): { attach: string; reason: string } | null {
+  if (!topo || (topo.bridges.length === 0 && topo.bundles.length === 0 && Object.keys(topo.l3Interfaces ?? {}).length === 0)) return null;
+  const l3 = topo.l3Interfaces ?? {};
+  // 1. A bridge that already carries L3 networks — the device's main LAN domain.
+  //    On LCOS the L3 address binds to the BRIDGE itself (NET_LIST Interface =
+  //    BRG-x), so check the bridge name AND its members; other vendors may bind
+  //    a member ifc instead.
+  for (const b of topo.bridges) {
+    const nets = [...new Set([b.name, ...b.members].flatMap((ifc) => l3[ifc] ?? []))];
+    if (nets.length > 0) return { attach: b.name, reason: `bridge ${b.name} carries existing L3 networks (${nets.join(', ')})` };
+  }
+  // 2. A bundle that already carries L3 networks.
+  for (const bu of topo.bundles) {
+    const nets = l3[bu.name] ?? [];
+    if (nets.length > 0) return { attach: bu.name, reason: `bundle ${bu.name} (${(bu.protocol ?? 'LACP').toLowerCase()}) carries existing L3 networks (${nets.join(', ')})` };
+  }
+  // 3. A plain interface directly carrying L3 networks — no bridge in front of
+  //    it and not part of an ACTIVE bundle (a port inside a configured-but-
+  //    inactive bundle is just a standalone port; LCOS-verified: WLC01 carries
+  //    its LAN on LAN-1 while BUNDLE-1 over it has Operating=No).
+  const inActiveAgg = (ifc: string) =>
+    topo.bridges.some((b) => b.name === ifc || b.members.includes(ifc)) ||
+    topo.bundles.some((bu) => bu.operating !== false && (bu.name === ifc || bu.members.includes(ifc)));
+  const direct = Object.entries(topo.l3Interfaces ?? {})
+    .filter(([ifc]) => !inActiveAgg(ifc))
+    .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  if (direct.length > 0) {
+    const [ifc, names] = direct[0];
+    return { attach: ifc, reason: `interface ${ifc} carries existing L3 networks (${names.join(', ')})` };
+  }
+  // 4. Any bridge with members at all (a configured LAN domain).
+  for (const b of topo.bridges) {
+    if (b.members.length > 0) return { attach: b.name, reason: `bridge ${b.name} is the only configured L2 domain (${b.members.join(', ')})` };
+  }
+  // 5. An active bundle (operating when the vendor reports it).
+  const active = topo.bundles.filter((bu) => bu.members.length > 0 && bu.operating !== false);
+  if (active.length > 0) return { attach: active[0].name, reason: `bundle ${active[0].name} (${(active[0].protocol ?? 'LACP').toLowerCase()}) aggregates ${active[0].members.join(', ')}` };
+  // 6. Caller's preference or the first physical assignment.
+  if (preferred && topo.physicalPorts.some((p) => p.assignment === preferred)) return { attach: preferred, reason: `requested interface ${preferred} exists on this device` };
+  const first = topo.physicalPorts.find((p) => p.assignment);
+  if (first?.assignment) return { attach: first.assignment, reason: `no bridges/bundles configured — using assigned port ${first.assignment}` };
+  return null;
+}
+
+/**
+ * Suggests the L2 member-port list for a new VLAN network on the given attach
+ * point. Convention (LCOS-verified): copy the Ports list of an EXISTING VLAN
+ * network whose L3 ifc sits in the same bridge — that is how the device's LAN
+ * segment is tagged today. Falls back to the bridge's physical/bundle members,
+ * then to the attach point itself.
+ */
+export function suggestL2VlanPorts(
+  topo: L2Topology,
+  attach: string,
+  existingVlanNetworks: Array<{ name: string; ports: string[] }>,
+): string[] {
+  const bridge = topo.bridges.find((b) => b.name === attach);
+  if (bridge) {
+    // The L3 ifcs that belong to this bridge domain (the bridge itself + members).
+    const inBridge = new Set([attach, ...bridge.members]);
+    // Invert l3Interfaces (ifc → network names) into network name → ifc.
+    const l3ByNetwork: Record<string, string> = {};
+    for (const [ifc, names] of Object.entries(topo.l3Interfaces ?? {})) for (const n of names) l3ByNetwork[n] = ifc;
+    for (const net of existingVlanNetworks) {
+      const ifc = l3ByNetwork[net.name];
+      if (ifc && inBridge.has(ifc) && net.ports.length > 0) return [...net.ports];
+    }
+    // No existing VLAN networks on this bridge — use its physical/bundle members.
+    const members = bridge.members.filter((m) => /^(LAN-\d+|BUNDLE-\d+)$/i.test(m));
+    if (members.length > 0) return members;
+  }
+  return [attach];
+}
+
 /** True when an action id is a canonical fleet intent (plugins implement them). */
 export function isCanonicalIntent(id: string): boolean {
   return (CANONICAL_INTENTS as readonly string[]).includes(id);
@@ -42,7 +178,7 @@ export function isCanonicalIntent(id: string): boolean {
 /**
  * Canonical input schema for `network.create`. Every field except `name` is
  * optional so a plugin can advertise the subset it supports:
- *   - LCOS: name, vlanId?, cidr|ip+netmask, cidrV6, interface, dhcpPool{start,end}, ssid{name}
+ *   - LCOS: name, vlanId?, cidr|ip+netmask, cidrV6, interface, vlanPorts?, dhcpPool{start,end}, ssid{name}
  *     (no vlanId → no dedicated L2 VLAN row; L3/DHCP bind to default VLAN 1)
  *   - OPNsense: name, vlanId (→ staged vlan.add + reconfigure)
  * `cidr` and `ip`/`netmask` are alternative forms of the same IPv4 L3 address —
@@ -50,6 +186,18 @@ export function isCanonicalIntent(id: string): boolean {
  * an optional IPv6 CIDR that rides alongside `cidr` (both set = dual-stack).
  * A rollout must provide at least one of vlanId / cidr|ip+netmask / cidrV6 /
  * ssid so there is something to create.
+ *
+ * ATTACH POINTS — vendors layer interfaces differently, and the L3 address
+ * often sits on a DIFFERENT interface than the VLAN tagging:
+ *   - `interface` = where the L3 address (v4/v6) binds — the single
+ *     "attach point". On LCOS this is usually a BRIDGE (BRG-x) or BUNDLE,
+ *     NOT a physical port. Plugins MUST resolve it per device in preflight
+ *     (see INTENT_L2_TOPOLOGY_READ / suggestL2AttachPoint) instead of
+ *     hardcoding; the user can override per device.
+ *   - `vlanPorts` = optional explicit list of logical ports that carry the
+ *     VLAN tag at L2 (LCOS: VLAN/Networks.Ports). When omitted, a plugin uses
+ *     its own convention (e.g. LCOS copies the member-port list of existing
+ *     VLAN networks on the same bridge).
  */
 export const NETWORK_CREATE_SCHEMA: InputSchema = {
   name: { type: 'string', required: true, minLength: 1, maxLength: 64, description: 'Network name (unique per device)' },
@@ -58,7 +206,8 @@ export const NETWORK_CREATE_SCHEMA: InputSchema = {
   cidrV6: { type: 'string', pattern: '^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*/\\d{1,3}$', description: 'Optional IPv6 L3 address as CIDR (e.g. fd00:42::1/64) — dual-stack when set alongside cidr' },
   ip: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'L3 address (alternative to cidr)' },
   netmask: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'Netmask for `ip`' },
-  interface: { type: 'string', maxLength: 64, description: 'Device-local L2 interface to attach the VLAN to (e.g. LAN-1)' },
+  interface: { type: 'string', maxLength: 64, description: 'L3 attach point — the device-local interface to bind the address to (bridge/bundle/port; resolved per device in preflight)' },
+  vlanPorts: { type: 'array', items: { type: 'string' }, description: 'Optional explicit list of logical ports carrying the VLAN tag at L2 (e.g. ["LAN-1","LAN-2"]); plugin convention applies when omitted' },
   dhcpPool: {
     type: 'object',
     description: 'Optional DHCP pool served on this network',
