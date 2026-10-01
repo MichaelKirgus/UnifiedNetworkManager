@@ -43,6 +43,12 @@ export interface SettingDescriptor {
   unit?: string;
   /** When true, this value is injected into plugins via x-unm-global-settings. */
   exposeToPlugins?: boolean;
+  /**
+   * Optional side-effect hook fired AFTER a successful update/reset of THIS
+   * setting (e.g. re-rendering the CA config from the new values). Failures are
+   * logged, never propagated — the settings write itself already succeeded.
+   */
+  onChange?: () => Promise<void> | void;
 }
 
 /** A setting as presented to the Settings page (effective value + metadata). */
@@ -321,6 +327,89 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'The file-repo plugin (capability `fileRepo`) that stores new uploads by default — the Files page preselects it so you normally never have to pick a repo per upload. Empty = auto-resolve (the built-in local-storage repo, or the first online provider). Individual uploads can still override this from the Files page.',
   },
 
+  // Certificate Authority (the unm-ca service — step-ca, see api/src/ca/).
+  // These knobs are rendered into the CA's ca.json by writeStepCaConfig() and
+  // hot-applied via SIGHUP; they do NOT take effect on already-issued leaves.
+  {
+    key: 'caLeafMinDays',
+    label: 'CA leaf minimum lifetime',
+    type: 'integer',
+    category: 'Certificate Authority',
+    unit: 'days',
+    min: 1,
+    max: 3650,
+    default: 7,
+    envVar: 'UNM_CA_LEAF_MIN_DAYS',
+    onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
+    help:
+      'Shortest validity the CA will issue for a plugin/API leaf certificate. Requests below this are clamped up. Keep short so revoked or leaked leaves die quickly.',
+  },
+  {
+    key: 'caLeafMaxDays',
+    label: 'CA leaf maximum lifetime',
+    type: 'integer',
+    category: 'Certificate Authority',
+    unit: 'days',
+    min: 1,
+    max: 3650,
+    default: 365,
+    envVar: 'UNM_CA_LEAF_MAX_DAYS',
+    onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
+    help:
+      'Longest validity the CA will issue for a leaf certificate. Requests above this are clamped down.',
+  },
+  {
+    key: 'caLeafDefaultDays',
+    label: 'CA leaf default lifetime',
+    type: 'integer',
+    category: 'Certificate Authority',
+    unit: 'days',
+    min: 1,
+    max: 3650,
+    default: 90,
+    envVar: 'UNM_CA_LEAF_DEFAULT_DAYS',
+    onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
+    help:
+      'Validity used when a client does not request a specific one. Clients renew at ~2/3 of their leaf lifetime, so this also sets the renewal cadence.',
+  },
+  {
+    key: 'caAllowedDnsNames',
+    label: 'CA allowed DNS names (SAN allow-list)',
+    type: 'string',
+    category: 'Certificate Authority',
+    default:
+      'unm-ca,localhost,api,mcp,basic-auth-plugin,secrets-provider-plugin,file-repo-plugin,opnsense-plugin,icmp-plugin,generic-snmp-plugin,lancom-lx-plugin,lancom-lcos-plugin,mikrotik-swos-plugin,lancom-sx-plugin,fbox-plugin,ix-truenas-plugin,mikrotik-routeros-plugin,docker-plugin,openwrt-plugin,generic-ssh-plugin,generic-http-plugin,generic-ntp-plugin,mailcow-plugin,zabbix-plugin',
+    envVar: 'UNM_CA_ALLOWED_DNS_NAMES',
+    maxLength: 8192,
+    onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
+    help:
+      'Comma-separated DNS names the CA may put into leaf certificates (SAN policy). Defaults to every UNM compose service name + localhost. Add a hostname here before enrolling a remote plugin instance under it — anything else is refused at issuance.',
+  },
+  {
+    key: 'caAcmeChallenges',
+    label: 'CA ACME challenge types',
+    type: 'string',
+    category: 'Certificate Authority',
+    default: 'http-01',
+    envVar: 'UNM_CA_ACME_CHALLENGES',
+    pattern: '^(http-01|dns-01|tls-alpn-01)(,(http-01|dns-01|tls-alpn-01))*$',
+    onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
+    help:
+      'Which RFC 8555 challenge types the ACME provisioner accepts. http-01 (default) is what UNM plugins use — the CA fetches a token from the plugin over the compose network. dns-01 / tls-alpn-01 are opt-in for future remote-instance topologies.',
+  },
+  {
+    key: 'caTlsMinVersion',
+    label: 'CA minimum TLS version',
+    type: 'string',
+    category: 'Certificate Authority',
+    default: '1.2',
+    envVar: 'UNM_CA_TLS_MIN_VERSION',
+    pattern: '^(1\.2|1\.3)$',
+    onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
+    help:
+      'Minimum TLS version the CA\'s own listener negotiates (and the floor UNM documents for plugin listeners). 1.2 is the default; 1.3 requires all clients to support it.',
+  },
+
   // Fleet rollout safety net (network.create plans).
   {
     key: 'rolloutOverlapMode',
@@ -571,6 +660,13 @@ export async function updateSetting(key: string, rawValue: unknown): Promise<Set
     [key, String(value), now]
   );
   cache = null;
+  if (d.onChange) {
+    try {
+      await d.onChange();
+    } catch (err) {
+      console.error(`[settings] onChange hook for "${key}" failed:`, err);
+    }
+  }
   return viewFor(d, await getEffectiveValues());
 }
 
@@ -584,6 +680,13 @@ export async function resetSetting(key: string): Promise<SettingView> {
   }
   await pool.query(`DELETE FROM system_settings WHERE "key" = $1`, [key]);
   cache = null;
+  if (d.onChange) {
+    try {
+      await d.onChange();
+    } catch (err) {
+      console.error(`[settings] onChange hook for "${key}" failed:`, err);
+    }
+  }
   return viewFor(d, await getEffectiveValues());
 }
 

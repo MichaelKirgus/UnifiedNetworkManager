@@ -124,6 +124,11 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // poll-cycle stats, Postgres health, and the admin-tunable HA settings.
   'system:read': 'View system status — workers, leader election, database health',
   'system:write': 'Change runtime worker/HA settings (poll cadence, concurrency)',
+  // Certificate Authority management (the unm-ca service): view CA status and
+  // issued certs, revoke leaves. Distinct from the device-facing `certificates:*`
+  // permissions — this is UNM's OWN PKI, not appliance cert inventory.
+  'ca:read': 'View the certificate authority status and issued certificates',
+  'ca:manage': 'Manage the certificate authority (revoke certificates)',
 };
 
 /** All known permission ids (stable order — object key insertion order). */

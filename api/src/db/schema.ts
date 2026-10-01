@@ -293,6 +293,37 @@ export const plugins = pgTable('plugins', {
   lastSeenAt: text('lastSeenAt'),
 });
 
+// Issued-leaf registry for UNM's OWN certificate authority (the unm-ca /
+// step-ca service). step-ca keeps its authoritative issuance state in its own
+// embedded DB; this table is UNM's operational mirror — written by the ACME
+// enrollment flow (Stage 1) and updated on revocation (POST /ca/revoke) — so
+// the webapp can show per-plugin cert status/expiry badges and the notification
+// worker can raise expiry warnings without parsing step-ca internals.
+export const caCertificates = pgTable(
+  'ca_certificates',
+  {
+    id: text('id').primaryKey(),
+    // Hex serial number (no 0x prefix) — unique per issued leaf; revocation is
+    // addressed by this value.
+    serial: text('serial').notNull().unique(),
+    // Identity the leaf was issued for: the plugin instance / api / mcp.
+    subject: text('subject').notNull(),
+    // SANs on the leaf (JSON array of DNS names).
+    dnsNames: text('dnsNames').notNull().default('[]'),
+    notBefore: text('notBefore').notNull(),
+    notAfter: text('notAfter').notNull(),
+    // issued | revoked. Revocation is PASSIVE in step-ca (no CRL/OCSP): the CA
+    // refuses renewals for a revoked serial, and existing leaves die at expiry —
+    // hence the short default leaf lifetime (caLeafDefaultDays).
+    status: text('status').notNull().default('issued'),
+    revokedAt: text('revokedAt'),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => ({
+    idxCaCertificatesSubject: index('idx_ca_certificates_subject').on(table.subject),
+  })
+);
+
 // User-set plugin option values, owned by the API (plugins never store their
 // own settings). `value` is JSON-encoded so any future option type fits.
 // Global rows have device_id = NULL; per-device override rows carry a

@@ -281,6 +281,23 @@ export async function initDb(): Promise<void> {
       "updatedAt" TEXT NOT NULL
     )`);
 
+  // Issued-leaf registry for UNM's own CA (see schema.ts caCertificates).
+  // Operational mirror of step-ca's issuance state — written by the ACME
+  // enrollment flow + POST /ca/revoke; drives UI badges and expiry notifications.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ca_certificates (
+      id TEXT PRIMARY KEY,
+      serial TEXT NOT NULL UNIQUE,
+      subject TEXT NOT NULL,
+      "dnsNames" TEXT NOT NULL DEFAULT '[]',
+      "notBefore" TEXT NOT NULL,
+      "notAfter" TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'issued',
+      "revokedAt" TEXT,
+      "createdAt" TEXT NOT NULL
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_ca_certificates_subject ON ca_certificates (subject)`);
+
   // Execution plans (see workers/planExecutor.ts). Plans persist a plugin's
   // /plan output + its provisioned secrets; steps run in dependency order.
   await pool.query(`

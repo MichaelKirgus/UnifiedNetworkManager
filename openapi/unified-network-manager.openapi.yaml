@@ -30,6 +30,7 @@ tags:
   - name: Users
   - name: Tokens
   - name: System
+  - name: Certificate Authority
 paths:
   /auth/flow:
     get:
@@ -5925,6 +5926,78 @@ paths:
         '404':
           description: Unknown setting key
 
+  /ca/status:
+    get:
+      tags: [Certificate Authority]
+      summary: Get certificate authority status
+      description: >-
+        CA version + root fingerprint/expiry (and the intermediate signing cert
+        expiry when reachable). Requires permission `ca:read`. Returns 503 with a
+        descriptive error while the CA container is down or still bootstrapping.
+      responses:
+        '200':
+          description: CA status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaStatusResponse'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:read permission
+        '503':
+          description: CA unavailable (container down / not bootstrapped)
+
+  /ca/certificates:
+    get:
+      tags: [Certificate Authority]
+      summary: List issued leaf certificates
+      description: >-
+        Leaves tracked in UNM's ca_certificates registry (written by the ACME
+        enrollment flow; updated on revocation). Requires permission `ca:read`.
+      responses:
+        '200':
+          description: Issued certificates
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaCertificatesResponse'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:read permission
+
+  /ca/revoke:
+    post:
+      tags: [Certificate Authority]
+      summary: Revoke a leaf certificate (passive)
+      description: >-
+        Marks the given serial revoked in step-ca's DB and UNM's registry. The CA
+        then refuses renewals for that serial; existing connections keep working
+        until the leaf expires or is renewed (no CRL/OCSP — see caLeafDefaultDays).
+        Requires permission `ca:manage`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CaRevokeRequest'
+      responses:
+        '200':
+          description: Revocation applied (CA + registry)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaRevokeResponse'
+        '400':
+          description: Invalid serial format
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:manage permission
+        '502':
+          description: CA unreachable — revocation NOT applied
+
 components:
   securitySchemes:
     bearerAuth:
@@ -9556,3 +9629,61 @@ components:
       properties:
         setting:
           $ref: '#/components/schemas/SettingView'
+
+    CaStatus:
+      type: object
+      required: [version, rootFingerprint, rootSubject, rootNotAfter]
+      properties:
+        version: { type: string, description: "step-ca version (e.g. 0.30.2)" }
+        rootFingerprint: { type: string, description: "SHA-256 fingerprint of the root certificate (hex)" }
+        rootSubject: { type: string, description: "Root certificate subject DN" }
+        rootNotAfter: { type: string, description: "Root certificate expiry (ISO 8601)" }
+        intermediateNotAfter: { type: string, nullable: true, description: "Intermediate (signing) certificate expiry (ISO 8601); null when the CA endpoint is unreachable" }
+
+    CaStatusResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          $ref: '#/components/schemas/CaStatus'
+
+    CaCertificateView:
+      type: object
+      required: [id, serial, subject, dnsNames, notBefore, notAfter, status, createdAt]
+      properties:
+        id: { type: string }
+        serial: { type: string, description: "Hex serial number (no 0x prefix)" }
+        subject: { type: string, description: "Identity the leaf was issued for (plugin instance / api / mcp)" }
+        dnsNames:
+          type: array
+          items: { type: string }
+          description: "SANs on the leaf"
+        notBefore: { type: string }
+        notAfter: { type: string }
+        status: { type: string, enum: [issued, revoked] }
+        revokedAt: { type: string, nullable: true }
+        createdAt: { type: string }
+
+    CaCertificatesResponse:
+      type: object
+      required: [certificates]
+      properties:
+        certificates:
+          type: array
+          items:
+            $ref: '#/components/schemas/CaCertificateView'
+
+    CaRevokeRequest:
+      type: object
+      required: [serial]
+      properties:
+        serial: { type: string, description: "Hex serial number of the leaf to revoke" }
+        reason: { type: integer, nullable: true, description: "Optional CRL revocation reason code (0–10)" }
+
+    CaRevokeResponse:
+      type: object
+      required: [serial]
+      properties:
+        serial: { type: string }
+        caStatus: { type: integer, description: "HTTP status returned by the CA's /1.0/revoke endpoint" }
+        caResponse: { description: "Raw response body from the CA" }

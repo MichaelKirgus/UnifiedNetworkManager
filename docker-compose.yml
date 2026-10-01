@@ -13,6 +13,28 @@ services:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
 
+  # Certificate Authority (step-ca, Apache 2.0 — see ca/Dockerfile). Issues the
+  # mTLS leaf certificates for every plugin + the API via RFC 8555 ACME.
+  # Two volumes with deliberately different exposure:
+  #   unm-ca-pki  CA-ONLY: root/intermediate certs + intermediate key. Mounted
+  #               here ONLY — no other service (incl. the API) ever sees keys.
+  #   unm-ca-cfg  shared with the api: ca.json (rendered by the API from global
+  #               settings; SIGHUP-reloaded on change) + step-ca's state DB.
+  # The CA listens on :9000 inside the compose network only — NOT published to
+  # the host. ACME directory: https://unm-ca:9000/acme/acme/directory.
+  unm-ca:
+    build:
+      context: .
+      dockerfile: ca/Dockerfile
+    environment:
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ${UNM_CA_PKI_VOLUME:-unm-ca-pki}:/pki
+      - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
   api:
     build:
       context: .
@@ -58,8 +80,13 @@ services:
       # Legacy api-local file-repo volume (fallback + pre-plugin rows). The
       # active byte store is the file-repo plugin's own volume below.
       - filerepo:/data/file-repo
+      # CA config volume (shared with unm-ca): the API renders ca.json here from
+      # global settings and persists its own admin JWK key. The PKI volume is
+      # deliberately NOT mounted — the API never sees CA signing keys.
+      - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca
     depends_on:
       - postgres
+      - unm-ca
     restart: unless-stopped
 
   # File-repository storage backend (capability `fileRepo`). STATELESS with
@@ -643,6 +670,13 @@ services:
 
 volumes:
   pgdata:
+  # CA PKI material (root/intermediate certs + intermediate key) — mounted on
+  # the unm-ca service ONLY. Override with UNM_CA_PKI_VOLUME=<host-path> in .env
+  # to back it up / migrate; losing this volume = re-keying the whole fleet.
+  unm-ca-pki:
+  # CA config + state (ca.json rendered by the API, step-ca's Badger DB) —
+  # mounted on BOTH unm-ca and api. Override with UNM_CA_CONFIG_VOLUME if needed.
+  unm-ca-cfg:
   # Legacy api-local file-repo volume (fallback + pre-plugin rows). Mounted on
   # the api service ONLY — plugins access files through the API, never directly.
   filerepo:

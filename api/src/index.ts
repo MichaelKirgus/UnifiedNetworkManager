@@ -29,6 +29,7 @@ import logsRouter from './routes/logs';
 import notificationsRouter from './routes/notifications';
 import systemRouter from './routes/system';
 import settingsRouter from './routes/settings';
+import caRouter from './routes/ca';
 import countsRouter from './routes/counts';
 import { filesRouter, internalFileRepoRouter } from './routes/files';
 import { startNotificationsWorker } from './workers/notifications';
@@ -154,6 +155,8 @@ async function main(): Promise<void> {
   api.use(systemRouter);
   // Central system settings (the Settings page) — app-wide knobs.
   api.use(settingsRouter);
+  // Certificate Authority management (/ca/status, /ca/certificates, /ca/revoke).
+  api.use(caRouter);
   // Aggregated nav-badge counts for the sidebar (permission-aware).
   api.use(countsRouter);
   // Central file repository (/files: list/upload/download/delete + usage audit).
@@ -221,6 +224,34 @@ async function main(): Promise<void> {
     void runAsLeader(LEADER_KEYS.notifications, 'notifications', () => startNotificationsWorker()).then((stop) => workerStops.push(stop));
     // Inactivity auto-disable (credential policy inactiveDisableAfterDays).
     void runAsLeader(LEADER_KEYS.inactiveUsers, 'inactiveUsers', () => startInactiveUsersWorker()).then((stop) => workerStops.push(stop));
+
+    // CA config rendering: the API owns ca.json (rendered from global settings)
+    // on the shared volume; the CA service SIGHUPs itself when it changes.
+    // The CA container may not have bootstrapped its PKI yet at our first write,
+    // so retry until it succeeds — after that, setting changes re-render via
+    // their onChange hooks (systemSettings.ts).
+    let caRenderWarned = false;
+    const renderCaConfig = async (): Promise<boolean> => {
+      try {
+        const { changed } = await require('./ca/stepCaConfig').writeStepCaConfig();
+        if (changed) console.log('[api] rendered CA config from global settings');
+        return true;
+      } catch (err) {
+        // Volume not mounted / PKI not bootstrapped yet — retry on next beat.
+        const e = err as { message?: string };
+        if (!caRenderWarned) {
+          caRenderWarned = true;
+          console.log(`[api] CA config render deferred (CA service not ready?): ${e.message}`);
+        }
+        return false;
+      }
+    };
+    void (async () => {
+      for (;;) {
+        if (await renderCaConfig()) break;
+        await new Promise((r) => setTimeout(r, 15_000));
+      }
+    })();
 
     // Discover plugins via mDNS/DNS-SD, with HTTP polling as a fallback for
     // Docker bridge networks where multicast is isolated. Leader-gated: the
