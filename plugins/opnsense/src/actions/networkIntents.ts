@@ -24,7 +24,7 @@ import * as ifaces from '../client/interfaces';
 import { opnsenseWriteOk } from '../client/interfaces';
 import { reconfigureDhcp } from '../client/dhcp';
 import { get, post } from '../client/http';
-import { probeAssignmentCapability, removeInterfaceAssignment, resolveAssignmentPath, writeInterfaceAssignment } from '../assignmentSsh';
+import { removeInterfaceAssignment, resolveAssignmentPath, writeInterfaceAssignment } from '../assignmentSsh';
 import type { ActionContext, ActionDescriptor } from './types';
 import { readOpnsenseL2Topology } from './l2Topology';
 
@@ -163,14 +163,12 @@ export const networkCreateAction: ActionDescriptor = {
       return { success: true, details: { skipped: `network "${name}" already exists on ${existing.device} (${existing.identifier})` } };
     }
 
-    // 1b. Capability gate — BEFORE any device state is written. On 26.7.x the
-    // assignment REST endpoint exists but its model has no IP fields, so the
-    // write would be refused AFTER the VLAN was already created (orphaned).
-    if ((v4 || v6) && (await resolveAssignmentPath(ctx.client, ctx.credentials as Record<string, unknown>)) === 'rest') {
-      const cap = await probeAssignmentCapability(ctx.client);
-      if (!cap.restIpCapable) {
-        return { success: false, error: 'the assignment REST API on this firmware (26.7.x) can create interface nodes but CANNOT hold an L3 address — its model has no type4/ipaddr fields; bind an `ssh` credential slot for the ≤26.4-style config edit, or upgrade to a build with the full assignment model' };
-      }
+    // 1b. Capability gate — BEFORE any device state is written. resolveAssignmentPath
+    // already folds in the 26.7.x case (REST endpoint present but its minimal model
+    // cannot hold an L3 address → falls back to SSH when a slot is bound). Only a
+    // null path means "no way to write this" — refuse before creating any VLAN.
+    if ((v4 || v6) && !(await resolveAssignmentPath(ctx.client, ctx.credentials as Record<string, unknown>))) {
+      return { success: false, error: 'no write path for interface assignments on this appliance: the assignment REST model cannot hold an L3 address and no `ssh` credential slot is bound — bind one to enable config-edit writes' };
     }
 
     // 2. Attach point + VLAN device.

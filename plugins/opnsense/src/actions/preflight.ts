@@ -111,25 +111,23 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
     } catch { /* non-fatal */ }
   }
 
-  // Write-path availability — assignment writes need REST (26.7+) or a bound
-  // SSH slot (≤26.4). A single GET probe; it 404s on older appliances. The REST
-  // endpoint existing is NOT the same as being able to hold an L3 address: the
-  // 26.7.x model has no IP fields, so a create would be refused by the executor.
+  // Write-path availability — resolveAssignmentPath folds in the 26.7.x case:
+  // REST only when its model can hold an L3 address, otherwise SSH (bound slot),
+  // otherwise null. The note distinguishes WHY ssh is used (no endpoint at all
+  // vs. minimal 26.7.x model) so the plan author knows what to expect.
   try {
     const path = await resolveAssignmentPath(ctx.client, ctx.credentials as Record<string, unknown>);
     if (path === 'rest') {
+      values.push({ key: '_writePath', value: 'rest', confidence: 'high', note: 'interface assignments are written via the REST model (full assignment model)' });
+    } else if (path === 'ssh') {
       const cap = await probeAssignmentCapability(ctx.client);
       values.push(
-        cap.restIpCapable
-          ? { key: '_writePath', value: 'rest', confidence: 'high', note: 'interface assignments are written via the REST model (full assignment model)' }
-          : { key: '_writePath', value: 'rest', confidence: 'low', note: 'assignment REST API present, but this firmware\'s model has no IP fields — network.create will be REFUSED; bind an `ssh` slot or upgrade to a build with the full assignment model' },
+        cap.restPresent
+          ? { key: '_writePath', value: 'ssh', confidence: 'medium', note: "assignment REST API present, but this firmware's model has no IP fields — writes fall back to the bound SSH slot (config.xml edit + rc.configure_interface)" }
+          : { key: '_writePath', value: 'ssh', confidence: 'medium', note: 'this appliance predates the assignment REST API — writes go through the bound SSH slot (config.xml edit + rc.configure_interface)' },
       );
     } else {
-      values.push(
-        path === 'ssh'
-          ? { key: '_writePath', value: 'ssh', confidence: 'medium', note: 'this appliance predates the assignment REST API — writes go through the bound SSH slot (config.xml edit + rc.configure_interface)' }
-          : { key: '_writePath', value: null, confidence: 'low', note: 'NO write path available: ≤26.4 appliance without a bound `ssh` credential slot — bind one before creating this plan' },
-      );
+      values.push({ key: '_writePath', value: null, confidence: 'low', note: 'NO write path available: the assignment REST model cannot hold an L3 address and no `ssh` credential slot is bound — bind one before creating this plan' });
     }
   } catch { /* non-fatal */ }
 

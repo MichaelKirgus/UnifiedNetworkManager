@@ -6,11 +6,13 @@
  *   - ZFS inventory + security checks need an SSH slot bound AND (for ZFS) the
  *     appliance to actually run ZFS storage (detected feature 'zfs').
  *   - The canonical network intents (network.create / network.delete) write
- *     interface assignments through TWO paths: REST setAssignmentItem on 26.7+
- *     (no extra credentials), or an SSH config upsert on ≤26.4 (requires a
- *     bound `ssh` slot). The support matrix encodes exactly that split, so the
- *     webapp can show "network rollout unavailable — bind an SSH credential"
- *     instead of failing at plan-execution time.
+ *     interface assignments through TWO paths: REST setAssignmentItem when the
+ *     firmware's model can hold an L3 address (full assignment model — master/
+ *     27.x+), or an SSH config upsert otherwise. On every RELEASED build that
+ *     matters today (≤26.4 and 26.7.x) a bound `ssh` slot is therefore required;
+ *     the support matrix encodes exactly that, so the webapp can show "network
+ *     rollout unavailable — bind an SSH credential" instead of failing at
+ *     plan-execution time.
  */
 
 import type { DeviceSupport } from '@unm/plugin-sdk';
@@ -48,17 +50,20 @@ export const OPNSENSE_DEVICE_SUPPORT: DeviceSupport = {
   ],
 
   profiles: [
-    // OPNsense 26.7+ — the REST API gained setAssignmentItem + reconfigure, so
-    // interface-assignment writes (the network intents) need NO extra slot.
+    // OPNsense 26.7+ — the REST API gained setAssignmentItem + reconfigure, but
+    // on every RELEASED build in this line (26.7.x) the model cannot hold an L3
+    // address, so assignment writes fall back to the SSH config edit and need a
+    // bound `ssh` slot. A future full-model build would make REST sufficient —
+    // until then the slot requirement is what makes 26.7.x configurable at all.
     {
       vendor: 'opnsense',
       minFirmware: '26.7',
       capabilities: [
-        { name: 'interfaceAssignment', label: 'Interface assignment (REST API)' },
+        { name: 'interfaceAssignment', label: 'Interface assignment (REST or SSH fallback)', conditions: { requiredSlots: ['ssh'] } },
       ],
       intents: [
-        { actionId: 'network.create', label: 'Create network' },
-        { actionId: 'network.delete', label: 'Delete network' },
+        { actionId: 'network.create', label: 'Create network', conditions: { requiredSlots: ['ssh'] } },
+        { actionId: 'network.delete', label: 'Delete network', conditions: { requiredSlots: ['ssh'] } },
       ],
     },
     // OPNsense ≤26.4 — assignment writes go through an SSH config upsert, so a

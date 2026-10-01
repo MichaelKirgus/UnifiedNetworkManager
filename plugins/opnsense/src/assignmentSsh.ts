@@ -43,12 +43,33 @@ export interface AssignmentWrite {
   subnetv6?: string;
 }
 
-/** Probes which write path is available (REST first — it exists on 26.7+). */
+/**
+ * Resolves the write path for interface assignments on this appliance:
+ *   - REST when the endpoint exists AND its model can hold an L3 address
+ *     (the full assignment model — master/27.x+ builds);
+ *   - otherwise SSH config edit, whenever a `ssh` slot is bound. This covers
+ *     BOTH ≤26.4 appliances (no endpoint at all) and 26.7.x appliances whose
+ *     minimal model cannot hold an address — the same DOMDocument upsert +
+ *     rc.configure_interface works on every firmware line, so a bound slot
+ *     makes 26.7.x fully configurable too;
+ *   - null when neither is available (the caller reports that clearly).
+ */
 export async function resolveAssignmentPath(client: AxiosInstance, credentials: Record<string, unknown>): Promise<AssignmentPath> {
-  try {
-    const r = await getAssignments(client);
-    if (r.ok) return 'rest';
-  } catch { /* fall through to SSH */ }
+  const cap = await probeAssignmentCapability(client);
+  if (cap.restPresent && cap.restIpCapable) return 'rest';
+  const ssh = resolveSshCredentials(credentials, { slotOnly: true });
+  return ssh ? 'ssh' : null;
+}
+
+/**
+ * Resolves the path for REMOVING an interface assignment. Node removal works
+ * via REST on every build that has the endpoint (del_item + reconfigure is part
+ * of even the minimal 26.7.x model — verified live), so only ≤26.4 appliances
+ * need the SSH config edit here.
+ */
+export async function resolveAssignmentRemovePath(client: AxiosInstance, credentials: Record<string, unknown>): Promise<AssignmentPath> {
+  const cap = await probeAssignmentCapability(client);
+  if (cap.restPresent) return 'rest';
   const ssh = resolveSshCredentials(credentials, { slotOnly: true });
   return ssh ? 'ssh' : null;
 }
@@ -136,14 +157,17 @@ function phpRemoveSource(payloadB64: string): string {
   ].join('\n');
 }
 
-/** Wraps a PHP source into the base64 shell command (quoting-proof). */
-function phpShellCommand(phpSource: string): string {
+/** Wraps a PHP source into the base64 shell command (quoting-proof).
+ *  `postApply` lines run ONLY when the config edit succeeded — they must sit
+ *  before the final exit, or they are dead code that never executes. */
+function phpShellCommand(phpSource: string, postApply: string[] = []): string {
   const b64 = Buffer.from(phpSource, 'utf8').toString('base64');
   return [
     'um=$(mktemp /tmp/unm-ifc.XXXXXX) || exit 9',
     `echo '${b64}' | base64 -d > "$um"`,
     'rc=0; php "$um" || rc=$?',
     'rm -f "$um"',
+    ...(postApply.length ? ['if [ $rc -eq 0 ]; then', ...postApply, 'fi'] : []),
     'exit $rc',
   ].join('\n');
 }
@@ -176,14 +200,8 @@ export async function writeInterfaceAssignment(
   const path = await resolveAssignmentPath(client, credentials);
 
   if (path === 'rest') {
-    // The endpoint existing is NOT enough: on 26.7.x the model has no IP fields,
-    // so set_item would "save" and silently drop the address. Refuse loudly.
-    const cap = await probeAssignmentCapability(client);
-    if (!cap.restIpCapable) {
-      throw new Error(
-        'the assignment REST API on this firmware (26.7.x) can create interface nodes but CANNOT hold an L3 address — its model has no type4/ipaddr fields; bind an `ssh` credential slot for the ≤26.4-style config edit, or upgrade to a build with the full assignment model',
-      );
-    }
+    // resolveAssignmentPath only returns 'rest' when the model can hold an L3
+    // address — on 26.7.x (minimal model) it already fell back to SSH here.
     // Full REST model (master/27.x+) — staged like every other item controller;
     // reconfigure applies it.
     const item: Record<string, unknown> = { if: w.device, descr: w.descr };
@@ -198,17 +216,16 @@ export async function writeInterfaceAssignment(
 
   if (path !== 'ssh') {
     throw new Error(
-      'no write path for interface assignment: this appliance predates the /api/interfaces/assignment REST model (≤26.4) and no `ssh` credential slot is bound to the plugin',
+      'no write path for interface assignments: the assignment REST model on this firmware cannot hold an L3 address and no `ssh` credential slot is bound to the plugin — bind one to enable config-edit writes',
     );
   }
 
   const payload = Buffer.from(JSON.stringify({ identifier: w.identifier, device: w.device, descr: w.descr, ipaddr: w.ipaddr ?? null, subnet: w.subnet ?? null, ipaddrv6: w.ipaddrv6 ?? null, subnetv6: w.subnetv6 ?? null }), 'utf8').toString('base64');
-  const script = [
-    phpShellCommand(phpUpsertSource(payload)),
+  const script = phpShellCommand(phpUpsertSource(payload), [
     // Apply the single interface (shipped per-ifc apply) + filter reload.
     `/usr/local/etc/rc.configure_interface ${w.identifier} >/dev/null 2>&1 || true`,
     'configd filter reload >/dev/null 2>&1 || true',
-  ].join('\n');
+  ]);
 
   const r = await sshExec(credentials, host, script, 90_000, sshPort);
   if (r.code !== 0) throw new Error(`SSH assignment write exited ${r.code}: ${(r.stderr || r.stdout).slice(0, 300)}`);
@@ -225,7 +242,7 @@ export async function removeInterfaceAssignment(
   teardown?: { device: string; v4: string[]; v6: string[] },
   sshPort?: number,
 ): Promise<{ path: 'rest' | 'ssh'; detail: string }> {
-  const path = await resolveAssignmentPath(client, credentials);
+  const path = await resolveAssignmentRemovePath(client, credentials);
 
   if (path === 'rest') {
     // del_item works on every build that has the endpoint (node removal is part
@@ -239,7 +256,7 @@ export async function removeInterfaceAssignment(
 
   if (path !== 'ssh') {
     throw new Error(
-      'no write path for interface assignment: this appliance predates the /api/interfaces/assignment REST model (≤26.4) and no `ssh` credential slot is bound to the plugin',
+      'no write path for interface assignments: the assignment REST model on this firmware cannot hold an L3 address and no `ssh` credential slot is bound to the plugin — bind one to enable config-edit writes',
     );
   }
 
@@ -253,8 +270,7 @@ export async function removeInterfaceAssignment(
   }
   const script = [
     ...teardownCmds,
-    phpShellCommand(phpRemoveSource(payload)),
-    'configd filter reload >/dev/null 2>&1 || true',
+    phpShellCommand(phpRemoveSource(payload), ['configd filter reload >/dev/null 2>&1 || true']),
   ].join('\n');
 
   const r = await sshExec(credentials, host, script, 90_000, sshPort);
