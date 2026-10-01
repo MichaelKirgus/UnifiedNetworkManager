@@ -1,4 +1,4 @@
-import axios from 'axios';
+import { pluginAxios } from '../utils/pluginHttp';
 import { db } from '../db';
 import { and, asc, eq } from 'drizzle-orm';
 import * as schema from '../db/schema';
@@ -112,8 +112,8 @@ async function processJob(jobId: string): Promise<void> {
     // defaults) so the plugin can read its options without storing them itself.
     const headers = await settingsHeaders(plugin.id, device.id).catch(() => ({}));
 
-    const response = await axios.post<ConfigResponse>(
-      `${plugin.endpoint.replace(/\/$/, '')}/config`,
+    const response = await pluginAxios(plugin.endpoint).post<ConfigResponse>(
+      '/config',
       {
         deviceId: device.id,
         // The UNM display name — plugins use it to label artifacts they create

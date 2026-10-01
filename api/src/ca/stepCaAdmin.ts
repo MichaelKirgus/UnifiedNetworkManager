@@ -129,6 +129,24 @@ export async function getCaStatus(): Promise<CaStatus> {
 }
 
 /**
+ * The CA trust bundle as PEM: the ROOT (from the shared config volume) followed
+ * by the INTERMEDIATE(S) from step-ca's public /1.0/intermediates.pem endpoint.
+ * This is what non-CA services use as their `ca` trust anchor — plugins never
+ * mount the PKI volume, so the API brokers it (GET /plugin/ca/bundle).
+ */
+export async function getCaBundlePem(): Promise<string> {
+  const rootPem = fs.readFileSync(ROOT_PEM_PATH, 'utf8');
+  let intermediates = '';
+  try {
+    const interPem = await rawText('/1.0/intermediates.pem');
+    if (interPem) intermediates = interPem.endsWith('\n') ? interPem : `${interPem}\n`;
+  } catch {
+    /* CA not ready — root alone still lets clients verify the ACME endpoint's chain */
+  }
+  return `${rootPem.trimEnd()}\n${intermediates}`;
+}
+
+/**
  * Passively revokes a certificate by serial (hex). step-ca marks it revoked in
  * its DB; existing connections keep working until the leaf expires or is
  * renewed — this matches UNM's short-leaf-lifetime threat model.

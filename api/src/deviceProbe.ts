@@ -1,4 +1,4 @@
-import axios from 'axios';
+import { pluginAxios } from './utils/pluginHttp';
 import { and, eq } from 'drizzle-orm';
 import { db } from './db';
 import * as schema from './db/schema';
@@ -96,8 +96,8 @@ export async function fetchDeviceProbe(
 
   let response;
   try {
-    response = await axios.post<ProbeResult>(
-      `${plugin.endpoint.replace(/\/$/, '')}/probe`,
+    response = await pluginAxios(plugin.endpoint).post<ProbeResult>(
+      '/probe',
       {
         deviceId,
         managementAddress: device.managementAddress,

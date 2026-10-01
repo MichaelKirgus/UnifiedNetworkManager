@@ -5,12 +5,15 @@
  */
 
 import path from 'path';
+import http from 'http';
+import tls from 'tls';
 import type { IncomingMessage } from 'http';
 import type { Duplex } from 'stream';
 import cors from 'cors';
 import express, { Express, Request, Response } from 'express';
 import { Bonjour } from 'bonjour-service';
 import { PluginIdentity } from './identity';
+import { ensureTlsIdentity, scheduleTlsRenewal, TlsIdentity } from './tlsIdentity';
 import { createSelfMetrics } from './selfMetrics';
 import {
   CatalogEntry,
@@ -80,14 +83,25 @@ export interface PluginServerOptions {
   /** Extra custom self-metrics gauges, merged into GET /metrics (see createSelfMetrics). */
   selfMetricsExtra?: Record<string, number> | (() => Record<string, number>);
   /** Optional WebSocket upgrade handler (e.g. makeConsoleUpgrade for the SSH console,
-   *  capability 'sshConsole'). Attached to the HTTP server on listen(); non-matching
-   *  paths are dropped by the handler itself. */
+   *  capability 'sshConsole'). Attached to BOTH the plain and TLS servers on
+   *  listen(); non-matching paths are dropped by the handler itself. */
   wsUpgrade?: (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
+  /**
+   * Enable mTLS (ACME enrollment against UNM's step-ca). Defaults to
+   * `process.env.UNM_TLS === '1'`. When enabled the server starts on plain
+   * HTTP immediately and swaps in-place to a TLS listener once enrollment
+   * succeeds (retries every 60s until it does — the fleet stays reachable on
+   * plain HTTP if the CA is down). The API's pluginHttp factory tries https
+   * first, so no advertised-endpoint change is needed.
+   */
+  tlsEnabled?: boolean;
 }
 
 export interface PluginServer {
   app: Express;
   identity: PluginIdentity;
+  /** True once the TLS listener is live (mTLS). False while plain HTTP only. */
+  readonly tlsLive: boolean;
   /** Starts listening + mDNS advertising. Returns the bound port. */
   listen(): Promise<number>;
 }
@@ -120,6 +134,101 @@ export function buildDiscoverPayload(identity: PluginIdentity, extras?: Discover
   };
 }
 
+/** Closes a listener, draining idle keep-alives first; force-kills after 5s. */
+function closeServer(server: http.Server | tls.Server): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (): void => {
+      if (!done) {
+        done = true;
+        resolve();
+      }
+    };
+    server.close(finish);
+    (server as unknown as { closeIdleConnections?: () => void }).closeIdleConnections?.();
+    const t = setTimeout(() => {
+      // Stuck active connections — destroy them so the port frees up.
+      (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
+      finish();
+    }, 5000);
+    (t as unknown as { unref?: () => void }).unref?.();
+  });
+}
+
+/**
+ * Background mTLS enrollment loop. Starts plain HTTP; on each successful
+ * ensureTlsIdentity() closes the current listener and re-opens it as a TLS
+ * server (requestCert + rejectUnauthorized — full mTLS). Retries every 60s
+ * while enrollment fails, so a downed CA never takes the plugin offline.
+ */
+function startTlsEnrollment(
+  app: Express,
+  port: number,
+  logTag: string,
+  wsUpgrade?: (req: IncomingMessage, socket: Duplex, head: Buffer) => void,
+  onLiveChange?: (live: boolean) => void,
+): { isLive(): boolean } {
+  let live = false;
+  let currentServer: http.Server | tls.Server | null = null;
+  let stopRenewal: (() => void) | null = null;
+  let loadedKeyPem: string | null = null;
+  let loadedCertPem: string | null = null;
+
+  const attachUpgrade = (s: http.Server | tls.Server): void => {
+    if (wsUpgrade) s.on('upgrade', wsUpgrade);
+  };
+
+  const swapToTls = async (identity: TlsIdentity): Promise<void> => {
+    if (currentServer) await closeServer(currentServer);
+    // tls.Server emits 'request' exactly like an http.Server — mount the same
+    // express app on it. The cast is type-level only; runtime behavior is
+    // identical to `app.listen()` over TLS.
+    const server = tls.createServer({
+      key: identity.keyPem,
+      cert: identity.certChainPem,
+      ca: [identity.caBundlePem],
+      requestCert: true,
+      rejectUnauthorized: true,
+    });
+    (server as unknown as http.Server).on('request', app);
+    attachUpgrade(server);
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, () => resolve());
+    });
+    currentServer = server;
+    live = true;
+    loadedKeyPem = identity.keyPem;
+    loadedCertPem = identity.certChainPem;
+    onLiveChange?.(true);
+    console.log(`[${logTag}] mTLS listener live on :${port} (leaf valid to ${identity.notAfter.toISOString()})`);
+  };
+
+  const enrollOnce = async (): Promise<void> => {
+    try {
+      const identity = await ensureTlsIdentity({ identity: logTag });
+      // Swap when the TLS listener isn't up yet OR the on-disk material changed.
+      if (!live || identity.keyPem !== loadedKeyPem || identity.certChainPem !== loadedCertPem) {
+        await swapToTls(identity);
+        stopRenewal?.();
+        stopRenewal = scheduleTlsRenewal(identity, () => void enrollOnce(), (m) => console.log(`[${logTag}] [tls] ${m}`));
+      }
+    } catch (err) {
+      console.warn(`[${logTag}] mTLS enrollment failed (staying on plain HTTP):`, (err as Error).message);
+    }
+  };
+
+  void enrollOnce().then(() => {
+    // If the first pass left us plain (CA down), keep retrying every 60s.
+    const timer = setInterval(() => {
+      if (!live) void enrollOnce();
+    }, 60_000);
+    (timer as unknown as { unref?: () => void }).unref?.();
+  });
+
+  return { isLive: () => live };
+}
+
 /** Advertises the plugin over mDNS/DNS-SD (service type `_unm-plugin._tcp`). Best-effort. */
 function startMdnsAdvertising(identity: PluginIdentity, logTag: string): void {
   try {
@@ -148,6 +257,15 @@ function startMdnsAdvertising(identity: PluginIdentity, logTag: string): void {
 export function createPluginServer(opts: PluginServerOptions): PluginServer {
   const identity = opts.identity;
   const logTag = opts.logTag ?? identity.displayName.toLowerCase().replace(/\s+/g, '-');
+  const tlsEnabled = opts.tlsEnabled ?? process.env.UNM_TLS === '1';
+
+  // Live TLS state — surfaced in /discover so the API's pluginHttp factory can
+  // prefer https without probing. Updated by startTlsEnrollment on swap.
+  const tlsState: { live: boolean } = { live: false };
+  const discoveryWrapped: DiscoveryExtras | (() => DiscoveryExtras) = () => ({
+    ...(typeof opts.discovery === 'function' ? opts.discovery() : (opts.discovery ?? {})),
+    ...(tlsEnabled ? { tlsLive: tlsState.live } : {}),
+  });
 
   const app = express();
   app.use(cors());
@@ -178,7 +296,7 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
   });
 
   app.get('/discover', (_req: Request, res: Response) => {
-    res.status(200).json(buildDiscoverPayload(identity, opts.discovery));
+    res.status(200).json(buildDiscoverPayload(identity, discoveryWrapped));
   });
 
   // Track work requests (/monitoring, /config, /plan): in-flight count,
@@ -189,10 +307,13 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
   return {
     app,
     identity,
+    get tlsLive(): boolean {
+      return tlsState.live;
+    },
     listen() {
       return new Promise<number>((resolve) => {
         const server = app.listen(identity.port, () => {
-          console.log(`[${logTag}] listening on port ${identity.port}`);
+          console.log(`[${logTag}] listening on port ${identity.port}${tlsEnabled ? ' (mTLS enrollment in progress)' : ''}`);
           startMdnsAdvertising(identity, logTag);
           resolve(identity.port);
         });
@@ -203,6 +324,12 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
         }
         // Keep a reference so the process stays alive and tests can close it.
         (app as unknown as { __server?: typeof server }).__server = server;
+
+        if (tlsEnabled) {
+          startTlsEnrollment(app, identity.port, logTag, opts.wsUpgrade, (live) => {
+            tlsState.live = live;
+          });
+        }
       });
     },
   };

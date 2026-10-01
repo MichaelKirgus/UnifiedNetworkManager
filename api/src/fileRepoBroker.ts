@@ -1,5 +1,6 @@
 import type { Readable } from 'stream';
-import axios, { AxiosInstance } from 'axios';
+import { AxiosInstance } from 'axios';
+import { pluginAxios } from './utils/pluginHttp';
 import { eq } from 'drizzle-orm';
 import { db } from './db';
 import * as schema from './db/schema';
@@ -160,10 +161,9 @@ const httpCache = new Map<string, AxiosInstance>();
 function providerHttp(provider: ProviderRecord): AxiosInstance {
   let h = httpCache.get(provider.id);
   if (!h) {
-    const base = provider.endpoint.replace(/\/+$/, '');
     const apiKey = process.env.PLUGIN_API_KEY;
-    h = axios.create({
-      baseURL: base,
+    // mTLS (Stage 1): pluginAxios picks the transport for this provider.
+    h = pluginAxios(provider.endpoint, {
       timeout: PROVIDER_TIMEOUT_MS,
       headers: apiKey ? { 'x-plugin-api-key': apiKey } : undefined,
       maxContentLength: Infinity, // multi-GB ISOs — never buffer/limit

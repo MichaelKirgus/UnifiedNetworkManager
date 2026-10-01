@@ -1,4 +1,4 @@
-import axios from 'axios';
+import { pluginAxios } from './utils/pluginHttp';
 import { and, eq } from 'drizzle-orm';
 import { db } from './db';
 import * as schema from './db/schema';
@@ -106,8 +106,8 @@ export async function fetchDeviceState(
 
   let response;
   try {
-    response = await axios.post<DeviceStateResponse>(
-      `${plugin.endpoint.replace(/\/$/, '')}/state`,
+    response = await pluginAxios(plugin.endpoint).post<DeviceStateResponse>(
+      '/state',
       {
         deviceId,
         managementAddress: device.managementAddress,

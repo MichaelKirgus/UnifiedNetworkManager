@@ -1,4 +1,4 @@
-import axios from 'axios';
+import { pluginAxios } from './utils/pluginHttp';
 import { and, eq } from 'drizzle-orm';
 import { db } from './db';
 import * as schema from './db/schema';
@@ -74,8 +74,8 @@ export async function resolveDeviceQuickActionUrl(
   const headers = await settingsHeaders(pluginId, deviceId).catch(() => ({}));
 
   try {
-    const response = await axios.post<QuickActionResult>(
-      `${plugin.endpoint.replace(/\/$/, '')}/quick-action`,
+    const response = await pluginAxios(plugin.endpoint).post<QuickActionResult>(
+      '/quick-action',
       { deviceId: device.id, managementAddress: device.managementAddress, actionId },
       // URL resolution is a local computation inside the plugin — no appliance
       // round-trip. A short budget keeps a wedged plugin from stalling the click.

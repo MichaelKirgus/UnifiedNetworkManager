@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { and, asc, desc, eq, gte, inArray, like, ne } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import axios from 'axios';
+import { pluginAxios } from '../utils/pluginHttp';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission, require2FA } from '../auth/middleware';
@@ -409,13 +409,13 @@ router.post(
       return;
     }
 
-    const plugin = await db.query.plugins.findFirst({ where: (plugins, { eq }) => eq(plugins.id, pluginId) });
-    if (!plugin) {
+    const pluginRow = await db.query.plugins.findFirst({ where: (plugins, { eq }) => eq(plugins.id, pluginId) });
+    if (!pluginRow) {
       res.status(404).json({ error: 'Plugin not found' });
       return;
     }
-    const preflightUrl = `${plugin.endpoint.replace(/\/$/, '')}/preflight`;
-
+    // Alias so the async worker closure below keeps the non-undefined narrowing.
+    const plugin = pluginRow;
     const allowed = await allowedDeviceIds(req);
     type PreflightEntry = PreflightResultDto & { check?: PreflightCheckDto };
     const results: PreflightEntry[] = [];
@@ -450,9 +450,12 @@ router.post(
       while (cursor < targets.length) {
         const t = targets[cursor++];
         try {
-          const r = await axios.post(preflightUrl, {
+          // Same x-unm-settings contract as /config — resolvers need the
+          // plugin's effective options for THIS device (parity fix).
+          const headers = await settingsHeaders(pluginId, t.deviceId).catch(() => ({}));
+          const r = await pluginAxios(plugin.endpoint).post('/preflight', {
             intentActionId, inputs, device: t,
-          }, { timeout: 45_000 });
+          }, { timeout: 45_000, headers });
           const result = (r.data?.result ?? {}) as PreflightResultDto;
           results.push({ deviceId: t.deviceId, values: Array.isArray(result.values) ? result.values : [], degraded: !!result.degraded, error: result.error });
         } catch (err) {
@@ -624,8 +627,8 @@ router.post(
       retryPolicy?: { maxAttempts?: number; waitMs?: number } | null;
     };
     try {
-      const response = await axios.post(
-        `${plugin.endpoint.replace(/\/$/, '')}/plan`,
+      const response = await pluginAxios(plugin.endpoint).post(
+        '/plan',
         { intent: { actionId: intentActionId, inputs }, devices: planDevices, ...(Object.keys(deviceInputs).length > 0 ? { deviceInputs } : {}) },
         { timeout: 20_000, headers }
       );

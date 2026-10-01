@@ -36,6 +36,21 @@ export function internalRouter() {
     next();
   };
 
+  // --- CA trust bundle (mTLS enrollment, Stage 1) ---------------------------
+
+  // GET /plugin/ca/bundle - the CA root + intermediate PEMs. Plugins never mount
+  // the PKI volume; they fetch this at boot (and on renewal) to build their
+  // https.Agent trust anchor for ACME calls and mTLS client connections.
+  router.get('/plugin/ca/bundle', pluginAuth, async (_req: Request, res: Response) => {
+    try {
+      const pem = await require('../ca/stepCaAdmin').getCaBundlePem();
+      res.status(200).json({ pem });
+    } catch (error) {
+      console.error('Error fetching CA bundle:', error);
+      res.status(503).json({ error: 'CA trust bundle unavailable' });
+    }
+  });
+
   // --- User data under /plugin/users (identity provider access) ------------
 
   // Serialize a user row for plugin consumption. `roles`/`permissions` are

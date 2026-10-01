@@ -1,9 +1,9 @@
-import type { Server } from 'http';
 import type { IncomingMessage } from 'http';
 import type { Duplex } from 'stream';
 import WebSocket, { WebSocketServer } from 'ws';
 import { peekConsoleTicket, redeemConsoleTicket } from './consoleTickets';
 import { DeviceConsoleError, resolveConsoleTarget } from './deviceConsole';
+import { pluginWsUrl, pluginWsTlsOptions } from './utils/pluginHttp';
 
 /**
  * Console WebSocket PROXY — the API-side half of the SSH console (capability
@@ -52,9 +52,14 @@ function upgradeBrowser(req: IncomingMessage, socket: Duplex): Promise<WebSocket
 }
 
 /** Connects to the plugin's /console endpoint and resolves once the handshake completes. */
-function connectUpstream(url: string): Promise<WebSocket> {
+function connectUpstream(endpoint: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url, { rejectUnauthorized: false });
+    // mTLS (Stage 1): wss + client cert when the plugin is TLS-live; plain ws
+    // otherwise. The apiKey query param stays — it authenticates the upgrade
+    // on the plugin side regardless of transport.
+    const url = pluginWsUrl(endpoint);
+    const tlsOpts = pluginWsTlsOptions(endpoint);
+    const ws = new WebSocket(url, { rejectUnauthorized: false, ...tlsOpts });
     const timer = setTimeout(() => {
       try { ws.terminate(); } catch { /* noop */ }
       reject(new ProxyError(502, 'Timed out connecting to the plugin console'));
@@ -105,11 +110,16 @@ function rejectUpgrade(socket: Duplex, status: number, message: string): void {
   socket.destroy();
 }
 
+/** Anything that emits 'upgrade' — both http.Server and tls.Server qualify. */
+interface UpgradeEmitter {
+  on(event: 'upgrade', listener: (req: IncomingMessage, socket: Duplex) => void): unknown;
+}
+
 /**
- * Attaches the console proxy to the API's HTTP server. Non-console upgrade paths
- * are left untouched (early return), so other WS consumers can coexist.
+ * Attaches the console proxy to a server's upgrade stream. Non-console upgrade
+ * paths are left untouched (early return), so other WS consumers can coexist.
  */
-export function attachConsoleProxy(server: Server): void {
+export function attachConsoleProxy(server: UpgradeEmitter): void {
   server.on('upgrade', (req: IncomingMessage, socket: Duplex) => {
     let url: URL;
     try {
@@ -144,8 +154,8 @@ export function attachConsoleProxy(server: Server): void {
         if (!redeemConsoleTicket(ticketId)) throw new ProxyError(401, 'Invalid or expired console ticket');
 
         const apiKey = process.env.PLUGIN_API_KEY ?? '';
-        const wsUrl = target.endpoint.replace(/^http/i, 'ws') + '/console' + (apiKey ? `?apiKey=${encodeURIComponent(apiKey)}` : '');
-        upstream = await connectUpstream(wsUrl);
+        // The endpoint carries the /console path via connectUpstream's base URL.
+        upstream = await connectUpstream(target.endpoint.replace(/\/+$/, '') + '/console' + (apiKey ? `?apiKey=${encodeURIComponent(apiKey)}` : ''));
 
         // The hello frame is the ONLY frame this proxy ever constructs — it carries
         // fresh credentials to the plugin. Everything after is verbatim piping.

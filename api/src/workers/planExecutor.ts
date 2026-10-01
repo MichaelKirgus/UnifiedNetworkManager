@@ -1,4 +1,4 @@
-import axios from 'axios';
+import { pluginAxios } from '../utils/pluginHttp';
 import { db } from '../db';
 import { asc, eq } from 'drizzle-orm';
 import * as schema from '../db/schema';
@@ -376,8 +376,8 @@ async function processPlan(planId: string): Promise<void> {
       transient = false;
       waitHintMs = null;
       try {
-        const response = await axios.post(
-          `${plugin.endpoint.replace(/\/$/, '')}/config`,
+        const response = await pluginAxios(plugin.endpoint).post(
+          '/config',
           {
             deviceId: device.id,
             // The UNM display name — plugins use it to label artifacts they create

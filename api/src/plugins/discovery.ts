@@ -1,8 +1,8 @@
-import axios from 'axios';
 import { Bonjour } from 'bonjour-service';
 import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
+import { probePluginEndpoint, setPluginTransport } from '../utils/pluginHttp';
 import type { PluginOptionDescriptor } from '../types/pluginOptions';
 import type { DeviceModelEntry } from '../types/deviceModels';
 import type {
@@ -45,6 +45,8 @@ export interface PluginIdentity {
   credentialSlots?: CredentialSlotDescriptor[];
   /** Device support metadata — license/help/docs + supported-device matrix (see types/deviceSupport.ts). */
   deviceSupport?: DeviceSupport;
+  /** mTLS state — true when this discovery pass reached the plugin over https. */
+  tlsLive?: boolean;
 }
 
 /**
@@ -324,34 +326,57 @@ function parseTxt(txt: Record<string, string> | undefined): Partial<PluginIdenti
   };
 }
 
+/** Raw /discover payload — everything optional until validated below. */
+interface RawDiscover {
+  uuid?: unknown;
+  name?: unknown;
+  version?: unknown;
+  vendors?: unknown;
+  capabilities?: unknown;
+  endpoint?: unknown;
+  authType?: unknown;
+  metrics?: unknown;
+  options?: unknown;
+  actions?: unknown;
+  quickActions?: unknown;
+  iconUrl?: unknown;
+  deviceModels?: unknown;
+  credentialSlots?: unknown;
+  deviceSupport?: unknown;
+}
+
 async function fetchIdentity(endpoint: string): Promise<PluginIdentity | null> {
   try {
-    const url = `${endpoint.replace(/\/+$/, '')}/discover`;
-    const res = await axios.get<PluginIdentity>(url, { timeout: DISCOVERY_POLL_TIMEOUT_MS });
-    const data = res.data;
-    if (!data || typeof data.uuid !== 'string' || data.uuid.length === 0) {
+    // Dual-transport probe (mTLS Stage 1): tries the registered transport
+    // first, then the other — so a plugin that just swapped to TLS (or lost
+    // its leaf) is re-detected within one poll cycle. The winning transport
+    // updates the API's per-endpoint registry used by every outbound call.
+    const { data: raw, transport } = await probePluginEndpoint<RawDiscover>(endpoint, '/discover', DISCOVERY_POLL_TIMEOUT_MS);
+    setPluginTransport(endpoint, transport);
+    if (!raw || typeof raw.uuid !== 'string' || raw.uuid.length === 0) {
       // eslint-disable-next-line no-console
       console.warn(`[discovery] plugin at ${endpoint} did not return a uuid`);
       return null;
     }
     return {
-      uuid: data.uuid,
-      name: data.name ?? data.uuid,
-      version: data.version ?? 'unknown',
-      vendors: Array.isArray(data.vendors) ? data.vendors : [],
-      capabilities: Array.isArray(data.capabilities) ? data.capabilities : [],
-      endpoint: data.endpoint ?? endpoint,
-      authType: data.authType ?? 'none',
-      metrics: Array.isArray(data.metrics) ? data.metrics : undefined,
+      uuid: raw.uuid,
+      name: typeof raw.name === 'string' ? raw.name : raw.uuid,
+      version: typeof raw.version === 'string' ? raw.version : 'unknown',
+      vendors: Array.isArray(raw.vendors) ? (raw.vendors as string[]) : [],
+      capabilities: Array.isArray(raw.capabilities) ? (raw.capabilities as string[]) : [],
+      endpoint: typeof raw.endpoint === 'string' && raw.endpoint.length > 0 ? raw.endpoint : endpoint,
+      authType: typeof raw.authType === 'string' ? raw.authType : 'none',
+      metrics: Array.isArray(raw.metrics) ? raw.metrics : undefined,
       // Standard scheduling options are injected for every plugin so the
       // Workers/Plugins settings UIs can tune per-plugin poll windows.
-      options: withStandardOptions(Array.isArray(data.options) ? (data.options as PluginOptionDescriptor[]) : undefined),
-      actions: Array.isArray(data.actions) ? data.actions : undefined,
-      quickActions: normalizeQuickActions(data.quickActions),
-      iconUrl: normalizeIconPath(data.iconUrl),
-      deviceModels: normalizeDeviceModels(data.deviceModels),
-      credentialSlots: normalizeCredentialSlots(data.credentialSlots),
-      deviceSupport: normalizeDeviceSupport(data.deviceSupport),
+      options: withStandardOptions(Array.isArray(raw.options) ? (raw.options as PluginOptionDescriptor[]) : undefined),
+      actions: Array.isArray(raw.actions) ? raw.actions : undefined,
+      quickActions: normalizeQuickActions(raw.quickActions),
+      iconUrl: normalizeIconPath(raw.iconUrl),
+      deviceModels: normalizeDeviceModels(raw.deviceModels),
+      credentialSlots: normalizeCredentialSlots(raw.credentialSlots),
+      deviceSupport: normalizeDeviceSupport(raw.deviceSupport as DeviceSupport | undefined),
+      tlsLive: transport === 'https',
     };
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -394,6 +419,9 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
   // Device support metadata: same guard — only overwrite when this discovery
   // source actually carries a document (the mDNS TXT path does not).
   const deviceSupportJson = identity.deviceSupport ? JSON.stringify(identity.deviceSupport) : null;
+  // mTLS state: only the HTTP-polling path knows it (mDNS TXT carries none),
+  // so an undefined value must never wipe what a probe established.
+  const hasTlsLive = typeof identity.tlsLive === 'boolean';
 
   if (existing) {
     await db
@@ -413,6 +441,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
         ...(hasModels ? { deviceModels: deviceModelsJson } : {}),
         ...(hasSlots ? { credentialSlots: credentialSlotsJson } : {}),
         ...(deviceSupportJson !== null ? { deviceSupport: deviceSupportJson } : {}),
+        ...(hasTlsLive ? { tlsLive: identity.tlsLive ?? false } : {}),
         lastSeenAt: now,
       })
       .where(eq(schema.plugins.id, identity.uuid));
@@ -433,6 +462,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
       deviceModels: deviceModelsJson,
       credentialSlots: credentialSlotsJson,
       deviceSupport: deviceSupportJson,
+      ...(hasTlsLive ? { tlsLive: identity.tlsLive ?? false } : {}),
       createdAt: now,
       lastSeenAt: now,
     });

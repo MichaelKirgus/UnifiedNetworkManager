@@ -1,5 +1,5 @@
 import type { SecretField, SecretType } from '@unm/plugin-sdk';
-import axios from 'axios';
+import { pluginAxios } from './utils/pluginHttp';
 import { eq } from 'drizzle-orm';
 import { db } from './db';
 import * as schema from './db/schema';
@@ -194,24 +194,25 @@ async function callProvider<T>(
   method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   body?: Record<string, unknown>
 ): Promise<T> {
-  const base = provider.endpoint.replace(/\/+$/, '');
   const apiKey = process.env.PLUGIN_API_KEY;
   const headers = apiKey ? { 'x-plugin-api-key': apiKey } : undefined;
+  // mTLS (Stage 1): pluginAxios picks the transport for this provider.
+  const http = pluginAxios(provider.endpoint);
 
   try {
     if (method === 'GET') {
-      const res = await axios.get<T>(`${base}${path}`, { timeout: PROVIDER_TIMEOUT_MS, headers });
+      const res = await http.get<T>(path, { timeout: PROVIDER_TIMEOUT_MS, headers });
       return res.data;
     }
     if (method === 'PATCH') {
-      const res = await axios.patch<T>(`${base}${path}`, body, { timeout: PROVIDER_TIMEOUT_MS, headers });
+      const res = await http.patch<T>(path, body, { timeout: PROVIDER_TIMEOUT_MS, headers });
       return res.data;
     }
     if (method === 'DELETE') {
-      const res = await axios.delete<T>(`${base}${path}`, { timeout: PROVIDER_TIMEOUT_MS, headers });
+      const res = await http.delete<T>(path, { timeout: PROVIDER_TIMEOUT_MS, headers });
       return res.data;
     }
-    const res = await axios.post<T>(`${base}${path}`, body, { timeout: PROVIDER_TIMEOUT_MS, headers });
+    const res = await http.post<T>(path, body, { timeout: PROVIDER_TIMEOUT_MS, headers });
     return res.data;
   } catch (err) {
     const e = err as {
@@ -235,11 +236,10 @@ export async function getProviderSecretTypes(provider: ProviderRecord): Promise<
     return cached.types;
   }
   try {
-    const base = provider.endpoint.replace(/\/+$/, '');
     const apiKey = process.env.PLUGIN_API_KEY;
     const headers = apiKey ? { 'x-plugin-api-key': apiKey } : undefined;
-    const res = await axios.get<{ secretsProvider?: { secretTypes?: SecretType[] } }>(
-      `${base}/discover`,
+    const res = await pluginAxios(provider.endpoint).get<{ secretsProvider?: { secretTypes?: SecretType[] } }>(
+      '/discover',
       { timeout: PROVIDER_TIMEOUT_MS, headers }
     );
     const types = res.data.secretsProvider?.secretTypes ?? [];
@@ -465,10 +465,9 @@ export async function getRequiredSecretTypes(pluginId: string): Promise<Required
   if (!row) return { requiredSecretType: null, requiredSecretTypes: [] };
   const provider = toRecord(row);
   try {
-    const base = provider.endpoint.replace(/\/+$/, '');
     const apiKey = process.env.PLUGIN_API_KEY;
     const headers = apiKey ? { 'x-plugin-api-key': apiKey } : undefined;
-    const res = await axios.get<{ requiredSecretType?: string; requiredSecretTypes?: string[] }>(`${base}/discover`, {
+    const res = await pluginAxios(provider.endpoint).get<{ requiredSecretType?: string; requiredSecretTypes?: string[] }>('/discover', {
       timeout: PROVIDER_TIMEOUT_MS,
       headers,
     });

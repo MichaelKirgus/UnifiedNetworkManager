@@ -1,4 +1,4 @@
-import axios from 'axios';
+import { pluginAxios } from './pluginHttp';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { getSecretFresh } from '../secretsProvider';
@@ -59,8 +59,8 @@ export async function dispatchPluginAction(
 
     const headers = await settingsHeaders(plugin.id, device.id).catch(() => ({}));
 
-    const response = await axios.post(
-      `${plugin.endpoint.replace(/\/$/, '')}/config`,
+    const response = await pluginAxios(plugin.endpoint).post(
+      '/config',
       { deviceId: device.id, managementAddress: device.managementAddress, credentials, actionId, input },
       { timeout: effectiveTimeout, headers }
     );

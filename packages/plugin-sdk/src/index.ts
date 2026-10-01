@@ -98,3 +98,9 @@ export type { ServiceType, ServiceStatus, ServiceRow } from './services';
 // Certificate/host-key PINNING — refuse connections whose key differs from UNM's inventory. See pinning.ts.
 export { pinningContextFromRequest, knownFingerprint, verifyTlsFingerprint, verifyEndpointForRequest, endpointUsesTls, createPinningGuard, rememberPinningContext, currentPinningContextFor, dynamicSshHostVerifier, makeSshHostVerifier, resolveSshPinnedFingerprint, normalizeCertFingerprint, certFingerprintMatches, endpointKey, recordObservedFingerprint, observedFingerprintFor, sshPinningErrorMessage, CertificatePinningError, resolveHttpsPort, resolveHttpPort, resolveSshPort } from './pinning';
 export type { PinningMode, KnownCertificate, PinningContext, TlsPreflightOptions, TlsPreflightResult, EndpointCheckOptions, PinningGuard, PinningGuardOptions, PinningPorts } from './pinning';
+// mTLS (Stage 1): minimal RFC 8555 ACME client for UNM's step-ca + the
+// enrollment/cert-lifecycle helper. See acmeClient.ts / tlsIdentity.ts.
+export { AcmeClient, AcmeError, buildCsr, derToRawSig, jwkThumbprint } from './acmeClient';
+export type { AcmeDirectory, AcmeChallenge, AcmeAuthorization, AcmeOrder, AcmeClientOptions } from './acmeClient';
+export { ensureTlsIdentity, scheduleTlsRenewal } from './tlsIdentity';
+export type { TlsIdentity, TlsIdentityOptions } from './tlsIdentity';

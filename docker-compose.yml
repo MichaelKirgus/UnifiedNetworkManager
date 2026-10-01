@@ -76,6 +76,10 @@ services:
       # All plugins listen on the conventional internal port 4080 (see
       # docs/PLUGIN-DEVELOPMENT.md); compose maps distinct HOST ports to it.
       - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://file-repo-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080,http://openwrt-plugin:4080,http://generic-ssh-plugin:4080,http://generic-http-plugin:4080,http://generic-ntp-plugin:4080,http://mailcow-plugin:4080,http://zabbix-plugin:4080}
+      # mTLS (Stage 1): enroll the API itself against the CA (identity "api") and
+      # open a TLS listener on :8443. Off by default — set UNM_TLS=1 in .env to
+      # enable it together with the plugins' enrollment.
+      - UNM_TLS=${UNM_TLS:-}
     volumes:
       # Legacy api-local file-repo volume (fallback + pre-plugin rows). The
       # active byte store is the file-repo plugin's own volume below.
@@ -84,6 +88,10 @@ services:
       # global settings and persists its own admin JWK key. The PKI volume is
       # deliberately NOT mounted — the API never sees CA signing keys.
       - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca
+      # mTLS (Stage 1): the API's OWN ACME account + leaf keys persist here so a
+      # container rebuild does not re-enroll (the old leaf stays valid until its
+      # renewal window). Only UNM-owned material — no CA signing keys.
+      - ${UNM_API_TLS_VOLUME:-unm-api-tls}:/data/tls
     depends_on:
       - postgres
       - unm-ca
@@ -107,6 +115,9 @@ services:
       - ADVERTISED_ENDPOINT=http://file-repo-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
       # On-disk store root inside this container (the ONLY mount that holds bytes).
       - FILE_REPO_PATH=/data/file-repo
@@ -139,6 +150,9 @@ services:
       - ADVERTISED_ENDPOINT=http://opnsense-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
       - OPNSENSE_HOST=${OPNSENSE_HOST:-https://opnsense.local}
       - OPNSENSE_KEY=${OPNSENSE_KEY:-}
@@ -163,6 +177,9 @@ services:
       - ADVERTISED_ENDPOINT=http://icmp-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     depends_on:
       - api
@@ -206,6 +223,9 @@ services:
       - ADVERTISED_ENDPOINT=http://generic-snmp-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/generic-snmp/mibs:/app/mibs:ro
@@ -230,6 +250,9 @@ services:
       - ADVERTISED_ENDPOINT=http://lancom-lx-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/lancom-lx/mibs:/app/mibs:ro
@@ -256,6 +279,9 @@ services:
       - ADVERTISED_ENDPOINT=http://lancom-lcos-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/lancom-lcos/mibs:/app/mibs:ro
@@ -282,6 +308,9 @@ services:
       - ADVERTISED_ENDPOINT=http://lancom-sx-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/lancom-sx/mibs:/app/mibs:ro
@@ -304,6 +333,9 @@ services:
       - ADVERTISED_ENDPOINT=http://fbox-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     depends_on:
       - api
@@ -325,6 +357,9 @@ services:
       - ADVERTISED_ENDPOINT=http://mikrotik-swos-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     depends_on:
       - api
@@ -347,6 +382,9 @@ services:
       - ADVERTISED_ENDPOINT=http://mikrotik-routeros-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     depends_on:
       - api
@@ -368,6 +406,9 @@ services:
       - ADVERTISED_ENDPOINT=http://ix-truenas-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     depends_on:
       - api
@@ -387,6 +428,9 @@ services:
       - ADVERTISED_ENDPOINT=http://mailcow-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     depends_on:
       - api
@@ -407,6 +451,9 @@ services:
       - ADVERTISED_ENDPOINT=http://docker-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     depends_on:
       - api
@@ -433,6 +480,9 @@ services:
       - ADVERTISED_ENDPOINT=http://openwrt-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     depends_on:
       - api
@@ -455,6 +505,9 @@ services:
       - ADVERTISED_ENDPOINT=http://generic-ssh-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     depends_on:
       - api
@@ -478,6 +531,9 @@ services:
       - ADVERTISED_ENDPOINT=http://generic-http-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     depends_on:
       - api
@@ -503,6 +559,9 @@ services:
       # Base URL of the API's internal endpoints (plugin -> API) — used for log
       # shipping AND the brokered inventory read (GET /v1/plugin/inventory/hosts).
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     depends_on:
       - api
@@ -527,6 +586,9 @@ services:
       - ADVERTISED_ENDPOINT=http://generic-ntp-plugin:4080
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     depends_on:
       - api
@@ -609,6 +671,9 @@ services:
       - ADVERTISED_ENDPOINT=http://basic-auth-plugin:4080
       # Base URL of the API's internal user-data endpoints (plugin -> API).
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
       # WebAuthn RP identity — MUST match the api service's values so assertion
       # verification accepts the options generated by the API.
@@ -636,6 +701,9 @@ services:
       - ADVERTISED_ENDPOINT=http://secrets-provider-plugin:4080
       # Base URL of the API's internal secrets-data endpoints (plugin -> API).
       - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
       # Crypto key material (the plugin is the crypto holder).
       - MASTER_KEY=${MASTER_KEY:-default-master-key-must-be-changed-in-production}
@@ -675,6 +743,10 @@ volumes:
   # to back it up / migrate; losing this volume = re-keying the whole fleet.
   unm-ca-pki:
   # CA config + state (ca.json rendered by the API, step-ca's Badger DB) —
+  # mTLS (Stage 1): the API's own ACME account key + enrolled leaf, persisted
+  # across container rebuilds. Contains ONLY UNM-owned material — CA signing
+  # keys never leave the CA-only volume above.
+  unm-api-tls:
   # mounted on BOTH unm-ca and api. Override with UNM_CA_CONFIG_VOLUME if needed.
   unm-ca-cfg:
   # Legacy api-local file-repo volume (fallback + pre-plugin rows). Mounted on

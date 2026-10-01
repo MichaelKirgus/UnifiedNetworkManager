@@ -1,4 +1,4 @@
-import axios from 'axios';
+import { pluginAxios } from '../utils/pluginHttp';
 import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
@@ -155,11 +155,12 @@ async function callProvider<T>(
   path: string,
   body: Record<string, unknown>
 ): Promise<T> {
-  const base = provider.endpoint.replace(/\/+$/, '');
   const apiKey = process.env.PLUGIN_API_KEY;
 
   try {
-    const res = await axios.post<T>(`${base}${path}`, body, {
+    // mTLS (Stage 1): pluginAxios picks the transport; the shared key still
+    // authenticates the call on the plugin side.
+    const res = await pluginAxios(provider.endpoint).post<T>(path, body, {
       timeout: PROVIDER_TIMEOUT_MS,
       headers: apiKey ? { 'x-plugin-api-key': apiKey } : undefined,
     });
@@ -360,10 +361,9 @@ export async function verifyWebauthn(
  */
 export async function getFlow(): Promise<string> {
   const provider = await resolveActiveProvider();
-  const base = provider.endpoint.replace(/\/+$/, '');
 
   try {
-    const res = await axios.get<{ identityProvider?: { flow?: string } }>(`${base}/discover`, {
+    const res = await pluginAxios(provider.endpoint).get<{ identityProvider?: { flow?: string } }>('/discover', {
       timeout: PROVIDER_TIMEOUT_MS,
     });
     const flow = res.data?.identityProvider?.flow;
@@ -386,11 +386,10 @@ export async function getFlow(): Promise<string> {
  */
 export async function getRedirectUrl(): Promise<string> {
   const provider = await resolveActiveProvider();
-  const base = provider.endpoint.replace(/\/+$/, '');
 
   try {
-    const res = await axios.get<{ identityProvider?: { redirectUrl?: string } }>(
-      `${base}/discover`,
+    const res = await pluginAxios(provider.endpoint).get<{ identityProvider?: { redirectUrl?: string } }>(
+      '/discover',
       { timeout: PROVIDER_TIMEOUT_MS }
     );
     const url = res.data?.identityProvider?.redirectUrl;

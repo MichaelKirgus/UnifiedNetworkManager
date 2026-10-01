@@ -1,4 +1,4 @@
-import axios from 'axios';
+import { pluginAxios } from './utils/pluginHttp';
 import { and, eq } from 'drizzle-orm';
 import { db } from './db';
 import * as schema from './db/schema';
@@ -120,8 +120,8 @@ export async function performFilesystemOp(
 
   let response;
   try {
-    response = await axios.post<FilesystemResult>(
-      `${plugin.endpoint.replace(/\/$/, '')}/filesystem`,
+    response = await pluginAxios(plugin.endpoint).post<FilesystemResult>(
+      '/filesystem',
       {
         deviceId,
         managementAddress: device.managementAddress,

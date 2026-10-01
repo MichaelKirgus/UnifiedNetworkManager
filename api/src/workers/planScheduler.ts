@@ -1,4 +1,4 @@
-import axios from 'axios';
+import { pluginAxios } from '../utils/pluginHttp';
 import { and, asc, eq, isNotNull } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
@@ -128,7 +128,7 @@ async function tick(): Promise<void> {
 
       let reachable = true;
       try {
-        await axios.get(`${plugin.endpoint.replace(/\/$/, '')}/healthz`, { timeout: 5_000 });
+        await pluginAxios(plugin.endpoint).get('/healthz', { timeout: 5_000 });
       } catch (err) {
         if (!isUnreachableError(err)) throw err; // unexpected — surface it below
         reachable = false;

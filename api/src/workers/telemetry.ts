@@ -1,4 +1,4 @@
-import axios from 'axios';
+import { pluginAxios } from '../utils/pluginHttp';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../db';
 import { and, eq, inArray, lt, notInArray, or, sql } from 'drizzle-orm';
@@ -158,8 +158,10 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
     // Per-device settings overrides are resolved for THIS assignment scope.
     const headers = await settingsHeaders(target.pluginId, target.deviceId).catch(() => ({}));
 
-    const response = await axios.post<MonitoringResponse>(
-      `${target.endpoint.replace(/\/$/, '')}/monitoring`,
+    // mTLS (Stage 1): pluginAxios picks https+client-cert when this plugin is
+    // TLS-live, plain http otherwise — identical behavior for un-enrolled plugins.
+    const response = await pluginAxios(target.endpoint).post<MonitoringResponse>(
+      '/monitoring',
       {
         deviceId: target.deviceId,
         managementAddress: target.managementAddress,

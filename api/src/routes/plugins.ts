@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import axios from 'axios';
+import { pluginAxios } from '../utils/pluginHttp';
 import { desc, eq } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
@@ -110,8 +110,7 @@ router.get('/plugins/:id/icon', async (req, res) => {
   }
 
   try {
-    const endpoint = resolvePluginEndpoint(row.endpoint).replace(/\/+$/, '');
-    const upstream = await axios.get(`${endpoint}${path}`, {
+    const upstream = await pluginAxios(row.endpoint).get(path, {
       timeout: 5_000,
       responseType: 'arraybuffer',
       maxContentLength: 1_024 * 1_024, // icons are small; cap at 1 MiB
@@ -176,8 +175,7 @@ router.get('/plugins/:id/asset', async (req, res) => {
   }
 
   try {
-    const endpoint = resolvePluginEndpoint(row.endpoint).replace(/\/+$/, '');
-    const upstream = await axios.get(`${endpoint}/assets${path}`, {
+    const upstream = await pluginAxios(row.endpoint).get(`/assets${path}`, {
       timeout: 5_000,
       maxContentLength: 1_024 * 1_024, // docs are small; cap at 1 MiB
     });

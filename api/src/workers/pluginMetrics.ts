@@ -1,8 +1,7 @@
-import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../db';
 import * as schema from '../db/schema';
-import { resolvePluginEndpoint } from '../utils/pluginEndpoint';
+import { pluginAxios } from '../utils/pluginHttp';
 import { LEADER_KEYS } from './leader';
 import { initWorker, trackBeat } from './stats';
 
@@ -33,8 +32,8 @@ function num(v: unknown): number | null {
 
 async function pollOne(pluginId: string, endpoint: string): Promise<void> {
   try {
-    const url = `${resolvePluginEndpoint(endpoint).replace(/\/+$/, '')}/metrics`;
-    const res = await axios.get<Record<string, unknown>>(url, { timeout: FETCH_TIMEOUT_MS });
+    // mTLS (Stage 1): pluginAxios resolves the host-dev rewrite + transport.
+    const res = await pluginAxios(endpoint).get<Record<string, unknown>>('/metrics', { timeout: FETCH_TIMEOUT_MS });
     const d = res.data ?? {};
 
     await db.insert(schema.pluginMetrics).values({

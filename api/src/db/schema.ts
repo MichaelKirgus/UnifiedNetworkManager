@@ -289,6 +289,11 @@ export const plugins = pgTable('plugins', {
   // effective-capability evaluation (see types/deviceSupport.ts). NULL = no
   // support matrix advertised.
   deviceSupport: text('deviceSupport'),
+  // mTLS state (Stage 1): true when discovery last confirmed this plugin is
+  // serving TLS with a CA-signed leaf on its conventional port. The API's
+  // pluginHttp factory uses https+client-cert for these, plain http otherwise.
+  // NULL/absent = unknown → treated as plain http until proven otherwise.
+  tlsLive: boolean('tlsLive'),
   createdAt: text('createdAt').notNull(),
   lastSeenAt: text('lastSeenAt'),
 });

@@ -45,6 +45,9 @@ import { startInactiveUsersWorker } from './workers/inactiveUsers';
 import { LEADER_KEYS, runAsLeader } from './workers/leader';
 import { initWorker } from './workers/stats';
 import { attachConsoleProxy } from './consoleProxy';
+import { setPluginTransports } from './utils/pluginHttp';
+import { startApiMtls } from './ca/apiMtls';
+import { db } from './db';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const API_PREFIX = '/v1';
@@ -80,6 +83,16 @@ async function main(): Promise<void> {
   await backfillDeviceAllPermission();
   await backfillDeviceSites();
   await backfillSecrets();
+
+  // mTLS (Stage 1): seed the per-endpoint transport registry from the last
+  // discovery state so outbound calls pick https+client-cert for plugins that
+  // are already mTLS-live — before the first discovery cycle runs.
+  try {
+    const pluginRows = await db.query.plugins.findMany();
+    setPluginTransports(pluginRows.map((p) => ({ endpoint: p.endpoint, tlsLive: p.tlsLive })));
+  } catch (err) {
+    console.warn('[api] could not seed plugin transport registry:', (err as Error).message);
+  }
 
   const spec = loadOpenApiSpec();
   const specPath = resolveOpenApiPath();
@@ -204,6 +217,19 @@ async function main(): Promise<void> {
     // the proxy attaches to the raw HTTP server — it pipes browser ⇄ plugin /console
     // verbatim using single-use tickets minted by POST /devices/:id/console.
     attachConsoleProxy(httpServer);
+
+    // mTLS (Stage 1): enroll the API itself against UNM's step-ca (identity
+    // "api") and open a TLS listener on :8443 serving the same app. Gated by
+    // UNM_TLS=1 (off by default — plain-HTTP fleets stay untouched). Non-fatal:
+    // while the CA is down the API keeps serving plain HTTP on :3000 and talks
+    // to plugins over http; enrollment retries every 30s in the background.
+    if (process.env.UNM_TLS === '1') {
+      void startApiMtls(app, {
+        onServer: (server) => attachConsoleProxy(server),
+      }).catch((err) => console.warn(`[api] mTLS not live yet: ${(err as Error).message}`));
+    } else {
+      console.log('[api] UNM_TLS not set — skipping API self-enrollment (plain HTTP only)');
+    }
 
     startConfigJobWorker();
 
