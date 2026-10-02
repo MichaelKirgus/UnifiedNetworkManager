@@ -246,7 +246,14 @@ export async function ensureTlsIdentity(opts: TlsIdentityOptions): Promise<TlsId
 export function scheduleTlsRenewal(identity: TlsIdentity, onDue: () => void | Promise<void>, log?: (msg: string) => void): () => void {
   const lifetimeMs = identity.notAfter.getTime() - identity.notBefore.getTime();
   const renewAt = identity.notBefore.getTime() + lifetimeMs * RENEW_FRACTION;
-  const delayMs = Math.max(60_000, renewAt - Date.now());
+  // setTimeout overflows past 2^31-1 ms (~24.8 days) and silently clamps to 1ms —
+  // an unclamped delay would re-fire the renewal check in a tight loop for any
+  // leaf longer than ~37 days (UNM's default is 90). Clamping is safe: early
+  // checks are harmless because ensureTlsIdentity() reuses the leaf until it is
+  // actually due, and consumers only swap material when it changed.
+  const MAX_TIMEOUT_MS = 0x7fffffff;
+  let delayMs = Math.max(60_000, renewAt - Date.now());
+  if (delayMs > MAX_TIMEOUT_MS) delayMs = MAX_TIMEOUT_MS;
   log?.(`next renewal check in ${Math.round(delayMs / 3_600_000)}h`);
   const t = setTimeout(() => {
     void Promise.resolve(onDue()).catch((err) => console.error('[tls] renewal failed:', err));

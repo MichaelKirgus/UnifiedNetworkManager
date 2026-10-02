@@ -1,5 +1,7 @@
 import pg from 'pg';
+import type { Dispatcher } from 'undici';
 import { z, ZodTypeAny } from 'zod';
+import { apiDispatcher, isTransportError, mtlsLive } from './mcpMtls.js';
 
 /**
  * Extended debug tools — served ONLY on the /debug/mcp endpoint (keyed by
@@ -59,9 +61,34 @@ function textResult(text: string, isError = false): DebugToolResult {
   return { content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) };
 }
 
+/**
+ * GETs one path on a plugin endpoint. mTLS Stage 2: when the MCP's own leaf is
+ * live, try https + client cert FIRST (mTLS-live plugins answer there); a
+ * transport-level failure falls back to plain http — so probes work against
+ * mixed fleets exactly like the API's dual-transport discovery probe.
+ */
 async function probePath(endpoint: string, pathName: string): Promise<{ status?: number; body?: unknown; error?: string }> {
+  // Scheme-less entries (e.g. "host:4080") are normalized to plain http first —
+  // fetch() rejects them outright and the https flip below needs a scheme too.
+  const base = /^https?:\/\//i.test(endpoint) ? endpoint.replace(/\/$/, '') : `http://${endpoint.replace(/\/$/, '')}`;
+  if (mtlsLive()) {
+    try {
+      return await doProbe(`${base.replace(/^http/i, 'https')}${pathName}`, apiDispatcher());
+    } catch (err) {
+      // Only transport-level failures ("wrong transport") fall through to the
+      // plain-http attempt; anything else is a real probe result.
+      if (!isTransportError(err)) return { error: (err as Error).message };
+    }
+  }
   try {
-    const res = await fetch(`${endpoint}${pathName}`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    return await doProbe(`${base}${pathName}`);
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+
+  /** Performs the GET; THROWS on transport failure so callers can fall back. */
+  async function doProbe(url: string, dispatcher?: Dispatcher): Promise<{ status?: number; body?: unknown }> {
+    const res = await fetch(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS), ...(dispatcher ? { dispatcher } : {}) });
     const text = await res.text();
     let body: unknown = text;
     try {
@@ -70,8 +97,6 @@ async function probePath(endpoint: string, pathName: string): Promise<{ status?:
       /* not JSON — keep raw */
     }
     return { status: res.status, body };
-  } catch (err) {
-    return { error: (err as Error).message };
   }
 }
 

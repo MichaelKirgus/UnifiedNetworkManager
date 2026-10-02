@@ -28,6 +28,10 @@ import { startHttpServer } from './httpServer.js';
  * Environment:
  *   UNM_API_TOKEN      long-lived API token for the OpenAPI tools (required)
  *   UNM_API_BASE       default http://localhost:3000/v1
+ *   UNM_TLS            "1" = enroll this server against the CA and talk to the
+ *                      API's mTLS listener (:8443) + mTLS-live plugins. Off by
+ *                      default — plain HTTP keeps working either way.
+ *   UNM_API_TLS_BASE   mTLS base URL (default: UNM_API_BASE with https)
  *   MCP_PORT           set to enable HTTP mode (container uses 3901)
  *   MCP_DEBUG_KEY      bearer key gating /debug/mcp
  *   MCP_KEY            optional bearer key also gating /mcp
@@ -36,6 +40,8 @@ import { startHttpServer } from './httpServer.js';
  */
 
 function main(): void {
+  // mTLS Stage 2: importing ./mcpMtls.js starts the background CA enrollment
+  // when UNM_TLS=1 (non-blocking; tools fall back to plain HTTP meanwhile).
   const specPath = resolveSpecPath();
   let tools;
   try {

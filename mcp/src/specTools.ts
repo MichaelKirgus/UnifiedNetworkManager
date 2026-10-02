@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { Dispatcher } from 'undici';
 import YAML from 'yaml';
 import { z, ZodTypeAny } from 'zod';
+import { apiDispatcher, isTransportError, mtlsLive } from './mcpMtls.js';
 
 /**
  * OpenAPI → MCP tool generation.
@@ -34,6 +36,9 @@ export interface GeneratedTool {
 }
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'] as const;
+
+/** One-time marker so the "first mTLS call" log line doesn't repeat per request. */
+let loggedMtlsUse = false;
 
 /** Resolves the OpenAPI spec file (env override → walk up to the repo root). */
 export function resolveSpecPath(): string {
@@ -224,7 +229,10 @@ export function generateTools(specPath: string): GeneratedTool[] {
         method,
         pathTemplate: templatePath,
         execute: async (args) => {
-          const apiBase = process.env.UNM_API_BASE ?? 'http://localhost:3000/v1';
+          // mTLS Stage 2: once the MCP's own leaf is live, prefer the API's
+          // :8443 mTLS listener (client cert + UNM root trust via undici).
+          const plainBase = process.env.UNM_API_BASE ?? 'http://localhost:3000/v1';
+          const tlsBase = (process.env.UNM_API_TLS_BASE ?? plainBase.replace(/^http/i, 'https')).replace(/\/$/, '');
           const token = process.env.UNM_API_TOKEN;
           if (!token) throw new Error('UNM_API_TOKEN is not set');
 
@@ -237,17 +245,37 @@ export function generateTools(specPath: string): GeneratedTool[] {
           for (const [key, value] of Object.entries(queryParams)) qs.set(key, value);
           const suffix = qs.toString() ? `?${qs.toString()}` : '';
 
-          const res = await fetch(`${apiBase.replace(/\/$/, '')}${urlPath}${suffix}`, {
-            method: method.toUpperCase(),
-            headers: {
-              Authorization: `Bearer ${token}`,
-              ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-            },
-            body: body !== undefined ? JSON.stringify(body) : undefined,
-          });
+          if (mtlsLive()) {
+            try {
+              const result = await doFetch(`${tlsBase}${urlPath}${suffix}`, apiDispatcher());
+              if (!loggedMtlsUse) {
+                loggedMtlsUse = true;
+                console.log(`[unm-mcp] first API call served over mTLS (${tlsBase})`);
+              }
+              return result;
+            } catch (err) {
+              // The API's mTLS listener may not be up yet (it enrolls on its own
+              // 30s loop too) — fall back to plain HTTP once.
+              if (!isTransportError(err)) throw err;
+              console.warn(`[unm-mcp] mTLS fetch failed (${(err as Error).message}) — falling back to plain HTTP`);
+            }
+          }
+          return await doFetch(`${plainBase.replace(/\/$/, '')}${urlPath}${suffix}`);
 
-          const text = await res.text();
-          return { status: res.status, bodyText: text || '(empty response)' };
+          async function doFetch(url: string, dispatcher?: Dispatcher): Promise<{ status: number; bodyText: string }> {
+            const res = await fetch(url, {
+              method: method.toUpperCase(),
+              headers: {
+                Authorization: `Bearer ${token}`,
+                ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+              },
+              body: body !== undefined ? JSON.stringify(body) : undefined,
+              ...(dispatcher ? { dispatcher } : {}),
+            });
+
+            const text = await res.text();
+            return { status: res.status, bodyText: text || '(empty response)' };
+          }
         },
       });
     }

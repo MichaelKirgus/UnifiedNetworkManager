@@ -34,6 +34,15 @@ services:
     depends_on:
       - postgres
     restart: unless-stopped
+    # The base image's built-in healthcheck runs `step ca health` WITHOUT the
+    # required --ca-url flag → it always fails, so the container shows
+    # "(unhealthy)" even though enrollment works fine. Override with a working
+    # invocation (the CA cert has no IP SANs — use its DNS name).
+    healthcheck:
+      test: ["CMD-SHELL", "step ca health --ca-url https://unm-ca:9000 | grep '^ok' >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   api:
     build:
@@ -612,6 +621,12 @@ services:
       - MCP_PORT=3901
       # Base URL the OpenAPI tools call (container-to-container).
       - UNM_API_BASE=http://api:3000/v1
+      # mTLS (Stage 2): enroll this server against the CA (identity "mcp") and
+      # talk to the API's mTLS listener on :8443 + mTLS-live plugins. Off by
+      # default — set UNM_TLS=1 in .env together with the fleet. Plain HTTP
+      # fallback keeps working while enrollment is pending or if it fails.
+      - UNM_TLS=${UNM_TLS:-}
+      - UNM_API_TLS_BASE=https://api:8443/v1
       # Long-lived API token for the OpenAPI tools — REQUIRED.
       - UNM_API_TOKEN=${UNM_API_TOKEN:-}
       # Bearer key gating /debug/mcp (read-only SQL + plugin probes).
@@ -622,6 +637,15 @@ services:
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
       # Endpoints probed by the plugin_probe debug tool (same list as the api).
       - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080,http://openwrt-plugin:4080,http://generic-ssh-plugin:4080,http://generic-http-plugin:4080,http://generic-ntp-plugin:4080,http://mailcow-plugin:4080,http://zabbix-plugin:4080}
+    volumes:
+      # mTLS (Stage 2): the CA config volume READ-ONLY — MCP only reads
+      # root_ca.crt from it to build its trust bundle. The PKI volume is never
+      # mounted here (no CA signing keys), and ca.json/state are irrelevant.
+      - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca:ro
+      # mTLS (Stage 2): the MCP's OWN ACME account + leaf keys persist here so a
+      # container rebuild does not re-enroll (the old leaf stays valid until its
+      # renewal window). Only UNM-owned material — no CA signing keys.
+      - ${UNM_MCP_TLS_VOLUME:-unm-mcp-tls}:/data/tls
     depends_on:
       - api
     restart: unless-stopped
@@ -749,6 +773,10 @@ volumes:
   unm-api-tls:
   # mounted on BOTH unm-ca and api. Override with UNM_CA_CONFIG_VOLUME if needed.
   unm-ca-cfg:
+  # mTLS (Stage 2): the MCP server's own ACME account key + enrolled leaf,
+  # persisted across container rebuilds. Same content rules as unm-api-tls —
+  # only UNM-owned material, no CA signing keys.
+  unm-mcp-tls:
   # Legacy api-local file-repo volume (fallback + pre-plugin rows). Mounted on
   # the api service ONLY — plugins access files through the API, never directly.
   filerepo:

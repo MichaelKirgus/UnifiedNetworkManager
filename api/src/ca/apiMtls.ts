@@ -16,8 +16,7 @@
  * API over mTLS; plain :3000 stays up for backward compatibility).
  */
 
-import http from 'http';
-import tls from 'tls';
+import https from 'https';
 import type { Express } from 'express';
 import { ensureTlsIdentity, scheduleTlsRenewal, TlsIdentity } from '@unm/plugin-sdk';
 import { getCaBundlePem } from './stepCaAdmin';
@@ -37,9 +36,14 @@ let stopRenewal: (() => void) | null = null;
  */
 export async function startApiMtls(
   app: Express,
-  opts: { failFast?: boolean; onLive?: (identity: TlsIdentity) => void; onServer?: (server: tls.Server) => void } = {},
+  opts: { failFast?: boolean; onLive?: (identity: TlsIdentity) => void; onServer?: (server: https.Server) => void } = {},
 ): Promise<TlsIdentity> {
-  let currentServer: tls.Server | null = null;
+  let currentServer: https.Server | null = null;
+  // Material the live listener was opened with — renewal checks that come back
+  // with an UNCHANGED leaf must NOT close+reopen :8443 (that would drop every
+  // in-flight mTLS connection on a no-op swap).
+  let loadedKeyPem: string | null = null;
+  let loadedCertPem: string | null = null;
 
   const openTlsListener = async (identity: TlsIdentity): Promise<void> => {
     if (currentServer) {
@@ -48,19 +52,26 @@ export async function startApiMtls(
         (currentServer as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
       });
     }
-    const server = tls.createServer({
-      key: identity.keyPem,
-      cert: identity.certChainPem,
-      ca: [identity.caBundlePem],
-      requestCert: true,
-      rejectUnauthorized: true,
-    });
-    (server as unknown as http.Server).on('request', app);
+    // https.createServer — NOT tls.createServer. The latter completes the TLS
+    // handshake but never parses HTTP: no 'request' events are ever emitted,
+    // so a listener built that way accepts connections and then goes silent.
+    const server = https.createServer(
+      {
+        key: identity.keyPem,
+        cert: identity.certChainPem,
+        ca: [identity.caBundlePem],
+        requestCert: true,
+        rejectUnauthorized: true,
+      },
+      app,
+    );
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen(API_TLS_PORT, () => resolve());
     });
     currentServer = server;
+    loadedKeyPem = identity.keyPem;
+    loadedCertPem = identity.certChainPem;
     opts.onServer?.(server);
     console.log(`[api] mTLS listener live on :${API_TLS_PORT} (identity "${IDENTIFIER}", leaf valid to ${identity.notAfter.toISOString()})`);
   };
@@ -76,7 +87,15 @@ export async function startApiMtls(
       log: (m) => console.log(`[api][tls] ${m}`),
     });
     setApiMtlsIdentity({ keyPem: identity.keyPem, certChainPem: identity.certChainPem, caBundlePem: identity.caBundlePem });
-    await openTlsListener(identity);
+    // Swap the listener only when it isn't up yet OR the material actually
+    // changed. Early renewal checks (the SDK clamps long delays to ~24.8d) come
+    // back with the SAME reused leaf — re-binding would drop every in-flight
+    // mTLS connection for no reason.
+    if (!currentServer || identity.keyPem !== loadedKeyPem || identity.certChainPem !== loadedCertPem) {
+      await openTlsListener(identity);
+    } else {
+      console.log(`[api][tls] leaf unchanged — keeping :${API_TLS_PORT} listener (valid to ${identity.notAfter.toISOString()})`);
+    }
     stopRenewal?.();
     stopRenewal = scheduleTlsRenewal(
       identity,

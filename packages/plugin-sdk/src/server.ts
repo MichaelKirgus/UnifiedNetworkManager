@@ -5,9 +5,8 @@
  */
 
 import path from 'path';
-import http from 'http';
-import tls from 'tls';
-import type { IncomingMessage } from 'http';
+import https from 'https';
+import type { IncomingMessage, Server as HttpServer } from 'http';
 import type { Duplex } from 'stream';
 import cors from 'cors';
 import express, { Express, Request, Response } from 'express';
@@ -135,7 +134,7 @@ export function buildDiscoverPayload(identity: PluginIdentity, extras?: Discover
 }
 
 /** Closes a listener, draining idle keep-alives first; force-kills after 5s. */
-function closeServer(server: http.Server | tls.Server): Promise<void> {
+function closeServer(server: HttpServer | https.Server): Promise<void> {
   return new Promise((resolve) => {
     let done = false;
     const finish = (): void => {
@@ -167,9 +166,12 @@ function startTlsEnrollment(
   logTag: string,
   wsUpgrade?: (req: IncomingMessage, socket: Duplex, head: Buffer) => void,
   onLiveChange?: (live: boolean) => void,
+  /** The initial plain-HTTP listener — closed by the first swapToTls. Without it
+   *  the TLS server would hit EADDRINUSE because nothing releases the port. */
+  initialServer?: HttpServer | https.Server,
 ): { isLive(): boolean } {
   let live = false;
-  let currentServer: http.Server | tls.Server | null = null;
+  let currentServer: HttpServer | https.Server | null = initialServer ?? null;
   let stopRenewal: (() => void) | null = null;
   let loadedKeyPem: string | null = null;
   let loadedCertPem: string | null = null;
@@ -177,23 +179,25 @@ function startTlsEnrollment(
   // detect an endpoint rename (ADVERTISED_ENDPOINT host change) at runtime.
   let servedFor = '';
 
-  const attachUpgrade = (s: http.Server | tls.Server): void => {
+  const attachUpgrade = (s: HttpServer | https.Server): void => {
     if (wsUpgrade) s.on('upgrade', wsUpgrade);
   };
 
   const swapToTls = async (identity: TlsIdentity): Promise<void> => {
     if (currentServer) await closeServer(currentServer);
-    // tls.Server emits 'request' exactly like an http.Server — mount the same
-    // express app on it. The cast is type-level only; runtime behavior is
-    // identical to `app.listen()` over TLS.
-    const server = tls.createServer({
-      key: identity.keyPem,
-      cert: identity.certChainPem,
-      ca: [identity.caBundlePem],
-      requestCert: true,
-      rejectUnauthorized: true,
-    });
-    (server as unknown as http.Server).on('request', app);
+    // https.createServer — NOT tls.createServer. The latter completes the TLS
+    // handshake but never parses HTTP, so no 'request' events would ever fire
+    // and every client would hang after connecting.
+    const server = https.createServer(
+      {
+        key: identity.keyPem,
+        cert: identity.certChainPem,
+        ca: [identity.caBundlePem],
+        requestCert: true,
+        rejectUnauthorized: true,
+      },
+      app,
+    );
     attachUpgrade(server);
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
@@ -342,7 +346,7 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
         if (tlsEnabled) {
           startTlsEnrollment(app, identity.port, logTag, opts.wsUpgrade, (live) => {
             tlsState.live = live;
-          });
+          }, server);
         }
       });
     },

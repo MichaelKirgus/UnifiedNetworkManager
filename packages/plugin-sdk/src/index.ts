@@ -104,3 +104,6 @@ export { AcmeClient, AcmeError, buildCsr, derToRawSig, jwkThumbprint } from './a
 export type { AcmeDirectory, AcmeChallenge, AcmeAuthorization, AcmeOrder, AcmeClientOptions } from './acmeClient';
 export { ensureTlsIdentity, scheduleTlsRenewal } from './tlsIdentity';
 export type { TlsIdentity, TlsIdentityOptions } from './tlsIdentity';
+// Client-only mTLS enrollment (services that present a leaf but never serve TLS). See clientMtls.ts.
+export { startClientMtls } from './clientMtls';
+export type { ClientMtlsHandle, ClientMtlsOptions } from './clientMtls';
