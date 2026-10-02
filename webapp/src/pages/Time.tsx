@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useQueries, useQuery } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ChevronDown, ChevronUp, Clock, Globe } from 'lucide-react';
+import { ChevronDown, ChevronUp, Clock, Globe, RefreshCw } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, type DataTableColumn } from '../components/DataTable';
-import { api, DeviceTimeRow } from '../api/client';
+import { ClockSyncDialog } from '../components/ClockSyncDialog';
+import { api } from '../api/client';
+import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
 
 /** The `system.deviceTime` blob a plugin emits (telemetry or live probe). */
@@ -323,6 +325,10 @@ export default function Time() {
   // Shared hover state: table rows and span-chart rows highlight each other.
   const [hoveredDevice, setHoveredDevice] = useState<string | null>(null);
 
+  // "Re-sync devices" dialog — re-trigger native NTP or push a specific
+  // time/timezone on the selected devices (one plan per plugin group).
+  const [clockSyncOpen, setClockSyncOpen] = useState(false);
+
   // Splitter layout: device table (top) vs drift-span view (bottom). Each side
   // can be collapsed so the other takes the full height; while both are open the
   // divider is draggable — same pattern as the WiFi page.
@@ -528,6 +534,17 @@ export default function Time() {
               </span>
             )}
           </span>
+          {can('configs:apply') && (
+            <button
+              type="button"
+              onClick={() => setClockSyncOpen(true)}
+              title="Re-trigger native NTP or push a specific time/timezone on the selected devices"
+              className="flex shrink-0 items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-primary-hover"
+            >
+              <RefreshCw size={13} />
+              Re-sync devices
+            </button>
+          )}
         </div>
 
         {/* Time base card — UNM's own clock vs international consensus (public NTP references). */}
@@ -733,6 +750,14 @@ export default function Time() {
           </div>
         </div>
       </div>
+
+      {clockSyncOpen && (
+        <ClockSyncDialog
+          devices={timeQuery.data?.devices ?? []}
+          consensusMs={ntpRefQuery.data?.consensusMs ?? null}
+          onClose={() => setClockSyncOpen(false)}
+        />
+      )}
     </Layout>
   );
 }

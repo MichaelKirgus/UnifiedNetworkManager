@@ -197,4 +197,82 @@ export const SYSTEM_ACTIONS: ActionDescriptor[] = [
       return okResult({ timezone: tz, reported: (check?.stdout ?? '').trim().split('\n')[0] ?? null });
     },
   },
+  // --- Fleet clock re-sync (Time page "Re-sync devices") ----------------------
+  // One canonical action id shared across plugins so the webapp can offer a single
+  // fleet-wide dialog + Plans-page intent. deviceCount 'N' → the plugin's plan.ts
+  // fans it out to one step per device; the API treats non-1 counts as multi-device
+  // intents (credentials required on every target — correct for clock ops).
+  {
+    id: 'system.clock.sync',
+    label: 'Sync or set device clock',
+    description:
+      "Re-syncs the device to its native NTP source (mode='sync') and/or sets a specific wall-clock time and/or IANA timezone (mode='set'). Fleet-wide intent — fans out one step per device. 'sync' restarts whichever NTP daemon is present (systemd-timesyncd / chronyd / ntp / openntpd). 'set' writes the clock with `date -s` (persisted to RTC best-effort) and/or the timezone via timedatectl.",
+    module: 'System',
+    riskLevel: 'write',
+    deviceCount: 'N',
+    timeoutMs: 60_000,
+    inputSchema: {
+      mode: { type: 'string', required: true, enum: ['sync', 'set'], description: "'sync' = re-trigger native NTP; 'set' = manual wall-clock and/or timezone" },
+      timeUtc: { type: 'string', description: "ISO-8601 UTC instant for mode='set' (e.g. 2026-10-02T14:30:00Z)" },
+      timezone: { type: 'string', description: "IANA zone for mode='set' (e.g. Europe/Berlin); independent of timeUtc" },
+    },
+    execute: async (ctx, input) => {
+      const mode = String(input.mode ?? '').trim();
+      if (!['sync', 'set'].includes(mode)) return failResult("mode must be 'sync' or 'set'.");
+
+      // --- sync: re-trigger native NTP ---------------------------------------
+      if (mode === 'sync') {
+        const r = await runCommands(ctx.backend, [CLOCK_SYNC_SCRIPT], 60_000);
+        if (!r.ok) return failResult(`NTP re-sync failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
+        // Best-effort read of the daemon's sync state after restart (not proof of sync —
+        // chrony/timesyncd converge over seconds to minutes; the Time page will show it).
+        const status = await ctx.backend.exec('timedatectl show --property=NTPSynchronized,ClockSource 2>/dev/null || true').catch(() => null);
+        return okResult({ mode: 'sync', restarted: (r.stdout ?? '').trim(), ntpStatus: (status?.stdout ?? '').trim() || undefined });
+      }
+
+      // --- set: manual wall-clock and/or timezone ----------------------------
+      const timeUtc = typeof input.timeUtc === 'string' && input.timeUtc.trim() ? input.timeUtc.trim() : undefined;
+      const tz = typeof input.timezone === 'string' && input.timezone.trim() ? input.timezone.trim() : undefined;
+      if (!timeUtc && !tz) return failResult("mode 'set' requires at least one of timeUtc or timezone.");
+
+      const cmds: string[] = [];
+      // Timezone first, so the wall-clock set is applied under the final zone.
+      if (tz) {
+        // IANA identifiers are [A-Za-z0-9_+-/]; reject anything else before it hits the shell.
+        if (!/^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/.test(tz)) return failResult('Invalid timezone identifier.');
+        cmds.push(`ZONEFILE=$(ls /usr/share/zoneinfo/${shq(tz)} 2>/dev/null || ls /etc/zoneinfo/${shq(tz)} 2>/dev/null); [ -n "$ZONEFILE" ] || { echo "timezone ${tz} not found in zoneinfo"; exit 1; }`);
+        cmds.push(`if command -v timedatectl >/dev/null 2>&1; then timedatectl set-timezone ${shq(tz)}; else ln -sf $ZONEFILE /etc/localtime && echo ${shq(tz)} > /etc/timezone; fi`);
+      }
+      if (timeUtc) {
+        // Strict ISO-8601 shape — reject anything that could inject shell.
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:?\d{2})?$/.test(timeUtc)) return failResult('timeUtc must be an ISO-8601 instant (e.g. 2026-10-02T14:30:00Z).');
+        cmds.push(`date -s ${shq(timeUtc)}`);
+        // Persist to the hardware clock best-effort — fails harmlessly in VMs/containers without RTC access.
+        cmds.push('hwclock --systohc 2>/dev/null || true');
+      }
+
+      const r = await runCommands(ctx.backend, cmds, 30_000);
+      if (!r.ok) return failResult(`Setting clock failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
+
+      // Verify by re-reading the wall clock + zone.
+      const check = await ctx.backend.exec('date -u +%Y-%m-%dT%H:%M:%SZ; date +%Z').catch(() => null);
+      const lines = (check?.stdout ?? '').trim().split('\n');
+      return okResult({ mode: 'set', timeUtc: timeUtc ?? undefined, timezone: tz ?? undefined, reportedUtc: lines[0] || undefined, reportedZone: lines[1] || undefined }, true);
+    },
+  },
 ];
+
+/** Restarts whichever NTP daemon is actually in use (active or enabled) so the device re-syncs to its configured source. */
+const CLOCK_SYNC_SCRIPT = [
+  'if command -v systemctl >/dev/null 2>&1; then',
+  '  for u in systemd-timesyncd chronyd ntp openntpd; do',
+  '    active=$(systemctl is-active "$u" 2>/dev/null || true)',
+  '    enabled=$(systemctl list-unit-files --no-legend "$u.service" 2>/dev/null | awk \'{print $2}\')',
+  '    if [ "$active" = "active" ] || [ "$enabled" = "enabled" ]; then',
+  '      systemctl restart "$u" && { echo "restarted $u"; exit 0; }',
+  '    fi',
+  '  done',
+  'elif [ -x /etc/init.d/ntp ]; then /etc/init.d/ntp restart && { echo "restarted ntp (init.d)"; exit 0; }; fi',
+  'echo "No NTP service found or enabled (tried systemd-timesyncd, chronyd, ntp, openntpd)" >&2',
+  'exit 1',
+].join('\n');

@@ -7,6 +7,19 @@
  * response values are STRINGS (even numbers and booleans); list endpoints
  * return JSON arrays of objects keyed by property name (`rx-byytes`, `.id`).
  *
+ * REST method semantics (verified live on RouterOS 7.21 LTS):
+ *   GET     — print a table or single record.
+ *   PUT     — CREATE one new record in the table at the path (201 + created row).
+ *   PATCH   — UPDATE a single record; the path MUST carry its id/name.
+ *             Some singleton tables (e.g. /system/clock) reject PATCH with 500 —
+ *             use POST `<table>/set` for those.
+ *   DELETE  — REMOVE one record by id in the path (204).
+ *   POST    — UNIVERSAL console-command access: `/rest/<command>` runs that
+ *             command word (`/export`, `/execute {script}`, `<table>/remove`).
+ *             Command-word endpoints take a SINGLE object body; array bodies
+ *             are rejected with 400. POST is NOT the CRUD create/update path —
+ *             `POST /rest/<table>` answers "no such command".
+ *
  * Transport notes:
  *  - We use raw node:http/node:https (NOT global fetch) because Node's fetch
  *    cannot disable TLS certificate verification via an `agent` option, and
@@ -84,7 +97,7 @@ interface RawResponse {
 }
 
 /** One raw HTTP(S) request with Basic auth + hard timeout. Never resolves on network failure — throws RouterOsUnreachableError. */
-function rawRequest(url: string, method: 'GET' | 'POST', headers: Record<string, string>, body: string | undefined, opts: { timeoutMs: number; insecureTls: boolean }): Promise<RawResponse> {
+function rawRequest(url: string, method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', headers: Record<string, string>, body: string | undefined, opts: { timeoutMs: number; insecureTls: boolean }): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
     let u: URL;
     try {
@@ -181,7 +194,7 @@ export class RouterOsClient {
   }
 
   /** Executes one REST call across the candidate schemes. HTTP-level errors (auth/API) propagate immediately — only network/TLS failures trigger a scheme fallback. */
-  private async request<T>(path: string, method: 'GET' | 'POST', body?: Record<string, unknown> | Array<Record<string, unknown>>): Promise<T> {
+  private async request<T>(path: string, method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', body?: Record<string, unknown> | Array<Record<string, unknown>>): Promise<T> {
     const headers: Record<string, string> = {
       Authorization: basicAuthHeader(this.opts.username, this.opts.password),
       Accept: 'application/json',
@@ -214,8 +227,29 @@ export class RouterOsClient {
     return this.request<T>(path, 'GET');
   }
 
-  /** POST to a console command endpoint (e.g. /export) — used by later config actions.
-   * Body may be an object or an ARRAY of objects (RouterOS `/remove` takes `[{".id": ...}]`). */
+  /** PUT — CREATE a new record in the table encoded in the path (`/rest/<table>`).
+   * Only ONE resource per request; the response is the created object (with `.id`). */
+  put<T = unknown>(path: string, body?: Record<string, unknown>): Promise<T> {
+    return this.request<T>(path, 'PUT', body);
+  }
+
+  /** PATCH — UPDATE a single record. The path MUST carry the record id
+   * (`/rest/<table>/<id>` or `/rest/<table>/<name>` for named tables). */
+  patch<T = unknown>(path: string, body?: Record<string, unknown>): Promise<T> {
+    return this.request<T>(path, 'PATCH', body);
+  }
+
+  /** DELETE — REMOVE the record with the id encoded in the path (`/rest/<table>/<id>`). */
+  delete(path: string): Promise<unknown> {
+    return this.request(path, 'DELETE');
+  }
+
+  /** POST to a console command endpoint (e.g. `/export`, `<table>/remove`).
+   * This is the UNIVERSAL method — it maps onto arbitrary console commands, so
+   * it works for operations with no CRUD equivalent (singleton `set` on tables
+   * like /system/clock that reject PATCH, batch removes via a SINGLE object
+   * body `{".id": ...}`, scripts via `/execute {script}`). NOTE: array bodies
+   * are NOT accepted by command-word endpoints — loop single-object calls. */
   post<T = unknown>(path: string, body?: Record<string, unknown> | Array<Record<string, unknown>>): Promise<T> {
     return this.request<T>(path, 'POST', body);
   }

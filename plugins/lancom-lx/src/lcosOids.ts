@@ -70,6 +70,29 @@ export function lxTimezoneToIana(v: number | null): string | null {
   return ZONES[v] ?? null;
 }
 
+/** Inverse of lxTimezoneToIana — maps an IANA zone name to the lcosLXSetupTimeTimezone enum (null when unsupported). */
+export function ianaToLxTimezoneEnum(zone: string): number | null {
+  const ZONES: Record<number, string> = {
+    0: 'UTC',
+    1: 'Europe/Berlin', 2: 'Europe/Vienna', 3: 'Europe/Zurich', 4: 'Europe/London',
+    5: 'Europe/Prague', 6: 'Europe/Warsaw', 7: 'Europe/Zagreb', 8: 'Europe/Copenhagen',
+    9: 'Europe/Paris', 10: 'Europe/Helsinki', 11: 'Europe/Tallinn', 12: 'Europe/Athens',
+    13: 'Europe/Budapest', 14: 'Europe/Dublin', 15: 'Europe/Rome', 16: 'Europe/Riga',
+    17: 'Europe/Vilnius', 18: 'Europe/Luxembourg', 19: 'Europe/Malta', 20: 'Europe/Amsterdam',
+    21: 'Europe/Nicosia', 22: 'Europe/Lisbon', 23: 'Europe/Bucharest', 24: 'Europe/Bratislava',
+    25: 'Europe/Ljubljana', 26: 'Europe/Madrid', 27: 'Europe/Stockholm', 28: 'Europe/Brussels',
+    29: 'Europe/Sofia', 30: 'America/Anchorage', 31: 'America/Los_Angeles',
+    32: 'America/Denver', 33: 'America/Chicago', 34: 'America/New_York',
+    35: 'Pacific/Auckland', 36: 'Pacific/Honolulu', 37: 'Australia/Brisbane',
+    38: 'Australia/Sydney', 39: 'Australia/Perth', 40: 'Australia/Darwin', 41: 'Australia/Adelaide',
+  };
+  const needle = zone.trim();
+  for (const [v, name] of Object.entries(ZONES)) {
+    if (name === needle) return Number(v);
+  }
+  return null;
+}
+
 /** lcosLXStatusHardwareInfo group (13.1.47). */
 export const HW = {
   base: `${LCOS_BASE}.1.47`,

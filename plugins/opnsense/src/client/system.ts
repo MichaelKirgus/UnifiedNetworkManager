@@ -49,6 +49,12 @@ export function getSystemTimezone(client: AxiosInstance): Promise<OpnsenseApiRes
   return get(client, '/api/system/timezone/get_timezone');
 }
 
+/** POST /api/system/timezone/set_timezone — set the appliance IANA timezone.
+ * Body: `{ timezone: 'Europe/Berlin' }`. Applies immediately (no staging). */
+export function setSystemTimezone(client: AxiosInstance, timezone: string): Promise<OpnsenseApiResult> {
+  return post(client, '/api/system/timezone/set_timezone', { timezone });
+}
+
 /** GET /api/diagnostics/system/system_resources — memory/cpu/uptime details. */
 export function getSystemResources(client: AxiosInstance): Promise<OpnsenseApiResult> {
   return get(client, '/api/diagnostics/system/system_resources');

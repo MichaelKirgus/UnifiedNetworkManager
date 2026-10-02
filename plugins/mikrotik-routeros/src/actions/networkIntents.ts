@@ -3,11 +3,13 @@
  *
  * A "network" on RouterOS is an L3 address bound to a logical interface,
  * optionally riding a dedicated 802.1q VLAN:
- *   - VLAN: `/interface/vlan add {name, vlan-id, interface=<parent>}` — the
+ *   - VLAN: `PUT /rest/interface/vlan {name, vlan-id, interface=<parent>}` — the
  *     VLAN's NAME carries the network name (RouterOS has no per-interface
  *     description), which is what makes create/delete idempotent by name.
- *   - L3 address: `/ip/address add {address=<cidr>, interface=<ifc>}` (+
- *     `/ipv6/address` for dual-stack). Writes apply IMMEDIATELY — RouterOS has
+ *   - L3 address: `PUT /rest/ip/address {address=<cidr>, interface=<ifc>}` (+
+ *     `/ipv6/address` for dual-stack). Removals use the command-word form
+ *     `POST <table>/remove {".id": ...}` (one record per request — array bodies
+ *     are rejected by RouterOS REST). Writes apply IMMEDIATELY — RouterOS has
  *     no staged/reconfigure model; every write is verified by a re-read.
  *
  * Attach-point semantics (resolved per device in preflight via the L2
@@ -148,12 +150,12 @@ export const networkCreateAction: ActionDescriptor = {
           parent = pickBridgeVlanParent(topo, attach) ?? '';
           if (!parent) return { success: false, error: `bridge ${attach} has no physical/bonding member to host the VLAN` };
         }
-        const addRes = await ctx.client.post('/interface/vlan', { name, vlanId: String(vlanId), interface: parent });
+        const addRes = await ctx.client.put('/interface/vlan', { name, 'vlan-id': String(vlanId), interface: parent });
         if (!addRes) return { success: false, error: `VLAN ${vlanId} creation failed (no response from /interface/vlan)` };
         targetIfc = name; // RouterOS names the new VLAN after our `name` property.
         details.vlan = isBridge ? `created VLAN ${vlanId} on ${parent}, added to bridge ${attach}` : `created VLAN ${vlanId} on ${parent}`;
         if (isBridge) {
-          await ctx.client.post('/interface/bridge/port', { interface: attach, slave: name }).catch(() => undefined);
+          await ctx.client.put('/interface/bridge/port', { interface: attach, slave: name }).catch(() => undefined);
         }
       }
     }
@@ -163,7 +165,7 @@ export const networkCreateAction: ActionDescriptor = {
     if (v4) {
       const already = addrs.some((a) => rosString(a, ['address']) === v4 && rosString(a, ['interface', 'actual-interface']) === targetIfc);
       if (!already) {
-        await ctx.client.post('/ip/address', { address: v4, interface: targetIfc });
+        await ctx.client.put('/ip/address', { address: v4, interface: targetIfc });
         added.push(v4);
       } else {
         details.v4Kept = `address ${v4} already present on ${targetIfc}`;
@@ -173,7 +175,7 @@ export const networkCreateAction: ActionDescriptor = {
       const v6Addrs = await ctx.client.get<Row[]>('/ipv6/address').catch(() => [] as Row[]);
       const already = v6Addrs.some((a) => rosString(a, ['address']) === v6 && rosString(a, ['interface', 'actual-interface']) === targetIfc);
       if (!already) {
-        await ctx.client.post('/ipv6/address', { address: v6, interface: targetIfc });
+        await ctx.client.put('/ipv6/address', { address: v6, interface: targetIfc });
         added.push(v6);
       } else {
         details.v6Kept = `address ${v6} already present on ${targetIfc}`;
@@ -234,7 +236,8 @@ export const networkDeleteAction: ActionDescriptor = {
         const addrs = await ctx.client.get<Row[]>(table);
         const mine = addrs.filter((a) => rosString(a, ['interface', 'actual-interface']) === vlanName).map((a) => rosString(a, ['.id'])).filter(Boolean);
         if (mine.length > 0) {
-          await ctx.client.post(`${table}/remove`, mine.map((i) => ({ '.id': i })));
+          // Command-word /remove takes ONE object per request — loop.
+          for (const i of mine) await ctx.client.post(`${table}/remove`, { '.id': i });
           details[key] = `removed ${mine.length}`;
         }
       } catch { /* best-effort — the VLAN removal below is the critical part */ }
@@ -245,13 +248,13 @@ export const networkDeleteAction: ActionDescriptor = {
       const ports = await ctx.client.get<Row[]>('/interface/bridge/port');
       const mine = ports.filter((p) => rosString(p, ['slave']) === vlanName).map((p) => rosString(p, ['.id'])).filter(Boolean);
       if (mine.length > 0) {
-        await ctx.client.post('/interface/bridge/port/remove', mine.map((i) => ({ '.id': i })));
+        for (const i of mine) await ctx.client.post('/interface/bridge/port/remove', { '.id': i });
         details.bridgePorts = `removed ${mine.length}`;
       }
     } catch { /* best-effort */ }
 
-    // 3. The VLAN itself.
-    await ctx.client.post('/interface/vlan/remove', [{ '.id': id }]);
+    // 3. The VLAN itself (single-object /remove — array bodies are rejected).
+    await ctx.client.post('/interface/vlan/remove', { '.id': id });
 
     // Verify by re-read.
     const afterVlans = await ctx.client.get<Row[]>('/interface/vlan').catch(() => [] as Row[]);

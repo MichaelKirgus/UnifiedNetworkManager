@@ -188,6 +188,115 @@ const systemTimezoneSetAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+/**
+ * Fleet clock re-sync — canonical id shared across plugins. TrueNAS specifics
+ * (verified against truenas/middleware source):
+ *  - mode='sync' : ensure the requested NTP servers are configured
+ *    (`system.ntpserver.create` for missing ones) and RESTART ntpd via
+ *    `service.control RESTART ntpd` — chrony re-reads its config and re-syncs.
+ *    Every write is PERSISTED in the middleware DB (survives reboot).
+ *  - mode='set'  : timezone only (`system.general.update {timezone}` — persisted,
+ *    applied via timedatectl + timeservices reload). The public API has NO
+ *    wall-clock setter: chrony owns the clock, and a raw `date -s` over SSH is
+ *    not saved by the middleware (it gets clobbered on the next sync/reboot).
+ */
+const systemClockSyncAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'system.clock.sync',
+  label: 'Sync or set device clock',
+  description:
+    "Re-syncs the appliance to its NTP source (mode='sync') and/or sets the IANA timezone (mode='set'). Fleet-wide intent — fans out one step per device. NOTE: TrueNAS's public API has no wall-clock setter, so mode='set' only supports the timezone field.",
+  module: 'System',
+  riskLevel: 'write' as const,
+  deviceCount: 'N' as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    mode: { type: 'string', required: true, enum: ['sync', 'set'], description: "'sync' = re-trigger native NTP; 'set' = manual wall-clock and/or timezone" },
+    timeUtc: { type: 'string', description: "ISO-8601 UTC instant for mode='set' (e.g. 2026-10-02T14:30:00Z)" },
+    timezone: { type: 'string', description: "IANA zone for mode='set' (e.g. Europe/Berlin); independent of timeUtc" },
+    servers: { type: 'array', items: { type: 'string' }, description: "Optional NTP server list for mode='sync' — missing ones are added to the appliance's NTP config" },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const mode = str(input, 'mode')?.trim();
+    if (!['sync', 'set'].includes(mode ?? '')) return { success: false, details: { error: "mode must be 'sync' or 'set'" } };
+
+    // --- sync: ensure NTP servers + restart ntpd (chrony re-syncs) -------------
+    if (mode === 'sync') {
+      const servers = Array.isArray(input.servers) ? input.servers.map((s) => String(s).trim()).filter(Boolean) : [];
+
+      let created: string[] = [];
+      if (servers.length > 0) {
+        // Read the current config — shape is `{ enable, servers: [{id, address, ...}] }`.
+        const cfg = await ctx.client.call<Record<string, unknown>>('system.ntpserver.get_config', [], ctx.creds);
+        const existing = Array.isArray(cfg?.['servers']) ? (cfg['servers'] as Record<string, unknown>[]) : [];
+        for (const addr of servers) {
+          if (existing.some((s) => pickString(s, ['address']) === addr)) continue;
+          // create is a transport-tolerant write — idempotent enough to re-dispatch on drop.
+          await dispatchWrite(ctx, 'system.ntpserver.create', [{ address: addr }], { idempotentRetry: true });
+          created.push(addr);
+        }
+      }
+
+      // Restart ntpd so chrony re-reads its config and re-syncs NOW (job-based).
+      const notes: string[] = [];
+      let jobId: number | null = null;
+      try {
+        const dr = await dispatchWrite(ctx, 'service.control', ['RESTART', 'ntpd'], {
+          verify: async () => {
+            try { return !!(await ctx.client.call<boolean>('service.started', ['ntpd'], ctx.creds)); } catch { return null; }
+          },
+        });
+        if (dr.note) notes.push(dr.note);
+        const r = dr.value;
+        if (typeof r === 'number') jobId = r;
+        else if (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number') {
+          jobId = (r as Record<string, unknown>)['id'] as number;
+        }
+      } catch (e) {
+        return { success: false, details: { error: `ntpd restart failed: ${e instanceof Error ? e.message : String(e)}` } };
+      }
+
+      let waitState = 'UNKNOWN';
+      if (jobId !== null) {
+        const wait = await waitForJob(ctx, jobId, 90_000);
+        waitState = wait.state;
+        if (wait.state === 'RUNNING') {
+          return { success: true, applied: true, details: { mode: 'sync', note: 'ntpd restart job still running — check the appliance shortly.', created } };
+        }
+        if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') {
+          return { success: false, details: { mode: 'sync', error: `ntpd restart job ended in state ${waitState}`, jobId, waitError: wait.error ?? undefined } };
+        }
+      }
+
+      let verified = false;
+      try { verified = !!(await ctx.client.call<boolean>('service.started', ['ntpd'], ctx.creds)); } catch { /* best-effort */ }
+      const note = created.length > 0 ? `Added ${created.length} NTP server(s); ntpd restarted — re-syncing.` : 'ntpd restarted — re-syncing to its configured servers.';
+      return { success: true, applied: true, verified, details: { mode: 'sync', note, created, jobId, state: waitState, ...(notes.length > 0 ? { notes } : {}) } };
+    }
+
+    // --- set: timezone only (NO wall-clock setter in the public API) -----------
+    const timeUtc = str(input, 'timeUtc');
+    const tz = str(input, 'timezone');
+    if (!timeUtc && !tz) return { success: false, details: { error: "mode 'set' requires at least one of timeUtc or timezone" } };
+    if (timeUtc && !tz) {
+      return { success: false, details: { error: "TrueNAS's public API has no wall-clock setter — only the timezone can be set. Use mode='sync' to re-sync via NTP instead." } };
+    }
+
+    const dr = await dispatchWrite(ctx, 'system.general.update', [{ timezone: tz! }], {
+      verify: async () => {
+        try {
+          const general = await ctx.client.call<Record<string, unknown>>('system.general.config', [], ctx.creds);
+          return pickString(general as Record<string, unknown>, ['timezone']) === tz; // matches — applied
+        } catch {
+          return null;
+        }
+      },
+    });
+    const notes: string[] = [];
+    if (dr.note) notes.push(dr.note);
+    return { success: true, applied: true, verified: !dr.unconfirmed, details: { mode: 'set', timezone: tz, ...(notes.length > 0 ? { notes } : {}) } };
+  },
+};
+
 const systemShutdownAction: ActionDescriptor<TruenasActionContext> = {
   id: 'system.shutdown',
   label: 'Shut down the appliance',
@@ -5953,6 +6062,7 @@ export const registry = createRegistry<TruenasActionContext>([
   systemRebootAction,
   systemTimezoneReadAction,
   systemTimezoneSetAction,
+  systemClockSyncAction,
   systemShutdownAction,
   systemFirmwareUpdateAction,
   configBackupDownloadAction,

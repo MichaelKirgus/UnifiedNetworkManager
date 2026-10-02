@@ -151,6 +151,74 @@ export const SYSTEM_ACTIONS: ActionDescriptor[] = [
       return r.ok ? okResult({ timezone: tz }) : failResult(`Setting timezone failed: ${r.stderr.slice(0, 300)}`);
     },
   },
+  // --- Fleet clock re-sync (Time page "Re-sync devices") ----------------------
+  // Canonical action id shared across plugins — deviceCount 'N' fans out one step
+  // per device via plan.ts; the API treats non-1 counts as multi-device intents.
+  {
+    id: 'system.clock.sync',
+    label: 'Sync or set device clock',
+    description:
+      "Re-syncs the router to its configured NTP source (mode='sync') and/or sets a specific wall-clock time and/or IANA timezone (mode='set'). Fleet-wide intent — fans out one step per device. 'sync' restarts the system/ntpd procd service so OpenWrt re-polls its uci-configured NTP servers. 'set' writes the clock with `date -s` and/or the timezone via uci.",
+    module: 'System',
+    riskLevel: 'write',
+    deviceCount: 'N',
+    timeoutMs: 60_000,
+    inputSchema: {
+      mode: { type: 'string', required: true, enum: ['sync', 'set'], description: "'sync' = re-trigger native NTP; 'set' = manual wall-clock and/or timezone" },
+      timeUtc: { type: 'string', description: "ISO-8601 UTC instant for mode='set' (e.g. 2026-10-02T14:30:00Z)" },
+      timezone: { type: 'string', description: "IANA zone for mode='set' (e.g. Europe/Berlin); independent of timeUtc" },
+    },
+    execute: async (ctx, input) => {
+      if (!sshAvailable(ctx)) return noSshResult();
+      const ssh = ctx.backend.ssh!;
+      const mode = String(input.mode ?? '').trim();
+      if (!['sync', 'set'].includes(mode)) return failResult("mode must be 'sync' or 'set'.");
+
+      // --- sync: re-trigger native NTP ---------------------------------------
+      if (mode === 'sync') {
+        // Newer OpenWrt runs ntpd as its own procd service; older versions fold it
+        // into the system service. Restart whichever exists — both are harmless no-ops otherwise.
+        const r = await runCommands(ssh, [
+          'if [ -x /etc/init.d/ntpd ]; then /etc/init.d/ntpd restart >/dev/null 2>&1 && { echo "restarted ntpd"; exit 0; }; fi',
+          '/etc/init.d/system restart >/dev/null 2>&1 && { echo "restarted system"; exit 0; }',
+          'echo "No NTP-capable service found (tried ntpd, system)" >&2; exit 1',
+        ], 30_000);
+        if (!r.ok) return failResult(`NTP re-sync failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
+        const status = await ssh.exec('date -u +%Y-%m-%dT%H:%M:%SZ; uci get system.@system[0].ntp_server 2>/dev/null || true').catch(() => null);
+        return okResult({ mode: 'sync', restarted: (r.stdout ?? '').trim(), clockUtc: status?.stdout?.split('\n')[0] });
+      }
+
+      // --- set: manual wall-clock and/or timezone ----------------------------
+      const timeUtc = typeof input.timeUtc === 'string' && input.timeUtc.trim() ? input.timeUtc.trim() : undefined;
+      const tz = typeof input.timezone === 'string' && input.timezone.trim() ? input.timezone.trim() : undefined;
+      if (!timeUtc && !tz) return failResult("mode 'set' requires at least one of timeUtc or timezone.");
+
+      const cmds: string[] = [];
+      // Timezone first, so the wall-clock set is applied under the final zone.
+      if (tz) {
+        // IANA identifiers are [A-Za-z0-9_+-/]; reject anything else before it hits the shell.
+        if (!/^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/.test(tz)) return failResult('Invalid timezone identifier.');
+        cmds.push(uciSetCmd('system', '@system[0]', 'timezone', tz));
+      }
+      if (timeUtc) {
+        // Strict ISO-8601 shape — reject anything that could inject shell.
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:?\d{2})?$/.test(timeUtc)) return failResult('timeUtc must be an ISO-8601 instant (e.g. 2026-10-02T14:30:00Z).');
+        cmds.push(`date -s '${timeUtc}'`);
+      }
+      if (tz) cmds.push(uciCommitCmd());
+      // Apply: restart the service that owns time handling.
+      cmds.push('if [ -x /etc/init.d/ntpd ]; then /etc/init.d/ntpd restart >/dev/null 2>&1 || true; fi');
+      cmds.push('/etc/init.d/system restart >/dev/null 2>&1 || true');
+
+      const r = await runCommands(ssh, cmds, 30_000);
+      if (!r.ok) return failResult(`Setting clock failed: ${r.stderr.slice(0, 300)}`);
+
+      // Verify by re-reading the wall clock + zone.
+      const check = await ssh.exec('date -u +%Y-%m-%dT%H:%M:%SZ; date +%Z').catch(() => null);
+      const lines = (check?.stdout ?? '').trim().split('\n');
+      return okResult({ mode: 'set', timeUtc: timeUtc ?? undefined, timezone: tz ?? undefined, reportedUtc: lines[0] || undefined, reportedZone: lines[1] || undefined });
+    },
+  },
   {
     id: 'system.reboot',
     label: 'Reboot device',

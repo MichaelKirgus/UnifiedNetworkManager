@@ -1038,6 +1038,82 @@ const systemTimezoneSet: ActionDescriptor = {
   },
 };
 
+/** Fleet clock re-sync — canonical id shared across plugins. LCOS specifics:
+ *  - mode='sync' : enable the NTP client (lcsSetupNtpOperating) and, when `servers`
+ *    is supplied, upsert them into lcsSetupNtpRqAddressTable — same SNMP writes as
+ *    ntp.servers.set. LCOS re-polls its servers on config change; there is no
+ *    force-sync command in the MIB.
+ *  - mode='set'  : timezone only (whole-hour enum via lcsSetupTimeTimezone). The
+ *    wall clock itself is READ-ONLY in the MIB — a manual time set is not possible. */
+const systemClockSync: ActionDescriptor = {
+  id: 'system.clock.sync',
+  label: 'Sync or set device clock',
+  description:
+    "Re-syncs the router to its NTP source (mode='sync') and/or sets the timezone (mode='set'). Fleet-wide intent — fans out one step per device. NOTE: the LCOS MIB exposes no wall-clock write, so mode='set' only supports the timezone field.",
+  module: 'System',
+  riskLevel: 'write',
+  deviceCount: 'N',
+  timeoutMs: 60_000,
+  inputSchema: {
+    mode: { type: 'string', required: true, enum: ['sync', 'set'], description: "'sync' = re-trigger native NTP; 'set' = manual wall-clock and/or timezone" },
+    timeUtc: { type: 'string', description: "ISO-8601 UTC instant for mode='set' (e.g. 2026-10-02T14:30:00Z)" },
+    timezone: { type: 'string', description: "IANA zone for mode='set' (e.g. Europe/Berlin); independent of timeUtc" },
+    servers: { type: 'array', items: { type: 'string' }, description: "Optional NTP server list for mode='sync' — upserted into the device's NTP table" },
+  },
+  async execute(ctx, input) {
+    const mode = String(input.mode ?? '').trim();
+    if (!['sync', 'set'].includes(mode)) return { success: false, error: "mode must be 'sync' or 'set'." };
+
+    // --- sync: enable NTP (+ optional server upsert) ---------------------------
+    if (mode === 'sync') {
+      const servers = Array.isArray(input.servers) ? (input.servers as unknown[]).map(String).filter(Boolean) : [];
+      await snmpSet(ctx.host, ctx.credentials.snmp, SETUP.ntpOperating, 'i', 1, ctx.opts);
+
+      let presentOnDevice: string[] | null = null;
+      if (servers.length > 0) {
+        const existing = await readNtpServers(ctx);
+        for (const addr of servers) {
+          if (existing.includes(addr)) continue;
+          const oid = `${SETUP.ntpRqAddressTableBase}.1.${SETUP.NTP_COL_ADDRESS}.${encodeTextIndex(addr)}`;
+          await snmpSet(ctx.host, ctx.credentials.snmp, oid, 's', addr, ctx.opts);
+        }
+        presentOnDevice = await readNtpServers(ctx);
+      }
+
+      const gotFlag = await readScalar(ctx, SETUP.ntpOperating);
+      const verified = gotFlag !== null && Number(gotFlag) === 1;
+      return {
+        success: verified,
+        applied: true,
+        verified,
+        details: { mode: 'sync', note: servers.length > 0 ? `NTP enabled with ${servers.length} server(s) upserted.` : 'NTP client ensured enabled — re-syncing to its configured servers.', presentOnDevice },
+      };
+    }
+
+    // --- set: timezone only (wall clock is RO in the MIB) ----------------------
+    const timeUtc = typeof input.timeUtc === 'string' && input.timeUtc.trim() ? input.timeUtc.trim() : undefined;
+    const tz = str(input, 'timezone');
+    if (!timeUtc && !tz) return { success: false, error: "mode 'set' requires at least one of timeUtc or timezone." };
+    if (timeUtc && !tz) {
+      return { success: false, error: "The LCOS MIB exposes no wall-clock write — only the timezone can be set. Use mode='sync' to re-sync via NTP instead." };
+    }
+
+    const minutes = ianaZoneToOffsetMinutes(tz!);
+    if (minutes === null) return { success: false, error: `Unknown IANA timezone "${tz}".` };
+    const enumVal = lcosMinutesToTimezoneEnum(minutes);
+    if (enumVal === null) return { success: false, error: `Offset ${minutes}m is not representable (whole hours −12..+14 only).` };
+
+    const before = await readScalar(ctx, SETUP_TIME.timezone);
+    if (before !== null && Number(before) === enumVal) {
+      return { success: true, applied: false, verified: true, details: { mode: 'set', timezoneMinutes: minutes, note: 'Already set — no change.' } };
+    }
+    await snmpSet(ctx.host, ctx.credentials.snmp, SETUP_TIME.timezone, 'i', enumVal, ctx.opts);
+    const after = await readScalar(ctx, SETUP_TIME.timezone);
+    const verified = after !== null && Number(after) === enumVal;
+    return { success: verified, applied: true, verified, details: { mode: 'set', timezoneMinutes: minutes, before: before === null ? null : String(before), after: after === null ? null : String(after) } };
+  },
+};
+
 // --- Registry ---------------------------------------------------------------------------
 
 const ALL_ACTIONS: ActionDescriptor[] = [
@@ -1051,6 +1127,7 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   lanIfcStateSet,
   networkStateRead,
   systemTimezoneSet,
+  systemClockSync,
   wlanNetworksRead,
   wlanRadiosRead,
   radioChannelSet,

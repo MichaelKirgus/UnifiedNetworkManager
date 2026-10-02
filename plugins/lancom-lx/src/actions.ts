@@ -22,6 +22,7 @@
 
 import { ActionResult, ActionDescriptor, configBackupFileName, createFileRepoClient, createRegistry, FileRepoClient } from '@unm/plugin-sdk';
 import { isWriteOk, LcosWebClient, parseLcosConfigText, REDACTED, redactConfig, tableCell, type ParsedLcosConfig } from './webapi';
+import { ianaToLxTimezoneEnum } from './lcosOids';
 
 // --- Context ------------------------------------------------------------------
 
@@ -1656,6 +1657,98 @@ const configRestore: ActionDescriptor<LxActionContext> = {
   },
 };
 
+/** Fleet clock re-sync — canonical id shared across plugins. LX specifics:
+ *  - mode='sync' : enable the NTP operating flag (scalar 13.2.14.21.1) and, when
+ *    `servers` is supplied, add any missing servers to table 13.2.14.21.3 as ACTIVE
+ *    so they are actually used for synchronization.
+ *  - mode='set'  : timezone only — the lcosLXSetupTimeTimezone enum (scalar
+ *    13.2.14.20.0) supports a fixed list of IANA zones; the wall clock itself has
+ *    no write path in ubus, so a manual time set is not possible. */
+const systemClockSync: ActionDescriptor<LxActionContext> = {
+  id: 'system.clock.sync',
+  label: 'Sync or set device clock',
+  description:
+    "Re-syncs the AP to its NTP source (mode='sync') and/or sets the timezone (mode='set'). Fleet-wide intent — fans out one step per device. NOTE: LX ubus exposes no wall-clock write, so mode='set' only supports the timezone field.",
+  module: 'System',
+  riskLevel: 'write' as const,
+  deviceCount: 'N' as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    mode: { type: 'string', required: true, enum: ['sync', 'set'], description: "'sync' = re-trigger native NTP; 'set' = manual wall-clock and/or timezone" },
+    timeUtc: { type: 'string', description: "ISO-8601 UTC instant for mode='set' (e.g. 2026-10-02T14:30:00Z)" },
+    timezone: { type: 'string', description: "IANA zone for mode='set' (e.g. Europe/Berlin); independent of timeUtc" },
+    servers: { type: 'array', items: { type: 'string' }, description: "Optional NTP server list for mode='sync' — added as active when missing" },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const mode = String(input.mode ?? '').trim();
+    if (!['sync', 'set'].includes(mode)) return { success: false, error: "mode must be 'sync' or 'set'." };
+
+    // --- sync: enable NTP (+ optional server upsert) ---------------------------
+    if (mode === 'sync') {
+      const servers = Array.isArray(input.servers) ? (input.servers as unknown[]).map(String).filter(Boolean) : [];
+      const c = client(ctx);
+      try {
+        // 1. Operating flag on.
+        let beforeFlag: string | null;
+        try { beforeFlag = await c.getScalar('13.2.14.21.1'); } catch { beforeFlag = null; }
+        if (beforeFlag !== '1') {
+          const tag = await c.setScalar('13.2.14.21.1', '1');
+          if (!isWriteOk(tag)) return { success: false, error: `setScalar 13.2.14.21.1 failed with errortag ${tag}` };
+        }
+
+        // 2. Add missing servers as ACTIVE (col .1 = address, col .2 = active).
+        let added: string[] = [];
+        if (servers.length > 0) {
+          const p = parseLcosConfigText(await c.getConfigText());
+          for (const server of servers) {
+            const exists = (p.tables.get('13.2.14.21.3') ?? []).some((_, i) => tableCell(p, '13.2.14.21.3', '1', rowIndexPath(p, '13.2.14.21.3', i)) === server);
+            if (exists) continue;
+            const tag = await c.addTableRow('13.2.14.21.3', { 1: server, 2: '1' });
+            if (!isWriteOk(tag)) return { success: false, error: `addTableRow 13.2.14.21.3 failed with errortag ${tag}` };
+            added.push(server);
+          }
+        }
+
+        // 3. Verify the flag.
+        const afterFlag = await c.getScalar('13.2.14.21.1');
+        return {
+          success: (afterFlag ?? '0') === '1',
+          applied: true,
+          verified: (afterFlag ?? '0') === '1',
+          details: { mode: 'sync', note: added.length > 0 ? `NTP enabled; ${added.length} server(s) added as active.` : 'NTP operating flag ensured on — re-syncing to its configured servers.', beforeFlag, afterFlag, added },
+        };
+      } finally {
+        await c.destroy().catch(() => undefined);
+      }
+    }
+
+    // --- set: timezone only (wall clock has no ubus write) ----------------------
+    const timeUtc = typeof input.timeUtc === 'string' && input.timeUtc.trim() ? input.timeUtc.trim() : undefined;
+    const tz = typeof input.timezone === 'string' && input.timezone.trim() ? input.timezone.trim() : undefined;
+    if (!timeUtc && !tz) return { success: false, error: "mode 'set' requires at least one of timeUtc or timezone." };
+    if (timeUtc && !tz) {
+      return { success: false, error: "LX ubus exposes no wall-clock write — only the timezone can be set. Use mode='sync' to re-sync via NTP instead." };
+    }
+
+    const enumVal = ianaToLxTimezoneEnum(tz!);
+    if (enumVal === null) {
+      return { success: false, error: `Timezone "${tz}" is not in the LX supported zone list — use mode='sync' to re-sync via NTP instead.` };
+    }
+
+    const c = client(ctx);
+    try {
+      const before = await c.getScalar('13.2.14.20.0');
+      if (before === String(enumVal)) return { success: true, applied: false, verified: true, details: { mode: 'set', timezone: tz, note: 'Already set — no change.' } };
+      const tag = await c.setScalar('13.2.14.20.0', String(enumVal));
+      if (!isWriteOk(tag)) return { success: false, error: `setScalar 13.2.14.20.0 failed with errortag ${tag}` };
+      const after = await c.getScalar('13.2.14.20.0');
+      return { success: (after ?? null) === String(enumVal), applied: true, verified: (after ?? null) === String(enumVal), details: { mode: 'set', timezone: tz, before, after } };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+  },
+};
+
 // --- Registry -----------------------------------------------------------------------------
 
 export const registry = createRegistry<LxActionContext>([
@@ -1684,6 +1777,7 @@ export const registry = createRegistry<LxActionContext>([
   ntpServerRemove,
   ntpServerSetActive,
   ntpOperatingSet,
+  systemClockSync,
   snmpSettingsSet,
   snmpCommunityAdd,
   stpSettingsSet,

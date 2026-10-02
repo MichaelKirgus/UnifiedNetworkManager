@@ -395,6 +395,10 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
 
   const identity = identityRes.status === 'fulfilled' ? firstRow(identityRes.value) : {};
   const clock = clockRes.status === 'fulfilled' ? firstRow(clockRes.value) : {};
+  // With time-zone-autodetect ON, /system/clock reports `time-zone-name: "manual"`
+  // — not a real IANA zone. Treat it as unknown so the Time page shows drift
+  // "not computable" instead of resolving against a bogus zone.
+  const clockTzRaw = rosString(clock, ['time-zone-name', 'time-zone', 'timezone']);
 
   // --- system ------------------------------------------------------------------
   const cpuLoadRaw = rosNumber(resource, ['cpu-load']);
@@ -414,7 +418,7 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
     uptimeSeconds: parseUptimeSeconds(rosString(resource, ['uptime'])),
     clockDate: rosString(clock, ['date']) ?? null,
     clockTime: rosString(clock, ['time']) ?? null,
-    timezone: rosString(clock, ['timezone', 'time-zone']) ?? null,
+    timezone: clockTzRaw && clockTzRaw.toLowerCase() !== 'manual' ? clockTzRaw : null,
     interfaces: [],
     addresses: [],
     arp: [],

@@ -1,6 +1,7 @@
 import * as sys from '../client/system';
 import * as backup from '../client/backup';
 import * as firmware from '../client/firmware';
+import * as ntpd from '../client/ntpd';
 import { ActionDescriptor, ActionResult } from './types';
 
 /**
@@ -318,6 +319,55 @@ export const systemActions: ActionDescriptor[] = [
       const d = dataOf(res) ?? {};
       const log = typeof d['log'] === 'string' ? d['log'].slice(-2000) : null;
       return { success: true, details: { status: d['status'] ?? null, log } };
+    },
+  },
+  // --- Fleet clock re-sync (Time page "Re-sync devices") ----------------------
+  // Canonical action id shared across plugins — deviceCount 'N' fans out one step
+  // per device via plan.ts; the API treats non-1 counts as multi-device intents.
+  {
+    id: 'system.clock.sync',
+    label: 'Sync or set device clock',
+    description:
+      "Re-syncs the firewall to its configured NTP source (mode='sync') and/or sets the IANA timezone (mode='set'). Fleet-wide intent — fans out one step per device. 'sync' restarts ntpd so it re-polls its configured servers. NOTE: OPNsense's REST API has no wall-clock setter, so mode='set' only supports the timezone field.",
+    module: 'System',
+    riskLevel: 'write',
+    deviceCount: 'N',
+    timeoutMs: 60_000,
+    inputSchema: {
+      mode: { type: 'string', required: true, enum: ['sync', 'set'], description: "'sync' = re-trigger native NTP; 'set' = manual wall-clock and/or timezone" },
+      timeUtc: { type: 'string', description: "ISO-8601 UTC instant for mode='set' (e.g. 2026-10-02T14:30:00Z)" },
+      timezone: { type: 'string', description: "IANA zone for mode='set' (e.g. Europe/Berlin); independent of timeUtc" },
+    },
+    execute: async (ctx, input) => {
+      const mode = String(input.mode ?? '').trim();
+      if (!['sync', 'set'].includes(mode)) return { success: false, error: "mode must be 'sync' or 'set'." };
+
+      // --- sync: re-trigger native NTP ---------------------------------------
+      if (mode === 'sync') {
+        const res = await ntpd.restartService(ctx.client);
+        if (!res.ok) return { success: false, error: `ntpd restart failed (HTTP ${res.status})` };
+        // Best-effort read of the current wall clock for the result details.
+        const t = await sys.getSystemTime(ctx.client).catch(() => null);
+        const d = t ? dataOf(t) ?? {} : {};
+        return { success: true, applied: true, details: { mode: 'sync', note: 'ntpd restarted — re-syncing to configured servers.', systemTime: d['system_time'] ?? d['time'] ?? null } };
+      }
+
+      // --- set: timezone (wall-clock NOT available over OPNsense REST) --------
+      const timeUtc = typeof input.timeUtc === 'string' && input.timeUtc.trim() ? input.timeUtc.trim() : undefined;
+      const tz = typeof input.timezone === 'string' && input.timezone.trim() ? input.timezone.trim() : undefined;
+      if (!timeUtc && !tz) return { success: false, error: "mode 'set' requires at least one of timeUtc or timezone." };
+      if (timeUtc && !tz) {
+        return { success: false, error: "OPNsense's REST API has no wall-clock setter — only the timezone can be set. Use mode='sync' to re-sync via NTP instead." };
+      }
+      // IANA identifiers are [A-Za-z0-9_+-/]; reject anything else before it hits the API.
+      if (!tz || !/^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/.test(tz)) return { success: false, error: 'Invalid timezone identifier.' };
+
+      const res = await sys.setSystemTimezone(ctx.client, tz);
+      if (!res.ok) return { success: false, error: `Setting timezone failed (HTTP ${res.status})` };
+      // Verify by re-reading the configured zone.
+      const check = await sys.getSystemTimezone(ctx.client).catch(() => null);
+      const cd = check ? dataOf(check) ?? {} : {};
+      return { success: true, applied: true, verified: String(cd['timezone'] ?? '') === tz, details: { mode: 'set', timezone: tz, reported: cd['timezone'] ?? null } };
     },
   },
 ];

@@ -30,7 +30,7 @@ import {
 } from '@unm/plugin-sdk';
 import { ROUTEROS_DEVICE_SUPPORT } from './deviceSupport';
 import { RouterOsAuthError, RouterOsClient } from './routerosClient';
-import { getAction } from './actions/registry';
+import { getAction, listCatalog, listModules } from './actions/registry';
 import { ActionContext, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest } from './plan';
 import { PREFLIGHT_RESOLVERS } from './actions/preflight';
@@ -310,6 +310,12 @@ const server = createPluginServer({
       },
     ],
     options: PLUGIN_OPTIONS,
+    // The full action catalog (single-device actions + multi-device intents) —
+    // advertised so the API persists it and validates plan inputs against the
+    // inputSchema (previously this plugin never sent `actions`, leaving its
+    // stored catalog empty).
+    actions: listCatalog(),
+    modules: listModules(),
     // Quick actions for the Devices page "Device Actions" column. The web-UI URL
     // is resolved by THIS plugin (scheme follows schemeMode, port = httpsPort);
     // shell reuses the existing console dialog.
