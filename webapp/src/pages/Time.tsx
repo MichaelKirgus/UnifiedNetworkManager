@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useQueries, useQuery } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ChevronDown, ChevronUp, Clock } from 'lucide-react';
+import { ChevronDown, ChevronUp, Clock, Globe } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, type DataTableColumn } from '../components/DataTable';
 import { api, DeviceTimeRow } from '../api/client';
@@ -150,6 +150,15 @@ export default function Time() {
   const timeQuery = useQuery({
     queryKey: ['device-time'],
     queryFn: () => api.deviceTime(),
+    refetchInterval: 30_000,
+  });
+
+  // Fleet time-base check: UNM's own clock vs the international consensus of
+  // configured public NTP references (polled server-side by the ntpReferences
+  // worker — this page only reads the freshest stored rows).
+  const ntpRefQuery = useQuery({
+    queryKey: ['ntp-references'],
+    queryFn: () => api.ntpReferences(),
     refetchInterval: 30_000,
   });
 
@@ -519,6 +528,69 @@ export default function Time() {
               </span>
             )}
           </span>
+        </div>
+
+        {/* Time base card — UNM's own clock vs international consensus (public NTP references). */}
+        <div className="mb-2 shrink-0 rounded-lg border border-border bg-card px-4 py-3">
+          <div className="flex items-center gap-3">
+            <span className="flex items-center gap-2 text-sm font-semibold text-secondary">
+              <Globe size={16} className="text-muted-foreground" />
+              Time base — UNM clock vs international consensus
+            </span>
+            {(() => {
+              const c = ntpRefQuery.data?.consensusMs ?? null;
+              if (c === null) return <span className="ml-auto text-xs text-faint">no healthy reference</span>;
+              const n = ntpRefQuery.data?.sampleCount ?? 0;
+              return (
+                <span
+                  className={clsx('ml-auto font-mono text-sm tabular-nums', driftTextClass(c))}
+                  title="Median drift across healthy public references — positive = UNM clock lags the consensus, negative = ahead. Devices that sync their clock from UNM inherit this offset."
+                >
+                  {fmtDrift(c)}{' '}
+                  <span className="text-xs text-faint">over {n} reference{n === 1 ? '' : 's'}</span>
+                </span>
+              );
+            })()}
+          </div>
+
+          <div className="mt-2 flex flex-col gap-1">
+            {(ntpRefQuery.data?.references ?? []).length === 0 && (
+              <p className="text-xs text-faint">
+                No public NTP references configured — set <span className="font-mono">ntpReferenceServers</span> on the Settings page.
+              </p>
+            )}
+            {(ntpRefQuery.data?.references ?? []).map((r) => {
+              const dot = r.status === 'ok' ? 'bg-status-ok' : r.status === 'unsynced' ? 'bg-status-warn' : 'bg-status-critical';
+              return (
+                <div key={r.server} className="flex items-center gap-3 text-xs">
+                  <span
+                    className={clsx('h-2 w-2 shrink-0 rounded-full', dot)}
+                    title={r.status === 'ok' ? 'Healthy' : r.status === 'unsynced' ? `Server not synchronized (${r.error ?? ''})` : (r.error ?? 'Unreachable')}
+                  />
+                  <span className="w-56 truncate font-mono text-secondary" title={`${r.server}:${r.port ?? 123}`}>
+                    {r.server}{r.port && r.port !== 123 ? `:${r.port}` : ''}
+                  </span>
+                  <span className="w-24 shrink-0 font-mono text-faint">{stratumLabel(r.stratum ?? null)}</span>
+                  <span className="min-w-0 flex-1 truncate text-right font-mono text-[10px] text-faint" title={r.timeUtc ?? undefined}>
+                    {r.referenceId ? `ref ${r.referenceId}` : ''}
+                  </span>
+                  <span className="w-24 shrink-0 text-right">
+                    {r.driftMs === null || r.driftMs === undefined ? (
+                      <span className="text-faint">{r.status === 'unreachable' ? 'no reply' : r.status === 'unsynced' ? 'unsynced' : '—'}</span>
+                    ) : (
+                      <span
+                        className={clsx('font-mono tabular-nums', driftTextClass(r.driftMs))}
+                        title="Served instant − UNM clock at read time — positive = UNM behind"
+                      >
+                        {fmtDrift(r.driftMs)}
+                      </span>
+                    )}
+                  </span>
+                  <span className="w-20 shrink-0 text-right text-faint">{fmtAge(r.collectedAt, nowMs)}</span>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         <div ref={vSplitRef} className="flex min-h-0 flex-1 flex-col">

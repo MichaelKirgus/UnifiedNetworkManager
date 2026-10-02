@@ -382,6 +382,25 @@ export async function initDb(): Promise<void> {
   await pool.query(`ALTER TABLE device_times ADD COLUMN IF NOT EXISTS "ntpStratum" INTEGER`);
   await pool.query(`ALTER TABLE device_times ADD COLUMN IF NOT EXISTS "ntpReferenceId" TEXT`);
 
+  // Public NTP reference readings (Time page "Time base" card) — one row per
+  // configured public server, upserted by the ntpReferences worker.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ntp_reference_readings (
+      "server" TEXT PRIMARY KEY,
+      port INTEGER,
+      status TEXT NOT NULL DEFAULT 'ok',
+      error TEXT NOT NULL DEFAULT '',
+      "rttMs" INTEGER,
+      "driftMs" BIGINT,
+      stratum INTEGER,
+      precision INTEGER,
+      "rootDelaySeconds" DOUBLE PRECISION,
+      "rootDispersionSeconds" DOUBLE PRECISION,
+      "referenceId" TEXT NOT NULL DEFAULT '',
+      "timeUtc" TEXT NOT NULL DEFAULT '',
+      "collectedAt" TEXT NOT NULL
+    )`);
+
   // Normalized inventory tables (Networks + Hosts pages). Populated by the
   // telemetry worker from plugin /monitoring metrics — see workers/telemetry.ts.
   await pool.query(`

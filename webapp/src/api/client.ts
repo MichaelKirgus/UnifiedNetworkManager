@@ -1697,6 +1697,37 @@ export interface DeviceTimeOverview {
   devices: DeviceTimeRow[];
 }
 
+// --- Public NTP references (fleet time-base check, Time page) ---------------
+
+/** One configured public NTP reference from GET /ntp-references. */
+export interface NtpReferenceRow {
+  /** Hostname or IP literal of the public reference. */
+  server: string;
+  port?: number | null;
+  /** ok = healthy reply · unreachable = no reply/DNS failure · unsynced = server itself not synchronized (excluded from consensus). */
+  status: 'ok' | 'unreachable' | 'unsynced';
+  error?: string | null;
+  rttMs?: number | null;
+  /** Served instant − UNM clock at read time — positive = UNM behind, negative = ahead. Null when no usable instant. */
+  driftMs?: number | null;
+  stratum?: number | null;
+  referenceId?: string | null;
+  /** UTC wall clock served by the reference (ISO-8601 "…Z"). */
+  timeUtc?: string | null;
+  collectedAt: string;
+}
+
+/** Response of GET /ntp-references — all references + consensus verdict. */
+export interface NtpReferenceOverview {
+  /** UNM's own clock at response time, epoch ms. */
+  unmNowMs: number;
+  /** Median drift across healthy references (UNM vs international consensus). Null when no reference is currently healthy. */
+  consensusMs?: number | null;
+  /** How many healthy references contributed to the median. */
+  sampleCount: number;
+  references: NtpReferenceRow[];
+}
+
 /** One device attached to a VM — NIC, disk, display, CD-ROM, PCIe passthrough…
  * (from the plugin's `vms` metric, extra.devices[]). Generic across hypervisor
  * plugins: `dtype` is the appliance-native type; `label`/`detail` are pre-formatted. */
@@ -2946,6 +2977,8 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<DeviceTimeOverview>(`/device-time${suffix}`);
   },
+  /** Public NTP reference overview — the fleet's time-base check (Time page). */
+  ntpReferences: () => apiFetch<NtpReferenceOverview>('/ntp-references'),
   vms: (params?: { deviceId?: string; siteId?: string }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);

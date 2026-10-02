@@ -434,6 +434,34 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     help:
       'How the server-side network-overlap check treats a rollout whose name, subnet or VLAN ID collides with an already-detected live network. "warn" (default): plan creation proceeds — NAT\'d remote sites and multi-site designs legitimately reuse names/subnets/VLAN ids. "block": such rollouts are REJECTED at plan creation until the overlap is resolved or this setting is switched back to warn.',
   },
+
+  // Public NTP reference monitoring (Time page "Time base" card). The ntpReferences
+  // worker polls each configured public server and compares its served instant
+  // against UNM's own clock — a large |drift| means the fleet's time base is off.
+  {
+    key: 'ntpReferenceServers',
+    label: 'NTP reference servers',
+    type: 'string',
+    category: 'Time',
+    default: 'pool.ntp.org:123,time.google.com:123',
+    envVar: 'UNM_NTP_REFERENCE_SERVERS',
+    maxLength: 500,
+    help:
+      'Comma-separated list of public NTP servers (host or IP, optional :port — default 123) polled by the time-base worker. Each server is queried with a single SNTP request; the median drift across healthy references is shown as "UNM clock vs international consensus" on the Time page. Use at least two independent sources so one bad reference cannot skew the verdict.',
+  },
+  {
+    key: 'ntpReferencePollIntervalMs',
+    label: 'NTP reference poll window',
+    type: 'integer',
+    category: 'Time',
+    unit: 'ms',
+    min: 60_000,
+    max: 3_600_000,
+    default: 300_000,
+    envVar: 'UNM_NTP_REFERENCE_POLL_INTERVAL_MS',
+    help:
+      'How often the time-base worker re-queries every configured public NTP reference. One lightweight SNTP request per server — keep it at or above one minute to stay a polite client of public pools.',
+  },
 ];
 
 const BY_KEY: Record<string, SettingDescriptor> = Object.fromEntries(

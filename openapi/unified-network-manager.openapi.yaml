@@ -4889,6 +4889,30 @@ paths:
         '401':
           description: Authentication required
 
+  /ntp-references:
+    get:
+      tags: [Inventory]
+      summary: Public NTP reference overview (Time page "Time base" card)
+      description: >-
+        Reads the `ntp_reference_readings` table — one row per configured public
+        NTP server, upserted by the ntpReferences worker on a configurable cadence
+        (`ntpReferenceServers` + `ntpReferencePollIntervalMs` settings). Each row's
+        driftMs is the served instant minus UNM's clock at read time (same
+        semantics as generic-ntp's ntp.driftMs), so a large |drift| means UNM's
+        OWN clock — and therefore every device synced to it — is off relative to
+        the international consensus. `consensusMs` is the median drift across
+        healthy references, computed at read time (never stored); null when no
+        reference is currently healthy. Gated on `time:read`.
+      responses:
+        '200':
+          description: All configured references with their latest reading + consensus verdict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NtpReferenceOverview'
+        '401':
+          description: Authentication required
+
   /vms:
     get:
       tags: [Inventory]
@@ -8425,6 +8449,40 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/DeviceTimeRow'
+
+    NtpReferenceRow:
+      type: object
+      required: [server, status, collectedAt]
+      properties:
+        server: { type: string, description: "Hostname or IP literal of the public reference" }
+        port: { type: [integer, 'null'], description: "UDP port queried (default 123)" }
+        status:
+          type: string
+          enum: [ok, unreachable, unsynced]
+          description: >-
+            ok = healthy reply with a usable instant; unreachable = no reply / DNS
+            failure (error carries the reason); unsynced = the server itself is not
+            synchronized (stratum 0/15 or leap alarm) — its drift is excluded from
+            the consensus.
+        error: { type: [string, 'null'], description: "Failure reason when status != ok" }
+        rttMs: { type: [integer, 'null'], description: "Client-measured round-trip time of the query, ms" }
+        driftMs: { type: [integer, 'null'], description: "Served instant − UNM clock at read time — positive = UNM behind, negative = ahead. Null when no usable instant (unreachable/unsynced)" }
+        stratum: { type: [integer, 'null'], description: "NTP stratum of the source (1 = reference clock … 15 = unsynchronized)" }
+        referenceId: { type: [string, 'null'], description: "NTP reference ID (dotted IPv4 for stratum ≤ 1, else a 4-char tag like GOOG)" }
+        timeUtc: { type: [string, 'null'], format: date-time, description: "UTC wall clock served by the reference (ISO-8601 …Z)" }
+        collectedAt: { type: string, format: date-time, description: "When UNM last queried this reference" }
+
+    NtpReferenceOverview:
+      type: object
+      required: [unmNowMs, consensusMs, sampleCount, references]
+      properties:
+        unmNowMs: { type: integer, description: "UNM's own clock at response time, epoch ms" }
+        consensusMs: { type: [integer, 'null'], description: "Median drift across healthy references — UNM clock vs international consensus (positive = UNM behind). Null when no reference is currently healthy" }
+        sampleCount: { type: integer, description: "How many healthy references contributed to the median" }
+        references:
+          type: array
+          items:
+            $ref: '#/components/schemas/NtpReferenceRow'
 
     VmRow:
       type: object

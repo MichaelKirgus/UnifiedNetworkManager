@@ -33,9 +33,12 @@ socket.on('message', (msg, rinfo) => {
   reply.writeUInt32BE(0, 8); // root dispersion 0 s
   reply.write('MOCK', 12, 'ascii'); // reference ID (stratum > 1 → ASCII tag)
 
-  const nowSec = Math.floor(Date.now() / 1000) + NTP_EPOCH_OFFSET_SECONDS;
+  const nowMs = Date.now();
+  const nowSec = Math.floor(nowMs / 1000) + NTP_EPOCH_OFFSET_SECONDS;
   reply.writeUInt32BE(nowSec, 40); // transmit timestamp — seconds
-  reply.writeUInt32BE(0x8000_0000, 44); // fraction = 0.5 s
+  // Fraction: the sub-second part as a 32-bit fixed-point value (ms/1000 · 2^32).
+  // A hardcoded fraction would make every client measure a constant offset.
+  reply.writeUInt32BE(Math.round(((nowMs % 1000) / 1000) * 0x1_0000_0000), 44);
 
   socket.send(reply, 0, 48, rinfo.port, rinfo.address, (err) => {
     if (!err) console.log(`[mock-ntp] answered ${rinfo.address}:${rinfo.port} with stratum-2 current time`);

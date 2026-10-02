@@ -518,6 +518,37 @@ export const deviceTimes = pgTable(
   }
 );
 
+// One row per configured PUBLIC NTP reference (the fleet's time-base check —
+// Time page "Time base" card). Populated by the ntpReferences worker, which
+// polls each server in the `ntpReferenceServers` setting with the SDK's
+// queryNtp() and upserts here. driftMs = served instant − UNM clock at read
+// time (same semantics as generic-ntp's ntp.driftMs): a large |drift| means
+// UNM's own clock — and therefore every device synced to it — is off relative
+// to the international consensus. Consensus itself (median of healthy rows)
+// is computed at read time, never stored.
+export const ntpReferenceReadings = pgTable(
+  'ntp_reference_readings',
+  {
+    // Hostname or IP literal of the reference (port kept separately so a
+    // host:port change doesn't orphan the row).
+    server: text('server').primaryKey(),
+    port: integer('port'),
+    // ok | unreachable (no reply / DNS failure) | unsynced (stratum 0/15 or leap alarm)
+    status: text('status').notNull().default('ok'),
+    error: text('error').notNull().default(''),
+    rttMs: integer('rttMs'),
+    // Served instant − Date.now() at read time, ms (negative = UNM clock ahead).
+    driftMs: bigint('driftMs', { mode: 'number' }),
+    stratum: integer('stratum'),
+    precision: integer('precision'),
+    rootDelaySeconds: doublePrecision('rootDelaySeconds'),
+    rootDispersionSeconds: doublePrecision('rootDispersionSeconds'),
+    referenceId: text('referenceId').notNull().default(''),
+    timeUtc: text('timeUtc').notNull().default(''),
+    collectedAt: text('collectedAt').notNull(),
+  }
+);
+
 export const networks = pgTable(
   'networks',
   {

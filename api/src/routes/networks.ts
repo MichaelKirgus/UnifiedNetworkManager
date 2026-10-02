@@ -5,6 +5,7 @@ import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { allowedDeviceIds } from '../deviceAccess';
 import { ipScope, subnetOf } from '@unm/plugin-sdk';
+import { consensusDrift } from '../workers/ntpReferences';
 import { suggestFreeRanges } from '../utils/networkCheck';
 import { buildFirewallInventoryIndex, enrichFirewallAddress, getCachedFirewallIndex } from '../utils/firewallEnrichment';
 import type { FirewallAddressResolution } from '../utils/firewallEnrichment';
@@ -1795,6 +1796,49 @@ router.get('/device-time', requireAuth, requirePermission('time:read'), async (_
     }
 
     res.status(200).json({ unmNowMs, devices: out });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// GET /ntp-references - Public NTP reference overview (Time page "Time base" card).
+// Reads the `ntp_reference_readings` table — one row per configured public
+// server, upserted by the ntpReferences worker. The consensus verdict (median
+// drift across healthy references) is computed HERE at read time via the same
+// pure helper the worker uses, so it always reflects the freshest rows without
+// a stored aggregate to keep in sync. `consensusMs` = UNM clock offset vs the
+// international consensus: positive means UNM's clock lags (behind), negative
+// means it leads (ahead). Null when no reference is currently healthy.
+router.get('/ntp-references', requireAuth, requirePermission('time:read'), async (_req, res: Response) => {
+  try {
+    const rows = await db.query.ntpReferenceReadings.findMany({ orderBy: asc(schema.ntpReferenceReadings.server) });
+
+    // pg returns BIGINT as a string — coerce for the JSON contract.
+    const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+    const references = rows.map((r) => ({
+      server: r.server,
+      port: r.port,
+      status: r.status as 'ok' | 'unreachable' | 'unsynced',
+      error: r.error || null,
+      rttMs: num(r.rttMs),
+      driftMs: (() => { const n = num(r.driftMs); return n !== null && Number.isFinite(n) ? n : null; })(),
+      stratum: num(r.stratum),
+      referenceId: r.referenceId || null,
+      timeUtc: r.timeUtc || null,
+      collectedAt: r.collectedAt,
+    }));
+
+    const consensus = consensusDrift(
+      references.map((r) => ({ server: r.server, status: r.status, error: r.error ?? '', driftMs: r.driftMs, stratum: r.stratum }))
+    );
+
+    res.status(200).json({
+      unmNowMs: Date.now(),
+      consensusMs: consensus.value,
+      sampleCount: consensus.sampleCount,
+      references,
+    });
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

@@ -41,6 +41,7 @@ import { startPlanExecutorWorker } from './workers/planExecutor';
 import { startPlanSchedulerWorker } from './workers/planScheduler';
 import { startLogRetentionWorker } from './workers/logRetention';
 import { startPluginMetricsWorker } from './workers/pluginMetrics';
+import { startNtpReferencesWorker } from './workers/ntpReferences';
 import { startInactiveUsersWorker } from './workers/inactiveUsers';
 import { LEADER_KEYS, runAsLeader } from './workers/leader';
 import { initWorker } from './workers/stats';
@@ -246,6 +247,8 @@ async function main(): Promise<void> {
       return () => clearInterval(timer);
     }).then((stop) => workerStops.push(stop));
     void runAsLeader(LEADER_KEYS.pluginMetrics, 'pluginMetrics', () => startPluginMetricsWorker()).then((stop) => workerStops.push(stop));
+    // Public NTP reference polling (Time page "Time base" card — fleet time-base check).
+    void runAsLeader(LEADER_KEYS.ntpReferences, 'ntpReferences', () => startNtpReferencesWorker()).then((stop) => workerStops.push(stop));
     // Notification maintenance: auto-resolve recovered device states + retention.
     void runAsLeader(LEADER_KEYS.notifications, 'notifications', () => startNotificationsWorker()).then((stop) => workerStops.push(stop));
     // Inactivity auto-disable (credential policy inactiveDisableAfterDays).
