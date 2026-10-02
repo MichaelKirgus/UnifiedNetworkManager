@@ -89,6 +89,10 @@ services:
       # open a TLS listener on :8443. Off by default — set UNM_TLS=1 in .env to
       # enable it together with the plugins' enrollment.
       - UNM_TLS=${UNM_TLS:-}
+      # mTLS (Stage 2): broker POST /ca/renew for subject 'mcp' through the MCP
+      # server's own /tls/renew endpoint (gated by its debug key).
+      - MCP_DEBUG_KEY=${MCP_DEBUG_KEY:-dev-mcp-debug-key}
+      - UNM_MCP_URL=http://mcp:3901
     volumes:
       # Legacy api-local file-repo volume (fallback + pre-plugin rows). The
       # active byte store is the file-repo plugin's own volume below.

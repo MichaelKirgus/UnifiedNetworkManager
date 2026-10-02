@@ -35,21 +35,26 @@ export interface ClientMtlsHandle {
   live(): boolean;
   /** Current identity material — null until the first enrollment succeeds. */
   material(): TlsIdentity | null;
+  /** Force a fresh ACME enrollment (new leaf, same account) and fire onLive
+   *  with the new material so consumers rebuild their TLS setup. */
+  renew(): Promise<{ ok: boolean; error?: string }>;
 }
 
 /** Starts the background client-enrollment loop. Non-blocking, non-fatal. */
 export function startClientMtls(opts: ClientMtlsOptions & { onLive?: (identity: TlsIdentity) => void }): ClientMtlsHandle {
   let current: TlsIdentity | null = null;
   let stopRenewal: (() => void) | null = null;
+  let renewing = false;
   const log = opts.log ?? ((m: string) => console.error(`[mtls:${opts.identity}] ${m}`));
 
-  const enrollOnce = async (): Promise<void> => {
+  const enrollOnce = async (forceRenewal = false): Promise<void> => {
     const id = await ensureTlsIdentity({
       dir: opts.dir,
       acmeDirectoryUrl: opts.acmeDirectoryUrl,
       identity: opts.identity,
       identifiers: opts.identifiers,
       fetchCaBundle: opts.fetchCaBundle,
+      forceRenewal,
       log,
     });
     current = id;
@@ -71,5 +76,19 @@ export function startClientMtls(opts: ClientMtlsOptions & { onLive?: (identity: 
   return {
     live: () => current !== null,
     material: () => current,
+    async renew(): Promise<{ ok: boolean; error?: string }> {
+      if (renewing) return { ok: false, error: 'a renewal is already in progress' };
+      renewing = true;
+      try {
+        await enrollOnce(true);
+        return { ok: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log(`manual re-enrollment failed: ${msg}`);
+        return { ok: false, error: msg };
+      } finally {
+        renewing = false;
+      }
+    },
   };
 }

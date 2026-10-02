@@ -3,6 +3,7 @@ import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { renewMtls } from './mcpMtls.js';
 
 export interface HttpMcpOptions {
   port: number;
@@ -38,6 +39,24 @@ export function startHttpServer(opts: HttpMcpOptions): http.Server {
 
   app.get('/healthz', (_req, res) => {
     res.status(200).json({ status: 'ok', endpoints: ['/mcp', '/debug/mcp'] });
+  });
+
+  // POST /tls/renew - force a fresh ACME enrollment for the MCP's own mTLS
+  // identity (new leaf, same account) + rebuild the outbound dispatcher. The
+  // API brokers this from its Plugins page (POST /plugins/:id/tls/renew).
+  // Gated by the debug key — it's an operational action, not a data endpoint.
+  app.post('/tls/renew', async (req: Request, res: Response) => {
+    const key = bearerToken(req);
+    if (!opts.debugKey || key !== opts.debugKey) {
+      res.status(401).json({ error: 'unauthorized — /tls/renew requires the MCP_DEBUG_KEY bearer token' });
+      return;
+    }
+    try {
+      const result = await renewMtls();
+      res.status(result.ok ? 200 : 502).json(result);
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ ok: false, error: (err as Error).message });
+    }
   });
 
   async function serveMcp(req: Request, res: Response, createServer: () => McpServer): Promise<void> {

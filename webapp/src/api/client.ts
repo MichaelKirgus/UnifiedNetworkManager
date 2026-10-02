@@ -920,7 +920,7 @@ export interface CertificateRow {
   pluginName?: string | null;
   /** Stable endpoint identity, e.g. "https:443" / "ssh:22". */
   name: string;
-  type: 'https' | 'ssh';
+  type: 'https' | 'ssh' | 'mtls';
   host?: string;
   port?: number | null;
   /** SHA-256 fingerprint of the key currently OBSERVED on the endpoint. */
@@ -950,6 +950,8 @@ export interface CertificateRow {
   chainDaysToExpiry?: number | null;
   /** Full served chain, leaf first (parsed array). */
   chain?: CertificateInfo[];
+  /** True when the CA registry has this leaf revoked (mtls rows only). */
+  revoked?: boolean;
   collectedAt: string;
 }
 
@@ -2072,6 +2074,8 @@ export interface Plugin {
   /** Number of metric descriptors declared in /discover (how many metrics it can emit); null when unknown. */
   declaredMetricCount?: number | null;
   lastSeenAt?: string | null;
+  /** True when the plugin's own mTLS listener is live (serving :4080 over TLS with a CA-issued leaf). */
+  tlsLive?: boolean;
 }
 
 /** One self-metrics sample of a plugin process (GET /plugins/:id/self-metrics). */
@@ -2872,7 +2876,7 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<MailAliasRow[]>(`/mail/aliases${suffix}`);
   },
-  certificates: (params?: { deviceId?: string; siteId?: string; type?: 'https' | 'ssh' }) => {
+  certificates: (params?: { deviceId?: string; siteId?: string; type?: 'https' | 'ssh' | 'mtls' }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);
     if (params?.siteId) qs.set('siteId', params.siteId);
@@ -3264,6 +3268,12 @@ export const api = {
   // result details (no plan row). Only riskLevel 'read' actions are allowed server-side.
   executePluginAction: (pluginId: string, body: { deviceId: string; actionId: string; input?: Record<string, unknown> }) =>
     apiFetch<{ details: Record<string, unknown> }>(`/plugins/${pluginId}/actions/execute`, { method: 'POST', body: JSON.stringify(body) }),
+  // Force a fresh mTLS leaf for one plugin (rotation — the old leaf stays valid until expiry).
+  renewPluginTls: (pluginId: string) =>
+    apiFetch<{ renewed: boolean; ok: boolean }>(`/plugins/${pluginId}/tls/renew`, { method: 'POST' }),
+  // Force a fresh mTLS leaf for one of UNM's own services ('api' | 'mcp').
+  caRenew: (subject: 'api' | 'mcp') =>
+    apiFetch<{ renewed: boolean; ok: boolean }>('/ca/renew', { method: 'POST', body: JSON.stringify({ subject }) }),
   // In-session 2FA re-validation (mint a fresh token without a full re-login).
   revalidateChallenge: () => apiFetch<RevalidateChallenge>('/auth/revalidate/challenge', { method: 'POST' }),
   verifyRevalidateTotp: (body: { challengeToken: string; totpCode: string }) =>

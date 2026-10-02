@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { pluginAxios } from '../utils/pluginHttp';
+import { registerLeaf, pruneStale } from '../ca/registry';
 import { LEADER_KEYS } from './leader';
 import { initWorker, trackBeat } from './stats';
 
@@ -30,11 +31,42 @@ function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
-async function pollOne(pluginId: string, endpoint: string): Promise<void> {
+/**
+ * Mirrors the plugin's OWN CA-issued leaf (reported as `tlsCert` in /metrics
+ * by mTLS-enabled SDK builds) into the ca_certificates registry — the backing
+ * data for the Certificates page's "mtls" rows. Best-effort: a parse failure
+ * must never break the metrics cycle, and old plugin images simply carry no
+ * tlsCert key (no-op).
+ */
+function ingestTlsCert(pluginName: string, d: Record<string, unknown>): void {
+  const cert = d['tlsCert'];
+  if (!cert || typeof cert !== 'object') return;
+  const c = cert as Record<string, unknown>;
+  const serial = typeof c.serial === 'string' ? c.serial.trim() : '';
+  const notBefore = typeof c.notBefore === 'string' ? c.notBefore : '';
+  const notAfter = typeof c.notAfter === 'string' ? c.notAfter : '';
+  if (!serial || !notBefore || !notAfter) return; // malformed — skip silently
+  void registerLeaf({
+    serial,
+    sans: Array.isArray(c.sans) ? (c.sans as unknown[]).filter((s): s is string => typeof s === 'string') : [],
+    issuer: typeof c.issuer === 'string' ? c.issuer : '',
+    notBefore,
+    notAfter,
+    subject: pluginName,
+    source: 'plugin',
+  }).catch((err) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[plugin-metrics] failed to register tlsCert for ${pluginName}:`, (err as Error).message);
+  });
+}
+
+async function pollOne(pluginId: string, pluginName: string, endpoint: string): Promise<void> {
   try {
     // mTLS (Stage 1): pluginAxios resolves the host-dev rewrite + transport.
     const res = await pluginAxios(endpoint).get<Record<string, unknown>>('/metrics', { timeout: FETCH_TIMEOUT_MS });
     const d = res.data ?? {};
+
+    ingestTlsCert(pluginName, d);
 
     await db.insert(schema.pluginMetrics).values({
       id: uuidv4(),
@@ -64,7 +96,7 @@ async function pollAllPlugins(): Promise<void> {
   const plugins = await db.query.plugins.findMany();
   if (plugins.length === 0) return;
   await Promise.all(
-    plugins.map((p) => pollOne(p.id, p.endpoint))
+    plugins.map((p) => pollOne(p.id, p.name, p.endpoint))
   );
 }
 
@@ -82,11 +114,21 @@ export function startPluginMetricsWorker(): () => void {
     console.error('[plugin-metrics] initial poll failed:', err);
   });
 
+  // Prune superseded/expired CA-registry leaves once an hour (120 cycles at
+  // the 30s beat) — re-enrolled plugins leave their old serial behind.
+  const PRUNE_EVERY_CYCLES = Math.max(1, Math.round(3_600_000 / POLL_INTERVAL_MS));
+  let cycle = 0;
+
   const timer = setInterval(() => {
     void trackBeat('pluginMetrics', pollAllPlugins).catch((err) => {
       // eslint-disable-next-line no-console
       console.error('[plugin-metrics] poll cycle failed:', err);
     });
+    if (++cycle % PRUNE_EVERY_CYCLES === 0) {
+      void pruneStale().then((n) => {
+        if (n > 0) console.log(`[plugin-metrics] pruned ${n} stale CA-registry leaf(s)`);
+      }).catch(() => undefined);
+    }
   }, POLL_INTERVAL_MS);
 
   return () => clearInterval(timer);

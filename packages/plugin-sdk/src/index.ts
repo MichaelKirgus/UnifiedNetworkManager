@@ -9,6 +9,7 @@ export * from './types';
 export { resolvePluginIdentity, DEFAULT_PLUGIN_PORT } from './identity';
 export type { PluginIdentity, PluginIdentityInput } from './identity';
 export { createPluginServer, buildDiscoverPayload, requirePluginKey, stateHandler, probeHandler, filesystemHandler, quickActionHandler } from './server';
+export type { TlsEnrollHandle } from './server';
 export type { PluginServerOptions, PluginServer, DiscoveryExtras } from './server';
 // Interactive SSH console (capability 'sshConsole'): PTY sessions + pool (terminal.ts)
 // and the WebSocket bridge helper plugins pass to createPluginServer (consoleWs.ts).
@@ -102,8 +103,8 @@ export type { PinningMode, KnownCertificate, PinningContext, TlsPreflightOptions
 // enrollment/cert-lifecycle helper. See acmeClient.ts / tlsIdentity.ts.
 export { AcmeClient, AcmeError, buildCsr, derToRawSig, jwkThumbprint } from './acmeClient';
 export type { AcmeDirectory, AcmeChallenge, AcmeAuthorization, AcmeOrder, AcmeClientOptions } from './acmeClient';
-export { ensureTlsIdentity, scheduleTlsRenewal } from './tlsIdentity';
-export type { TlsIdentity, TlsIdentityOptions } from './tlsIdentity';
+export { ensureTlsIdentity, scheduleTlsRenewal, describeTlsCert, describeLeaf } from './tlsIdentity';
+export type { TlsIdentity, TlsIdentityOptions, TlsCertInfo } from './tlsIdentity';
 // Client-only mTLS enrollment (services that present a leaf but never serve TLS). See clientMtls.ts.
 export { startClientMtls } from './clientMtls';
 export type { ClientMtlsHandle, ClientMtlsOptions } from './clientMtls';

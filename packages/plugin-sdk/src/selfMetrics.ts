@@ -62,6 +62,10 @@ export interface PluginSelfMetrics {
 export interface SelfMetricsOptions {
   /** Extra custom gauges, merged into the response. May be a function for dynamic values. */
   extra?: Record<string, number> | (() => Record<string, number>);
+  /** Extra NON-NUMERIC fields (objects/strings), merged verbatim into the
+   *  response. Used by createPluginServer to expose the plugin's own mTLS leaf
+   *  descriptor (`tlsCert`) so the API can mirror it into its CA registry. */
+  extraObject?: Record<string, unknown> | (() => Record<string, unknown>);
   /** How many work requests to keep in the ring buffer (default 20). */
   windowSize?: number;
   /** Pending log-queue depth getter (wired to the plugin logger by createPluginServer). */
@@ -233,6 +237,18 @@ export function createSelfMetrics(opts: SelfMetricsOptions = {}) {
         }
       } catch {
         // a broken extra() must never break /metrics
+      }
+    }
+    if (opts.extraObject) {
+      try {
+        const extraObj = typeof opts.extraObject === 'function' ? opts.extraObject() : opts.extraObject;
+        for (const [key, value] of Object.entries(extraObj)) {
+          if (value !== undefined && value !== null) {
+            (snapshot as unknown as Record<string, unknown>)[key] = value;
+          }
+        }
+      } catch {
+        // a broken extraObject() must never break /metrics
       }
     }
     res.status(200).json(snapshot);

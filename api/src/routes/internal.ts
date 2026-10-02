@@ -27,12 +27,19 @@ import * as schema from '../db/schema';
 export function internalRouter() {
   const router = require('express').Router();
 
-  // Middleware to authenticate plugins
-  const pluginAuth = (req: Request, res: Response, next: (err?: any) => void) => {
+  // True when the shared x-plugin-api-key matches (plugins + secrets provider).
+  const pluginAuthSync = (req: Request, res: Response): boolean => {
     const apiKey = req.headers['x-plugin-api-key'];
     if (apiKey !== process.env.PLUGIN_API_KEY) {
-      return res.status(403).json({ error: 'Forbidden: Invalid plugin API key' });
+      res.status(403).json({ error: 'Forbidden: Invalid plugin API key' });
+      return false;
     }
+    return true;
+  };
+
+  // Middleware to authenticate plugins
+  const pluginAuth = (req: Request, res: Response, next: (err?: any) => void) => {
+    if (!pluginAuthSync(req, res)) return;
     next();
   };
 
@@ -48,6 +55,72 @@ export function internalRouter() {
     } catch (error) {
       console.error('Error fetching CA bundle:', error);
       res.status(503).json({ error: 'CA trust bundle unavailable' });
+    }
+  });
+
+  // POST /plugin/ca/register - mirror ONE of UNM's own CA-issued leaves into the
+  // ca_certificates registry (Certificates page, "mtls" rows). Plugins report
+  // their leaf via GET /metrics instead; this route exists for client-only
+  // services like the MCP server that have no plugin-metrics poll. Body:
+  // { subject, source?, serial, sans[], issuer, notBefore, notAfter }.
+  // Auth: EITHER the shared x-plugin-api-key (plugins) OR a valid bearer token
+  // (the MCP uses its UNM_API_TOKEN). Registering your OWN leaf is idempotent +
+  // low-risk, so any authenticated caller may do it.
+  const registerAuth = async (req: Request, res: Response, next: (err?: unknown) => void): Promise<void> => {
+    // Plugin key path — only when the header is actually present (the MCP has
+    // no plugin key and must fall through to bearer-token auth).
+    if (req.headers['x-plugin-api-key'] !== undefined) {
+      if (!pluginAuthSync(req, res)) return;
+      next();
+      return;
+    }
+    const header = req.headers.authorization;
+    if (!header || !header.startsWith('Bearer ')) {
+      res.status(403).json({ error: 'Forbidden: plugin key or bearer token required' });
+      return;
+    }
+    const token = header.slice('Bearer '.length).trim();
+    let ok = false;
+    try {
+      // Short-lived JWT first, then long-lived API tokens.
+      require('../auth/jwt').verifyToken(token);
+      ok = true;
+    } catch {
+      const payload = await require('../auth/apiTokens').resolveApiTokenPayload(token).catch(() => null);
+      ok = !!payload;
+    }
+    if (!ok) {
+      res.status(403).json({ error: 'Forbidden: invalid token' });
+      return;
+    }
+    next();
+  };
+
+  router.post('/plugin/ca/register', registerAuth, async (req: Request, res: Response) => {
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const serial = typeof body.serial === 'string' ? body.serial.trim() : '';
+      const subject = typeof body.subject === 'string' ? body.subject.trim() : '';
+      const notBefore = typeof body.notBefore === 'string' ? body.notBefore : '';
+      const notAfter = typeof body.notAfter === 'string' ? body.notAfter : '';
+      if (!serial || !subject || !notBefore || !notAfter) {
+        res.status(400).json({ error: '"serial", "subject", "notBefore" and "notAfter" are required' });
+        return;
+      }
+      const source = body.source === 'api' ? 'api' : body.source === 'mcp' ? 'mcp' : 'plugin';
+      await require('../ca/registry').registerLeaf({
+        serial,
+        subject,
+        source,
+        sans: Array.isArray(body.sans) ? (body.sans as unknown[]).filter((s): s is string => typeof s === 'string') : [],
+        issuer: typeof body.issuer === 'string' ? body.issuer : '',
+        notBefore,
+        notAfter,
+      });
+      res.status(200).json({ ok: true, serial, subject });
+    } catch (error) {
+      console.error('Error registering CA leaf:', error);
+      res.status(500).json({ error: 'Failed to register CA leaf' });
     }
   });
 

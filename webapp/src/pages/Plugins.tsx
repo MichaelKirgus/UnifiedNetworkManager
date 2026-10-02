@@ -1,6 +1,6 @@
-import { ReactNode, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { BookOpen, ExternalLink, Settings, X } from 'lucide-react';
+import { ReactNode, useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { BookOpen, Check, ExternalLink, RefreshCw, Settings, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { OptionForm } from '../components/OptionForm';
@@ -269,6 +269,74 @@ function PluginDetailsModal({ pluginId, onClose }: { pluginId: string; onClose: 
   );
 }
 
+/**
+ * "Re-enroll mTLS" action for one plugin: forces a fresh CA-issued leaf (new
+ * serial) under the same ACME account — rotation, not revocation. The old leaf
+ * stays valid until its expiry; the registry row refreshes on the next metrics poll.
+ */
+function RenewTlsButton({ plugin }: { plugin: Plugin }) {
+  const queryClient = useQueryClient();
+  const [confirming, setConfirming] = useState(false);
+  useEffect(() => {
+    if (!confirming) return;
+    const t = setTimeout(() => setConfirming(false), 4000);
+    return () => clearTimeout(t);
+  }, [confirming]);
+
+  const mutation = useMutation({
+    mutationFn: () => api.renewPluginTls(plugin.id),
+    onSuccess: () => {
+      setConfirming(false);
+      void queryClient.invalidateQueries({ queryKey: ['plugins'] });
+      void queryClient.invalidateQueries({ queryKey: ['certificates'] });
+    },
+  });
+
+  if (mutation.isSuccess) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs font-medium text-success-fg" title={`New mTLS leaf issued for ${plugin.name}`}>
+        <Check className="h-4 w-4" /> renewed
+      </span>
+    );
+  }
+
+  return (
+    <>
+      {confirming ? (
+        <button
+          type="button"
+          aria-label={`Confirm re-enrollment for ${plugin.name}`}
+          title="Click again to confirm — issues a NEW mTLS leaf (the old one stays valid until expiry)"
+          onClick={() => mutation.mutate()}
+          disabled={mutation.isPending}
+          className="rounded-md bg-danger px-2 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+        >
+          {mutation.isPending ? 'Renewing…' : 'Confirm'}
+        </button>
+      ) : (
+        <button
+          type="button"
+          aria-label={`Re-enroll mTLS for ${plugin.name}`}
+          title={
+            plugin.tlsLive
+              ? 'Issue a fresh mTLS leaf for this plugin (rotation — the current one stays valid until expiry)'
+              : 'This plugin is not serving mTLS yet — re-enrollment will fail until its listener is live'
+          }
+          onClick={() => setConfirming(true)}
+          className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"
+        >
+          <RefreshCw className={`h-4 w-4 ${mutation.isPending ? 'animate-spin' : ''}`} />
+        </button>
+      )}
+      {mutation.isError && (
+        <span title={(mutation.error as Error).message} className="text-xs text-danger-fg">
+          {(mutation.error as Error).message}
+        </span>
+      )}
+    </>
+  );
+}
+
 export default function Plugins() {
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
   // Plugin whose settings form is open in the modal (null = closed).
@@ -299,22 +367,33 @@ export default function Plugins() {
       key: 'status',
       // Sort by recency of last seen; offline plugins sink to the bottom.
       sortAccessor: (row) => (row.lastSeenAt ? new Date(row.lastSeenAt).getTime() : null),
-      render: (row) =>
-        isOnline(row) ? (
-          <span className="inline-flex items-center rounded-full bg-success px-2 py-0.5 text-xs font-medium text-success-fg">
-            online
-          </span>
-        ) : (
-          <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-secondary">
-            offline
-          </span>
-        ),
+      render: (row) => (
+        <div className="flex flex-wrap items-center gap-1">
+          {isOnline(row) ? (
+            <span className="inline-flex items-center rounded-full bg-success px-2 py-0.5 text-xs font-medium text-success-fg">
+              online
+            </span>
+          ) : (
+            <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-secondary">
+              offline
+            </span>
+          )}
+          {row.tlsLive && (
+            <span
+              title="Serving its internal API over mTLS with a UNM CA-issued leaf"
+              className="inline-flex items-center rounded-full bg-accent-violet px-2 py-0.5 text-xs font-medium text-accent-violet-fg"
+            >
+              mTLS
+            </span>
+          )}
+        </div>
+      ),
     },
     {
       header: 'Actions',
       key: 'actions',
       excludeFromExport: true,
-      width: 130,
+      width: 220,
       sortable: false,
       render: (row) => (
         <div className="inline-flex items-center gap-1">
@@ -339,6 +418,9 @@ export default function Plugins() {
             >
               <Settings className="h-4 w-4" />
             </button>
+          )}
+          {can('ca:manage') && (
+            <RenewTlsButton plugin={row} />
           )}
         </div>
       ),

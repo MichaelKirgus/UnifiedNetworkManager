@@ -761,24 +761,93 @@ router.get('/services', requireAuth, requirePermission('services:read'), async (
   }
 });
 
+/** Maps one ca_certificates row (UNM's own CA-issued mTLS leaf) into the same
+ *  shape as a device certificate row — type 'mtls', no device. The Certificates
+ *  page renders both kinds in one table; deviceId/pluginId are empty strings so
+ *  existing consumers keep working. */
+function mapCaLeafToCertRow(r: typeof schema.caCertificates.$inferSelect): Record<string, unknown> {
+  const now = Date.now();
+  const notAfterMs = new Date(r.notAfter).getTime();
+  const daysToExpiry = Number.isFinite(notAfterMs) ? Math.floor((notAfterMs - now) / 86_400_000) : null;
+  return {
+    deviceId: '',
+    pluginId: '',
+    deviceName: 'UNM',
+    managementAddress: null,
+    siteName: null,
+    pluginName: r.source === 'plugin' ? r.subject : `${r.subject} (${r.source})`,
+    name: r.subject,
+    type: 'mtls',
+    host: '',
+    port: null,
+    fingerprint: null,
+    trustedFingerprint: null,
+    fingerprintMismatch: false,
+    commonName: safeParseJson<string[]>(r.dnsNames)[0] ?? r.subject,
+    subject: `CN = ${r.subject}`,
+    issuer: r.issuer || 'UNM CA',
+    selfSigned: false,
+    notBefore: r.notBefore,
+    notAfter: r.notAfter,
+    keyAlgorithm: 'ECDSA',
+    keySizeBits: null,
+    curveName: 'P-256',
+    signatureAlgorithm: 'ecdsa-with-SHA256',
+    sanNames: safeParseJson<string[]>(r.dnsNames),
+    serialNumber: r.serial,
+    valid: r.status === 'revoked' ? false : daysToExpiry !== null && daysToExpiry < 0 ? false : true,
+    invalidReason: r.status === 'revoked' ? `revoked ${r.revokedAt ?? ''}`.trim() : daysToExpiry !== null && daysToExpiry < 0 ? 'expired' : null,
+    daysToExpiry,
+    chainDaysToExpiry: null,
+    chain: [],
+    collectedAt: r.createdAt,
+    revoked: r.status === 'revoked',
+  };
+}
+
 // GET /certificates - All certificate endpoints across devices (Certificates page).
 // Query params: deviceId (exact), siteId (filter by device's site),
-// type ('https'|'ssh'). One row per endpoint on a device — the management HTTPS
-// cert and/or the SSH host key. No cross-device merge needed (a row is already one
-// logical endpoint on one device). `sanNames`/`chain` are returned as parsed arrays.
+// type ('https'|'ssh'|'mtls'). Device rows are one per endpoint on a device —
+// the management HTTPS cert and/or the SSH host key. 'mtls' rows come from the
+// ca_certificates registry: UNM's OWN CA-issued leaves (plugins, api, mcp) —
+// fleet infrastructure certs with no device to hang off. `sanNames`/`chain` are
+// returned as parsed arrays.
 router.get('/certificates', requireAuth, requirePermission('certificates:read'), async (_req, res: Response) => {
   try {
     const { deviceId, siteId, type } = _req.query as Record<string, string | undefined>;
 
-    if (type && !['https', 'ssh'].includes(type)) {
-      res.status(400).json({ error: '"type" must be one of: https, ssh' });
+    if (type && !['https', 'ssh', 'mtls'].includes(type)) {
+      res.status(400).json({ error: '"type" must be one of: https, ssh, mtls' });
       return;
+    }
+
+    // mTLS rows are fleet infrastructure — they have no device/site scope and
+    // are visible to every certificates:read caller. A deviceId or siteId filter
+    // excludes them (the caller asked for a specific device's certs); a bare
+    // type=mtls filter returns ONLY them.
+    const includeMtls = !deviceId && !siteId && (!type || type === 'mtls');
+
+    let mtlsRows: Record<string, unknown>[] = [];
+    if (includeMtls) {
+      // The registry keeps EVERY issued leaf per subject (audit trail — the
+      // /ca/certificates endpoint shows all of them). The Certificates page
+      // wants the CURRENT one: newest notAfter wins per subject.
+      const caRows = await db.query.caCertificates.findMany({
+        orderBy: [asc(schema.caCertificates.subject), desc(schema.caCertificates.notAfter)],
+      });
+      const currentBySubject = new Map<string, (typeof caRows)[number]>();
+      for (const r of caRows) if (!currentBySubject.has(r.subject)) currentBySubject.set(r.subject, r);
+      mtlsRows = [...currentBySubject.values()].map(mapCaLeafToCertRow);
+      if (type === 'mtls') {
+        res.status(200).json(mtlsRows);
+        return;
+      }
     }
 
     // Device-level access control — scoped callers only see rows of their devices.
     const allowed = await allowedDeviceIds(_req);
     if (allowed !== null && allowed.size === 0) {
-      res.status(200).json([]);
+      res.status(200).json(mtlsRows);
       return;
     }
     if (deviceId && allowed !== null && !allowed.has(deviceId)) {
@@ -822,8 +891,8 @@ router.get('/certificates', requireAuth, requirePermission('certificates:read'),
       loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId)))),
     ]);
 
-    res.status(200).json(
-      rows.map((r) => {
+    res.status(200).json([
+      ...rows.map((r) => {
         const device = deviceViews.get(r.deviceId);
         return {
           ...r,
@@ -838,8 +907,9 @@ router.get('/certificates', requireAuth, requirePermission('certificates:read'),
           siteName: device?.siteName ?? null,
           pluginName: pluginNames.get(r.pluginId) ?? null,
         };
-      })
-    );
+      }),
+      ...mtlsRows,
+    ]);
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

@@ -1,5 +1,5 @@
 import { Router, Request } from 'express';
-import { and, eq, exists, not, notInArray, or, sql, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, exists, not, notInArray, or, sql, inArray } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth } from '../auth/middleware';
@@ -52,28 +52,43 @@ const COUNTS: CountSpec[] = [
   {
     // Certificate endpoints that are NOT healthy right now: expired leaf or
     // issuer, chain-invalid, or presenting a DIFFERENT key than trusted (a live
-    // pinning mismatch). Surfaced as the red badge on the Certificates nav item.
+    // pinning mismatch). PLUS UNM's own mTLS leaves that are revoked or past
+    // their expiry. Surfaced as the red badge on the Certificates nav item.
     key: 'certificates',
     permission: 'certificates:read',
     compute: async (req) => {
       const allowed = await allowedDeviceIds(req);
-      if (allowed !== null && allowed.size === 0) return 0;
-      const [row] = await db
-        .select({ n: sql<number>`count(*)::int` })
-        .from(schema.certificates)
-        .where(
-          and(
-            or(
-              sql`"daysToExpiry" < 0`,
-              sql`"chainDaysToExpiry" < 0`,
-              eq(schema.certificates.valid, false),
-              // fingerprint set AND differs from the trusted pin (both non-null).
-              sql`"fingerprint" IS NOT NULL AND "trustedFingerprint" IS NOT NULL AND "fingerprint" <> "trustedFingerprint"`
-            ),
-            allowed !== null ? inArray(schema.certificates.deviceId, [...allowed]) : undefined
-          )
-        );
-      return row?.n ?? 0;
+      let n = 0;
+      if (!(allowed !== null && allowed.size === 0)) {
+        const [row] = await db
+          .select({ n: sql<number>`count(*)::int` })
+          .from(schema.certificates)
+          .where(
+            and(
+              or(
+                sql`"daysToExpiry" < 0`,
+                sql`"chainDaysToExpiry" < 0`,
+                eq(schema.certificates.valid, false),
+                // fingerprint set AND differs from the trusted pin (both non-null).
+                sql`"fingerprint" IS NOT NULL AND "trustedFingerprint" IS NOT NULL AND "fingerprint" <> "trustedFingerprint"`
+              ),
+              allowed !== null ? inArray(schema.certificates.deviceId, [...allowed]) : undefined
+            )
+          );
+        n = row?.n ?? 0;
+      }
+      // Fleet-infra mTLS leaves (no device scope — visible to every caller).
+      // Only the CURRENT leaf per subject counts (newest notAfter) — the
+      // registry keeps superseded rows as an audit trail.
+      const allLeaves = await db.query.caCertificates.findMany({
+        orderBy: [asc(schema.caCertificates.subject), desc(schema.caCertificates.notAfter)],
+      });
+      const currentBySubject = new Map<string, (typeof allLeaves)[number]>();
+      for (const r of allLeaves) if (!currentBySubject.has(r.subject)) currentBySubject.set(r.subject, r);
+      const mtlsBad = [...currentBySubject.values()].filter(
+        (r) => r.status === 'revoked' || new Date(r.notAfter).getTime() < Date.now()
+      ).length;
+      return n + mtlsBad;
     },
   },
   {

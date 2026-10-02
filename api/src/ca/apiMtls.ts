@@ -18,8 +18,9 @@
 
 import https from 'https';
 import type { Express } from 'express';
-import { ensureTlsIdentity, scheduleTlsRenewal, TlsIdentity } from '@unm/plugin-sdk';
+import { describeTlsCert, ensureTlsIdentity, scheduleTlsRenewal, TlsIdentity } from '@unm/plugin-sdk';
 import { getCaBundlePem } from './stepCaAdmin';
+import { registerApiLeaf } from './registry';
 import { setApiMtlsIdentity } from '../utils/pluginHttp';
 
 const API_TLS_PORT = Number(process.env.UNM_API_TLS_PORT ?? 8443);
@@ -27,6 +28,17 @@ const IDENTIFIER = 'api';
 const TLS_DIR = process.env.UNM_API_TLS_DIR ?? '/data/tls';
 
 let stopRenewal: (() => void) | null = null;
+// Set by startApiMtls() — lets POST /ca/renew/api force a fresh leaf without
+// reaching into the enrollment closure. Null until mTLS is enabled + started.
+let renewFn: (() => Promise<{ ok: boolean; error?: string }>) | null = null;
+
+/** Force a fresh ACME enrollment for the API's own identity (new leaf, same
+ *  account) and swap the :8443 listener to it. No-op with an error when mTLS
+ *  is not enabled. */
+export async function renewApiMtls(): Promise<{ ok: boolean; error?: string }> {
+  if (!renewFn) return { ok: false, error: 'mTLS is not enabled (UNM_TLS != 1)' };
+  return renewFn();
+}
 
 /**
  * Runs the API's enrollment loop. Resolves once the first identity is live
@@ -76,7 +88,7 @@ export async function startApiMtls(
     console.log(`[api] mTLS listener live on :${API_TLS_PORT} (identity "${IDENTIFIER}", leaf valid to ${identity.notAfter.toISOString()})`);
   };
 
-  const enrollOnce = async (): Promise<TlsIdentity> => {
+  const enrollOnce = async (forceRenewal = false): Promise<TlsIdentity> => {
     // Local bundle: root from the shared volume + intermediate from step-ca's
     // public endpoint. Throws until the CA has bootstrapped its PKI.
     const identity = await ensureTlsIdentity({
@@ -84,9 +96,17 @@ export async function startApiMtls(
       identity: IDENTIFIER,
       identifiers: [IDENTIFIER],
       fetchCaBundle: async () => getCaBundlePem(),
+      forceRenewal,
       log: (m) => console.log(`[api][tls] ${m}`),
     });
     setApiMtlsIdentity({ keyPem: identity.keyPem, certChainPem: identity.certChainPem, caBundlePem: identity.caBundlePem });
+    // Mirror our own leaf into the CA registry — the "mtls" row for subject
+    // 'api' on the Certificates page. Best-effort; a DB hiccup must never
+    // break enrollment itself.
+    const info = describeTlsCert(identity.certChainPem);
+    if (info) {
+      void registerApiLeaf(info).catch((e: Error) => console.warn('[api][tls] CA registry update failed:', e.message));
+    }
     // Swap the listener only when it isn't up yet OR the material actually
     // changed. Early renewal checks (the SDK clamps long delays to ~24.8d) come
     // back with the SAME reused leaf — re-binding would drop every in-flight
@@ -106,6 +126,25 @@ export async function startApiMtls(
       (m) => console.log(`[api][tls] ${m}`),
     );
     return identity;
+  };
+
+  // Manual re-enrollment (POST /ca/renew with subject 'api'): force a fresh
+  // leaf + swap the :8443 listener. Guards against concurrent calls.
+  let renewing = false;
+  renewFn = async () => {
+    if (renewing) return { ok: false, error: 'a renewal is already in progress' };
+    renewing = true;
+    try {
+      const identity = await enrollOnce(true);
+      opts.onLive?.(identity);
+      return { ok: true };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn('[api][tls] manual re-enrollment failed:', msg);
+      return { ok: false, error: msg };
+    } finally {
+      renewing = false;
+    }
   };
 
   try {

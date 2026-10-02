@@ -75,6 +75,10 @@ function serializePlugin(row: any) {
       }
     })(),
     lastSeenAt: row.lastSeenAt ?? null,
+    // mTLS state (Stage 1): true when discovery last confirmed this plugin is
+    // serving TLS on its endpoint. Drives the Certificates page's "mtls" rows
+    // and gates the re-enroll button on the Plugins page.
+    tlsLive: !!row.tlsLive,
   };
 }
 
@@ -208,6 +212,45 @@ router.get('/plugins', requireAuth, requirePermission('plugins:read'), async (_r
     orderBy: [desc(schema.plugins.createdAt)],
   });
   res.status(200).json(result.map(serializePlugin));
+});
+
+// POST /plugins/:id/tls/renew - Force the plugin to enroll a FRESH mTLS leaf
+// (same ACME account, new serial) and swap its live TLS listener. The old leaf
+// stays valid until its expiry — this is rotation, not revocation. Gated on
+// ca:manage (it's a CA operation). Only works for plugins whose SDK build
+// serves POST /tls/renew (mTLS-enabled images); older images answer 404 and we
+// surface that as a clear error.
+router.post('/plugins/:id/tls/renew', requireAuth, requirePermission('ca:manage'), async (req, res) => {
+  const { id } = req.params;
+  try {
+    const row = await db.query.plugins.findFirst({ where: eq(schema.plugins.id, id) });
+    if (!row) {
+      res.status(404).json({ error: 'Plugin not found' });
+      return;
+    }
+    // mTLS (Stage 1): pluginAxios picks the transport — a TLS-live plugin is
+    // reached over https with our client cert, which /tls/renew requires anyway.
+    const res2 = await pluginAxios(row.endpoint).post(
+      '/tls/renew',
+      {},
+      { timeout: 30_000, headers: { 'x-plugin-api-key': process.env.PLUGIN_API_KEY ?? '' } }
+    );
+    // The SDK answers 200 { ok: true } on success; the registry row is refreshed
+    // by the next /metrics poll (tlsCert carries the new serial).
+    res.status(200).json({ renewed: true, ...(res2.data ?? {}) });
+  } catch (err) {
+    const e = err as { response?: { status?: number; data?: { error?: string } }; message?: string };
+    if (e.response?.status === 404) {
+      res.status(501).json({ error: 'This plugin image does not support re-enrollment (rebuild it with the current SDK)' });
+      return;
+    }
+    if (e.response?.status === 403) {
+      res.status(502).json({ error: 'Plugin rejected the request (plugin API key mismatch?)' });
+      return;
+    }
+    console.warn(`[plugins] tls/renew failed for ${id}:`, e.message ?? err);
+    res.status(502).json({ error: `Re-enrollment failed: ${e.response?.data?.error ?? e.message ?? 'unknown error'}` });
+  }
 });
 
 // GET /plugins/:id/required-secret-type - The secret type(s) a device plugin

@@ -2820,6 +2820,43 @@ paths:
         '502':
           description: Device/assignment/plugin missing or dispatch failed
 
+  /plugins/{id}/tls/renew:
+    post:
+      tags: [Plugins]
+      summary: Force a fresh mTLS leaf for one plugin
+      description: >-
+        Triggers the plugin's own ACME re-enrollment (POST /tls/renew on its SDK):
+        a NEW leaf with a new serial is issued under the SAME ACME account and the
+        live TLS listener swaps to it. The old leaf stays valid until its expiry —
+        this is rotation, not revocation. Requires ca:manage. Only works for
+        plugins whose image ships an mTLS-enabled SDK build (older images answer
+        404 → surfaced as 501). The registry row refreshes on the next /metrics poll.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Re-enrollment succeeded (new leaf live)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  renewed: { type: boolean }
+                  ok: { type: boolean }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:manage permission
+        '404':
+          description: Plugin not found
+        '501':
+          description: The plugin image does not support re-enrollment (rebuild with the current SDK)
+        '502':
+          description: The plugin rejected or failed the re-enrollment
+
   /plugins/{id}/options:
     get:
       tags: [Plugins]
@@ -4467,7 +4504,7 @@ paths:
   /certificates:
     get:
       tags: [Inventory]
-      summary: List all certificate endpoints across devices
+      summary: List all certificate endpoints across devices + UNM's own mTLS leaves
       description: >-
         Cross-device view of the normalized `certificates` inventory table, populated
         by the telemetry worker from each plugin's /monitoring metrics. One row per
@@ -4476,6 +4513,11 @@ paths:
         validity window, key algorithm/size, SAN names and a real chain-validation
         verdict (an expired ISSUER invalidates the row even when the leaf is still
         nominally valid). Rows not refreshed within 24h are swept away.
+
+        In addition, UNM's OWN CA-issued mTLS leaves (plugins + api + mcp) are
+        returned as type `mtls` rows from the ca_certificates registry — fleet
+        infrastructure certs with no device to hang off (deviceId is empty). A
+        deviceId or siteId filter excludes them; a bare type=mtls returns only them.
       parameters:
         - in: query
           name: deviceId
@@ -4492,8 +4534,8 @@ paths:
           required: false
           schema:
             type: string
-            enum: [https, ssh]
-          description: Filter by endpoint kind (TLS cert vs. SSH host key)
+            enum: [https, ssh, mtls]
+          description: "Filter by endpoint kind (device TLS cert vs. SSH host key vs. UNM's own mTLS leaf)"
       responses:
         '200':
           description: Certificate rows (device + plugin identity included)
@@ -5966,6 +6008,46 @@ paths:
           description: Authentication required
         '403':
           description: Missing ca:read permission
+
+  /ca/renew:
+    post:
+      tags: [Certificate Authority]
+      summary: Force a fresh mTLS leaf for the api or mcp service
+      description: >-
+        Re-enrolls UNM's own services (the API's :8443 listener, or the MCP
+        server) with a NEW leaf under the same ACME account — rotation, not
+        revocation; the old leaf stays valid until its expiry. Requires
+        `ca:manage`. The api renews in-process; mcp is proxied to the MCP
+        server's /tls/renew (needs MCP_DEBUG_KEY configured on the API).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                subject: { type: string, enum: [api, mcp] }
+              required: [subject]
+      responses:
+        '200':
+          description: Re-enrollment succeeded (new leaf live)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  renewed: { type: boolean }
+                  ok: { type: boolean }
+        '400':
+          description: Missing or invalid subject
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:manage permission
+        '502':
+          description: The target service rejected or failed the re-enrollment
+        '503':
+          description: MCP_DEBUG_KEY not configured (mcp subject only)
 
   /ca/revoke:
     post:
@@ -7777,11 +7859,11 @@ components:
         siteName: { type: [string, 'null'] }
         pluginId: { type: string, description: "Plugin instance id that reported this endpoint" }
         pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
-        name: { type: string, description: "Stable endpoint identity on the device (e.g. https:443, ssh:22)" }
+        name: { type: string, description: "Stable endpoint identity on the device (e.g. https:443, ssh:22); for mtls rows the UNM service subject (plugin name / 'api' / 'mcp')" }
         type:
           type: string
-          enum: [https, ssh]
-          description: "What kind of credential material is presented — TLS certificate vs. SSH host key"
+          enum: [https, ssh, mtls]
+          description: "What kind of credential material is presented — device TLS cert vs. SSH host key vs. UNM's own CA-issued mTLS leaf"
         host: { type: string, description: "Hostname/IP probed (the management address); '' = unknown" }
         port: { type: [integer, 'null'], description: "Port probed (443 for https, 22 for ssh)" }
         fingerprint: { type: [string, 'null'], description: "SHA-256 fingerprint of the leaf cert / SSH host key currently OBSERVED (OpenSSH-style SHA256:<base64>)" }
@@ -7806,6 +7888,7 @@ components:
         invalidReason: { type: [string, 'null'], description: "Human-readable reason when valid === false (e.g. expired issuer), else null" }
         daysToExpiry: { type: [integer, 'null'], description: "Days until the LEAF expires (negative = already expired); null when n/a" }
         chainDaysToExpiry: { type: [integer, 'null'], description: "Days until the EARLIEST chain element expires — an issuer expiring before its leaf is a real break; null when n/a" }
+        revoked: { type: boolean, description: "mtls rows only — true when this UNM-issued leaf has been passively revoked (it dies at expiry)" }
         chain:
           type: array
           items:
@@ -9663,6 +9746,8 @@ components:
         status: { type: string, enum: [issued, revoked] }
         revokedAt: { type: string, nullable: true }
         createdAt: { type: string }
+        source: { type: string, description: "How the leaf was registered — 'plugin' (via /metrics poll) or 'api'/'mcp' (self-registered)" }
+        issuer: { type: string, description: "Issuer DN of the leaf" }
 
     CaCertificatesResponse:
       type: object

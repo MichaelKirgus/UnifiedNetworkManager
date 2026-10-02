@@ -12,7 +12,7 @@ import cors from 'cors';
 import express, { Express, Request, Response } from 'express';
 import { Bonjour } from 'bonjour-service';
 import { PluginIdentity } from './identity';
-import { ensureTlsIdentity, resolveTlsIdentifiers, scheduleTlsRenewal, TlsIdentity } from './tlsIdentity';
+import { describeTlsCert, ensureTlsIdentity, resolveTlsIdentifiers, scheduleTlsRenewal, TlsCertInfo, TlsIdentity } from './tlsIdentity';
 import { createSelfMetrics } from './selfMetrics';
 import {
   CatalogEntry,
@@ -154,6 +154,25 @@ function closeServer(server: HttpServer | https.Server): Promise<void> {
   });
 }
 
+/** Result of a manual re-enrollment (TlsEnrollHandle.renew). */
+export interface TlsRenewResult {
+  ok: boolean;
+  error?: string;
+  /** Set when deferSwap was requested — resolves once the listener swap settled. */
+  swapSettled?: Promise<void>;
+}
+
+/** Handle returned by startTlsEnrollment — liveness + manual re-enrollment. */
+export interface TlsEnrollHandle {
+  isLive(): boolean;
+  /** Force a fresh ACME enrollment (new leaf, same account) and swap the live
+   *  listener to it. Resolves once the swap finished or failed. Pass deferSwap
+   *  when the caller must send its HTTP response BEFORE the swap happens — the
+   *  swap destroys in-flight connections (closeAllConnections), which would
+   *  otherwise kill the caller's own request mid-response. */
+  renew(opts?: { deferSwap?: boolean }): Promise<TlsRenewResult>;
+}
+
 /**
  * Background mTLS enrollment loop. Starts plain HTTP; on each successful
  * ensureTlsIdentity() closes the current listener and re-opens it as a TLS
@@ -165,16 +184,20 @@ function startTlsEnrollment(
   port: number,
   logTag: string,
   wsUpgrade?: (req: IncomingMessage, socket: Duplex, head: Buffer) => void,
-  onLiveChange?: (live: boolean) => void,
+  onLiveChange?: (live: boolean, identity?: TlsIdentity) => void,
   /** The initial plain-HTTP listener — closed by the first swapToTls. Without it
    *  the TLS server would hit EADDRINUSE because nothing releases the port. */
   initialServer?: HttpServer | https.Server,
-): { isLive(): boolean } {
+): TlsEnrollHandle {
   let live = false;
   let currentServer: HttpServer | https.Server | null = initialServer ?? null;
   let stopRenewal: (() => void) | null = null;
   let loadedKeyPem: string | null = null;
   let loadedCertPem: string | null = null;
+  // The identity the live listener was opened with (null while plain HTTP).
+  let currentIdentity: TlsIdentity | null = null;
+  // Guards against concurrent renew() calls (manual trigger + renewal timer).
+  let renewing = false;
   // Joined identifier set the currently-live leaf was enrolled for — used to
   // detect an endpoint rename (ADVERTISED_ENDPOINT host change) at runtime.
   let servedFor = '';
@@ -207,7 +230,8 @@ function startTlsEnrollment(
     live = true;
     loadedKeyPem = identity.keyPem;
     loadedCertPem = identity.certChainPem;
-    onLiveChange?.(true);
+    currentIdentity = identity;
+    onLiveChange?.(true, identity);
     console.log(`[${logTag}] mTLS listener live on :${port} (leaf valid to ${identity.notAfter.toISOString()})`);
   };
 
@@ -244,7 +268,49 @@ function startTlsEnrollment(
     (timer as unknown as { unref?: () => void }).unref?.();
   });
 
-  return { isLive: () => live };
+  return {
+    isLive: () => live,
+    /** Manual re-enrollment (POST /tls/renew): force a fresh leaf + swap. */
+    async renew(opts?: { deferSwap?: boolean }): Promise<TlsRenewResult> {
+      if (renewing) return { ok: false, error: 'a renewal is already in progress' };
+      renewing = true;
+      let deferred = false;
+      try {
+        const ids = resolveTlsIdentifiers();
+        const identity = await ensureTlsIdentity({ identity: logTag, identifiers: ids, forceRenewal: true });
+        const applySwap = async (): Promise<void> => {
+          await swapToTls(identity);
+          stopRenewal?.();
+          stopRenewal = scheduleTlsRenewal(identity, () => void enrollOnce(), (m) => console.log(`[${logTag}] [tls] ${m}`));
+          servedFor = ids.join('\u0000');
+        };
+        if (opts?.deferSwap) {
+          // The caller sends its HTTP response BEFORE the swap settles — the
+          // swap destroys in-flight connections, which would otherwise kill
+          // this very request mid-response. closeServer's 5s drain window is
+          // what makes flushing the response safe; swapSettled resolves once
+          // the new listener is live (or the swap failed).
+          deferred = true;
+          const swapSettled = applySwap()
+            .catch((err: Error) => {
+              console.warn(`[${logTag}] deferred listener swap failed:`, err.message);
+            })
+            .finally(() => {
+              renewing = false;
+            });
+          return { ok: true, swapSettled };
+        }
+        await applySwap();
+        return { ok: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[${logTag}] manual re-enrollment failed:`, msg);
+        return { ok: false, error: msg };
+      } finally {
+        if (!deferred) renewing = false;
+      }
+    },
+  };
 }
 
 /** Advertises the plugin over mDNS/DNS-SD (service type `_unm-plugin._tcp`). Best-effort. */
@@ -277,9 +343,11 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
   const logTag = opts.logTag ?? identity.displayName.toLowerCase().replace(/\s+/g, '-');
   const tlsEnabled = opts.tlsEnabled ?? process.env.UNM_TLS === '1';
 
-  // Live TLS state — surfaced in /discover so the API's pluginHttp factory can
-  // prefer https without probing. Updated by startTlsEnrollment on swap.
-  const tlsState: { live: boolean } = { live: false };
+  // Live TLS state — surfaced in /discover (tlsLive) and /metrics (tlsCert), so
+  // the API's pluginHttp factory can prefer https without probing AND its CA
+  // registry can mirror this plugin's own leaf. Updated by startTlsEnrollment
+  // on every swap (first enrollment + renewals).
+  const tlsState: { live: boolean; certInfo: TlsCertInfo | null } = { live: false, certInfo: null };
   const discoveryWrapped: DiscoveryExtras | (() => DiscoveryExtras) = () => ({
     ...(typeof opts.discovery === 'function' ? opts.discovery() : (opts.discovery ?? {})),
     ...(tlsEnabled ? { tlsLive: tlsState.live } : {}),
@@ -304,9 +372,19 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
   // samples for the webapp's per-plugin health view. Mounted automatically —
   // plugins need zero code for CPU/memory/lag/poll-duration visibility.
   // The plugin logger (if any) registers its queue depth with the self-metrics
-  // module itself — no wiring needed here.
+  // module itself — no wiring needed here. When mTLS is enabled, the plugin's
+  // OWN CA-issued leaf descriptor rides along as `tlsCert` so the API can
+  // mirror it into its ca_certificates registry (Certificates page).
   const selfMetrics = createSelfMetrics({
     extra: opts.selfMetricsExtra,
+    ...(tlsEnabled
+      ? {
+          extraObject: () => ({
+            tlsLive: tlsState.live,
+            ...(tlsState.certInfo ? { tlsCert: tlsState.certInfo } : {}),
+          }),
+        }
+      : {}),
   });
 
   app.get('/healthz', (_req: Request, res: Response) => {
@@ -321,6 +399,28 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
   // duration + success of the last N. Must be registered BEFORE the routes.
   app.use(selfMetrics.trackMiddleware);
   app.get('/metrics', selfMetrics.handler);
+
+  if (tlsEnabled) {
+    // Manual re-enrollment trigger: force a fresh ACME leaf and swap the live
+    // listener to it. Gated by the shared x-plugin-api-key like every other
+    // API-facing route — only UNM's own plugin-metrics worker / renew broker
+    // can reach it (the webapp never talks to plugins directly).
+    app.post('/tls/renew', requirePluginKey, async (_req: Request, res: Response) => {
+      if (!tlsHandle) {
+        res.status(503).json({ error: 'mTLS enrollment has not started yet' });
+        return;
+      }
+      // deferSwap: the listener swap destroys in-flight connections — it must
+      // settle AFTER this response is flushed, or we'd kill our own request.
+      const result = await tlsHandle.renew({ deferSwap: true });
+      res.status(result.ok ? 200 : 502).json({ ok: result.ok, ...(result.error ? { error: result.error } : {}) });
+    });
+  }
+
+  // The enrollment handle — set by listen() when mTLS is enabled. The POST
+  // /tls/renew route (registered above) reads it lazily per request, so the
+  // declaration order doesn't matter at module scope.
+  let tlsHandle: TlsEnrollHandle | null = null;
 
   return {
     app,
@@ -344,8 +444,10 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
         (app as unknown as { __server?: typeof server }).__server = server;
 
         if (tlsEnabled) {
-          startTlsEnrollment(app, identity.port, logTag, opts.wsUpgrade, (live) => {
+          tlsHandle = startTlsEnrollment(app, identity.port, logTag, opts.wsUpgrade, (live, id) => {
             tlsState.live = live;
+            // Describe the leaf from its PEM — no disk read needed.
+            tlsState.certInfo = id ? describeTlsCert(id.certChainPem) : null;
           }, server);
         }
       });

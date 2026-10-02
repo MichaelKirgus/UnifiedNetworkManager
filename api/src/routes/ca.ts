@@ -4,6 +4,7 @@ import { caCertificates } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { getCaStatus, revokeCertificate } from '../ca/stepCaAdmin';
+import { renewApiMtls } from '../ca/apiMtls';
 
 /**
  * Certificate Authority management (the unm-ca service — step-ca).
@@ -11,10 +12,11 @@ import { getCaStatus, revokeCertificate } from '../ca/stepCaAdmin';
  *   GET  /ca/status      -> CA version + root fingerprint/expiry (public CA endpoints)
  *   GET  /ca/certificates-> issued leaves tracked in the ca_certificates registry
  *   POST /ca/revoke      -> passive revocation by serial (step-ca DB + local registry)
+ *   POST /ca/renew       -> force a fresh leaf for ONE UNM identity ('api' | 'mcp')
  *
- * Reading requires `ca:read`; revoking requires `ca:manage`. The CA's signing
- * keys live on a volume only the CA container mounts — these routes never touch
- * them; they read public endpoints and UNM's own registry.
+ * Reading requires `ca:read`; revoking/renewing requires `ca:manage`. The CA's
+ * signing keys live on a volume only the CA container mounts — these routes
+ * never touch them; they read public endpoints and UNM's own registry.
  */
 
 const router = Router();
@@ -85,6 +87,54 @@ router.post(
     }
 
     res.status(200).json({ serial, caStatus: caResult.status, caResponse: caResult.body });
+  }
+);
+
+// POST /ca/renew - force a FRESH leaf for one of UNM's own non-plugin mTLS
+// identities. Body: { subject: 'api' | 'mcp' }. Plugins are renewed through
+// POST /plugins/:id/tls/renew (they run their own enrollment). The old leaf
+// stays valid until its expiry — this is rotation, not revocation. Gated on
+// ca:manage like revocation.
+router.post(
+  '/ca/renew',
+  requireAuth,
+  requirePermission('ca:manage'),
+  async (req, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const subject = typeof body.subject === 'string' ? body.subject.trim() : '';
+    if (!['api', 'mcp'].includes(subject)) {
+      res.status(400).json({ error: '"subject" must be "api" or "mcp" (plugins use POST /plugins/:id/tls/renew)' });
+      return;
+    }
+
+    try {
+      if (subject === 'api') {
+        const result = await renewApiMtls();
+        res.status(result.ok ? 200 : 502).json({ subject, ...result });
+        return;
+      }
+
+      // mcp: broker through the MCP server's own /tls/renew (it owns its ACME
+      // account + dispatcher rebuild). Reached over plain HTTP — it's a local
+      // compose service and this is an operational action.
+      const debugKey = process.env.MCP_DEBUG_KEY ?? '';
+      if (!debugKey) {
+        res.status(503).json({ error: 'MCP_DEBUG_KEY not configured on the API — cannot reach the MCP renew endpoint' });
+        return;
+      }
+      const mcpBase = (process.env.UNM_MCP_URL ?? 'http://mcp:3901').replace(/\/+$/, '');
+      const r = await fetch(`${mcpBase}/tls/renew`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${debugKey}` },
+        signal: AbortSignal.timeout(60_000),
+      });
+      const data = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+      res.status(r.ok ? 200 : 502).json({ subject, ...(data as object) });
+    } catch (err) {
+      const e = err as { message?: string };
+      console.warn(`[ca] renew for "${subject}" failed:`, e.message);
+      res.status(502).json({ error: `Re-enrollment of "${subject}" failed: ${e.message ?? 'unknown error'}` });
+    }
   }
 );
 

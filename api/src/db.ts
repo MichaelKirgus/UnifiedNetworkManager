@@ -293,6 +293,8 @@ export async function initDb(): Promise<void> {
       serial TEXT NOT NULL UNIQUE,
       subject TEXT NOT NULL,
       "dnsNames" TEXT NOT NULL DEFAULT '[]',
+      source TEXT NOT NULL DEFAULT 'plugin',
+      issuer TEXT NOT NULL DEFAULT '',
       "notBefore" TEXT NOT NULL,
       "notAfter" TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'issued',
@@ -300,6 +302,10 @@ export async function initDb(): Promise<void> {
       "createdAt" TEXT NOT NULL
     )`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_ca_certificates_subject ON ca_certificates (subject)`);
+  // Which UNM service holds the leaf ('api' | 'mcp' | plugin name) — added when
+  // the Certificates page started listing UNM-issued mTLS leaves alongside device certs.
+  await pool.query(`ALTER TABLE ca_certificates ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'plugin'`);
+  await pool.query(`ALTER TABLE ca_certificates ADD COLUMN IF NOT EXISTS issuer TEXT NOT NULL DEFAULT ''`);
 
   // Execution plans (see workers/planExecutor.ts). Plans persist a plugin's
   // /plan output + its provisioned secrets; steps run in dependency order.

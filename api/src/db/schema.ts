@@ -315,6 +315,10 @@ export const caCertificates = pgTable(
     subject: text('subject').notNull(),
     // SANs on the leaf (JSON array of DNS names).
     dnsNames: text('dnsNames').notNull().default('[]'),
+    // Which UNM service holds this leaf — 'api', 'mcp' or a plugin name.
+    source: text('source').notNull().default('plugin'),
+    // Issuer DN of the leaf (the CA that signed it) — display only.
+    issuer: text('issuer').notNull().default(''),
     notBefore: text('notBefore').notNull(),
     notAfter: text('notAfter').notNull(),
     // issued | revoked. Revocation is PASSIVE in step-ca (no CRL/OCSP): the CA

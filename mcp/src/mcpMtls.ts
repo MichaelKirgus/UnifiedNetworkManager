@@ -26,12 +26,35 @@ import fs from 'fs';
 import https from 'https';
 import { Agent } from 'undici';
 import type { Dispatcher } from 'undici';
-import { startClientMtls, TlsIdentity } from '@unm/plugin-sdk';
+import { describeTlsCert, startClientMtls, TlsIdentity } from '@unm/plugin-sdk';
 
 const CA_BASE = process.env.UNM_CA_URL ?? 'https://unm-ca:9000';
 const ROOT_PEM_PATH = '/data/ca/root_ca.crt';
 const TLS_DIR = process.env.UNM_MCP_TLS_DIR ?? '/data/tls';
 const IDENTIFIER = 'mcp';
+
+/** Mirrors the MCP's own leaf into UNM's ca_certificates registry (the "mtls"
+ *  row for subject 'mcp' on the Certificates page). Uses the MCP's API token —
+ *  the register route accepts bearer auth because the MCP has no plugin key. */
+async function registerLeaf(id: TlsIdentity): Promise<void> {
+  const info = describeTlsCert(id.certChainPem);
+  if (!info) return;
+  const apiBase = (process.env.UNM_API_BASE ?? 'http://api:3000/v1').replace(/\/+$/, '');
+  const token = process.env.UNM_API_TOKEN ?? '';
+  if (!token) {
+    console.error('[unm-mcp][tls] UNM_API_TOKEN not set — skipping CA registry update');
+    return;
+  }
+  try {
+    await fetch(`${apiBase}/plugin/ca/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ subject: IDENTIFIER, source: 'mcp', ...info }),
+    });
+  } catch (err) {
+    console.error('[unm-mcp][tls] CA registry update failed:', (err as Error).message);
+  }
+}
 
 /** True when the fleet-wide mTLS switch is on (same env as plugins/api). */
 export function mtlsEnabled(): boolean {
@@ -88,6 +111,9 @@ const handle = mtlsEnabled()
       fetchCaBundle: localCaBundle,
       log: (m) => console.error(`[unm-mcp][tls] ${m}`),
       onLive: (id) => {
+        // Mirror the leaf into UNM's CA registry — fires on first enrollment
+        // AND after every renewal (the dispatcher guard below skips no-op swaps).
+        void registerLeaf(id);
         if (dispatcher && id.keyPem === loadedKeyPem && id.certChainPem === loadedCertPem) return;
         const next = buildDispatcher(id);
         dispatcher?.close();
@@ -101,6 +127,13 @@ const handle = mtlsEnabled()
 /** True once the MCP's own leaf is live (callers may then prefer https). */
 export function mtlsLive(): boolean {
   return handle ? handle.live() : false;
+}
+
+/** Force a fresh ACME enrollment for the MCP's own identity (new leaf, same
+ *  account) and rebuild the outbound dispatcher. Used by POST /tls/renew. */
+export async function renewMtls(): Promise<{ ok: boolean; error?: string }> {
+  if (!handle) return { ok: false, error: 'mTLS is not enabled (UNM_TLS != 1)' };
+  return handle.renew();
 }
 
 /** The mTLS dispatcher for outbound fetch() — undefined until enrollment succeeds. */

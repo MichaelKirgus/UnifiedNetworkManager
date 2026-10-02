@@ -128,6 +128,7 @@ function MismatchDetail({ row }: { row: CertificateRow }) {
 const TYPE_STYLES: Record<CertificateRow['type'], string> = {
   https: 'bg-accent-teal text-accent-teal-fg',
   ssh: 'bg-accent-indigo text-accent-indigo-fg',
+  mtls: 'bg-accent-violet text-accent-violet-fg',
 };
 
 function TypeBadge({ type }: { type: CertificateRow['type'] }) {
@@ -181,6 +182,13 @@ function ExpiryCell({ row, warnDays = 30 }: { row: CertificateRow; warnDays?: nu
 /** Chain-validation verdict badge (valid / invalid / unknown). */
 function ValidBadge({ row }: { row: CertificateRow }) {
   if (row.type === 'ssh') return <span className="text-faint">—</span>;
+  if (row.revoked) {
+    return (
+      <span title={row.invalidReason ?? undefined} className="inline-flex cursor-help rounded bg-danger/15 px-1.5 py-0.5 text-xs font-medium uppercase tracking-wide text-danger-fg">
+        revoked
+      </span>
+    );
+  }
   if (row.valid === true) {
     return <span className="inline-flex rounded bg-success/15 px-1.5 py-0.5 text-xs font-medium text-success-fg">valid</span>;
   }
@@ -206,17 +214,21 @@ function keyLabel(row: CertificateRow): string {
 /** At-a-glance security overview: total endpoints, expiring soon, expired, invalid chains. */
 function SummaryStrip({ rows }: { rows: CertificateRow[] }) {
   const https = rows.filter((r) => r.type === 'https');
-  const ssh = rows.length - https.length;
-  const devices = new Set(rows.map((r) => r.deviceId)).size;
+  const ssh = rows.filter((r) => r.type === 'ssh').length;
+  const mtls = rows.filter((r) => r.type === 'mtls').length;
+  // UNM's own mTLS leaves have no device — don't count the empty deviceId as one.
+  const devices = new Set(rows.filter((r) => r.deviceId).map((r) => r.deviceId)).size;
+  // Every TLS cert (device endpoints + UNM's own mTLS leaves) counts for expiry/validity.
+  const tls = rows.filter((r) => r.type !== 'ssh');
   // Expired = leaf OR any chain element (issuer) already past its validity window.
   const isExpired = (r: CertificateRow): boolean =>
     (r.daysToExpiry != null && r.daysToExpiry < 0) || (r.chainDaysToExpiry != null && r.chainDaysToExpiry < 0);
-  const expired = https.filter(isExpired).length;
+  const expired = tls.filter(isExpired).length;
   // Expiring soon = leaf within 30 days, not already expired.
-  const expiringSoon = https.filter(
+  const expiringSoon = tls.filter(
     (r) => !isExpired(r) && r.daysToExpiry != null && r.daysToExpiry >= 0 && r.daysToExpiry <= 30
   ).length;
-  const invalid = https.filter((r) => r.valid === false).length;
+  const invalid = tls.filter((r) => r.valid === false).length;
   // Key changed since UNM pinned it — strict pinning refuses these endpoints.
   const mismatched = rows.filter((r) => r.fingerprintMismatch).length;
 
@@ -235,6 +247,7 @@ function SummaryStrip({ rows }: { rows: CertificateRow[] }) {
       {cell('devices', devices)}
       {cell('TLS certs', https.length)}
       {cell('SSH host keys', ssh)}
+      {mtls > 0 ? cell('UNM mTLS leaves', mtls) : null}
       {expired > 0 ? cell('expired', expired, 'danger') : null}
       {expiringSoon > 0 ? cell('expiring ≤30d', expiringSoon, 'warning') : null}
       {invalid > 0 ? cell('invalid chain', invalid, 'danger') : null}
@@ -368,7 +381,8 @@ export default function Certificates() {
           <p className="mb-3 max-w-4xl text-xs text-muted-foreground">
             TLS certificates served by device management endpoints and SSH host keys, collected per inventory poll. The chain is validated for
             expiry of every element — an expired issuer is flagged even when the leaf itself is still valid. Expiry/invalidity also raises a
-            notification (auto-resolved once renewed).
+            notification (auto-resolved once renewed). Violet <span className="font-medium uppercase">mtls</span> rows are UNM's own CA-issued
+            leaves (plugins, api, mcp) from the certificate registry — they have no device and refresh on each metrics poll.
           </p>
           <DataTable
             columns={columns}

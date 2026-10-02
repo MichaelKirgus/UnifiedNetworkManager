@@ -36,6 +36,9 @@ export interface TlsIdentityOptions {
   identity: string;
   /** DNS names to cover in the leaf. Default: host of ADVERTISED_ENDPOINT. */
   identifiers?: string[];
+  /** Skip the reuse check and enroll a FRESH leaf (same ACME account). Used by
+   *  manual re-enrollment triggers — the old leaf simply dies at its expiry. */
+  forceRenewal?: boolean;
   /**
    * Fetches the CA trust bundle (root + intermediate PEMs). Defaults to the
    * UNM API's internal route `${UNM_API_URL}/plugin/ca/bundle` with the shared
@@ -130,6 +133,54 @@ function leafNames(chainPem: string): { cn?: string; sans: string[] } {
   return { cn: cert.subject, sans };
 }
 
+/** Descriptive metadata of one CA-issued leaf (what UNM's registry stores). */
+export interface TlsCertInfo {
+  /** Hex serial number (no 0x prefix) — the revocation address. */
+  serial: string;
+  /** SAN DNS names on the leaf. */
+  sans: string[];
+  /** Issuer DN as reported by Node (e.g. "CN = UNM Intermediate, O = Unified Network Manager"). */
+  issuer: string;
+  notBefore: string;
+  notAfter: string;
+}
+
+/**
+ * Describes the FIRST certificate of a PEM chain (serial, SANs, issuer,
+ * validity window). Lets a service REPORT its own CA-issued leaf to UNM
+ * without re-parsing step-ca internals. Null when no parseable cert is found.
+ */
+export function describeTlsCert(chainPem: string): TlsCertInfo | null {
+  try {
+    const firstBlock = chainPem.split(/(?=-----BEGIN CERTIFICATE-----)/).find((b) => b.includes('CERTIFICATE'));
+    if (!firstBlock) return null;
+    const cert = new crypto.X509Certificate(firstBlock);
+    const { sans } = leafNames(chainPem);
+    return {
+      serial: cert.serialNumber,
+      sans,
+      issuer: cert.issuer,
+      notBefore: new Date(cert.validFrom).toISOString(),
+      notAfter: new Date(cert.validTo).toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Describes the leaf stored in `dir` (reads tls.crt). Null when no readable
+ * leaf exists yet.
+ */
+export function describeLeaf(dir: string): TlsCertInfo | null {
+  try {
+    const chainPem = fs.readFileSync(path.join(dir, 'tls.crt'), 'utf8');
+    return describeTlsCert(chainPem);
+  } catch {
+    return null;
+  }
+}
+
 /** The transient http-01 challenge server — serves ONLY /.well-known/acme-challenge/<token>. */
 function createChallengeServer(port: number): Promise<{ set(token: string, keyAuth: string): void; clear(): void; close(): Promise<void> }> {
   let current: { token: string; keyAuth: string } | null = null;
@@ -174,27 +225,31 @@ export async function ensureTlsIdentity(opts: TlsIdentityOptions): Promise<TlsId
   const bundleFile = path.join(dir, 'ca-bundle.pem');
 
   // --- reuse check (no network at all when the leaf is still good) ---------
-  try {
-    const chainPem = fs.readFileSync(certFile, 'utf8');
-    const keyPem = fs.readFileSync(keyFile, 'utf8');
-    const bundlePem = fs.readFileSync(bundleFile, 'utf8');
-    const firstBlock = chainPem.split(/(?=-----BEGIN CERTIFICATE-----)/).find((b) => b.includes('CERTIFICATE'));
-    if (firstBlock && /-----BEGIN PRIVATE KEY-----|-----BEGIN EC PRIVATE KEY-----/.test(keyPem)) {
-      const cert = new crypto.X509Certificate(firstBlock);
-      const notBefore = new Date(cert.validFrom);
-      const notAfter = new Date(cert.validTo);
-      const now = new Date();
-      const renewAt = new Date(notBefore.getTime() + (notAfter.getTime() - notBefore.getTime()) * RENEW_FRACTION);
-      const { sans } = leafNames(chainPem);
-      const coversAll = identifiers.every((id) => sans.includes(id));
-      if (coversAll && now < renewAt && now < notAfter) {
-        log(`reusing existing leaf (SANs=[${sans.join(',')}], valid to ${notAfter.toISOString()})`);
-        return { keyPem, certChainPem: chainPem, caBundlePem: bundlePem, notBefore, notAfter, reused: true };
+  if (!opts.forceRenewal) {
+    try {
+      const chainPem = fs.readFileSync(certFile, 'utf8');
+      const keyPem = fs.readFileSync(keyFile, 'utf8');
+      const bundlePem = fs.readFileSync(bundleFile, 'utf8');
+      const firstBlock = chainPem.split(/(?=-----BEGIN CERTIFICATE-----)/).find((b) => b.includes('CERTIFICATE'));
+      if (firstBlock && /-----BEGIN PRIVATE KEY-----|-----BEGIN EC PRIVATE KEY-----/.test(keyPem)) {
+        const cert = new crypto.X509Certificate(firstBlock);
+        const notBefore = new Date(cert.validFrom);
+        const notAfter = new Date(cert.validTo);
+        const now = new Date();
+        const renewAt = new Date(notBefore.getTime() + (notAfter.getTime() - notBefore.getTime()) * RENEW_FRACTION);
+        const { sans } = leafNames(chainPem);
+        const coversAll = identifiers.every((id) => sans.includes(id));
+        if (coversAll && now < renewAt && now < notAfter) {
+          log(`reusing existing leaf (SANs=[${sans.join(',')}], valid to ${notAfter.toISOString()})`);
+          return { keyPem, certChainPem: chainPem, caBundlePem: bundlePem, notBefore, notAfter, reused: true };
+        }
+        log('existing leaf needs renewal/re-enrollment');
       }
-      log('existing leaf needs renewal/re-enrollment');
+    } catch {
+      /* no usable existing identity — enroll below */
     }
-  } catch {
-    /* no usable existing identity — enroll below */
+  } else {
+    log('forceRenewal requested — skipping reuse check, enrolling a fresh leaf');
   }
 
   // --- fresh enrollment ------------------------------------------------------
