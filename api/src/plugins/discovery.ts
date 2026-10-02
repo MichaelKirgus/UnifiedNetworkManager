@@ -2,7 +2,7 @@ import { Bonjour } from 'bonjour-service';
 import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
-import { probePluginEndpoint, setPluginTransport } from '../utils/pluginHttp';
+import { probePluginEndpoint, removePluginTransport, setPluginTransport } from '../utils/pluginHttp';
 import type { PluginOptionDescriptor } from '../types/pluginOptions';
 import type { DeviceModelEntry } from '../types/deviceModels';
 import type {
@@ -390,6 +390,19 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
   const existing = await db.query.plugins.findFirst({
     where: (plugins, { eq }) => eq(plugins.id, identity.uuid),
   });
+
+  // Endpoint-change detection (mTLS): if a plugin's advertised endpoint moved,
+  // the registry entry for the OLD name is stale — evict it so a later return to
+  // that name re-probes from scratch instead of trusting a dead transport. The
+  // stored tlsLive is also reset: an mDNS TXT upsert carries no tlsLive, so
+  // without this a rename seen via TXT would leave the old flag in place until
+  // the next HTTP poll happened to flip it. (The NEW endpoint's transport is set
+  // by fetchIdentity's probe just before this runs.)
+  const endpointChanged = !!existing && existing.endpoint !== identity.endpoint;
+  if (endpointChanged) {
+    removePluginTransport(existing.endpoint);
+    await db.update(schema.plugins).set({ tlsLive: false }).where(eq(schema.plugins.id, identity.uuid));
+  }
 
   // Only overwrite the stored descriptors when this discovery source actually
   // carries them (the mDNS TXT path does not), so a metrics-less upsert never

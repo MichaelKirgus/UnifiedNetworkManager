@@ -94,6 +94,11 @@ export function getPluginTransport(endpoint: string): PluginTransport {
   return transportByEndpoint.get(normalizeEndpoint(endpoint)) ?? 'http';
 }
 
+/** Drops a stale registry entry (e.g. when a plugin's endpoint changed) so the next probe re-detects its transport from scratch. */
+export function removePluginTransport(endpoint: string): void {
+  transportByEndpoint.delete(normalizeEndpoint(endpoint));
+}
+
 /** True when the endpoint should be reached over https with the API's client cert. */
 function wantsHttps(endpoint: string): boolean {
   return getPluginTransport(endpoint) === 'https' && apiMtls !== null;

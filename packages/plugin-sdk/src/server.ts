@@ -13,7 +13,7 @@ import cors from 'cors';
 import express, { Express, Request, Response } from 'express';
 import { Bonjour } from 'bonjour-service';
 import { PluginIdentity } from './identity';
-import { ensureTlsIdentity, scheduleTlsRenewal, TlsIdentity } from './tlsIdentity';
+import { ensureTlsIdentity, resolveTlsIdentifiers, scheduleTlsRenewal, TlsIdentity } from './tlsIdentity';
 import { createSelfMetrics } from './selfMetrics';
 import {
   CatalogEntry,
@@ -173,6 +173,9 @@ function startTlsEnrollment(
   let stopRenewal: (() => void) | null = null;
   let loadedKeyPem: string | null = null;
   let loadedCertPem: string | null = null;
+  // Joined identifier set the currently-live leaf was enrolled for — used to
+  // detect an endpoint rename (ADVERTISED_ENDPOINT host change) at runtime.
+  let servedFor = '';
 
   const attachUpgrade = (s: http.Server | tls.Server): void => {
     if (wsUpgrade) s.on('upgrade', wsUpgrade);
@@ -206,22 +209,33 @@ function startTlsEnrollment(
 
   const enrollOnce = async (): Promise<void> => {
     try {
-      const identity = await ensureTlsIdentity({ identity: logTag });
+      // Resolve the desired identifiers fresh each pass so an endpoint rename
+      // (ADVERTISED_ENDPOINT host change) is picked up without a restart: if the
+      // new name isn't covered by the existing leaf, ensureTlsIdentity re-enrolls.
+      const ids = resolveTlsIdentifiers();
+      const identity = await ensureTlsIdentity({ identity: logTag, identifiers: ids });
+      const idKey = ids.join('\u0000');
       // Swap when the TLS listener isn't up yet OR the on-disk material changed.
       if (!live || identity.keyPem !== loadedKeyPem || identity.certChainPem !== loadedCertPem) {
         await swapToTls(identity);
         stopRenewal?.();
         stopRenewal = scheduleTlsRenewal(identity, () => void enrollOnce(), (m) => console.log(`[${logTag}] [tls] ${m}`));
+      } else if (servedFor !== idKey) {
+        // Identifiers changed but the existing leaf already covers them — no cert
+        // swap needed; log so endpoint drift is visible.
+        console.log(`[${logTag}] [tls] identifiers now [${ids.join(', ')}] (existing leaf still valid)`);
       }
+      servedFor = idKey;
     } catch (err) {
       console.warn(`[${logTag}] mTLS enrollment failed (staying on plain HTTP):`, (err as Error).message);
     }
   };
 
   void enrollOnce().then(() => {
-    // If the first pass left us plain (CA down), keep retrying every 60s.
+    // If the first pass left us plain (CA down), keep retrying every 60s — and
+    // re-check whenever the desired identifier set drifts from what we serve.
     const timer = setInterval(() => {
-      if (!live) void enrollOnce();
+      if (!live || servedFor !== resolveTlsIdentifiers().join('\u0000')) void enrollOnce();
     }, 60_000);
     (timer as unknown as { unref?: () => void }).unref?.();
   });

@@ -373,6 +373,18 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'Validity used when a client does not request a specific one. Clients renew at ~2/3 of their leaf lifetime, so this also sets the renewal cadence.',
   },
   {
+    key: 'caAcmeEnrollmentPolicy',
+    label: 'ACME enrollment policy',
+    type: 'string',
+    category: 'Certificate Authority',
+    default: 'any',
+    envVar: 'UNM_CA_ACME_ENROLLMENT_POLICY',
+    pattern: '^(deny|allowlist|any)$',
+    onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
+    help:
+      'Who may request a certificate from the CA over ACME. "any" (default) — any name that passes its http-01 challenge is issued, so new plugins enroll without extra setup. "allowlist" — only names in "CA allowed DNS names" are issued. "deny" — no ACME enrollment at all (the CA stays manageable via its admin credential). Hot-applied to the running CA.',
+  },
+  {
     key: 'caAllowedDnsNames',
     label: 'CA allowed DNS names (SAN allow-list)',
     type: 'string',
@@ -383,7 +395,7 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     maxLength: 8192,
     onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
     help:
-      'Comma-separated DNS names the CA may put into leaf certificates (SAN policy). Defaults to every UNM compose service name + localhost. Add a hostname here before enrolling a remote plugin instance under it — anything else is refused at issuance.',
+      'Comma-separated DNS names the CA may put into leaf certificates. Only enforced when "ACME enrollment policy" is set to allowlist — in any mode this list is ignored, and in deny mode no ACME enrollment happens at all. Defaults to every UNM compose service name + localhost.',
   },
   {
     key: 'caAcmeChallenges',

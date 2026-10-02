@@ -77,6 +77,15 @@ function defaultIdentifiers(): string[] {
   }
 }
 
+/**
+ * Public resolver for the identifiers a service should enroll (the host of
+ * ADVERTISED_ENDPOINT). Exposed so the server's enrollment loop can detect an
+ * endpoint rename at runtime and re-enroll without waiting for renewal.
+ */
+export function resolveTlsIdentifiers(): string[] {
+  return defaultIdentifiers();
+}
+
 /** Default bundle fetcher: the API brokers root+intermediate (PKI volume is CA-only). */
 async function defaultFetchCaBundle(): Promise<string> {
   const baseUrl = process.env.UNM_API_URL ?? 'http://api:3000/v1';

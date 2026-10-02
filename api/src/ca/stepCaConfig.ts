@@ -34,7 +34,8 @@ interface StepCaConfig {
   db: { type: string; dataSource: string };
   authority: {
     claims: Record<string, unknown>;
-    policy: Record<string, unknown>;
+    /** Omitted entirely in "any"/"deny" enrollment-policy modes (no x509 name policy). */
+    policy?: Record<string, unknown>;
     provisioners: Array<Record<string, unknown>>;
   };
   tls: Record<string, unknown>;
@@ -63,9 +64,30 @@ export async function renderStepCaConfig(): Promise<StepCaConfig> {
   // extends this list when adding remote instances.
   const allowedDns = splitList(v.caAllowedDnsNames);
 
+  // ACME enrollment policy (three modes — see the caAcmeEnrollmentPolicy setting):
+  //   any       → no x509 name policy at all; step-ca's engine treats "no policy"
+  //               as allow-all, so new plugins enroll without touching this list.
+  //   allowlist → permit only the names in caAllowedDnsNames (wildcards off).
+  //   deny      → omit the ACME provisioner entirely (below); enrollment then fails
+  //               at the directory while the unm-admin JWK provisioner keeps UNM's
+  //               management plane working. There is no step-ca DNS constraint that
+  //               matches "everything", so this is the cleanest deny-all encoding.
+  const policy = String(v.caAcmeEnrollmentPolicy ?? 'any');
+  const acmeEnabled = policy !== 'deny';
+  const x509Policy: Record<string, unknown> | null =
+    policy === 'allowlist' ? { allow: { dns: allowedDns }, allowWildcardNames: false } : null;
+
   const challenges = splitList(v.caAcmeChallenges).length > 0 ? splitList(v.caAcmeChallenges) : ['http-01'];
 
   const adminJwk = loadAdminJwk();
+  // The ACME provisioner is present only when enrollment isn't denied. The
+  // unm-admin JWK provisioner (UNM's management credential — public half only, the
+  // private key lives in admin-jwk.pem on this same volume and never leaves it) is
+  // ALWAYS present so the CA stays manageable even when ACME enrollment is off.
+  const provisioners: Array<Record<string, unknown>> = [
+    { type: 'JWK', name: ADMIN_PROVISIONER_NAME, key: adminJwk.public },
+  ];
+  if (acmeEnabled) provisioners.unshift({ type: 'ACME', name: ACME_PROVISIONER_NAME, challenges });
 
   return {
     root: `${PKI_DIR}/root_ca.crt`,
@@ -81,18 +103,9 @@ export async function renderStepCaConfig(): Promise<StepCaConfig> {
         maxTLSCertDuration: daysToDuration(maxDays),
         defaultTLSCertDuration: daysToDuration(defaultDays),
       },
-      policy: {
-        x509: {
-          allow: { dns: allowedDns },
-          allowWildcardNames: false,
-        },
-      },
-      provisioners: [
-        { type: 'ACME', name: ACME_PROVISIONER_NAME, challenges },
-        // UNM's own management credential (public half only — the private key
-        // lives in admin-jwk.pem on this same volume and never leaves it).
-        { type: 'JWK', name: ADMIN_PROVISIONER_NAME, key: adminJwk.public },
-      ],
+      // Omitted in "any" (allow-all) and "deny" modes — only allowlist renders one.
+      ...(x509Policy ? { policy: { x509: x509Policy } } : {}),
+      provisioners,
     },
     tls: { minVersion: 1.2, maxVersion: 1.3 },
   };
