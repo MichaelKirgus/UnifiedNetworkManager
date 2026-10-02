@@ -223,7 +223,14 @@ export const SYSTEM_ACTIONS: ActionDescriptor[] = [
       // --- sync: re-trigger native NTP ---------------------------------------
       if (mode === 'sync') {
         const r = await runCommands(ctx.backend, [CLOCK_SYNC_SCRIPT], 60_000);
-        if (!r.ok) return failResult(`NTP re-sync failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
+        if (!r.ok) {
+          const out = (r.stderr || r.stdout).slice(0, 300);
+          // systemd polkit: the SSH user may not be allowed to restart system services.
+          if (/interactive authentication required|access denied/i.test(out)) {
+            return failResult(`NTP daemon is running but cannot be restarted — the SSH user lacks permission (systemd answered "Interactive authentication required"). Grant passwordless sudo for systemctl, or use a privileged account.`);
+          }
+          return failResult(`NTP re-sync failed: ${out}`);
+        }
         // Best-effort read of the daemon's sync state after restart (not proof of sync —
         // chrony/timesyncd converge over seconds to minutes; the Time page will show it).
         const status = await ctx.backend.exec('timedatectl show --property=NTPSynchronized,ClockSource 2>/dev/null || true').catch(() => null);

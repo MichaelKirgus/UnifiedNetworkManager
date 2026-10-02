@@ -575,11 +575,19 @@ router.post(
           return;
         }
       } else if (intent && intent.deviceCount !== 1) {
-        // Multi-device intents always need appliance credentials.
-        res.status(400).json({
-          error: `Device "${device.name}" has no secret assigned for this plugin — multi-device intents require credentials`,
-        });
-        return;
+        // Multi-device intents always need appliance credentials. A bound PRIMARY
+        // secret OR any bound credential slot counts — the executor passes slots
+        // through under credentials.slots.<name>, so a slot-only assignment (e.g.
+        // TrueNAS with just an apiKey slot) is legitimately usable. Devices with
+        // NO credential at all are rejected here; plugin-level auth failures on
+        // insufficient-but-present credentials surface per-step at execution time.
+        const slots = parseExtraCredentials(assignment.extraCredentials);
+        if (Object.keys(slots).length === 0) {
+          res.status(400).json({
+            error: `Device "${device.name}" has no secret assigned for this plugin — multi-device intents require credentials`,
+          });
+          return;
+        }
       }
       planDevices.push({ deviceId: device.id, managementAddress: device.managementAddress, credentials });
     }
