@@ -1,4 +1,4 @@
-import type { ActionDescriptor as SdkActionDescriptor } from '@unm/plugin-sdk';
+import type { ActionDescriptor as SdkActionDescriptor, SshPool, SftpPool } from '@unm/plugin-sdk';
 import { isValidInput, validateInput } from '@unm/plugin-sdk';
 import type {
   ActionResult,
@@ -59,9 +59,17 @@ export interface ActionContext {
   client: RouterOsClient;
   /** Full management address as given by the API (may carry scheme/port). */
   address: string;
+  /** Bare hostname of the management address (no scheme/port) — SSH/SFTP target. */
+  host: string;
+  /** SSH daemon port for this device (default 22 when unset). */
+  sshPort?: number;
   deviceId?: string;
   deviceName?: string;
   credentials: StepCredentials;
+  /** Process-wide SSH pool — config export over `exec` (see actions/sshTransport.ts). */
+  sshPool: SshPool;
+  /** Process-wide SFTP pool — config restore via the router's file store. */
+  sftpPool: SftpPool;
 }
 
 /** A fully-described action — the SDK descriptor. */

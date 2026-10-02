@@ -2,6 +2,12 @@ import { ActionDescriptor } from './types';
 import { l2TopologyAction } from './l2Topology';
 import { networkIntentActions } from './networkIntents';
 import { clockSyncAction } from './clock';
+import { systemActions } from './system';
+import { networkActions } from './network';
+import { firewallActions } from './firewall';
+import { vpnActions } from './vpn';
+import { backupActions } from './backup';
+import { firmwareActions } from './firmware';
 
 /**
  * The action registry — the single source of truth for everything this plugin
@@ -15,6 +21,13 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   l2TopologyAction,
   ...networkIntentActions,
   clockSyncAction,
+  // 0.4.0 — full feature surface (System / Network / Firewall / VPN / Backup / Updates).
+  ...systemActions,
+  ...networkActions,
+  ...firewallActions,
+  ...vpnActions,
+  ...backupActions,
+  ...firmwareActions,
 ];
 
 const byId = new Map<string, ActionDescriptor>(ALL_ACTIONS.map((a) => [a.id, a]));

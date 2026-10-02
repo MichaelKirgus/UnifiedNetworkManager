@@ -107,6 +107,14 @@ function rawRequest(url: string, method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DEL
       return;
     }
     const lib = u.protocol === 'https:' ? https : http;
+    // CRITICAL: RouterOS 7.x REST SILENTLY IGNORES chunked-transfer-encoded
+    // request bodies — a POST `<table>/set` with no Content-Length answers
+    // `200 []` and applies NOTHING (verified live on 7.21 LTS). Node's
+    // http.request only sets Content-Length when the body is passed to the
+    // options object, so we must compute it explicitly here; otherwise every
+    // write degrades into a silent no-op (or a 400 "Bad Request" with an
+    // empty body on PUT/PATCH).
+    const headersWithLength = body !== undefined ? { ...headers, 'Content-Length': String(Buffer.byteLength(body)) } : { ...headers };
     const req = lib.request(
       {
         protocol: u.protocol,
@@ -114,7 +122,7 @@ function rawRequest(url: string, method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DEL
         port: u.port || (u.protocol === 'https:' ? 443 : 80),
         path: `${u.pathname}${u.search}`,
         method,
-        headers: { ...headers },
+        headers: headersWithLength,
         // Self-signed certs are the norm on RouterOS — opt in explicitly.
         ...(u.protocol === 'https:' ? { rejectUnauthorized: !opts.insecureTls } : {}),
       },
@@ -146,10 +154,12 @@ function parseBody<T>(res: RawResponse): T {
   }
   if (res.status < 200 || res.status >= 300) {
     const obj = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
-    // RouterOS error bodies are JSON objects carrying `error`/`message`.
+    // RouterOS error bodies are JSON objects carrying `error`/`message`. The
+    // REAL reason lives in `detail` (e.g. "missing =group=") — `message` is a
+    // generic label ("Bad Request"), so prefer detail when both are present.
     if (obj !== null && ('error' in obj || 'message' in obj)) {
-      const detail = obj['message'] ?? obj['detail'];
-      const msg = typeof detail === 'string' && detail.trim() !== '' ? detail : `HTTP ${res.status}`;
+      const rawDetail = typeof obj['detail'] === 'string' && obj['detail'].trim() !== '' ? obj['detail'] : obj['message'];
+      const msg = typeof rawDetail === 'string' && rawDetail.trim() !== '' ? rawDetail : `HTTP ${res.status}`;
       if (res.status === 401 || res.status === 403) throw new RouterOsAuthError(`Authentication failed (${msg})`);
       throw new RouterOsApiError(res.status, msg);
     }

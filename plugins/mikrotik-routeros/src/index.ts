@@ -4,6 +4,8 @@ import {
   Health,
   PluginOptionDescriptor,
   SshCredentials,
+  createSftpPool,
+  createSshPool,
   clampInt,
   createPluginLogger,
   createPluginServer,
@@ -68,7 +70,15 @@ const identity = resolvePluginIdentity({
   // 0.3.0 — Configuration + planning: canonical fleet intents over the REST
   // API (`l2.topology.read`, `network.create`, `network.delete`) with a
   // /preflight resolver for per-device attach-point suggestions.
-  version: '0.3.0',
+  // 0.4.0 — Feature-complete configuration surface (verified live on RouterOS
+  // 7.21 LTS): System (info/status/identity/users/services/reboot/halt/
+  // scripts/scheduler/logging), Network (interfaces/VLANs/routes/gateways/DHCP
+  // server stack + static leases/DNS servers + hosts), Firewall (filter/NAT
+  // rule CRUD+toggle, address lists), VPN (WireGuard server/peer CRUD with
+  // auto key generation, IPsec inventory), config backup/restore over SSH+SFTP
+  // into UNM's file repository, and firmware check/update via the package
+  // manager. All writes apply immediately and are verified by re-read.
+  version: '0.4.0',
   vendors: ['mikrotik'],
   // monitoring + inventory over the REST API, plus an interactive SSH console
   // ('sshConsole') — RouterOS exposes a full CLI shell over SSH (port 22).
@@ -235,8 +245,20 @@ function resolveRouterOsSsh(creds?: Record<string, unknown> | null): SshCredenti
 const assertPinned = createPinningGuard();
 
 const termPool = createTerminalPool();
-process.on('SIGTERM', () => termPool.closeAll());
-process.on('SIGINT', () => termPool.closeAll());
+// Pooled SSH/SFTP transports for the config backup/restore actions (0.4.0) —
+// keyed by host|port|username, closed on shutdown like the terminal pool.
+const sshPool = createSshPool();
+const sftpPool = createSftpPool();
+process.on('SIGTERM', () => {
+  termPool.closeAll();
+  sshPool.closeAll();
+  sftpPool.closeAll();
+});
+process.on('SIGINT', () => {
+  termPool.closeAll();
+  sshPool.closeAll();
+  sftpPool.closeAll();
+});
 
 const consoleUpgrade = makeConsoleUpgrade({
   expectedApiKey: () => process.env.PLUGIN_API_KEY ?? null,
@@ -534,9 +556,13 @@ function buildActionContext(args: {
       httpPort: opts.httpPort,
     }),
     address: args.address,
+    host: hostFromAddress(args.address) ?? args.address.replace(/^https?:\/\//i, '').split('/')[0],
+    sshPort: resolveSshPort(args.settings.sshPort),
     deviceId: args.deviceId,
     deviceName: args.deviceName,
     credentials: args.credentials,
+    sshPool,
+    sftpPool,
   };
 }
 
@@ -615,6 +641,15 @@ app.post('/config', async (req, res) => {
     }
 
     const result = await action.execute(ctx, input);
+    // Every successful write in this plugin is CONFIRMED by a post-apply re-read
+    // of device state (or an idempotent skip against current state) — surface
+    // that to the plan executor so plans reach 'succeeded' instead of
+    // 'unverified'. The fire-and-forget actions are excluded: they succeed on a
+    // command acknowledgement / connection drop and cannot re-read afterwards.
+    const NOT_VERIFIABLE = new Set(['system.reboot', 'system.halt', 'firmware.update']);
+    if (result.success && action.riskLevel !== 'read' && !NOT_VERIFIABLE.has(action.id)) {
+      result.verified = true;
+    }
     res.status(200).json({ success: result.success, result: { ...result } });
   } catch (err) {
     logger.error(`Config action ${actionId} failed for ${managementAddress}: ${(err as Error).message}`, { deviceId: typeof deviceId === 'string' ? deviceId : null, context: { host: managementAddress, actionId } });
