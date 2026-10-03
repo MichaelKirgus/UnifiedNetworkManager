@@ -75,12 +75,23 @@ export function DialogShell({
   // Once the user resizes the panel manually, stop auto-fitting its size.
   const userAdjusted = useRef(false);
 
-  /** The panel's natural height: header + body (capped by bodyMaxHeight) + footer. */
+  /** The panel's natural size: header + body (capped by bodyMaxHeight) + footer. */
   function naturalSize(el: HTMLElement): { w: number; h: number } {
     const prevH = el.style.height;
     el.style.height = 'auto'; // let the content dictate — the body stays capped
     const w = Math.min(el.offsetWidth, window.innerWidth - 32);
-    const h = Math.min(el.scrollHeight, window.innerHeight - 32);
+    // Sum the rendered box heights (the body's clientHeight respects its
+    // maxHeight cap) instead of scrollHeight, which would report the FULL
+    // uncapped content height and open long dialogs taller than their cap.
+    let h = 0;
+    for (const child of Array.from(el.children)) {
+      const c = child as HTMLElement;
+      if (!(c instanceof HTMLElement)) continue;
+      const cs = getComputedStyle(c);
+      if (cs.position === 'absolute') continue; // resize handles don't take layout space
+      h += c.clientHeight + (parseFloat(cs.marginBottom) || 0);
+    }
+    h = Math.min(h, window.innerHeight - 32);
     el.style.height = prevH; // restore — the state update takes over
     return { w, h };
   }
@@ -96,22 +107,32 @@ export function DialogShell({
   }, []);
 
   // Many dialogs load their content asynchronously (schemas, compose YAML, …)
-  // — keep fitting the panel to it until the user resizes manually.
+  // — keep fitting the panel to it until the user resizes manually. Two
+  // triggers: the body's box size (viewport resize changes its maxHeight cap),
+  // and DOM mutations inside it (loading → form swaps). The mutation observer
+  // is essential because the body's own box stays constrained by the panel's
+  // fixed height, so content growth alone never resizes it.
   useEffect(() => {
     const el = panelRef.current;
     if (!el) return;
     const body = el.querySelector(':scope > div');
     if (!(body instanceof HTMLElement)) return;
-    const ro = new ResizeObserver(() => {
+    let raf = 0;
+    const fit = () => {
+      raf = 0;
       if (userAdjusted.current) return;
       setGeom((g) => {
         const { h } = naturalSize(el);
         if (Math.abs(h - g.h) < 1) return g;
         return { ...g, h, y: Math.max(0, Math.min(g.y, window.innerHeight - h - 16)) };
       });
-    });
+    };
+    const scheduleFit = () => { if (!raf) raf = requestAnimationFrame(fit); };
+    const ro = new ResizeObserver(scheduleFit);
     ro.observe(body);
-    return () => ro.disconnect();
+    const mo = new MutationObserver(scheduleFit);
+    mo.observe(body, { childList: true, subtree: true });
+    return () => { ro.disconnect(); mo.disconnect(); if (raf) cancelAnimationFrame(raf); };
   }, []);
 
   return (
