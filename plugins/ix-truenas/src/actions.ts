@@ -380,9 +380,62 @@ const systemFirmwareUpdateAction: ActionDescriptor<TruenasActionContext> = {
     if (train) options['train'] = train;
     if (version) options['version'] = version;
 
+    // Second idempotency layer — the one that hid SRV03's stuck state (2026-10-03):
+    // a boot environment for the target version may ALREADY EXIST (an earlier
+    // install-only run, or an update.run whose reboot leg never fired). Re-running
+    // update.run then fails INSIDE the appliance job ("already installed") AFTER we
+    // have already returned success with a jobId — invisible to UNM. So: skip the
+    // download/install entirely and just (re)activate + boot into what's there.
+    if (version) {
+      let beq: { rows: BootEnvRow[]; namespace: string } | null = null;
+      try {
+        beq = await queryBootEnvs(ctx); // best-effort pre-check — a failure falls through to update.run
+      } catch { /* pre-check only */ }
+      const existing = beq?.rows.find((r) => r.id === version);
+      if (beq && existing) {
+        if (!reboot) {
+          return { success: true, applied: false, verified: true, details: { note: `Boot environment ${version} is already installed — nothing to install. Reboot the box to enter it (or use bootenv.activate).`, currentVersion: current } };
+        }
+        // REAL errors from here on must surface — do NOT fall through to update.run.
+        // Re-activating an already-activated BE is a no-op (25.10.x answers EINVAL for it).
+        try {
+          await ctx.client.call<unknown>(`${beq.namespace}.activate`, [{ id: version }], ctx.creds);
+        } catch (e3) {
+          if (!(e3 instanceof TruenasRpcError && /already activated/i.test(e3.message))) throw e3;
+        }
+        try {
+          const rb = await ctx.client.call<unknown>('system.reboot', ['System upgrade (UNM — boot environment already installed)', {}], ctx.creds);
+          return { success: true, applied: true, details: { note: `Boot environment ${version} was already installed — activated and rebooting into it. Unreachable while down; verification is impossible by design.` }, ...(describeJobResult(rb) as Record<string, unknown>) };
+        } catch (e2) {
+          if (e2 instanceof TruenasRpcError && /timed out|closed|unresponsive/i.test(e2.message)) {
+            return { success: true, applied: true, details: { note: `Boot environment ${version} was already installed — reboot initiated; connection lost as expected while the appliance went down.` } };
+          }
+          throw e2;
+        }
+      }
+    }
+
     try {
       const result = await ctx.client.call<unknown>('update.run', [options], ctx.creds);
-      return { success: true, applied: true, details: describeJobResult(result) };
+      if (reboot) {
+        // The appliance reboots itself inside the job — we cannot observe its outcome.
+        return { success: true, applied: true, details: describeJobResult(result) };
+      }
+      // Install-only: WAIT for the real job outcome so a failed install is reported as
+      // FAILURE (SRV03 incident 2026-10-03: jobId accepted, the job died ~20 min later
+      // on an already-installed BE, and the plan still said "succeeded").
+      const jid = typeof result === 'number' ? result : (result && typeof result === 'object' && typeof (result as Record<string, unknown>)['id'] === 'number') ? ((result as Record<string, unknown>)['id'] as number) : null;
+      if (jid !== null) {
+        const wait = await waitForJob(ctx, jid, 3_500_000);
+        if (wait.state === 'RUNNING') return { success: true, applied: true, details: { jobId: jid, note: wait.error ?? 'Update job still in progress on the appliance.' } };
+        if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') return { success: false, details: { jobId: jid, error: wait.error ?? `Job ended in state ${wait.state}` } };
+      }
+      // Confirm the new BE actually exists when we know its name.
+      let verified = false;
+      if (version) {
+        try { verified = (await queryBootEnvs(ctx)).rows.some((r) => r.id === version); } catch { /* best-effort */ }
+      }
+      return { success: true, applied: true, verified, details: { ...(jid !== null ? { jobId: jid } : {}), note: 'Update installed — NO reboot performed (install-only). The new boot environment is active at the next manual reboot.' } };
     } catch (e) {
       // The socket dies when the appliance reboots into the new boot environment — EXPECTED.
       if (e instanceof TruenasRpcError && /timed out|closed|unresponsive/i.test(e.message)) {
@@ -854,6 +907,152 @@ const firmwareUpdateFileAction: ActionDescriptor<TruenasActionContext> = {
     // Install confirmed — now the reboot (finishWithReboot swallows its own expected
     // disconnect; a transport error anywhere else here is a REAL failure).
     return await finishWithReboot({ jobId: r2.jobId, fileName: payload.fileName });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Boot environments (SCALE) — the same data TrueNAS's Web UI shows under
+// System → Boot Environments, exposed as plan actions so UNM can see what an
+// upgrade actually installed and ROLL BACK to a previous OS version. Verified
+// against truenas/middleware source: plugins/boot_environment/ + api/v25_10_x/
+// boot_environments.py — namespace `boot.environment` (roles BOOT_ENV_*), entry
+// fields {id, dataset, active, activated, created, used_bytes, used, keep,
+// can_activate}. Pre-25.04 appliances expose the legacy `bootenv.*` namespace
+// with positional args and no keep/can_activate — queryBootEnvs falls back to
+// it automatically (JSON-RPC -32601).
+// ---------------------------------------------------------------------------
+
+interface BootEnvRow { id: string; dataset?: string; active?: boolean; activated?: boolean; created?: unknown; usedBytes?: number; used?: string; keep?: boolean; canActivate?: boolean; }
+
+/** Queries the appliance's boot environments, normalizing both namespaces. */
+async function queryBootEnvs(ctx: TruenasActionContext): Promise<{ rows: BootEnvRow[]; namespace: 'boot.environment' | 'bootenv' }> {
+  const normalize = (raw: unknown[]): BootEnvRow[] => raw.map((r) => {
+    const o = r as Record<string, unknown>;
+    return { id: String(o['id'] ?? ''), dataset: typeof o['dataset'] === 'string' ? o['dataset'] : undefined, active: o['active'] === true || (typeof o['active'] === 'string' && /^R/.test(o['active'])), activated: o['activated'] === true || (typeof o['activated'] === 'string' && /N/.test(o['activated'])), created: o['created'], usedBytes: typeof o['used_bytes'] === 'number' ? o['used_bytes'] : undefined, used: typeof o['used'] === 'string' ? o['used'] : undefined, keep: typeof o['keep'] === 'boolean' ? o['keep'] : undefined, canActivate: typeof o['can_activate'] === 'boolean' ? o['can_activate'] : undefined };
+  });
+  try {
+    const rows = await ctx.client.call<unknown[]>('boot.environment.query', [[], {}], ctx.creds);
+    return { rows: normalize(Array.isArray(rows) ? rows : []), namespace: 'boot.environment' };
+  } catch (e) {
+    if (!(e instanceof TruenasRpcError && e.code === -32601)) throw e; // legacy appliance — try the old namespace
+    const rows = await ctx.client.call<unknown[]>('bootenv.query', [[], {}], ctx.creds);
+    return { rows: normalize(Array.isArray(rows) ? rows : []), namespace: 'bootenv' };
+  }
+}
+
+const bootEnvReadAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'bootenv.read',
+  label: 'List boot environments',
+  description:
+    "Lists the appliance's OS boot environments (TrueNAS `boot.environment.query` — the same data as System → Boot Environments in the Web UI). Shows which version is currently running (`active`) and which one will be booted next (`activated`). Use after a firmware upgrade to confirm what got installed, or before rolling back.",
+  module: 'System',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  async execute(ctx: TruenasActionContext): Promise<ActionResult> {
+    const { rows } = await queryBootEnvs(ctx);
+    return { success: true, details: { count: rows.length, bootEnvironments: rows } };
+  },
+};
+
+const bootEnvActivateAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'bootenv.activate',
+  label: 'Boot into a boot environment (rollback / forward-boot)',
+  description:
+    "Activates the named boot environment so it becomes the default at the NEXT reboot (TrueNAS `boot.environment.activate`) — this is how you roll back to an older OS version after a bad upgrade, or finish an install-only update. The currently running OS is untouched until the box reboots; set reboot=true (default) to reboot immediately.",
+  module: 'System',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000, // activate regenerates the boot menu — quick; the optional reboot drops the socket
+  retryOnDispatchFailure: false,
+  inputSchema: {
+    id: { type: 'string', required: true, minLength: 2, description: 'Boot environment name (usually the version, e.g. "25.10.4") — see bootenv.read' },
+    reboot: { type: 'boolean', required: false, default: true, description: 'Reboot immediately so the selected boot environment takes effect now (default). Set false to only arm it for the next manual reboot.' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const id = str(input, 'id');
+    if (!id) return { success: false, details: { error: 'id (boot environment name) is required' } };
+    const reboot = input['reboot'] !== false;
+
+    // Resolve the namespace + confirm the BE exists BEFORE mutating anything.
+    const beq = await queryBootEnvs(ctx);
+    const target = beq.rows.find((r) => r.id === id);
+    if (!target) return { success: false, details: { error: `No boot environment named "${id}" on this appliance`, available: beq.rows.map((r) => r.id) } };
+
+    // activate: re-activating an already-activated BE is a no-op — some releases
+    // (25.10.x observed live on SRV03) answer EINVAL "already activated" instead of
+    // regenerating the menu; treat that as success, everything else must surface.
+    try {
+      await ctx.client.call<unknown>(`${beq.namespace}.activate`, [{ id }], ctx.creds);
+    } catch (e) {
+      if (!(e instanceof TruenasRpcError && /already activated/i.test(e.message))) throw e;
+    }
+
+    if (!reboot) {
+      return { success: true, applied: true, details: { bootEnvironment: id, note: `Boot environment ${id} is armed for the next reboot — the currently running OS stays active until then.` } };
+    }
+    try {
+      const rb = await ctx.client.call<unknown>('system.reboot', [`UNM boot environment switch → ${id}`, {}], ctx.creds);
+      return { success: true, applied: true, details: { bootEnvironment: id, note: `Rebooting into ${id}. Unreachable while down; verification is impossible by design.` }, ...(describeJobResult(rb) as Record<string, unknown>) };
+    } catch (e) {
+      if (e instanceof TruenasRpcError && /timed out|closed|unresponsive/i.test(e.message)) {
+        return { success: true, applied: true, details: { bootEnvironment: id, note: `Reboot into ${id} initiated; connection lost as expected while the appliance went down.` } };
+      }
+      throw e;
+    }
+  },
+};
+
+const bootEnvDestroyAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'bootenv.destroy',
+  label: 'Delete a boot environment',
+  description:
+    "Permanently deletes the named boot environment (TrueNAS `boot.environment.destroy`), freeing its space. The appliance refuses to delete the currently running (`active`) or next-boot (`activated`) one — those guards are enforced on the appliance side.",
+  module: 'System',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000, // destroy + boot-menu regeneration can take a while for large BEs
+  retryOnDispatchFailure: false,
+  inputSchema: {
+    id: { type: 'string', required: true, minLength: 2, description: 'Boot environment name to delete (e.g. "25.10.4") — see bootenv.read' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const id = str(input, 'id');
+    if (!id) return { success: false, details: { error: 'id (boot environment name) is required' } };
+    const beq = await queryBootEnvs(ctx);
+    const target = beq.rows.find((r) => r.id === id);
+    if (!target) return { success: false, details: { error: `No boot environment named "${id}" on this appliance — nothing to delete.`, available: beq.rows.map((r) => r.id) } };
+    await ctx.client.call<unknown>(`${beq.namespace}.destroy`, [{ id }], ctx.creds); // active/activated are refused by the appliance itself
+    return { success: true, applied: true, details: { bootEnvironment: id, note: `Boot environment ${id} deleted.` } };
+  },
+};
+
+const bootEnvKeepAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'bootenv.keep',
+  label: 'Protect a boot environment from auto-deletion',
+  description:
+    "Sets or clears the keep flag on a boot environment (TrueNAS `boot.environment.keep`). When true, the updater will NOT delete this BE when it needs space for an update — useful to pin a known-good version as your rollback target. Requires TrueNAS 25.04+ (the legacy bootenv namespace has no keep flag).",
+  module: 'System',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    id: { type: 'string', required: true, minLength: 2, description: 'Boot environment name (e.g. "25.10.4") — see bootenv.read' },
+    value: { type: 'boolean', required: true, description: 'true = protect from updater auto-deletion; false = allow it' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const id = str(input, 'id');
+    if (!id) return { success: false, details: { error: 'id (boot environment name) is required' } };
+    if (typeof input['value'] !== 'boolean') return { success: false, details: { error: 'value must be a boolean' } };
+    const value = input['value'] as boolean;
+    const beq = await queryBootEnvs(ctx);
+    if (!beq.rows.some((r) => r.id === id)) return { success: false, details: { error: `No boot environment named "${id}" on this appliance`, available: beq.rows.map((r) => r.id) } };
+    try {
+      await ctx.client.call<unknown>('boot.environment.keep', [{ id, value }], ctx.creds);
+    } catch (e) {
+      if (e instanceof TruenasRpcError && e.code === -32601) return { success: false, details: { error: 'This appliance predates the keep flag (pre-25.04 `bootenv` namespace) — nothing to set.' } };
+      throw e;
+    }
+    return { success: true, applied: true, verified: true, details: { bootEnvironment: id, keep: value, note: value ? `Boot environment ${id} is now protected from updater auto-deletion.` : `Boot environment ${id} may be deleted by the updater when it needs space.` } };
   },
 };
 
@@ -6098,6 +6297,10 @@ export const registry = createRegistry<TruenasActionContext>([
   updateProfileReadAction,
   updateProfileSetAction,
   firmwareUpdateFileAction,
+  bootEnvReadAction,
+  bootEnvActivateAction,
+  bootEnvDestroyAction,
+  bootEnvKeepAction,
   alertsDismissAction,
   alertsUndismissAction,
   containersStopAction,
