@@ -79,19 +79,10 @@ export function DialogShell({
   function naturalSize(el: HTMLElement): { w: number; h: number } {
     const prevH = el.style.height;
     el.style.height = 'auto'; // let the content dictate — the body stays capped
+    // offsetWidth/offsetHeight are border-box (Tailwind preflight), so this is
+    // EXACTLY the inline height to set afterwards — no scrollbar, no clipping.
     const w = Math.min(el.offsetWidth, window.innerWidth - 32);
-    // Sum the rendered box heights (the body's clientHeight respects its
-    // maxHeight cap) instead of scrollHeight, which would report the FULL
-    // uncapped content height and open long dialogs taller than their cap.
-    let h = 0;
-    for (const child of Array.from(el.children)) {
-      const c = child as HTMLElement;
-      if (!(c instanceof HTMLElement)) continue;
-      const cs = getComputedStyle(c);
-      if (cs.position === 'absolute') continue; // resize handles don't take layout space
-      h += c.clientHeight + (parseFloat(cs.marginBottom) || 0);
-    }
-    h = Math.min(h, window.innerHeight - 32);
+    const h = Math.min(el.offsetHeight, window.innerHeight - 32);
     el.style.height = prevH; // restore — the state update takes over
     return { w, h };
   }
