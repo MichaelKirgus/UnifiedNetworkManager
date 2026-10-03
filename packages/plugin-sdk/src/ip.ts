@@ -365,3 +365,62 @@ export function ipScope(value: string): IpScope | null {
   if ((w[0] & 0xe000) === 0x2000) return 'public'; // 2000::/3 GUA
   return 'reserved'; // unspecified, benchmarking, reserved space…
 }
+
+// ---------------------------------------------------------------------------
+// Address allocation — next free host address inside a CIDR
+// ---------------------------------------------------------------------------
+
+/** Hard cap on candidate scans so a pathological (fully-allocated) subnet can't hang the caller. */
+const MAX_ADDRESS_SCAN = 1_000_000;
+
+/**
+ * Finds the next free host address in a CIDR, skipping structurally reserved
+ * addresses and everything in `used` (zone ids stripped on comparison).
+ *
+ *   - IPv4: skips the network address and the broadcast. /31 and /32 are fully
+ *     usable per RFC 3021 (point-to-point) — no skip there.
+ *   - IPv6: skips only the first address of the subnet (the "network" address,
+ *     mirroring v4 convention); /127 and /128 are fully usable per RFC 6164.
+ *
+ * Returns null when the CIDR is malformed or no free candidate exists within
+ * the scan cap. Pure — `used` may be any iterable of address literals.
+ */
+export function nextFreeAddressInCidr(cidr: string, used: Iterable<string>): string | null {
+  const s = splitCidr(cidr);
+  if (!s) return null;
+  const usedSet = new Set(Array.from(used).map((a: string) => stripZoneId(a)));
+
+  if (!s.net.includes(':')) {
+    // --- IPv4 (32-bit int math) -------------------------------------------
+    const netInt = ipv4ToInt(s.net);
+    if (netInt === null) return null;
+    const mask = s.prefix === 0 ? 0 : (~0 << (32 - s.prefix)) >>> 0;
+    const network = (netInt & mask) >>> 0;
+    const size = ((~mask) >>> 0) + 1; // addresses in the block
+    // /31, /32: every address is usable (RFC 3021). Otherwise skip network + broadcast.
+    let start = s.prefix >= 31 ? network : (network + 1) >>> 0;
+    const endExclusive = s.prefix === 32 ? (network + 1) >>> 0 : s.prefix === 31 ? (network + 2) >>> 0 : (network + size - 1) >>> 0; // broadcast addr, exclusive bound
+    for (let i = 0; i < MAX_ADDRESS_SCAN && start < endExclusive; i++) {
+      const lit = ipv4FromInt(start);
+      if (!usedSet.has(lit)) return lit;
+      start = (start + 1) >>> 0;
+    }
+    return null;
+  }
+
+  // --- IPv6 (BigInt math) ---------------------------------------------------
+  const netBig = ipv6ToBigInt(s.net);
+  if (netBig === null) return null;
+  const mask = s.prefix === 0 ? 0n : ((1n << 128n) - 1n) ^ ((1n << BigInt(128 - s.prefix)) - 1n);
+  const network = netBig & mask;
+  const size = 1n << BigInt(128 - s.prefix);
+  // /127, /128: every address is usable (RFC 6164). Otherwise skip the first address.
+  let start = s.prefix >= 127 ? network : network + 1n;
+  const endExclusive = network + size;
+  for (let i = 0n; i < BigInt(MAX_ADDRESS_SCAN) && start < endExclusive; i += 1n) {
+    const lit = ipv6FromBigInt(start);
+    if (!usedSet.has(lit)) return lit;
+    start += 1n;
+  }
+  return null;
+}
