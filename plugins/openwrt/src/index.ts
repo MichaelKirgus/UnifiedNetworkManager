@@ -55,6 +55,7 @@ import { collectMonitoring, getInventory } from './monitoring';
 import { stateStore } from './stateStore';
 import { collectSecurityChecks, DEFAULT_WATCHED_FILES, type SecuritySettings } from './security';
 import { getAction, listModules } from './actions/registry';
+import { PREFLIGHT_RESOLVERS } from './actions/networkIntents';
 import type { ActionContext } from './actions/types';
 import { validateInput } from '@unm/plugin-sdk';
 import type { StepCredentials } from '@unm/plugin-sdk';
@@ -583,6 +584,46 @@ app.post('/config', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /preflight — per-device best-guess resolution for a canonical fleet
+// intent (read-only). The rollout wizard calls this BEFORE planning so the user
+// sees concrete per-device values (VLAN parent, reuse hints) with confidence +
+// notes. Same body shape as a single-device step dispatch; resolvers NEVER write.
+// ---------------------------------------------------------------------------
+app.post('/preflight', async (req, res) => {
+  const body = req.body ?? {};
+  const intentActionId = typeof body.intentActionId === 'string' ? body.intentActionId : undefined;
+  const inputs: Record<string, unknown> = body.inputs && typeof body.inputs === 'object' ? (body.inputs as Record<string, unknown>) : {};
+  const dev = (body.device ?? {}) as Record<string, unknown>;
+  const managementAddress = typeof dev.managementAddress === 'string' ? dev.managementAddress : undefined;
+
+  if (!intentActionId || !managementAddress) {
+    res.status(400).json({ error: 'intentActionId and device.managementAddress are required' });
+    return;
+  }
+  const resolver = PREFLIGHT_RESOLVERS[intentActionId];
+  if (!resolver) {
+    res.status(400).json({ error: `No preflight resolver for intent "${intentActionId}"` });
+    return;
+  }
+
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+
+  try {
+    // Same credential assembly as /config — primary secret + bound slots.
+    const creds = (dev.credentials && typeof dev.credentials === 'object' ? dev.credentials : {}) as Record<string, unknown>;
+    await assertPinned(req, managementAddress, pinningTransportOf(transportOf(settings)), portsOf(settings));
+    const backend = await backendFor(managementAddress, creds, settings);
+    const ctx: ActionContext = { backend, host: managementAddress, deviceId: typeof dev.deviceId === 'string' ? dev.deviceId : undefined, credentials: { ...creds } };
+    const result = await resolver(ctx, inputs);
+    res.status(200).json({ result });
+  } catch (err) {
+    // Preflight is advisory — a probe failure degrades the suggestion.
+    res.status(200).json({ result: { deviceId: String(dev.deviceId ?? ''), values: [], degraded: true, error: (err as Error).message } });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /plan — plans a multi-device intent (or fans out a single action across a
 // batch). The plugin does ALL the planning — cross-device references, dependency
 // ordering, credential provisioning requests. It never generates key material:
@@ -605,6 +646,10 @@ app.post('/plan', async (req, res) => {
         }))
       : [],
   };
+  // Per-device overrides from the rollout wizard (confirmed preflight values).
+  if (body.deviceInputs && typeof body.deviceInputs === 'object') {
+    planReq.deviceInputs = body.deviceInputs as PlanRequest['deviceInputs'];
+  }
 
   try {
     const plan = buildPlan(planReq);

@@ -18,6 +18,7 @@ import { WIREGUARD_ACTIONS } from './wireguard';
 import { OPENVPN_ACTIONS } from './openvpn';
 import { ROUTES_ACTIONS } from './routes';
 import { INTERFACE_ACTIONS } from './interfaces';
+import { networkIntentActions } from './networkIntents';
 import { DNS_ACTIONS, DHCP_ACTIONS } from './dnsDhcp';
 import { WIRELESS_ACTIONS } from './wireless';
 import { SECURITY_ACTIONS } from './security';
@@ -30,6 +31,8 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   ...OPENVPN_ACTIONS,
   ...ROUTES_ACTIONS,
   ...INTERFACE_ACTIONS,
+  // Canonical fleet intents (network.create / network.delete / l2.topology.read).
+  ...networkIntentActions,
   ...DNS_ACTIONS,
   ...DHCP_ACTIONS,
   ...WIRELESS_ACTIONS,

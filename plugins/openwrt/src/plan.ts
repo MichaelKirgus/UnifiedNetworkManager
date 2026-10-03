@@ -11,7 +11,7 @@
  * Single-device actions fan out (one step per device) for batch rollouts.
  */
 
-import { finalizePlan, PlanningError } from '@unm/plugin-sdk';
+import { finalizePlan, PlanningError, isCanonicalIntent } from '@unm/plugin-sdk';
 import type { CatalogEntry, Plan, PlanDevice as SdkPlanDevice, PlanRequest as SdkPlanRequest, PlanStep, ProvisionRequest, InputSchema, RiskLevel } from '@unm/plugin-sdk';
 import { getAction, listActions } from './actions/registry';
 
@@ -168,7 +168,10 @@ export function listCatalog(): CatalogEntry[] {
     description: a.description,
     module: a.module,
     riskLevel: a.riskLevel,
-    deviceCount: 1 as const,
+    // Canonical fleet intents (network.create / network.delete) FAN OUT across
+    // the batch — one step per device. 'N' tells the API to accept any device
+    // count; a numeric 1 would reject legitimate multi-device rollouts.
+    deviceCount: isCanonicalIntent(a.id) ? ('N' as const) : (1 as const),
     timeoutMs: a.timeoutMs,
     retryOnDispatchFailure: a.retryOnDispatchFailure,
     inputSchema: a.inputSchema,
@@ -222,10 +225,13 @@ export function buildPlan(req: PlanRequest): Plan {
   if (!action) throw new PlanningError(`Unknown action or intent "${intentId}"`);
   if (req.devices.length === 0) throw new PlanningError('No devices supplied');
 
+  // Per-device overrides (PlanRequest.deviceInputs — the rollout wizard's
+  // confirmed preflight values, e.g. a different VLAN parent or L3 address per
+  // box) merge on top of the shared inputs for that device only.
   const rawSteps: Omit<PlanStep, 'stepIndex'>[] = req.devices.map((d) => ({
     deviceId: d.deviceId,
     actionId: intentId,
-    input: { ...(req.intent.inputs ?? {}) },
+    input: { ...(req.intent.inputs ?? {}), ...((req.deviceInputs ?? {})[d.deviceId] ?? {}) },
   }));
   return finalizePlan(
     intentId,
