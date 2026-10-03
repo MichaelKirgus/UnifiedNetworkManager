@@ -16,6 +16,7 @@ import NetworkRolloutPage from './pages/NetworkRolloutPage';
 import Hosts from './pages/Hosts';
 import DocumentedHosts from './pages/DocumentedHosts';
 import DocumentedNetworks from './pages/DocumentedNetworks';
+import DocumentedHostImportPage from './pages/DocumentedHostImportPage';
 import DocumentedNetworkImportPage from './pages/DocumentedNetworkImportPage';
 import Tunnels from './pages/Tunnels';
 import Services from './pages/Services';
@@ -59,6 +60,9 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   { path: '/networks/rollout', permission: 'networks:read' },
   { path: '/hosts', permission: 'hosts:read' },
   { path: '/documented-hosts', permission: 'documented-hosts:read' },
+  // Full-page "import from live inventory" wizard — mutates documented rows, so it
+  // is gated on the write perm (the endpoint requires documented-hosts:write).
+  { path: '/documented-hosts/import-from-inventory', permission: 'documented-hosts:write' },
   { path: '/documented-networks', permission: 'documented-networks:read' },
   // Full-page "import from live inventory" wizard — mutates documented rows, so it
   // is gated on the write perm (the endpoint requires documented-networks:write).
@@ -149,6 +153,8 @@ export default function App() {
       <Route path="/hosts" element={<Page permission="hosts:read"><Hosts /></Page>} />
       {/* User-maintained host documentation (permanent inventory + CSV import). */}
       <Route path="/documented-hosts" element={<Page permission="documented-hosts:read"><DocumentedHosts /></Page>} />
+      {/* Full-page "import from live inventory" wizard (replaces the old modal) — write-gated. */}
+      <Route path="/documented-hosts/import-from-inventory" element={<Page permission="documented-hosts:write"><DocumentedHostImportPage /></Page>} />
       <Route path="/documented-networks" element={<Page permission="documented-networks:read"><DocumentedNetworks /></Page>} />
       {/* Full-page "import from live inventory" wizard (replaces the old modal) — write-gated. */}
       <Route path="/documented-networks/import-from-inventory" element={<Page permission="documented-networks:write"><DocumentedNetworkImportPage /></Page>} />
