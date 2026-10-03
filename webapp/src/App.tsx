@@ -16,6 +16,7 @@ import NetworkRolloutPage from './pages/NetworkRolloutPage';
 import Hosts from './pages/Hosts';
 import DocumentedHosts from './pages/DocumentedHosts';
 import DocumentedNetworks from './pages/DocumentedNetworks';
+import DocumentedNetworkImportPage from './pages/DocumentedNetworkImportPage';
 import Tunnels from './pages/Tunnels';
 import Services from './pages/Services';
 import Mail from './pages/Mail';
@@ -59,6 +60,9 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   { path: '/hosts', permission: 'hosts:read' },
   { path: '/documented-hosts', permission: 'documented-hosts:read' },
   { path: '/documented-networks', permission: 'documented-networks:read' },
+  // Full-page "import from live inventory" wizard — mutates documented rows, so it
+  // is gated on the write perm (the endpoint requires documented-networks:write).
+  { path: '/documented-networks/import-from-inventory', permission: 'documented-networks:write' },
   { path: '/tunnels', permission: 'tunnels:read' },
   // Cross-device service inventory (systemd/OpenRC/runit/SysVinit/rc/middleware).
   { path: '/services', permission: 'services:read' },
@@ -146,6 +150,8 @@ export default function App() {
       {/* User-maintained host documentation (permanent inventory + CSV import). */}
       <Route path="/documented-hosts" element={<Page permission="documented-hosts:read"><DocumentedHosts /></Page>} />
       <Route path="/documented-networks" element={<Page permission="documented-networks:read"><DocumentedNetworks /></Page>} />
+      {/* Full-page "import from live inventory" wizard (replaces the old modal) — write-gated. */}
+      <Route path="/documented-networks/import-from-inventory" element={<Page permission="documented-networks:write"><DocumentedNetworkImportPage /></Page>} />
       <Route path="/tunnels" element={<Page permission="tunnels:read"><Tunnels /></Page>} />
       {/* Cross-device service inventory (OPNsense rc, TrueNAS middleware, Linux inits). */}
       <Route path="/services" element={<Page permission="services:read"><Services /></Page>} />
