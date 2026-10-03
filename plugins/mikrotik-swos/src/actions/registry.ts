@@ -11,10 +11,11 @@
  * changes are applied and persisted immediately by the switch.
  */
 
-import { configBackupFileName, createFileRepoClient, createRegistry, FileRepoClient, pollUntil } from '@unm/plugin-sdk';
+import { configBackupFileName, createFileRepoClient, createRegistry, isCanonicalIntent, FileRepoClient, pollUntil } from '@unm/plugin-sdk';
 import { buildPostArray, buildPostData, encodeHexString, encodeIpLe, encodePortMask } from '../swosClient';
 import { getField, hasField } from '../platform';
 import { decodeFilePayload, FIRMWARE_MAX_BYTES, rebootSwitch, restoreConfig, runFirmwareUpgrade } from '../firmware';
+import { networkIntentActions } from './networkIntents';
 import { ActionContext, ActionDescriptor } from './types';
 
 // --- Post-apply state verification -------------------------------------------------------
@@ -742,6 +743,8 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   firmwareUpdateAction,
   configRestoreAction,
   systemRebootAction,
+  // Canonical fleet intents (network.create / network.delete / l2.topology.read).
+  ...networkIntentActions,
 ];
 
 // One registry serves /discover, /plan and /config — the byId map + listers come
@@ -763,9 +766,13 @@ export function listModules(): string[] {
   return registry.listModules();
 }
 
-/** The full action catalog (single-device actions only in v1 — no multi-device intents). */
+/** The full action catalog. Canonical fleet intents FAN OUT across the batch
+ * (one step per device) — 'N' tells the API to accept any device count; a
+ * numeric 1 would reject legitimate multi-device rollouts. */
 export function listCatalog() {
-  return registry.listCatalog();
+  return registry.listCatalog().map((e) =>
+    isCanonicalIntent(e.id) ? { ...e, deviceCount: 'N' as const } : e,
+  );
 }
 
 // --- Shared decode helper (avoids importing monitoring into the registry) -------------------

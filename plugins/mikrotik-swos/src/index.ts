@@ -31,6 +31,7 @@ import { createPlatform } from './platform';
 import { DEFAULT_OPTIONS, MonitoringResult, SwosOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
 import { buildSwosState } from './state';
 import { DEVICE_MODELS } from './deviceModels';
+import { PREFLIGHT_RESOLVERS } from './actions/networkIntents';
 import { getAction, listCatalog } from './actions/registry';
 import { ActionContext, ActionResult, validateInput } from './actions/types';
 import { PlanRequest, PlanningError, buildPlan } from './plan';
@@ -492,6 +493,42 @@ app.post('/config', async (req, res) => {
 });
 
 /**
+ * Read-only preflight for canonical fleet intents — the rollout wizard calls
+ * this per device to resolve best-guess values (member ports from a donor VLAN,
+ * reuse hints). Failures degrade gracefully: HTTP 200 + `degraded: true`.
+ */
+app.post('/preflight', async (req, res) => {
+  const body = req.body ?? {};
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+
+  const intentActionId: string | undefined = typeof body.intentActionId === 'string' ? body.intentActionId : undefined;
+  const managementAddress: string | undefined = typeof body.device?.managementAddress === 'string' ? body.device.managementAddress : undefined;
+  if (!intentActionId || !managementAddress) {
+    res.status(400).json({ error: 'Missing intentActionId or device.managementAddress' });
+    return;
+  }
+
+  const resolver = PREFLIGHT_RESOLVERS[intentActionId];
+  if (!resolver) {
+    res.status(400).json({ error: `No preflight resolver for ${intentActionId}` });
+    return;
+  }
+
+  try {
+    await assertPinned(req, managementAddress, swosTransportOf(managementAddress), portsOf(settings));
+    const creds = (body.device?.credentials && typeof body.device.credentials === 'object' ? body.device.credentials : {}) as Record<string, unknown>;
+    const ctx = await buildActionContext({ host: managementAddress, deviceId: body.device?.deviceId, credentials: creds, settings });
+    // Await — the resolvers are async; serializing a pending Promise yields {}.
+    const result = await resolver(ctx, (body.inputs ?? {}) as Record<string, unknown>);
+    res.status(200).json({ result });
+  } catch (err) {
+    logger.warn(`preflight ${intentActionId} failed for ${managementAddress}: ${(err as Error).message}`);
+    res.status(200).json({ result: { deviceId: body.device?.deviceId, values: [], degraded: true, error: (err as Error).message } });
+  }
+});
+
+/**
  * Plans an intent across a batch of devices. The plugin does ALL the planning —
  * SwOS v1 has no multi-device intents, so this is a per-device fan-out with a
  * best-effort backup snapshot prepended for every device that gets writes.
@@ -519,6 +556,10 @@ app.post('/plan', async (req, res) => {
         }))
       : [],
   };
+  // Per-device overrides from the rollout wizard (confirmed preflight values).
+  if (body.deviceInputs && typeof body.deviceInputs === 'object') {
+    planReq.deviceInputs = body.deviceInputs as PlanRequest['deviceInputs'];
+  }
 
   try {
     const plan = buildPlan(planReq);

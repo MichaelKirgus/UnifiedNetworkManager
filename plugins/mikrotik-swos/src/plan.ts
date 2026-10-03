@@ -45,11 +45,13 @@ export function buildPlan(req: PlanRequest): Plan {
     throw new PlanningError(`Invalid input for ${actionId}: ${issues.map((i) => `${i.path}: ${i.message}`).join('; ')}`);
   }
 
-  // Fan-out: one step per device with the same inputs.
+  // Fan-out: one step per device. Per-device overrides (PlanRequest.deviceInputs
+  // — the rollout wizard's confirmed preflight values, e.g. different member
+  // ports per switch) merge on top of the shared inputs for that device only.
   const rawSteps: Omit<PlanStep, 'stepIndex'>[] = devices.map((d) => ({
     deviceId: d.deviceId,
     actionId: action.id,
-    input: { ...(inputs ?? {}) },
+    input: { ...(inputs ?? {}), ...((req.deviceInputs ?? {})[d.deviceId] ?? {}) },
   }));
 
   // The SDK finalizer assigns indices and prepends a best-effort backup snapshot
