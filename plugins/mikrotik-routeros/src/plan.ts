@@ -6,9 +6,9 @@
  *
  * Like the LCOS/OPNsense planners this module is pure with respect to writes:
  * it never mutates a router and never generates key material — RouterOS v1
- * needs no provisioned secrets at all. No rollback step is prepended: RouterOS
- * has no config-backup action in v1 (the web-UI backup is manual), so the plan
- * carries only the intent steps themselves.
+ * needs no provisioned secrets at all. Write plans get a best-effort
+ * `config.backup.download` rollback step prepended (SSH /export → UNM file
+ * repo) so every dirty device has a pre-change snapshot to restore from.
  */
 
 import { finalizePlan, PlanningError } from '@unm/plugin-sdk';
@@ -61,6 +61,6 @@ export function buildPlan(req: PlanRequest): Plan {
       const a = getAction(stepActionId);
       return !!a && a.riskLevel !== 'read';
     },
-    // No rollbackStep — RouterOS has no config-backup action in v1.
+    { rollbackStep: () => ({ actionId: 'config.backup.download', input: {} }) }
   );
 }

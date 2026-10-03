@@ -12,6 +12,8 @@ import { trafficshaperActions } from './trafficshaper';
 import { ntpdActions, syslogActions, monitActions } from './services';
 import { syncActions } from './sync';
 import { securityActions } from './security';
+import { configBackupActions } from './configBackup';
+import { userActions } from './users';
 import { l2TopologyAction } from './l2Topology';
 import { networkIntentActions } from './networkIntents';
 
@@ -39,6 +41,10 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   ...monitActions,
   ...syncActions,
   ...securityActions,
+  // File-repo config backup + SSH restore (gap fill — snapshots are appliance-local).
+  ...configBackupActions,
+  // Local user management (version-aware /api/auth/user ↔ /api/core/user).
+  ...userActions,
   l2TopologyAction,
   ...networkIntentActions,
 ];

@@ -1030,6 +1030,9 @@ const QUICK_ACTIONS: QuickAction[] = [
 const server = createPluginServer({
   identity,
   logTag: 'opnsense-plugin',
+  // config.restore accepts an inline base64 payload (fileBase64) — OPNsense
+  // configs are tens of KB; raise the JSON limit like LCOS/SwOS/TrueNAS.
+  jsonLimit: '32mb',
   // Static icon assets (plugin + per-model icons), advertised in /discover and
   // fetched by the API's icon proxy. dist/src/../../icons = <plugin root>/icons.
   iconsDir: path.join(__dirname, '../../icons'),
@@ -1051,7 +1054,7 @@ const server = createPluginServer({
         secretTypes: ['usernamePassword', 'sshKeyPair'],
         required: false,
         description:
-          'Optional SSH access for ZFS pool/dataset inventory (pools, datasets, zvols, scrub state, snapshots, per-disk health). The OPNsense API has no ZFS listing — without this slot only the mounted-root overview is collected. Read-only commands; runs at 15-min inventory cadence.',
+          'Optional SSH access for ZFS pool/dataset inventory (pools, datasets, zvols, scrub state, snapshots, per-disk health) and config.restore (the API has no upload endpoint — the restore stages the file over SSH and applies it with rc.reload_all). Without this slot only the mounted-root overview is collected. Inventory commands are read-only at 15-min cadence; restore is an explicit dangerous action.',
       },
     ],
     // Static metric descriptors (system metrics). The traffic table descriptor
@@ -1723,6 +1726,7 @@ app.post('/config', async (req, res) => {
     const ctx = await buildActionContext({
       host: managementAddress,
       deviceId: typeof deviceId === 'string' ? deviceId : undefined,
+      deviceName: typeof body.deviceName === 'string' && body.deviceName !== '' ? (body.deviceName as string) : undefined,
       credentials: stepCredentials,
       transport,
       settings,
@@ -1756,12 +1760,13 @@ app.post('/config', async (req, res) => {
 async function buildActionContext(args: {
   host: string;
   deviceId?: string;
+  deviceName?: string;
   credentials: StepCredentials;
   transport: OpnsenseTransport;
   settings: Record<string, unknown>;
   ports?: OpnsensePorts;
 }): Promise<ActionContext> {
-  const { host, deviceId, credentials, transport, settings, ports } = args;
+  const { host, deviceId, deviceName, credentials, transport, settings, ports } = args;
   const client = createClient(host, { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }, transport, ports);
   const runtime = await resolveRuntimeContext(
     host,
@@ -1774,6 +1779,7 @@ async function buildActionContext(args: {
     client,
     host,
     deviceId,
+    deviceName,
     credentials,
     transport,
     edition: runtime.edition,

@@ -62,6 +62,8 @@ export interface ActionContext {
   client: AxiosInstance;
   host: string;
   deviceId?: string;
+  /** UNM's device display name (sent by the API on /config) — labels artifacts like config backups. */
+  deviceName?: string;
   credentials: StepCredentials;
   transport?: 'auto' | 'http' | 'https';
   edition: OpnsenseEdition;
