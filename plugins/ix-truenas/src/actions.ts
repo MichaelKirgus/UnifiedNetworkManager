@@ -13,7 +13,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { ActionDescriptor, ActionResult, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, pickNumber, pickString, pollUntil, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { ActionDescriptor, ActionResult, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, INTENT_L2_TOPOLOGY_READ, INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, L2Topology, pickNumber, pickString, pollUntil, PreflightResult, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
 import { hostSshPort, normalizeVmDevice, sshPool } from './enrich';
 import { fsSftpPool } from './index';
@@ -6396,10 +6396,293 @@ const servicesStopAction = serviceControlAction('services.stop', 'STOP', 'Stop a
 const servicesRestartAction = serviceControlAction('services.restart', 'RESTART', 'Restart a service',
   'Restarts ONE named middleware service (service.control RESTART) — stop + start with config regeneration.');
 
+// ---------------------------------------------------------------------------
+// Canonical fleet intents — network.create / network.delete + l2.topology.read.
+//
+// A "network" on TrueNAS SCALE is a named interface object (interface.assign is
+// an UPSERT keyed by name): for a VLAN it carries {type:'VLAN',
+// vlan_parent_interface, vlan_tag}; L3 addresses are STATIC properties on the
+// SAME interface ({ipv4_4_addr, ipv4_4_bits} / {ipv6_6_addr, ipv6_6_bits}).
+// The network NAME is the idempotency key (like RouterOS's VLAN naming). An
+// appliance that only needs to KNOW the VLAN (no IP) gets a VLAN-only interface;
+// one that also serves it as a gateway/host adds the STATIC addresses.
+// ---------------------------------------------------------------------------
+
+/** Splits "a.b.c.d/p" into [ip, prefix]; null when malformed. */
+function splitV4Cidr(cidr: string): { ip: string; bits: number } | null {
+  const m = /^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/.exec(cidr.trim());
+  if (!m) return null;
+  const bits = Number(m[2]);
+  if (bits < 8 || bits > 30) return null; // /31+/32 are point-to-point/broadcast — not a LAN address
+  return { ip: m[1], bits };
+}
+
+/** Splits an IPv6 CIDR into [addr, prefix]; null when malformed. */
+function splitV6Cidr(cidr: string): { addr: string; bits: number } | null {
+  const m = /^([0-9a-fA-F:.]+)\/(\d{1,3})$/.exec(cidr.trim());
+  if (!m) return null;
+  const bits = Number(m[2]);
+  if (bits < 8 || bits > 126) return null;
+  return { addr: m[1], bits };
+}
+
+/** Reads all interfaces once (interface.query rows). */
+async function queryInterfaces(ctx: TruenasActionContext): Promise<Record<string, unknown>[]> {
+  const ifaces = await ctx.client.call<Record<string, unknown>[]>('interface.query', [], ctx.creds);
+  return Array.isArray(ifaces) ? ifaces : [];
+}
+
+/** Finds an interface row by its name (case-sensitive — TrueNAS names are exact). */
+function findInterfaceByName(ifaces: Record<string, unknown>[], name: string): Record<string, unknown> | undefined {
+  return ifaces.find((i) => pickString(i, ['name']) === name);
+}
+
+/** Finds a VLAN interface by tag (any parent) — for reuse instead of re-creation. */
+function findVlanByTag(ifaces: Record<string, unknown>[], vlanId: number): Record<string, unknown> | undefined {
+  return ifaces.find((i) => pickString(i, ['type']) === 'VLAN' && pickNumber(i, ['vlan_tag']) === vlanId);
+}
+
+/** The v4/v6 addresses currently on one interface (from its aliases). */
+function ifaceAddresses(iface: Record<string, unknown>): { v4?: string; v6?: string } {
+  const out: { v4?: string; v6?: string } = {};
+  const aliasesRaw = iface['aliases'];
+  if (!Array.isArray(aliasesRaw)) return out;
+  for (const a of aliasesRaw) {
+    let alias: Record<string, unknown> | undefined;
+    if (typeof a === 'string') { try { alias = JSON.parse(a) as Record<string, unknown>; } catch { continue; } }
+    else if (a && typeof a === 'object') alias = a as Record<string, unknown>;
+    if (!alias) continue;
+    const ip = pickString(alias, ['address']);
+    if (!ip) continue;
+    if (pickString(alias, ['type']) === 'INET6') { if (!out.v6) out.v6 = `${ip}/${pickNumber(alias, ['netmask', 'prefixlen']) ?? 64}`; }
+    else if (!out.v4) out.v4 = `${ip}/${pickNumber(alias, ['netmask', 'prefixlen']) ?? 24}`;
+  }
+  return out;
+}
+
+/** Builds the L2 topology from interface.query rows (physical NICs + bridges). */
+async function readTruenasL2Topology(ctx: TruenasActionContext): Promise<L2Topology> {
+  const ifaces = await queryInterfaces(ctx);
+  const physicalPorts: Array<{ name: string; assignment: string | null }> = [];
+  const bridges: Array<{ name: string; members: string[] }> = [];
+  const l3Interfaces: Record<string, string[]> = {};
+  for (const i of ifaces) {
+    const name = pickString(i, ['name']);
+    if (!name || /^lo\d*$/.test(name)) continue; // loopbacks are never attach points
+    const type = pickString(i, ['type']) ?? '';
+    const desc = pickString(i, ['description']) ?? '';
+    const label = desc || name;
+    if (type === 'BRIDGE') {
+      const membersRaw = i['members'];
+      const members = Array.isArray(membersRaw) ? membersRaw.map((m) => String(m)).filter(Boolean) : [];
+      bridges.push({ name, members });
+    } else if (type === 'PHYSICAL' || type === '') {
+      physicalPorts.push({ name, assignment: label });
+    }
+    const addrs = ifaceAddresses(i);
+    if (addrs.v4 || addrs.v6) l3Interfaces[name] = [label];
+  }
+  return { physicalPorts, bridges, bundles: [], l3Interfaces };
+}
+
+/** Picks the parent interface for a new VLAN — explicit `interface` wins when it exists. */
+function pickVlanParent(topo: L2Topology, preferred?: string): string | null {
+  if (preferred) {
+    const known = topo.physicalPorts.some((p) => p.name === preferred || p.assignment === preferred)
+      || topo.bridges.some((b) => b.name === preferred);
+    if (known) return preferred;
+  }
+  // Prefer a bridge that carries L3 networks (the appliance's LAN domain), else the first physical NIC.
+  for (const b of topo.bridges) {
+    const nets = [...new Set([b.name, ...b.members].flatMap((ifc) => topo.l3Interfaces?.[ifc] ?? []))];
+    if (nets.length > 0) return b.name;
+  }
+  for (const b of topo.bridges) if (b.members.length > 0) return b.name;
+  const first = topo.physicalPorts.find((p) => p.name);
+  return first?.name ?? null;
+}
+
+/** network.create — ensure a named VLAN interface (+ optional STATIC addresses). */
+const networkCreateAction: ActionDescriptor<TruenasActionContext> = {
+  id: INTENT_NETWORK_CREATE,
+  label: 'Create network (VLAN + optional L3 address)',
+  description:
+    'Creates a named VLAN interface on the appliance (interface.assign upsert) and optionally binds static IPv4/IPv6 addresses to it. Idempotent by name — an existing interface with the same name is reused; missing addresses are added, present ones left untouched.',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  // Canonical fleet intent — FANS OUT across the batch (one step per appliance).
+  deviceCount: 'N' as const,
+  timeoutMs: 90_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, maxLength: 64, description: 'Network name — becomes the interface name (idempotency key)' },
+    vlanId: { type: 'number', min: 1, max: 4094, description: 'VLAN ID — a VLAN interface is created/attached on the parent. Omit for an L3-only network on an existing interface.' },
+    cidr: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}/\\d{1,2}$', description: 'Optional static IPv4 address as CIDR (e.g. 10.42.0.1/24) — omit when the appliance only needs to know the VLAN' },
+    cidrV6: { type: 'string', pattern: '^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*/\\d{1,3}$', description: 'Optional static IPv6 address as CIDR (dual-stack when set alongside cidr)' },
+    interface: { type: 'string', maxLength: 64, description: 'Parent interface for the VLAN (physical NIC or bridge) — resolved per device in preflight' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name')?.trim();
+    if (!name) return { success: false, details: { error: 'Network name is required' } };
+    const vlanId = typeof input.vlanId === 'number' ? Math.floor(input.vlanId as number) : null;
+    const v4 = typeof input.cidr === 'string' && input.cidr.trim() ? splitV4Cidr(String(input.cidr)) : null;
+    if (typeof input.cidr === 'string' && input.cidr.trim() && !v4) return { success: false, details: { error: `Invalid IPv4 CIDR "${input.cidr}"` } };
+    const v6 = typeof input.cidrV6 === 'string' && input.cidrV6.trim() ? splitV6Cidr(String(input.cidrV6)) : null;
+    if (typeof input.cidrV6 === 'string' && input.cidrV6.trim() && !v6) return { success: false, details: { error: `Invalid IPv6 CIDR "${input.cidrV6}"` } };
+
+    const topo = await readTruenasL2Topology(ctx);
+    let ifaces = await queryInterfaces(ctx);
+    const existing = findInterfaceByName(ifaces, name);
+    const details: Record<string, unknown> = {};
+
+    // interface.assign is an UPSERT that replaces the interface's FULL property
+    // set — so every assign below carries BOTH the VLAN identity (when this is a
+    // VLAN) AND the STATIC addresses. Sending only one kind would strip the other.
+    const vlanProps: Record<string, unknown> = {};
+    if (vlanId !== null) {
+      if (existing && pickString(existing, ['type']) === 'VLAN' && pickNumber(existing, ['vlan_tag']) === vlanId) {
+        Object.assign(vlanProps, { type: 'VLAN', vlan_parent_interface: existing['vlan_parent_interface'], vlan_tag: vlanId });
+        details.vlan = `reused existing VLAN interface ${name} (tag ${vlanId})`;
+      } else if (existing) {
+        return { success: false, details: { error: `Interface "${name}" already exists but is not a VLAN with tag ${vlanId} — refusing to overwrite it` } };
+      } else {
+        const parent = pickVlanParent(topo, str(input, 'interface')?.trim());
+        if (!parent) return { success: false, details: { error: 'No parent interface found for the VLAN — set `interface` explicitly' } };
+        Object.assign(vlanProps, { type: 'VLAN', vlan_parent_interface: parent, vlan_tag: vlanId });
+      }
+    } else if (!existing) {
+      // L3-only: the target must be an EXISTING interface (we never create a bare NIC).
+      return { success: false, details: { error: `No VLAN requested and no interface named "${name}" exists — L3-only networks need an existing interface` } };
+    }
+
+    // The desired STATIC properties (empty = this appliance only knows the VLAN).
+    const staticProps: Record<string, unknown> = {};
+    if (v4) Object.assign(staticProps, { ipv4_4_addr: v4.ip, ipv4_4_bits: v4.bits });
+    if (v6) Object.assign(staticProps, { ipv6_6_addr: v6.addr, ipv6_6_bits: v6.bits });
+
+    // Current addresses on the target — decide whether a write is needed at all.
+    const cur = ifaceAddresses(existing ?? {});
+    const wantV4 = v4 ? `${v4.ip}/${v4.bits}` : null;
+    const wantV6 = v6 ? `${v6.addr}/${v6.bits}` : null;
+    const vlanChanged = !existing || (vlanId !== null && !(pickString(existing, ['type']) === 'VLAN' && pickNumber(existing, ['vlan_tag']) === vlanId));
+    const addrsChanged = (wantV4 !== null && cur.v4 !== wantV4) || (wantV6 !== null && cur.v6 !== wantV6);
+
+    if (!vlanChanged && !addrsChanged) {
+      return { success: true, applied: false, verified: true, details: { skipped: `interface "${name}" already matches the requested network`, ...details } };
+    }
+
+    // One assign with the complete property set (VLAN identity + STATIC addrs).
+    const properties: Record<string, unknown> = { ...vlanProps, ...(Object.keys(staticProps).length > 0 ? staticProps : {}) };
+    if (Object.keys(properties).length === 0) return { success: false, details: { error: 'Nothing to write — no VLAN and no addresses requested' } };
+    await dispatchWrite(ctx, 'interface.assign', [{ name, properties }], { verify: async () => {
+      const i = findInterfaceByName(await queryInterfaces(ctx), name);
+      if (!i) return false;
+      if (vlanId !== null && !(pickString(i, ['type']) === 'VLAN' && pickNumber(i, ['vlan_tag']) === vlanId)) return false;
+      const a = ifaceAddresses(i);
+      if (wantV4 && a.v4 !== wantV4) return false;
+      if (wantV6 && a.v6 !== wantV6) return false;
+      return true;
+    } });
+
+    // Verify by re-read.
+    const finalIfaces = await queryInterfaces(ctx);
+    const finalAddrs = ifaceAddresses(findInterfaceByName(finalIfaces, name) ?? {});
+    if (wantV4 && finalAddrs.v4 !== wantV4) return { success: false, details: { error: `Verification failed — ${wantV4} not present on ${name} after write` } };
+    if (wantV6 && finalAddrs.v6 !== wantV6) return { success: false, details: { error: `Verification failed — ${wantV6} not present on ${name} after write` } };
+
+    const assigned = [wantV4, wantV6].filter((x): x is string => !!x);
+    return { success: true, applied: true, verified: true, details: { interface: name, addresses: assigned, ...details } };
+  },
+};
+
+/** network.delete — remove the named interface (VLAN + its addresses go with it). */
+const networkDeleteAction: ActionDescriptor<TruenasActionContext> = {
+  id: INTENT_NETWORK_DELETE,
+  label: 'Delete network',
+  description: 'Removes the named VLAN/interface from the appliance (interface.delete) — its static addresses are removed with it. Idempotent: a missing name is a no-op.',
+  module: 'Network',
+  riskLevel: 'write' as const,
+  // Canonical fleet intent — FANS OUT across the batch (one step per appliance).
+  deviceCount: 'N' as const,
+  timeoutMs: 60_000,
+  inputSchema: { name: { type: 'string', required: true, minLength: 1, maxLength: 64, description: 'Network (interface) name to remove' } },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const name = str(input, 'name')?.trim();
+    if (!name) return { success: false, details: { error: 'Network name is required' } };
+
+    const ifaces = await queryInterfaces(ctx);
+    const existing = findInterfaceByName(ifaces, name);
+    if (!existing) return { success: true, applied: false, verified: true, details: { skipped: `no interface named "${name}" on this appliance` } };
+
+    // Never delete the management interface — that would lock UNM out. The API's
+    // own address is not in scope here; a user deleting it by name gets a clear
+    // appliance-side error (in-use) rather than a silent lockout.
+    await dispatchWrite(ctx, 'interface.delete', [name], { verify: async () => !findInterfaceByName(await queryInterfaces(ctx), name) });
+
+    const after = await queryInterfaces(ctx);
+    if (findInterfaceByName(after, name)) return { success: false, details: { error: `Verification failed — interface ${name} still present after delete` } };
+    return { success: true, applied: true, verified: true, details: { removed: name, type: pickString(existing, ['type']) ?? 'unknown' } };
+  },
+};
+
+/** l2.topology.read — the appliance's L2 hierarchy (physical NICs + bridges). */
+const l2TopologyReadAction: ActionDescriptor<TruenasActionContext> = {
+  id: INTENT_L2_TOPOLOGY_READ,
+  label: 'Read L2 topology',
+  description: 'Physical interfaces and bridge groups from interface.query — the attach-point source for network.create preflight.',
+  module: 'Network',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  async execute(ctx: TruenasActionContext): Promise<ActionResult> {
+    const topo = await readTruenasL2Topology(ctx);
+    return { success: true, details: { topology: topo } };
+  },
+};
+
+/** Preflight resolver for network.create — suggests the VLAN parent + reuse hints. */
+export async function preflightNetworkCreate(ctx: TruenasActionContext, inputs: Record<string, unknown>): Promise<PreflightResult> {
+  const values: Array<{ key: string; value: unknown; confidence: 'high' | 'medium' | 'low'; note?: string }> = [];
+  try {
+    const ifaces = await queryInterfaces(ctx);
+    const topo = await readTruenasL2Topology(ctx);
+    const name = str(inputs, 'name')?.trim();
+    const vlanId = typeof inputs.vlanId === 'number' ? Math.floor(inputs.vlanId as number) : null;
+
+    if (vlanId !== null) {
+      const parent = pickVlanParent(topo, str(inputs, 'interface')?.trim());
+      if (parent) values.push({ key: 'interface', value: parent, confidence: 'medium', note: `new VLAN ${vlanId} would be created on ${parent}` });
+      const byTag = findVlanByTag(ifaces, vlanId);
+      if (byTag) {
+        const tName = pickString(byTag, ['name']);
+        values.push({ key: 'interface', value: tName ?? parent ?? '', confidence: 'high', note: `VLAN ${vlanId} already exists as "${tName}" — it will be reused` });
+      }
+    }
+    if (name && findInterfaceByName(ifaces, name)) {
+      values.push({ key: 'name', value: name, confidence: 'high', note: `interface "${name}" already exists — the step will be a no-op / address top-up only` });
+    }
+
+    // Platform note — TrueNAS VLANs ride their parent NIC/LAGG; there is no per-port concept.
+    if (vlanId !== null) {
+      const last = [...values].reverse().find((v) => v.key === 'interface');
+      if (last?.note) last.note += ' · The VLAN is created on the selected parent interface — choose NIC/LAGG in “interface”; per-port selection is not available';
+    }
+  } catch (e) {
+    return { deviceId: ctx.deviceId ?? '', values, degraded: true, error: e instanceof Error ? e.message : String(e) };
+  }
+  return { deviceId: ctx.deviceId ?? '', values, capabilities: { vlanPorts: false } };
+}
+
+export const PREFLIGHT_RESOLVERS: Record<string, (ctx: TruenasActionContext, inputs: Record<string, unknown>) => Promise<PreflightResult>> = {
+  [INTENT_NETWORK_CREATE]: preflightNetworkCreate,
+};
+
 export const registry = createRegistry<TruenasActionContext>([
   systemInfoAction,
   poolsReadAction,
   interfacesReadAction,
+  networkCreateAction,
+  networkDeleteAction,
+  l2TopologyReadAction,
   systemRebootAction,
   systemTimezoneReadAction,
   systemTimezoneSetAction,

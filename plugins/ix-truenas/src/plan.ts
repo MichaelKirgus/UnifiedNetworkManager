@@ -28,8 +28,12 @@ export async function buildPlan(req: PlanRequest): Promise<Plan> {
     throw new PlanningError(`Unknown action "${actionId}". Available: ${actionRegistry.listActions().map((a) => a.id).join(', ')}`);
   }
 
-  // Single-device fan-out — one step per device, same input.
-  const rawSteps = devices.map((d) => ({ deviceId: d.deviceId, actionId, input: { ...(inputs ?? {}) } }));
+  // Single-device fan-out — one step per device. Per-device overrides (the
+  // rollout wizard's confirmed preflight values, e.g. a different L3 address or
+  // an explicit null to clear the shared CIDR for an L2-only appliance) merge
+  // over the shared inputs for that device only.
+  const overrides = req.deviceInputs ?? {};
+  const rawSteps = devices.map((d) => ({ deviceId: d.deviceId, actionId, input: { ...(inputs ?? {}), ...(overrides[d.deviceId] ?? {}) } }));
 
   // Rollback point: every plan that mutates the appliance gets a best-effort
   // configuration backup (config.backup.download — read-only on the device)

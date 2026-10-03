@@ -75,7 +75,7 @@ import {
   type ServiceNetDetail,
   buildVirshPreamble,
 } from './enrich';
-import { alertDedupeKey, bootPoolName, queryBootEnvs, registry as actionRegistry, type BootEnvRow, TruenasActionContext } from './actions';
+import { alertDedupeKey, bootPoolName, PREFLIGHT_RESOLVERS, queryBootEnvs, registry as actionRegistry, type BootEnvRow, TruenasActionContext } from './actions';
 import { collectServices } from './services';
 import { buildTruenasState } from './state';
 import { buildPlan, PlanningError } from './plan';
@@ -3053,6 +3053,51 @@ app.post('/config', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /preflight — READ-ONLY best-guess resolution for a fleet intent (the
+// rollout wizard's step 2). Advisory by contract: any probe failure degrades to
+// `degraded:true` and NEVER blocks planning. Resolvers live in actions.ts.
+// ---------------------------------------------------------------------------
+app.post('/preflight', async (req, res) => {
+  const body = req.body ?? {};
+  const intentActionId = typeof body.intentActionId === 'string' ? body.intentActionId : undefined;
+  const inputs: Record<string, unknown> = body.inputs && typeof body.inputs === 'object' ? (body.inputs as Record<string, unknown>) : {};
+  const dev = (body.device ?? {}) as Record<string, unknown>;
+  const managementAddress = typeof dev.managementAddress === 'string' ? dev.managementAddress : undefined;
+
+  if (!intentActionId || !managementAddress) {
+    res.status(400).json({ error: 'intentActionId and device.managementAddress are required' });
+    return;
+  }
+  const resolver = PREFLIGHT_RESOLVERS[intentActionId];
+  if (!resolver) {
+    res.status(400).json({ error: `No preflight resolver for intent "${intentActionId}"` });
+    return;
+  }
+
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+  const host = applianceHost(managementAddress);
+  setHostSshPort(host, sshPortOf(settings));
+  const timeoutMs = clampInt(settings.timeoutMs, 500, 60000, 5000);
+
+  try {
+    // Same credential assembly as /config — primary secret + bound slots.
+    const apiKeyUsername = typeof settings.apiKeyUsername === 'string' ? settings.apiKeyUsername.trim() : '';
+    const { creds } = resolveCredentials((dev.credentials ?? {}) as Record<string, unknown>, apiKeyUsername);
+    if (!creds) {
+      res.status(200).json({ result: { deviceId: String(dev.deviceId ?? ''), values: [], degraded: true, error: 'Missing credentials' } });
+      return;
+    }
+    const ctx: TruenasActionContext = { client: getClient(host, transportOf(settings), timeoutMs, portsOf(settings)), creds, host, deviceId: typeof dev.deviceId === 'string' ? dev.deviceId : undefined };
+    const result = await resolver(ctx, inputs);
+    res.status(200).json({ result });
+  } catch (err) {
+    // Preflight is advisory — a probe failure degrades the suggestion.
+    res.status(200).json({ result: { deviceId: String(dev.deviceId ?? ''), values: [], degraded: true, error: errMsg(err) } });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /state — dynamic device-state document for the UNM Config page. The API
 // broker (api/src/deviceState.ts) calls this with fresh credentials + injected
 // settings and returns the response verbatim to the webapp. All three reads are
@@ -3416,6 +3461,11 @@ app.post('/plan', async (req, res) => {
         }))
       : [],
   };
+  // Per-device input overrides from the rollout wizard (e.g. an explicit null to
+  // clear the shared CIDR for an L2-only appliance) — merged per step in buildPlan.
+  if (body.deviceInputs && typeof body.deviceInputs === 'object') {
+    planReq.deviceInputs = body.deviceInputs as PlanRequest['deviceInputs'];
+  }
 
   try {
     const plan = await buildPlan(planReq);
