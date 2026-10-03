@@ -16,7 +16,9 @@ const PLAN_ACTION_PATHS = ['/storage', '/shares', '/containers', '/vms', '/updat
 function isPlanActionPath(pathname: string): boolean {
   if (PLAN_ACTION_PATHS.some((p) => pathname === p || pathname.startsWith(p + '/'))) return true;
   // Per-device Config page — its state sections trigger catalog actions.
-  return /^\/devices\/[^/]+\/config$/.test(pathname);
+  if (/^\/devices\/[^/]+\/config$/.test(pathname)) return true;
+  // Fleet rollout wizard — creates (and optionally executes) plans per plugin.
+  return pathname === '/networks/rollout';
 }
 
 export interface LayoutProps {

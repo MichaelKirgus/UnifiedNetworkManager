@@ -3299,7 +3299,7 @@ export const api = {
     intentActionId: string;
     inputs?: Record<string, unknown>;
     deviceIds: string[];
-  }) => apiFetch<{ results: PreflightResultDto[] }>('/plans/preflight', { method: 'POST', body: JSON.stringify(body) }),
+  }, opts?: RequestInit) => apiFetch<{ results: PreflightResultDto[] }>('/plans/preflight', { method: 'POST', body: JSON.stringify(body), ...opts }),
   /** Server-side network-overlap check for a rollout (warnings + per-device
    * deployed/new status + free-range suggestions). Read-only, no 2FA. */
   plansNetworkCheck: (body: {

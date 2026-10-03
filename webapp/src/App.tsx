@@ -12,6 +12,7 @@ import Plugins from './pages/Plugins';
 import Sites from './pages/Sites';
 import Layers from './pages/Layers';
 import Networks from './pages/Networks';
+import NetworkRolloutPage from './pages/NetworkRolloutPage';
 import Hosts from './pages/Hosts';
 import DocumentedHosts from './pages/DocumentedHosts';
 import DocumentedNetworks from './pages/DocumentedNetworks';
@@ -53,6 +54,8 @@ import { can } from './auth/permissions';
 const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> = [
   { path: '/devices', permission: 'devices:read' },
   { path: '/networks', permission: 'networks:read' },
+  // Full-page rollout wizard — same read perm as the Networks page it lives on.
+  { path: '/networks/rollout', permission: 'networks:read' },
   { path: '/hosts', permission: 'hosts:read' },
   { path: '/documented-hosts', permission: 'documented-hosts:read' },
   { path: '/documented-networks', permission: 'documented-networks:read' },
@@ -137,6 +140,8 @@ export default function App() {
       <Route path="/plugins" element={<Page permission="plugins:read"><Plugins /></Page>} />
       <Route path="/sites" element={<Page permission="sites:read"><Sites /></Page>} />
       <Route path="/networks" element={<Page permission="networks:read"><Networks /></Page>} />
+      {/* Full-page rollout wizard (replaces the old dialog) — same read perm as /networks. */}
+      <Route path="/networks/rollout" element={<Page permission="networks:read"><NetworkRolloutPage /></Page>} />
       <Route path="/hosts" element={<Page permission="hosts:read"><Hosts /></Page>} />
       {/* User-maintained host documentation (permanent inventory + CSV import). */}
       <Route path="/documented-hosts" element={<Page permission="documented-hosts:read"><DocumentedHosts /></Page>} />
