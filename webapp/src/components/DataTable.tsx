@@ -793,13 +793,19 @@ export function DataTable<T>({
                     ) : (
                       <span className="block truncate">{col.header}</span>
                     )}
-                    {/* Resize grip on the right edge of the header cell */}
+                    {/* Resize grip on the right edge of the header cell. On the LAST
+                        column it sits INSIDE the cell (right-0) — straddling the edge
+                        (-right-1) would push 4px past the table's border-box and keep
+                        a horizontal scrollbar visible at all times. */}
                     <span
                       role="separator"
                       aria-orientation="vertical"
                       title="Drag to resize column"
                       onMouseDown={(e) => startResize(e, col.key)}
-                      className="absolute -right-1 top-0 h-full w-2 cursor-col-resize rounded hover:bg-status-neutral/70 active:bg-faint"
+                      className={clsx(
+                        'absolute top-0 h-full w-2 cursor-col-resize rounded hover:bg-status-neutral/70 active:bg-faint',
+                        col === visibleColumns[visibleColumns.length - 1] ? 'right-0' : '-right-1'
+                      )}
                     />
                   </th>
                 );
