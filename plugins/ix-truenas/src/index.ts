@@ -75,7 +75,7 @@ import {
   type ServiceNetDetail,
   buildVirshPreamble,
 } from './enrich';
-import { alertDedupeKey, registry as actionRegistry, TruenasActionContext } from './actions';
+import { alertDedupeKey, bootPoolName, queryBootEnvs, registry as actionRegistry, type BootEnvRow, TruenasActionContext } from './actions';
 import { collectServices } from './services';
 import { buildTruenasState } from './state';
 import { buildPlan, PlanningError } from './plan';
@@ -1043,6 +1043,74 @@ function parseDataset(d: Record<string, unknown>): FsRow | null {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Boot pool + boot environments (Storage page) — the OS pool is invisible to
+// pool.query / pool.dataset.query by design (see the batch comment above), so
+// its rows are built from boot.get_state + boot.environment.query instead. The
+// webapp badges BE rows via extra.bootEnvironment and offers storage.boot-scrub
+// on the pool row; destructive dataset ops on these names are refused in actions.ts.
+// ---------------------------------------------------------------------------
+
+/** Maps one raw boot.get_state entry to a zfs-pool filesystem row (same shape as
+ * parsePool — size/allocated/free/status + scan state). */
+function parseBootPoolState(st: Record<string, unknown>): FsRow | null {
+  const name = pickString(st, ['name']);
+  if (!name) return null; // no boot pool reported — nothing to emit
+  const statusRaw = pickString(st, ['status', 'state']);
+  const sizeBytes = pickNumber(st, ['size', 'size_bytes']);
+  const allocBytes = pickNumber(st, ['allocated', 'alloc', 'used', 'used_bytes']);
+  const freeBytes = pickNumber(st, ['free', 'available', 'free_bytes']);
+  // Scan state: same `scan` object shape as pool.query ({state, function}).
+  let scrubState: string | undefined;
+  const scan = st['scan'];
+  if (scan && typeof scan === 'object') {
+    const s = pickString(scan as Record<string, unknown>, ['state']);
+    const fn = pickString(scan as Record<string, unknown>, ['function']);
+    scrubState = s ? `${fn ?? ''} ${s}`.trim() : undefined;
+  } else if (typeof st['scrub_state'] === 'string') {
+    scrubState = st['scrub_state'];
+  }
+
+  return {
+    name,
+    type: 'zfs-pool',
+    mountpoint: null,
+    sizeBytes: sizeBytes ?? null,
+    usedBytes: allocBytes ?? (sizeBytes !== undefined && freeBytes !== undefined ? sizeBytes - freeBytes : null),
+    freeBytes: freeBytes ?? null,
+    status: statusRaw ? statusRaw.toLowerCase() : 'unknown',
+    extra: { bootPool: true, ...(scrubState ? { scrub: scrubState } : {}) },
+  };
+}
+
+/** Maps one normalized boot-environment entry to a dataset-like row nested under
+ * the boot pool. `name` is the BE's ZFS dataset (e.g. `boot-pool/ROOT/25.10.7`) —
+ * falling back to the bare id when the appliance doesn't report it; `parent` is
+ * the boot pool name so the Storage page nests it under the pool row. */
+function parseBootEnv(be: BootEnvRow, poolName: string): FsRow | null {
+  const dataset = be.dataset && be.dataset.includes('/') ? be.dataset : undefined;
+  const name = dataset ?? (be.id ? `${poolName}/${be.id}` : undefined);
+  if (!name) return null;
+  return {
+    name,
+    type: 'zfs-dataset',
+    mountpoint: null, // the OS owns these mounts — never show a user-facing path
+    sizeBytes: null, // no quota/reservation on BE datasets — unlimited within the pool
+    usedBytes: be.usedBytes ?? null,
+    freeBytes: null,
+    status: 'online',
+    parent: poolName,
+    extra: {
+      bootEnvironment: true,
+      id: be.id || undefined,
+      active: be.active === true, // running right now
+      activated: be.activated === true, // booted at next reboot (rollback target)
+      keep: typeof be.keep === 'boolean' ? be.keep : undefined,
+      canActivate: typeof be.canActivate === 'boolean' ? be.canActivate : undefined,
+    },
+  };
+}
+
 /** Maps one raw hardware.disk.query entry to a disk row. */
 function parseDisk(d: Record<string, unknown>): DiskRow | null {
   const name = pickString(d, ['name', 'identifier']);
@@ -1990,7 +2058,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // before error handling. The last three are best-effort extras (networks
   // inventory + static routes + board serial/model) — their failure does NOT
   // count toward health.
-  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes, vmsRes, updateAvailRes, updateConfigRes] = await Promise.allSettled([
+  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes, vmsRes, updateAvailRes, updateConfigRes, bootStateRes, bootEnvsRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('alert.list', [], creds),
@@ -2040,6 +2108,21 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     // The configured update profile/branch — stamped onto the firmware row's
     // `branch` (Updates page Branch column). Same best-effort contract.
     collectInventory ? client.call<Record<string, unknown>>('update.config', [], creds) : Promise.resolve(undefined),
+    // Storage-page boot-pool extras (best-effort — never count toward health).
+    // The OS boot pool is INVISIBLE to the generic storage RPCs by design:
+    //   - pool.query excludes it from discovery ("boot pool is never in the
+    //     database" — middleware skips BOOT_POOL_NAME_VALID), and
+    //   - pool.dataset.query filters internal datasets server-side (the
+    //     boot-pool name + its ROOT/<version> children are INTERNAL_DATASETS).
+    // So the Storage page's boot-pool row + one row per boot environment come
+    // from these two dedicated RPCs instead:
+    //   - boot.get_state  → full pool state (size/allocated/free/status/scan),
+    //     same shape as a pool.query entry;
+    //   - boot.environment.query → the BE list ({id, dataset, active, activated,
+    //     used_bytes, keep, can_activate}); pre-25.04 appliances expose the
+    //     legacy `bootenv.*` namespace — queryBootEnvs falls back automatically.
+    collectInventory ? client.call<Record<string, unknown>>('boot.get_state', [], creds) : Promise.resolve(undefined),
+    collectInventory ? (async () => { const ctx: TruenasActionContext = { client, creds }; return queryBootEnvs(ctx); })() : Promise.resolve(undefined),
   ]);
 
   // Shares-page live sessions (best-effort — never count toward health). The
@@ -2211,6 +2294,27 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
         const row = parseDataset(d);
         if (row) fsRows.push(row);
       }
+    }
+    // Boot pool + boot environments — the OS pool is invisible to the generic
+    // storage RPCs by design (pool.query excludes it; pool.dataset.query filters
+    // its datasets server-side), so these rows come from the dedicated RPCs.
+    // Best-effort: a failed call simply omits the rows for this poll (same
+    // contract as the dataset rows above — they reappear on the next one).
+    let bootPoolRow: FsRow | null = null;
+    if (bootStateRes.status === 'fulfilled' && bootStateRes.value && typeof bootStateRes.value === 'object') {
+      bootPoolRow = parseBootPoolState(bootStateRes.value as Record<string, unknown>);
+      if (bootPoolRow) fsRows.push(bootPoolRow);
+    } else if (bootStateRes.status === 'rejected' && !isMethodMissing(bootStateRes.reason)) {
+      console.warn(`[storage] boot.get_state failed: ${errMsg(bootStateRes.reason)}`);
+    }
+    if (bootEnvsRes.status === 'fulfilled' && bootEnvsRes.value !== undefined) {
+      const poolName = bootPoolRow?.name ?? bootPoolName(); // fallback keeps BE rows nested under the canonical name
+      for (const be of bootEnvsRes.value.rows) {
+        const row = parseBootEnv(be, poolName);
+        if (row && !fsRows.some((r) => r.name === row.name)) fsRows.push(row);
+      }
+    } else if (bootEnvsRes.status === 'rejected') {
+      console.warn(`[storage] boot environment query failed: ${errMsg(bootEnvsRes.reason)}`);
     }
     metrics['filesystems'] = fsRows;
 

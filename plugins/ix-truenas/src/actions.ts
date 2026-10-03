@@ -922,10 +922,10 @@ const firmwareUpdateFileAction: ActionDescriptor<TruenasActionContext> = {
 // it automatically (JSON-RPC -32601).
 // ---------------------------------------------------------------------------
 
-interface BootEnvRow { id: string; dataset?: string; active?: boolean; activated?: boolean; created?: unknown; usedBytes?: number; used?: string; keep?: boolean; canActivate?: boolean; }
+export interface BootEnvRow { id: string; dataset?: string; active?: boolean; activated?: boolean; created?: unknown; usedBytes?: number; used?: string; keep?: boolean; canActivate?: boolean; }
 
-/** Queries the appliance's boot environments, normalizing both namespaces. */
-async function queryBootEnvs(ctx: TruenasActionContext): Promise<{ rows: BootEnvRow[]; namespace: 'boot.environment' | 'bootenv' }> {
+/** Queries the appliance's boot environments, normalizing both namespaces. Exported so index.ts can reuse it for the Storage page's BE rows (same normalization, one code path). */
+export async function queryBootEnvs(ctx: TruenasActionContext): Promise<{ rows: BootEnvRow[]; namespace: 'boot.environment' | 'bootenv' }> {
   const normalize = (raw: unknown[]): BootEnvRow[] => raw.map((r) => {
     const o = r as Record<string, unknown>;
     return { id: String(o['id'] ?? ''), dataset: typeof o['dataset'] === 'string' ? o['dataset'] : undefined, active: o['active'] === true || (typeof o['active'] === 'string' && /^R/.test(o['active'])), activated: o['activated'] === true || (typeof o['activated'] === 'string' && /N/.test(o['activated'])), created: o['created'], usedBytes: typeof o['used_bytes'] === 'number' ? o['used_bytes'] : undefined, used: typeof o['used'] === 'string' ? o['used'] : undefined, keep: typeof o['keep'] === 'boolean' ? o['keep'] : undefined, canActivate: typeof o['can_activate'] === 'boolean' ? o['can_activate'] : undefined };
@@ -938,6 +938,30 @@ async function queryBootEnvs(ctx: TruenasActionContext): Promise<{ rows: BootEnv
     const rows = await ctx.client.call<unknown[]>('bootenv.query', [[], {}], ctx.creds);
     return { rows: normalize(Array.isArray(rows) ? rows : []), namespace: 'bootenv' };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Boot-pool guards — shared by the storage actions below. The OS boot pool
+// (`boot-pool` on modern releases, `freenas-boot` on legacy ones) holds the
+// appliance's own datasets (one per boot environment). It is NOT a data pool:
+//   - it never appears in pool.query / pool.dataset.query results (middleware
+//     excludes it from discovery and filters internal datasets server-side), so
+//     the generic storage actions can only reach it through names we surface on
+//     the Storage page — those must be refused here, not "not found";
+//   - scrubbing it is a DIFFERENT RPC (`boot.scrub`, role BOOT_ENV_WRITE) than
+//     pool.scrub, so the boot-pool row gets its own storage.boot-scrub action.
+// ---------------------------------------------------------------------------
+
+/** The appliance's OS boot pool name — `boot-pool` (25.x/26), `freenas-boot` (legacy). */
+export function bootPoolName(): string {
+  return 'boot-pool';
+}
+
+const BOOT_POOL_NAMES = new Set(['boot-pool', 'freenas-boot']);
+
+/** True for the OS boot pool itself or any dataset under it (e.g. `boot-pool/ROOT/25.10.7`). */
+export function isBootPoolName(name: string): boolean {
+  return BOOT_POOL_NAMES.has(name) || name.startsWith('boot-pool/') || name.startsWith('freenas-boot/');
 }
 
 const bootEnvReadAction: ActionDescriptor<TruenasActionContext> = {
@@ -4490,6 +4514,66 @@ const storageScrubAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+const storageBootScrubAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'storage.boot-scrub',
+  label: 'Scrub boot pool',
+  description:
+    "Starts a scrub on the appliance's OS BOOT POOL (TrueNAS `boot.scrub` — an appliance job). The boot pool holds TrueNAS itself and its boot environments; it is invisible to pool.query/pool.scrub, so this dedicated action covers it. A scrub reads every block and repairs silently-corrupted data from redundancy.",
+  module: 'Storage',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: "Boot pool name(s) to scrub (e.g. [\"boot-pool\"])" },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const names = strArray(input, 'names');
+    if (names.length === 0) return { success: false, details: { error: 'No pool names provided' } };
+
+    // The boot pool is the ONLY valid target — anything else belongs to storage.scrub.
+    const nonBoot = names.filter((n) => !isBootPoolName(n));
+    if (nonBoot.length > 0) return { success: false, details: { error: `Not a boot pool: ${nonBoot.join(', ')} — use "Scrub pool" for data pools` } };
+
+    // Idempotency pre-check: re-read the boot pool's scan state; an in-flight
+    // scrub is skipped, not failed (boot.get_state carries the same `scan` shape
+    // as pool.query). Missing method on a legacy release → proceed anyway.
+    let alreadyScrubbing = false;
+    try {
+      const st = await ctx.client.call<Record<string, unknown>>('boot.get_state', [], ctx.creds);
+      const scan = (st?.['scan'] ?? {}) as Record<string, unknown>;
+      const state = pickString(scan, ['state'])?.toUpperCase();
+      if (state === 'RUNNING' || state === 'WAITING') alreadyScrubbing = true;
+    } catch { /* best-effort — boot.get_state missing or transient */ }
+
+    try {
+      // Transport-tolerant — a lost response is confirmed by re-reading the scan state.
+      const r = await dispatchWrite(ctx, 'boot.scrub', [], {
+        verify: async () => {
+          try {
+            const st = await ctx.client.call<Record<string, unknown>>('boot.get_state', [], ctx.creds);
+            const scan = (st?.['scan'] ?? {}) as Record<string, unknown>;
+            const state = pickString(scan, ['state'])?.toUpperCase();
+            if (state === 'RUNNING' || state === 'WAITING') return true; // scrub active — applied
+            if (state === 'STOPPED') return false; // not scrubbing — not applied
+            return null; // unknown state — don't guess
+          } catch {
+            return null;
+          }
+        },
+      });
+      const jobId = typeof r.value === 'number' ? r.value : undefined;
+      if (alreadyScrubbing) {
+        return { success: true, applied: false, details: { note: 'Boot pool scrub already in progress — skipped.', ...(jobId !== undefined ? { jobId } : {}) } };
+      }
+      return { success: !r.unconfirmed, applied: true, details: { started: 1, ...(jobId !== undefined ? { jobId } : {}), ...(r.note ? { note: r.note } : {}) } };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/already|in progress/i.test(msg)) return { success: true, applied: false, details: { note: 'Boot pool scrub already in progress — skipped.' } };
+      return { success: false, details: { error: msg } };
+    }
+  },
+};
+
 const storageSnapshotAction: ActionDescriptor<TruenasActionContext> = {
   id: 'storage.snapshot',
   label: 'Create snapshot(s)',
@@ -4507,6 +4591,10 @@ const storageSnapshotAction: ActionDescriptor<TruenasActionContext> = {
   async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
     const name = str(input, 'name');
     if (!name) return { success: false, details: { error: 'Dataset name is required' } };
+    // The OS boot pool and its boot-environment datasets are not data storage —
+    // snapshots there would bloat the very pool TrueNAS itself runs on. Refuse
+    // with a clear pointer instead of letting the appliance decide.
+    if (isBootPoolName(name)) return { success: false, details: { error: `"${name}" is part of the OS boot pool — it holds the appliance's own boot environments and cannot be snapshotted from here.` } };
     const recursive = input['recursive'] === true;
     const retentionRaw = typeof input['retentionDays'] === 'number' ? (input['retentionDays'] as number) : undefined;
 
@@ -4599,6 +4687,8 @@ const storageQuotaSetAction: ActionDescriptor<TruenasActionContext> = {
   async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
     const name = str(input, 'name');
     if (!name) return { success: false, details: { error: 'Dataset name is required' } };
+    // Quotas on the OS boot pool would cap TrueNAS's own space — refuse.
+    if (isBootPoolName(name)) return { success: false, details: { error: `"${name}" is part of the OS boot pool — quotas there are managed by the appliance itself.` } };
     const raw = typeof input['quota'] === 'string' ? (input['quota'] as string).trim() : '';
     let quota: number | null;
     if (raw === '') quota = null; // clear
@@ -4650,6 +4740,10 @@ const storageMountAction: ActionDescriptor<TruenasActionContext> = {
   async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
     const names = strArray(input, 'names');
     if (names.length === 0) return { success: false, details: { error: 'No dataset names provided' } };
+    // The OS boot pool and its BE datasets are managed by the appliance itself —
+    // mounting/unmounting them from here would break the running system. Refuse.
+    const bootNames = names.filter(isBootPoolName);
+    if (bootNames.length > 0) return { success: false, details: { error: `Refusing to mount "${bootNames.join(', ')}" — it is part of the OS boot pool and managed by TrueNAS itself.` } };
     let mounted = 0;
     let unconfirmed = 0;
     const notes: Record<string, string> = {};
@@ -4686,6 +4780,9 @@ const storageUnmountAction: ActionDescriptor<TruenasActionContext> = {
   async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
     const names = strArray(input, 'names');
     if (names.length === 0) return { success: false, details: { error: 'No dataset names provided' } };
+    // Unmounting the OS boot pool or a BE dataset would break the running system.
+    const bootNames = names.filter(isBootPoolName);
+    if (bootNames.length > 0) return { success: false, details: { error: `Refusing to unmount "${bootNames.join(', ')}" — it is part of the OS boot pool and managed by TrueNAS itself.` } };
     const force = input['force'] === true;
     let unmounted = 0;
     let unconfirmed = 0;
@@ -4725,6 +4822,24 @@ const storageDeleteAction: ActionDescriptor<TruenasActionContext> = {
   async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
     const names = strArray(input, 'names');
     if (names.length === 0) return { success: false, details: { error: 'No dataset names provided' } };
+    // The OS boot pool itself can never be deleted from here — it holds the
+    // running system. Boot-environment datasets under it are removed via the
+    // dedicated `bootenv.destroy` action (the appliance enforces its own guards
+    // against active/activated BEs); deleting them as plain datasets would skip
+    // those checks and the boot menu bookkeeping.
+    const poolNames = names.filter((n) => !n.includes('/'));
+    const beCandidates = names.filter((n) => n.includes('/') && isBootPoolName(n));
+    if (poolNames.some(isBootPoolName)) {
+      return { success: false, details: { error: `Refusing to delete the OS boot pool — it holds TrueNAS itself. Individual boot environments are removed with "Delete a boot environment" (bootenv.destroy).` } };
+    }
+    if (beCandidates.length > 0) {
+      let beIds: string[] = [];
+      try {
+        const { rows } = await queryBootEnvs(ctx);
+        beIds = rows.map((r) => r.id);
+      } catch { /* best-effort — the error below still names the datasets */ }
+      return { success: false, details: { error: `Refusing to delete "${beCandidates.join(', ')}" as plain datasets — they are boot environments. Use "Delete a boot environment" (bootenv.destroy) instead${beIds.length > 0 ? `; available: ${beIds.join(', ')}` : ''}.` } };
+    }
     const recursive = input['recursive'] === true;
     const force = input['force'] === true;
 
@@ -6339,6 +6454,7 @@ export const registry = createRegistry<TruenasActionContext>([
   vmsPciAttachAction,
   vmsUsbAttachAction,
   storageScrubAction,
+  storageBootScrubAction,
   storageSnapshotAction,
   storageQuotaSetAction,
   storageMountAction,

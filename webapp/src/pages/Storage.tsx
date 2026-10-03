@@ -34,6 +34,66 @@ function FsTypeBadge({ type }: { type: string }) {
   );
 }
 
+// --- Boot pool / boot-environment rows (TrueNAS) ------------------------------
+// The OS boot pool is invisible to the generic storage RPCs by design, so the
+// TrueNAS plugin emits it + one row per boot environment from boot.get_state /
+// boot.environment.query and flags them via `extra`. These predicates drive the
+// badges below AND action eligibility (BE rows get no destructive dataset ops —
+// the appliance manages those; the pool row gets its own scrub action).
+/** Reads the `extra` JSON defensively. The API's `/storage` route returns it as a
+ *  raw TEXT column (a JSON string), while some routes parse it server-side into an
+ *  object — accept both so corrupt/absent rows never break the table. */
+function extraOf(row: StorageFilesystemRow): Record<string, unknown> {
+  const e = row.extra;
+  if (!e) return {};
+  if (typeof e === 'object') return e as Record<string, unknown>;
+  if (typeof e === 'string') {
+    try {
+      const parsed = JSON.parse(e);
+      return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+/** True for a boot-environment dataset row (TrueNAS `extra.bootEnvironment`). */
+const isBootEnvRow = (r: StorageFilesystemRow): boolean => extraOf(r)['bootEnvironment'] === true;
+
+/** True for the OS boot pool row itself (`extra.bootPool` or the canonical names). */
+const isBootPoolRow = (r: StorageFilesystemRow): boolean =>
+  extraOf(r)['bootPool'] === true || r.name === 'boot-pool' || r.name === 'freenas-boot';
+
+/** Status chips for boot rows — "OS" on the pool, running/next-boot on BEs. */
+function BootBadges({ row }: { row: StorageFilesystemRow }) {
+  if (isBootPoolRow(row)) {
+    return (
+      <span className="ml-2 inline-flex rounded bg-accent-violet px-1.5 py-0.5 text-xs font-medium text-accent-violet-fg" title="OS boot pool — holds TrueNAS itself and its boot environments">
+        OS
+      </span>
+    );
+  }
+  if (!isBootEnvRow(row)) return null;
+  const extra = extraOf(row);
+  const active = extra['active'] === true;
+  const activated = extra['activated'] === true;
+  return (
+    <span className="ml-2 inline-flex items-center gap-1">
+      {active && (
+        <span className="inline-flex rounded bg-success px-1.5 py-0.5 text-xs font-medium text-success-fg" title="This OS version is running right now">
+          running
+        </span>
+      )}
+      {activated && !active && (
+        <span className="inline-flex rounded bg-accent-indigo px-1.5 py-0.5 text-xs font-medium text-accent-indigo-fg" title="Armed for the next reboot — rollback/forward-boot target">
+          next boot
+        </span>
+      )}
+    </span>
+  );
+}
+
 /** Rotation-rate badge for physical disks. */
 const ROTATION_STYLES: Record<string, string> = {
   hdd: 'bg-muted text-secondary',
@@ -294,7 +354,7 @@ function QuotaDialog({ row, onClose }: { row: StorageFilesystemRow; onClose: () 
   const isPlanMode = mode === 'plan';
   // Read-Only: the quota plan cannot be saved or executed.
   const isReadOnly = mode === 'readonly';
-  const extra = row.extra ?? {};
+  const extra = extraOf(row);
   const currentQuota = typeof extra['quota'] === 'number' ? formatBytes(extra['quota'] as number) : (typeof extra['quotaParsed'] === 'string' ? (extra['quotaParsed'] as string) : null);
   const [value, setValue] = useState('');
   const [saving, setSaving] = useState(false);
@@ -532,8 +592,12 @@ export default function Storage() {
   // else that is ZFS (or has a slash) as dataset-like. This keeps scrub offered
   // only on genuine pools while still enabling quota/mount/snapshot on datasets.
   const isRealPool = (r: StorageFilesystemRow): boolean => r.type === 'zfs-pool' && !r.name.includes('/');
+  // Boot rows are EXCLUDED from dataset-like eligibility — the appliance manages
+  // its own boot pool + BE datasets (mount/unmount/quota/snapshot/delete would
+  // break or corrupt the running OS). The plugin's actions refuse them too.
+  const isBootRow = (r: StorageFilesystemRow): boolean => isBootPoolRow(r) || isBootEnvRow(r);
   const isDatasetLike = (r: StorageFilesystemRow): boolean =>
-    r.type === 'zfs-dataset' || r.type === 'zfs-zvol' || (r.type.startsWith('zfs') && r.name.includes('/'));
+    !isBootRow(r) && (r.type === 'zfs-dataset' || r.type === 'zfs-zvol' || (r.type.startsWith('zfs') && r.name.includes('/')));
   const isMounted = (r: StorageFilesystemRow): boolean => !!r.mountpoint;
 
   // --- Data -----------------------------------------------------------------------
@@ -562,8 +626,12 @@ export default function Storage() {
     if (!arr) { arr = []; byName.set(f.name, arr); }
     arr.push(f);
   }
+  // Nesting is about TREE STRUCTURE, not action eligibility — boot-environment
+  // rows are deliberately NOT dataset-like (no mount/quota/snapshot/delete), but
+  // they still live under the boot pool and must nest there.
+  const isNestable = (f: StorageFilesystemRow): boolean => isDatasetLike(f) || isBootEnvRow(f);
   const hasParent = (f: StorageFilesystemRow): boolean => {
-    if (!isDatasetLike(f) || !f.parent) return false;
+    if (!isNestable(f) || !f.parent) return false;
     const parents = byName.get(f.parent);
     return !!parents?.some((p) => p.deviceId === f.deviceId && p.pluginId === f.pluginId);
   };
@@ -650,18 +718,23 @@ export default function Storage() {
   // that action id in its catalog, so any future storage plugin gets this column free.
   function renderActions(row: StorageFilesystemRow): ReactNode {
     const pool = isRealPool(row);
-    const dsLike = isDatasetLike(row);
+    const bootPool = isBootPoolRow(row);
+    const dsLike = isDatasetLike(row); // already excludes boot rows (see predicate)
     const mounted = isMounted(row);
     // Read-Only mode disables every write action (Browse stays available).
     const readOnly = mode === 'readonly';
 
     const actions: { id: string; label: string; icon: ReactNode; available: boolean; eligible: boolean; danger?: boolean }[] = [
-      { id: 'storage.scrub', label: `Scrub pool ${row.name}`, icon: <Search size={14} />, available: hasAction(row.pluginId, 'storage.scrub') && !readOnly, eligible: pool },
-      { id: 'storage.snapshot', label: `Snapshot ${row.name}`, icon: <Camera size={14} />, available: hasAction(row.pluginId, 'storage.snapshot') && !readOnly, eligible: pool || dsLike },
+      { id: 'storage.scrub', label: `Scrub pool ${row.name}`, icon: <Search size={14} />, available: hasAction(row.pluginId, 'storage.scrub') && !readOnly, eligible: pool && !bootPool },
+      // The boot pool is invisible to pool.scrub — it gets its own action (boot.scrub).
+      { id: 'storage.boot-scrub', label: `Scrub boot pool ${row.name}`, icon: <Search size={14} />, available: hasAction(row.pluginId, 'storage.boot-scrub') && !readOnly, eligible: bootPool },
+      // The boot pool is excluded — the plugin refuses snapshots on it (OS-managed).
+      { id: 'storage.snapshot', label: `Snapshot ${row.name}`, icon: <Camera size={14} />, available: hasAction(row.pluginId, 'storage.snapshot') && !readOnly, eligible: (pool && !bootPool) || dsLike },
       { id: 'storage.quota-set', label: `Set quota on ${row.name}`, icon: <Gauge size={14} />, available: hasAction(row.pluginId, 'storage.quota-set') && !readOnly, eligible: dsLike },
       { id: 'storage.mount', label: `Mount ${row.name}`, icon: <ArrowDownToLine size={14} />, available: hasAction(row.pluginId, 'storage.mount') && !readOnly, eligible: dsLike && !mounted },
       { id: 'storage.unmount', label: `Unmount ${row.name}`, icon: <ArrowUpFromLine size={14} />, available: hasAction(row.pluginId, 'storage.unmount') && !readOnly, eligible: dsLike && mounted },
-      { id: 'storage.delete', label: `Delete ${row.name}`, icon: <Trash2 size={13} />, available: hasAction(row.pluginId, 'storage.delete') && !readOnly, eligible: true, danger: true },
+      // Boot rows are never deletable from here — BEs go through bootenv.destroy.
+      { id: 'storage.delete', label: `Delete ${row.name}`, icon: <Trash2 size={13} />, available: hasAction(row.pluginId, 'storage.delete') && !readOnly && !isBootRow(row), eligible: true, danger: true },
     ];
 
     // Browse the contents over SFTP — only when the plugin advertises the
@@ -670,7 +743,9 @@ export default function Storage() {
     //     (pool.dataset.query covers pools too) → context { kind:'dataset', name }.
     //   - Any other mounted filesystem (ext4/xfs/… from df): the row's own
     //     mountpoint IS the SFTP root → context { kind:'mount', mountpoint }.
-    const browsable = hasFilesystemCap(row.pluginId) && ((pool || dsLike) || isMounted(row));
+    // Boot rows are excluded — their datasets live on the OS pool, which the
+    // plugin's SFTP scoping does not expose.
+    const browsable = hasFilesystemCap(row.pluginId) && !isBootRow(row) && ((pool || dsLike) || isMounted(row));
 
     return (
       <div className="flex items-center gap-0.5">
@@ -727,7 +802,12 @@ export default function Storage() {
       header: 'Name',
       key: 'name',
       width: 280,
-      render: (row) => <span className="font-medium text-foreground">{row.name}</span>,
+      render: (row) => (
+        <span className="flex items-center">
+          <span className="font-medium text-foreground">{row.name}</span>
+          <BootBadges row={row} />
+        </span>
+      ),
     },
     {
       header: 'Type',
@@ -803,11 +883,12 @@ export default function Storage() {
         const basename = child.name.split('/').pop() ?? child.name;
         return (
           <span
-            className="block truncate font-medium text-secondary"
+            className="flex items-center gap-1"
             style={{ paddingLeft: 18 + depth * 14 }}
             title={child.name}
           >
-            {basename}
+            <span className="truncate font-medium text-secondary">{basename}</span>
+            <BootBadges row={child} />
           </span>
         );
       }
@@ -1056,13 +1137,16 @@ export default function Storage() {
                 searchPlaceholder="Search filesystems…"
                 selectable
                 bulkActions={[
-                  { label: 'Scrub', onClick: fsBulk('storage.scrub', 'Scrub selected pools', isRealPool, 'No selected rows are ZFS pools — nothing to scrub.') },
+                  // The boot pool is invisible to pool.scrub — it gets its own action.
+                  { label: 'Scrub', onClick: fsBulk('storage.scrub', 'Scrub selected pools', (r) => isRealPool(r) && !isBootPoolRow(r), 'No selected rows are ZFS data pools — nothing to scrub.') },
+                  { label: 'Scrub boot pool', onClick: fsBulk('storage.boot-scrub', 'Scrub selected boot pools', (r) => isBootPoolRow(r), 'No selected rows are OS boot pools — nothing to scrub.') },
                   { label: 'Mount', onClick: fsBulk('storage.mount', 'Mount selected datasets', (r) => isDatasetLike(r) && !isMounted(r), 'No selected datasets are unmounted — nothing to mount.') },
                   { label: 'Unmount', onClick: fsBulk('storage.unmount', 'Unmount selected datasets', (r) => isDatasetLike(r) && isMounted(r), 'No selected datasets are mounted — nothing to unmount.') },
                   {
                     label: 'Delete',
                     confirm: (c) => `Permanently delete ${c} filesystem(s)? This is destructive and removes all data in them.`,
-                    onClick: fsBulk('storage.delete', 'Delete selected', () => true, ''),
+                    // Boot rows are never deletable from here — BEs go through bootenv.destroy.
+                    onClick: fsBulk('storage.delete', 'Delete selected', (r) => !isBootRow(r), 'Selected rows are OS boot pool / boot environments only — they cannot be deleted from here.'),
                   },
                 ]}
                 emptyMessage="No filesystems reported yet — devices with a storage plugin (TrueNAS pools/datasets, RouterOS/SwOS root filesystem) populate this view within a poll cycle."
