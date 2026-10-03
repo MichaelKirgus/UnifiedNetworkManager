@@ -782,10 +782,16 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
               </>
             )}
 
-            {/* Rollout diff summary — what will happen per device before anything is written. */}
+            {/* Rollout diff summary — what will happen per device before anything is written.
+                Only devices that actually receive a plan step (≥1 supporting plugin) count —
+                the network-check covers every scoped device, so unsupported ones must be filtered out. */}
             {checkResult && checkResult.devices.length > 0 && (() => {
-              const deployed = checkResult.devices.filter((d) => d.status === 'deployed');
-              const fresh = checkResult.devices.filter((d) => d.status === 'new');
+              const plannedIds = new Set<string>();
+              for (const devs of groups.values()) for (const d of devs) plannedIds.add(d.id);
+              const relevant = checkResult.devices.filter((d) => plannedIds.has(d.deviceId));
+              if (relevant.length === 0) return null;
+              const deployed = relevant.filter((d) => d.status === 'deployed');
+              const fresh = relevant.filter((d) => d.status === 'new');
               return (
                 <section className="rounded-md border border-border bg-background p-3">
                   <h3 className="mb-2 text-sm font-semibold text-secondary">Rollout summary</h3>
