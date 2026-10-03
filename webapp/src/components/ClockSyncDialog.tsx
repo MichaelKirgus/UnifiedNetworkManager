@@ -244,7 +244,7 @@ export function ClockSyncDialog({ devices, consensusMs, onClose }: ClockSyncDial
         onClose={onClose}
         zIndex="z-[70]"
         footer={
-          <>
+          <div className="flex items-center justify-end gap-2">
             <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
               {done ? 'Done' : 'Cancel'}
             </button>
@@ -258,7 +258,7 @@ export function ClockSyncDialog({ devices, consensusMs, onClose }: ClockSyncDial
                 {busy ? 'Executing…' : mode === 'sync' ? 'Re-sync clocks' : 'Apply time'}
               </button>
             )}
-          </>
+          </div>
         }
       >
 

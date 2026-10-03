@@ -1,22 +1,26 @@
-import type { ElementType, MouseEvent as ReactMouseEvent, FormHTMLAttributes, ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, type ElementType, type MouseEvent as ReactMouseEvent, type FormHTMLAttributes, type ReactNode } from 'react';
 import clsx from 'clsx';
 import { X } from 'lucide-react';
+import { RESIZE_HANDLES, useDragResize } from '../hooks/useDragResize';
 
 /**
  * Reusable modal-dialog shell — the standard "small/medium" dialog used across
  * the app (plugin settings, action forms, schedule, clock sync, …). It exists so
  * every dialog scrolls identically when its content exceeds the viewport:
  *
- * - The overlay is `fixed inset-0` and centers the panel.
- * - The PANEL has a fixed header (title + close), an internally-scrolling BODY
- *   (`max-h-[min(70vh,640px)] overflow-y-auto`) and an optional fixed footer —
- *   so long forms (e.g. a plugin with many options) never get cut off and the
- *   action buttons stay reachable without scrolling.
+ * - The overlay is `fixed inset-0`; the panel opens CENTERED and sized to its
+ *   CONTENT (measured before first paint), capped by `maxWidth` / `bodyMaxHeight`.
+ * - Movable + resizable like ResizableDialog — both shells share the same
+ *   drag/resize/viewport-clamp logic via the useDragResize hook. Drag from the
+ *   header; resize from any edge or corner (the panel keeps its size after that).
+ * - The BODY scrolls internally (`overflow-y-auto`, capped by `bodyMaxHeight`)
+ *   and an optional fixed footer keeps the action buttons reachable — so long
+ *   forms (e.g. a plugin with many options) never get cut off.
  * - `tag` lets form-driven dialogs render the panel as a `<form>` (so Enter /
  *   submit still work); all remaining props are forwarded to that element.
  *
- * Bigger, draggable/resizable surfaces (console, file browser, container logs)
- * use `ResizableDialog` instead — same "body scrolls internally" contract.
+ * Bigger, fixed-size "window" surfaces (console, file browser, container logs)
+ * use `ResizableDialog` instead — same hook, different default geometry.
  */
 
 export interface DialogShellProps extends Omit<FormHTMLAttributes<HTMLFormElement>, 'title'> {
@@ -33,7 +37,7 @@ export interface DialogShellProps extends Omit<FormHTMLAttributes<HTMLFormElemen
   tag?: ElementType;
   /** Overlay stacking order (default z-50; pass a higher value to stack above other dialogs). */
   zIndex?: string;
-  /** Max panel width (Tailwind class, default max-w-lg). */
+  /** Max panel width (Tailwind class, e.g. 'max-w-md'; the panel hugs its content up to this — default max-w-lg). */
   maxWidth?: string;
   /** Max height of the scrolling body (CSS value, default 'min(70vh,640px)'). */
   bodyMaxHeight?: string;
@@ -58,14 +62,75 @@ export function DialogShell({
   ...rest
 }: DialogShellProps) {
   const Panel: ElementType = tag;
+
+  // Draggable + resizable geometry. Until the first measurement below runs, the
+  // panel is sized by its classes (w-full + maxWidth cap); afterwards the inline
+  // style takes over so drag/resize work like in ResizableDialog.
+  const { geom, setGeom, startDrag, onDragMove, endDrag, startResize, onResizeMove, endResize } = useDragResize({
+    initialGeom: () => ({ x: 0, y: 0, w: 0, h: 320 }),
+    minW: 280,
+    minH: 140,
+  });
+  const panelRef = useRef<HTMLElement | null>(null);
+  // Once the user resizes the panel manually, stop auto-fitting its size.
+  const userAdjusted = useRef(false);
+
+  /** The panel's natural height: header + body (capped by bodyMaxHeight) + footer. */
+  function naturalSize(el: HTMLElement): { w: number; h: number } {
+    const prevH = el.style.height;
+    el.style.height = 'auto'; // let the content dictate — the body stays capped
+    const w = Math.min(el.offsetWidth, window.innerWidth - 32);
+    const h = Math.min(el.scrollHeight, window.innerHeight - 32);
+    el.style.height = prevH; // restore — the state update takes over
+    return { w, h };
+  }
+
+  // Fit the panel to its natural content size once on mount (before first paint),
+  // then center it. Short dialogs hug their content; long ones open at the body's
+  // maxHeight cap and scroll internally.
+  useLayoutEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    const { w, h } = naturalSize(el);
+    setGeom({ x: Math.max(16, (window.innerWidth - w) / 2), y: Math.max(16, (window.innerHeight - h) / 2), w, h });
+  }, []);
+
+  // Many dialogs load their content asynchronously (schemas, compose YAML, …)
+  // — keep fitting the panel to it until the user resizes manually.
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    const body = el.querySelector(':scope > div');
+    if (!(body instanceof HTMLElement)) return;
+    const ro = new ResizeObserver(() => {
+      if (userAdjusted.current) return;
+      setGeom((g) => {
+        const { h } = naturalSize(el);
+        if (Math.abs(h - g.h) < 1) return g;
+        return { ...g, h, y: Math.max(0, Math.min(g.y, window.innerHeight - h - 16)) };
+      });
+    });
+    ro.observe(body);
+    return () => ro.disconnect();
+  }, []);
+
   return (
-    <div className={`fixed inset-0 ${zIndex} flex items-start justify-center overflow-y-auto bg-primary/40 p-6`} onClick={onClose}>
+    <div className={`fixed inset-0 ${zIndex} bg-primary/40`} onClick={onClose}>
       <Panel
         {...(tag === 'form' ? rest : {})}
-        className={clsx('w-full rounded-md border border-border bg-card shadow-xl', maxWidth, className)}
+        ref={panelRef}
+        className={clsx('absolute flex w-full flex-col overflow-hidden rounded-md border border-border bg-card shadow-xl', maxWidth, className)}
+        style={{ left: geom.x || undefined, top: geom.y || undefined, width: geom.w || undefined, height: geom.h }}
         onClick={(e: ReactMouseEvent<HTMLElement>) => e.stopPropagation()}
       >
-        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3">
+        {/* Header — also the drag handle (cursor-move). */}
+        <header
+          className="flex shrink-0 cursor-move touch-none select-none items-center justify-between gap-3 border-b border-border px-4 py-3"
+          onPointerDown={startDrag}
+          onPointerMove={onDragMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        >
           <div className="min-w-0">
             <h2 className="flex min-w-0 items-center gap-2 text-base font-semibold text-foreground">
               {icon}
@@ -79,11 +144,23 @@ export function DialogShell({
         </header>
 
         {/* Body — scrolls internally so long content is never cut off. */}
-        <div className={clsx('overflow-y-auto px-4 py-3', bodyClassName)} style={{ maxHeight: bodyMaxHeight }}>{children}</div>
+        <div className={clsx('min-h-0 flex-1 overflow-y-auto px-4 py-3', bodyClassName)} style={{ maxHeight: bodyMaxHeight }}>{children}</div>
 
         {footer && (
           <footer className="shrink-0 border-t border-border px-4 py-3">{footer}</footer>
         )}
+
+        {/* Resize handles (edges + corners). */}
+        {RESIZE_HANDLES.map((h) => (
+          <div
+            key={h.edge}
+            className={`absolute touch-none ${h.cls}`}
+            onPointerDown={(e) => { userAdjusted.current = true; startResize(h.edge)(e); }}
+            onPointerMove={onResizeMove}
+            onPointerUp={endResize}
+            onPointerCancel={endResize}
+          />
+        ))}
       </Panel>
     </div>
   );

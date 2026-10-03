@@ -381,7 +381,7 @@ function ActionQuickDialog({
       title={entry?.label ?? qa.label}
       onClose={onClose}
       footer={
-        <>
+        <div className="flex items-center justify-end gap-2">
           <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background">
             Cancel
           </button>
@@ -396,7 +396,7 @@ function ActionQuickDialog({
               {entry.riskLevel === 'write' ? 'Apply change' : 'Run'}
             </button>
           )}
-        </>
+        </div>
       }
     >
       <div className="space-y-3">

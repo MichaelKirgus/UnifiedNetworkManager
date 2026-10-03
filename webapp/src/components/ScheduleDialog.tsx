@@ -131,7 +131,7 @@ export function ScheduleDialog({ plan, plans = [], onClose, onSaved }: ScheduleD
       onClose={onClose}
       zIndex="z-[70]"
       footer={
-        <>
+        <div className="flex items-center justify-end gap-2">
           <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
             Cancel
           </button>
@@ -143,7 +143,7 @@ export function ScheduleDialog({ plan, plans = [], onClose, onSaved }: ScheduleD
             <CalendarClock className="h-4 w-4" />
             {busy ? 'Scheduling…' : isBulk ? `Schedule ${plans.length} plans` : 'Schedule'}
           </button>
-        </>
+        </div>
       }
     >
 

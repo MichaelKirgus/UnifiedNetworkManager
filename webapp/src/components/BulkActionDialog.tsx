@@ -156,14 +156,14 @@ export function BulkActionDialog({ deviceId, pluginId, entry, items, onClose }: 
         title={entry.label}
         onClose={onClose}
         footer={
-          <>
+          <div className="flex items-center justify-end gap-2">
             <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background">
               Close
             </button>
             <button type="button" onClick={() => navigate(`/plans/${savedPlanId}`)} className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover">
               Open in Plans
             </button>
-          </>
+          </div>
         }
       >
         <div className="space-y-3">
