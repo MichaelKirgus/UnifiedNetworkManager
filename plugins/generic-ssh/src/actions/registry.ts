@@ -19,6 +19,7 @@ import { WIREGUARD_ACTIONS } from './wireguard';
 import { PACKAGES_ACTIONS } from './packages';
 import { SECURITY_ACTIONS } from './security';
 import { DOCKER_ACTIONS } from './docker';
+import { networkIntentActions } from './networkIntents';
 
 const ALL_ACTIONS: SdkActionDescriptor<ActionContext>[] = [
   ...SYSTEM_ACTIONS,
@@ -30,6 +31,8 @@ const ALL_ACTIONS: SdkActionDescriptor<ActionContext>[] = [
   // Docker / Compose (Containers page) — only meaningful on hosts that run a
   // docker daemon; the actions degrade to clear errors elsewhere.
   ...DOCKER_ACTIONS,
+  // Canonical fleet intents (network.create / network.delete / l2.topology.read).
+  ...networkIntentActions,
 ];
 
 export const registry = createRegistry<ActionContext>(ALL_ACTIONS);

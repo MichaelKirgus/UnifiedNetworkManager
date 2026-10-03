@@ -9,7 +9,7 @@
  * Single-device actions fan out (one step per device) for batch rollouts.
  */
 
-import { finalizePlan, PlanningError } from '@unm/plugin-sdk';
+import { finalizePlan, PlanningError, isCanonicalIntent } from '@unm/plugin-sdk';
 import type { CatalogEntry, Plan, PlanDevice as SdkPlanDevice, PlanRequest as SdkPlanRequest, PlanStep, ProvisionRequest, InputSchema, RiskLevel } from '@unm/plugin-sdk';
 import { getAction, listActions, listCatalog } from './actions/registry';
 
@@ -107,7 +107,13 @@ export const MULTI_DEVICE_INTENTS: IntentDescriptor[] = [WIREGUARD_TUNNEL];
 
 /** The full action catalog: single-device actions + multi-device intents. */
 export function listCatalogWithIntents(): CatalogEntry[] {
-  return [...listCatalog(), ...MULTI_DEVICE_INTENTS.map((i) => ({
+  // Canonical fleet intents (network.create / network.delete) FAN OUT across
+  // the batch — one step per device. 'N' tells the API to accept any device
+  // count; a numeric 1 would reject legitimate multi-device rollouts.
+  const fromActions: CatalogEntry[] = listCatalog().map((e) =>
+    isCanonicalIntent(e.id) ? { ...e, deviceCount: 'N' as const } : e,
+  );
+  return [...fromActions, ...MULTI_DEVICE_INTENTS.map((i) => ({
     id: i.id,
     label: i.label,
     description: i.description,
@@ -154,10 +160,13 @@ export function buildPlan(req: PlanRequest): Plan {
   if (!action) throw new PlanningError(`Unknown action or intent "${intentId}"`);
   if (req.devices.length === 0) throw new PlanningError('No devices supplied');
 
+  // Per-device overrides (PlanRequest.deviceInputs — the rollout wizard's
+  // confirmed preflight values, e.g. a different parent or L3 address per box)
+  // merge on top of the shared inputs for that device only.
   const rawSteps: Omit<PlanStep, 'stepIndex'>[] = req.devices.map((d) => ({
     deviceId: d.deviceId,
     actionId: intentId,
-    input: { ...(req.intent.inputs ?? {}) },
+    input: { ...(req.intent.inputs ?? {}), ...((req.deviceInputs ?? {})[d.deviceId] ?? {}) },
   }));
   return finalizePlan(
     intentId,
