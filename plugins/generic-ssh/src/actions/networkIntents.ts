@@ -17,7 +17,7 @@
  */
 
 import { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, INTENT_L2_TOPOLOGY_READ } from '@unm/plugin-sdk';
-import type { L2Topology, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
+import type { L2Topology, PreflightInterfaceOption, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
 import { suggestL2AttachPoint } from '@unm/plugin-sdk';
 import type { ActionContext, ActionDescriptor } from './types';
 import { okResult, failResult, runCommands, shq, isV4Cidr, isSafeName } from './types';
@@ -427,7 +427,14 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
       if (last?.note) last.note += ' · The VLAN is created as a sub-interface of the selected parent NIC — per-port selection is not available on this host';
     }
 
-    return { deviceId: ctx.deviceId ?? '', values, capabilities: { vlanPorts: false } };
+    // Interface candidates for the dialog's dropdown — physical NICs + bond/team
+    // bundles. Virtual plumbing (veth/docker/tap/bridge members) is excluded.
+    const interfaces: PreflightInterfaceOption[] = links
+      .filter((l) => !/^lo\d*$/.test(l.name) && l.kind !== 'vlan' && l.kind !== 'bridge'
+        && !/^veth|^docker|^br-|^tap|^tun|^cni|^flannel|^cali|^kube/i.test(l.name))
+      .map((l): PreflightInterfaceOption => ({ name: l.name, kind: (l.kind === 'bond' || l.kind === 'team') ? ('bundle' as const) : ('physical' as const), note: l.alias && l.alias !== l.name ? `alias ${l.alias}` : undefined }));
+
+    return { deviceId: ctx.deviceId ?? '', values, interfaces, capabilities: { vlanPorts: false } };
   } catch (e) {
     return { deviceId: ctx.deviceId ?? '', values, degraded: true, error: e instanceof Error ? e.message : String(e) };
   }

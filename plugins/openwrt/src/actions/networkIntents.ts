@@ -14,7 +14,7 @@
  */
 
 import { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, INTENT_L2_TOPOLOGY_READ } from '@unm/plugin-sdk';
-import type { L2Topology, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
+import type { L2Topology, PreflightInterfaceOption, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
 import { suggestL2AttachPoint } from '@unm/plugin-sdk';
 import type { ActionContext, ActionDescriptor } from './types';
 import { sshAvailable, noSshResult } from './types';
@@ -419,7 +419,15 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
       if (last?.note) last.note += ' · Port-level VLAN assignment is not supported on this platform (DSA swconfig support planned)';
     }
 
-    return { deviceId: ctx.deviceId ?? '', values, capabilities: { vlanPorts: false } };
+    // Interface candidates for the dialog's dropdown — physical ports, bridges,
+    // bundles (kernel device names; that is what `interface` expects).
+    const interfaces: PreflightInterfaceOption[] = [
+      ...topo.physicalPorts.map((p): PreflightInterfaceOption => ({ name: p.name, kind: 'physical' as const, note: (topo.uplinks ?? []).includes(p.name) ? 'uplink (wan)' : undefined })),
+      ...topo.bridges.map((b): PreflightInterfaceOption => ({ name: b.name, kind: 'bridge' as const })),
+      ...topo.bundles.map((bu): PreflightInterfaceOption => ({ name: bu.name, kind: 'bundle' as const })),
+    ];
+
+    return { deviceId: ctx.deviceId ?? '', values, interfaces, capabilities: { vlanPorts: false } };
   } catch (e) {
     return { deviceId: ctx.deviceId ?? '', values, degraded: true, error: e instanceof Error ? e.message : String(e) };
   }

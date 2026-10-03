@@ -13,7 +13,7 @@
  * plan creation (overrides ride back in PlanRequest.deviceInputs).
  */
 
-import type { L2Topology, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
+import type { L2Topology, PreflightInterfaceOption, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
 import { suggestL2AttachPoint } from '@unm/plugin-sdk';
 import * as ifaces from '../client/interfaces';
 import { probeAssignmentCapability, resolveAssignmentPath } from '../assignmentSsh';
@@ -131,7 +131,15 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
     }
   } catch { /* non-fatal */ }
 
-  return { deviceId: ctx.deviceId ?? '', values };
+  // Interface candidates for the dialog's dropdown — physical NICs, bridges,
+  // LAG bundles (kernel device names; that is what `interface` expects).
+  const interfaces: PreflightInterfaceOption[] = [
+    ...topo!.physicalPorts.map((p): PreflightInterfaceOption => ({ name: p.name, kind: 'physical' as const })),
+    ...topo!.bridges.map((b): PreflightInterfaceOption => ({ name: b.name, kind: 'bridge' as const })),
+    ...topo!.bundles.map((bu): PreflightInterfaceOption => ({ name: bu.name, kind: 'bundle' as const })),
+  ];
+
+  return { deviceId: ctx.deviceId ?? '', values, interfaces };
 }
 
 /** Registry of preflight resolvers per canonical intent id. */

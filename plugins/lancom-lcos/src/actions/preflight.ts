@@ -12,7 +12,7 @@
  * plan creation (overrides ride back in PlanRequest.deviceInputs).
  */
 
-import type { L2Bridge, L2Bundle, L2PhysicalPort, L2Topology, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
+import type { L2Bridge, L2Bundle, L2PhysicalPort, L2Topology, PreflightInterfaceOption, PreflightPort, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
 import { suggestL2AttachPoint, suggestL2VlanPorts } from '@unm/plugin-sdk';
 import { snmpWalk } from '@unm/snmp-client';
 import { NET_LIST } from '../lcosOids';
@@ -292,9 +292,25 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
     if (slot) values.push(slot);
   }
 
+  // Interface candidates for the dialog's dropdown — bridges (BRG-x) and LACP
+  // bundles (BUNDLE-x) are the valid attach points on LCOS.
+  const interfaces: PreflightInterfaceOption[] = topo === null ? [] : [
+    ...topo.bridges.map((b): PreflightInterfaceOption => ({ name: b.name, kind: 'bridge' as const })),
+    ...topo.bundles.map((bu): PreflightInterfaceOption => ({ name: bu.name, kind: 'bundle' as const })),
+  ];
+
+  // Port quick-selects — LCOS tags VLANs on LOGICAL ports (LAN-x / BUNDLE-x),
+  // the same names its network.create `vlanPorts` input accepts.
+  const portNames = topo === null ? [] : [...new Set(
+    [...topo.bridges.flatMap((b) => b.members), ...topo.bundles.map((bu) => bu.name)]
+      .filter((m) => /^(LAN-\d+|BUNDLE-\d+)$/i.test(m)),
+  )].sort();
+
   return {
     deviceId: ctx.deviceId ?? '',
     values,
+    ...(portNames.length > 0 ? { ports: portNames.map((name): PreflightPort => ({ name })), capabilities: { vlanPorts: true } } : {}),
+    ...(interfaces.length > 0 ? { interfaces } : {}),
     ...(topo === null ? { degraded: true, error: 'L2 topology could not be read (no SSH slot or CLI failed) — attach point defaults to LAN-1' } : {}),
   };
 }

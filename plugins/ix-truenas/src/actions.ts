@@ -13,7 +13,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { ActionDescriptor, ActionResult, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, INTENT_L2_TOPOLOGY_READ, INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, L2Topology, pickNumber, pickString, pollUntil, PreflightResult, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { ActionDescriptor, ActionResult, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, INTENT_L2_TOPOLOGY_READ, INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, L2Topology, pickNumber, pickString, pollUntil, PreflightInterfaceOption, PreflightResult, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
 import { hostSshPort, normalizeVmDevice, sshPool } from './enrich';
 import { fsSftpPool } from './index';
@@ -6642,6 +6642,7 @@ const l2TopologyReadAction: ActionDescriptor<TruenasActionContext> = {
 /** Preflight resolver for network.create — suggests the VLAN parent + reuse hints. */
 export async function preflightNetworkCreate(ctx: TruenasActionContext, inputs: Record<string, unknown>): Promise<PreflightResult> {
   const values: Array<{ key: string; value: unknown; confidence: 'high' | 'medium' | 'low'; note?: string }> = [];
+  let interfaces: PreflightInterfaceOption[] = [];
   try {
     const ifaces = await queryInterfaces(ctx);
     const topo = await readTruenasL2Topology(ctx);
@@ -6666,10 +6667,17 @@ export async function preflightNetworkCreate(ctx: TruenasActionContext, inputs: 
       const last = [...values].reverse().find((v) => v.key === 'interface');
       if (last?.note) last.note += ' · The VLAN is created on the selected parent interface — choose NIC/LAGG in “interface”; per-port selection is not available';
     }
+
+    // Interface candidates for the dialog's dropdown — physical NICs, bridges,
+    // LAGGs and existing VLAN interfaces (all valid `vlan_parent_interface` values).
+    interfaces = ifaces
+      .map((i) => ({ name: pickString(i, ['name']) ?? '', type: pickString(i, ['type']) ?? '', desc: pickString(i, ['description']) ?? '' }))
+      .filter((i) => i.name && !/^lo\d*$/.test(i.name))
+      .map((i): PreflightInterfaceOption => ({ name: i.name, kind: (i.type === 'BRIDGE' ? 'bridge' : i.type === 'LAGG' ? 'bundle' : i.type === 'VLAN' ? 'vlan' : 'physical') as PreflightInterfaceOption['kind'], note: i.desc || undefined }));
   } catch (e) {
     return { deviceId: ctx.deviceId ?? '', values, degraded: true, error: e instanceof Error ? e.message : String(e) };
   }
-  return { deviceId: ctx.deviceId ?? '', values, capabilities: { vlanPorts: false } };
+  return { deviceId: ctx.deviceId ?? '', values, interfaces, capabilities: { vlanPorts: false } };
 }
 
 export const PREFLIGHT_RESOLVERS: Record<string, (ctx: TruenasActionContext, inputs: Record<string, unknown>) => Promise<PreflightResult>> = {
