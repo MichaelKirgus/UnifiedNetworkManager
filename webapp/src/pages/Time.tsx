@@ -517,12 +517,12 @@ export default function Time() {
         )}
 
         {/* Header strip — UNM's own clock (the reference) + coverage summary. */}
-        <div className="mb-2 flex shrink-0 items-center gap-4 rounded-lg border border-border bg-card px-4 py-2.5">
+        <div className="mb-2 flex shrink-0 items-center gap-4 rounded-lg border border-border bg-card px-4 py-2">
           <span className="flex items-center gap-2 text-sm font-semibold text-secondary">
             <Clock size={16} className="text-muted-foreground" />
             UNM clock
           </span>
-          <span className="font-mono text-lg tabular-nums text-foreground">{formatTime(nowMs)}</span>
+          <span className="font-mono text-base tabular-nums text-foreground">{formatTime(nowMs)}</span>
           <span className="font-mono text-[11px] text-faint">{formatDate(nowMs)}</span>
           <span className="ml-auto flex items-center gap-3 text-xs text-secondary">
             <span>{availableCount} of {rows.length} devices reporting</span>
@@ -539,7 +539,7 @@ export default function Time() {
               type="button"
               onClick={() => setClockSyncOpen(true)}
               title="Re-trigger native NTP or push a specific time/timezone on the selected devices"
-              className="flex shrink-0 items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-primary-hover"
+              className="flex shrink-0 items-center gap-1.5 rounded-md bg-primary px-3 py-1 text-xs font-semibold text-white hover:bg-primary-hover"
             >
               <RefreshCw size={13} />
               Re-sync devices
@@ -614,7 +614,7 @@ export default function Time() {
           {/* Device table (top) — fixed share of the page height while the span
               view is open; when collapsed it takes everything. */}
           <div
-            className={clsx('min-h-0 px-1', !spanOpen && 'flex-1')}
+            className={clsx('min-h-0', !spanOpen && 'flex-1')}
             style={{ height: spanOpen ? `${tablePct}%` : undefined }}
           >
             <DataTable<TimeRowView>
@@ -650,7 +650,7 @@ export default function Time() {
               center line to the device's clock position. Right = ahead, left =
               behind; color encodes magnitude. The header stays mounted when
               collapsed so it can be re-opened. */}
-          <div className={clsx('shrink-0 min-h-0 px-1', spanOpen && 'flex-1')}>
+          <div className={clsx('shrink-0 min-h-0', spanOpen && 'flex-1')}>
             <div className="flex h-full min-h-0 flex-col rounded-lg border border-border bg-card">
               <button
                 type="button"

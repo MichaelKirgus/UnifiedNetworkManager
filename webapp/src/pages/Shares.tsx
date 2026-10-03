@@ -764,7 +764,7 @@ export default function Shares() {
           {/* Shares table (top) — fixed share of the page height while the
               sessions panel is open; when collapsed it takes everything left. */}
           <div
-            className={clsx('min-h-0 px-1', !sessionsOpen && 'flex-1')}
+            className={clsx('min-h-0', !sessionsOpen && 'flex-1')}
             style={{ height: sessionsOpen ? `${tablePct}%` : undefined }}
           >
             {sharesQuery.data && (
@@ -806,7 +806,7 @@ export default function Shares() {
           )}
 
           {/* Sessions panel (bottom) — live CIFS/SMB + NFS client connections. */}
-          <div className={clsx('shrink-0 min-h-0 px-1', sessionsOpen && 'flex-1')}>
+          <div className={clsx('shrink-0 min-h-0', sessionsOpen && 'flex-1')}>
             <div className="flex h-full min-h-0 flex-col rounded-lg border border-border bg-card">
               <button
                 type="button"

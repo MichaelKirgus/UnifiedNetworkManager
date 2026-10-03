@@ -1104,7 +1104,7 @@ export default function Storage() {
           {/* Filesystem table (top) — fixed share of the page height while the
               disk table is open; when collapsed it takes everything left. */}
           <div
-            className={clsx('min-h-0 px-1', !disksOpen && 'flex-1')}
+            className={clsx('min-h-0', !disksOpen && 'flex-1')}
             style={{ height: disksOpen ? `${tablePct}%` : undefined }}
           >
             {storageQuery.data && (
@@ -1158,7 +1158,7 @@ export default function Storage() {
 
           {/* Disk table (bottom) — takes the remaining height. The header stays
               mounted when collapsed so it can be re-opened. */}
-          <div className={clsx('shrink-0 min-h-0 px-1', disksOpen && 'flex-1')}>
+          <div className={clsx('shrink-0 min-h-0', disksOpen && 'flex-1')}>
             <div className="flex h-full min-h-0 flex-col rounded-lg border border-border bg-card">
               <button
                 type="button"
