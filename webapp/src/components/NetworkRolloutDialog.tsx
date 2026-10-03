@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useMutation, useQuery } from '@tanstack/react-query';
-import { ChevronDown, Globe, X } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ChevronDown, Globe, Settings2, X } from 'lucide-react';
 import clsx from 'clsx';
-import { api, CatalogEntry, Device, DocumentedNetwork, NetworkCheckResultDto, NetworkLayer, PreflightPortDto, PreflightResultDto, Site, TopologyResponse } from '../api/client';
+import { api, CatalogEntry, Device, DocumentedNetwork, NetworkCheckResultDto, NetworkLayer, PreflightInterfaceOptionDto, PreflightPortDto, PreflightResultDto, Site, TopologyResponse } from '../api/client';
 import { useExecutionMode } from '../executionMode';
 
 /**
@@ -32,7 +32,7 @@ const INTENT_ID = 'network.create';
 /** Plugins whose devices are L2-only by default (switches) — the IP toggle starts OFF there. */
 const L2_ONLY_PLUGINS = new Set(['mikrotik-swos']);
 
-type PortMode = 'all' | 'trunk' | 'custom';
+type PortMode = 'all' | 'trunk' | 'uplink' | 'custom';
 
 /** Per-device rollout state, keyed `${pluginId}:${deviceId}`. */
 interface DeviceRolloutState {
@@ -58,7 +58,36 @@ function selectedPorts(mode: PortMode, custom: string[], ports?: PreflightPortDt
   if (!ports || ports.length === 0) return [];
   if (mode === 'all') return ports.map((p) => p.name);
   if (mode === 'trunk') return ports.filter((p) => p.trunk).map((p) => p.name);
+  if (mode === 'uplink') return ports.filter((p) => p.uplink).map((p) => p.name);
   return custom;
+}
+
+/** The suggested `interface` value from a preflight result (for the select default). */
+function suggestedInterface(r?: PreflightResultDto): string {
+  const v = r?.values.find((x) => x.key === 'interface');
+  return typeof v?.value === 'string' ? v.value : '';
+}
+
+/** Renders the `interface` input — a dropdown of candidates when the plugin
+ *  enumerated them, else a free-text override. */
+function InterfaceField({ r, value, onCommit }: { r?: PreflightResultDto; value: string; onCommit: (v: string) => void }) {
+  const opts = r?.interfaces ?? [];
+  if (opts.length === 0) return null; // caller falls back to a free-text field
+  // Ensure the current/suggested value is always selectable even if not listed.
+  const extra: PreflightInterfaceOptionDto[] = !value || opts.some((o) => o.name === value) ? [] : [{ name: value }];
+  const all = [...extra, ...opts];
+  return (
+    <label className="block min-w-0 flex-1">
+      <span className="mb-0.5 block truncate text-[11px] font-medium uppercase tracking-wide text-faint">interface</span>
+      <select value={value} onChange={(e) => onCommit(e.target.value)} className="w-full rounded border border-border bg-background px-2 py-1 text-sm">
+        {all.map((o, i) => (
+          <option key={`${o.name}-${i}`} value={o.name}>
+            {o.kind ? `[${o.kind}] ` : ''}{o.name}{o.note ? ` — ${o.note}` : ''}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
 }
 
 /** Renders one preflight value as an editable field (commits on blur). */
@@ -293,6 +322,26 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
     preflightQuery.reset();
   }
 
+  // --- Persistent port roles (uplink/trunk markers) ---------------------------------
+  const queryClient = useQueryClient();
+  /** Mark/clear a port's role — then re-run the preflight so the merged live+role
+   *  flags refresh immediately (the API ORs device_port_roles into ports). */
+  const markRole = useMutation({
+    mutationFn: async ({ pid, deviceId, portName, role }: { pid: string; deviceId: string; portName: string; role: 'uplink' | 'trunk' | null }) => {
+      await api.setDevicePortRole(deviceId, { pluginId: pid, portName, role });
+    },
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['rollout-preflight'] }); preflightQuery.mutate(); },
+  });
+
+  // Which chip's role menu is open (keyed `${deviceId}:${portName}`), if any.
+  const [roleMenu, setRoleMenu] = useState<string | null>(null);
+  useEffect(() => {
+    if (!roleMenu) return;
+    const close = () => setRoleMenu(null);
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [roleMenu]);
+
   // --- Submit: one plan per supporting plugin with confirmed per-device inputs ----
   const createPlans = useMutation({
     mutationFn: async () => {
@@ -353,6 +402,15 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
     if (!preflightQuery.data) return false;
     for (const results of preflightQuery.data.values()) {
       if (results.some((r) => r.capabilities?.vlanPorts && (r.ports?.length ?? 0) > 0)) return true;
+    }
+    return false;
+  }, [preflightQuery.data]);
+
+  /** Any port in step 2 persistently marked as an uplink? */
+  const anyUplinkMarked = useMemo(() => {
+    if (!preflightQuery.data) return false;
+    for (const results of preflightQuery.data.values()) {
+      if (results.some((r) => r.ports?.some((p) => p.uplink))) return true;
     }
     return false;
   }, [preflightQuery.data]);
@@ -560,6 +618,9 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
                     <span className="mx-1 h-4 w-px bg-border" />
                     <button type="button" onClick={() => bulkSetMode('all')} className={bulkBtnCls}>All ports</button>
                     <button type="button" onClick={() => bulkSetMode('trunk')} className={bulkBtnCls}>Trunk ports only</button>
+                    {anyUplinkMarked && (
+                      <button type="button" onClick={() => bulkSetMode('uplink')} title="Every port the user has persistently marked as an uplink" className={bulkBtnCls}>Uplinks</button>
+                    )}
                   </>)}
                 </div>
 
@@ -607,23 +668,26 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
                                   {/* Port quick-select — only when the plugin supports vlanPorts. */}
                                   {portCapable ? (
                                     <span className="flex items-center gap-1">
-                                      {(['all', 'trunk', 'custom'] as const).map((m) => (
-                                        <button
-                                          key={m}
-                                          type="button"
-                                          onClick={() => {
-                                            if (m === 'custom' && st.portMode !== 'custom') {
-                                              // Seed the custom selection with what the current mode would pick.
-                                              setSt({ portMode: m, customPorts: selectedPorts(st.portMode, st.customPorts, r?.ports) });
-                                            } else {
-                                              setSt({ portMode: m });
-                                            }
-                                          }}
-                                          className={clsx('rounded px-1.5 py-0.5 text-xs', st.portMode === m ? 'bg-primary/15 font-medium text-primary' : 'text-faint hover:bg-muted')}
-                                        >
-                                          {m === 'all' ? `All (${r!.ports!.length})` : m === 'trunk' ? `Trunk only (${r!.ports!.filter((p) => p.trunk).length})` : `Select (${chosen.length})`}
-                                        </button>
-                                      ))}
+                                      {(['all', 'trunk', 'uplink', 'custom'] as const).map((m) => {
+                                        if (m === 'uplink' && !(r!.ports!.some((p) => p.uplink))) return null;
+                                        return (
+                                          <button
+                                            key={m}
+                                            type="button"
+                                            onClick={() => {
+                                              if (m === 'custom' && st.portMode !== 'custom') {
+                                                // Seed the custom selection with what the current mode would pick.
+                                                setSt({ portMode: m, customPorts: selectedPorts(st.portMode, st.customPorts, r?.ports) });
+                                              } else {
+                                                setSt({ portMode: m });
+                                              }
+                                            }}
+                                            className={clsx('rounded px-1.5 py-0.5 text-xs', st.portMode === m ? 'bg-primary/15 font-medium text-primary' : 'text-faint hover:bg-muted')}
+                                          >
+                                            {m === 'all' ? `All (${r!.ports!.length})` : m === 'trunk' ? `Trunk only (${r!.ports!.filter((p) => p.trunk).length})` : m === 'uplink' ? `Uplinks (${r!.ports!.filter((p) => p.uplink).length})` : `Select (${chosen.length})`}
+                                          </button>
+                                        );
+                                      })}
                                     </span>
                                   ) : (
                                     <span className="text-xs text-faint" title={portCapable ? '' : 'This platform creates the VLAN on its parent interface — no per-port selection.'}>interface-only</span>
@@ -640,19 +704,41 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
                                       <div className="flex flex-wrap gap-1">
                                         {r!.ports!.map((p) => {
                                           const active = st.portMode !== 'custom' || st.customPorts.includes(p.name);
+                                          const menuKey = `${d.id}:${p.name}`;
                                           return (
-                                            <button
-                                              key={p.name}
-                                              type="button"
-                                              disabled={st.portMode !== 'custom'}
-                                              onClick={() => setSt({ customPorts: active ? st.customPorts.filter((x) => x !== p.name) : [...st.customPorts, p.name] })}
-                                              title={`${p.name}${p.trunk ? ' · trunk/uplink' : ''}${p.pvid != null ? ` · PVID ${p.pvid}` : ''}`}
-                                              className={clsx('flex items-center gap-1 rounded border px-1.5 py-0.5 text-xs', active ? 'border-primary/40 bg-primary/10 text-foreground' : 'border-border text-faint', st.portMode === 'custom' && !active && 'opacity-60')}
-                                            >
-                                              {p.trunk && <span className="h-1.5 w-1.5 rounded-full bg-warning" title="trunk/uplink port" />}
-                                              {p.name}
-                                              {p.pvid != null && <span className="text-[10px] text-faint">{p.pvid}</span>}
-                                            </button>
+                                            <span key={p.name} className="relative inline-flex items-center gap-0.5">
+                                              <button
+                                                type="button"
+                                                disabled={st.portMode !== 'custom'}
+                                                onClick={() => setSt({ customPorts: active ? st.customPorts.filter((x) => x !== p.name) : [...st.customPorts, p.name] })}
+                                                title={`${p.name}${p.uplink ? ' · marked uplink' : ''}${!p.uplink && p.trunk ? ' · trunk/uplink' : ''}${p.pvid != null ? ` · PVID ${p.pvid}` : ''}`}
+                                                className={clsx('flex items-center gap-1 rounded border px-1.5 py-0.5 text-xs', active ? 'border-primary/40 bg-primary/10 text-foreground' : 'border-border text-faint', st.portMode === 'custom' && !active && 'opacity-60')}
+                                              >
+                                                {p.uplink && <span className="h-1.5 w-1.5 rounded-full bg-primary" title="marked uplink (persistent)" />}
+                                                {!p.uplink && p.trunk && <span className="h-1.5 w-1.5 rounded-full bg-warning" title="trunk/uplink port (live detection)" />}
+                                                {p.name}
+                                                {p.pvid != null && <span className="text-[10px] text-faint">{p.pvid}</span>}
+                                              </button>
+                                              {/* Persistent role marker — survives across rollouts. */}
+                                              <button
+                                                type="button"
+                                                onClick={(e) => { e.stopPropagation(); setRoleMenu(roleMenu === menuKey ? null : menuKey); }}
+                                                title={p.uplink ? 'Marked uplink — click to change/clear' : p.trunk ? 'Trunk (live) — click to mark persistently' : 'Click to mark as uplink/trunk'}
+                                                className="rounded p-0.5 text-faint hover:bg-muted"
+                                              >
+                                                <Settings2 className={clsx('h-3 w-3', (p.uplink || p.trunk) && 'text-secondary')} />
+                                              </button>
+                                              {roleMenu === menuKey && (
+                                                <div className="absolute right-0 top-full z-10 mt-0.5 w-40 rounded-md border border-border bg-card p-1 text-xs shadow-lg" onClick={(e) => e.stopPropagation()}>
+                                                  <p className="px-2 py-1 font-medium text-secondary">{p.name}</p>
+                                                  <button type="button" onClick={() => { setRoleMenu(null); markRole.mutate({ pid, deviceId: d.id, portName: p.name, role: 'uplink' }); }} className={clsx('block w-full rounded px-2 py-1 text-left hover:bg-muted', p.uplink && 'font-medium text-primary')}>Mark as uplink</button>
+                                                  <button type="button" onClick={() => { setRoleMenu(null); markRole.mutate({ pid, deviceId: d.id, portName: p.name, role: 'trunk' }); }} className={clsx('block w-full rounded px-2 py-1 text-left hover:bg-muted', !p.uplink && p.trunk && 'font-medium text-primary')}>Mark as trunk</button>
+                                                  {(p.uplink || p.trunk) && (
+                                                    <button type="button" onClick={() => { setRoleMenu(null); markRole.mutate({ pid, deviceId: d.id, portName: p.name, role: null }); }} className="block w-full rounded px-2 py-1 text-left text-danger-fg hover:bg-muted">Clear role</button>
+                                                  )}
+                                                </div>
+                                              )}
+                                            </span>
                                           );
                                         })}
                                       </div>
@@ -673,7 +759,10 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
                             {ipOn && (!r || !r.values.some((v) => v.key === 'cidrV6')) && (
                               <PreflightField label="cidrV6 (override)" initial={st.cidrV6 ?? sharedInputs.cidrV6 ?? ''} onCommit={(val) => setSt({ cidrV6: val })} />
                             )}
-                            {(!r || !r.values.some((v) => v.key === 'interface')) && (
+                            {/* Interface — dropdown of live candidates when the plugin enumerated them, else free text. */}
+                            {r?.interfaces && r.interfaces.length > 0 ? (
+                              <InterfaceField r={r} value={st.interface ?? suggestedInterface(r)} onCommit={(val) => setSt({ interface: val })} />
+                            ) : (!r || !r.values.some((v) => v.key === 'interface')) && (
                               <PreflightField label="interface (override)" initial={st.interface ?? ''} onCommit={(val) => setSt({ interface: val })} />
                             )}
                           </div>

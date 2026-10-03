@@ -2270,10 +2270,20 @@ export interface PreflightNetworkCheckDto {
 export interface PreflightPortDto {
   /** Vendor-local port name — the value that goes into `vlanPorts`. */
   name: string;
-  /** Whether the port is currently a trunk/uplink (carries >1 VLAN). */
+  /** Whether the port is currently a trunk/uplink (carries >1 VLAN, or user-marked). */
   trunk?: boolean;
   /** Untagged default VLAN id, when known. */
   pvid?: number | null;
+  /** True when the user has persistently marked this port as an uplink in UNM. */
+  uplink?: boolean;
+}
+
+/** One candidate interface for the `interface` input (network.create). */
+export interface PreflightInterfaceOptionDto {
+  /** The value that goes into the intent's `interface` input. */
+  name: string;
+  kind?: 'physical' | 'bridge' | 'bundle' | 'vlan';
+  note?: string;
 }
 
 /** The preflight result for one device of one plugin (POST /plans/preflight). */
@@ -2283,10 +2293,20 @@ export interface PreflightResultDto {
   degraded?: boolean;
   error?: string;
   check?: PreflightNetworkCheckDto;
-  /** Physical ports with trunk status — feeds the dialog's All/Trunk/Select quick-selects. */
+  /** Physical ports with trunk status — feeds the dialog's All/Trunk/Uplinks/Select quick-selects. */
   ports?: PreflightPortDto[];
+  /** Candidate interfaces for the `interface` input (NICs/bridges/bundles). */
+  interfaces?: PreflightInterfaceOptionDto[];
   /** Capability flags advertised by the plugin (e.g. explicit vlanPorts lists). */
   capabilities?: { vlanPorts?: boolean };
+}
+
+/** One user-assigned port role row (GET /devices/:id/port-roles). */
+export interface PortRoleDto {
+  pluginId: string;
+  portName: string;
+  role: 'uplink' | 'trunk';
+  note?: string;
 }
 
 /** Free-range suggestions from gaps in the live inventory (GET /networks/suggestions). */
@@ -2752,6 +2772,14 @@ export const api = {
   // Normalized port inventory for a device across all plugins.
   devicePorts: (deviceId: string) =>
     apiFetch<{ deviceId: string; ports: DevicePortRow[] }>(`/devices/${deviceId}/ports`),
+  // User-assigned port roles (uplink/trunk markers). role=null clears the mark.
+  devicePortRoles: (deviceId: string, pluginId?: string) =>
+    apiFetch<{ deviceId: string; roles: PortRoleDto[] }>(`/devices/${deviceId}/port-roles${pluginId ? `?pluginId=${encodeURIComponent(pluginId)}` : ''}`),
+  setDevicePortRole: (deviceId: string, body: { pluginId: string; portName: string; role: 'uplink' | 'trunk' | null }) =>
+    apiFetch<{ deviceId: string; pluginId: string; portName: string; role: 'uplink' | 'trunk' | null }>(
+      `/devices/${deviceId}/port-roles`,
+      { method: 'PUT', body: JSON.stringify(body) },
+    ),
   deviceTelemetry: (deviceId: string, limit = 30) =>
     apiFetch<{ deviceId: string; history: { collectedAt: string; health: string; pluginId?: string; metrics: Record<string, unknown> }[] }>(
       `/devices/${deviceId}/telemetry?limit=${limit}`
