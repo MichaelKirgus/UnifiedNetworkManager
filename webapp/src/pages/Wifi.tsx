@@ -390,7 +390,7 @@ export default function Wifi() {
           {/* SSID table (top) — fixed share of the page height while the spectrum is
               open; when collapsed it takes everything left of the header card. */}
           <div
-            className={clsx('min-h-0 pr-1', !spectrumOpen && 'flex-1')}
+            className={clsx('min-h-0 px-1', !spectrumOpen && 'flex-1')}
             style={{ height: spectrumOpen ? `${tablePct}%` : undefined }}
           >
             <DataTable<WifiSsidGroup>
@@ -425,7 +425,7 @@ export default function Wifi() {
           {/* Spectrum view (bottom) — takes the remaining height; each column
               inside scrolls independently so nothing spills out of the card.
               The header stays mounted when collapsed so it can be re-opened. */}
-          <div className={clsx('shrink-0 min-h-0 pl-1', spectrumOpen && 'flex-1')}>
+          <div className={clsx('shrink-0 min-h-0 px-1', spectrumOpen && 'flex-1')}>
             {/* Collapsible spectrum view — all three bands, WiFi-scanner style.
                 The header (with its toggle) stays mounted when collapsed so the
                 view can be re-opened; only the content below it is conditional. */}

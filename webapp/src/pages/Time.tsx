@@ -614,7 +614,7 @@ export default function Time() {
           {/* Device table (top) — fixed share of the page height while the span
               view is open; when collapsed it takes everything. */}
           <div
-            className={clsx('min-h-0 pr-1', !spanOpen && 'flex-1')}
+            className={clsx('min-h-0 px-1', !spanOpen && 'flex-1')}
             style={{ height: spanOpen ? `${tablePct}%` : undefined }}
           >
             <DataTable<TimeRowView>
@@ -650,7 +650,7 @@ export default function Time() {
               center line to the device's clock position. Right = ahead, left =
               behind; color encodes magnitude. The header stays mounted when
               collapsed so it can be re-opened. */}
-          <div className={clsx('shrink-0 min-h-0 pl-1', spanOpen && 'flex-1')}>
+          <div className={clsx('shrink-0 min-h-0 px-1', spanOpen && 'flex-1')}>
             <div className="flex h-full min-h-0 flex-col rounded-lg border border-border bg-card">
               <button
                 type="button"

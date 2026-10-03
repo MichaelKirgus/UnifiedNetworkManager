@@ -2058,7 +2058,7 @@ export default function Containers() {
           {/* Container table (top) — fixed share of the page height while the
               image panel is open; when collapsed it takes everything left. */}
           <div
-            className={clsx('min-h-0 pr-1', !imagesOpen && 'flex-1')}
+            className={clsx('min-h-0 px-1', !imagesOpen && 'flex-1')}
             style={{ height: imagesOpen ? `${tablePct}%` : undefined }}
           >
             {containersQuery.data && (
@@ -2125,7 +2125,7 @@ export default function Containers() {
 
           {/* Image panel (bottom) — takes the remaining height. The header stays
               mounted when collapsed so it can be re-opened. */}
-          <div className={clsx('shrink-0 min-h-0 pl-1', imagesOpen && 'flex-1')}>
+          <div className={clsx('shrink-0 min-h-0 px-1', imagesOpen && 'flex-1')}>
             <div className="flex h-full min-h-0 flex-col rounded-lg border border-border bg-card">
               {/* Header row — the title + chevron toggle collapse; the Pull button
                   lives beside them (a nested <button> inside a <button> is invalid). */}
