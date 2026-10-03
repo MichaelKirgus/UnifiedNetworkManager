@@ -96,7 +96,7 @@ export function WizardLayout({ title, icon, steps, current, onExit, actions, chi
         </>
       }
     >
-      <div className="mx-auto max-w-5xl space-y-4 p-4 sm:p-6">
+      <div className="space-y-4">
         <Stepper steps={steps} current={current} />
         {children}
       </div>
