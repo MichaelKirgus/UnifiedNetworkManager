@@ -11,7 +11,7 @@ import { settingsHeaders } from '../pluginSettings';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { enqueuePlanExecution } from '../workers/planExecutor';
-import type { CatalogEntry as SdkCatalogEntry } from '@unm/plugin-sdk';
+import { isCanonicalIntent, type CatalogEntry as SdkCatalogEntry } from '@unm/plugin-sdk';
 import { validateInput, type InputSchema } from '../utils/inputSchema';
 import { networkChecksForDevices, networkCheck, assertRolloutAllowed } from '../utils/networkCheck';
 
@@ -346,6 +346,10 @@ interface PreflightResultDto {
   values: Array<{ key: string; value: unknown; confidence: 'high' | 'medium' | 'low'; note?: string }>;
   degraded?: boolean;
   error?: string;
+  /** Physical ports with trunk status (network.create) — for the dialog's port quick-selects. */
+  ports?: Array<{ name: string; trunk?: boolean; pvid?: number | null }>;
+  /** Capability flags advertised by the plugin (e.g. explicit vlanPorts lists). */
+  capabilities?: { vlanPorts?: boolean };
 }
 
 /** Server-side overlap check attached to each preflight result (network.create only). */
@@ -457,7 +461,14 @@ router.post(
             intentActionId, inputs, device: t,
           }, { timeout: 45_000, headers });
           const result = (r.data?.result ?? {}) as PreflightResultDto;
-          results.push({ deviceId: t.deviceId, values: Array.isArray(result.values) ? result.values : [], degraded: !!result.degraded, error: result.error });
+          results.push({
+            deviceId: t.deviceId,
+            values: Array.isArray(result.values) ? result.values : [],
+            degraded: !!result.degraded,
+            error: result.error,
+            ports: Array.isArray(result.ports) ? result.ports : undefined,
+            capabilities: isPlainObject(result.capabilities) ? (result.capabilities as { vlanPorts?: boolean }) : undefined,
+          });
         } catch (err) {
           const e = err as { response?: { status?: number; data?: { error?: string } }; message?: string };
           results.push({ deviceId: t.deviceId, values: [], degraded: true, error: e.response?.data?.error ?? `Preflight failed: ${e.message ?? 'unreachable'}` });
@@ -529,7 +540,10 @@ router.post(
 
     const catalog = await loadCatalog(pluginId);
     const intent = catalog.find((c) => c.id === intentActionId);
-    if (intent && typeof intent.deviceCount === 'number') {
+    // Canonical fleet intents (network.create, …) FAN OUT — one step per device,
+    // any count. Older persisted catalogs may still carry a numeric deviceCount
+    // for them; the 'N' contract wins over the stale number.
+    if (intent && typeof intent.deviceCount === 'number' && !isCanonicalIntent(intentActionId)) {
       // Multi-device intents name an exact device count (e.g. 2 for tunnels).
       if (devicesRaw.length !== intent.deviceCount) {
         res.status(400).json({
