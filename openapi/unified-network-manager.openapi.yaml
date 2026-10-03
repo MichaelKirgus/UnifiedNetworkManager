@@ -7159,6 +7159,16 @@ components:
             User-assigned free-form tags (same data basis as devices.tags,
             e.g. "vm", "lab"). Also auto-applied from a matching device on
             inventory import when the host has none yet.
+        macs:
+          type: array
+          items: { type: string }
+          default: []
+          description: >-
+            Additional known MAC addresses of this host (colon form) — e.g. rotated
+            container MACs or randomized client MACs synced from the live inventory
+            by the import wizard (macSyncPolicy=add). The primary/expected MAC per
+            address lives in ips[].mac; these extra identities are used for discovery
+            and import matching so a re-keyed host stays one documented row.
         ips:
           type: array
           minItems: 1
@@ -7320,6 +7330,18 @@ components:
           minimum: 0
           default: 24
           description: "Only import hosts observed within this many hours (0 = all)"
+        macSyncPolicy:
+          type: string
+          enum: [keep, replace, add]
+          default: keep
+          description: >-
+            How to reconcile a documented MAC that differs from what is currently
+            observed for the same address (docker container re-creation or a client
+            with a randomized MAC): keep = never touch documented MACs — mismatches
+            stay flagged in the UI; replace = set the address's documented MAC to the
+            observed one; add = keep it and remember the observed MAC as an additional
+            identity of the host (documented_hosts.macs), so discovery + future import
+            matching keep working after a re-key.
         dryRun:
           type: boolean
           default: true
@@ -7350,12 +7372,24 @@ components:
                   Extra MACs folded into this entry by the smart hostname merge
                   (a multi-NIC machine observed once per NIC); empty/absent =
                   single-MAC row.
+              macReplaced:
+                type: integer
+                description: "Documented-vs-observed MAC mismatches that would be REPLACED with the observed MAC (macSyncPolicy=replace)"
+              macAdded:
+                type: integer
+                description: "Observed MACs that would be ADDED as additional identities of this host (macSyncPolicy=add)"
         created: { type: integer }
         updated: { type: integer }
         skipped: { type: integer }
         mergedGroups:
           type: integer
           description: "How many live MAC rows were folded into one entry by the hostname merge (dry-run only)"
+        macReplaced:
+          type: integer
+          description: "Total documented-vs-observed MAC mismatches replaced with the observed MAC"
+        macAdded:
+          type: integer
+          description: "Total observed MACs added as additional identities of their host"
 
     DocumentedNetwork:
       type: object

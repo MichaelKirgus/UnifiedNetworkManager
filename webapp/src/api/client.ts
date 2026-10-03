@@ -418,6 +418,8 @@ export interface DocumentedHost {
   layerName: string | null;
   /** User-assigned free-form tags (same data basis as devices.tags). */
   tags: string[];
+  /** Additional known MACs of this host (rotated/randomized client MACs synced from the inventory). */
+  macs: string[];
   ips: DocumentedHostIp[];
   /** True when any documented MAC or IP was observed in the live inventory. */
   discovered: boolean;
@@ -493,6 +495,8 @@ export interface DocumentedHostInventoryImportOptions {
   skipWithoutVlan?: boolean;
   /** Only import hosts observed within this many hours (0 = all, default 24). */
   maxAgeHours?: number;
+  /** How to reconcile documented vs observed MACs: keep = never touch (default), replace = set the address's documented MAC to the observed one, add = keep it and remember the observed MAC as an additional identity of the host. */
+  macSyncPolicy?: 'keep' | 'replace' | 'add';
   /** Preview only — compute the plan without writing anything (default true). */
   dryRun?: boolean;
 }
@@ -509,6 +513,10 @@ export interface DocumentedHostInventoryPlanEntry {
   stripped?: number;
   /** Extra MACs folded into this entry by the smart hostname merge (multi-NIC host); empty/absent = single-MAC row. */
   mergedFrom?: string[];
+  /** Documented-vs-observed MAC mismatches that would be REPLACED with the observed MAC (macSyncPolicy='replace'). */
+  macReplaced?: number;
+  /** Observed MACs that would be ADDED as additional identities of this host (macSyncPolicy='add'). */
+  macAdded?: number;
 }
 
 /** Result of the inventory import (dry-run plan or applied summary). */
@@ -521,6 +529,10 @@ export interface DocumentedHostInventoryImportResult {
   skipped: number;
   /** How many live MAC rows were folded into one entry by the hostname merge (dry-run only). */
   mergedGroups?: number;
+  /** Total documented-vs-observed MAC mismatches replaced with the observed MAC. */
+  macReplaced?: number;
+  /** Total observed MACs added as additional identities of their host. */
+  macAdded?: number;
 }
 
 /** Result of merging several documented host rows into one. */

@@ -140,6 +140,14 @@ function IpBlock({ row }: { row: DocumentedHost }) {
           )}
         </span>
       ))}
+      {row.macs.length > 0 && (
+        <span
+          title={`Additional known MACs of this host — synced from the live inventory (rotated/randomized client MACs): ${row.macs.join(', ')}`}
+          className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-secondary"
+        >
+          +{row.macs.length} mac{row.macs.length > 1 ? 's' : ''}
+        </span>
+      )}
     </div>
   );
 }
@@ -1030,20 +1038,22 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
   const [rangesText, setRangesText] = useState('');
   const [skipWithoutVlan, setSkipWithoutVlan] = useState(false);
   const [maxAgeHours, setMaxAgeHours] = useState(24);
+  type MacSyncPolicy = 'keep' | 'replace' | 'add';
+  const [macSyncPolicy, setMacSyncPolicy] = useState<MacSyncPolicy>('keep');
   // Phase: 'options' → pick filters; 'plan' → dry-run preview; 'done' → applied.
   const [phase, setPhase] = useState<'options' | 'plan' | 'done'>('options');
   const [plan, setPlan] = useState<import('../api/client').DocumentedHostInventoryImportResult | null>(null);
   const [applied, setApplied] = useState<import('../api/client').DocumentedHostInventoryImportResult | null>(null);
 
   const previewMutation = useMutation({
-    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, publicIpv4Policy, publicIpv6Policy, rangeMode, ranges: parseRanges(rangesText), skipWithoutVlan, maxAgeHours, dryRun: true }),
+    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, publicIpv4Policy, publicIpv6Policy, rangeMode, ranges: parseRanges(rangesText), skipWithoutVlan, maxAgeHours, macSyncPolicy, dryRun: true }),
     onSuccess: (res) => {
       setPlan(res);
       setPhase('plan');
     },
   });
   const applyMutation = useMutation({
-    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, publicIpv4Policy, publicIpv6Policy, rangeMode, ranges: parseRanges(rangesText), skipWithoutVlan, maxAgeHours, dryRun: false }),
+    mutationFn: () => api.importDocumentedHostsFromInventory({ skipWithoutHostname, skipUnknownNetworks, publicIpv4Policy, publicIpv6Policy, rangeMode, ranges: parseRanges(rangesText), skipWithoutVlan, maxAgeHours, macSyncPolicy, dryRun: false }),
     onSuccess: (res) => {
       setApplied(res);
       setPhase('done');
@@ -1055,7 +1065,7 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
   useEffect(() => {
     if (phase === 'plan') previewMutation.mutate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [skipWithoutHostname, skipUnknownNetworks, publicIpv4Policy, publicIpv6Policy, rangeMode, rangesText, skipWithoutVlan, maxAgeHours]);
+  }, [skipWithoutHostname, skipUnknownNetworks, publicIpv4Policy, publicIpv6Policy, rangeMode, rangesText, skipWithoutVlan, maxAgeHours, macSyncPolicy]);
 
   const plannedCreates = plan?.planned.filter((p) => p.action === 'create').length ?? 0;
   const plannedUpdates = plan?.planned.filter((p) => p.action === 'update').length ?? 0;
@@ -1139,6 +1149,13 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
                   <option value={24}>last 24 hours</option>
                 </select>
               </label>
+              <div className="rounded-md border border-border px-3 py-2" title="What to do when a documented MAC differs from what is currently observed for the same address — e.g. after a docker container re-creation or on clients with randomized MACs.">MAC sync
+                <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={macSyncPolicy} onChange={(e) => setMacSyncPolicy(e.target.value as MacSyncPolicy)}>
+                  <option value="keep">No sync (flag mismatches only)</option>
+                  <option value="replace">Replace with inventory</option>
+                  <option value="add">Add new MAC to host</option>
+                </select>
+              </div>
             </div>
 
             <div className="flex justify-end gap-2 border-t border-border pt-3">
@@ -1170,6 +1187,16 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
               {mergedGroupCount > 0 && (
                 <span title="Live rows sharing one hostname were folded into a single documented host — multi-NIC machines no longer create duplicate rows." className="rounded bg-warning px-2 py-1 font-medium text-warning-fg">
                   {mergedGroupCount} multi-NIC host(s) merged by hostname
+                </span>
+              )}
+              {(plan.macReplaced ?? 0) > 0 && (
+                <span title="Documented MACs that differ from the live observation would be REPLACED with the observed MAC." className="rounded bg-warning px-2 py-1 font-medium text-warning-fg">
+                  {plan.macReplaced} MAC(s) to replace
+                </span>
+              )}
+              {(plan.macAdded ?? 0) > 0 && (
+                <span title="Observed MACs that would be ADDED as additional identities of their host (the documented MAC is kept)." className="rounded bg-info px-2 py-1 font-medium text-info-fg">
+                  {plan.macAdded} MAC(s) to add
                 </span>
               )}
               {plannedSkips > 0 && <span className="rounded bg-muted px-2 py-1 font-medium text-secondary">{plannedSkips} skipped</span>}
@@ -1221,6 +1248,14 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
                   <option value={24}>last 24 hours</option>
                 </select>
               </label>
+              <label className="flex items-center gap-2" title="What to do when a documented MAC differs from what is currently observed for the same address.">
+                MAC sync
+                <select className="rounded-md border border-border bg-background px-2 py-1 text-xs" value={macSyncPolicy} onChange={(e) => setMacSyncPolicy(e.target.value as MacSyncPolicy)}>
+                  <option value="keep">no sync</option>
+                  <option value="replace">replace with inventory</option>
+                  <option value="add">add new MAC to host</option>
+                </select>
+              </label>
             </div>
 
             {previewMutation.isPending && <p className="mb-3 text-sm text-faint">Recomputing preview…</p>}
@@ -1232,6 +1267,7 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
                     <th className="px-2 py-1.5 font-medium">MAC</th>
                     <th className="px-2 py-1.5 font-medium">Hostname</th>
                     <th className="px-2 py-1.5 font-medium">IPs</th>
+                    <th className="px-2 py-1.5 font-medium" title="Planned MAC sync changes (only shown when a MAC sync policy is active)">MAC sync</th>
                     <th className="px-2 py-1.5 font-medium">Action</th>
                   </tr>
                 </thead>
@@ -1257,6 +1293,18 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
                         {p.stripped ? (
                           <span className="text-faint" title={`${p.stripped} public address(es) removed by the strip policy`}> · {p.stripped} stripped</span>
                         ) : null}
+                      </td>
+                      <td className="px-2 py-1">
+                        {(p.macReplaced ?? 0) > 0 && (
+                          <span title={`${p.macReplaced} documented MAC(s) would be replaced with the observed one`} className="mr-1 rounded bg-warning px-1.5 py-0.5 text-[10px] font-semibold text-warning-fg">
+                            {p.macReplaced} mac → replace
+                          </span>
+                        )}
+                        {(p.macAdded ?? 0) > 0 && (
+                          <span title={`${p.macAdded} observed MAC(s) would be added as additional identities of this host`} className="rounded bg-info px-1.5 py-0.5 text-[10px] font-semibold text-info-fg">
+                            {p.macAdded} mac → add
+                          </span>
+                        )}
                       </td>
                       <td className="px-2 py-1">
                         {p.action === 'create' && <span className="rounded bg-success px-1.5 py-0.5 text-[10px] font-semibold text-success-fg">create</span>}
@@ -1294,6 +1342,16 @@ function InventoryImportModal({ onClose, onDone }: InventoryImportModalProps) {
             <div className="mb-4 flex flex-wrap gap-2 text-sm">
               <span className="rounded bg-success px-2 py-1 font-medium text-success-fg">{applied.created} created</span>
               <span className="rounded bg-info px-2 py-1 font-medium text-info-fg">{applied.updated} updated (merged)</span>
+              {(applied.macReplaced ?? 0) > 0 && (
+                <span title="Documented MACs replaced with the observed one." className="rounded bg-warning px-2 py-1 font-medium text-warning-fg">
+                  {applied.macReplaced} MAC(s) replaced
+                </span>
+              )}
+              {(applied.macAdded ?? 0) > 0 && (
+                <span title="Observed MACs added as additional identities of their host." className="rounded bg-info px-2 py-1 font-medium text-info-fg">
+                  {applied.macAdded} MAC(s) added
+                </span>
+              )}
               {applied.skipped > 0 && <span className="rounded bg-muted px-2 py-1 font-medium text-secondary">{applied.skipped} skipped</span>}
             </div>
             <p className="mb-4 text-sm text-secondary">

@@ -488,6 +488,9 @@ export async function initDb(): Promise<void> {
   await pool.query(`ALTER TABLE documented_hosts ADD COLUMN IF NOT EXISTS "isActive" BOOLEAN NOT NULL DEFAULT TRUE`);
   // Free-form tags (same data basis as devices.tags) — added after the table existed.
   await pool.query(`ALTER TABLE documented_hosts ADD COLUMN IF NOT EXISTS "tags" TEXT NOT NULL DEFAULT '[]'`);
+  // Additional known MACs of a host (rotated/randomized client MACs synced from
+  // the live inventory by the import wizard) — added after the table existed.
+  await pool.query(`ALTER TABLE documented_hosts ADD COLUMN IF NOT EXISTS "macs" TEXT NOT NULL DEFAULT '[]'`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_documented_hosts_site ON documented_hosts ("siteId")`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_documented_hosts_layer ON documented_hosts ("layerId")`);
 

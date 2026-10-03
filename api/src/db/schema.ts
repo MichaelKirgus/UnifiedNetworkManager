@@ -1908,6 +1908,12 @@ export const documentedHosts = pgTable(
     // "lab") — JSON string array; also auto-applied from a matching device on
     // inventory import when the host has none yet.
     tags: text('tags').notNull().default('[]'),
+    // Additional known MAC addresses of this host (JSON string array, colon form)
+    // — e.g. rotated container MACs or randomized client MACs synced from the live
+    // inventory by the import wizard (macSyncPolicy='add'). The PRIMARY/expected
+    // MAC per address lives in documented_host_ips.mac; these are extra identities
+    // used for discovery + import matching so a re-keyed host stays one row.
+    macs: text('macs').notNull().default('[]'),
     // User-maintained lifecycle flag: true = the host is in active use, false =
     // stale/retired (the row stays documented but is visually dimmed). Default
     // TRUE — every new or imported host starts active.

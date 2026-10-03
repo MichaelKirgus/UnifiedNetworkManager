@@ -260,6 +260,8 @@ export interface DocumentedHostView {
   layerName: string | null;
   /** User-assigned free-form tags (same data basis as devices.tags). */
   tags: string[];
+  /** Additional known MACs of this host (rotated/randomized client MACs synced from the inventory). */
+  macs: string[];
   ips: DocumentedHostIpView[];
   /** True when any documented MAC or IP was observed in the live inventory. */
   discovered: boolean;
@@ -342,6 +344,15 @@ function shapeHost(
       hostNameCandidates.push({ dhcp: !!live.dhcpHostname, value: live.dhcpHostname ?? live.hostname! });
     }
   }
+  // Additional known MACs (rotated/randomized client MACs synced from the inventory)
+  // also count as discovery evidence — a re-keyed host stays "discovered".
+  for (const m of safeParseStringArray(h.host.macs)) {
+    const mi = byMac.get(macKey(m));
+    if (mi) {
+      discovered = true;
+      if (mi.lastSeenAt > (lastSeenAt ?? '')) lastSeenAt = mi.lastSeenAt;
+    }
+  }
   for (const ip of ips) {
     if (ip.macMismatch) macMismatch = true;
   }
@@ -360,6 +371,7 @@ function shapeHost(
     layerId: h.host.layerId,
     layerName: h.host.layerId ? (layerNameById.get(h.host.layerId) ?? null) : null,
     tags: readStringArray(h.host.tags),
+    macs: safeParseStringArray(h.host.macs),
     ips,
     discovered,
     lastSeenAt,
@@ -417,8 +429,9 @@ async function loadHostsWithIps(siteId?: string): Promise<HostWithIps[]> {
 /** Full view for a set of hosts — shared by the list route and single-row responses. */
 async function buildViews(hosts: HostWithIps[]): Promise<DocumentedHostView[]> {
   if (hosts.length === 0) return [];
+  // Primary per-address MACs + additional known MACs (rotated/randomized clients).
   const macs = Array.from(
-    new Set(hosts.flatMap((h) => h.ips.map((i) => i.mac).filter((m): m is string => !!m)))
+    new Set(hosts.flatMap((h) => [...h.ips.map((i) => i.mac), ...safeParseStringArray(h.host.macs)].filter((m): m is string => !!m)))
   );
   const addrs = Array.from(new Set(hosts.flatMap((h) => h.ips.map((i) => i.address))));
   const [{ byMac, byIp }, { siteNameById, layerNameById }, resolveNetworkLabel] = await Promise.all([
@@ -919,6 +932,18 @@ router.post('/documented-hosts/bulk', requireAuth, requirePermission('documented
  */
 type PublicIpPolicy = 'keep' | 'strip' | 'skip-host';
 
+/**
+ * How to reconcile a documented MAC that differs from what is currently observed
+ * for the same address (e.g. docker container re-creation or a client with a
+ * randomized MAC):
+ * - 'keep'     : never touch documented MACs — mismatches stay flagged in the UI (default).
+ * - 'replace'  : set the address's documented MAC to the observed one.
+ * - 'add'      : keep the documented MAC and remember the observed one as an
+ *                ADDITIONAL identity of the host (documented_hosts.macs) — discovery
+ *                + future import matching keep working after a re-key.
+ */
+type MacSyncPolicy = 'keep' | 'replace' | 'add';
+
 /** Options for the inventory import. */
 interface InventoryImportOptions {
   /** Skip live hosts without a usable hostname (no DNS name can be derived). Default true. */
@@ -937,6 +962,8 @@ interface InventoryImportOptions {
   skipWithoutVlan?: boolean;
   /** Only import hosts observed within this many hours (0 = all, default 24 — the sweep window). */
   maxAgeHours?: number;
+  /** How to reconcile documented vs observed MACs: keep = never touch (default), replace = set the address's documented MAC to the observed one, add = keep it and remember the observed MAC as an additional identity of the host. */
+  macSyncPolicy?: MacSyncPolicy;
   /** Preview only — compute what would change without writing anything. Default true. */
   dryRun?: boolean;
 }
@@ -953,6 +980,10 @@ interface InventoryImportPlanEntry {
   stripped?: number;
   /** Extra MACs folded into this entry by the hostname merge (multi-NIC host); empty/absent = single-MAC row. */
   mergedFrom?: string[];
+  /** Documented-vs-observed MAC mismatches that would be REPLACED with the observed MAC (macSyncPolicy='replace'). */
+  macReplaced?: number;
+  /** Observed MACs that would be ADDED as additional identities of the host (macSyncPolicy='add'). */
+  macAdded?: number;
 }
 
 /** Result of the inventory import (dry-run or applied). */
@@ -965,6 +996,10 @@ interface InventoryImportResult {
   skipped: number;
   /** How many live MAC rows were folded into one entry by the hostname merge (dry-run only). */
   mergedGroups?: number;
+  /** Total documented-vs-observed MAC mismatches replaced with the observed MAC. */
+  macReplaced?: number;
+  /** Total observed MACs added as additional identities of their host. */
+  macAdded?: number;
 }
 
 /** Normalizes an observed hostname into a documentable DNS name. */
@@ -1368,18 +1403,23 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
       if (list) list.push(h);
       else docByAddr.set(ip.address.toLowerCase(), [h]);
     }
-    for (const ip of h.ips) {
-      if (ip.mac && !docByMac.has(macKey(ip.mac))) docByMac.set(macKey(ip.mac), h);
+    // Primary per-address MACs + additional known MACs — a re-keyed host must
+    // still match its documented row instead of creating a duplicate.
+    for (const m of [...h.ips.map((i) => i.mac), ...safeParseStringArray(h.host.macs)]) {
+      if (m && !docByMac.has(macKey(m))) docByMac.set(macKey(m), h);
     }
   }
 
   const live = mergeHostRows(hostRows).filter((h) => h.lastSeenAt >= cutoff);
   // Parse the range filter ONCE (throws 400 on a malformed entry).
   const ranges = parseRanges(opts.ranges);
+  const macSyncPolicy: MacSyncPolicy = opts.macSyncPolicy ?? 'keep';
   const planned: InventoryImportPlanEntry[] = [];
   let created = 0;
   let updated = 0;
   let skipped = 0;
+  let totalMacReplaced = 0;
+  let totalMacAdded = 0;
 
   // SMART MERGE — fold the per-MAC live rows into hostname groups so a
   // multi-NIC machine is planned as ONE documented host (see above).
@@ -1470,6 +1510,27 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
       }
     }
 
+    // MAC sync — documented vs observed for the addresses this group reports.
+    let macReplaced = 0;
+    const macAddedList: string[] = [];
+    if (target && macSyncPolicy !== 'keep') {
+      const existingMacs = new Set(target.ips.map((i) => i.mac).filter((m): m is string => !!m).map(macKey));
+      for (const a of addrs) {
+        const rowMac = g.addrMac.get(a.toLowerCase()) ?? g.mac;
+        const norm = normalizeMac(rowMac);
+        if (!norm) continue;
+        const docRow = target.ips.find((i) => i.address.toLowerCase() === a.toLowerCase());
+        if (docRow?.mac && macKey(docRow.mac) !== macKey(norm)) {
+          // Documented MAC differs from what is observed for this address.
+          if (macSyncPolicy === 'replace') {
+            macReplaced++;
+          } else if (!existingMacs.has(macKey(norm))) {
+            macAddedList.push(norm);
+          }
+        }
+      }
+    }
+
     // Would the merge actually change anything?
     let wouldChange = false;
     const placement = placementForGroup(g, placementIdx);
@@ -1490,6 +1551,8 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
       if (placement && applyDevicePlacement({ siteId: target.host.siteId, layerId: target.host.layerId, tags: readStringArray(target.host.tags) }, placement).changed) {
         wouldChange = true;
       }
+      // Planned MAC sync changes count too — a pure re-key is still an update.
+      if (macReplaced > 0 || macAddedList.length > 0) wouldChange = true;
     }
 
     if (!wouldChange) {
@@ -1500,6 +1563,8 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
 
     if (target) updated++;
     else created++;
+    totalMacReplaced += macReplaced;
+    totalMacAdded += macAddedList.length;
     planned.push({
       mac: g.mac,
       hostname: g.hostname ?? dnsName,
@@ -1507,10 +1572,12 @@ async function buildInventoryImportPlan(opts: InventoryImportOptions): Promise<I
       action: target ? 'update' : 'create',
       stripped: stripped > 0 ? stripped : undefined,
       mergedFrom: g.macs.length > 1 ? g.macs.slice(1) : undefined,
+      macReplaced: macReplaced > 0 ? macReplaced : undefined,
+      macAdded: macAddedList.length > 0 ? macAddedList.length : undefined,
     });
   }
 
-  return { dryRun: true, totalLiveHosts: live.length, planned, created, updated, skipped, mergedGroups };
+  return { dryRun: true, totalLiveHosts: live.length, planned, created, updated, skipped, mergedGroups, macReplaced: totalMacReplaced || undefined, macAdded: totalMacAdded || undefined };
 }
 
 /** Applies the plan — writes only what buildInventoryImportPlan() computed. */
@@ -1537,17 +1604,21 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
       if (list) list.push(h);
       else docByAddr.set(ip.address.toLowerCase(), [h]);
     }
-    for (const ip of h.ips) {
-      if (ip.mac && !docByMac.has(macKey(ip.mac))) docByMac.set(macKey(ip.mac), h);
+    // Primary per-address MACs + additional known MACs (same index as the plan).
+    for (const m of [...h.ips.map((i) => i.mac), ...safeParseStringArray(h.host.macs)]) {
+      if (m && !docByMac.has(macKey(m))) docByMac.set(macKey(m), h);
     }
   }
 
   const live = mergeHostRows(hostRows).filter((h) => h.lastSeenAt >= cutoff);
   // Parse the range filter ONCE (throws 400 on a malformed entry).
   const ranges = parseRanges(opts.ranges);
+  const macSyncPolicy: MacSyncPolicy = opts.macSyncPolicy ?? 'keep';
   let created = 0;
   let updated = 0;
   let skipped = 0;
+  let totalMacReplaced = 0;
+  let totalMacAdded = 0;
   const now = new Date().toISOString();
 
   // SMART MERGE — same hostname grouping as the plan, so apply and dry-run agree.
@@ -1639,6 +1710,33 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
       }
     });
 
+    // MAC sync — reconcile documented vs observed for the addresses this group reports.
+    let newMacs: string[] | null = null;
+    if (target && macSyncPolicy !== 'keep') {
+      const existingMacs = new Set(target.ips.map((i) => i.mac).filter((m): m is string => !!m).map(macKey));
+      for (const a of addrs) {
+        const rowMac = g.addrMac.get(a.toLowerCase()) ?? g.mac;
+        const norm = normalizeMac(rowMac);
+        if (!norm) continue;
+        const docRow = target.ips.find((i) => i.address.toLowerCase() === a.toLowerCase());
+        if (docRow?.mac && macKey(docRow.mac) !== macKey(norm)) {
+          // Documented MAC differs from what is observed for this address.
+          if (macSyncPolicy === 'replace') {
+            const m = mergedIps.find((x) => x.address.toLowerCase() === a.toLowerCase());
+            if (m && m.mac !== norm) { m.mac = norm; changed = true; }
+            totalMacReplaced++;
+          } else if (!existingMacs.has(macKey(norm))) {
+            // Keep the documented MAC — remember the observed one as an additional identity.
+            newMacs ??= [...safeParseStringArray(target.host.macs)];
+            newMacs.push(norm);
+            existingMacs.add(macKey(norm));
+            totalMacAdded++;
+            changed = true;
+          }
+        }
+      }
+    }
+
     const names = target ? safeParseStringArray(target.host.dnsNames) : [];
     if (!names.includes(dnsName)) {
       names.push(dnsName);
@@ -1680,7 +1778,7 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
 
     if (target) {
       await db.update(schema.documentedHosts)
-        .set({ dnsNames: JSON.stringify(names), friendlyName, siteId: newSiteId, layerId: newLayerId, tags: JSON.stringify(newTags), updatedAt: now })
+        .set({ dnsNames: JSON.stringify(names), friendlyName, siteId: newSiteId, layerId: newLayerId, tags: JSON.stringify(newTags), macs: JSON.stringify(newMacs ?? safeParseStringArray(target.host.macs)), updatedAt: now })
         .where(eq(schema.documentedHosts.id, target.host.id));
       // Replace the address list with the MERGED one (existing rows kept + new ones added).
       await db.delete(schema.documentedHostIps).where(eq(schema.documentedHostIps.hostId, target.host.id));
@@ -1700,6 +1798,7 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
         siteId: newSiteId, // inherited from a known device when available (see above)
         layerId: newLayerId,
         tags: JSON.stringify(newTags),
+        macs: '[]', // fresh hosts start without additional MAC identities
         isActive: true, // imported hosts start active
         createdAt: now,
         updatedAt: now,
@@ -1713,7 +1812,7 @@ async function applyInventoryImport(opts: InventoryImportOptions): Promise<Inven
     }
   }
 
-  return { dryRun: false, totalLiveHosts: live.length, planned: [], created, updated, skipped };
+  return { dryRun: false, totalLiveHosts: live.length, planned: [], created, updated, skipped, macReplaced: totalMacReplaced || undefined, macAdded: totalMacAdded || undefined };
 }
 
 // POST /documented-hosts/import-from-inventory — copy the LIVE host inventory
@@ -1730,6 +1829,7 @@ router.post('/documented-hosts/import-from-inventory', requireAuth, requirePermi
       ranges: Array.isArray(body.ranges) ? (body.ranges as unknown[]).filter((r): r is string => typeof r === 'string') : [],
       skipWithoutVlan: body.skipWithoutVlan === true,
       maxAgeHours: typeof body.maxAgeHours === 'number' ? body.maxAgeHours : 24,
+      macSyncPolicy: body.macSyncPolicy === 'replace' || body.macSyncPolicy === 'add' ? body.macSyncPolicy : 'keep',
       dryRun: body.dryRun !== false, // preview first — explicit opt-in to write
     };
 
