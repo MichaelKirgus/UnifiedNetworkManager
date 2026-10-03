@@ -35,7 +35,7 @@ export type { ValidationIssue, ActionDescriptor, ActionRegistry } from './action
 export { PlanningError, STEP_TOKEN_PATTERN, shiftStepTokens, finalizePlan } from './planning';
 // Canonical fleet intents (cross-vendor network rollout contract). See intents.ts.
 export { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, CANONICAL_INTENTS, isCanonicalIntent, NETWORK_CREATE_SCHEMA, NETWORK_DELETE_SCHEMA, CANONICAL_INTENT_SCHEMAS } from './intents';
-export type { PreflightConfidence, PreflightValue, PreflightResult, PreflightRequest, PreflightPort, PreflightCapabilities } from './intents';
+export type { PreflightConfidence, PreflightValue, PreflightResult, PreflightRequest, PreflightPort, PreflightInterfaceOption, PreflightCapabilities } from './intents';
 // L2 topology abstraction (interface layering: ports → bundles/bridges). See intents.ts.
 export { INTENT_L2_TOPOLOGY_READ, suggestL2AttachPoint, suggestL2VlanPorts, portTrunkStatus } from './intents';
 export type { L2PhysicalPort, L2Bridge, L2Bundle, L2Topology } from './intents';

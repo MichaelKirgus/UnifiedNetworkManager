@@ -341,6 +341,16 @@ export interface PreflightPort {
   pvid?: number | null;
 }
 
+/** One candidate interface for the `interface` input of network.create. */
+export interface PreflightInterfaceOption {
+  /** The value that goes into the intent's `interface` input (e.g. `eth1`, `br-lan`, `bond0`). */
+  name: string;
+  /** What kind of interface it is — drives grouping/labels in the UI. */
+  kind?: 'physical' | 'bridge' | 'bundle' | 'vlan';
+  /** Short human hint (e.g. "uplink to ISP", "LAN bridge"). */
+  note?: string;
+}
+
 /** Capability flags a preflight resolver may advertise for one device. */
 export interface PreflightCapabilities {
   /** The plugin can assign the new VLAN to an explicit list of ports (`vlanPorts` input). */
@@ -362,6 +372,13 @@ export interface PreflightResult {
    * topology round-trip. Only present for intents that touch ports (network.create).
    */
   ports?: PreflightPort[];
+  /**
+   * Candidate interfaces for the `interface` input — physical NICs, bridges,
+   * LAG/bond bundles (and VLAN sub-interfaces where relevant). Lets the rollout
+   * dialog offer a dropdown instead of free text on multi-NIC devices. Only
+   * present when the resolver could enumerate them.
+   */
+  interfaces?: PreflightInterfaceOption[];
   /** What this device supports for the intent (e.g. explicit port lists). */
   capabilities?: PreflightCapabilities;
 }
