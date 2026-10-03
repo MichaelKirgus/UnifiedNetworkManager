@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Archive, CircleCheck, CircleX, DatabaseZap, GitMerge, Globe, NotebookPen, Pencil, Plus, Tag, Trash2, Upload, X } from 'lucide-react';
+import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 
@@ -852,15 +853,42 @@ function ImportModal({ sites, layers, onClose, onDone }: ImportModalProps) {
   const previewRows = rows.slice(0, 5);
 
   return (
-    <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-primary/40 p-4 sm:items-center" onClick={onClose}>
-      <div className="w-full max-w-3xl rounded-md border border-border bg-card p-5 shadow-lg" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-base font-semibold text-foreground">Import documented networks from CSV</h2>
-          <button type="button" aria-label="Close import dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
+    <DialogShell
+      title="Import documented networks from CSV"
+      onClose={onClose}
+      zIndex="z-40"
+      maxWidth="max-w-3xl"
+      footer={
+        result ? (
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">
+              Close
+            </button>
+            <button
+              type="button"
+              onClick={() => { setHeaders([]); setRows([]); setFileName(''); setResult(null); setLocalErrors([]); }}
+              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
+            >
+              Import another file
+            </button>
+          </div>
+        ) : headers.length > 0 ? (
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => { setHeaders([]); setRows([]); setFileName(''); setResult(null); setLocalErrors([]); }} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">
+              Choose another file
+            </button>
+            <button
+              type="button"
+              disabled={importMutation.isPending}
+              onClick={runImport}
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+            >
+              <Upload className="h-4 w-4" /> Import {rows.length} row(s)
+            </button>
+          </div>
+        ) : undefined
+      }
+    >
         {/* Step 1 — pick the file */}
         {headers.length === 0 && (
           <label className="flex cursor-pointer flex-col items-center gap-2 rounded-md border-2 border-dashed border-border p-8 text-sm text-secondary hover:bg-muted">
@@ -936,19 +964,6 @@ function ImportModal({ sites, layers, onClose, onDone }: ImportModalProps) {
               </label>
             </div>
 
-            <div className="flex justify-end gap-2 border-t border-border pt-3">
-              <button type="button" onClick={() => { setHeaders([]); setRows([]); setFileName(''); setResult(null); setLocalErrors([]); }} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">
-                Choose another file
-              </button>
-              <button
-                type="button"
-                disabled={importMutation.isPending}
-                onClick={runImport}
-                className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
-              >
-                <Upload className="h-4 w-4" /> Import {rows.length} row(s)
-              </button>
-            </div>
           </>
         )}
 
@@ -968,22 +983,9 @@ function ImportModal({ sites, layers, onClose, onDone }: ImportModalProps) {
                 {[...localErrors, ...result.errors].length > 50 && <p>…and {[...localErrors, ...result.errors].length - 50} more</p>}
               </div>
             )}
-            <div className="flex justify-end gap-2 border-t border-border pt-3">
-              <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">
-                Close
-              </button>
-              <button
-                type="button"
-                onClick={() => { setHeaders([]); setRows([]); setFileName(''); setResult(null); setLocalErrors([]); }}
-                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
-              >
-                Import another file
-              </button>
-            </div>
           </>
         )}
-      </div>
-    </div>
+    </DialogShell>
   );
 }
 
@@ -1020,20 +1022,14 @@ function PlacementPickerModal({ kind, ids, sites, layers, onClose }: PlacementPi
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-primary/40 p-4" onClick={onClose}>
-      <div className="w-full max-w-sm rounded-md border border-border bg-card p-5 shadow-lg" onClick={(e) => e.stopPropagation()}>
-        <h2 className="mb-3 text-base font-semibold text-foreground">Set {label.toLowerCase()} for {ids.length} selected network{ids.length === 1 ? '' : 's'}</h2>
-        <p className="mb-3 text-sm text-secondary">
-          Assigns the chosen {label.toLowerCase()} to every selected row in one call — no per-row editing needed.
-        </p>
-        <select className="w-full rounded-md border border-border px-2 py-1.5 text-sm" value={value} onChange={(e) => setValue(e.target.value)}>
-          <option value="">— choose {label.toLowerCase()} —</option>
-          {options.map((o) => (
-            <option key={o.id} value={o.id}>{o.name}</option>
-          ))}
-          <option value="clear">— unassign (clear) —</option>
-        </select>
-        <div className="mt-4 flex justify-end gap-2 border-t border-border pt-3">
+    <DialogShell
+      title={`Set ${label.toLowerCase()} for ${ids.length} selected network${ids.length === 1 ? '' : 's'}`}
+      subtitle={<>Assigns the chosen {label.toLowerCase()} to every selected row in one call — no per-row editing needed.</>}
+      onClose={onClose}
+      zIndex="z-40"
+      maxWidth="max-w-sm"
+      footer={
+        <div className="flex justify-end gap-2">
           <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">
             Cancel
           </button>
@@ -1046,8 +1042,16 @@ function PlacementPickerModal({ kind, ids, sites, layers, onClose }: PlacementPi
             Apply to {ids.length} network{ids.length === 1 ? '' : 's'}
           </button>
         </div>
-      </div>
-    </div>
+      }
+    >
+      <select className="w-full rounded-md border border-border px-2 py-1.5 text-sm" value={value} onChange={(e) => setValue(e.target.value)}>
+        <option value="">— choose {label.toLowerCase()} —</option>
+        {options.map((o) => (
+          <option key={o.id} value={o.id}>{o.name}</option>
+        ))}
+        <option value="clear">— unassign (clear) —</option>
+      </select>
+    </DialogShell>
   );
 }
 

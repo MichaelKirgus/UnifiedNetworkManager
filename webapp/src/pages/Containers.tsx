@@ -13,6 +13,7 @@ import { DataTable, DataTableColumn, ExpandChildContext } from '../components/Da
 import { DeviceChip } from '../components/DeviceChip';
 import { formatBytes, formatDuration } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
+import { DialogShell } from '../components/DialogShell';
 import { READONLY_MESSAGE, runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, CatalogEntry, ContainerNetwork, ContainerRow, ContainerServiceDetail, DockerImageRow } from '../api/client';
 import { useTimeFormat } from '../utils/time';
@@ -216,50 +217,34 @@ function YamlEditorDialog({ app, onClose }: { app: ContainerRow; onClose: () => 
   // Plan mode: the plan was saved without executing — offer to close.
   if (saved) {
     return (
-      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-        <div
-          className="mt-8 w-full max-w-2xl rounded-md border border-border bg-card shadow-xl"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <header className="flex items-center justify-between border-b border-border px-4 py-3">
-            <h2 className="text-base font-semibold text-foreground">Edit compose — {app.name}</h2>
-            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-              <X size={16} />
-            </button>
-          </header>
-          <div className="space-y-3 p-4">
-            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
-              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
-              Compose change saved as a plan — it was NOT executed and the app was not redeployed. Open the Plans
-              center to run it later (or schedule it).
-            </div>
-          </div>
-          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover">
-              Close
-            </button>
-          </footer>
+      <DialogShell
+        title={`Edit compose — ${app.name}`}
+        onClose={onClose}
+        maxWidth="max-w-2xl"
+        footer={
+          <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover">
+            Close
+          </button>
+        }
+      >
+        <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+          <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+          Compose change saved as a plan — it was NOT executed and the app was not redeployed. Open the Plans
+          center to run it later (or schedule it).
         </div>
-      </div>
+      </DialogShell>
     );
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div className="mt-8 w-full max-w-2xl rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div>
-            <h2 className="text-base font-semibold text-foreground">Edit compose — {app.name}</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              Applies via the plan workflow on {app.deviceName ?? app.deviceId}. The app is redeployed after saving.
-            </p>
-          </div>
-          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-            <X className="h-4 w-4" />
-          </button>
-        </header>
-
-        <div className="p-4">
+    <>
+      <DialogShell
+        title={`Edit compose — ${app.name}`}
+        subtitle={`Applies via the plan workflow on ${app.deviceName ?? app.deviceId}. The app is redeployed after saving.`}
+        onClose={onClose}
+        maxWidth="max-w-2xl"
+      >
+        <div>
           {loading && (
             <div className="flex items-center gap-2 py-6 text-sm text-secondary">
               <Loader2 className="h-4 w-4 animate-spin" /> Loading current compose…
@@ -299,16 +284,18 @@ function YamlEditorDialog({ app, onClose }: { app: ContainerRow; onClose: () => 
             </>
           )}
         </div>
-      </div>
+      </DialogShell>
 
       {reauth && (
-        <ReauthDialog
-          contextLabel={`Edit compose for ${app.name}`}
-          onClose={() => setReauth(false)}
-          onSuccess={async () => { setReauth(false); await save(); }}
-        />
+        <div onClick={(e) => e.stopPropagation()}>
+          <ReauthDialog
+            contextLabel={`Edit compose for ${app.name}`}
+            onClose={() => setReauth(false)}
+            onSuccess={async () => { setReauth(false); await save(); }}
+          />
+        </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -346,54 +333,16 @@ function PullImageDialog({ deviceId, deviceName, pluginId, onClose }: { deviceId
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div className="mt-12 w-full max-w-lg rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div>
-            <h2 className="text-base font-semibold text-foreground">Pull image</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              Pulls on {deviceName ?? deviceId} via the plan workflow. One reference per line (or comma-separated).
-            </p>
-          </div>
-          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-            <X size={16} />
-          </button>
-        </header>
-
-        {saved ? (
-          <>
-            <div className="space-y-3 p-4">
-              <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
-                <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
-                Pull saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
-              </div>
-            </div>
-            <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-              <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover">Close</button>
-            </footer>
-          </>
-        ) : (
-          <>
-            <div className="space-y-3 p-4">
-              {isReadOnly && (
-                <div className="flex items-start gap-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
-                  <EyeOff className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  Read-only mode is active — this action cannot be saved or applied. Switch to Plan or Execute in the top bar.
-                </div>
-              )}
-              {error && (
-                <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
-              )}
-              <textarea
-                value={refs}
-                onChange={(e) => setRefs(e.target.value)}
-                spellCheck={false}
-                rows={4}
-                placeholder={'nginx:alpine\nghcr.io/your-org/app:1.2.3'}
-                className="w-full resize-y rounded-md border border-border bg-background p-3 font-mono text-xs leading-relaxed focus:border-focus-ring focus:outline-none"
-              />
-            </div>
-            <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+    <>
+      <DialogShell
+        title="Pull image"
+        subtitle={`Pulls on ${deviceName ?? deviceId} via the plan workflow. One reference per line (or comma-separated).`}
+        onClose={onClose}
+        footer={
+          saved ? (
+            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover">Close</button>
+          ) : (
+            <>
               <button type="button" onClick={onClose} disabled={saving} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background disabled:opacity-40">
                 Cancel
               </button>
@@ -408,19 +357,49 @@ function PullImageDialog({ deviceId, deviceName, pluginId, onClose }: { deviceId
                 <Download size={14} />
                 {isPlanMode ? 'Save as plan' : 'Pull'}
               </button>
-            </footer>
+            </>
+          )
+        }
+      >
+
+        {saved ? (
+          <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+            <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+            Pull saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
+          </div>
+        ) : (
+          <>
+            {isReadOnly && (
+              <div className="mb-3 flex items-start gap-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+                <EyeOff className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                Read-only mode is active — this action cannot be saved or applied. Switch to Plan or Execute in the top bar.
+              </div>
+            )}
+            {error && (
+              <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
+            )}
+            <textarea
+              value={refs}
+              onChange={(e) => setRefs(e.target.value)}
+              spellCheck={false}
+              rows={4}
+              placeholder={'nginx:alpine\nghcr.io/your-org/app:1.2.3'}
+              className="w-full resize-y rounded-md border border-border bg-background p-3 font-mono text-xs leading-relaxed focus:border-focus-ring focus:outline-none"
+            />
           </>
         )}
+      </DialogShell>
 
-        {reauth && (
+      {reauth && (
+        <div onClick={(e) => e.stopPropagation()}>
           <ReauthDialog
             contextLabel={`Pull image on ${deviceName ?? deviceId}`}
             onClose={() => setReauth(false)}
             onSuccess={async () => { setReauth(false); await submit(); }}
           />
-        )}
-      </div>
-    </div>
+        </div>
+      )}
+    </>
   );
 }
 

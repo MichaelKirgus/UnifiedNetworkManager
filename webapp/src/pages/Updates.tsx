@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowUpCircle, CheckCircle2, ExternalLink, Layers, Loader2, RefreshCw, Rocket, ShieldCheck, X } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle2, ExternalLink, Layers, Loader2, RefreshCw, Rocket, ShieldCheck } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, type ExpandChildContext } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
@@ -747,20 +748,14 @@ export default function Updates() {
 
         {/* Release-notes text viewer — device-provided notes (e.g. TrueNAS feed). */}
         {notesView && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay/40 p-6" onClick={() => setNotesView(null)}>
-            <div
-              className="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-lg border border-border bg-card shadow-xl"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between border-b border-border px-4 py-3">
-                <span className="text-sm font-semibold text-foreground">{notesView.title}</span>
-                <button type="button" aria-label="Close release notes" onClick={() => setNotesView(null)} className="rounded p-1 text-faint hover:bg-muted hover:text-secondary">
-                  <X size={16} />
-                </button>
-              </div>
-              <pre className="flex-1 overflow-auto whitespace-pre-wrap px-4 py-3 font-mono text-xs text-secondary">{notesView.text}</pre>
-            </div>
-          </div>
+          <DialogShell
+            title={notesView.title}
+            onClose={() => setNotesView(null)}
+            maxWidth="max-w-2xl"
+            bodyMaxHeight="80vh"
+          >
+            <pre className="whitespace-pre-wrap font-mono text-xs text-secondary">{notesView.text}</pre>
+          </DialogShell>
         )}
       </div>
     </Layout>

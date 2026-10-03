@@ -1,10 +1,11 @@
 import { ReactNode, useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { BookOpen, Check, ExternalLink, RefreshCw, Settings, X } from 'lucide-react';
+import { BookOpen, Check, ExternalLink, RefreshCw, Settings } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { OptionForm } from '../components/OptionForm';
 import { Markdown } from '../components/Markdown';
+import { DialogShell } from '../components/DialogShell';
 import { api, DeviceSupportProfile, Plugin, PluginSelfMetricsSample, SupportCondition } from '../api/client';
 import { can } from '../auth/permissions';
 
@@ -162,19 +163,14 @@ function PluginDetailsModal({ pluginId, onClose }: { pluginId: string; onClose: 
   });
 
   return (
-    <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-primary/40 p-4 sm:items-center" onClick={onClose}>
-      <div className="w-full max-w-2xl rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <h2 className="text-base font-semibold text-foreground">
-            {plugin.name}
-            <span className="ml-2 text-xs font-normal text-faint">{plugin.version}</span>
-          </h2>
-          <button type="button" aria-label="Close details" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted hover:text-secondary">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        <div className="max-h-[70vh] overflow-y-auto px-4 py-3">
+    <DialogShell
+      title={plugin.name}
+      subtitle={plugin.version}
+      onClose={onClose}
+      zIndex="z-40"
+      maxWidth="max-w-2xl"
+      bodyMaxHeight="70vh"
+    >
           {/* License + help row */}
           <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
             {support.license && (
@@ -263,9 +259,7 @@ function PluginDetailsModal({ pluginId, onClose }: { pluginId: string; onClose: 
               </div>
             </section>
           )}
-        </div>
-      </div>
-    </div>
+    </DialogShell>
   );
 }
 
@@ -450,28 +444,14 @@ export default function Plugins() {
 
       {/* Plugin settings modal — generic form rendered from the plugin's option descriptors. */}
       {configurePlugin && (
-        <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-primary/40 p-4 sm:items-center" onClick={() => setConfigureId(null)}>
-          <div
-            className="w-full max-w-lg rounded-md border border-border bg-card shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-border px-4 py-3">
-              <h2 className="text-base font-semibold text-foreground">
-                Settings — {configurePlugin.name}
-                <span className="ml-2 text-xs font-normal text-faint">{configurePlugin.version}</span>
-              </h2>
-              <button
-                type="button"
-                aria-label="Close settings"
-                onClick={() => setConfigureId(null)}
-                className="rounded p-1 text-faint hover:bg-muted hover:text-secondary"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <OptionForm pluginId={configurePlugin.id} />
-          </div>
-        </div>
+        <DialogShell
+          title={`Settings — ${configurePlugin.name}`}
+          subtitle={configurePlugin.version}
+          onClose={() => setConfigureId(null)}
+          zIndex="z-40"
+        >
+          <OptionForm pluginId={configurePlugin.id} />
+        </DialogShell>
       )}
 
       {/* Plugin details modal — license / help / built-in docs / support matrix. */}

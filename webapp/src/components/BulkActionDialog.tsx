@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertTriangle, CheckCircle2, EyeOff, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, EyeOff } from 'lucide-react';
 import clsx from 'clsx';
 import { SchemaForm, validateSchema, defaultValues } from './SchemaForm';
+import { DialogShell } from './DialogShell';
 import { api, ApiError, CatalogEntry, InputSchema, StateItem } from '../api/client';
 import { runAction, savedPlanIdOf, useExecutionMode } from '../executionMode';
 
@@ -151,63 +152,39 @@ export function BulkActionDialog({ deviceId, pluginId, entry, items, onClose }: 
   // the Plans center (where it can be run later or scheduled).
   if (savedPlanId) {
     return (
-      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-        <div
-          className="mt-10 w-full max-w-lg rounded-md border border-border bg-card shadow-xl"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <header className="flex items-center justify-between border-b border-border px-4 py-3">
-            <h2 className="text-base font-semibold text-foreground">{entry.label}</h2>
-            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-              <X className="h-4 w-4" />
+      <DialogShell
+        title={entry.label}
+        onClose={onClose}
+        footer={
+          <>
+            <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background">
+              Close
             </button>
-          </header>
-          <div className="space-y-3 p-4">
+            <button type="button" onClick={() => navigate(`/plans/${savedPlanId}`)} className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover">
+              Open in Plans
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-3">
             <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
               <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               Plan saved with {count} step{count === 1 ? '' : 's'} — it was NOT executed. Open the Plans center to run it
               later (or schedule it).
             </div>
-            <p className="text-xs text-faint">Plan ID: {savedPlanId}</p>
-          </div>
-          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background"
-            >
-              Close
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate(`/plans/${savedPlanId}`)}
-              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
-            >
-              Open in Plans
-            </button>
-          </footer>
+          <p className="text-xs text-faint">Plan ID: {savedPlanId}</p>
         </div>
-      </div>
+      </DialogShell>
     );
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div className="mt-10 w-full max-w-lg rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div>
-            <h2 className="text-base font-semibold text-foreground">{entry.label}</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              Applied to {count} port{count === 1 ? '' : 's'} — one plan step per port,
-              {isPlanMode ? ' saved in order (not executed).' : ' executed in order.'}
-            </p>
-          </div>
-          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-            <X className="h-4 w-4" />
-          </button>
-        </header>
-
-        <div className="p-4">
+    <DialogShell
+      title={entry.label}
+      subtitle={`Applied to ${count} port${count === 1 ? '' : 's'} — one plan step per port, ${isPlanMode ? 'saved in order (not executed).' : 'executed in order.'}`}
+      onClose={onClose}
+    >
+      <div>
           {isReadOnly && (
             <div className="mb-3 flex items-start gap-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
               <EyeOff className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -305,8 +282,7 @@ export function BulkActionDialog({ deviceId, pluginId, entry, items, onClose }: 
               </div>
             </div>
           )}
-        </div>
       </div>
-    </div>
+    </DialogShell>
   );
 }

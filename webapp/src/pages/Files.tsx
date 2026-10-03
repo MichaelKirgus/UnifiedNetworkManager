@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { Database, Download, FileUp, FolderOpen, History, Loader2, Trash2, X } from 'lucide-react';
+import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { formatBytes } from '../components/formatMetric';
@@ -52,18 +53,14 @@ function UsesDialog({ entry, onClose }: { entry: FileRepoEntry; onClose: () => v
   })();
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div className="mt-12 w-full max-w-lg rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div>
-            <h2 className="text-base font-semibold text-foreground">Usage history</h2>
-            <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground" title={entry.name}>{entry.name}</p>
-          </div>
-          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-            <X size={16} />
-          </button>
-        </header>
-        <div className="max-h-[50vh] space-y-2 overflow-y-auto px-4 py-3">
+    <DialogShell
+      title="Usage history"
+      subtitle={<span className="block truncate font-mono" title={entry.name}>{entry.name}</span>}
+      onClose={onClose}
+      maxWidth="max-w-lg"
+      bodyMaxHeight="50vh"
+    >
+        <div className="space-y-2">
           {error && <p className="text-xs text-danger-fg">{error}</p>}
           {!error && uses === null && (
             <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 size={14} className="animate-spin" /> Loading…</p>
@@ -82,8 +79,7 @@ function UsesDialog({ entry, onClose }: { entry: FileRepoEntry; onClose: () => v
             </div>
           ))}
         </div>
-      </div>
-    </div>
+    </DialogShell>
   );
 }
 

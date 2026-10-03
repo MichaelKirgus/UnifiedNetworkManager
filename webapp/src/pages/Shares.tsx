@@ -3,6 +3,7 @@ import clsx from 'clsx';
 import { CheckCircle2, ChevronDown, ChevronUp, EyeOff, FolderTree, HardDrive, Loader2, Pencil, Plus, Trash2, Users, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Layout } from '../components/Layout';
+import { DialogShell } from '../components/DialogShell';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { StatusBadge } from '../components/StatusBadge';
@@ -206,49 +207,49 @@ function ShareDialog({ mode, type, row, onClose }: { mode: 'create' | 'edit'; ty
   // Plan mode: the plan was saved without executing — offer to close.
   if (saved) {
     return (
-      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-        <div
-          className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <header className="flex items-center justify-between border-b border-border px-4 py-3">
-            <h2 className="text-base font-semibold text-foreground">{title}</h2>
-            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-              <X size={16} />
-            </button>
-          </header>
-          <div className="space-y-3 px-4 py-4">
-            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
-              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
-              Share change saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
-            </div>
-          </div>
-          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">
-              Close
-            </button>
-          </footer>
+      <DialogShell
+        title={title}
+        onClose={onClose}
+        maxWidth="max-w-md"
+        footer={
+          <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">
+            Close
+          </button>
+        }
+      >
+        <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+          <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+          Share change saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
         </div>
-      </div>
+      </DialogShell>
     );
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div>
-            <h2 className="text-base font-semibold text-foreground">{title}</h2>
-            {row && (
-              <p className="mt-0.5 text-xs text-muted-foreground">Applies on {row.deviceName ?? row.deviceId}.</p>
-            )}
+    <>
+      <DialogShell
+        title={title}
+        subtitle={row ? <>Applies on {row.deviceName ?? row.deviceId}.</> : undefined}
+        onClose={onClose}
+        maxWidth="max-w-md"
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
+            <button
+              type="button"
+              disabled={saving || (mode === 'edit' && !row) || isReadOnly}
+              title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
+              onClick={() => void submit()}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {saving && <Loader2 size={12} className="animate-spin" />}
+              {isPlanMode ? 'Save as plan' : mode === 'edit' ? 'Save changes' : 'Create share'}
+            </button>
           </div>
-          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-            <X size={16} />
-          </button>
-        </header>
+        }
+      >
 
-        <div className="space-y-4 px-4 py-4">
+        <div className="space-y-4">
           {isReadOnly && (
             <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
               <EyeOff size={14} className="mt-0.5 shrink-0" />
@@ -344,21 +345,10 @@ function ShareDialog({ mode, type, row, onClose }: { mode: 'create' | 'edit'; ty
           )}
         </div>
 
-        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
-          <button
-            type="button"
-            disabled={saving || (mode === 'edit' && !row) || isReadOnly}
-            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
-            onClick={() => void submit()}
-            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {saving && <Loader2 size={12} className="animate-spin" />}
-            {isPlanMode ? 'Save as plan' : mode === 'edit' ? 'Save changes' : 'Create share'}
-          </button>
-        </footer>
+      </DialogShell>
 
-        {reauth && (
+      {reauth && (
+        <div onClick={(e) => e.stopPropagation()}>
           <ReauthDialog
             contextLabel={`${title}`}
             onClose={() => setReauth(false)}
@@ -367,9 +357,9 @@ function ShareDialog({ mode, type, row, onClose }: { mode: 'create' | 'edit'; ty
               try { await submit(); } catch { /* dialog stays open */ }
             }}
           />
-        )}
-      </div>
-    </div>
+        </div>
+      )}
+    </>
   );
 }
 

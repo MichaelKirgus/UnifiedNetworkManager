@@ -1,9 +1,10 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { useQueries } from '@tanstack/react-query';
-import { CheckCircle2, Clock, Loader2, RefreshCw, X, XCircle } from 'lucide-react';
+import { CheckCircle2, Clock, Loader2, RefreshCw, XCircle } from 'lucide-react';
 import { api, ApiError, CatalogEntry, DeviceTimeRow } from '../api/client';
 import { ReauthDialog } from './ReauthDialog';
+import { DialogShell } from './DialogShell';
 
 // The single shared clock action id — every plugin that can change a device's
 // time exposes it under this exact id (see the actions modules in plugins/).
@@ -235,21 +236,31 @@ export function ClockSyncDialog({ devices, consensusMs, onClose }: ClockSyncDial
 
   return (
     <>
-      <div className="fixed inset-0 z-[70] flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-        <form
-          onSubmit={handleSubmit}
-          onClick={(e) => e.stopPropagation()}
-          className="mt-8 w-full max-w-lg rounded-lg border border-border bg-card p-5 shadow-xl"
-        >
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
-              <RefreshCw className="h-4 w-4 text-primary" />
-              Re-sync device clocks
-            </h2>
-            <button type="button" onClick={onClose} aria-label="Close" className="rounded p-1 text-faint hover:bg-muted hover:text-secondary">
-              <X className="h-4 w-4" />
+      <DialogShell
+        tag="form"
+        onSubmit={handleSubmit}
+        title="Re-sync device clocks"
+        icon={<RefreshCw className="h-4 w-4 text-primary" />}
+        onClose={onClose}
+        zIndex="z-[70]"
+        footer={
+          <>
+            <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
+              {done ? 'Done' : 'Cancel'}
             </button>
-          </div>
+            {!done && (
+              <button
+                type="submit"
+                disabled={busy || catalogsLoading || eligible.length === 0}
+                className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
+              >
+                <Clock className="h-4 w-4" />
+                {busy ? 'Executing…' : mode === 'sync' ? 'Re-sync clocks' : 'Apply time'}
+              </button>
+            )}
+          </>
+        }
+      >
 
           {/* Mode: re-trigger native NTP vs push a specific time/timezone. */}
           <div className="mb-4">
@@ -377,23 +388,7 @@ export function ClockSyncDialog({ devices, consensusMs, onClose }: ClockSyncDial
             <div className="mb-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{error}</div>
           )}
 
-          <div className="flex items-center justify-end gap-2">
-            <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
-              {done ? 'Done' : 'Cancel'}
-            </button>
-            {!done && (
-              <button
-                type="submit"
-                disabled={busy || catalogsLoading || eligible.length === 0}
-                className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
-              >
-                <Clock className="h-4 w-4" />
-                {busy ? 'Executing…' : mode === 'sync' ? 'Re-sync clocks' : 'Apply time'}
-              </button>
-            )}
-          </div>
-        </form>
-      </div>
+      </DialogShell>
 
       {reauth && (
         <ReauthDialog

@@ -9,6 +9,7 @@ import { DataTable, DataTableColumn, ExpandChildContext } from '../components/Da
 import { DeviceChip } from '../components/DeviceChip';
 import { formatBytes, formatDuration } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
+import { DialogShell } from '../components/DialogShell';
 import { defaultValues, SchemaForm, validateSchema } from '../components/SchemaForm';
 import { READONLY_MESSAGE, runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, CatalogEntry, Device, FileRepoEntry, InputSchema, VmDevice, VmNic, VmRow } from '../api/client';
@@ -613,38 +614,47 @@ function AttachDeviceDialog({ target, stopped, onClose }: { target: NicAttachTar
   // Plan mode: the plan was saved without executing — offer to close.
   if (saved) {
     return (
-      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-        <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-          <header className="flex items-center justify-between border-b border-border px-4 py-3">
-            <h2 className="text-base font-semibold text-foreground">Add device — {row.name}</h2>
-            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted"><X size={16} /></button>
-          </header>
-          <div className="space-y-3 px-4 py-4">
-            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
-              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
-              Device attach saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
-            </div>
-          </div>
-          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
-          </footer>
+      <DialogShell
+        title={`Add device — ${row.name}`}
+        onClose={onClose}
+        maxWidth="max-w-md"
+        footer={
+          <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
+        }
+      >
+        <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+          <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+          Device attach saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
         </div>
-      </div>
+      </DialogShell>
     );
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div>
-            <h2 className="text-base font-semibold text-foreground">Add device — {row.name}</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">Applies via the plan workflow on {row.deviceName ?? row.deviceId}.</p>
+    <>
+      <DialogShell
+        title={`Add device — ${row.name}`}
+        subtitle={`Applies via the plan workflow on ${row.deviceName ?? row.deviceId}.`}
+        onClose={onClose}
+        maxWidth="max-w-md"
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
+            <button
+              type="button"
+              disabled={!selectedType || saving || isReadOnly || needsStopped}
+              title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : needsStopped ? 'Stop the VM first' : undefined}
+              onClick={() => void submit()}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {saving && <Loader2 size={12} className="animate-spin" />}
+              {isPlanMode ? 'Save as plan' : selectedType ? `Attach ${selectedType.label}` : 'Attach'}
+            </button>
           </div>
-          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted"><X size={16} /></button>
-        </header>
+        }
+      >
 
-        <div className="space-y-4 px-4 py-4">
+        <div className="space-y-4">
           {isReadOnly && (
             <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
               <EyeOff size={14} className="mt-0.5 shrink-0" />
@@ -818,22 +828,10 @@ function AttachDeviceDialog({ target, stopped, onClose }: { target: NicAttachTar
             </>
           )}
         </div>
+      </DialogShell>
 
-        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
-          <button
-            type="button"
-            disabled={!selectedType || saving || isReadOnly || needsStopped}
-            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : needsStopped ? 'Stop the VM first' : undefined}
-            onClick={() => void submit()}
-            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {saving && <Loader2 size={12} className="animate-spin" />}
-            {isPlanMode ? 'Save as plan' : selectedType ? `Attach ${selectedType.label}` : 'Attach'}
-          </button>
-        </footer>
-
-        {reauth && (
+      {reauth && (
+        <div onClick={(e) => e.stopPropagation()}>
           <ReauthDialog
             contextLabel={`Add device to ${row.name}`}
             onClose={() => setReauth(false)}
@@ -842,9 +840,9 @@ function AttachDeviceDialog({ target, stopped, onClose }: { target: NicAttachTar
               try { await submit(); } catch { /* dialog stays open */ }
             }}
           />
-        )}
-      </div>
-    </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1055,38 +1053,47 @@ function EditDeviceDialog({ target, stopped, onClose }: { target: DeviceEditTarg
   // Plan mode: the plan was saved without executing — offer to close.
   if (saved) {
     return (
-      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-        <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-          <header className="flex items-center justify-between border-b border-border px-4 py-3">
-            <h2 className="text-base font-semibold text-foreground">Edit device — {row.name}</h2>
-            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted"><X size={16} /></button>
-          </header>
-          <div className="space-y-3 px-4 py-4">
-            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
-              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
-              Device edit saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
-            </div>
-          </div>
-          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
-          </footer>
+      <DialogShell
+        title={`Edit device — ${row.name}`}
+        onClose={onClose}
+        maxWidth="max-w-md"
+        footer={
+          <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
+        }
+      >
+        <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+          <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+          Device edit saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
         </div>
-      </div>
+      </DialogShell>
     );
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div>
-            <h2 className="text-base font-semibold text-foreground">Edit {descriptor?.label ?? target.dtype.toLowerCase()} — {row.name}</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">Unchanged fields keep their current value; applies via the plan workflow on {row.deviceName ?? row.deviceId}.</p>
+    <>
+      <DialogShell
+        title={`Edit ${descriptor?.label ?? target.dtype.toLowerCase()} — ${row.name}`}
+        subtitle={`Unchanged fields keep their current value; applies via the plan workflow on ${row.deviceName ?? row.deviceId}.`}
+        onClose={onClose}
+        maxWidth="max-w-md"
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
+            <button
+              type="button"
+              disabled={!descriptor?.editInputSchema || saving || isReadOnly || needsStopped || changedKeys.length === 0 || (isCdrom && !cdromCanSubmit)}
+              title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : needsStopped ? 'Stop the VM first' : undefined}
+              onClick={() => void submit()}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {saving && <Loader2 size={12} className="animate-spin" />}
+              {isPlanMode ? 'Save as plan' : `Edit ${descriptor?.label ?? 'device'}`}
+            </button>
           </div>
-          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted"><X size={16} /></button>
-        </header>
+        }
+      >
 
-        <div className="space-y-4 px-4 py-4">
+        <div className="space-y-4">
           {isReadOnly && (
             <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
               <EyeOff size={14} className="mt-0.5 shrink-0" />
@@ -1220,22 +1227,10 @@ function EditDeviceDialog({ target, stopped, onClose }: { target: DeviceEditTarg
             </>
           )}
         </div>
+      </DialogShell>
 
-        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
-          <button
-            type="button"
-            disabled={!descriptor?.editInputSchema || saving || isReadOnly || needsStopped || changedKeys.length === 0 || (isCdrom && !cdromCanSubmit)}
-            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : needsStopped ? 'Stop the VM first' : undefined}
-            onClick={() => void submit()}
-            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {saving && <Loader2 size={12} className="animate-spin" />}
-            {isPlanMode ? 'Save as plan' : `Edit ${descriptor?.label ?? 'device'}`}
-          </button>
-        </footer>
-
-        {reauth && (
+      {reauth && (
+        <div onClick={(e) => e.stopPropagation()}>
           <ReauthDialog
             contextLabel={`Edit device on ${row.name}`}
             onClose={() => setReauth(false)}
@@ -1244,9 +1239,9 @@ function EditDeviceDialog({ target, stopped, onClose }: { target: DeviceEditTarg
               try { await submit(); } catch { /* dialog stays open */ }
             }}
           />
-        )}
-      </div>
-    </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1407,23 +1402,19 @@ function EditVmDialog({ row, stopped, onClose }: { row: VmRow; stopped: boolean;
   // Plan mode: the plan was saved without executing — offer to close.
   if (saved) {
     return (
-      <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-        <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-          <header className="flex items-center justify-between border-b border-border px-4 py-3">
-            <h2 className="text-base font-semibold text-foreground">Edit VM — {row.name}</h2>
-            <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted"><X size={16} /></button>
-          </header>
-          <div className="space-y-3 px-4 py-4">
-            <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
-              <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
-              VM edit saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
-            </div>
-          </div>
-          <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-            <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
-          </footer>
+      <DialogShell
+        title={`Edit VM — ${row.name}`}
+        onClose={onClose}
+        maxWidth="max-w-md"
+        footer={
+          <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
+        }
+      >
+        <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+          <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+          VM edit saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
         </div>
-      </div>
+      </DialogShell>
     );
   }
 
@@ -1465,17 +1456,30 @@ function EditVmDialog({ row, stopped, onClose }: { row: VmRow; stopped: boolean;
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div>
-            <h2 className="text-base font-semibold text-foreground">Edit VM — {row.name}</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">Unchanged fields keep their current value; applies via the plan workflow on {row.deviceName ?? row.deviceId}. Most changes take effect at the guest's next boot.</p>
+    <>
+      <DialogShell
+        title={`Edit VM — ${row.name}`}
+        subtitle={`Unchanged fields keep their current value; applies via the plan workflow on ${row.deviceName ?? row.deviceId}. Most changes take effect at the guest's next boot.`}
+        onClose={onClose}
+        maxWidth="max-w-md"
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
+            <button
+              type="button"
+              disabled={saving || isReadOnly || needsStopped || pinVcpusBroken || changedKeys.length === 0}
+              title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : needsStopped ? 'Stop the VM first (renaming requires it)' : pinVcpusBroken ? 'Set a cpuset for Pin vCPUs, or untick it' : undefined}
+              onClick={() => void submit()}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {saving && <Loader2 size={12} className="animate-spin" />}
+              {isPlanMode ? 'Save as plan' : 'Edit VM'}
+            </button>
           </div>
-          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted"><X size={16} /></button>
-        </header>
+        }
+      >
 
-        <div className="space-y-4 px-4 py-4">
+        <div className="space-y-4">
           {isReadOnly && (
             <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
               <EyeOff size={14} className="mt-0.5 shrink-0" />
@@ -1514,21 +1518,10 @@ function EditVmDialog({ row, stopped, onClose }: { row: VmRow; stopped: boolean;
           )}
         </div>
 
-        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
-          <button
-            type="button"
-            disabled={saving || isReadOnly || needsStopped || pinVcpusBroken || changedKeys.length === 0}
-            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : needsStopped ? 'Stop the VM first (renaming requires it)' : pinVcpusBroken ? 'Set a cpuset for Pin vCPUs, or untick it' : undefined}
-            onClick={() => void submit()}
-            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {saving && <Loader2 size={12} className="animate-spin" />}
-            {isPlanMode ? 'Save as plan' : 'Edit VM'}
-          </button>
-        </footer>
+      </DialogShell>
 
-        {reauth && (
+      {reauth && (
+        <div onClick={(e) => e.stopPropagation()}>
           <ReauthDialog
             contextLabel={`Edit VM ${row.name}`}
             onClose={() => setReauth(false)}
@@ -1537,9 +1530,9 @@ function EditVmDialog({ row, stopped, onClose }: { row: VmRow; stopped: boolean;
               try { await submit(); } catch { /* dialog stays open */ }
             }}
           />
-        )}
-      </div>
-    </div>
+        </div>
+      )}
+    </>
   );
 }
 

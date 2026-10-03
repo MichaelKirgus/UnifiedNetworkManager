@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { Hourglass, KeyRound, Loader2, ShieldCheck, X } from 'lucide-react';
+import { Hourglass, KeyRound, Loader2, ShieldCheck } from 'lucide-react';
 import clsx from 'clsx';
 import { api, ApiError, RevalidateChallenge, setAccessToken } from '../api/client';
 import { toRequestOptions } from '../utils/webauthn';
+import { DialogShell } from './DialogShell';
 
 /**
  * ExtendSessionDialog — extends the current session by re-proving a second
@@ -113,19 +114,8 @@ export function ExtendSessionDialog({ onClose, onSuccess }: ExtendSessionDialogP
   }
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div className="mt-16 w-full max-w-sm rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div className="flex items-center gap-2">
-            <Hourglass className="h-4 w-4 text-warning-fg" />
-            <h2 className="text-base font-semibold text-foreground">Extend session</h2>
-          </div>
-          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-            <X className="h-4 w-4" />
-          </button>
-        </header>
-
-        <div className="p-4">
+    <DialogShell title="Extend session" icon={<Hourglass className="h-4 w-4 text-warning-fg" />} onClose={onClose} zIndex="z-[60]" maxWidth="max-w-sm">
+      <div>
           <p className="mb-3 text-xs text-muted-foreground">
             Your session is about to expire. Verify a second factor to extend it — no password needed.
           </p>
@@ -192,8 +182,7 @@ export function ExtendSessionDialog({ onClose, onSuccess }: ExtendSessionDialogP
               </div>
             </form>
           )}
-        </div>
       </div>
-    </div>
+    </DialogShell>
   );
 }

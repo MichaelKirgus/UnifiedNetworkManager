@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
-import { KeyRound, Loader2, ShieldCheck, X } from 'lucide-react';
+import { KeyRound, Loader2, ShieldCheck } from 'lucide-react';
 import clsx from 'clsx';
 import { api, ApiError, RevalidateChallenge, setAccessToken } from '../api/client';
 import { toRequestOptions } from '../utils/webauthn';
+import { DialogShell } from './DialogShell';
 
 /**
  * ReauthDialog — in-session two-factor re-validation. Shown when a privileged
@@ -106,19 +107,8 @@ export function ReauthDialog({ contextLabel, onClose, onSuccess }: ReauthDialogP
   }
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div className="mt-16 w-full max-w-sm rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="h-4 w-4 text-primary" />
-            <h2 className="text-base font-semibold text-foreground">Two-factor required</h2>
-          </div>
-          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-            <X className="h-4 w-4" />
-          </button>
-        </header>
-
-        <div className="p-4">
+    <DialogShell title="Two-factor required" icon={<ShieldCheck className="h-4 w-4 text-primary" />} onClose={onClose} zIndex="z-[60]" maxWidth="max-w-sm">
+      <div>
           {contextLabel && (
             <p className="mb-3 text-xs text-muted-foreground">
               “{contextLabel}” needs a fresh two-factor check before it can run.
@@ -187,8 +177,7 @@ export function ReauthDialog({ contextLabel, onClose, onSuccess }: ReauthDialogP
               </div>
             </form>
           )}
-        </div>
       </div>
-    </div>
+    </DialogShell>
   );
 }

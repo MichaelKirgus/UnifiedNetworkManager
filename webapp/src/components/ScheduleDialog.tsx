@@ -1,8 +1,9 @@
 import { FormEvent, useMemo, useState } from 'react';
 import clsx from 'clsx';
-import { CalendarClock, X } from 'lucide-react';
+import { CalendarClock } from 'lucide-react';
 import { api, ApiError, Plan } from '../api/client';
 import { useTimeFormat } from '../utils/time';
+import { DialogShell } from './DialogShell';
 
 /**
  * Reusable "schedule this plan" dialog — used by the Plans list (single + bulk)
@@ -122,21 +123,29 @@ export function ScheduleDialog({ plan, plans = [], onClose, onSaved }: ScheduleD
   const validDue = typeof dueMs === 'number' && !Number.isNaN(dueMs) && dueMs > Date.now() - 60_000;
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <form
-        onSubmit={handleSubmit}
-        onClick={(e) => e.stopPropagation()}
-        className="mt-8 w-full max-w-lg rounded-lg border border-border bg-card p-5 shadow-xl"
-      >
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
-            <CalendarClock className="h-4 w-4 text-primary" />
-            {isBulk ? `Schedule ${plans.length} plans` : 'Schedule plan'}
-          </h2>
-          <button type="button" onClick={onClose} aria-label="Close" className="rounded p-1 text-faint hover:bg-muted hover:text-secondary">
-            <X className="h-4 w-4" />
+    <DialogShell
+      tag="form"
+      onSubmit={handleSubmit}
+      title={isBulk ? `Schedule ${plans.length} plans` : 'Schedule plan'}
+      icon={<CalendarClock className="h-4 w-4 text-primary" />}
+      onClose={onClose}
+      zIndex="z-[70]"
+      footer={
+        <>
+          <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
+            Cancel
           </button>
-        </div>
+          <button
+            type="submit"
+            disabled={busy || !validDue}
+            className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
+          >
+            <CalendarClock className="h-4 w-4" />
+            {busy ? 'Scheduling…' : isBulk ? `Schedule ${plans.length} plans` : 'Schedule'}
+          </button>
+        </>
+      }
+    >
 
         {!isBulk && targets[0] && (
           <p className="mb-3 truncate rounded border border-border bg-background px-2.5 py-1.5 text-xs text-secondary" title={targets[0].intentActionId}>
@@ -244,21 +253,7 @@ export function ScheduleDialog({ plan, plans = [], onClose, onSaved }: ScheduleD
           <div className="mb-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{error}</div>
         )}
 
-        <div className="flex items-center justify-end gap-2">
-          <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
-            Cancel
-          </button>
-          <button
-            type="submit"
-            disabled={busy || !validDue}
-            className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
-          >
-            <CalendarClock className="h-4 w-4" />
-            {busy ? 'Scheduling…' : isBulk ? `Schedule ${plans.length} plans` : 'Schedule'}
-          </button>
-        </div>
-      </form>
-    </div>
+    </DialogShell>
   );
 }
 

@@ -19,6 +19,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { StatusBadge } from '../components/StatusBadge';
 import { SchemaForm, validateSchema, defaultValues } from '../components/SchemaForm';
@@ -563,14 +564,31 @@ function StepEditor({ step, planId, onSaved, onClose }: {
 
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-primary/40 p-4" onClick={onClose}>
-      <div className="max-h-[85vh] w-full max-w-lg overflow-auto rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <h3 className="text-sm font-semibold text-foreground">Edit step #{step.stepIndex}</h3>
-          <button onClick={onClose} aria-label="Close" className="rounded p-1 text-faint hover:bg-muted"><X className="h-4 w-4" /></button>
+    <DialogShell
+      title={`Edit step #${step.stepIndex}`}
+      onClose={onClose}
+      maxWidth="max-w-lg"
+      bodyMaxHeight="85vh"
+      footer={
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">Cancel</button>
+          <button
+            onClick={() => {
+              const entry = (actionsQuery.data ?? []).find((c) => c.id === actionId);
+              if (entry?.inputSchema) {
+                const errors = validateSchema(entry.inputSchema, input);
+                if (Object.keys(errors).length > 0) { setFieldErrors(errors); return; }
+              }
+              saveMutation.mutate();
+            }}
+            disabled={saveMutation.isPending}
+            className="rounded-md bg-primary px-4 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50">
+            {saveMutation.isPending ? 'Saving…' : 'Save'}
+          </button>
         </div>
-
-        <div className="space-y-4 px-4 py-3">
+      }
+    >
+        <div className="space-y-4">
           {error && <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{error}</div>}
 
           <div>
@@ -628,26 +646,8 @@ function StepEditor({ step, planId, onSaved, onClose }: {
               className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring" />
             Best effort (failure does not abort the plan)
           </label>
-
-          <div className="flex justify-end gap-2 border-t border-border pt-3">
-            <button onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">Cancel</button>
-            <button
-              onClick={() => {
-                const entry = (actionsQuery.data ?? []).find((c) => c.id === actionId);
-                if (entry?.inputSchema) {
-                  const errors = validateSchema(entry.inputSchema, input);
-                  if (Object.keys(errors).length > 0) { setFieldErrors(errors); return; }
-                }
-                saveMutation.mutate();
-              }}
-              disabled={saveMutation.isPending}
-              className="rounded-md bg-primary px-4 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50">
-              {saveMutation.isPending ? 'Saving…' : 'Save'}
-            </button>
-          </div>
         </div>
-      </div>
-    </div>
+    </DialogShell>
   );
 }
 
@@ -707,13 +707,32 @@ function AddStepModal({ plan, onDone, onClose }: { plan: PlanDetailType; onDone:
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-primary/40 p-4" onClick={onClose}>
-      <div className="max-h-[85vh] w-full max-w-lg overflow-auto rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <h3 className="text-sm font-semibold text-foreground">Add step</h3>
-          <button onClick={onClose} aria-label="Close" className="rounded p-1 text-faint hover:bg-muted"><X className="h-4 w-4" /></button>
+    <DialogShell
+      title="Add step"
+      onClose={onClose}
+      maxWidth="max-w-lg"
+      bodyMaxHeight="85vh"
+      footer={
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">Cancel</button>
+          <button
+            onClick={() => {
+              const entry = (actionsQuery.data ?? []).find((c) => c.id === actionId);
+              if (!deviceId || !actionId) return;
+              if (entry?.inputSchema) {
+                const errors = validateSchema(entry.inputSchema, input);
+                if (Object.keys(errors).length > 0) { setFieldErrors(errors); return; }
+              }
+              addMutation.mutate();
+            }}
+            disabled={addMutation.isPending || !deviceId || !actionId}
+            className="rounded-md bg-primary px-4 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50">
+            {addMutation.isPending ? 'Adding…' : 'Add Step'}
+          </button>
         </div>
-        <div className="space-y-4 px-4 py-3">
+      }
+    >
+        <div className="space-y-4">
           {error && <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{error}</div>}
 
           <div>
@@ -742,27 +761,8 @@ function AddStepModal({ plan, onDone, onClose }: { plan: PlanDetailType; onDone:
               <SchemaForm schema={entry.inputSchema} values={input} onChange={(v) => { setInput(v); setFieldErrors({}); }} fieldErrors={fieldErrors} />
             ) : null;
           })()}
-
-          <div className="flex justify-end gap-2 border-t border-border pt-3">
-            <button onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">Cancel</button>
-            <button
-              onClick={() => {
-                const entry = (actionsQuery.data ?? []).find((c) => c.id === actionId);
-                if (!deviceId || !actionId) return;
-                if (entry?.inputSchema) {
-                  const errors = validateSchema(entry.inputSchema, input);
-                  if (Object.keys(errors).length > 0) { setFieldErrors(errors); return; }
-                }
-                addMutation.mutate();
-              }}
-              disabled={addMutation.isPending || !deviceId || !actionId}
-              className="rounded-md bg-primary px-4 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50">
-              {addMutation.isPending ? 'Adding…' : 'Add Step'}
-            </button>
-          </div>
         </div>
-      </div>
-    </div>
+    </DialogShell>
   );
 }
 

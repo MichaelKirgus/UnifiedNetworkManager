@@ -12,10 +12,10 @@ import {
   RefreshCw,
   Trash2,
   Upload,
-  X,
 } from 'lucide-react';
 import { api, ApiError, type FilesystemEntry, type SessionCredentialCandidate } from '../api/client';
 import { CredentialPicker } from './CredentialPicker';
+import { DialogShell } from './DialogShell';
 import { formatBytes } from './formatMetric';
 import { ResizableDialog } from './ResizableDialog';
 import { useTimeFormat } from '../utils/time';
@@ -342,32 +342,29 @@ export function FileBrowser({ deviceId, pluginId, context, initialPath }: FileBr
 
       {/* Editor overlay */}
         {editing && (
-          <div className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-primary/50 p-6" onClick={() => setEditing(null)}>
-            <div className="mt-8 w-full max-w-2xl rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-              <header className="flex items-center justify-between border-b border-border px-4 py-3">
-                <h3 className="truncate font-mono text-sm font-semibold text-foreground">{editing.name}</h3>
-                <button type="button" aria-label="Close editor" onClick={() => setEditing(null)} className="rounded p-1 text-faint hover:bg-muted">
-                  <X size={16} />
-                </button>
-              </header>
-              <div className="p-4">
-                <textarea
-                  value={editing.content}
-                  onChange={(e) => setEditing({ ...editing, content: e.target.value })}
-                  spellCheck={false}
-                  className="h-[50vh] w-full resize-none rounded-md border border-border bg-background p-3 font-mono text-xs text-foreground"
-                />
-              </div>
-              <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+          <DialogShell
+            title={<span className="font-mono">{editing.name}</span>}
+            onClose={() => setEditing(null)}
+            zIndex="z-[60]"
+            maxWidth="max-w-2xl"
+            footer={
+              <div className="flex items-center justify-end gap-2">
                 <button type="button" onClick={() => setEditing(null)} disabled={savingEdit} className="rounded-md border border-border px-3 py-1.5 text-sm text-secondary hover:bg-muted disabled:opacity-40">
                   Cancel
                 </button>
                 <button type="button" onClick={() => void saveEdit()} disabled={savingEdit} className="flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-fg hover:opacity-90 disabled:opacity-40">
                   {savingEdit && <Loader2 size={14} className="animate-spin" />} Save file
                 </button>
-              </footer>
-            </div>
-          </div>
+              </div>
+            }
+          >
+            <textarea
+              value={editing.content}
+              onChange={(e) => setEditing({ ...editing, content: e.target.value })}
+              spellCheck={false}
+              className="h-[50vh] w-full resize-none rounded-md border border-border bg-background p-3 font-mono text-xs text-foreground"
+            />
+          </DialogShell>
         )}
 
       {/* Credential picker — shown when the broker needs a choice of file-access credential. */}

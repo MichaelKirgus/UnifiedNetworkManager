@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import clsx from 'clsx';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { Copy, FolderOpen, Power, Plus, RefreshCw, Settings, Settings2, Star, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
+import { Copy, FolderOpen, Power, Plus, RefreshCw, Settings, Settings2, Star, Terminal as TerminalIcon, Trash2 } from 'lucide-react';
+import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { ConsoleDialog } from '../components/ConsoleDialog';
 import { FileBrowserDialog } from '../components/FileBrowserDialog';
@@ -808,82 +809,46 @@ export default function DeviceDetail() {
 
       {/* --- Add plugin modal --------------------------------------------- */}
       {showAddPlugin && (
-        <div
-          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-primary/40 p-6"
-          onClick={() => setShowAddPlugin(false)}
+        <DialogShell
+          title={`Add plugin to ${device?.name ?? 'device'}`}
+          onClose={() => setShowAddPlugin(false)}
+          zIndex="z-40"
+          maxWidth="max-w-lg"
         >
-          <div
-            className="mt-10 w-full max-w-lg rounded-md border border-border bg-card shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <header className="flex items-center justify-between border-b border-border px-4 py-3">
-              <h3 className="text-sm font-semibold text-foreground">Add plugin to {device?.name ?? 'device'}</h3>
-              <button aria-label="Close" onClick={() => setShowAddPlugin(false)} className="rounded-md p-1 text-faint hover:bg-muted">
-                <X className="h-4 w-4" />
-              </button>
-            </header>
-            <div className="p-4">
-              {addAssignments.isError && (
-                <div className="mb-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
-                  {(addAssignments.error as Error).message}
-                </div>
-              )}
-              <PluginAssignmentBuilder
-                plugins={pluginsQuery.data ?? []}
-                secrets={secretsQuery.data ?? []}
-                excludedPluginIds={assignments.map((a) => a.pluginId)}
-                onSubmit={(inputs) => addAssignments.mutate(inputs)}
-                submitLabel="Add"
-                busy={addAssignments.isPending}
-                appendMode
-              />
+          {addAssignments.isError && (
+            <div className="mb-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
+              {(addAssignments.error as Error).message}
             </div>
-          </div>
-        </div>
+          )}
+          <PluginAssignmentBuilder
+            plugins={pluginsQuery.data ?? []}
+            secrets={secretsQuery.data ?? []}
+            excludedPluginIds={assignments.map((a) => a.pluginId)}
+            onSubmit={(inputs) => addAssignments.mutate(inputs)}
+            submitLabel="Add"
+            busy={addAssignments.isPending}
+            appendMode
+          />
+        </DialogShell>
       )}
 
       {/* --- Add IP modal -------------------------------------------------- */}
       {showAddIp && (
-        <div
-          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-primary/40 p-6"
-          onClick={() => setShowAddIp(false)}
-        >
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              const v = newIpInput.trim();
-              if (!v) return;
-              if (!isValidAddress(v)) { setIpError(addressError(v)); return; }
-              addIp.mutate(v);
-            }}
-            className="mt-10 w-full max-w-md rounded-md border border-border bg-card shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <header className="flex items-center justify-between border-b border-border px-4 py-3">
-              <h3 className="text-sm font-semibold text-foreground">Add IP to {device?.name ?? 'device'}</h3>
-              <button type="button" aria-label="Close" onClick={() => setShowAddIp(false)} className="rounded-md p-1 text-faint hover:bg-muted">
-                <X className="h-4 w-4" />
-              </button>
-            </header>
-            <div className="space-y-3 p-4">
-              {addIp.isError && (
-                <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
-                  {(addIp.error as Error).message}
-                </div>
-              )}
-              <div>
-                <label className="mb-1 block text-sm font-medium text-secondary">IP address</label>
-                <input
-                  autoFocus
-                  className={`w-full rounded-md border px-3 py-2 text-sm ${ipError ? 'border-danger-border' : 'border-border'}`}
-                  value={newIpInput}
-                  onChange={(e) => { setNewIpInput(e.target.value); setIpError(null); }}
-                  placeholder="10.0.0.2 or 2001:db8::1"
-                />
-                {ipError && <p className="mt-1 text-xs text-danger-fg">{ipError}</p>}
-              </div>
-            </div>
-            <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+        <DialogShell
+          tag="form"
+          title={`Add IP to ${device?.name ?? 'device'}`}
+          onClose={() => setShowAddIp(false)}
+          zIndex="z-40"
+          maxWidth="max-w-md"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const v = newIpInput.trim();
+            if (!v) return;
+            if (!isValidAddress(v)) { setIpError(addressError(v)); return; }
+            addIp.mutate(v);
+          }}
+          footer={
+            <div className="flex items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setShowAddIp(false)}
@@ -898,34 +863,40 @@ export default function DeviceDetail() {
               >
                 Add IP
               </button>
-            </footer>
-          </form>
-        </div>
+            </div>
+          }
+        >
+          <div className="space-y-3">
+            {addIp.isError && (
+              <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
+                {(addIp.error as Error).message}
+              </div>
+            )}
+            <div>
+              <label className="mb-1 block text-sm font-medium text-secondary">IP address</label>
+              <input
+                autoFocus
+                className={`w-full rounded-md border px-3 py-2 text-sm ${ipError ? 'border-danger-border' : 'border-border'}`}
+                value={newIpInput}
+                onChange={(e) => { setNewIpInput(e.target.value); setIpError(null); }}
+                placeholder="10.0.0.2 or 2001:db8::1"
+              />
+              {ipError && <p className="mt-1 text-xs text-danger-fg">{ipError}</p>}
+            </div>
+          </div>
+        </DialogShell>
       )}
 
       {/* --- Per-device settings modal ------------------------------------- */}
       {settingsAssignment && (
-        <div
-          className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-primary/40 p-6"
-          onClick={() => setSettingsPluginId(null)}
+        <DialogShell
+          title={`Settings — ${settingsAssignment.pluginName ?? settingsAssignment.pluginId} on ${device?.name ?? 'this device'}`}
+          onClose={() => setSettingsPluginId(null)}
+          zIndex="z-40"
+          maxWidth="max-w-lg"
         >
-          <div
-            className="mt-10 w-full max-w-lg rounded-md border border-border bg-card shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <header className="flex items-center justify-between border-b border-border px-4 py-3">
-              <h3 className="text-sm font-semibold text-foreground">
-                Settings — {settingsAssignment.pluginName ?? settingsAssignment.pluginId} on {device?.name ?? 'this device'}
-              </h3>
-              <button aria-label="Close" onClick={() => setSettingsPluginId(null)} className="rounded-md p-1 text-faint hover:bg-muted">
-                <X className="h-4 w-4" />
-              </button>
-            </header>
-            <div className="p-4">
-              <OptionForm pluginId={settingsAssignment.pluginId} deviceId={deviceId as string} onSaved={invalidateDevice} />
-            </div>
-          </div>
-        </div>
+          <OptionForm pluginId={settingsAssignment.pluginId} deviceId={deviceId as string} onSaved={invalidateDevice} />
+        </DialogShell>
       )}
 
       {/* --- SSH console (host login shell, capability 'sshConsole') -------- */}

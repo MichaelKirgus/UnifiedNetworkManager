@@ -5,6 +5,7 @@ import { AlertTriangle, CheckCircle2, FolderOpen, Globe, Loader2, MoreHorizontal
 import clsx from 'clsx';
 import { api, ApiError, CatalogEntry, Device, QuickAction, pluginIconUrl } from '../api/client';
 import { SchemaForm, validateSchema, defaultValues } from './SchemaForm';
+import { DialogShell } from './DialogShell';
 import { ConsoleDialog } from './ConsoleDialog';
 import { FileBrowserDialog } from './FileBrowserDialog';
 import { runAction, useExecutionMode, READONLY_MESSAGE } from '../executionMode';
@@ -376,25 +377,11 @@ function ActionQuickDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div className="mt-10 w-full max-w-lg rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <h2 className="text-base font-semibold text-foreground">{entry?.label ?? qa.label}</h2>
-          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-            <X className="h-4 w-4" />
-          </button>
-        </header>
-        <div className="space-y-3 p-4">
-          {entry?.description ? (
-            <p className="text-xs text-faint">{entry.description}</p>
-          ) : null}
-          {Object.keys(entry?.inputSchema ?? {}).length > 0 ? (
-            <SchemaForm schema={entry?.inputSchema ?? {}} values={values} onChange={(v) => setValues(v)} fieldErrors={fieldErrors} />
-          ) : (
-            <p className="text-xs text-faint">This action takes no input.</p>
-          )}
-        </div>
-        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+    <DialogShell
+      title={entry?.label ?? qa.label}
+      onClose={onClose}
+      footer={
+        <>
           <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background">
             Cancel
           </button>
@@ -409,8 +396,19 @@ function ActionQuickDialog({
               {entry.riskLevel === 'write' ? 'Apply change' : 'Run'}
             </button>
           )}
-        </footer>
+        </>
+      }
+    >
+      <div className="space-y-3">
+          {entry?.description ? (
+            <p className="text-xs text-faint">{entry.description}</p>
+          ) : null}
+          {Object.keys(entry?.inputSchema ?? {}).length > 0 ? (
+            <SchemaForm schema={entry?.inputSchema ?? {}} values={values} onChange={(v) => setValues(v)} fieldErrors={fieldErrors} />
+          ) : (
+            <p className="text-xs text-faint">This action takes no input.</p>
+          )}
       </div>
-    </div>
+    </DialogShell>
   );
 }

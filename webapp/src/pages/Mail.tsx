@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { CheckCircle2, ChevronRight, EyeOff, Loader2, Mail as MailIcon, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { CheckCircle2, ChevronRight, EyeOff, Loader2, Mail as MailIcon, Pencil, Plus, Trash2 } from 'lucide-react';
+import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
@@ -164,35 +165,6 @@ function parseNum(s: string): number | undefined {
   return Number.isFinite(n) ? n : NaN;
 }
 
-/** Shared dialog shell — header, body slot, footer buttons. */
-function DialogShell({
-  title, subtitle, onClose, children, footer,
-}: {
-  title: string;
-  subtitle?: ReactNode;
-  onClose: () => void;
-  children: ReactNode;
-  footer: ReactNode;
-}) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-primary/40 p-6" onClick={onClose}>
-      <div className="mt-8 w-full max-w-md rounded-md border border-border bg-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div>
-            <h2 className="text-base font-semibold text-foreground">{title}</h2>
-            {subtitle && <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>}
-          </div>
-          <button type="button" aria-label="Close dialog" onClick={onClose} className="rounded p-1 text-faint hover:bg-muted">
-            <X size={16} />
-          </button>
-        </header>
-        {children}
-        {footer}
-      </div>
-    </div>
-  );
-}
-
 /** "Mail server" select — only rendered when more than one mail device exists. */
 function DeviceSelect({ devices, value, onChange }: { devices: MailDevice[]; value: string; onChange: (deviceId: string) => void }) {
   if (devices.length <= 1) return null;
@@ -307,28 +279,26 @@ function DomainDialog({ state, devices, hasAction, onClose }: { state: Extract<D
 
   if (saved) {
     return (
-      <DialogShell title={title} onClose={onClose} footer={
-        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-          <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
-        </footer>
+      <DialogShell title={title} onClose={onClose} maxWidth="max-w-md" footer={
+        <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
       }>
-        <div className="space-y-3 px-4 py-4">
-          <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
-            <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
-            Domain change saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
-          </div>
+        <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+          <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+          Domain change saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
         </div>
       </DialogShell>
     );
   }
 
   return (
+    <>
     <DialogShell
       title={title}
       subtitle={row ? `Applies on ${row.deviceName ?? row.deviceId}.` : undefined}
       onClose={onClose}
+      maxWidth="max-w-md"
       footer={
-        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+        <div className="flex items-center justify-end gap-2">
           <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
           <button
             type="button"
@@ -340,10 +310,10 @@ function DomainDialog({ state, devices, hasAction, onClose }: { state: Extract<D
             {saving && <Loader2 size={12} className="animate-spin" />}
             {isPlanMode ? 'Save as plan' : state.mode === 'edit' ? 'Save changes' : 'Create domain'}
           </button>
-        </footer>
+        </div>
       }
     >
-      <div className="space-y-4 px-4 py-4">
+      <div className="space-y-4">
         {isReadOnly && (
           <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
             <EyeOff size={14} className="mt-0.5 shrink-0" />
@@ -412,8 +382,10 @@ function DomainDialog({ state, devices, hasAction, onClose }: { state: Extract<D
           Backup MX (relay domain — accepts mail without local delivery)
         </label>
       </div>
+    </DialogShell>
 
-      {reauth && (
+    {reauth && (
+      <div onClick={(e) => e.stopPropagation()}>
         <ReauthDialog
           contextLabel={title}
           onClose={() => setReauth(false)}
@@ -422,8 +394,9 @@ function DomainDialog({ state, devices, hasAction, onClose }: { state: Extract<D
             try { await submit(); } catch { /* dialog stays open */ }
           }}
         />
-      )}
-    </DialogShell>
+      </div>
+    )}
+    </>
   );
 }
 
@@ -521,28 +494,26 @@ function MailboxDialog({ state, devices, domains, hasAction, onClose }: {
 
   if (saved) {
     return (
-      <DialogShell title={title} onClose={onClose} footer={
-        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-          <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
-        </footer>
+      <DialogShell title={title} onClose={onClose} maxWidth="max-w-md" footer={
+        <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
       }>
-        <div className="space-y-3 px-4 py-4">
-          <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
-            <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
-            Mailbox change saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
-          </div>
+        <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+          <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+          Mailbox change saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
         </div>
       </DialogShell>
     );
   }
 
   return (
+    <>
     <DialogShell
       title={title}
       subtitle={row ? `Applies on ${row.deviceName ?? row.deviceId}.` : undefined}
       onClose={onClose}
+      maxWidth="max-w-md"
       footer={
-        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+        <div className="flex items-center justify-end gap-2">
           <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
           <button
             type="button"
@@ -554,10 +525,10 @@ function MailboxDialog({ state, devices, domains, hasAction, onClose }: {
             {saving && <Loader2 size={12} className="animate-spin" />}
             {isPlanMode ? 'Save as plan' : state.mode === 'edit' ? 'Save changes' : 'Create mailbox'}
           </button>
-        </footer>
+        </div>
       }
     >
-      <div className="space-y-4 px-4 py-4">
+      <div className="space-y-4">
         {isReadOnly && (
           <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
             <EyeOff size={14} className="mt-0.5 shrink-0" />
@@ -639,8 +610,10 @@ function MailboxDialog({ state, devices, domains, hasAction, onClose }: {
           </label>
         )}
       </div>
+    </DialogShell>
 
-      {reauth && (
+    {reauth && (
+      <div onClick={(e) => e.stopPropagation()}>
         <ReauthDialog
           contextLabel={title}
           onClose={() => setReauth(false)}
@@ -649,8 +622,9 @@ function MailboxDialog({ state, devices, domains, hasAction, onClose }: {
             try { await submit(); } catch { /* dialog stays open */ }
           }}
         />
-      )}
-    </DialogShell>
+      </div>
+    )}
+    </>
   );
 }
 
@@ -722,28 +696,26 @@ function AliasDialog({ state, devices, hasAction, onClose }: { state: Extract<Di
 
   if (saved) {
     return (
-      <DialogShell title={title} onClose={onClose} footer={
-        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
-          <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
-        </footer>
+      <DialogShell title={title} onClose={onClose} maxWidth="max-w-md" footer={
+        <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">Close</button>
       }>
-        <div className="space-y-3 px-4 py-4">
-          <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
-            <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
-            Alias change saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
-          </div>
+        <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+          <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+          Alias change saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).
         </div>
       </DialogShell>
     );
   }
 
   return (
+    <>
     <DialogShell
       title={title}
       subtitle={row ? `Applies on ${row.deviceName ?? row.deviceId}.` : undefined}
       onClose={onClose}
+      maxWidth="max-w-md"
       footer={
-        <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+        <div className="flex items-center justify-end gap-2">
           <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
           <button
             type="button"
@@ -755,10 +727,10 @@ function AliasDialog({ state, devices, hasAction, onClose }: { state: Extract<Di
             {saving && <Loader2 size={12} className="animate-spin" />}
             {isPlanMode ? 'Save as plan' : state.mode === 'edit' ? 'Save changes' : 'Create alias'}
           </button>
-        </footer>
+        </div>
       }
     >
-      <div className="space-y-4 px-4 py-4">
+      <div className="space-y-4">
         {isReadOnly && (
           <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
             <EyeOff size={14} className="mt-0.5 shrink-0" />
@@ -808,8 +780,10 @@ function AliasDialog({ state, devices, hasAction, onClose }: { state: Extract<Di
           </label>
         )}
       </div>
+    </DialogShell>
 
-      {reauth && (
+    {reauth && (
+      <div onClick={(e) => e.stopPropagation()}>
         <ReauthDialog
           contextLabel={title}
           onClose={() => setReauth(false)}
@@ -818,8 +792,9 @@ function AliasDialog({ state, devices, hasAction, onClose }: { state: Extract<Di
             try { await submit(); } catch { /* dialog stays open */ }
           }}
         />
-      )}
-    </DialogShell>
+      </div>
+    )}
+    </>
   );
 }
 
