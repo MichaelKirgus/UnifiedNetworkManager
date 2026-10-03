@@ -351,10 +351,19 @@ const systemFirmwareUpdateAction: ActionDescriptor<TruenasActionContext> = {
   inputSchema: {
     version: { type: 'string', required: false, minLength: 2, description: 'Target release (e.g. "25.10.1"); omit for the newest matching the configured update profile' },
     train: { type: 'string', required: false, minLength: 2, description: "Update train override (e.g. \"TrueNAS-26-BETA\"); omit to keep the box's configured profile" },
+    // TrueNAS's UpdateRunAttrs.reboot DEFAULTS TO FALSE — without it the job
+    // downloads + installs a new boot environment and then just… stops, leaving
+    // the appliance running the old OS (observed live on SRV03 25.10.4: update.run
+    // [{}] → jobId accepted, box never rebooted). The Web UI always reboots after
+    // an update, so we do too by default; set false to install-only.
+    reboot: { type: 'boolean', required: false, default: true, description: 'Reboot into the new boot environment when the update is applied (TrueNAS default is NO — this must be passed explicitly)' },
   },
   async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
     const version = str(input, 'version');
     const train = str(input, 'train');
+    // Default TRUE — see the schema note: TrueNAS's own default is false, which
+    // silently leaves the box on the old OS after a successful install.
+    const reboot = input['reboot'] !== false;
 
     // Idempotency guard — already on the requested release (or newer) → no-op.
     // Older releases prefix system.info's version with "SCALE "/"CORE ".
@@ -367,7 +376,7 @@ const systemFirmwareUpdateAction: ActionDescriptor<TruenasActionContext> = {
       return { success: true, applied: false, verified: true, details: { note: `Already on ${version} (or newer) — nothing to do.`, currentVersion: current } };
     }
 
-    const options: Record<string, unknown> = {};
+    const options: Record<string, unknown> = { reboot }; // REQUIRED — TrueNAS defaults it to false (install-only)
     if (train) options['train'] = train;
     if (version) options['version'] = version;
 
@@ -774,11 +783,35 @@ const firmwareUpdateFileAction: ActionDescriptor<TruenasActionContext> = {
     destination: { type: 'string', required: false, maxLength: 200, description: "Pool mountpoint to stage the uploaded file in (e.g. /mnt/tank); omit for :temp: — only used with fileBase64" },
     fileBase64: { type: 'string', required: false, minLength: 8, description: "The .update file content as base64 (uploaded via the appliance's /_upload endpoint)" },
     fileName: { type: 'string', required: false, maxLength: 200, description: "Original file name (e.g. TrueNAS-25.10.1.update) — used for the upload; defaults to update-file" },
+    // The update.manual / update.file jobs have NO reboot parameter — they only
+    // install a new boot environment and stop (TrueNAS's own Web UI issues a
+    // separate system.reboot afterwards). We mirror that: default true reboots
+    // into the new BE once the job succeeds; set false to install-only.
+    reboot: { type: 'boolean', required: false, default: true, description: 'Reboot into the new boot environment after the update is installed (the update jobs themselves never reboot)' },
   },
   async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
     const path = str(input, 'path');
     const b64 = typeof input['fileBase64'] === 'string' && (input['fileBase64'] as string).length > 0 ? (input['fileBase64'] as string) : undefined;
     if (!path && !b64) return { success: false, details: { error: 'Either path (a file already on the appliance) or fileBase64 (uploaded content) is required' } };
+    // Default TRUE — see schema note: the update jobs never reboot on their own.
+    const reboot = input['reboot'] !== false;
+
+    /** Reboots into the new boot environment after a successful install job. */
+    const finishWithReboot = async (details: Record<string, unknown>): Promise<ActionResult> => {
+      if (!reboot) {
+        return { success: true, applied: true, details: { ...details, note: 'Update installed — NO reboot performed (install-only). The new boot environment is active at the next manual reboot.' } };
+      }
+      try {
+        const r = await ctx.client.call<unknown>('system.reboot', ['System upgrade (UNM firmware update from file)', {}], ctx.creds);
+        return { success: true, applied: true, details: { ...details, note: 'Update installed — reboot initiated into the new boot environment. Unreachable while down; verification is impossible by design.' }, ...(describeJobResult(r) as Record<string, unknown>) };
+      } catch (e) {
+        // The socket dies when the appliance reboots — EXPECTED.
+        if (e instanceof TruenasRpcError && /timed out|closed|unresponsive/i.test(e.message)) {
+          return { success: true, applied: true, details: { ...details, note: 'Update installed — reboot initiated; connection lost as expected while the appliance went down.' } };
+        }
+        throw e;
+      }
+    };
 
     // Idempotency guard — already at/above the target version named in the file
     // ("TrueNAS-25.10.1.update" → 25.10.1). Best-effort only.
@@ -795,38 +828,32 @@ const firmwareUpdateFileAction: ActionDescriptor<TruenasActionContext> = {
       }
     }
 
-    try {
-      if (path) {
-        // File already lives on the appliance → update.manual job.
-        const r = await runUpdateJobWithResume(ctx, async () => jobIdOf(await ctx.client.call<unknown>('update.manual', [{ path }])), 'update.manual', [{ path, resume: true }], 3_600_000);
-        if (r.state === 'RUNNING') return { success: true, applied: true, details: { jobId: r.jobId, note: 'Update job still in progress on the appliance — it will reboot into the new boot environment.' } };
-        if (r.state !== 'SUCCESS' && r.state !== 'FINISHED') return { success: false, details: { jobId: r.jobId, error: r.error ?? `Job ended in state ${r.state}` } };
-        return { success: true, applied: true, details: describeJobResult(r.jobId) };
-      }
-
-      // Content passed as base64 → upload via /_upload running update.file.
-      const payload = decodeFilePayload(input);
-      if ('error' in payload) return { success: false, details: { error: payload.error } };
-      const destination = str(input, 'destination');
-      const fileParams = [{ ...(destination ? { destination } : {}) }];
-      const startUpload = async (): Promise<number | null> => {
-        // API-key credentials mint a session token inside uploadFile (never Bearer —
-        // TrueNAS 26+ would revoke the key on such an HTTP login).
-        const r = await ctx.client.uploadFile(ctx.creds, 'update.file', payload.data, payload.fileName || 'update-file', undefined, fileParams);
-        return typeof r['job_id'] === 'number' ? (r['job_id'] as number) : null;
-      };
-
-      const r = await runUpdateJobWithResume(ctx, startUpload, 'update.file', [{ resume: true }], 3_600_000);
-      if (r.state === 'RUNNING') return { success: true, applied: true, details: { jobId: r.jobId, note: 'Update job still in progress on the appliance — it will reboot into the new boot environment.' } };
+    if (path) {
+      // File already lives on the appliance → update.manual job.
+      const r = await runUpdateJobWithResume(ctx, async () => jobIdOf(await ctx.client.call<unknown>('update.manual', [{ path }])), 'update.manual', [{ path, resume: true }], 3_600_000);
+      if (r.state === 'RUNNING') return { success: true, applied: true, details: { jobId: r.jobId, note: reboot ? 'Update job still in progress on the appliance — once it finishes, REBOOT the box to enter the new boot environment (the update jobs never reboot by themselves).' : 'Update job still in progress on the appliance (install-only; no reboot will be performed).' } };
       if (r.state !== 'SUCCESS' && r.state !== 'FINISHED') return { success: false, details: { jobId: r.jobId, error: r.error ?? `Job ended in state ${r.state}` } };
-      return { success: true, applied: true, details: { jobId: r.jobId, fileName: payload.fileName, note: 'Update installed — the appliance is rebooting into the new boot environment. Unreachable while down; verification is impossible by design.' } };
-    } catch (e) {
-      // The socket dies when the appliance reboots into the new BE — EXPECTED.
-      if (e instanceof TruenasRpcError && /timed out|closed|unresponsive/i.test(e.message)) {
-        return { success: true, applied: true, details: { note: 'Update initiated — connection lost as expected while the appliance rebooted.' } };
-      }
-      throw e;
+      return finishWithReboot({ jobId: r.jobId });
     }
+
+    // Content passed as base64 → upload via /_upload running update.file.
+    const payload = decodeFilePayload(input);
+    if ('error' in payload) return { success: false, details: { error: payload.error } };
+    const destination = str(input, 'destination');
+    const fileParams = [{ ...(destination ? { destination } : {}) }];
+    const startUpload = async (): Promise<number | null> => {
+      // API-key credentials mint a session token inside uploadFile (never Bearer —
+      // TrueNAS 26+ would revoke the key on such an HTTP login).
+      const r = await ctx.client.uploadFile(ctx.creds, 'update.file', payload.data, payload.fileName || 'update-file', undefined, fileParams);
+      return typeof r['job_id'] === 'number' ? (r['job_id'] as number) : null;
+    };
+
+    const r2 = await runUpdateJobWithResume(ctx, startUpload, 'update.file', [{ resume: true }], 3_600_000);
+    if (r2.state === 'RUNNING') return { success: true, applied: true, details: { jobId: r2.jobId, fileName: payload.fileName, note: reboot ? 'Update job still in progress on the appliance — once it finishes, REBOOT the box to enter the new boot environment (the update jobs never reboot by themselves).' : 'Update job still in progress on the appliance (install-only; no reboot will be performed).' } };
+    if (r2.state !== 'SUCCESS' && r2.state !== 'FINISHED') return { success: false, details: { jobId: r2.jobId, fileName: payload.fileName, error: r2.error ?? `Job ended in state ${r2.state}` } };
+    // Install confirmed — now the reboot (finishWithReboot swallows its own expected
+    // disconnect; a transport error anywhere else here is a REAL failure).
+    return await finishWithReboot({ jobId: r2.jobId, fileName: payload.fileName });
   },
 };
 
