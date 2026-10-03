@@ -123,7 +123,7 @@ export default function Networks() {
           <button
             type="button"
             onClick={() => navigate('/networks/rollout', { state: { from: '/networks' } })}
-            className="flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
           >
             <Globe className="h-4 w-4" /> Roll out network
           </button>

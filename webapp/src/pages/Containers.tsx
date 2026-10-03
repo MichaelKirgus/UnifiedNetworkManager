@@ -2,9 +2,10 @@ import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { ArrowUpCircle, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Container, Download, EyeOff, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { ConsoleDialog } from '../components/ConsoleDialog';
 import { ContainerLogsView } from '../components/ContainerLogs';
-import { CreateAppDialog, CreateAppCandidate, type AppMode } from '../components/CreateAppDialog';
+import { CreateAppCandidate, type AppMode } from './CreateAppPage';
 import { FileBrowserDialog } from '../components/FileBrowserDialog';
 import { ResizableDialog } from '../components/ResizableDialog';
 import { Layout } from '../components/Layout';
@@ -1027,6 +1028,7 @@ function ChildRow({ node, ctx, actions }: { node: TreeNode; ctx: ExpandChildCont
 }
 
 export default function Containers() {
+  const navigate = useNavigate();
   const { formatDateTime } = useTimeFormat();
   // Global Execute/Plan mode — decides whether page actions run immediately or
   // are saved as (unexecuted) plans for later execution/scheduling.
@@ -1250,7 +1252,6 @@ export default function Containers() {
   /** Custom app whose compose YAML is being edited. */
   const [yamlApp, setYamlApp] = useState<ContainerRow | null>(null);
   const [logsApp, setLogsApp] = useState<ContainerRow | null>(null);
-  const [createOpen, setCreateOpen] = useState(false);
   /** Device target of the "Pull image" dialog (null = closed). */
   const [pullTarget, setPullTarget] = useState<{ deviceId: string; deviceName?: string | null; pluginId: string } | null>(null);
   /** Dismissible status banner (info / error only — plan execution itself is
@@ -1503,35 +1504,6 @@ export default function Containers() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) setReauth({ label, retry: attempt });
       else setNotice({ kind: 'error', text: `${label} failed: ${err instanceof Error ? err.message : String(err)}` });
-    }
-  }
-
-  /** Create-app submit — a single-step plan through the standard workflow
-   * (2FA-gated), tracked so the device is force-refreshed when execution settles.
-   * Throws on failure so the dialog can surface it; a 401 opens the reauth flow
-   * AND throws, keeping the dialog open for retry after revalidation. */
-  async function runInstall(candidate: CreateAppCandidate, appMode: AppMode, input: Record<string, unknown>) {
-    const actionId = candidate.actions[appMode];
-    if (!actionId) throw new Error(`No install action for mode '${appMode}' on ${candidate.deviceName}`);
-    const label = `Create app ${String(input['name'])}`;
-    const attempt = async () => {
-      if (mode === 'readonly') { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
-      const planId = await createAndExecutePlan(candidate.pluginId, actionId, [{ deviceId: candidate.deviceId, input }], mode);
-      if (mode === 'plan') {
-        setNotice({ kind: 'ok', text: `App creation saved as a plan — not executed. Open the Plans center to run it later.` });
-        return;
-      }
-      trackPlan(planId, [candidate.deviceId], typeof input['name'] === 'string' ? [input['name']] : []);
-    };
-    try {
-      await attempt();
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
-        // ReauthDialog takes over — the dialog closes and the plan runs after revalidation.
-        setReauth({ label, retry: attempt });
-        return;
-      }
-      throw err; // dialog renders this as its submit error
     }
   }
 
@@ -2094,8 +2066,8 @@ export default function Containers() {
             {createCandidates.length > 0 && (
               <button
                 type="button"
-                onClick={() => setCreateOpen(true)}
-                className="ml-auto inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover"
+                onClick={() => navigate('/containers/create-app?from=/containers')}
+                className="ml-auto inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
               >
                 <Plus size={14} /> Create app
               </button>
@@ -2295,12 +2267,8 @@ export default function Containers() {
         />
       )}
 
-      {/* Create app (catalog template or custom compose) — generic over any
-          backend whose plugin advertises an install action. `apps` feeds the
-          "Duplicate existing" source picker + clone prefill. */}
-      {createOpen && createCandidates.length > 0 && (
-        <CreateAppDialog candidates={createCandidates} apps={containersQuery.data?.containers ?? []} onSubmit={(c, mode, input) => runInstall(c, mode, input)} onClose={() => setCreateOpen(false)} readOnly={mode === 'readonly'} />
-      )}
+      {/* Create app is a full-page wizard now (/containers/create-app) — it owns
+          its own candidate detection, clone prefill and plan submission. */}
 
       {/* Pull image — arbitrary refs on one device via the generic images.pull action. */}
       {pullTarget && (

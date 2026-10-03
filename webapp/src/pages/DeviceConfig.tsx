@@ -113,9 +113,9 @@ export default function DeviceConfig() {
               type="button"
               onClick={() => stateQuery.refetch()}
               disabled={stateQuery.isFetching}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background disabled:opacity-40"
+              className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted disabled:opacity-40"
             >
-              <RefreshCw className={clsx('h-3.5 w-3.5', stateQuery.isFetching && 'animate-spin')} /> Refresh
+              <RefreshCw className={clsx('h-4 w-4', stateQuery.isFetching && 'animate-spin')} /> Refresh
             </button>
           )}
         </>

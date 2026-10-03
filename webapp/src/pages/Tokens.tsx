@@ -217,8 +217,9 @@ export default function Tokens() {
             </label>
           )}
           <button
+            type="button"
             onClick={() => setShowForm(!showForm)}
-            className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover"
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
           >
             {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
             {showForm ? 'Cancel' : 'Create Token'}

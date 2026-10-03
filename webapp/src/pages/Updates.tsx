@@ -646,9 +646,9 @@ export default function Updates() {
             type="button"
             onClick={() => void checkNow()}
             disabled={checking}
-            className="inline-flex items-center gap-1.5 rounded border border-border bg-card px-2.5 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-60"
+            className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted disabled:opacity-60"
           >
-            {checking ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Check now
+            {checking ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Check now
           </button>
         ) : undefined
       }

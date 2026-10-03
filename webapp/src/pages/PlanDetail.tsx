@@ -156,15 +156,15 @@ export default function PlanDetail() {
       actions={
         <div className="flex items-center gap-2">
           {canApply && editable && (
-            <button onClick={() => executeMutation.mutate()} disabled={executeMutation.isPending || steps.length === 0}
-              className="flex items-center gap-1.5 rounded-md bg-success-solid px-3 py-1.5 text-sm font-semibold text-white hover:bg-success-solid-hover disabled:opacity-50">
+            <button type="button" onClick={() => executeMutation.mutate()} disabled={executeMutation.isPending || steps.length === 0}
+              className="inline-flex items-center gap-2 rounded-md bg-success-solid px-3 py-1.5 text-sm font-medium text-white hover:bg-success-solid-hover disabled:opacity-50">
               <Play className="h-4 w-4" /> Execute
             </button>
           )}
           {canApply && plan.status !== 'executing' && SCHEDULABLE_STATUSES.includes(plan.status) && (
             <button onClick={() => setShowSchedule(true)}
               title={plan.status === 'scheduled' ? 'Change the schedule for this plan' : 'Schedule this plan to run later (relative or absolute time)'}
-              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
+              className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
               <CalendarClock className="h-4 w-4" /> {plan.status === 'scheduled' ? 'Reschedule' : 'Schedule'}
             </button>
           )}

@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
+import { api } from './api/client';
 
 /**
  * Global execution mode — the top-bar toggle that decides what happens when a
@@ -122,4 +123,31 @@ export function savedPlanIdOf(err: unknown): string | undefined {
     return typeof v === 'string' ? v : undefined;
   }
   return undefined;
+}
+
+/** Creates a plan for ONE plugin. In Execute mode it is also executed in the
+ * background (no navigation); in Plan mode it is saved WITHOUT executing and
+ * only its id is returned — callers surface a "saved" notice instead of
+ * tracking execution progress. Throws on failure — callers catch ApiError 401
+ * to offer two-factor revalidation and then retry from scratch. */
+export async function createAndExecutePlan(
+  pluginId: string,
+  actionId: string,
+  steps: Array<{ deviceId: string; input: Record<string, unknown> }>,
+  mode: ExecutionMode,
+): Promise<string> {
+  const first = steps[0];
+  const create = async () => {
+    const plan = await api.createPlan({
+      pluginId,
+      intentActionId: actionId,
+      inputs: first.input,
+      devices: [{ deviceId: first.deviceId }],
+    });
+    if (steps.length > 1) {
+      await api.addPlanStepsBulk(plan.id, steps.slice(1).map((s) => ({ deviceId: s.deviceId, actionId, input: s.input })));
+    }
+    return plan;
+  };
+  return runAction(create, (id) => api.executePlan(id), mode);
 }

@@ -317,7 +317,8 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
       actions={
         onCreate && (
           <button
-            className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover"
+            type="button"
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
             onClick={onCreate}
           >
             <Plus className="h-4 w-4" /> New Plan

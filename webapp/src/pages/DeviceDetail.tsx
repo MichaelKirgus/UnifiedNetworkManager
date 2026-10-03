@@ -338,7 +338,7 @@ export default function DeviceDetail() {
           {device && hasDeviceConfig && (
             <Link
               to={`/devices/${device.id}/config`}
-              className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
             >
               <Settings2 className="h-4 w-4" />
               Config

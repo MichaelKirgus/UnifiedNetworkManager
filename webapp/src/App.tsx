@@ -30,12 +30,14 @@ import Wifi from './pages/Wifi';
 import Storage from './pages/Storage';
 import Shares from './pages/Shares';
 import Containers from './pages/Containers';
+import CreateAppPage from './pages/CreateAppPage';
 import Time from './pages/Time';
 import ContainerLogsPage from './pages/ContainerLogsPage';
 import ConsolePage from './pages/ConsolePage';
 import FileBrowserPage from './pages/FileBrowserPage';
 import Files from './pages/Files';
 import Vms from './pages/Vms';
+import CreateVmPage from './pages/CreateVmPage';
 import Updates from './pages/Updates';
 import Security from './pages/Security';
 import Topology from './pages/Topology';
@@ -83,9 +85,13 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   { path: '/storage', permission: 'storage:read' },
   { path: '/shares', permission: 'shares:read' },
   { path: '/containers', permission: 'containers:read' },
+  // Full-page "Create app" wizard — same read perm as the Containers page it lives on.
+  { path: '/containers/create-app', permission: 'containers:read' },
   // Cross-device clock overview — each device's local time + drift vs UNM.
   { path: '/time', permission: 'time:read' },
   { path: '/vms', permission: 'vms:read' },
+  // Full-page "Create VM" wizard — same read perm as the VMs page it lives on.
+  { path: '/vms/create-vm', permission: 'vms:read' },
   // Central file repository — device-independent store of ISOs/firmware/config
   // backups/scripts (volume mounted on the API only; metadata in Postgres).
   { path: '/files', permission: 'files:read' },
@@ -174,6 +180,8 @@ export default function App() {
       <Route path="/shares" element={<Page permission="shares:read"><Shares /></Page>} />
       {/* Cross-device container/App workloads (TrueNAS SCALE Apps). */}
       <Route path="/containers" element={<Page permission="containers:read"><Containers /></Page>} />
+      {/* Full-page create-app wizard (replaces the old dialog) — same read perm as /containers. */}
+      <Route path="/containers/create-app" element={<Page permission="containers:read"><CreateAppPage /></Page>} />
       <Route path="/time" element={<Page permission="time:read"><Time /></Page>} />
       {/* Standalone SSH console window — popped out of the ConsoleDialog; needs devices:write
           because minting a console ticket is gated on it server-side. */}
@@ -186,6 +194,8 @@ export default function App() {
       <Route path="/container-logs/:deviceId" element={<Page permission="containers:read"><ContainerLogsPage /></Page>} />
       {/* Cross-device virtual machines (TrueNAS SCALE VMs today; generic key for future hypervisor plugins). */}
       <Route path="/vms" element={<Page permission="vms:read"><Vms /></Page>} />
+      {/* Full-page create-VM wizard (replaces the old dialog) — same read perm as /vms. */}
+      <Route path="/vms/create-vm" element={<Page permission="vms:read"><CreateVmPage /></Page>} />
       {/* Central file repository — device-independent store of ISOs/firmware/config backups/scripts. */}
       <Route path="/files" element={<Page permission="files:read"><Files /></Page>} />
       {/* Cross-device update center — available updates + stack self-update card. */}
