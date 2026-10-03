@@ -53,6 +53,17 @@ export interface L2PhysicalPort {
   name: string;
   /** The logical interface this port is assigned to (null = idle/unassigned). */
   assignment: string | null;
+  /**
+   * Whether the port currently carries traffic for MORE than one VLAN
+   * (trunk/uplink semantics). Optional — platforms without a per-port VLAN
+   * concept (plain hosts, appliances) omit it. The rollout dialog uses this
+   * to offer "Trunk ports only" as a quick select.
+   */
+  trunk?: boolean;
+  /** Untagged default VLAN id of the port (PVID), when the platform reports one. */
+  pvid?: number | null;
+  /** All VLAN ids this port carries (tagged + untagged), when known. */
+  vlans?: number[];
 }
 
 /** One bridge group — a layer-2 domain that can carry networks/VLANs. */
@@ -182,6 +193,37 @@ export function isCanonicalIntent(id: string): boolean {
   return (CANONICAL_INTENTS as readonly string[]).includes(id);
 }
 
+/**
+ * Resolves the trunk status of one physical port from an L2 topology.
+ *
+ * Preference order:
+ *   1. The platform's own flag (`port.trunk`) when present — exact data wins.
+ *   2. Generic inference: a port is a trunk when it carries >1 VLAN
+ *      (`port.vlans.length > 1`) OR its assignment sits in more than one
+ *      bridge/bundle group (a member of several L2 domains).
+ *
+ * Used by preflight resolvers that have per-port data but did not set the
+ * explicit flag, and as a fallback for UIs rendering port chips.
+ */
+export function portTrunkStatus(topo: L2Topology, portName: string): { trunk: boolean; pvid?: number | null; vlans: number[] } {
+  const port = topo.physicalPorts.find((p) => p.name === portName);
+  if (!port) return { trunk: false, vlans: [] };
+  if (typeof port.trunk === 'boolean') return { trunk: port.trunk, pvid: port.pvid ?? null, vlans: port.vlans ?? [] };
+  const vlans = port.vlans ?? [];
+  // Generic inference from group membership: count distinct bridges/bundles
+  // whose members include this port's assignment (or the port name itself).
+  const candidates = new Set<string>([port.name]);
+  if (port.assignment) candidates.add(port.assignment);
+  let groups = 0;
+  for (const b of topo.bridges) {
+    if ([...candidates].some((c) => c === b.name || b.members.includes(c))) groups += 1;
+  }
+  for (const bu of topo.bundles) {
+    if ([...candidates].some((c) => c === bu.name || bu.members.includes(c))) groups += 1;
+  }
+  return { trunk: vlans.length > 1 || groups > 1, pvid: port.pvid ?? null, vlans };
+}
+
 // ---------------------------------------------------------------------------
 // network.create — "create Network XY with VLAN ID on all devices" (+ optional SSID)
 // ---------------------------------------------------------------------------
@@ -289,6 +331,22 @@ export interface PreflightValue {
   note?: string;
 }
 
+/** One physical port entry returned by a preflight resolver for port selection. */
+export interface PreflightPort {
+  /** Vendor-local port name (the value that goes into `vlanPorts`). */
+  name: string;
+  /** Whether the port is currently a trunk/uplink (carries >1 VLAN). */
+  trunk?: boolean;
+  /** Untagged default VLAN id, when known. */
+  pvid?: number | null;
+}
+
+/** Capability flags a preflight resolver may advertise for one device. */
+export interface PreflightCapabilities {
+  /** The plugin can assign the new VLAN to an explicit list of ports (`vlanPorts` input). */
+  vlanPorts?: boolean;
+}
+
 /** The preflight result for ONE device of ONE plugin. */
 export interface PreflightResult {
   deviceId: string;
@@ -298,6 +356,14 @@ export interface PreflightResult {
   degraded?: boolean;
   /** Why it is degraded (shown in the UI; the device can still be planned with defaults). */
   error?: string;
+  /**
+   * The device's physical ports with trunk status — lets the rollout dialog
+   * offer "All / Trunk only / Select ports" quick selects WITHOUT a separate
+   * topology round-trip. Only present for intents that touch ports (network.create).
+   */
+  ports?: PreflightPort[];
+  /** What this device supports for the intent (e.g. explicit port lists). */
+  capabilities?: PreflightCapabilities;
 }
 
 /** Body of POST /preflight on a plugin. */
