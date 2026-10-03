@@ -13,11 +13,11 @@
  * plan creation (overrides ride back in PlanRequest.deviceInputs).
  */
 
-import type { L2Topology, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
+import type { L2Topology, PreflightCapabilities, PreflightPort, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
 import { suggestL2AttachPoint } from '@unm/plugin-sdk';
 import { rosString } from '../routerosClient';
 import type { ActionContext } from './types';
-import { readRouterOsL2Topology } from './l2Topology';
+import { readRouterOsL2Topology, readSwitchVlanTable } from './l2Topology';
 
 type Row = Record<string, unknown>;
 
@@ -31,14 +31,23 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
 
   const name = String(inputs.name ?? '').trim();
   const vlanId = typeof inputs.vlanId === 'number' ? Math.floor(inputs.vlanId as number) : null;
+  // VLAN-only rollout — no L3 address requested for this device.
+  const l2Only = vlanId !== null && !inputs.cidr && !inputs.ip && !inputs.cidrV6;
 
   let topo: L2Topology | null = null;
   let vlans: Row[] = [];
+  // Switch-chip probe (null → no integrated switch → port selection N/A).
+  const switchTable = await readSwitchVlanTable(ctx);
   try {
     [topo, vlans] = await Promise.all([readRouterOsL2Topology(ctx), ctx.client.get<Row[]>('/interface/vlan').catch(() => [] as Row[])]);
   } catch (e) {
     return { deviceId: ctx.deviceId ?? '', values, degraded: true, error: `state read failed: ${(e as Error).message}` };
   }
+
+  // Port list + trunk flags for the dialog's quick selects (All / Trunk only /
+  // Select ports) — rides along with the preflight, no extra round-trip.
+  const ports: PreflightPort[] = topo.physicalPorts.map((p) => ({ name: p.name, trunk: p.trunk ?? false }));
+  const capabilities: PreflightCapabilities = { vlanPorts: switchTable !== null };
 
   // Idempotency hint — a network with this name already exists (VLANs carry the name).
   if (name) {
@@ -47,7 +56,7 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
     values.push(
       existing
         ? { key: 'name', value: name, confidence: 'high', note: `network "${name}" already exists as VLAN ${rosString(existing, ['name'])} (vlan-id ${rosString(existing, ['vlan-id'])}) — will be left untouched` }
-        : { key: 'name', value: name, confidence: 'medium', note: `no network named "${name}" yet — a new VLAN + L3 address will be created` },
+        : { key: 'name', value: name, confidence: 'medium', note: l2Only ? `no network named "${name}" yet — a new VLAN (L2 only) will be created` : `no network named "${name}" yet — a new VLAN + L3 address will be created` },
     );
   }
 
@@ -55,6 +64,11 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
   const attach = suggestL2AttachPoint(topo!);
   if (attach) {
     values.push({ key: 'interface', value: attach.attach, confidence: /carries existing L3/i.test(attach.reason) ? 'high' : 'medium', note: `suggested attach point — ${attach.reason}` });
+  } else if (l2Only && topo!.bridges.length > 0) {
+    // VLAN-only rollout — no L3 address is bound, so any bridge works as the
+    // parent domain. Prefer bridge1 (always present on RouterOS).
+    const fallback = topo!.bridges.some((b) => b.name === 'bridge1') ? 'bridge1' : topo!.bridges[0].name;
+    values.push({ key: 'interface', value: fallback, confidence: 'medium', note: `L2-only (no address requested) — VLAN will be created on a member of ${fallback}` });
   } else {
     values.push({ key: 'interface', value: null, confidence: 'low', note: 'no L3-carrying interface found — set the attach point explicitly' });
   }
@@ -69,7 +83,7 @@ export async function preflightNetworkCreate(ctx: ActionContext, inputs: Record<
     );
   }
 
-  return { deviceId: ctx.deviceId ?? '', values };
+  return { deviceId: ctx.deviceId ?? '', values, ports, capabilities };
 }
 
 /** Registry of preflight resolvers per canonical intent id. */

@@ -23,7 +23,7 @@ import type { L2Topology } from '@unm/plugin-sdk';
 import { suggestL2AttachPoint } from '@unm/plugin-sdk';
 import { rosString } from '../routerosClient';
 import type { ActionContext, ActionDescriptor } from './types';
-import { readRouterOsL2Topology } from './l2Topology';
+import { readRouterOsL2Topology, readSwitchVlanTable } from './l2Topology';
 
 type Row = Record<string, unknown>;
 
@@ -87,7 +87,37 @@ const NETWORK_CREATE_INPUTS = {
   ip: { type: 'string' as const, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'L3 address (alternative to cidr)' },
   netmask: { type: 'string' as const, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'Netmask for `ip`' },
   interface: { type: 'string' as const, maxLength: 64, description: 'L2 attach point (bridge/bundle/port) — resolved per device in preflight' },
+  vlanPorts: { type: 'array' as const, items: { type: 'string' } as const, description: 'Physical ports that carry this VLAN tagged on the switch chip (/interface/switch.vlan). Switch-capable SoCs only (hEX/cCR/CRS); ignored on devices without a switch chip.' },
 } as const;
+
+/**
+ * Ensures one TAGGED /interface/switch.vlan row per requested port for this VLAN.
+ * Idempotent: existing rows for the same (port, vlan-id) are left untouched; only
+ * missing combinations are PUT. Returns { applied, skipped } counts + a note when
+ * the device has no switch chip at all.
+ */
+async function applySwitchVlanPorts(ctx: ActionContext, vlanId: number, ports: string[]): Promise<Record<string, unknown>> {
+  const table = await readSwitchVlanTable(ctx);
+  if (table === null) {
+    return { switchVlansSkipped: 'device has no integrated switch chip — VLAN was created on the interface only' };
+  }
+  const rowKey = (r: Row) => `${rosString(r, ['port'])}:${Number(rosString(r, ['vlan-id']))}`;
+  const existing = new Set(table.map(rowKey));
+  let added = 0;
+  for (const p of ports) {
+    if (existing.has(`${p}:${vlanId}`)) continue;
+    const res = await ctx.client.put('/interface/switch.vlan', { port: p, 'vlan-id': String(vlanId), tagged: true });
+    if (!res) return { switchVlansError: `could not add switch.vlan row for port ${p} (no response)` };
+    added += 1;
+  }
+  // Verify by re-read.
+  const after = await readSwitchVlanTable(ctx);
+  const present = new Set((after ?? []).map(rowKey));
+  for (const p of ports) {
+    if (!present.has(`${p}:${vlanId}`)) return { switchVlansError: `verification failed — switch.vlan row ${p}:${vlanId} missing after write` };
+  }
+  return added > 0 ? { switchVlansAdded: added, switchVlanPorts: ports } : { switchVlansSkipped: `all requested ports already carry VLAN ${vlanId}` };
+}
 
 /**
  * Creates one network on one router. Idempotent by name (VLANs carry the
@@ -107,8 +137,8 @@ export const networkCreateAction: ActionDescriptor = {
     const vlanId = typeof input.vlanId === 'number' ? Math.floor(input.vlanId as number) : null;
     const v4 = parseV4(input);
     const v6 = parseV6(input);
-    if (!v4 && !v6) {
-      return { success: false, error: 'nothing to create — provide cidr (or ip+netmask) and/or cidrV6' };
+    if (!v4 && !v6 && vlanId === null) {
+      return { success: false, error: 'nothing to create — provide cidr (or ip+netmask), and/or cidrV6, and/or vlanId' };
     }
 
     // 1. Live state.
@@ -129,6 +159,13 @@ export const networkCreateAction: ActionDescriptor = {
     if (!attach) {
       const suggestion = suggestL2AttachPoint(topo);
       attach = suggestion?.attach ?? null;
+    }
+    // L2-only (VLAN, no addresses): the VLAN just needs a parent — fall back to
+    // bridge1 (always present on RouterOS) instead of failing. With an address
+    // there must be a real attach point to bind it to.
+    if (!attach && vlanId !== null && !v4 && !v6) {
+      const hasBridge1 = topo.bridges.some((b) => b.name === 'bridge1');
+      attach = hasBridge1 ? 'bridge1' : (topo.bridges[0]?.name ?? null);
     }
     if (!attach) {
       return { success: false, error: 'no attach point — set `interface` explicitly (no L3-carrying interface found on this device)' };
@@ -158,6 +195,17 @@ export const networkCreateAction: ActionDescriptor = {
           await ctx.client.put('/interface/bridge/port', { interface: attach, slave: name }).catch(() => undefined);
         }
       }
+    }
+
+    // L2-only rollout — no address was requested for this device.
+    if (!v4 && !v6) {
+      details.l3Skipped = 'no L3 address requested — VLAN only';
+    }
+
+    // 2b. Per-port tagging on the switch chip (switch-capable SoCs only).
+    const vlanPortsRaw = Array.isArray(input.vlanPorts) ? (input.vlanPorts as unknown[]).map((p) => String(p).trim()).filter(Boolean) : null;
+    if (vlanId !== null && vlanPortsRaw && vlanPortsRaw.length > 0) {
+      Object.assign(details, await applySwitchVlanPorts(ctx, vlanId, [...new Set(vlanPortsRaw)]));
     }
 
     // 3. L3 addresses (immediate writes — verified by re-read).
@@ -252,6 +300,19 @@ export const networkDeleteAction: ActionDescriptor = {
         details.bridgePorts = `removed ${mine.length}`;
       }
     } catch { /* best-effort */ }
+
+    // 2b. Per-port tagging on the switch chip — remove rows for this VLAN's tag.
+    const vlanTag = Number(rosString(vlan, ['vlan-id']));
+    if (Number.isFinite(vlanTag) && vlanTag > 0) {
+      try {
+        const svTable = await readSwitchVlanTable(ctx);
+        if (svTable !== null) {
+          const mine = svTable.filter((r) => Number(rosString(r, ['vlan-id'])) === vlanTag).map((r) => rosString(r, ['.id'])).filter(Boolean);
+          for (const i of mine) await ctx.client.post('/interface/switch.vlan/remove', { '.id': i });
+          if (mine.length > 0) details.switchVlans = `removed ${mine.length} port row(s)`;
+        }
+      } catch { /* best-effort — no switch chip or table gone */ }
+    }
 
     // 3. The VLAN itself (single-object /remove — array bodies are rejected).
     await ctx.client.post('/interface/vlan/remove', { '.id': id });

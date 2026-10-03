@@ -33,6 +33,7 @@ export function buildRouterOsL2Topology(
   bondingRows: Row[],
   ipAddrRows: Row[],
   ipv6AddrRows: Row[],
+  switchVlanRows: Row[] = [],
 ): L2Topology {
   // --- Bundles (bonding) ------------------------------------------------------
   const bundles: L2Bundle[] = [];
@@ -72,6 +73,21 @@ export function buildRouterOsL2Topology(
     const child = rosString(v, ['name']) ?? (parent && rosString(v, ['vlan-id']) ? `${parent}.${rosString(v, ['vlan-id'])}` : null);
     if (parent && child && !vlanByParent.has(parent)) vlanByParent.set(parent, child);
   }
+
+  // Per-port VLAN facts from the switch chip's /interface/switch.vlan table —
+  // a port carrying >1 VLAN id or any tagged row is a trunk/uplink.
+  const portVlans = new Map<string, Set<number>>();
+  const taggedPorts = new Set<string>();
+  for (const sv of switchVlanRows) {
+    const p = rosString(sv, ['port']);
+    const vid = Number(rosString(sv, ['vlan-id']));
+    if (!p || !vid) continue;
+    let s = portVlans.get(p);
+    if (!s) { s = new Set(); portVlans.set(p, s); }
+    s.add(vid);
+    if (sv['tagged'] === true || sv['tagged'] === 'true') taggedPorts.add(p);
+  }
+
   const physicalPorts: L2PhysicalPort[] = [];
   for (const r of ifaceRows) {
     const type = rosString(r, ['type']);
@@ -81,7 +97,17 @@ export function buildRouterOsL2Topology(
     // Explicit master-name wins (bridge/bonding membership); otherwise a VLAN
     // parented on this port is its implicit assignment.
     const master = rosString(r, ['master-name']);
-    physicalPorts.push({ name, assignment: master ?? vlanByParent.get(name) ?? null });
+    const vset = portVlans.get(name);
+    if (vset && vset.size > 0) {
+      physicalPorts.push({
+        name,
+        assignment: master ?? vlanByParent.get(name) ?? null,
+        trunk: vset.size > 1 || taggedPorts.has(name),
+        vlans: [...vset].sort((a, b) => a - b),
+      });
+    } else {
+      physicalPorts.push({ name, assignment: master ?? vlanByParent.get(name) ?? null });
+    }
   }
 
   // --- L3 interfaces --------------------------------------------------------------
@@ -105,13 +131,14 @@ export function buildRouterOsL2Topology(
 
 /** Reads the full L2 topology of one router (read-only REST batch). */
 export async function readRouterOsL2Topology(ctx: ActionContext): Promise<L2Topology> {
-  const [ifaceRes, bridgePortRes, vlanRes, bondingRes, ipAddrRes, ipv6AddrRes] = await Promise.allSettled([
+  const [ifaceRes, bridgePortRes, vlanRes, bondingRes, ipAddrRes, ipv6AddrRes, switchVlanRes] = await Promise.allSettled([
     ctx.client.get<Row[]>('/interface'),
     ctx.client.get<Row[]>('/interface/bridge/port'),
     ctx.client.get<Row[]>('/interface/vlan'),
     ctx.client.get<Row[]>('/interface/bonding'),
     ctx.client.get<Row[]>('/ip/address'),
     ctx.client.get<Row[]>('/ipv6/address'),
+    ctx.client.get<Row[]>('/interface/switch.vlan'),
   ]);
   const rows = (r: PromiseSettledResult<unknown>): Row[] => (r.status === 'fulfilled' && Array.isArray(r.value) ? (r.value as Row[]) : []);
   // /interface is the only hard requirement — the rest degrade to empty tables.
@@ -125,7 +152,23 @@ export async function readRouterOsL2Topology(ctx: ActionContext): Promise<L2Topo
     rows(bondingRes),
     rows(ipAddrRes),
     rows(ipv6AddrRes),
+    rows(switchVlanRes),
   );
+}
+
+/**
+ * Reads `/interface/switch.vlan` — the per-port VLAN table on switch-capable SoCs
+ * (hEX, cCR, CRS…). Returns null when the device has NO integrated switch chip
+ * (the endpoint is absent → REST rejects), else the row array of shape
+ * `{port, vlan-id, tagged}`. Callers use null to mean "L2 port selection N/A".
+ */
+export async function readSwitchVlanTable(ctx: ActionContext): Promise<Row[] | null> {
+  try {
+    const rows = await ctx.client.get<Row[]>('/interface/switch.vlan');
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return null; // no switch chip on this device
+  }
 }
 
 /** The canonical `l2.topology.read` action. */
