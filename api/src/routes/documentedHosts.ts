@@ -1847,6 +1847,103 @@ router.post('/documented-hosts/import-from-inventory', requireAuth, requirePermi
 });
 
 // ---------------------------------------------------------------------------
+// MAC sync — replace documented per-address MACs with what the live inventory
+// currently observes (the single-host / bulk counterpart of the import wizard's
+// macSyncPolicy='replace'). A client that re-keyed (docker container recreated,
+// randomized MAC) shows up as a `macMismatch` on its row; this endpoint writes
+// the observed MAC back to the documentation. Stale additional-MAC entries
+// (documented_hosts.macs) that are no longer observed anywhere for the host are
+// pruned at the same time — a re-keyed client that came back to its original
+// MAC stops carrying the old one as an "additional identity".
+// ---------------------------------------------------------------------------
+
+/** Per-host outcome of a MAC sync. */
+interface MacSyncHostDetail {
+  id: string;
+  /** Primary name for display (first DNS name, else first address). */
+  name: string;
+  /** Documented per-address MACs replaced with the currently observed ones. */
+  macReplaced: number;
+}
+
+/** Replaces mismatching documented MACs on the given hosts from live observations. */
+async function syncHostMacs(ids: string[]): Promise<{ updated: number; unchanged: number; missing: string[]; details: MacSyncHostDetail[] }> {
+  const hostRows = await db.query.documentedHosts.findMany({ where: inArray(schema.documentedHosts.id, ids) });
+  const foundIds = new Set(hostRows.map((h) => h.id));
+  const missing = ids.filter((id) => !foundIds.has(id));
+  if (hostRows.length === 0) return { updated: 0, unchanged: 0, missing, details: [] };
+
+  // All documented MACs + addresses of the requested hosts — one live sweep.
+  const ipRows = await db.query.documentedHostIps.findMany({ where: inArray(schema.documentedHostIps.hostId, hostRows.map((h) => h.id)) });
+  const ipsByHost = new Map<string, typeof schema.documentedHostIps.$inferSelect[]>();
+  for (const ip of ipRows) {
+    const list = ipsByHost.get(ip.hostId);
+    if (list) list.push(ip);
+    else ipsByHost.set(ip.hostId, [ip]);
+  }
+  const macs: string[] = [];
+  const addrs: string[] = [];
+  for (const h of hostRows) {
+    for (const m of [...(ipsByHost.get(h.id) ?? []).map((i) => i.mac), ...safeParseStringArray(h.macs)].filter((m): m is string => !!m)) macs.push(m);
+    for (const a of (ipsByHost.get(h.id) ?? []).map((i) => i.address)) addrs.push(a);
+  }
+  const { byMac, byIp } = await loadLiveObservations(Array.from(new Set(macs)), Array.from(new Set(addrs)));
+
+  let updated = 0;
+  let unchanged = 0;
+  const details: MacSyncHostDetail[] = [];
+  for (const h of hostRows) {
+    const ips = ipsByHost.get(h.id) ?? [];
+    // Pre-mutation snapshots — change detection + targeted row rewrites.
+    const originalMacs = h.macs;
+    const originalIpMacById = new Map(ips.map((ip) => [ip.id, ip.mac] as const));
+
+    // Replace documented per-address MACs that differ from the current observation.
+    let macReplaced = 0;
+    for (const ip of ips) {
+      if (!ip.mac) continue; // nothing documented — the import wizard fills gaps, not here
+      const live = byIp.get(ip.address);
+      const observedMac = live ? [...live.macs][0] ?? null : null;
+      if (!observedMac || macKey(observedMac) === macKey(ip.mac)) continue; // matches (or unobserved — leave alone)
+      ip.mac = normalizeMac(observedMac) ?? observedMac.toLowerCase();
+      macReplaced++;
+    }
+
+    // Prune additional MACs that are no longer observed anywhere for this host.
+    const keptAdditional = safeParseStringArray(h.macs).filter((m) => byMac.has(macKey(m)));
+
+    if (macReplaced === 0 && JSON.stringify(keptAdditional) === originalMacs) { unchanged++; continue; }
+
+    await db.update(schema.documentedHosts).set({ macs: JSON.stringify(keptAdditional), updatedAt: new Date().toISOString() }).where(eq(schema.documentedHosts.id, h.id));
+    for (const ip of ips) {
+      if (!ip.mac || originalIpMacById.get(ip.id) === ip.mac) continue; // only rewrite rows that changed
+      await db.update(schema.documentedHostIps).set({ mac: ip.mac }).where(eq(schema.documentedHostIps.id, ip.id));
+    }
+    updated++;
+    details.push({ id: h.id, name: safeParseStringArray(h.dnsNames)[0] ?? ips[0]?.address ?? h.id, macReplaced });
+  }
+
+  return { updated, unchanged, missing, details };
+}
+
+// POST /documented-hosts/sync-macs — replace documented MACs with the currently
+// observed ones for a set of hosts (single row or bulk selection). Body:
+// { ids: string[] }. Hosts without any mismatch are reported as `unchanged`.
+router.post('/documented-hosts/sync-macs', requireAuth, requirePermission('documented-hosts:write'), async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (!Array.isArray(body.ids)) throw Object.assign(new Error('"ids" must be an array of host ids'), { status: 400 });
+    const ids = (body.ids as unknown[]).filter((v): v is string => typeof v === 'string' && v.trim() !== '');
+    if (ids.length === 0) throw Object.assign(new Error('"ids" must contain at least one host id'), { status: 400 });
+    if (ids.length > 5000) throw Object.assign(new Error('At most 5000 hosts per call'), { status: 400 });
+    res.status(200).json(await syncHostMacs(ids));
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Merging duplicate rows — one physical host with several NICs/MACs can end up
 // documented as multiple rows (e.g. imported once per MAC from the live
 // inventory). This endpoint merges a set of rows into ONE: addresses are

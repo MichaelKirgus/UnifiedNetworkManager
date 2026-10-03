@@ -3818,6 +3818,50 @@ paths:
         '403':
           description: Missing documented-hosts:write permission
 
+  /documented-hosts/sync-macs:
+    post:
+      tags: [Inventory]
+      summary: Replace documented MACs with the currently observed ones
+      description: >-
+        Requires permission `documented-hosts:write`. For every existing id in
+        the batch, each per-address DOCUMENTED MAC that differs from what the
+        live inventory (ARP/NDP/DHCP) currently observes for that address is
+        replaced with the observed value — the single/bulk counterpart of the
+        import wizard's `macSyncPolicy: replace` (re-keyed clients: docker
+        container re-creation, randomized client MACs). Addresses without a
+        documented MAC or not observed recently are left untouched. Stale
+        additional-MAC entries (`documented_hosts.macs`) that are no longer
+        observed anywhere for the host are pruned at the same time. Hosts with
+        nothing to change are reported as `unchanged`; unknown ids in `missing`
+        never abort the call. At most 5000 ids per request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Documented host ids to sync"
+      responses:
+        '200':
+          description: Sync summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentedHostMacSyncResult'
+        '400':
+          description: Empty batch or more than 5000 ids
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-hosts:write permission
+
   /documented-hosts/merge:
     post:
       tags: [Inventory]
@@ -7390,6 +7434,26 @@ components:
         macAdded:
           type: integer
           description: "Total observed MACs added as additional identities of their host"
+
+    DocumentedHostMacSyncResult:
+      type: object
+      required: [updated, unchanged, missing, details]
+      properties:
+        updated: { type: integer, description: "Hosts where at least one documented MAC (or a stale additional entry) changed" }
+        unchanged: { type: integer, description: "Hosts that were already in sync — nothing written" }
+        missing:
+          type: array
+          items: { type: string }
+          description: "Submitted ids that do not exist"
+        details:
+          type: array
+          items:
+            type: object
+            required: [id, name, macReplaced]
+            properties:
+              id: { type: string }
+              name: { type: string, description: "Primary name for display (first DNS name, else first address)" }
+              macReplaced: { type: integer, description: "Documented per-address MACs replaced with the currently observed ones" }
 
     DocumentedNetwork:
       type: object

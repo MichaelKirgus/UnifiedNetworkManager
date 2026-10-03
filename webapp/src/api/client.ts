@@ -545,6 +545,26 @@ export interface DocumentedHostMergeResult {
   count: number;
 }
 
+/** Per-host outcome of a documented-host MAC sync. */
+export interface DocumentedHostMacSyncDetail {
+  id: string;
+  /** Primary name for display (first DNS name, else first address). */
+  name: string;
+  /** Documented per-address MACs replaced with the currently observed ones. */
+  macReplaced: number;
+}
+
+/** Result of replacing documented MACs with the currently observed ones. */
+export interface DocumentedHostMacSyncResult {
+  /** Hosts where at least one MAC (or a stale additional entry) changed. */
+  updated: number;
+  /** Hosts that were already in sync — nothing written. */
+  unchanged: number;
+  /** Submitted ids that do not exist. */
+  missing: string[];
+  details: DocumentedHostMacSyncDetail[];
+}
+
 // --- Documented networks (user-maintained network documentation) --------------
 
 /** Per-subnet host-address stats — one entry per documented subnet, both families. */
@@ -2896,6 +2916,9 @@ export const api = {
     apiFetch<DocumentedHostBulkResult>('/documented-hosts/bulk', { method: 'POST', body: JSON.stringify({ ids, ...placement }) }),
   mergeDocumentedHosts: (ids: string[]) =>
     apiFetch<DocumentedHostMergeResult>('/documented-hosts/merge', { method: 'POST', body: JSON.stringify({ ids }) }),
+  /** Replaces documented per-address MACs with the currently observed ones for a set of hosts. */
+  syncDocumentedHostMacs: (ids: string[]) =>
+    apiFetch<DocumentedHostMacSyncResult>('/documented-hosts/sync-macs', { method: 'POST', body: JSON.stringify({ ids }) }),
   importDocumentedHosts: (body: { hosts: DocumentedHostRequest[]; matchBy?: 'dns' | 'mac'; updateExisting?: boolean }) =>
     apiFetch<DocumentedHostImportResult>('/documented-hosts/import', { method: 'POST', body: JSON.stringify(body) }),
   /** Copy the live host inventory into the documented hosts (additive merge).

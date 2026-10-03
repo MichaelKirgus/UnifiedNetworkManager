@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { Archive, CircleCheck, CircleX, DatabaseZap, Dices, GitMerge, NotebookPen, Pencil, Plus, Tag, Trash2, TriangleAlert, Upload, X } from 'lucide-react';
+import { Archive, CircleCheck, CircleX, DatabaseZap, Dices, GitMerge, NotebookPen, Pencil, Plus, RefreshCw, Tag, Trash2, TriangleAlert, Upload, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ChipInput } from '../components/ChipInput';
@@ -1236,6 +1236,32 @@ export default function DocumentedHosts() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['documentedHosts'] }),
   });
 
+  // MAC sync — replace documented per-address MACs with what the live inventory
+  // currently observes (re-keyed clients: docker re-creation, randomized MACs).
+  const macSyncMutation = useMutation({
+    mutationFn: (ids: string[]) => api.syncDocumentedHostMacs(ids),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['documentedHosts'] }),
+  });
+
+  /** Number of per-address MAC mismatches on one host. */
+  function mismatchCount(row: DocumentedHost): number {
+    return row.ips.filter((ip) => ip.macMismatch).length;
+  }
+
+  function handleSyncMacs(rows: DocumentedHost[]) {
+    const total = rows.reduce((sum, r) => sum + mismatchCount(r), 0);
+    if (total === 0) { alert('No MAC mismatches on the selected host(s) — nothing to sync.'); return; }
+    macSyncMutation.mutate(rows.map((r) => r.id), {
+      onSuccess: (res) => {
+        const parts = [`${res.updated} host(s) updated, ${total} MAC mismatch${total === 1 ? '' : 's'} resolved`];
+        if (res.unchanged > 0) parts.push(`${res.unchanged} already in sync`);
+        if (res.missing.length > 0) parts.push(`${res.missing.length} id(s) no longer exist`);
+        alert(parts.join(', '));
+      },
+      onError: (err) => alert(`MAC sync failed: ${(err as Error).message}`),
+    });
+  }
+
   // Bulk site/layer placement — a picker modal collects the target value, then
   // one bulk call sets it on every selected row (null = clear).
   const [placementPicker, setPlacementPicker] = useState<{ kind: 'site' | 'layer'; ids: string[] } | null>(null);
@@ -1373,11 +1399,22 @@ export default function DocumentedHosts() {
           {
             header: 'Actions',
             key: 'actions',
-            width: 130,
+            width: 150,
             sortable: false as const,
             excludeFromExport: true,
             render: (row: DocumentedHost) => (
               <div className="flex gap-1">
+                {mismatchCount(row) > 0 && (
+                  <button
+                    type="button"
+                    aria-label={`Sync MACs of ${row.dnsNames[0]} from the live inventory`}
+                    title={`${mismatchCount(row)} documented MAC(s) differ from what is currently observed — replace with the observed value(s)`}
+                    className="rounded-md p-1.5 text-warning-fg hover:bg-muted hover:text-foreground"
+                    onClick={() => handleSyncMacs([row])}
+                  >
+                    <RefreshCw className={`h-4 w-4 ${macSyncMutation.isPending ? 'animate-spin' : ''}`} />
+                  </button>
+                )}
                 <button
                   type="button"
                   aria-label={row.isActive ? `Mark ${row.dnsNames[0]} stale` : `Mark ${row.dnsNames[0]} active`}
@@ -1470,6 +1507,12 @@ export default function DocumentedHosts() {
                         alert(`Merge failed: ${(err as Error).message}`);
                       }
                     },
+                  },
+                  {
+                    label: 'Sync MACs from inventory',
+                    enabled: (rows) => rows.some((r) => r.macMismatch),
+                    confirm: (count) => `Replace the documented MAC(s) of ${count} selected host${count === 1 ? '' : 's'} with what is currently observed in the live inventory? Stale additional-MAC entries are pruned at the same time.`,
+                    onClick: async (selected: DocumentedHost[]) => handleSyncMacs(selected),
                   },
                   {
                     label: 'Set site…',
