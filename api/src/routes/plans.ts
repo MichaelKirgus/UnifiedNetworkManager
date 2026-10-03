@@ -14,6 +14,7 @@ import { enqueuePlanExecution } from '../workers/planExecutor';
 import { isCanonicalIntent, type CatalogEntry as SdkCatalogEntry } from '@unm/plugin-sdk';
 import { validateInput, type InputSchema } from '../utils/inputSchema';
 import { networkChecksForDevices, networkCheck, assertRolloutAllowed } from '../utils/networkCheck';
+import { suggestRolloutAddresses } from '../utils/ipAllocation';
 
 const router = Router();
 
@@ -378,7 +379,20 @@ router.post(
       : [];
 
     try {
-      res.status(200).json(await networkCheck(inputs, deviceIds));
+      const result = await networkCheck(inputs, deviceIds);
+      // Optional: per-device next-free host addresses inside the rollout's CIDR(s),
+      // computed from the live inventory (sequential within this batch). The dialog
+      // pre-fills its cidr/cidrV6 override fields with these when auto-assignment is on.
+      if (body.autoAssign === true) {
+        const cidrV4 = typeof inputs.cidr === 'string' && inputs.cidr.trim() ? inputs.cidr.trim() : null;
+        const cidrV6 = typeof inputs.cidrV6 === 'string' && inputs.cidrV6.trim() ? inputs.cidrV6.trim() : null;
+        try {
+          result.ipSuggestions = await suggestRolloutAddresses(deviceIds, cidrV4, cidrV6);
+        } catch {
+          // Advisory — a failure here must not break the overlap check.
+        }
+      }
+      res.status(200).json(result);
     } catch (err) {
       const e = err as { status?: number; message?: string };
       res.status(e.status ?? 500).json({ error: e.message ?? 'Network check failed' });

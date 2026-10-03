@@ -45,10 +45,18 @@ export interface NetworkCheckSuggestions {
   lowestFreeVlanId: number | null;
 }
 
+/** Per-device next-free host address inside the rollout's CIDR(s) (auto-assignment). */
+export interface IpSuggestion {
+  v4?: string | null;
+  v6?: string | null;
+}
+
 export interface NetworkCheckResult {
   warnings: NetworkCheckWarning[];
   devices: NetworkCheckDeviceStatus[];
   suggestions: NetworkCheckSuggestions;
+  /** Present only when the caller passed `autoAssign: true` and a CIDR was given. */
+  ipSuggestions?: Record<string, IpSuggestion>;
 }
 
 /** The shared intent inputs we care about (canonical network.create shape). */

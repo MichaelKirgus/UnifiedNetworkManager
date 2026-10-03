@@ -1927,9 +1927,16 @@ paths:
                   type: array
                   maxItems: 200
                   items: { type: string }
+                autoAssign:
+                  type: boolean
+                  default: false
+                  description: >-
+                    When true and the inputs carry a cidr/cidrV6, also compute per-device
+                    next-free host addresses inside those subnets (from the live inventory,
+                    sequential within this batch) — returned as `ipSuggestions`.
       responses:
         '200':
-          description: Warnings + per-device status + free-range suggestions
+          description: Warnings + per-device status + free-range suggestions (+ ipSuggestions when autoAssign)
           content:
             application/json:
               schema:
@@ -9267,6 +9274,17 @@ components:
               status: { type: string, enum: [deployed, new], description: "deployed = live inventory already shows this network on the device (no-op)" }
         suggestions:
           $ref: '#/components/schemas/NetworkSuggestions'
+        ipSuggestions:
+          type: object
+          description: >-
+            Present only when `autoAssign` was requested and a CIDR was given. Maps deviceId →
+            the next free host address(es) inside the rollout's subnet(s), computed from the live
+            inventory (networks + hosts/leases + device_ips) and allocated sequentially within the batch.
+          additionalProperties:
+            type: object
+            properties:
+              v4: { type: ['string', 'null'], description: "Next free IPv4 host address, or null when the subnet is exhausted" }
+              v6: { type: ['string', 'null'], description: "Next free IPv6 host address, or null when the subnet is exhausted" }
 
     PlanStepCreateRequest:
       type: object
