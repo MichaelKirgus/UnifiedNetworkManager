@@ -2266,6 +2266,16 @@ export interface PreflightNetworkCheckDto {
   warnings: NetworkCheckWarningDto[];
 }
 
+/** One physical port entry from a preflight result (network.create). */
+export interface PreflightPortDto {
+  /** Vendor-local port name — the value that goes into `vlanPorts`. */
+  name: string;
+  /** Whether the port is currently a trunk/uplink (carries >1 VLAN). */
+  trunk?: boolean;
+  /** Untagged default VLAN id, when known. */
+  pvid?: number | null;
+}
+
 /** The preflight result for one device of one plugin (POST /plans/preflight). */
 export interface PreflightResultDto {
   deviceId: string;
@@ -2273,6 +2283,10 @@ export interface PreflightResultDto {
   degraded?: boolean;
   error?: string;
   check?: PreflightNetworkCheckDto;
+  /** Physical ports with trunk status — feeds the dialog's All/Trunk/Select quick-selects. */
+  ports?: PreflightPortDto[];
+  /** Capability flags advertised by the plugin (e.g. explicit vlanPorts lists). */
+  capabilities?: { vlanPorts?: boolean };
 }
 
 /** Free-range suggestions from gaps in the live inventory (GET /networks/suggestions). */

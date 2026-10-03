@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Globe, X } from 'lucide-react';
+import { ChevronDown, Globe, X } from 'lucide-react';
 import clsx from 'clsx';
-import { api, CatalogEntry, Device, DocumentedNetwork, NetworkCheckResultDto, NetworkLayer, PreflightResultDto, Site, TopologyResponse } from '../api/client';
+import { api, CatalogEntry, Device, DocumentedNetwork, NetworkCheckResultDto, NetworkLayer, PreflightPortDto, PreflightResultDto, Site, TopologyResponse } from '../api/client';
 import { useExecutionMode } from '../executionMode';
 
 /**
@@ -28,6 +28,38 @@ interface NetworkRolloutDialogProps {
 }
 
 const INTENT_ID = 'network.create';
+
+/** Plugins whose devices are L2-only by default (switches) — the IP toggle starts OFF there. */
+const L2_ONLY_PLUGINS = new Set(['mikrotik-swos']);
+
+type PortMode = 'all' | 'trunk' | 'custom';
+
+/** Per-device rollout state, keyed `${pluginId}:${deviceId}`. */
+interface DeviceRolloutState {
+  /** null = untouched → smart default (L2-only plugins OFF, others ON). */
+  ipEnabled: boolean | null;
+  portMode: PortMode;
+  customPorts: string[];
+  vlanId?: string;
+  interface?: string;
+  cidr?: string;
+  cidrV6?: string;
+}
+
+const EMPTY_DEVICE_STATE: DeviceRolloutState = { ipEnabled: null, portMode: 'all', customPorts: [] };
+
+function effectiveIpEnabled(pid: string, st: DeviceRolloutState | undefined): boolean {
+  if (st?.ipEnabled != null) return st.ipEnabled;
+  return !L2_ONLY_PLUGINS.has(pid);
+}
+
+/** Port names selected for a device given its mode + the preflight port list. */
+function selectedPorts(mode: PortMode, custom: string[], ports?: PreflightPortDto[]): string[] {
+  if (!ports || ports.length === 0) return [];
+  if (mode === 'all') return ports.map((p) => p.name);
+  if (mode === 'trunk') return ports.filter((p) => p.trunk).map((p) => p.name);
+  return custom;
+}
 
 /** Renders one preflight value as an editable field (commits on blur). */
 function PreflightField({ label, initial, onCommit }: { label: string; initial: unknown; onCommit: (v: string) => void }) {
@@ -66,8 +98,9 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
   // Dual-stack: optional IPv6 CIDR alongside the v4 one.
   const [cidrV6, setCidrV6] = useState(() => initialNetwork?.subnets.find((s) => s.includes('/') && s.includes(':')) ?? '');
 
-  // --- Step 2: per-device overrides (keyed `${pluginId}:${deviceId}`) -----------
-  const [overrides, setOverrides] = useState<Record<string, Record<string, string>>>({});
+  // --- Step 2: per-device rollout state (keyed `${pluginId}:${deviceId}`) --------
+  const [deviceState, setDeviceState] = useState<Record<string, DeviceRolloutState>>({});
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [step, setStep] = useState<1 | 2>(1);
 
   // Documented network to pre-fill from (the selector in the Network section).
@@ -219,11 +252,17 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
   // --- Step 2: preflight ---------------------------------------------------------
   const preflightQuery = useMutation({
     mutationFn: async () => {
+      // Parallel fan-out — one plugin's probe failure must not sink the whole
+      // wizard; its devices are marked degraded and fall back to defaults.
       const perPlugin = new Map<string, PreflightResultDto[]>();
-      for (const [pid, devs] of groups.entries()) {
-        const r = await api.plansPreflight({ pluginId: pid, intentActionId: INTENT_ID, inputs: sharedInputs, deviceIds: devs.map((d) => d.id) });
-        perPlugin.set(pid, r.results);
-      }
+      await Promise.all([...groups.entries()].map(async ([pid, devs]) => {
+        try {
+          const r = await api.plansPreflight({ pluginId: pid, intentActionId: INTENT_ID, inputs: sharedInputs, deviceIds: devs.map((d) => d.id) });
+          perPlugin.set(pid, r.results);
+        } catch (e) {
+          perPlugin.set(pid, devs.map((d) => ({ deviceId: d.id, values: [], degraded: true, error: e instanceof Error ? e.message : String(e) })));
+        }
+      }));
       return perPlugin;
     },
     // The whole point of the mutation is to advance the wizard — without this
@@ -244,7 +283,8 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
       return;
     }
     if (groups.size === 0) { setFormError('No target device has a plugin that implements network.create.'); return; }
-    setOverrides({});
+    setDeviceState({});
+    setExpandedIds(new Set());
     preflightQuery.mutate();
   }
 
@@ -259,13 +299,27 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
       const deviceInputs: Record<string, Record<string, unknown>> = {};
       for (const [pid, devs] of groups.entries()) {
         for (const d of devs) {
-          const ov = overrides[`${pid}:${d.id}`];
-          if (!ov) continue;
+          const st = deviceState[`${pid}:${d.id}`];
+          if (!st) continue;
+          const r = preflightQuery.data?.get(pid)?.find((x) => x.deviceId === d.id);
           const perDevice: Record<string, unknown> = {};
-          if (ov.vlanId !== undefined && ov.vlanId !== '' && Number.isInteger(Number(ov.vlanId))) perDevice['vlanId'] = Number(ov.vlanId);
-          if (ov.interface !== undefined && ov.interface !== '') perDevice['interface'] = ov.interface;
-          if (ov.cidr !== undefined && ov.cidr !== '') perDevice['cidr'] = ov.cidr;
-          if (ov.cidrV6 !== undefined && ov.cidrV6 !== '') perDevice['cidrV6'] = ov.cidrV6;
+          // IP toggle — explicit nulls clear the shared L3 address for this
+          // device only (L2-only rollout: e.g. a switch gets the VLAN but no
+          // IP). Plugins treat null as "absent" in their input validation.
+          if (!effectiveIpEnabled(pid, st)) {
+            perDevice['cidr'] = null;
+            perDevice['cidrV6'] = null;
+          } else {
+            if (st.cidr !== undefined) perDevice['cidr'] = st.cidr === '' ? null : st.cidr;
+            if (st.cidrV6 !== undefined) perDevice['cidrV6'] = st.cidrV6 === '' ? null : st.cidrV6;
+          }
+          // Port selection — only for plugins that advertise the capability.
+          if (r?.capabilities?.vlanPorts && r.ports && r.ports.length > 0) {
+            const names = selectedPorts(st.portMode, st.customPorts, r.ports);
+            if (names.length > 0) perDevice['vlanPorts'] = names;
+          }
+          if (st.vlanId !== undefined && st.vlanId !== '' && Number.isInteger(Number(st.vlanId))) perDevice['vlanId'] = Number(st.vlanId);
+          if (st.interface !== undefined && st.interface !== '') perDevice['interface'] = st.interface;
           if (Object.keys(perDevice).length > 0) deviceInputs[d.id] = perDevice;
         }
       }
@@ -292,6 +346,46 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
   const sites: Site[] = sitesQuery.data ?? [];
   const layers: NetworkLayer[] = (layersQuery.data ?? []).slice().sort((a, b) => a.sort - b.sort);
   const pluginName = (id: string) => pluginsQuery.data?.find((p) => p.id === id)?.name ?? id;
+
+  // --- Step 2 bulk controls -------------------------------------------------------
+  /** Any device in step 2 that supports explicit port lists? */
+  const anyPortCapable = useMemo(() => {
+    if (!preflightQuery.data) return false;
+    for (const results of preflightQuery.data.values()) {
+      if (results.some((r) => r.capabilities?.vlanPorts && (r.ports?.length ?? 0) > 0)) return true;
+    }
+    return false;
+  }, [preflightQuery.data]);
+
+  /** Bulk IP toggle across every device of step 2. */
+  function bulkSetIp(on: boolean) {
+    setDeviceState((prev) => {
+      const next = { ...prev };
+      for (const [pid, devs] of groups.entries()) for (const d of devs) {
+        const k = `${pid}:${d.id}`;
+        next[k] = { ...(next[k] ?? EMPTY_DEVICE_STATE), ipEnabled: on };
+      }
+      return next;
+    });
+  }
+
+  /** Bulk port mode across every device that supports vlanPorts. */
+  function bulkSetMode(mode: PortMode) {
+    setDeviceState((prev) => {
+      const next = { ...prev };
+      for (const [pid, devs] of groups.entries()) {
+        for (const d of devs) {
+          const r = preflightQuery.data?.get(pid)?.find((x) => x.deviceId === d.id);
+          if (!r?.capabilities?.vlanPorts || !r.ports?.length) continue;
+          const k = `${pid}:${d.id}`;
+          next[k] = { ...(next[k] ?? EMPTY_DEVICE_STATE), portMode: mode, customPorts: [] };
+        }
+      }
+      return next;
+    });
+  }
+
+  const bulkBtnCls = 'rounded-md border border-border px-2 py-1 text-secondary hover:bg-muted';
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
@@ -425,7 +519,7 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
                 </label>
               </div>
               <p className="mt-2 text-xs text-faint">
-                No generic interface field on purpose — each router decides its own L2 port. Step 2 resolves the best-guess per device from live state and lets you override it.
+                No generic interface field on purpose — each router decides its own L2 port. Step 2 resolves the best-guess per device from live state and lets you override it. Clearing a CIDR for one device in step 2 makes that device L2-only (VLAN without an IP address) — e.g. a switch or an appliance that only needs to know the VLAN.
               </p>
             </section>
 
@@ -455,56 +549,149 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
           <div className="space-y-4">
             {preflightQuery.isPending && <p className="text-sm text-muted-foreground">Probing device state (read-only)…</p>}
 
-            {!preflightQuery.isPending && preflightQuery.data && [...groups.entries()].map(([pid, devs]) => {
-              const results = preflightQuery.data?.get(pid) ?? [];
-              return (
-                <section key={pid} className="rounded-md border border-border bg-background p-3">
-                  <h3 className="mb-2 text-sm font-semibold text-secondary">{pluginName(pid)} — {devs.length} device{devs.length === 1 ? '' : 's'}</h3>
-                  <div className="space-y-2">
-                    {devs.map((d) => {
-                      const r = results.find((x) => x.deviceId === d.id);
-                      const ovKey = `${pid}:${d.id}`;
-                      const ov = overrides[ovKey] ?? {};
-                      const setOv = (k: string, v: string) => setOverrides((prev) => ({ ...prev, [ovKey]: { ...(prev[ovKey] ?? {}), [k]: v } }));
-                      return (
-                        <div key={d.id} className="rounded-md border border-border p-2">
-                          <div className="mb-1.5 flex items-center gap-2 text-sm">
-                            <span className="font-medium text-foreground">{d.name}</span>
-                            {(r?.check?.deployed ?? checkResult?.devices.find((x) => x.deviceId === d.id)?.status === 'deployed') && (
-                              <span title="The live inventory already shows this network on the device — the step will be a no-op there." className="rounded-full bg-success/15 px-2 py-0.5 text-xs text-success">already deployed</span>
-                            )}
-                            {r?.degraded && (
-                              <span title={r.error} className="rounded-full bg-danger/15 px-2 py-0.5 text-xs text-danger-fg">probe failed — defaults apply</span>
-                            )}
-                          </div>
+            {!preflightQuery.isPending && preflightQuery.data && (
+              <>
+                {/* Bulk controls — operate on every device of step 2 at once. */}
+                <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background p-2 text-xs">
+                  <span className="font-medium uppercase tracking-wide text-faint">Apply to all:</span>
+                  <button type="button" onClick={() => bulkSetIp(true)} className={bulkBtnCls}>IP on</button>
+                  <button type="button" onClick={() => bulkSetIp(false)} className={bulkBtnCls}>IP off (L2-only)</button>
+                  {anyPortCapable && (<>
+                    <span className="mx-1 h-4 w-px bg-border" />
+                    <button type="button" onClick={() => bulkSetMode('all')} className={bulkBtnCls}>All ports</button>
+                    <button type="button" onClick={() => bulkSetMode('trunk')} className={bulkBtnCls}>Trunk ports only</button>
+                  </>)}
+                </div>
+
+                {[...groups.entries()].map(([pid, devs]) => {
+                  const results = preflightQuery.data?.get(pid) ?? [];
+                  return (
+                    <section key={pid} className="rounded-md border border-border bg-background p-3">
+                      <h3 className="mb-2 text-sm font-semibold text-secondary">{pluginName(pid)} — {devs.length} device{devs.length === 1 ? '' : 's'}</h3>
+                      <div className="space-y-1.5">
+                        {devs.map((d) => {
+                          const r = results.find((x) => x.deviceId === d.id);
+                          const k = `${pid}:${d.id}`;
+                          const st = deviceState[k] ?? EMPTY_DEVICE_STATE;
+                          const setSt = (patch: Partial<DeviceRolloutState>) =>
+                            setDeviceState((prev) => ({ ...prev, [k]: { ...(prev[k] ?? EMPTY_DEVICE_STATE), ...patch } }));
+                          const ipOn = effectiveIpEnabled(pid, st);
+                          const portCapable = !!r?.capabilities?.vlanPorts && (r.ports?.length ?? 0) > 0;
+                          const expanded = expandedIds.has(d.id);
+                          const chosen = selectedPorts(st.portMode, st.customPorts, r?.ports);
+                          return (
+                            <div key={d.id} className="rounded-md border border-border">
+                              {/* Compact row — always visible. */}
+                              <div className="flex flex-wrap items-center gap-2 px-2 py-1.5 text-sm">
+                                <button
+                                  type="button"
+                                  aria-label={expanded ? 'Collapse' : 'Expand'}
+                                  onClick={() => setExpandedIds((prev) => { const next = new Set(prev); if (next.has(d.id)) next.delete(d.id); else next.add(d.id); return next; })}
+                                  className="rounded p-0.5 text-faint hover:bg-muted"
+                                >
+                                  <ChevronDown className={clsx('h-4 w-4 transition-transform', !expanded && '-rotate-90')} />
+                                </button>
+                                <span className="font-medium text-foreground">{d.name}</span>
+                                {(r?.check?.deployed ?? checkResult?.devices.find((x) => x.deviceId === d.id)?.status === 'deployed') && (
+                                  <span title="The live inventory already shows this network on the device — the step will be a no-op there." className="rounded-full bg-success/15 px-2 py-0.5 text-xs text-success">already deployed</span>
+                                )}
+                                {r?.degraded && (
+                                  <span title={r.error} className="rounded-full bg-danger/15 px-2 py-0.5 text-xs text-danger-fg">probe failed — defaults apply</span>
+                                )}
+                                <span className="ml-auto flex items-center gap-3">
+                                  {/* IP toggle — off = L2-only (explicit null cidrs). */}
+                                  <label className="flex cursor-pointer items-center gap-1.5 text-xs text-secondary" title={ipOn ? 'This device gets the shared L3 address' : 'L2-only — VLAN without an IP address'}>
+                                    <input type="checkbox" checked={ipOn} onChange={(e) => setSt({ ipEnabled: e.target.checked })} className="h-3.5 w-3.5 accent-[var(--color-primary)]" />
+                                    Set IP
+                                  </label>
+                                  {/* Port quick-select — only when the plugin supports vlanPorts. */}
+                                  {portCapable ? (
+                                    <span className="flex items-center gap-1">
+                                      {(['all', 'trunk', 'custom'] as const).map((m) => (
+                                        <button
+                                          key={m}
+                                          type="button"
+                                          onClick={() => {
+                                            if (m === 'custom' && st.portMode !== 'custom') {
+                                              // Seed the custom selection with what the current mode would pick.
+                                              setSt({ portMode: m, customPorts: selectedPorts(st.portMode, st.customPorts, r?.ports) });
+                                            } else {
+                                              setSt({ portMode: m });
+                                            }
+                                          }}
+                                          className={clsx('rounded px-1.5 py-0.5 text-xs', st.portMode === m ? 'bg-primary/15 font-medium text-primary' : 'text-faint hover:bg-muted')}
+                                        >
+                                          {m === 'all' ? `All (${r!.ports!.length})` : m === 'trunk' ? `Trunk only (${r!.ports!.filter((p) => p.trunk).length})` : `Select (${chosen.length})`}
+                                        </button>
+                                      ))}
+                                    </span>
+                                  ) : (
+                                    <span className="text-xs text-faint" title={portCapable ? '' : 'This platform creates the VLAN on its parent interface — no per-port selection.'}>interface-only</span>
+                                  )}
+                                </span>
+                              </div>
+
+                              {/* Expanded area — port chips, notes, overrides. */}
+                              {expanded && (
+                                <div className="space-y-2 border-t border-border px-3 py-2">
+                                  {portCapable && r!.ports!.length > 0 && (
+                                    <div>
+                                      <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-faint">Ports carrying VLAN{st.portMode === 'custom' ? ' (click to toggle)' : ''}</p>
+                                      <div className="flex flex-wrap gap-1">
+                                        {r!.ports!.map((p) => {
+                                          const active = st.portMode !== 'custom' || st.customPorts.includes(p.name);
+                                          return (
+                                            <button
+                                              key={p.name}
+                                              type="button"
+                                              disabled={st.portMode !== 'custom'}
+                                              onClick={() => setSt({ customPorts: active ? st.customPorts.filter((x) => x !== p.name) : [...st.customPorts, p.name] })}
+                                              title={`${p.name}${p.trunk ? ' · trunk/uplink' : ''}${p.pvid != null ? ` · PVID ${p.pvid}` : ''}`}
+                                              className={clsx('flex items-center gap-1 rounded border px-1.5 py-0.5 text-xs', active ? 'border-primary/40 bg-primary/10 text-foreground' : 'border-border text-faint', st.portMode === 'custom' && !active && 'opacity-60')}
+                                            >
+                                              {p.trunk && <span className="h-1.5 w-1.5 rounded-full bg-warning" title="trunk/uplink port" />}
+                                              {p.name}
+                                              {p.pvid != null && <span className="text-[10px] text-faint">{p.pvid}</span>}
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  )}
+
                           {/* Suggested values as editable fields, pre-filled from the probe. */}
                           <div className="flex flex-wrap gap-2">
-                            {r?.values.map((v) => (
-                              <PreflightField key={v.key} label={`${v.key}${v.confidence !== 'high' ? ` (${v.confidence})` : ''}`} initial={ov[v.key] ?? v.value} onCommit={(val) => setOv(v.key, val)} />
+                            {r?.values.filter((v) => v.key !== 'vlanPorts').map((v) => (
+                              <PreflightField key={v.key} label={`${v.key}${v.confidence !== 'high' ? ` (${v.confidence})` : ''}`} initial={st[v.key as keyof DeviceRolloutState] ?? v.value} onCommit={(val) => setSt({ [v.key]: val } as Partial<DeviceRolloutState>)} />
                             ))}
                             {(!r || !r.values.some((v) => v.key === 'vlanId')) && (
-                              <PreflightField label="vlanId (override)" initial={ov.vlanId ?? sharedInputs.vlanId ?? ''} onCommit={(val) => setOv('vlanId', val)} />
+                              <PreflightField label="vlanId (override)" initial={st.vlanId ?? sharedInputs.vlanId ?? ''} onCommit={(val) => setSt({ vlanId: val })} />
                             )}
-                            {(!r || !r.values.some((v) => v.key === 'cidr')) && (
-                              <PreflightField label="cidr (override)" initial={ov.cidr ?? sharedInputs.cidr ?? ''} onCommit={(val) => setOv('cidr', val)} />
+                            {ipOn && (!r || !r.values.some((v) => v.key === 'cidr')) && (
+                              <PreflightField label="cidr (override)" initial={st.cidr ?? sharedInputs.cidr ?? ''} onCommit={(val) => setSt({ cidr: val })} />
                             )}
-                            {(!r || !r.values.some((v) => v.key === 'cidrV6')) && (
-                              <PreflightField label="cidrV6 (override)" initial={ov.cidrV6 ?? sharedInputs.cidrV6 ?? ''} onCommit={(val) => setOv('cidrV6', val)} />
+                            {ipOn && (!r || !r.values.some((v) => v.key === 'cidrV6')) && (
+                              <PreflightField label="cidrV6 (override)" initial={st.cidrV6 ?? sharedInputs.cidrV6 ?? ''} onCommit={(val) => setSt({ cidrV6: val })} />
                             )}
                             {(!r || !r.values.some((v) => v.key === 'interface')) && (
-                              <PreflightField label="interface (override)" initial={ov.interface ?? ''} onCommit={(val) => setOv('interface', val)} />
+                              <PreflightField label="interface (override)" initial={st.interface ?? ''} onCommit={(val) => setSt({ interface: val })} />
                             )}
                           </div>
+
                           {r?.values.filter((v) => v.note).map((v) => (
                             <p key={`note-${v.key}`} className="mt-1 text-xs text-faint">• {v.key}: {v.note}</p>
                           ))}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </section>
-              );
-            })}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  );
+                })}
+              </>
+            )}
 
             {/* Rollout diff summary — what will happen per device before anything is written. */}
             {checkResult && checkResult.devices.length > 0 && (() => {
