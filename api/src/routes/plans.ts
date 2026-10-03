@@ -347,7 +347,9 @@ interface PreflightResultDto {
   degraded?: boolean;
   error?: string;
   /** Physical ports with trunk status (network.create) — for the dialog's port quick-selects. */
-  ports?: Array<{ name: string; trunk?: boolean; pvid?: number | null }>;
+  ports?: Array<{ name: string; trunk?: boolean; pvid?: number | null; uplink?: boolean }>;
+  /** Candidate interfaces for the `interface` input (NICs/bridges/bundles). */
+  interfaces?: Array<{ name: string; kind?: 'physical' | 'bridge' | 'bundle' | 'vlan'; note?: string }>;
   /** Capability flags advertised by the plugin (e.g. explicit vlanPorts lists). */
   capabilities?: { vlanPorts?: boolean };
 }
@@ -467,6 +469,7 @@ router.post(
             degraded: !!result.degraded,
             error: result.error,
             ports: Array.isArray(result.ports) ? result.ports : undefined,
+            interfaces: Array.isArray(result.interfaces) ? result.interfaces : undefined,
             capabilities: isPlainObject(result.capabilities) ? (result.capabilities as { vlanPorts?: boolean }) : undefined,
           });
         } catch (err) {
@@ -476,6 +479,36 @@ router.post(
       }
     }
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
+
+    // Merge user-assigned port roles (uplink/trunk markers from device_port_roles)
+    // into the live ports — a marked-uplink port counts as trunk for selection and
+    // is flagged `uplink` so the dialog can offer an "Uplinks" quick-select.
+    if (intentActionId === 'network.create') {
+      try {
+        const roleRows = await db.query.devicePortRoles.findMany({
+          where: and(eq(schema.devicePortRoles.pluginId, pluginId), inArray(schema.devicePortRoles.deviceId, targets.map((t) => t.deviceId))),
+        });
+        if (roleRows.length > 0) {
+          const byDevice = new Map<string, Map<string, string>>(); // deviceId → portName → role
+          for (const r of roleRows) {
+            let m = byDevice.get(r.deviceId);
+            if (!m) { m = new Map(); byDevice.set(r.deviceId, m); }
+            m.set(r.portName, r.role);
+          }
+          for (const res of results) {
+            const roles = byDevice.get(res.deviceId);
+            if (!roles || !res.ports) continue;
+            for (const p of res.ports) {
+              const role = roles.get(p.name);
+              if (role === 'uplink') { p.uplink = true; p.trunk = true; }
+              else if (role === 'trunk') p.trunk = true;
+            }
+          }
+        }
+      } catch {
+        // Roles are advisory — never fail the preflight because of them.
+      }
+    }
 
     // Server-side overlap check (network.create only): per-device "already
     // deployed" flag + this device's live-row warnings. One inventory load for

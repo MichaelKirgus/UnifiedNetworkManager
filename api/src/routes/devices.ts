@@ -1393,6 +1393,72 @@ router.get('/devices/:deviceId/ports', requireAuth, requirePermission('devices:r
   });
 });
 
+// --- Port roles (user-assigned uplink/trunk markers) ---------------------------------
+// Persistent per device+plugin+port. Complements the LIVE trunk detection from
+// preflight — a marked-uplink port is always offered in the rollout dialog's
+// "Uplinks" quick-select even when the live probe cannot see multi-VLAN tagging.
+
+type PortRole = 'uplink' | 'trunk';
+const PORT_ROLES: PortRole[] = ['uplink', 'trunk'];
+
+// GET /devices/:deviceId/port-roles?pluginId=… — all roles for one device (optionally scoped to a plugin).
+router.get('/devices/:deviceId/port-roles', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
+  const { deviceId } = req.params;
+  const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+  if (!device) {
+    res.status(404).json({ error: 'Device not found' });
+    return;
+  }
+  const pluginId = typeof req.query.pluginId === 'string' ? (req.query.pluginId as string) : null;
+  const rows = await db.query.devicePortRoles.findMany({
+    where: pluginId
+      ? and(eq(schema.devicePortRoles.deviceId, deviceId), eq(schema.devicePortRoles.pluginId, pluginId))
+      : eq(schema.devicePortRoles.deviceId, deviceId),
+    orderBy: [asc(schema.devicePortRoles.pluginId), asc(schema.devicePortRoles.portName)],
+  });
+  res.status(200).json({
+    deviceId,
+    roles: rows.map((r) => ({ pluginId: r.pluginId, portName: r.portName, role: r.role as PortRole, note: r.note ?? undefined })),
+  });
+});
+
+// PUT /devices/:deviceId/port-roles — set or clear ONE port's role.
+// Body: { pluginId, portName, role: 'uplink' | 'trunk' | null }
+router.put('/devices/:deviceId/port-roles', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
+  const { deviceId } = req.params;
+  const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+  if (!device) {
+    res.status(404).json({ error: 'Device not found' });
+    return;
+  }
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const pluginId = typeof body.pluginId === 'string' ? body.pluginId : '';
+  const portName = typeof body.portName === 'string' ? body.portName.trim() : '';
+  const role = body.role === null ? null : (typeof body.role === 'string' ? body.role : '');
+  if (!pluginId || !portName) {
+    res.status(400).json({ error: 'pluginId and portName are required' });
+    return;
+  }
+  if (role !== null && !(PORT_ROLES as string[]).includes(role)) {
+    res.status(400).json({ error: `role must be one of ${PORT_ROLES.join(', ')} or null` });
+    return;
+  }
+
+  const existing = await db.query.devicePortRoles.findFirst({
+    where: and(eq(schema.devicePortRoles.deviceId, deviceId), eq(schema.devicePortRoles.pluginId, pluginId), eq(schema.devicePortRoles.portName, portName)),
+  });
+  if (role === null) {
+    // Clear — delete the row when present.
+    if (existing) await db.delete(schema.devicePortRoles).where(eq(schema.devicePortRoles.id, existing.id));
+  } else if (existing) {
+    await db.update(schema.devicePortRoles).set({ role: role as PortRole }).where(eq(schema.devicePortRoles.id, existing.id));
+  } else {
+    await db.insert(schema.devicePortRoles).values({ id: uuidv4(), deviceId, pluginId, portName, role: role as PortRole, createdAt: new Date().toISOString() });
+  }
+
+  res.status(200).json({ deviceId, pluginId, portName, role });
+});
+
 // GET /devices/:deviceId/telemetry - Recent telemetry history (for plot metrics).
 router.get('/devices/:deviceId/telemetry', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
   const { deviceId } = req.params;

@@ -1715,6 +1715,78 @@ paths:
         '404':
           description: Device not found
 
+  /devices/{deviceId}/port-roles:
+    get:
+      tags: [Devices]
+      summary: Get persistent port roles for a device
+      description: >-
+        User-assigned per-port roles (uplink/trunk markers) from the
+        `device_port_roles` table. The rollout dialog merges these into the
+        live preflight ports — an uplink-marked port counts as trunk and is
+        flagged so the "Uplinks" quick-select can offer it. Optionally scoped
+        to one plugin via the `pluginId` query parameter. Requires permission
+        `devices:read`.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: pluginId
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Port roles for this device
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DevicePortRoles'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Device not found
+    put:
+      tags: [Devices]
+      summary: Set or clear one port's role
+      description: >-
+        Upserts a single (device, plugin, port) role row. `role` is
+        `uplink`, `trunk`, or `null` to clear the marker. Requires permission
+        `devices:write`.
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetPortRoleRequest'
+      responses:
+        '200':
+          description: Role stored (or cleared)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deviceId: { type: string }
+                  pluginId: { type: string }
+                  portName: { type: string }
+                  role: { type: ['string', 'null'], enum: [uplink, trunk, null] }
+        '400':
+          description: Missing or invalid fields
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing required permission
+        '404':
+          description: Device not found
+
   /devices/{deviceId}/config-jobs:
     post:
       tags: [Configuration]
@@ -8966,6 +9038,31 @@ components:
           items:
             $ref: '#/components/schemas/DevicePortRow'
 
+    DevicePortRoles:
+      type: object
+      required: [deviceId, roles]
+      properties:
+        deviceId: { type: string }
+        roles:
+          type: array
+          items:
+            type: object
+            required: [pluginId, portName, role]
+            properties:
+              pluginId: { type: string }
+              portName: { type: string }
+              role: { type: string, enum: [uplink, trunk] }
+              note: { type: string }
+
+    SetPortRoleRequest:
+      type: object
+      required: [pluginId, portName, role]
+      properties:
+        pluginId: { type: string }
+        portName: { type: string }
+        # `null` clears the marker; otherwise one of uplink | trunk.
+        role: { type: ['string', 'null'], enum: [uplink, trunk, null] }
+
     ConfigJobRequest:
       type: object
       required: [pluginId, action, payload]
@@ -9072,6 +9169,37 @@ components:
               note: { type: string, description: "Human-readable explanation of how the value was derived" }
         degraded: { type: boolean, description: "true when the probe failed — defaults apply" }
         error: { type: string, description: "Reason for degradation (when degraded)" }
+        ports:
+          type: array
+          description: >-
+            Physical/logical ports with live trunk status (network.create only) — feeds the
+            dialog's port quick-selects. `uplink` is merged server-side from the persistent
+            device_port_roles markers (an uplink-marked port also counts as trunk).
+          items:
+            type: object
+            required: [name]
+            properties:
+              name: { type: string }
+              trunk: { type: boolean, description: "Live trunk/uplink detection OR a persistent role marker" }
+              pvid: { type: ['integer', 'null'] }
+              uplink: { type: boolean, description: "User has persistently marked this port as an uplink" }
+        interfaces:
+          type: array
+          description: >-
+            Candidate values for the `interface` input (NICs / bridges / bundles / VLAN
+            sub-interfaces) — rendered as a dropdown in the rollout dialog when present.
+          items:
+            type: object
+            required: [name]
+            properties:
+              name: { type: string }
+              kind: { type: string, enum: [physical, bridge, bundle, vlan] }
+              note: { type: string }
+        capabilities:
+          type: object
+          description: "Capability flags advertised by the plugin (e.g. explicit vlanPorts lists)"
+          properties:
+            vlanPorts: { type: boolean }
         check:
           $ref: '#/components/schemas/PreflightNetworkCheck'
 

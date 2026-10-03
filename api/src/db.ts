@@ -93,6 +93,34 @@ export async function initDb(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_device_ips_device
       ON device_ips ("deviceId")`);
 
+  // User-assigned port roles (uplink / trunk) — persistent, per device+plugin+port.
+  // Complements the LIVE trunk detection from preflight: a marked-uplink port is
+  // always offered in the rollout dialog's "Uplinks" quick-select even when the
+  // live probe cannot see multi-VLAN tagging (e.g. a fresh switch).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_port_roles (
+      id TEXT PRIMARY KEY,
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      "portName" TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('uplink', 'trunk')),
+      note TEXT,
+      "createdAt" TEXT NOT NULL
+    )`);
+  // Repair for the first deploy: an unquoted `portName` in the DDL above was
+  // folded to lowercase by Postgres — rename it back so Drizzle's quoted
+  // identifier matches. No-op once fixed (or on fresh installs).
+  await pool.query(`
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'device_port_roles' AND column_name = 'portname')
+         AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'device_port_roles' AND column_name = 'portName') THEN
+        ALTER TABLE device_port_roles RENAME COLUMN portname TO "portName";
+      END IF;
+    END $$`);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_device_port_roles
+      ON device_port_roles ("deviceId", "pluginId", "portName")`);
+
   // Sites: first-class site objects; devices reference one via siteId.
   // Replaces the legacy free-text `devices.site` column (see backfillDeviceSites).
   await pool.query(`

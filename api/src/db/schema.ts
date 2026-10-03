@@ -1201,6 +1201,30 @@ export const devicePorts = pgTable(
   }
 );
 
+// User-assigned port roles (uplink / trunk) — persistent, per device+plugin+port.
+// Complements the LIVE trunk detection from preflight: a marked-uplink port is
+// always offered in the rollout dialog's "Uplinks" quick-select even when the
+// live probe cannot see multi-VLAN tagging. One role per port (uplink implies
+// trunk for selection purposes).
+export const devicePortRoles = pgTable(
+  'device_port_roles',
+  {
+    id: text('id').primaryKey(),
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Port/interface label on the device (matches preflight port names).
+    portName: text('portName').notNull(),
+    role: text('role').notNull(), // 'uplink' | 'trunk'
+    note: text('note'),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => {
+    return {
+      uqDevicePortRoles: uniqueIndex('uq_device_port_roles').on(table.deviceId, table.pluginId, table.portName),
+    };
+  }
+);
+
 // One row per filesystem/pool/dataset as reported by a plugin's `filesystems`
 // metric. Powers the top table of the cross-device Storage page. Same
 // upsert-per-poll + delete-on-absent lifecycle as tunnels/routes: filesystems
