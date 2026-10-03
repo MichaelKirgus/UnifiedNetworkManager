@@ -2324,11 +2324,19 @@ export interface NetworkCheckDeviceDto {
   status: 'deployed' | 'new';
 }
 
+/** Next free host address(es) for one device, computed by the API (auto-assign). */
+export interface IpSuggestionDto {
+  v4?: string | null;
+  v6?: string | null;
+}
+
 /** Server-side overlap-check result (POST /plans/network-check). */
 export interface NetworkCheckResultDto {
   warnings: NetworkCheckWarningDto[];
   devices: NetworkCheckDeviceDto[];
   suggestions: NetworkSuggestions;
+  /** deviceId → next free address(es); present only when `autoAssign` was requested. */
+  ipSuggestions?: Record<string, IpSuggestionDto>;
 }
 
 export interface CatalogEntry {
@@ -3294,7 +3302,12 @@ export const api = {
   }) => apiFetch<{ results: PreflightResultDto[] }>('/plans/preflight', { method: 'POST', body: JSON.stringify(body) }),
   /** Server-side network-overlap check for a rollout (warnings + per-device
    * deployed/new status + free-range suggestions). Read-only, no 2FA. */
-  plansNetworkCheck: (body: { inputs?: Record<string, unknown>; deviceIds?: string[] }) =>
+  plansNetworkCheck: (body: {
+    inputs?: Record<string, unknown>;
+    deviceIds?: string[];
+    /** Ask the API to compute per-device next-free-address suggestions. */
+    autoAssign?: boolean;
+  }) =>
     apiFetch<NetworkCheckResultDto>('/plans/network-check', { method: 'POST', body: JSON.stringify(body) }),
   getPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}`),
   /** Update plan-level settings (currently: the per-plan retry policy). Draft/ready/scheduled only. */

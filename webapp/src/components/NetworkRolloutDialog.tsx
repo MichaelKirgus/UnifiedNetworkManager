@@ -127,6 +127,10 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
   // Dual-stack: optional IPv6 CIDR alongside the v4 one.
   const [cidrV6, setCidrV6] = useState(() => initialNetwork?.subnets.find((s) => s.includes('/') && s.includes(':')) ?? '');
 
+  // Auto-assignment: UNM fills each device's L3 address with the next free host of
+  // the rollout subnet(s), skipping addresses already in use. Default ON.
+  const [autoAssign, setAutoAssign] = useState(true);
+
   // --- Step 2: per-device rollout state (keyed `${pluginId}:${deviceId}`) --------
   const [deviceState, setDeviceState] = useState<Record<string, DeviceRolloutState>>({});
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
@@ -267,7 +271,7 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
     setChecking(true);
     const t = window.setTimeout(async () => {
       try {
-        const r = await api.plansNetworkCheck({ inputs: sharedInputs, deviceIds: targetDeviceIds });
+        const r = await api.plansNetworkCheck({ inputs: sharedInputs, deviceIds: targetDeviceIds, autoAssign });
         if (seq === checkSeq.current) setCheckResult(r);
       } catch {
         // Advisory feature — a transient failure must not block the wizard.
@@ -276,7 +280,7 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
       }
     }, 400);
     return () => window.clearTimeout(t);
-  }, [step, name, vlanId, cidr, sharedInputs, targetDeviceIds]);
+  }, [step, name, vlanId, cidr, sharedInputs, targetDeviceIds, autoAssign]);
 
   // --- Step 2: preflight ---------------------------------------------------------
   const preflightQuery = useMutation({
@@ -312,9 +316,37 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
       return;
     }
     if (groups.size === 0) { setFormError('No target device has a plugin that implements network.create.'); return; }
-    setDeviceState({});
+    setDeviceState(buildPrefilledDeviceState());
     setExpandedIds(new Set());
     preflightQuery.mutate();
+  }
+
+  /** Step-2 initial state: when auto-assignment is on, pre-fill each IP-enabled
+   *  device's CIDR override with the API-computed next free host address(es)
+   *  (`<addr>/<prefix>` — the canonical per-device override form). Devices whose
+   *  subnet is exhausted are left untouched (user decides). */
+  function buildPrefilledDeviceState(): Record<string, DeviceRolloutState> {
+    const out: Record<string, DeviceRolloutState> = {};
+    if (!autoAssign) return out;
+    const sug = checkResult?.ipSuggestions;
+    if (!sug) return out;
+    const p4 = cidr.trim().split('/').pop();
+    const p6 = cidrV6.trim().split('/').pop();
+    for (const [pid, devs] of groups.entries()) {
+      for (const d of devs) {
+        const s = sug[d.id];
+        if (!s) continue;
+        const patch: Partial<DeviceRolloutState> = {};
+        // Only pre-fill when the device will actually get an IP (smart default
+        // is ON except L2-only plugins — respect an explicit toggle choice too).
+        if (effectiveIpEnabled(pid, undefined)) {
+          if (s.v4 && p4) patch.cidr = `${s.v4}/${p4}`;
+          if (s.v6 && p6) patch.cidrV6 = `${s.v6}/${p6}`;
+        }
+        if (Object.keys(patch).length > 0) out[`${pid}:${d.id}`] = { ...EMPTY_DEVICE_STATE, ...patch };
+      }
+    }
+    return out;
   }
 
   function handleBack() {
@@ -576,6 +608,15 @@ export function NetworkRolloutDialog({ onClose, initialNetwork }: NetworkRollout
                   <input type="text" value={cidrV6} onChange={(e) => setCidrV6(e.target.value)} placeholder="fd00:42::1/64 — dual-stack when both are set" className="w-full rounded-md border border-border px-3 py-2 text-sm" />
                 </label>
               </div>
+              <label className="mt-3 flex items-start gap-2 text-sm">
+                <input type="checkbox" checked={autoAssign} onChange={(e) => setAutoAssign(e.target.checked)} className="mt-0.5 h-4 w-4 rounded border-border accent-primary" />
+                <span>
+                  <span className="font-medium text-secondary">Auto-assign IP addresses</span>
+                  <span className="block text-xs text-faint">
+                    UNM fills each device's L3 address with the next free host of the subnet(s) above, skipping every address already in use (live interfaces, ARP/NDP leases, management IPs). Works for IPv4 and IPv6. Turn off to enter addresses manually in step 2.
+                  </span>
+                </span>
+              </label>
               <p className="mt-2 text-xs text-faint">
                 No generic interface field on purpose — each router decides its own L2 port. Step 2 resolves the best-guess per device from live state and lets you override it. Clearing a CIDR for one device in step 2 makes that device L2-only (VLAN without an IP address) — e.g. a switch or an appliance that only needs to know the VLAN.
               </p>
