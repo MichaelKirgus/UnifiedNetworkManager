@@ -13,7 +13,7 @@ import { createHash } from 'crypto';
 import type { MetricDescriptor, PortRow } from '@unm/plugin-sdk';
 import { CounterTracker, TtlCache } from '@unm/plugin-sdk';
 import { SwosClient, SwosData, decodeHexString, decodeMac, decodeIpLe, decodePortMask } from './swosClient';
-import { SwosPlatform, createPlatform, getField, hasField } from './platform';
+import { SwosPlatform, createPlatform, getField, hasField } from './swosPlatform';
 
 export interface SwosOptions {
   /** How long a collected snapshot stays fresh (ms). */

@@ -22,7 +22,7 @@
 import axios from 'axios';
 import { FBoxCredentials } from './fboxClient';
 import type { FBoxOptions, MonitoringResult, FBoxSnapshot } from './monitoring';
-import { maskToPrefix, normalizeMac, normalizeModelName } from './endpoints';
+import { maskToPrefix, normalizeMac, normalizeModelName } from './webuiEndpoints';
 
 /** Raised when the device rejects our TR-064 credentials (HTTP 401/403). */
 export class FBoxTr064AuthError extends Error {

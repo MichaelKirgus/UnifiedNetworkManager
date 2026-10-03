@@ -16,7 +16,7 @@
 import type { L2Topology, PreflightInterfaceOption, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
 import { suggestL2AttachPoint } from '@unm/plugin-sdk';
 import * as ifaces from '../client/interfaces';
-import { probeAssignmentCapability, resolveAssignmentPath } from '../assignmentSsh';
+import { probeAssignmentCapability, resolveAssignmentPath } from '../interfaceAssignment';
 import type { ActionContext } from './types';
 import { readOpnsenseL2Topology } from './l2Topology';
 

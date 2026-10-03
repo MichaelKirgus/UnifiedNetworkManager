@@ -33,7 +33,7 @@ import {
   type QuickAction,
 } from '@unm/plugin-sdk';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
-import { LcosOptions, getLcosInventory, readLcosClock, walkLcosCounters } from './lcosClient';
+import { LcosOptions, getLcosInventory, readLcosClock, walkLcosCounters } from './snmpCollector';
 import { deriveSecurityChecks } from './security';
 import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 import { DEVICE_MODELS } from './deviceModels';

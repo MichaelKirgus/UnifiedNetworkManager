@@ -17,7 +17,7 @@
 import { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, INTENT_L2_TOPOLOGY_READ } from '@unm/plugin-sdk';
 import type { L2Topology, PreflightCapabilities, PreflightPort, PreflightResult, PreflightValue } from '@unm/plugin-sdk';
 import { buildPostArray, decodeHexString, decodePortMask, encodeHexString, encodePortMask } from '../swosClient';
-import { hasField } from '../platform';
+import { hasField } from '../swosPlatform';
 import type { ActionContext, ActionDescriptor } from './types';
 
 // --- vlan.b table model -----------------------------------------------------------------

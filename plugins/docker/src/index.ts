@@ -38,7 +38,7 @@ import {
 } from '@unm/plugin-sdk';
 
 import { DockerClientOptions, DockerTlsMaterial, engineVersion, listContainers, listImages } from './client';
-import { buildContainerRows, buildImageRows, ContainerRow as UnmContainerRow, DockerContainerRaw, DockerImageRaw, ImageRow } from './rows';
+import { buildContainerRows, buildImageRows, ContainerRow as UnmContainerRow, DockerContainerRaw, DockerImageRaw, ImageRow } from './inventory';
 import { registry as actionRegistry, DockerActionContext } from './actions';
 import { buildPlan, PlanningError } from './plan';
 import { collectProbeStats, collectProbeStates, ProbeContainerStat, ProbeContainerState } from './probe';

@@ -12,7 +12,7 @@
  *     add we read the row back by uuid and use its actual `vlanif`.
  *   - Assignment (identifier + IP): REST `/api/interfaces/assignment/*` on
  *     26.7+; SSH config.xml edit + rc.configure_interface on ≤26.4 (see
- *     assignmentSsh.ts — needs a bound `ssh` slot).
+ *     interfaceAssignment.ts — needs a bound `ssh` slot).
  *   - DHCP range: REST `dnsmasq/settings/add_range` (dnsmasq backend only; Kea
  *     is reported as skipped in v1).
  */
@@ -24,7 +24,7 @@ import * as ifaces from '../client/interfaces';
 import { opnsenseWriteOk } from '../client/interfaces';
 import { reconfigureDhcp } from '../client/dhcp';
 import { get, post } from '../client/http';
-import { removeInterfaceAssignment, resolveAssignmentPath, writeInterfaceAssignment } from '../assignmentSsh';
+import { removeInterfaceAssignment, resolveAssignmentPath, writeInterfaceAssignment } from '../interfaceAssignment';
 import type { ActionContext, ActionDescriptor } from './types';
 import { readOpnsenseL2Topology } from './l2Topology';
 

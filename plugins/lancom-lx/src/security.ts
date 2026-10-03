@@ -21,7 +21,7 @@
  */
 
 import type { SecurityCheckRow } from '@unm/plugin-sdk';
-import type { LcosSnapshot, LcosSsid } from './lcosClient';
+import type { LcosSnapshot, LcosSsid } from './snmpCollector';
 
 // ---------------------------------------------------------------------------
 // Re-collection throttle + PSK counter baselines

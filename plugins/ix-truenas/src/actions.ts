@@ -15,7 +15,8 @@
 import { randomBytes } from 'node:crypto';
 import { ActionDescriptor, ActionResult, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, INTENT_L2_TOPOLOGY_READ, INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, L2Topology, pickNumber, pickString, pollUntil, PreflightInterfaceOption, PreflightResult, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
-import { hostSshPort, normalizeVmDevice, sshPool } from './enrich';
+import { hostSshPort, sshPool } from './ssh';
+import { normalizeVmDevice } from './enrichment';
 import { fsSftpPool } from './index';
 
 /** Executor context for one /config step. */

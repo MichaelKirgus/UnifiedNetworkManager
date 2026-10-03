@@ -32,7 +32,7 @@ import {
   parseOverview,
   parseSystemInfo,
   parseWlanInfo,
-} from './endpoints';
+} from './webuiEndpoints';
 
 /** Which query method the plugin uses (plugin option `apiMode`). */
 export type FBoxApiMode = 'webui' | 'tr064';

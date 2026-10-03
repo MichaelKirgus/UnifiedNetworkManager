@@ -18,7 +18,7 @@
 import type { ServiceRow } from '@unm/plugin-sdk';
 import { resolveSshCredentials, dynamicSshHostVerifier } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
-import { sshPool, hostSshPort } from './enrich';
+import { hostSshPort, sshPool } from './ssh';
 
 /** One raw `service.query` row (datastore prefix stripped by the extend). */
 interface ServiceQueryRow {

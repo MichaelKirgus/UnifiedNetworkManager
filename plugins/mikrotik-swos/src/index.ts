@@ -27,7 +27,7 @@ import {
   type QuickAction,
 } from '@unm/plugin-sdk';
 import { SwosClient, SwosAuthError } from './swosClient';
-import { createPlatform } from './platform';
+import { createPlatform } from './swosPlatform';
 import { DEFAULT_OPTIONS, MonitoringResult, SwosOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
 import { buildSwosState } from './state';
 import { DEVICE_MODELS } from './deviceModels';

@@ -13,7 +13,7 @@
 
 import { configBackupFileName, createFileRepoClient, createRegistry, isCanonicalIntent, FileRepoClient, pollUntil } from '@unm/plugin-sdk';
 import { buildPostArray, buildPostData, encodeHexString, encodeIpLe, encodePortMask } from '../swosClient';
-import { getField, hasField } from '../platform';
+import { getField, hasField } from '../swosPlatform';
 import { decodeFilePayload, FIRMWARE_MAX_BYTES, rebootSwitch, restoreConfig, runFirmwareUpgrade } from '../firmware';
 import { networkIntentActions } from './networkIntents';
 import { ActionContext, ActionDescriptor } from './types';
@@ -93,7 +93,7 @@ function postObject(ctx: ActionContext, endpoint: string, data: Record<string, u
  * read-only fields (status, statistics, calculated values) are never sent back.
  * `writableKeys` names the logical fields allowed on this endpoint.
  */
-function postWritable(ctx: ActionContext, endpoint: string, data: Record<string, unknown>, writableKeys: readonly (keyof import('../platform').FieldMap)[]): Promise<string> {
+function postWritable(ctx: ActionContext, endpoint: string, data: Record<string, unknown>, writableKeys: readonly (keyof import('../swosPlatform').FieldMap)[]): Promise<string> {
   const map = ctx.platform.map;
   const fields: Record<string, number | string | (number | string)[]> = {};
   for (const key of writableKeys) {

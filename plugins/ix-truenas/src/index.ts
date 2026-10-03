@@ -60,11 +60,8 @@ import {
   getVmEnrichment,
   monitoringInFlight,
   normalizeVmDevice,
-  hostSshPort,
-  setHostSshPort,
   serviceNetDetails,
   sshHostOf,
-  sshPool,
   type ContainerStat,
   type ContainerVolume,
   type DockerContainerInfo,
@@ -74,7 +71,8 @@ import {
   type ProbeVmStat,
   type ServiceNetDetail,
   buildVirshPreamble,
-} from './enrich';
+} from './enrichment';
+import { hostSshPort, setHostSshPort, sshPool } from './ssh';
 import { alertDedupeKey, bootPoolName, PREFLIGHT_RESOLVERS, queryBootEnvs, registry as actionRegistry, type BootEnvRow, TruenasActionContext } from './actions';
 import { collectServices } from './services';
 import { buildTruenasState } from './state';

@@ -11,7 +11,7 @@
  */
 
 import { SwosClient } from '../swosClient';
-import { SwosPlatform } from '../platform';
+import { SwosPlatform } from '../swosPlatform';
 import type { ActionDescriptor as SdkActionDescriptor } from '@unm/plugin-sdk';
 import { isValidInput, validateInput } from '@unm/plugin-sdk';
 import type {

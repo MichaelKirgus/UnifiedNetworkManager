@@ -9,7 +9,7 @@ import {
   readSettings,
   resolvePluginIdentity,
 } from '@unm/plugin-sdk';
-import { pingHost, PingResult } from './icmpping';
+import { pingHost, PingResult } from './ping';
 import { collectInventory, TargetInventory } from './inventory';
 
 export const PLUGIN_UUID = 'c9d5e7f8-2a3b-4c5d-8e6f-0a1b2c3d4e5f';

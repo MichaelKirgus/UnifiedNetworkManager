@@ -58,6 +58,43 @@ Makefile's `build:` target if you want `make build` to cover it.
 The Dockerfile uses the **repo root as build context** so it can copy + build
 the shared SDK first — keep that structure when editing.
 
+### 2a. Canonical module layout (keep every plugin shaped like this)
+
+All plugins follow one file-structure convention so a maintainer can find any
+concern in the same place, regardless of vendor:
+
+```
+src/
+  index.ts            # entry: identity, options, metric descriptors, route wiring — no business logic
+  monitoring.ts       # POST /monitoring collection + buildDescriptors/buildMetrics (when non-trivial)
+  plan.ts             # POST /plan → buildPlan() (+ PlanningError usage)
+  security.ts         # security-check derivation/collection (collectSecurityChecks / deriveSecurityChecks)
+  state.ts            # POST /state document builder        ┐ only when the plugin
+  stateStore.ts       # persistent per-host store + PLUGIN_UUID ┘ exposes deviceState
+  deviceModels.ts     # vendor/model catalog (+ firmware releases where relevant)
+  <vendor>Client.ts   # transport client for the appliance API (top-level, or client/<vendor>Client.ts
+                      #   when it grows multiple transports/backends — e.g. opnsense/client/*, openwrt/client/*)
+  actions/            # action catalog: registry.ts + one module per domain (firewall.ts, routes.ts, …)
+                      #   OR a single src/actions.ts for small catalogs — both are fine, pick ONE per plugin
+```
+
+Naming rules (enforced by review):
+
+- **Name modules after what they DO**, not how they do it: `ping.ts` (not
+  `icmpping.ts`), `inventory.ts` (not `rows.ts`), `swosPlatform.ts` (not a bare
+  `platform.ts`), `webuiEndpoints.ts` (not `endpoints.ts`). A reader must be able
+  to guess the module's job from its name alone.
+- **One concern per file.** If a file mixes an SSH/transport pool with data
+  collection, split it: transport in `ssh.ts`, collection in its own module
+  (`enrichment.ts` in ix-truenas is the reference).
+- **Top-level modules must not share a bare name with `actions/*`.** The layering
+  is intentional — top level = READ/collect (e.g. opnsense's `firewall.ts`
+  collects rules), `actions/firewall.ts` = WRITE intents — but the two layers are
+  distinguished by directory, so keep each file's role unambiguous from its name.
+- **Client names must match their transport.** A read-only SNMP collector is not
+  a "client" (lancom-lx: `snmpCollector.ts` for the SNMP walk, `webapi.ts` for
+  the real ubus web client).
+
 ---
 
 ## 3. What the SDK gives you (`@unm/plugin-sdk`)
