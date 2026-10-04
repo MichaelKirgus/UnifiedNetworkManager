@@ -314,8 +314,25 @@ export default function Flows() {
     {
       header: 'Network',
       key: 'name',
-      width: 240,
-      render: (row) => <span className="font-medium text-foreground">{orDash(row.name)}</span>,
+      width: 260,
+      exportValue: (row) => row.subnets?.length ? `${row.name} (${row.subnets.join(', ')})` : row.name,
+      render: (row) => (
+        <div className="flex flex-col">
+          {row.name === '(external)' ? (
+            <span className="w-fit rounded bg-muted px-1.5 py-0.5 text-xs font-medium">External</span>
+          ) : (
+            <span className={row.name === '(unknown)' ? 'text-faint' : 'font-medium text-foreground'}>{row.name}</span>
+          )}
+          {row.subnets && row.subnets.length > 0 && (
+            <span className="mt-0.5 flex flex-wrap gap-1">
+              {row.subnets.slice(0, 3).map((s) => (
+                <span key={s} className="rounded bg-muted px-1 py-0.5 font-mono text-[10px]">{s}</span>
+              ))}
+              {row.subnets.length > 3 && <span className="text-[10px] text-faint">+{row.subnets.length - 3}</span>}
+            </span>
+          )}
+        </div>
+      ),
     },
     {
       header: 'VLAN',

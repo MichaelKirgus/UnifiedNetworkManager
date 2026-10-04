@@ -1191,10 +1191,16 @@ export interface FlowPortsResponse {
   destinationPorts: FlowPortRow[];
 }
 
-/** One inventoried network by traffic (GET /flows/networks). */
+/** One LOGICAL network by traffic (GET /flows/networks) — same grouping as the
+ * Networks page (several interfaces on one subnet/VLAN collapse into one row). */
 export interface FlowNetworkRow {
+  /** Logical-network label — the group's named interface when one exists
+   * (e.g. "NET_DMZ_WAN01"), else its canonical subnet; "(external)" for
+   * internet-classified traffic, "(unknown)" for unmatched internal. */
   name: string;
   vlanId: number | null;
+  /** All subnets of the group (v4 first) — empty for unknown/VLAN-only rows. */
+  subnets?: string[];
   srcEstBytes: number;
   dstEstBytes: number;
   estBytes: number;

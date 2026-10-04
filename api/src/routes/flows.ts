@@ -4,6 +4,9 @@ import { requireAuth, requirePermission } from '../auth/middleware';
 import { pluginAxios } from '../utils/pluginHttp';
 import { reverseLookup } from '../utils/reverseDns';
 import { getFlowIngestStats } from '../workers/flows';
+import { mergeNetworkRows } from './networks';
+import type { MergedNetwork } from './networks';
+import { ipInCidr } from '@unm/plugin-sdk';
 
 /**
  * Flows page routes (sFlow/NetFlow traffic visibility).
@@ -483,11 +486,89 @@ router.get('/flows/ports', requireAuth, requirePermission('flows:read'), async (
   }
 });
 
+/** One logical network group with its subnets + VLANs (for flow mapping). */
+interface FlowNetworkGroup {
+  /** Display label — the group's NAMED interface when one exists (e.g.
+   *  "NET_DMZ_WAN01"), else the canonical subnet, else "VLAN <id>". Physical
+   *  port names (optN/ensN/ethN/wlan) are deliberately not used as labels. */
+  label: string;
+  vlanId: number | null; // single-VLAN groups only
+  subnets: { cidr: string; prefixLen: number }[];
+}
+
+/** Physical interface names that carry no meaning for a traffic summary. */
+const PHYSICAL_IF_RE = /^(opt\d+|ens\w+|eth\d+|enp\S*|wl[a-z]*\d*|lo|vnet\d+)$/i;
+
+/** The group's preferred display name: first non-physical member interface. */
+function preferredLabel(g: MergedNetwork): string {
+  for (const d of g.devices) {
+    for (const ifc of d.interfaces) {
+      if (ifc && !PHYSICAL_IF_RE.test(ifc)) return ifc;
+    }
+  }
+  return g.name; // canonical subnet / "VLAN <id>" / physical name
+}
+
 /**
- * GET /v1/flows/networks?from&to&limit&siteId= — traffic per inventoried
- * network (name + VLAN), split by direction. Endpoints without a matching
- * inventory network are grouped under "(unknown)". Powers the drilldown from
- * "which networks carry the most flow".
+ * Builds the logical-network index used by /flows/networks — the SAME grouping
+ * as GET /networks (mergeNetworkRows: subnet + VLAN-bridge + union-find over
+ * shared subnets), so "Traffic per network" summarizes per LOGICAL network
+ * instead of per physical interface (opt19 on 10.100.0.0/16 shows up under
+ * NET_DMZ_WAN01, not as its own row). Cached for 30 s — inventory changes are
+ * slow and this route is polled by the page.
+ */
+let flowNetIndex: { at: number; groups: FlowNetworkGroup[]; vlanToLabel: Map<number, string> } | null = null;
+async function loadFlowNetworkGroups(): Promise<FlowNetworkGroup[]> {
+  if (flowNetIndex && Date.now() - flowNetIndex.at < 30_000) return flowNetIndex.groups;
+  const res = await pool.query(
+    `SELECT "deviceId", "pluginId", name, ip, prefix, version, "vlanId", mac, status, "collectedAt"
+     FROM networks`
+  );
+  // ALL rows — exactly what GET /networks feeds mergeNetworkRows. IP-less
+  // named interfaces (e.g. a router's tagged port with only a VLAN id) are
+  // essential: they bridge VLAN→subnet in pass 2 and supply the group's label.
+  const merged = mergeNetworkRows(res.rows as any[]) as MergedNetwork[];
+  const groups: FlowNetworkGroup[] = merged.map((g) => ({
+    label: preferredLabel(g),
+    vlanId: g.vlanId,
+    subnets: g.subnets.map((cidr) => ({ cidr, prefixLen: Number(cidr.split('/')[1] ?? 0) })),
+  }));
+  // VLAN → label index for the fallback match (single-VLAN groups only).
+  const vlanToLabel = new Map<number, string>();
+  for (const g of groups) if (g.vlanId !== null) vlanToLabel.set(g.vlanId, g.label);
+  flowNetIndex = { at: Date.now(), groups, vlanToLabel };
+  return groups;
+}
+
+/**
+ * Maps one endpoint IP to its logical network label. Longest-prefix match over
+ * ALL subnets of all groups (family-agnostic — a merged dual-stack group
+ * carries both v4 and v6 CIDRs); falls back to the stored VLAN id when no
+ * subnet matches. Returns null → "(unknown)".
+ */
+function mapIpToLogicalNetwork(ip: string, vlanId: number | null, groups: FlowNetworkGroup[]): string | null {
+  let best: { label: string; prefixLen: number } | null = null;
+  for (const g of groups) {
+    for (const s of g.subnets) {
+      if (!ipInCidr(ip, s.cidr)) continue;
+      if (!best || s.prefixLen > best.prefixLen) best = { label: g.label, prefixLen: s.prefixLen };
+    }
+  }
+  if (best) return best.label;
+  // VLAN fallback — the rollup stored the interface's vlanId even when its
+  // name was unknown; a group keyed on that VLAN is still the right bucket.
+  if (vlanId !== null && vlanId > 0 && flowNetIndex?.vlanToLabel.has(vlanId)) {
+    return flowNetIndex.vlanToLabel.get(vlanId)!;
+  }
+  return null;
+}
+
+/**
+ * GET /v1/flows/networks?from&to&limit&siteId= — traffic per LOGICAL network
+ * (the same grouping as the Networks page: several interfaces on one subnet /
+ * VLAN collapse into one row), split by direction. Endpoints classified as
+ * 'internet' aggregate under "(external)"; internal endpoints without a match
+ * fall back to "(unknown)".
  */
 router.get('/flows/networks', requireAuth, requirePermission('flows:read'), async (req: Request, res: Response) => {
   const q = req.query as Record<string, unknown>;
@@ -502,6 +583,10 @@ router.get('/flows/networks', requireAuth, requirePermission('flows:read'), asyn
     const site = await resolveSiteFilter(params, q, true);
     if (site.kind === 'unknown') return res.status(400).json({ error: `Unknown site id: ${String(q.siteId)}` });
 
+    // Aggregate per ENDPOINT IP (not per stored interface name) — the mapping
+    // into logical network groups happens in JS below. Distinct IPs over a
+    // window stay small enough for an in-memory pass; SQL still does the heavy
+    // lifting (window + site filter + SUM).
     let srcRes;
     let dstRes;
     if (site.kind === 'ok' && site.empty) {
@@ -511,39 +596,56 @@ router.get('/flows/networks', requireAuth, requirePermission('flows:read'), asyn
       const siteClause = site.kind === 'ok' ? site.clause : '';
       [srcRes, dstRes] = await Promise.all([
         pool.query(
-          `SELECT COALESCE("srcNetworkName", '(unknown)') AS name, MAX("srcVlanId")::int AS vlan_id,
-                  SUM("estBytes")::bigint AS est_bytes
+          `SELECT host("srcIp") AS ip, MAX("srcVlanId")::int AS vlan_id,
+                  MAX("srcClass") AS ip_class, SUM("estBytes")::bigint AS est_bytes
            FROM ${table} WHERE bucket >= $1 AND bucket < $2${siteClause}
-           GROUP BY 1 ORDER BY est_bytes DESC LIMIT $${params.length + 1}`,
-          [...params, limit]
+           GROUP BY 1 ORDER BY est_bytes DESC LIMIT 50000`,
+          params
         ),
         pool.query(
-          `SELECT COALESCE("dstNetworkName", '(unknown)') AS name, MAX("dstVlanId")::int AS vlan_id,
-                  SUM("estBytes")::bigint AS est_bytes
+          `SELECT host("dstIp") AS ip, MAX("dstVlanId")::int AS vlan_id,
+                  MAX("dstClass") AS ip_class, SUM("estBytes")::bigint AS est_bytes
            FROM ${table} WHERE bucket >= $1 AND bucket < $2${siteClause}
-           GROUP BY 1 ORDER BY est_bytes DESC LIMIT $${params.length + 1}`,
-          [...params, limit]
+           GROUP BY 1 ORDER BY est_bytes DESC LIMIT 50000`,
+          params
         ),
       ]);
     }
 
-    // Merge both directions into one row per (name, vlan).
-    const byNet = new Map<string, { name: string; vlanId: number | null; srcEstBytes: number; dstEstBytes: number }>();
-    for (const r of [...srcRes.rows.map((x) => ({ ...x, dir: 's' as const })), ...dstRes.rows.map((x) => ({ ...x, dir: 'd' as const }))]) {
-      const name = String(r.name);
-      const vlanId = r.vlan_id === null || r.vlan_id === undefined ? null : Number(r.vlan_id);
-      const key = `${name}|${vlanId ?? ''}`;
-      let row = byNet.get(key);
+    // Map every endpoint IP to its logical network (Networks-page grouping).
+    // Endpoints the rollup classified as 'internet' are not part of any
+    // internal network — they aggregate under "(external)".
+    const groups = await loadFlowNetworkGroups();
+    const byNet = new Map<string, { name: string; srcEstBytes: number; dstEstBytes: number }>();
+    const add = (ip: unknown, vlanId: unknown, ipClass: unknown, bytes: unknown, dir: 's' | 'd') => {
+      const label = ipClass === 'internet'
+        ? '(external)'
+        : mapIpToLogicalNetwork(String(ip), vlanId === null || vlanId === undefined ? null : Number(vlanId), groups) ?? '(unknown)';
+      let row = byNet.get(label);
       if (!row) {
-        row = { name, vlanId, srcEstBytes: 0, dstEstBytes: 0 };
-        byNet.set(key, row);
+        row = { name: label, srcEstBytes: 0, dstEstBytes: 0 };
+        byNet.set(label, row);
       }
-      const v = Number(r.est_bytes);
-      if (r.dir === 's') row.srcEstBytes += v; else row.dstEstBytes += v;
-    }
+      const v = Number(bytes);
+      if (dir === 's') row.srcEstBytes += v; else row.dstEstBytes += v;
+    };
+    for (const r of srcRes.rows) add(r.ip, r.vlan_id, r.ip_class, r.est_bytes, 's');
+    for (const r of dstRes.rows) add(r.ip, r.vlan_id, r.ip_class, r.est_bytes, 'd');
 
+    // Attach the group's subnets + single VLAN id to each row.
+    const byLabel = new Map(groups.map((g) => [g.label, g] as const));
     const networks = [...byNet.values()]
-      .map((r) => ({ name: r.name, vlanId: r.vlanId, srcEstBytes: r.srcEstBytes, dstEstBytes: r.dstEstBytes, estBytes: r.srcEstBytes + r.dstEstBytes }))
+      .map((r) => {
+        const g = r.name === '(unknown)' || r.name === '(external)' ? null : byLabel.get(r.name);
+        return {
+          name: r.name,
+          vlanId: g?.vlanId ?? null,
+          subnets: g ? g.subnets.map((s) => s.cidr) : [],
+          srcEstBytes: r.srcEstBytes,
+          dstEstBytes: r.dstEstBytes,
+          estBytes: r.srcEstBytes + r.dstEstBytes,
+        };
+      })
       .sort((a, b) => b.estBytes - a.estBytes)
       .slice(0, limit);
 

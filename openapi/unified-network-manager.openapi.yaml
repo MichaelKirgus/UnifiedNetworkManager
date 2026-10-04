@@ -7455,14 +7455,22 @@ components:
     FlowNetworkRow:
       type: object
       description: >-
-        One inventoried network (name + VLAN) ranked by total estimated bytes.
+        One LOGICAL network ranked by total estimated bytes — the same grouping
+        as GET /networks (interfaces sharing a subnet or VLAN collapse into one
+        row; e.g. opt19/opt25 on one LAN appear once). The label is the group's
+        named interface when one exists (e.g. "NET_DMZ_WAN01"), else its
+        canonical subnet. Each flow endpoint IP is mapped to its group via
+        longest-prefix match over all of the group's subnets, with a stored-VLAN
+        fallback.
         srcEstBytes is traffic SOURCED from the network (outbound), dstEstBytes
-        traffic DESTINED to it (inbound); estBytes is their sum. Endpoints with
-        no matching inventory network are grouped under "(unknown)".
+        traffic DESTINED to it (inbound); estBytes is their sum. Endpoints
+        classified as 'internet' aggregate under "(external)"; unmatched internal
+        endpoints under "(unknown)".
       required: [name, srcEstBytes, dstEstBytes, estBytes]
       properties:
-        name: { type: string }
-        vlanId: { type: [integer, 'null'], description: "VLAN id of the network (null when untagged or unknown)" }
+        name: { type: string, description: "Logical-network label (named interface, canonical subnet, or 'VLAN <id>'); '(external)' for internet-classified traffic, '(unknown)' for unmatched internal" }
+        vlanId: { type: [integer, 'null'], description: "VLAN id when the group carries exactly one VLAN (null otherwise)" }
+        subnets: { type: array, items: { type: string }, description: "All subnets of the group, IPv4 first — empty for unknown/VLAN-only rows" }
         srcEstBytes: { type: integer, format: int64 }
         dstEstBytes: { type: integer, format: int64 }
         estBytes: { type: integer, format: int64 }
