@@ -13,9 +13,10 @@ import { getEffectiveSettingValue } from '../systemSettings';
  *      multi-value INSERTs with ON CONFLICT summing for duplicate tuples).
  *   B. 5-min rollup  — every 5 minutes, completed windows are aggregated from
  *      flow_micro into flow_agg_5m WITH enrichment: each endpoint IP is joined
- *      against an in-memory map built from the hosts / device_ips / networks
- *      inventory (refreshed every 60 s) and classified internal | internet |
- *      unknown; estBytes = reported bytes × sampling rate.
+ *      against an in-memory map built from the hosts / device_ips / devices
+ *      (managementAddress) / networks inventory (refreshed every 60 s) and
+ *      classified internal | internet | unknown; estBytes = reported bytes ×
+ *      sampling rate.
  *   C. hourly rollup — rolls flow_agg_5m into flow_agg_1h (long-term tier).
  *   D. partitions    — ensures the next weeks' range partitions exist on all
  *      three tables and drops expired ones (retention = instant DROP PARTITION,
@@ -133,20 +134,30 @@ async function refreshEnrichment(): Promise<void> {
   if (now - lastEnrichmentRefresh < 60_000) return;
 
   try {
-    const [hosts, deviceIps, networks] = await Promise.all([
+    const [hosts, deviceIps, devices, networks] = await Promise.all([
       pool.query(`SELECT ip, "deviceId" FROM hosts WHERE ip <> ''`),
       // device_ips stores the address in `address` (not `ip`) — alias it.
       pool.query(`SELECT address AS ip, "deviceId" FROM device_ips WHERE address IS NOT NULL AND address <> ''`),
+      // A device's PRIMARY address is devices.managementAddress — exporters
+      // report flows against exactly these IPs, so they must enrich too.
+      pool.query(
+        `SELECT "managementAddress" AS ip, id AS "deviceId" FROM devices WHERE "managementAddress" <> '' AND enabled = TRUE`
+      ),
       pool.query(
         `SELECT ip, prefix, version, "deviceId" FROM networks WHERE ip <> '' AND prefix IS NOT NULL`
       ),
     ]);
 
+    // First-seen wins; most specific first (probe-derived hosts > secondary
+    // device_ips > primary management address).
     const exact = new Map<string, string>();
     for (const r of hosts.rows) {
       if (!exact.has(r.ip)) exact.set(String(r.ip), String(r.deviceId));
     }
     for (const r of deviceIps.rows) {
+      if (!exact.has(r.ip)) exact.set(String(r.ip), String(r.deviceId));
+    }
+    for (const r of devices.rows) {
       if (!exact.has(r.ip)) exact.set(String(r.ip), String(r.deviceId));
     }
 

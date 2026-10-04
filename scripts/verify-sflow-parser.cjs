@@ -44,7 +44,7 @@ console.log('test 1: standard mock datagram');
   check('internal→internal TCP flow present', !!v4tcp);
   if (v4tcp) {
     check(`proto=6 tcp (got ${v4tcp.proto})`, v4tcp.proto === 6);
-    check(`estBytes=150_000 = 1500×100 (got ${v4tcp.bytes})`, v4tcp.bytes === 1_500 * 100);
+    check(`reportedBytes=1500 (rate applied once by API rollup) (got ${v4tcp.bytes})`, v4tcp.bytes === 1_500);
     check('sampleRate=100', v4tcp.sampleRate === 100);
   }
 
@@ -52,14 +52,14 @@ console.log('test 1: standard mock datagram');
   check('internal→internet UDP flow present', !!v4udp);
   if (v4udp) {
     check(`proto=17 udp (got ${v4udp.proto})`, v4udp.proto === 17);
-    check(`estBytes=80_000 = 800×100 (got ${v4udp.bytes})`, v4udp.bytes === 800 * 100);
+    check(`reportedBytes=800 (got ${v4udp.bytes})`, v4udp.bytes === 800);
   }
 
   const v6 = flows.find((f) => f.srcIp === '2001:db8::50');
   check('IPv6 flow present', !!v6);
   if (v6) {
     check(`dst=2001:4860:4860::8888 (got ${v6.dstIp})`, v6.dstIp === '2001:4860:4860::8888');
-    check(`estBytes=60_000 = 600×100 (got ${v6.bytes})`, v6.bytes === 600 * 100);
+    check(`reportedBytes=600 (got ${v6.bytes})`, v6.bytes === 600);
   }
 
   // The counter sample must be skipped WITHOUT corrupting the flow records.
@@ -80,7 +80,7 @@ console.log('test 2: custom ips + sample rate');
   const f = flows.find((x) => x.srcIp === '10.0.0.5' && x.dstIp === '10.0.0.9');
   check('custom internal flow present', !!f);
   if (f) {
-    check(`estBytes=96_000 = 1500×64 (got ${f.bytes})`, f.bytes === 1_500 * 64);
+    check(`reportedBytes=1500 (rate applied once by API rollup) (got ${f.bytes})`, f.bytes === 1_500);
     check('sampleRate=64', f.sampleRate === 64);
   }
 }

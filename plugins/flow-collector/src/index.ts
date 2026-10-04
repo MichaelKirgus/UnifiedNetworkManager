@@ -1,9 +1,10 @@
 /**
- * Flow collector plugin — sFlow (v1) receiver for the UNM Flows feature.
+ * Flow collector plugin — sFlow + NetFlow v5/v9 receiver for the UNM Flows feature.
  *
  * A GLOBAL service plugin (no device assignment, no credentials): it listens on
  * UDP for flow samples pushed by network devices (LANCOM LX, OPNsense, …),
- * parses them, PRE-AGGREGATES them in-process into per-window
+ * parses them (sFlow v1/5 or NetFlow v5/v9 — sniffed per datagram),
+ * PRE-AGGREGATES them in-process into per-window
  * (srcIp,dstIp,proto) tuples and pushes compact batches to the UNM API's
  * internal POST /plugin/flows endpoint. The API enqueues the rows; a
  * leader-gated worker persists + enriches + rolls them up (see
@@ -15,9 +16,9 @@
  * (counted + surfaced via self-metrics). Pushes are fire-and-forget with one
  * retry — same semantics as the SDK's log pipeline.
  *
- * v1 protocol support: sFlow v1 (sampled packets + flow records, IPv4/IPv6).
- * NetFlow v5/v9/IPFIX arrive in a follow-up phase behind the same tuple
- * normalization (see plan).
+ * Protocol support: sFlow v1/5 (sampled packets + flow records, IPv4/IPv6)
+ * and NetFlow v5/v9 (RFC 3954; v9 templates cached per SourceID).
+ * IPFIX arrives in a follow-up phase behind the same tuple normalization.
  */
 
 import dgram from 'dgram';
@@ -30,10 +31,10 @@ import {
   resolvePluginIdentity,
 } from '@unm/plugin-sdk';
 import axios from 'axios';
-import { parseSflowDatagram } from './sflowParser';
+import { parseFlowDatagram } from './dispatch';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-0000000012';
-export const PLUGIN_NAME = 'Flow Collector (sFlow)';
+export const PLUGIN_NAME = 'Flow Collector (sFlow/NetFlow)';
 
 /**
  * Multi-instance support: set `PLUGIN_INSTANCE_ID` (e.g. "site-a") to run
@@ -115,10 +116,8 @@ server.app.post('/monitoring', (_req, res) => {
   });
 });
 
-// ── sFlow v1 parsing ────────────────────────────────────────────────────────
-// Reference: RFC 3176 (sFlow v5 wire format is "sFlow" — the protocol version
-// field in the header is 1 for the original and 5 for the current; both share
-// the same record layout we parse here).
+// ── Datagram parsing lives in ./sflowParser, ./netflowParser, ./dispatch ───
+// sFlow: RFC 3176. NetFlow v5: Cisco legacy format. NetFlow v9: RFC 3954.
 
 /** One normalized flow tuple (pre-aggregation input + push wire shape). */
 interface FlowTuple {
@@ -183,9 +182,7 @@ function flushWindow(): void {
   windowStartMs = Date.now();
 }
 
-// ── sFlow datagram parsing lives in ./sflowParser (pure module, unit-tested) ─
-
-// ── UDP socket (sFlow) ──────────────────────────────────────────────────────
+// ── UDP socket (sFlow + NetFlow v5/v9 — sniffed per datagram) ───────────────
 
 function startSflowSocket(): void {
   const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
@@ -194,7 +191,7 @@ function startSflowSocket(): void {
 
   sock.on('message', (msg) => {
     stats.samplesReceivedTotal += 1;
-    for (const f of parseSflowDatagram(msg)) {
+    for (const f of parseFlowDatagram(msg)) {
       addSample(f.srcIp, f.dstIp, f.proto, f.bytes, f.packets, f.sampleRate);
     }
   });
@@ -204,7 +201,7 @@ function startSflowSocket(): void {
 
   sock.bind(SFLOW_PORT, () => {
     // eslint-disable-next-line no-console
-    console.log(`[flow-collector] sFlow listener live on udp/${SFLOW_PORT}`);
+    console.log(`[flow-collector] flow listener (sFlow/NetFlow v5/v9) live on udp/${SFLOW_PORT}`);
   });
 }
 

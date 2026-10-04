@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 /**
- * E2E test for the sFlow collector pipeline:
+ * E2E test for the flow collector pipeline (sFlow + NetFlow v5/v9):
  *   1. login (admin/admin, TOTP-aware)
- *   2. send a burst of mock sFlow datagrams to the collector (host udp/6343)
- *   3. wait for ingest into flow_micro
- *   4. exercise all five /v1/flows routes
- * Usage: node scripts/e2e-flows.cjs [collectorHost] [collectorPort]
+ *   2. send a burst of mock sFlow AND NetFlow v5/v9 datagrams to the shared
+ *      collector port (host udp/6343) — all three protocols on one socket
+ *   3. wait for ingest into flow_micro (verifies per-protocol tuples)
+ *   4. exercise all five /v1/flows routes (+ estBytes single-multiplication check)
+ Usage: node scripts/e2e-flows.cjs [collectorHost] [collectorPort]
  */
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 
 const API = process.env.API_URL || 'http://localhost:3000/v1';
 const HOST = process.argv[2] || '127.0.0.1';
@@ -22,12 +23,21 @@ const TRUNCATE = process.env.FLOWS_E2E_TRUNCATE === '1';
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-async function waitForRollup() {
+async function waitForRollup(pool) {
+  // The rollup tick is a setInterval aligned to API START, not wall-clock
+  // boundaries — after the bucket closes we may wait up to one full interval
+  // for the next tick. Poll flow_agg_5m instead of sleeping to an estimate:
+  // boundary + one interval (300s) + margin (60s), checked every 10s.
   const nowMs = Date.now();
   const bucketEndMs = (Math.floor(nowMs / 300_000) + 1) * 300_000; // next boundary
-  const waitMs = bucketEndMs - nowMs + 25_000; // boundary + rollup tick margin
-  console.log(`\n[rollup] waiting ${Math.round(waitMs / 1000)}s for the 5-minute rollup…`);
-  await sleep(waitMs);
+  const deadline = bucketEndMs + 360_000;
+  console.log(`\n[rollup] waiting for the 5-minute rollup (polling until ${new Date(deadline).toISOString()})…`);
+  while (Date.now() < deadline) {
+    await sleep(10_000);
+    const r = await pool.query('SELECT count(*)::int AS n FROM flow_agg_5m');
+    if (r.rows[0].n > 0) { console.log(`[rollup] flow_agg_5m has ${r.rows[0].n} rows`); return; }
+  }
+  console.warn('[rollup] timed out waiting for rollup rows — continuing anyway');
 }
 
 let failures = 0;
@@ -72,18 +82,58 @@ async function main() {
 
   // ── 0. optional clean slate (restart the API AFTER truncating so its
   //      rollup cursor starts fresh and covers this run's data) ───────────
+  const E2E_DEVICES = [
+    { id: 'e2e-flows-dev-a', name: 'E2E Test A', mgmt: '192.168.1.50', extra: ['192.168.1.75'] },
+    { id: 'e2e-flows-dev-b', name: 'E2E Test B', mgmt: '192.168.1.10', extra: [] },
+  ];
+
+  async function seedTestDevices() {
+    const now = new Date().toISOString();
+    for (const d of E2E_DEVICES) {
+      await pool.query(
+        `INSERT INTO devices (id, name, vendor, "managementAddress", status, "createdAt", enabled, "deviceTypes", tags)
+         VALUES ($1,$2,'generic',$3,'unknown',$4,TRUE,'[]','[]')
+         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
+        [d.id, d.name, d.mgmt, now]
+      );
+      for (const ip of d.extra) {
+        await pool.query(
+          `INSERT INTO device_ips (id, "deviceId", address, "createdAt") VALUES ($1,$2,$3,$4)
+           ON CONFLICT DO NOTHING`,
+          [`e2e-flows-ip-${d.id}-${ip}`, d.id, ip, now]
+        );
+      }
+    }
+  }
+
+  async function cleanupTestDevices() {
+    const ids = E2E_DEVICES.map((d) => d.id);
+    await pool.query('DELETE FROM device_ips WHERE "deviceId" = ANY($1)', [ids]);
+    await pool.query('DELETE FROM devices WHERE id = ANY($1)', [ids]);
+  }
+
   if (TRUNCATE) {
     console.log('\n[setup] truncating flow tables…');
     await pool.query('TRUNCATE flow_micro, flow_agg_5m, flow_agg_1h');
     const { execSync } = require('child_process');
     execSync('docker compose up -d api', { cwd: path.join(__dirname, '..'), stdio: 'inherit' });
     await new Promise((r) => setTimeout(r, 8000)); // wait for API boot + leadership
+    // Seed two devices matching the mock IPs so IP→device enrichment and the
+    // pairs route are exercised (enrichment map rebuilds on the first rollup).
+    await seedTestDevices();
+    const desc = E2E_DEVICES.map((d) => d.name + ' (' + d.mgmt + (d.extra.length ? ' + ' + d.extra.join(', ') : '') + ')');
+    console.log('[setup] seeded test devices:', desc.join('; '));
   }
 
-  // ── 1. mock burst ────────────────────────────────────────────────
-  console.log(`\n[mock] sending sFlow datagrams to udp://${HOST}:${PORT} for ${BURST_MS / 1000}s`);
-  const env = { ...process.env, SFLOW_SEND_INTERVAL_MS: '2000' };
-  spawnSync('node', [path.join(__dirname, 'mock-sflow.cjs'), HOST, String(PORT)], { stdio: 'inherit', env, timeout: BURST_MS });
+  // ── 1. mock burst (sFlow + NetFlow v5/v9 in parallel on the same port) ───
+  console.log(`\n[mock] sending sFlow + NetFlow v5/v9 datagrams to udp://${HOST}:${PORT} for ${BURST_MS / 1000}s`);
+  const env = { ...process.env, SFLOW_SEND_INTERVAL_MS: '2000', NF_SEND_INTERVAL_MS: '2000' };
+  const procs = [
+    spawn('node', [path.join(__dirname, 'mock-sflow.cjs'), HOST, String(PORT)], { stdio: 'inherit', env }),
+    spawn('node', [path.join(__dirname, 'mock-netflow.cjs'), HOST, String(PORT)], { stdio: 'inherit', env }),
+  ];
+  await sleep(BURST_MS);
+  for (const p of procs) p.kill();
 
   // ── 2. wait for ingest (drain loop runs every 1s) ───────────────
   let microRows = 0;
@@ -103,7 +153,13 @@ async function main() {
   const v6 = await pool.query("SELECT count(*)::int n FROM flow_micro WHERE family(\"srcIp\") = 6");
   check('IPv6 flows ingested', v6.rows[0].n > 0, `rows=${v6.rows[0].n}`);
 
-  if (WAIT_ROLLUP) await waitForRollup();
+  // NetFlow-specific tuples (distinct from the sFlow mock's):
+  const nf9 = await pool.query("SELECT count(*)::int n FROM flow_micro WHERE \"srcIp\" = '192.168.1.75'");
+  check('NetFlow v9 flows ingested (template cache across datagrams)', nf9.rows[0].n > 0, `rows=${nf9.rows[0].n}`);
+  const nf5 = await pool.query("SELECT count(*)::int n FROM flow_micro WHERE \"dstIp\" = '192.168.1.20'");
+  check('NetFlow v5 flows ingested', nf5.rows[0].n > 0, `rows=${nf5.rows[0].n}`);
+
+  if (WAIT_ROLLUP) await waitForRollup(pool);
 
   // ── 3. routes ────────────────────────────────────────────────────
   const now = Date.now();
@@ -129,7 +185,10 @@ async function main() {
   check('GET /flows/pairs → 200', pairs.status === 200, `status=${pairs.status}`);
   if (pairs.status === 200) {
     const j = await pairs.json();
-    check('pairs non-empty', Array.isArray(j.pairs) && j.pairs.length > 0, `pairs=${j.pairs?.length}`);
+    // Requires BOTH endpoints enriched to known devices — only meaningful when
+    // the test devices were seeded (TRUNCATE run).
+    if (TRUNCATE) check('pairs non-empty (seeded devices enrich both ends)', Array.isArray(j.pairs) && j.pairs.length > 0, `pairs=${j.pairs?.length}`);
+    else console.log(`    pairs: ${j.pairs?.length ?? 0} (no seeded inventory — skipped)`);
   }
 
   const series = await authed(`/flows/timeseries?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&bucket=5m`);
@@ -139,6 +198,21 @@ async function main() {
     check('timeseries has points', Array.isArray(j.points) && j.points.length > 0, `points=${j.points?.length}`);
   }
 
+  // estBytes invariant: the sampling rate is applied EXACTLY ONCE (in the
+  // rollup). Every flow_agg_5m row must satisfy estBytes = bytes × rate —
+  // a pre-multiplied parser would show estBytes = bytes × rate².
+  if (WAIT_ROLLUP) {
+    const inv = await pool.query(
+      `SELECT count(*) FILTER (WHERE a."estBytes" <> a.bytes * m.rate)::int AS bad,
+              count(*)::int AS total
+       FROM flow_agg_5m a
+       JOIN (SELECT \"srcIp\", \"dstIp\", proto, MAX(\"sampleRate\") AS rate
+             FROM flow_micro GROUP BY 1,2,3) m
+         ON m.\"srcIp\" = a.\"srcIp\" AND m.\"dstIp\" = a.\"dstIp\" AND m.proto = a.proto`
+    );
+    check('estBytes = bytes × rate exactly once (no double-multiplication)', inv.rows[0].bad === 0, `bad=${inv.rows[0].bad}/${inv.rows[0].total}`);
+  }
+
   const collectors = await authed('/flow-collectors');
   check('GET /flows/flow-collectors → 200', collectors.status === 200, `status=${collectors.status}`);
   if (collectors.status === 200) {
@@ -146,6 +220,11 @@ async function main() {
     check('ingest stats present', Boolean(j.ingest?.queueDepth !== undefined), JSON.stringify(j.ingest ?? null));
     check('collector listed + reachable', Array.isArray(j.collectors) && j.collectors.length > 0 && j.collectors[0].reachable, `collectors=${j.collectors?.length}`);
     if (j.collectors?.[0]) console.log(`    collector: ${JSON.stringify(j.collectors[0])}`);
+  }
+
+  if (TRUNCATE) {
+    await cleanupTestDevices();
+    console.log('\n[cleanup] removed E2E test devices');
   }
 
   await pool.end();

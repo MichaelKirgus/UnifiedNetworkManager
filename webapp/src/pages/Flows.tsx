@@ -260,7 +260,7 @@ export default function Flows() {
           rowKey={(row) => row.deviceId}
           storageKey="flows-internet"
           searchPlaceholder="Search devices…"
-          emptyMessage="No internet egress recorded in this window — assign the flow-collector plugin to a device and point an sFlow exporter at it."
+          emptyMessage="No internet egress recorded in this window — start the flow-collector plugin and point an sFlow or NetFlow exporter at it."
         />
       )}
 
