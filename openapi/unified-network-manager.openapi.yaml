@@ -10330,12 +10330,21 @@ components:
 
     PostgresTableStat:
       type: object
+      description: >-
+        One user table (regular or partitioned parent). For partitioned parents,
+        rows/size are summed over the parent plus all direct partitions. Rows in
+        `partitions` reuse this shape with bound + parent set instead.
       required: [name, approxRows, totalSizeBytes, totalSizePretty]
       properties:
         name: { type: string }
         approxRows: { type: integer, description: "Approximate live row count (pg_stat_user_tables)" }
         totalSizeBytes: { type: integer }
         totalSizePretty: { type: string, example: "12 MB" }
+        isPartitioned: { type: boolean, description: "True for partitioned parent tables (relkind 'p')" }
+        partitionCount: { type: integer, description: "Direct partition count — set on partitioned parents only" }
+        partitionKey: { type: [string, 'null'], description: "PARTITION BY definition, e.g. \"RANGE (ts)\" — partitioned parents only", example: "RANGE (ts)" }
+        bound: { type: [string, 'null'], description: "Partition bound — set on partition child rows only", example: "FOR VALUES FROM ('2026-10-05 00:00:00+00') TO ('2026-10-12 00:00:00+00')" }
+        parent: { type: string, description: "Parent table name — set on partition child rows only" }
 
     PostgresStats:
       type: object
@@ -10349,6 +10358,12 @@ components:
         connectionsActive: { type: integer }
         connectionsIdle: { type: integer }
         tables:
+          description: "Every user table (regular + partitioned parents), largest first"
+          type: array
+          items:
+            $ref: '#/components/schemas/PostgresTableStat'
+        partitions:
+          description: "One row per partition of every user partitioned table (expandable detail under each parent)"
           type: array
           items:
             $ref: '#/components/schemas/PostgresTableStat'

@@ -1467,15 +1467,27 @@ export interface SystemEvent {
   message: string;
 }
 
-/** One tracked Postgres table (approx rows + total size incl. indexes). */
+/** One user table (or one partition, when listed in `partitions`). Regular and
+ * partitioned-parent rows carry isPartitioned/partitionCount/partitionKey;
+ * partition child rows carry bound + parent. */
 export interface PostgresTableStat {
   name: string;
   approxRows: number;
   totalSizeBytes: number;
   totalSizePretty: string;
+  /** True for partitioned parent tables (relkind 'p'). */
+  isPartitioned?: boolean;
+  /** Direct partition count (0/undefined when not partitioned). */
+  partitionCount?: number;
+  /** PARTITION BY definition, e.g. "RANGE (ts)" — set on partitioned parents only. */
+  partitionKey?: string | null;
+  /** Partition bound (e.g. "FOR VALUES FROM (...) TO (...)") — partition child rows only. */
+  bound?: string | null;
+  /** Parent table name — partition child rows only. */
+  parent?: string;
 }
 
-/** Read-only Postgres snapshot (version, connections, table sizes). */
+/** Read-only Postgres snapshot (version, connections, ALL user tables + partitions). */
 export interface PostgresStats {
   version: string;
   databaseName: string;
@@ -1484,7 +1496,10 @@ export interface PostgresStats {
   connectionsTotal: number;
   connectionsActive: number;
   connectionsIdle: number;
+  /** Every user table (regular + partitioned parents), largest first. */
   tables: PostgresTableStat[];
+  /** One row per partition of every user partitioned table (expandable detail). */
+  partitions: PostgresTableStat[];
 }
 
 /** Full system status payload (GET /system/status). */

@@ -1,11 +1,11 @@
 import { ReactNode, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
-import { DataTable, DataTableColumn } from '../components/DataTable';
+import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { api, PostgresTableStat, SystemEvent, WorkerRuntime } from '../api/client';
 import { useTimeFormat } from '../utils/time';
 import { can } from '../auth/permissions';
-import { Activity, Cpu, Database, Gauge, Save, ServerCog, TimerReset } from 'lucide-react';
+import { Activity, ChevronDown, ChevronRight, Cpu, Database, Gauge, Save, ServerCog, TimerReset } from 'lucide-react';
 
 /** Human-friendly duration (ms → "1.2 s" / "340 ms"). */
 function fmtMs(ms?: number | null): string {
@@ -176,7 +176,25 @@ export default function Workers() {
   ];
 
   const tableColumns: DataTableColumn<PostgresTableStat>[] = [
-    { header: 'Table', key: 'name', width: 200, render: (row) => <span className="font-mono text-sm">{row.name}</span> },
+    { header: 'Table', key: 'name', width: 240, render: (row) => <span className="font-mono text-sm">{row.name}</span> },
+    {
+      // Partition status — count + PARTITION BY key for partitioned parents.
+      header: 'Partitioned',
+      key: 'isPartitioned',
+      width: 170,
+      sortAccessor: (row) => (row.isPartitioned ? row.partitionCount ?? 0 : -1),
+      render: (row) =>
+        row.isPartitioned ? (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="rounded bg-info px-1.5 py-0.5 text-[11px] font-medium text-info-fg">{row.partitionCount}</span>
+            {row.partitionKey && (
+              <span className="font-mono text-[11px] text-faint" title={row.partitionKey}>{row.partitionKey}</span>
+            )}
+          </span>
+        ) : (
+          <span className="text-faint">—</span>
+        ),
+    },
     {
       header: 'Rows (approx)',
       key: 'approxRows',
@@ -191,7 +209,40 @@ export default function Workers() {
       sortAccessor: (row) => row.totalSizeBytes,
       render: (row) => <span className="font-mono text-sm">{row.totalSizePretty}</span>,
     },
+    {
+      // Only meaningful for partition child rows — hidden by default, enable via the Columns picker.
+      header: 'Bound',
+      key: 'bound',
+      width: 280,
+      filterable: false,
+      hiddenByDefault: true,
+      render: (row) => (row.bound ? <span className="font-mono text-xs">{row.bound}</span> : <span className="text-faint">—</span>),
+    },
   ];
+
+  // Cell content for one partition child row, aligned to the visible columns.
+  const partitionCell = (key: string, part: PostgresTableStat): ReactNode => {
+    switch (key) {
+      case 'name': return <span className="font-mono text-xs">{part.name}</span>;
+      case 'isPartitioned': return <span className="text-[11px] text-faint">partition</span>;
+      case 'approxRows': return <span className="font-mono text-sm">{part.approxRows.toLocaleString()}</span>;
+      case 'totalSizeBytes': return <span className="font-mono text-sm">{part.totalSizePretty}</span>;
+      case 'bound': return part.bound ? <span className="font-mono text-xs">{part.bound}</span> : <span className="text-faint">—</span>;
+      default: return null;
+    }
+  };
+
+  function PgPartitionRow({ child, ctx }: { child: PostgresTableStat; ctx: ExpandChildContext }) {
+    return (
+      <tr className="bg-accent-sky/40 dark:bg-muted/70">
+        <td className="px-1 py-2 align-middle"><span className="inline-block h-6 w-6" /></td>
+        {ctx.selectable && <td className="px-3 py-2" />}
+        {ctx.columns.map((col) => (
+          <td key={col.key} className="overflow-hidden px-4 py-2 text-secondary">{partitionCell(col.key, child)}</td>
+        ))}
+      </tr>
+    );
+  }
 
   const pg = status?.postgres;
   const connPct = pg && pg.maxConnections > 0 ? Math.min(100, Math.round((pg.connectionsTotal / pg.maxConnections) * 100)) : 0;
@@ -390,7 +441,11 @@ export default function Workers() {
               rows={pg.tables}
               rowKey={(row) => row.name}
               storageKey="unm:table:pg-tables"
-              emptyMessage="No tracked tables found"
+              emptyMessage="No user tables found"
+              expandable={{
+                childrenOf: (row) => pg.partitions.filter((p) => p.parent === row.name),
+                renderChild: (child, _parent, ctx) => <PgPartitionRow child={child} ctx={ctx} />,
+              }}
             />
           </section>
         )}

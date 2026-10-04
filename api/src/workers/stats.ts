@@ -172,34 +172,28 @@ export function getEvents(limit = 50): SystemEvent[] {
 
 // --- Postgres health (read-only introspection) -------------------------------
 
-const TRACKED_TABLES = [
-  'telemetry',
-  'hosts',
-  'networks',
-  'tunnels',
-  'routes',
-  'wifi_ssids',
-  'wifi_channels',
-  'wifi_radios',
-  'wifi_neighbors',
-  'wifi_clients',
-  'plugin_logs',
-  'plugin_metrics',
-  'devices',
-  'device_plugins',
-  'config_jobs',
-  'plans',
-  'plan_steps',
-  'secrets',
-  'plugins',
-  'users',
-];
+// All user tables are listed (no fixed allow-list) — see getPostgresStats.
 
+/**
+ * One user table (or one partition, when returned in `partitions`). Regular
+ * and partitioned-parent rows carry isPartitioned/partitionCount/partitionKey;
+ * partition child rows carry bound + parent instead.
+ */
 export interface PostgresTableStat {
   name: string;
   approxRows: number;
   totalSizeBytes: number;
   totalSizePretty: string;
+  /** True for partitioned parent tables (relkind 'p'). */
+  isPartitioned?: boolean;
+  /** Direct partition count (0/undefined when not partitioned). */
+  partitionCount?: number;
+  /** PARTITION BY definition, e.g. "RANGE (ts)" — set on partitioned parents only. */
+  partitionKey?: string | null;
+  /** Partition bound (e.g. "FOR VALUES FROM (...) TO (...)") — set on partition child rows only. */
+  bound?: string | null;
+  /** Parent table name — set on partition child rows only. */
+  parent?: string;
 }
 
 export interface PostgresStats {
@@ -211,11 +205,13 @@ export interface PostgresStats {
   connectionsActive: number;
   connectionsIdle: number;
   tables: PostgresTableStat[];
+  /** One row per partition of every user partitioned table (for expandable rows). */
+  partitions: PostgresTableStat[];
 }
 
 /** One-shot read-only snapshot of the Postgres instance (pg_catalog only). */
 export async function getPostgresStats(): Promise<PostgresStats> {
-  const [versionRes, sizeRes, maxConnRes, activityRes, tablesRes] = await Promise.all([
+  const [versionRes, sizeRes, maxConnRes, activityRes, tablesRes, partitionsRes] = await Promise.all([
     pool.query('SELECT version() AS v'),
     pool.query("SELECT current_database() AS db, pg_size_pretty(pg_database_size(current_database())) AS size"),
     pool.query("SELECT setting::int AS n FROM pg_settings WHERE name = 'max_connections'"),
@@ -224,17 +220,51 @@ export async function getPostgresStats(): Promise<PostgresStats> {
              count(*) FILTER (WHERE state = 'active')::int AS active,
              count(*) FILTER (WHERE state = 'idle')::int AS idle
       FROM pg_stat_activity`),
-    pool.query(
-      `SELECT c.relname AS name,
-              COALESCE(s.n_live_tup, 0)::bigint AS rows,
-              pg_total_relation_size(c.oid) AS size_bytes,
-              pg_size_pretty(pg_total_relation_size(c.oid)) AS size_pretty
-       FROM pg_class c
-       JOIN pg_stat_user_tables s ON s.relid = c.oid
-       WHERE c.relname = ANY($1::text[])
-       ORDER BY pg_total_relation_size(c.oid) DESC`,
-      [TRACKED_TABLES]
-    ),
+    // ALL user tables (regular + partitioned parents). A partitioned parent's own
+    // storage is 0 — its data lives in the partitions — so size/rows are summed
+    // over the parent PLUS all direct partition children via a LATERAL aggregate.
+    pool.query(`
+      SELECT c.relname AS name,
+             (COALESCE(s.n_live_tup, 0) + COALESCE(p.part_rows, 0))::bigint AS rows,
+             (pg_total_relation_size(c.oid) + COALESCE(p.part_bytes, 0))::bigint AS size_bytes,
+             pg_size_pretty(pg_total_relation_size(c.oid) + COALESCE(p.part_bytes, 0)) AS size_pretty,
+             (c.relkind = 'p') AS is_partitioned,
+             COALESCE(p.partition_count, 0)::int AS partition_count,
+             CASE WHEN c.relkind = 'p' THEN pg_get_partkeydef(c.oid) ELSE NULL END AS part_key
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+      LEFT JOIN LATERAL (
+        SELECT count(*)::int AS partition_count,
+               sum(pg_total_relation_size(i.inhrelid)) AS part_bytes,
+               sum(COALESCE(cs.n_live_tup, 0))::bigint AS part_rows
+        FROM pg_inherits i
+        LEFT JOIN pg_stat_user_tables cs ON cs.relid = i.inhrelid
+        WHERE i.inhparent = c.oid
+      ) p ON true
+      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_%'
+        AND c.relkind IN ('r', 'p')
+        -- Partition CHILDREN are not top-level tables — they appear under their
+        -- parent (expandable) and are already summed into the parent's rows/size.
+        AND NOT EXISTS (SELECT 1 FROM pg_inherits i2 WHERE i2.inhrelid = c.oid)
+      ORDER BY (pg_total_relation_size(c.oid) + COALESCE(p.part_bytes, 0)) DESC`),
+    // One row per partition of every user partitioned table — the expandable
+    // detail under each parent on the Workers page.
+    pool.query(`
+      SELECT parent.relname AS parent_name,
+             c.relname AS name,
+             pg_get_expr(c.relpartbound, c.oid) AS bound,
+             COALESCE(s.n_live_tup, 0)::bigint AS rows,
+             pg_total_relation_size(c.oid)::bigint AS size_bytes,
+             pg_size_pretty(pg_total_relation_size(c.oid)) AS size_pretty
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+      JOIN pg_inherits i ON i.inhrelid = c.oid
+      JOIN pg_class parent ON parent.oid = i.inhparent
+      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_%'
+        AND c.relkind IN ('r', 'p')
+      ORDER BY parent_name, name`),
   ]);
 
   const tables: PostgresTableStat[] = (tablesRes.rows ?? []).map((r) => ({
@@ -242,6 +272,18 @@ export async function getPostgresStats(): Promise<PostgresStats> {
     approxRows: Number(r.rows),
     totalSizeBytes: Number(r.size_bytes),
     totalSizePretty: String(r.size_pretty),
+    isPartitioned: Boolean(r.is_partitioned),
+    partitionCount: Number(r.partition_count ?? 0),
+    partitionKey: r.part_key ? String(r.part_key) : null,
+  }));
+
+  const partitions: PostgresTableStat[] = (partitionsRes.rows ?? []).map((r) => ({
+    name: String(r.name),
+    parent: String(r.parent_name),
+    approxRows: Number(r.rows),
+    totalSizeBytes: Number(r.size_bytes),
+    totalSizePretty: String(r.size_pretty),
+    bound: r.bound ? String(r.bound) : null,
   }));
 
   return {
@@ -253,5 +295,6 @@ export async function getPostgresStats(): Promise<PostgresStats> {
     connectionsActive: Number(activityRes.rows?.[0]?.active ?? 0),
     connectionsIdle: Number(activityRes.rows?.[0]?.idle ?? 0),
     tables,
+    partitions,
   };
 }
