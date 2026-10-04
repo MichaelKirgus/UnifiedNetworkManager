@@ -23,6 +23,7 @@ tags:
   - name: Layers
   - name: Files
   - name: Inventory
+  - name: Flows
   - name: Updates
   - name: Security
   - name: Logs
@@ -3615,6 +3616,244 @@ paths:
         '401':
           description: Authentication required
 
+  /flows/top-talkers:
+    get:
+      tags: [Flows]
+      summary: Top source and destination IPs by estimated traffic
+      description: >-
+        Traffic visibility (sFlow/NetFlow collector feature). Aggregates the
+        enriched flow_agg_5m table (or flow_agg_1h for ranges older than its
+        retention) over the window, ranking source and destination IPs by
+        estimated bytes. Endpoints are classified internal/internet against the
+        live inventory; known devices carry their id + name.
+      parameters:
+        - in: query
+          name: from
+          required: false
+          schema: { type: string }
+          description: "Window start (ISO-8601). Default: one hour before `to`"
+        - in: query
+          name: to
+          required: false
+          schema: { type: string }
+          description: "Window end (ISO-8601, exclusive). Default: now"
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 20, maximum: 100 }
+      responses:
+        '200':
+          description: Ranked source + destination IP lists
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fromMs: { type: integer }
+                  toMs: { type: integer }
+                  table: { type: string, enum: [flow_agg_5m, flow_agg_1h] }
+                  sources:
+                    type: array
+                    items: { $ref: '#/components/schemas/FlowTalker' }
+                  destinations:
+                    type: array
+                    items: { $ref: '#/components/schemas/FlowTalker' }
+        '401':
+          description: Authentication required
+
+  /flows/internet:
+    get:
+      tags: [Flows]
+      summary: Per-device egress to the internet
+      description: >-
+        Estimated bytes sent from each known internal device to destinations
+        classified as 'internet' (dstClass), plus the overall total. Use
+        `deviceId` to scope one device.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to traffic sourced by this device
+        - in: query
+          name: from
+          required: false
+          schema: { type: string }
+        - in: query
+          name: to
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Internet egress totals + per-device breakdown
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fromMs: { type: integer }
+                  toMs: { type: integer }
+                  table: { type: string, enum: [flow_agg_5m, flow_agg_1h] }
+                  total:
+                    type: object
+                    properties:
+                      estBytes: { type: integer, format: int64 }
+                      distinctDestinations: { type: integer }
+                  perDevice:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        deviceId: { type: string }
+                        deviceName: { type: [string, 'null'] }
+                        estBytes: { type: integer, format: int64 }
+                        distinctDestinations: { type: integer }
+        '401':
+          description: Authentication required
+
+  /flows/pairs:
+    get:
+      tags: [Flows]
+      summary: Top internal device-to-device traffic pairs
+      description: >-
+        Estimated bytes between pairs of known internal devices (both endpoints
+        classified 'internal' with a resolved device id), ranked descending.
+      parameters:
+        - in: query
+          name: from
+          required: false
+          schema: { type: string }
+        - in: query
+          name: to
+          required: false
+          schema: { type: string }
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 20, maximum: 100 }
+      responses:
+        '200':
+          description: Ranked device pairs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fromMs: { type: integer }
+                  toMs: { type: integer }
+                  table: { type: string, enum: [flow_agg_5m, flow_agg_1h] }
+                  pairs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        srcDeviceId: { type: string }
+                        dstDeviceId: { type: string }
+                        srcName: { type: [string, 'null'] }
+                        dstName: { type: [string, 'null'] }
+                        estBytes: { type: integer, format: int64 }
+                        distinctPairs: { type: integer }
+        '401':
+          description: Authentication required
+
+  /flows/timeseries:
+    get:
+      tags: [Flows]
+      summary: Bucketed estimated-bytes series for charts
+      description: >-
+        Continuous (gap-filled) time series of estimated bytes from the
+        aggregate tables. `bucket=5m` reads flow_agg_5m, `bucket=1h` reads
+        flow_agg_1h. Optional filters scope by source device and destination
+        classification (e.g. class=internet = total internet egress over time).
+      parameters:
+        - in: query
+          name: from
+          required: false
+          schema: { type: string }
+        - in: query
+          name: to
+          required: false
+          schema: { type: string }
+        - in: query
+          name: bucket
+          required: false
+          schema: { type: string, enum: [5m, 1h], default: '5m' }
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to traffic sourced by this device
+        - in: query
+          name: class
+          required: false
+          schema: { type: string, enum: [internet, internal] }
+          description: Filter on the destination classification
+      responses:
+        '200':
+          description: Bucketed series (zero-filled gaps)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fromMs: { type: integer }
+                  toMs: { type: integer }
+                  table: { type: string, enum: [flow_agg_5m, flow_agg_1h] }
+                  bucket: { type: string, enum: [5m, 1h] }
+                  points:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        bucket: { type: string, format: date-time }
+                        estBytes: { type: integer, format: int64 }
+        '401':
+          description: Authentication required
+
+  /flow-collectors:
+    get:
+      tags: [Flows]
+      summary: Flow collector ingest status
+      description: >-
+        Ingest pipeline health: the flows worker's in-process queue counters
+        (depth, enqueued/dropped/inserted totals) plus each registered
+        flow-collector plugin's live self-metrics gauges (samples/s, tuples/s,
+        drops, push failures). A collector that is unreachable is reported with
+        reachable=false.
+      responses:
+        '200':
+          description: Ingest stats + per-collector status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ingest:
+                    type: object
+                    properties:
+                      queueDepth: { type: integer }
+                      enqueuedTotal: { type: integer, format: int64 }
+                      droppedTotal: { type: integer, format: int64 }
+                      insertedTotal: { type: integer, format: int64 }
+                      lastInsertAt: { type: [string, 'null'], format: date-time }
+                      lastError: { type: [string, 'null'] }
+                  collectors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        reachable: { type: boolean }
+                        samplesPerSec: { type: number }
+                        tuplesPerSec: { type: number }
+                        droppedTuplesTotal: { type: integer, format: int64 }
+                        queueDepth: { type: integer }
+                        pushesTotal: { type: integer, format: int64 }
+                        pushFailuresTotal: { type: integer, format: int64 }
+        '401':
+          description: Authentication required
+
   /hosts:
     get:
       tags: [Inventory]
@@ -7047,6 +7286,21 @@ components:
         emittedMetricsCount: { type: [integer, 'null'], description: "Metric keys in the plugin's last /monitoring payload (per-poll telemetry weight)" }
         logQueueDepth: { type: [integer, 'null'], description: "Pending entries in the plugin logger queue; null when no logger is registered" }
         timestamp: { type: string, format: date-time }
+
+    FlowTalker:
+      type: object
+      description: >-
+        One ranked IP (source or destination) from the Flows page. estBytes is
+        reported bytes × sampling rate; internal=true when the endpoint matches
+        a known device/network in the live inventory.
+      required: [ip, estBytes]
+      properties:
+        ip: { type: string }
+        estBytes: { type: integer, format: int64 }
+        reportedBytes: { type: integer, format: int64 }
+        deviceId: { type: [string, 'null'], description: "Known device this IP belongs to (inventory join)" }
+        deviceName: { type: [string, 'null'] }
+        internal: { type: boolean }
 
     NetworkRow:
       type: object

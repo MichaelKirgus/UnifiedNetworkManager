@@ -42,6 +42,7 @@ export const LEADER_KEYS = {
   inactiveUsers: 9008,
   planScheduler: 9009,
   ntpReferences: 9010,
+  flows: 9011,
 } as const;
 
 /**

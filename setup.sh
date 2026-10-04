@@ -22,7 +22,8 @@ DOCKER_PORT=4013
 OPENWRT_PORT=4014
 GENERIC_SSH_PORT=4015
 ZABBIX_PORT=4019
-ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}" "${ICMP_PORT}" "${SNMP_PORT}" "${LANCOM_LX_PORT}" "${LANCOM_LCOS_PORT}" "${SWOS_PORT}" "${FBOX_PORT}" "${TRUENAS_PORT}" "${ROUTEROS_PORT}" "${DOCKER_PORT}" "${OPENWRT_PORT}" "${GENERIC_SSH_PORT}" "${ZABBIX_PORT}")
+FLOW_COLLECTOR_PORT=4021
+ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}" "${ICMP_PORT}" "${SNMP_PORT}" "${LANCOM_LX_PORT}" "${LANCOM_LCOS_PORT}" "${SWOS_PORT}" "${FBOX_PORT}" "${TRUENAS_PORT}" "${ROUTEROS_PORT}" "${DOCKER_PORT}" "${OPENWRT_PORT}" "${GENERIC_SSH_PORT}" "${ZABBIX_PORT}" "${FLOW_COLLECTOR_PORT}")
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/unm-dev.XXXXXX")"
 DEV_PIDS=()
 
@@ -247,7 +248,7 @@ ok "Plugins + MCP server built (in parallel)."
 # 7. Start the plugin containers (--build: always reflect current source;
 #    reusing stale images silently serves old code — a past source of bugs)
 echo "🌐 Starting plugin containers..."
-docker_compose up -d --build opnsense-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-cos-plugin mikrotik-swos-plugin fbox-plugin ix-truenas-plugin mikrotik-routeros-plugin docker-plugin openwrt-plugin generic-ssh-plugin basic-auth-plugin secrets-provider-plugin mcp
+docker_compose up -d --build opnsense-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-cos-plugin mikrotik-swos-plugin fbox-plugin ix-truenas-plugin mikrotik-routeros-plugin docker-plugin openwrt-plugin generic-ssh-plugin basic-auth-plugin secrets-provider-plugin flow-collector-plugin mcp
 ok "Plugin + MCP containers started."
 
 # 8. Wait for the plugins to be reachable (basic-auth must be up before the
@@ -267,6 +268,7 @@ wait_for_port "$DOCKER_PORT" "docker-plugin"
 wait_for_port "$OPENWRT_PORT" "openwrt-plugin"
 wait_for_port "$GENERIC_SSH_PORT" "generic-ssh-plugin"
 wait_for_port "$ZABBIX_PORT" "zabbix-plugin"
+wait_for_port "$FLOW_COLLECTOR_PORT" "flow-collector-plugin"
 wait_for_port "$BASIC_AUTH_PORT" "basic-auth-plugin"
 wait_for_port "$SECRETS_PORT" "secrets-provider-plugin"
 ok "Plugins are reachable."

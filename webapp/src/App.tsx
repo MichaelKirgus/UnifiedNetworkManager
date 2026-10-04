@@ -40,6 +40,7 @@ import Vms from './pages/Vms';
 import CreateVmPage from './pages/CreateVmPage';
 import Updates from './pages/Updates';
 import Security from './pages/Security';
+import Flows from './pages/Flows';
 import Topology from './pages/Topology';
 import Users from './pages/Users';
 import Roles from './pages/Roles';
@@ -99,6 +100,8 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   { path: '/updates', permission: 'updates:read' },
   // Cross-device security findings — unsuccessful logins, file integrity, rate limiting.
   { path: '/security', permission: 'security:read' },
+  // sFlow/NetFlow traffic visibility (aggregated from flow-collector samples).
+  { path: '/flows', permission: 'flows:read' },
   { path: '/topology', permission: 'topology:read' },
   // Layers is open to every authenticated user (no read permission).
   { path: '/layers' },
@@ -203,6 +206,7 @@ export default function App() {
       {/* Cross-device security findings — unsuccessful logins, file integrity, rate limiting. */}
       <Route path="/security" element={<Page permission="security:read"><Security /></Page>} />
       {/* Physical + logical network graph (inferred cables, per-VLAN segments). */}
+      <Route path="/flows" element={<Page permission="flows:read"><Flows /></Page>} />
       <Route path="/topology" element={<Page permission="topology:read"><Topology /></Page>} />
       {/* Network layer registry — open to every authenticated user. */}
       <Route path="/layers" element={<Page><Layers /></Page>} />

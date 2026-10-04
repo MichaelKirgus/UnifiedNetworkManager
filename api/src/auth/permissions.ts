@@ -78,6 +78,11 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // permission instead of riding on devices:read.
   'security:read': 'View the Security page (unsuccessful logins, file-integrity and rate-limit findings across devices)',
   'topology:read': 'View the Topology page (physical + logical network graph)',
+  // Cross-device traffic visibility — sFlow/NetFlow flow data collected by the
+  // flow-collector plugin: top talkers, device→internet egress and internal
+  // device-to-device pairs. Read-only; collector configuration is global
+  // (env-driven) in v1.
+  'flows:read': 'View the Flows page (traffic flows between devices and to the internet)',
   'sites:read': 'View sites',
   'config-jobs:read': 'View configuration jobs',
   'plans:read': 'View execution plans and their steps',

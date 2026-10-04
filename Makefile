@@ -26,6 +26,7 @@ setup:
 	  (cd plugins/generic-ssh && npm install) & \
 	  (cd plugins/generic-http && npm install) & \
 	  (cd plugins/generic-ntp && npm install) & \
+	  (cd plugins/flow-collector && npm install) & \
 	  (cd plugins/mailcow && npm install) & \
 	  (cd plugins/zabbix && npm install) & \
 	  (cd mcp && npm install) & \
@@ -48,7 +49,7 @@ build:
 	@echo "Building @unm/lancom-shared..."
 	cd packages/lancom-shared && npm run build
 	@echo "Refreshing file:-linked copies in dependent plugins + api..."
-	for p in icmp generic-snmp lancom-lx lancom-sx lancom-lcos opnsense mikrotik-swos fbox ix-truenas mikrotik-routeros docker openwrt generic-ssh generic-http generic-ntp mailcow zabbix basic-auth secrets-provider file-repo; do \
+	for p in icmp generic-snmp lancom-lx lancom-sx lancom-lcos opnsense mikrotik-swos fbox ix-truenas mikrotik-routeros docker openwrt generic-ssh generic-http generic-ntp flow-collector mailcow zabbix basic-auth secrets-provider file-repo; do \
 	  rm -rf plugins/$$p/node_modules/@unm/plugin-sdk; \
 	  cp -r packages/plugin-sdk plugins/$$p/node_modules/@unm/plugin-sdk; \
 	done
@@ -82,6 +83,7 @@ build:
 	  (cd plugins/generic-ssh && npm run build) & \
 	  (cd plugins/generic-http && npm run build) & \
 	  (cd plugins/generic-ntp && npm run build) & \
+	  (cd plugins/flow-collector && npm run build) & \
 	  (cd plugins/mailcow && npm run build) & \
 	  (cd plugins/zabbix && npm run build) & \
 	  (cd mcp && npm run build) & \

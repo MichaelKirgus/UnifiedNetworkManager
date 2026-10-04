@@ -4,6 +4,7 @@ import {
   BellRing,
   Box,
   Cable,
+  Radio,
   KeyRound,
   Laptop,
   ListChecks,
@@ -108,6 +109,9 @@ export const NAV_ITEMS: NavItem[] = [
   // active rate limiting / brute-force protection (per-appliance checks owned by
   // each plugin). Badge = count of open warning/critical findings.
   { to: '/security', label: 'Security', icon: ShieldCheck, requiresPermission: 'security:read', countKey: 'securityChecks' },
+  // sFlow/NetFlow traffic visibility — who talks to the internet and between
+  // devices (aggregated from flow-collector plugin samples).
+  { to: '/flows', label: 'Flows', icon: Radio, requiresPermission: 'flows:read' },
   // Physical + logical network graph (inferred cables + per-VLAN segments).
   { to: '/topology', label: 'Topology', icon: GitGraph, requiresPermission: 'topology:read' },
   // Layer registry — the topology view's horizontal bands (open to all users).

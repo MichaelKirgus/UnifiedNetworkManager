@@ -1144,6 +1144,70 @@ export async function initDb(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_plugin_metrics_timestamp
       ON plugin_metrics (timestamp)`);
 
+  // ── Flow data (sFlow/NetFlow collector feature) ────────────────────────────
+  // Deliberate exception to the repo's TEXT-timestamp convention: this is true
+  // high-volume time-series data, so it uses real timestamptz columns, weekly
+  // RANGE partitions and BRIN indexes. Retention = instant DROP PARTITION
+  // (no multi-GB cutoff DELETE / VACUUM pressure). Managed entirely by raw DDL
+  // here — NOT in db/schema.ts — because drizzle-kit push cannot express
+  // partitioning and would otherwise create plain tables on fresh setups.
+  // workers/flows.ts owns partition creation/dropping (ensureFlowPartitions).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS flow_micro (
+      ts TIMESTAMPTZ NOT NULL,
+      "collectorId" TEXT NOT NULL,
+      "srcIp" INET NOT NULL,
+      "dstIp" INET NOT NULL,
+      proto SMALLINT NOT NULL DEFAULT 0,
+      bytes BIGINT NOT NULL DEFAULT 0,
+      packets BIGINT NOT NULL DEFAULT 0,
+      "sampleCount" INTEGER NOT NULL DEFAULT 1,
+      "sampleRate" INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (ts, "srcIp", "dstIp", proto, "collectorId")
+    ) PARTITION BY RANGE (ts)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS brin_flow_micro_ts ON flow_micro USING BRIN (ts)`);
+
+  // Enriched 5-minute aggregates: one row per (bucket, srcIp, dstIp, proto)
+  // merged across all collectors. estBytes = reported bytes × sampling rate.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS flow_agg_5m (
+      bucket TIMESTAMPTZ NOT NULL,
+      "srcIp" INET NOT NULL,
+      "dstIp" INET NOT NULL,
+      proto SMALLINT NOT NULL DEFAULT 0,
+      bytes BIGINT NOT NULL DEFAULT 0,
+      packets BIGINT NOT NULL DEFAULT 0,
+      "estBytes" BIGINT NOT NULL DEFAULT 0,
+      "srcDeviceId" TEXT,
+      "dstDeviceId" TEXT,
+      "srcClass" TEXT NOT NULL DEFAULT 'unknown',
+      "dstClass" TEXT NOT NULL DEFAULT 'unknown',
+      PRIMARY KEY (bucket, "srcIp", "dstIp", proto)
+    ) PARTITION BY RANGE (bucket)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS brin_flow_agg_5m_bucket ON flow_agg_5m USING BRIN (bucket)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_src_device ON flow_agg_5m ("srcDeviceId")`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_dst_device ON flow_agg_5m ("dstDeviceId")`);
+
+  // Hourly aggregates rolled from the 5-minute tier; longest retention.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS flow_agg_1h (
+      bucket TIMESTAMPTZ NOT NULL,
+      "srcIp" INET NOT NULL,
+      "dstIp" INET NOT NULL,
+      proto SMALLINT NOT NULL DEFAULT 0,
+      bytes BIGINT NOT NULL DEFAULT 0,
+      packets BIGINT NOT NULL DEFAULT 0,
+      "estBytes" BIGINT NOT NULL DEFAULT 0,
+      "srcDeviceId" TEXT,
+      "dstDeviceId" TEXT,
+      "srcClass" TEXT NOT NULL DEFAULT 'unknown',
+      "dstClass" TEXT NOT NULL DEFAULT 'unknown',
+      PRIMARY KEY (bucket, "srcIp", "dstIp", proto)
+    ) PARTITION BY RANGE (bucket)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS brin_flow_agg_1h_bucket ON flow_agg_1h USING BRIN (bucket)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_src_device ON flow_agg_1h ("srcDeviceId")`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_dst_device ON flow_agg_1h ("dstDeviceId")`);
+
   // WebAuthn passkeys per user + credential policies (see schema.ts). The
   // global policy row (userId IS NULL) is seeded once; it defaults to the
   // pre-passkey behavior: TOTP required at login, only `totp` satisfies the

@@ -167,6 +167,45 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     help:
       'How many days terminal (resolved/closed) notifications are kept before the sweep prunes them. Active notifications are never pruned.',
   },
+  {
+    key: 'flowMicroRetentionDays',
+    label: 'Flow micro retention',
+    type: 'integer',
+    category: 'Retention',
+    unit: 'days',
+    min: 1,
+    max: 90,
+    default: 7,
+    envVar: 'FLOW_MICRO_RETENTION_DAYS',
+    help:
+      'How many days of raw (per-5s pre-aggregated) flow tuples are kept. Older weekly partitions are dropped instantly by the flows worker.',
+  },
+  {
+    key: 'flowAgg5mRetentionDays',
+    label: 'Flow 5-min aggregate retention',
+    type: 'integer',
+    category: 'Retention',
+    unit: 'days',
+    min: 1,
+    max: 365,
+    default: 30,
+    envVar: 'FLOW_AGG_5M_RETENTION_DAYS',
+    help:
+      'How many days of enriched 5-minute flow aggregates are kept. These power the Flows page for recent history.',
+  },
+  {
+    key: 'flowAgg1hRetentionDays',
+    label: 'Flow hourly aggregate retention',
+    type: 'integer',
+    category: 'Retention',
+    unit: 'days',
+    min: 1,
+    max: 730,
+    default: 180,
+    envVar: 'FLOW_AGG_1H_RETENTION_DAYS',
+    help:
+      'How many days of hourly flow aggregates are kept — the long-term trend tier.',
+  },
 
   // Certificate monitoring (Certificates page).
   {

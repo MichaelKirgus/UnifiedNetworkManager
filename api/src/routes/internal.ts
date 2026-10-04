@@ -530,6 +530,62 @@ export function internalRouter() {
     }
   });
 
+  // POST /plugin/flows - accept a batch of pre-aggregated flow tuples from the
+  // flow-collector plugin (sFlow/NetFlow feature). The collector receives UDP
+  // samples, aggregates them per ~5s window into (srcIp,dstIp,proto) tuples and
+  // pushes batches here. This handler does NO database work — it validates and
+  // enqueues into the flows worker's bounded in-memory queue (see
+  // workers/flows.ts), which batch-inserts into flow_micro off-band. That is
+  // what keeps high-volume flow traffic from ever stalling the main API.
+  const MAX_FLOW_SAMPLES_PER_REQUEST = 20_000;
+  router.post('/plugin/flows', pluginAuth, async (req: Request, res: Response) => {
+    const { enqueueFlowRows } = await import('../workers/flows');
+    const body = req.body ?? {};
+    const pluginId = typeof body.pluginId === 'string' ? body.pluginId : '';
+    if (!pluginId) {
+      return res.status(400).json({ error: 'pluginId is required' });
+    }
+    const samples = Array.isArray(body.samples) ? body.samples : null;
+    if (!samples || samples.length === 0) {
+      return res.status(400).json({ error: '"samples" array with at least one entry is required' });
+    }
+
+    try {
+      const plugin = await db.query.plugins.findFirst({ where: eq(schema.plugins.id, pluginId) });
+      if (!plugin) {
+        return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
+      }
+
+      // Compact wire shape per sample: { s: srcIp, d: dstIp, p: proto,
+      // b: bytes, k: packets, n: sampleCount, r: sampleRate } — small keys keep
+      // the payloads compact at high tuple counts.
+      const rows = [];
+      for (const e of samples.slice(0, MAX_FLOW_SAMPLES_PER_REQUEST)) {
+        if (!e || typeof e !== 'object') continue;
+        const srcIp = String(e.s ?? '').trim();
+        const dstIp = String(e.d ?? '').trim();
+        if (!srcIp || !dstIp) continue; // unparseable endpoint — drop the tuple
+        rows.push({
+          ts: typeof e.ts === 'string' && e.ts ? e.ts : new Date().toISOString(),
+          collectorId: pluginId,
+          srcIp,
+          dstIp,
+          proto: Number.isFinite(Number(e.p)) ? Math.max(0, Math.min(255, Number(e.p))) : 0,
+          bytes: Number.isFinite(Number(e.b)) ? Math.max(0, Number(e.b)) : 0,
+          packets: Number.isFinite(Number(e.k)) ? Math.max(0, Number(e.k)) : 0,
+          sampleCount: Number.isFinite(Number(e.n)) ? Math.max(1, Number(e.n)) : 1,
+          sampleRate: Number.isFinite(Number(e.r)) ? Math.max(1, Number(e.r)) : 1,
+        });
+      }
+
+      enqueueFlowRows(rows);
+      res.status(202).json({ accepted: rows.length });
+    } catch (error) {
+      console.error('Error ingesting flow samples:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   // POST /plugin/notifications - accept notification pushes from one plugin.
   // Body: { pluginId, notifications?: [ {severity?, title, message?, dedupeKey?, deviceId?, context?} ],
   //         resolve?: string[] } — `resolve` lists (plugin-prefixed) dedupe keys

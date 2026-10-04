@@ -34,7 +34,9 @@ const SERVICE_HOST_PORTS: Record<string, number> = {
   'generic-ssh-plugin': 4015, // pre-existing gap — added with the ntp entry
   'generic-http-plugin': 4016, // pre-existing gap — added with the ntp entry
   'generic-ntp-plugin': 4017,
+  'mailcow-plugin': 4018, // pre-existing gap — added with the flow-collector entry
   'zabbix-plugin': 4019,
+  'flow-collector-plugin': 4021,
 };
 
 /** True when the API is running on the host (not inside a Docker container). */

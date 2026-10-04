@@ -1141,6 +1141,105 @@ export interface TopologyResponse {
   edges: TopologyEdge[];
 }
 
+// --- Flows (sFlow/NetFlow traffic visibility) ---------------------------------
+
+/** One top source or destination IP by estimated bytes (GET /flows/top-talkers). */
+export interface FlowTalker {
+  ip: string;
+  /** Estimated bytes = reported bytes × sample rate. */
+  estBytes: number;
+  /** Raw reported bytes from the collector samples. */
+  reportedBytes: number;
+  deviceId: string | null;
+  deviceName: string | null;
+  internal: boolean;
+}
+
+export interface FlowTopTalkersResponse {
+  fromMs: number;
+  toMs: number;
+  /** Which aggregate table served the window (flow_agg_5m or flow_agg_1h). */
+  table: 'flow_agg_5m' | 'flow_agg_1h';
+  sources: FlowTalker[];
+  destinations: FlowTalker[];
+}
+
+/** Per-device internet egress row (GET /flows/internet). */
+export interface FlowInternetDevice {
+  deviceId: string;
+  deviceName: string | null;
+  estBytes: number;
+  distinctDestinations: number;
+}
+
+export interface FlowInternetResponse {
+  fromMs: number;
+  toMs: number;
+  table: 'flow_agg_5m' | 'flow_agg_1h';
+  total: { estBytes: number; distinctDestinations: number };
+  perDevice: FlowInternetDevice[];
+}
+
+/** One internal device-to-device pair by estimated bytes (GET /flows/pairs). */
+export interface FlowPair {
+  srcDeviceId: string;
+  dstDeviceId: string;
+  srcName: string | null;
+  dstName: string | null;
+  estBytes: number;
+  distinctPairs: number;
+}
+
+export interface FlowPairsResponse {
+  fromMs: number;
+  toMs: number;
+  table: 'flow_agg_5m' | 'flow_agg_1h';
+  pairs: FlowPair[];
+}
+
+/** One gap-filled point of the flow timeseries (GET /flows/timeseries). */
+export interface FlowTimeseriesPoint {
+  /** Bucket start, ISO-8601. */
+  bucket: string;
+  estBytes: number;
+}
+
+export interface FlowTimeseriesResponse {
+  fromMs: number;
+  toMs: number;
+  table: 'flow_agg_5m' | 'flow_agg_1h';
+  bucket: '5m' | '1h';
+  points: FlowTimeseriesPoint[];
+}
+
+/** Ingest queue counters of the flows worker on this API replica. */
+export interface FlowIngestStats {
+  queueDepth: number;
+  enqueuedTotal: number;
+  droppedTotal: number;
+  insertedTotal: number;
+  lastInsertAt: string | null;
+  lastError: string | null;
+}
+
+/** Live stats of one flow-collector plugin instance (GET /flow-collectors). */
+export interface FlowCollectorStats {
+  id: string;
+  name: string;
+  reachable: boolean;
+  samplesPerSec: number;
+  tuplesPerSec: number;
+  droppedTuplesTotal: number;
+  queueDepth: number;
+  pushesTotal: number;
+  pushFailuresTotal: number;
+}
+
+export interface FlowCollectorsResponse {
+  ingest: FlowIngestStats;
+  collectors: FlowCollectorStats[];
+}
+
 /** One network layer — a horizontal band of the topology view (GET /layers).
  * Built-ins (core/distribution/access/endpoint) are seeded at boot; custom
  * layers are user-created and deletable when unreferenced. */
@@ -3148,6 +3247,42 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<TopologyResponse>(`/topology${suffix}`);
   },
+  // Flows page — sFlow/NetFlow traffic visibility (aggregate tables only).
+  flowsTopTalkers: (params?: { from?: string; to?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<FlowTopTalkersResponse>(`/flows/top-talkers${suffix}`);
+  },
+  flowsInternet: (params?: { from?: string; to?: string; deviceId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<FlowInternetResponse>(`/flows/internet${suffix}`);
+  },
+  flowsPairs: (params?: { from?: string; to?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<FlowPairsResponse>(`/flows/pairs${suffix}`);
+  },
+  flowsTimeseries: (params?: { from?: string; to?: string; bucket?: '5m' | '1h'; deviceId?: string; class?: 'internet' | 'internal' }) => {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.bucket) qs.set('bucket', params.bucket);
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.class) qs.set('class', params.class);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<FlowTimeseriesResponse>(`/flows/timeseries${suffix}`);
+  },
+  flowCollectors: () => apiFetch<FlowCollectorsResponse>('/flow-collectors'),
   // Plugin log entries (global Logs page + per-device section in DeviceDetail).
   logs: (params?: {
     deviceId?: string;
