@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { pool } from '../db';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { pluginAxios } from '../utils/pluginHttp';
+import { reverseLookup } from '../utils/reverseDns';
 import { getFlowIngestStats } from '../workers/flows';
 
 /**
@@ -51,6 +52,42 @@ async function loadDeviceNames(deviceIds: string[]): Promise<Map<string, string>
 }
 
 /**
+ * Resolves a `?siteId=` query param into a SQL fragment for flow queries.
+ * Same pattern as /networks, /tunnels & co.: the site's (enabled) device ids
+ * are bound as one text[] parameter and matched against the stored
+ * srcDeviceId/dstDeviceId enrichment columns.
+ *
+ *   - no `siteId` param → { kind: 'none' } (no filtering)
+ *   - unknown site id   → { kind: 'unknown' } (caller answers 400)
+ *   - otherwise         → { kind: 'ok', clause, empty }: the ids are appended
+ *     to `params` and `clause` is the AND-fragment. `empty` is true when the
+ *     site has no devices — callers should short-circuit with empty results
+ *     instead of running a query that matches nothing.
+ *
+ * `both` = match rows where EITHER endpoint belongs to the site (top talkers,
+ * pairs); otherwise only the SOURCE device must belong to it (internet egress
+ * and timeseries are about traffic FROM this site).
+ */
+async function resolveSiteFilter(
+  params: unknown[],
+  q: Record<string, unknown>,
+  both: boolean,
+): Promise<{ kind: 'none' } | { kind: 'unknown' } | { kind: 'ok'; clause: string; empty: boolean }> {
+  const siteId = typeof q.siteId === 'string' ? q.siteId : '';
+  if (!siteId) return { kind: 'none' };
+  const site = await pool.query(`SELECT id FROM sites WHERE id = $1`, [siteId]);
+  if (!site.rows.length) return { kind: 'unknown' };
+  const res = await pool.query(`SELECT id FROM devices WHERE "siteId" = $1 AND enabled = TRUE`, [siteId]);
+  const deviceIds = res.rows.map((r) => String(r.id));
+  params.push(deviceIds);
+  const n = params.length;
+  const clause = both
+    ? ` AND ("srcDeviceId" = ANY($${n}::text[]) OR "dstDeviceId" = ANY($${n}::text[]))`
+    : ` AND "srcDeviceId" = ANY($${n}::text[])`;
+  return { kind: 'ok', clause, empty: deviceIds.length === 0 };
+}
+
+/**
  * GET /v1/flows/top-talkers?from&to&limit — top source AND destination IPs by
  * estimated bytes over the window. Auto-picks flow_agg_5m (range ≤ its data)
  * or falls back to flow_agg_1h for older ranges.
@@ -65,22 +102,40 @@ router.get('/flows/top-talkers', requireAuth, requirePermission('flows:read'), a
     const use5m = toMs - fromMs <= 31 * 86_400_000;
     const table = use5m ? 'flow_agg_5m' : 'flow_agg_1h';
 
-    const [srcRes, dstRes] = await Promise.all([
-      pool.query(
-        `SELECT "srcIp" AS ip, SUM("estBytes")::bigint AS est_bytes, SUM(bytes)::bigint AS reported_bytes,
-                MAX("srcDeviceId") AS device_id, BOOL_OR("srcClass" = 'internal') AS is_internal
-         FROM ${table} WHERE bucket >= $1 AND bucket < $2
-         GROUP BY "srcIp" ORDER BY est_bytes DESC LIMIT $3`,
-        [new Date(fromMs).toISOString(), new Date(toMs).toISOString(), limit]
-      ),
-      pool.query(
-        `SELECT "dstIp" AS ip, SUM("estBytes")::bigint AS est_bytes, SUM(bytes)::bigint AS reported_bytes,
-                MAX("dstDeviceId") AS device_id, BOOL_OR("dstClass" = 'internal') AS is_internal
-         FROM ${table} WHERE bucket >= $1 AND bucket < $2
-         GROUP BY "dstIp" ORDER BY est_bytes DESC LIMIT $3`,
-        [new Date(fromMs).toISOString(), new Date(toMs).toISOString(), limit]
-      ),
-    ]);
+    // Site filter: either endpoint may belong to the site (a talker is
+    // interesting when it talks TO or FROM this site).
+    const params: unknown[] = [new Date(fromMs).toISOString(), new Date(toMs).toISOString()];
+    const site = await resolveSiteFilter(params, q, true);
+    if (site.kind === 'unknown') return res.status(400).json({ error: `Unknown site id: ${String(q.siteId)}` });
+
+    let srcRes: { rows: any[] };
+    let dstRes: { rows: any[] };
+    if (site.kind === 'ok' && site.empty) {
+      srcRes = { rows: [] };
+      dstRes = { rows: [] };
+    } else {
+      const siteClause = site.kind === 'ok' ? site.clause : '';
+      [srcRes, dstRes] = await Promise.all([
+        pool.query(
+          `SELECT "srcIp" AS ip, SUM("estBytes")::bigint AS est_bytes, SUM(bytes)::bigint AS reported_bytes,
+                  MAX("srcDeviceId") AS device_id, BOOL_OR("srcClass" = 'internal') AS is_internal,
+                  MAX("srcNetworkName") AS network_name, MAX("srcVlanId") AS vlan_id,
+                  MAX("srcHostname") AS hostname
+           FROM ${table} WHERE bucket >= $1 AND bucket < $2${siteClause}
+           GROUP BY "srcIp" ORDER BY est_bytes DESC LIMIT $${params.length + 1}`,
+          [...params, limit]
+        ),
+        pool.query(
+          `SELECT "dstIp" AS ip, SUM("estBytes")::bigint AS est_bytes, SUM(bytes)::bigint AS reported_bytes,
+                  MAX("dstDeviceId") AS device_id, BOOL_OR("dstClass" = 'internal') AS is_internal,
+                  MAX("dstNetworkName") AS network_name, MAX("dstVlanId") AS vlan_id,
+                  MAX("dstHostname") AS hostname
+           FROM ${table} WHERE bucket >= $1 AND bucket < $2${siteClause}
+           GROUP BY "dstIp" ORDER BY est_bytes DESC LIMIT $${params.length + 1}`,
+          [...params, limit]
+        ),
+      ]);
+    }
 
     const deviceIds = [...new Set([
       ...srcRes.rows.map((r) => r.device_id),
@@ -88,16 +143,49 @@ router.get('/flows/top-talkers', requireAuth, requirePermission('flows:read'), a
     ].filter(Boolean))];
     const names = await loadDeviceNames(deviceIds);
 
-    const shape = (rows: any[]) => rows.map((r) => ({
+    const shape = (rows: any[]) => rows.map((r): {
+      ip: string; estBytes: number; reportedBytes: number; deviceId: string | null; deviceName: string | null;
+      internal: boolean; hostname: string | null; hostnameSource: 'inventory' | 'reverse-dns' | null;
+      networkName: string | null; vlanId: number | null;
+    } => ({
       ip: String(r.ip),
       estBytes: Number(r.est_bytes),
       reportedBytes: Number(r.reported_bytes),
       deviceId: r.device_id ? String(r.device_id) : null,
       deviceName: r.device_id ? names.get(String(r.device_id)) ?? null : null,
       internal: Boolean(r.is_internal),
+      // Inventory hostname (hosts table — container/VM name, DHCP lease). For
+      // external talkers this is usually null and filled below via reverse DNS.
+      hostname: r.hostname !== null && r.hostname !== undefined ? String(r.hostname) : null,
+      hostnameSource: r.hostname !== null && r.hostname !== undefined ? 'inventory' : null,
+      networkName: r.network_name !== null && r.network_name !== undefined ? String(r.network_name) : null,
+      vlanId: r.vlan_id === null || r.vlan_id === undefined ? null : Number(r.vlan_id),
     }));
 
-    res.status(200).json({ fromMs, toMs, table, sources: shape(srcRes.rows), destinations: shape(dstRes.rows) });
+    const sources = shape(srcRes.rows);
+    const destinations = shape(dstRes.rows);
+
+    // Best-effort reverse DNS for EXTERNAL talkers WITHOUT an inventory name —
+    // internal IPs are already identified by their hosts-inventory hostname.
+    // Lookups run in parallel, each capped at 2 s; a dead resolver degrades to
+    // hostname: null and never fails the request.
+    const allRows = [...sources, ...destinations];
+    const externalIps = new Set(allRows.filter((r) => !r.internal && !r.deviceId && !r.hostname).map((r) => r.ip));
+    if (externalIps.size > 0) {
+      const hostnames = await Promise.all(
+        [...externalIps].map(async (ip) => [ip, await reverseLookup(ip)] as const),
+      );
+      const byIp = new Map(hostnames);
+      for (const row of allRows) {
+        if (!row.hostname && !row.internal && !row.deviceId) {
+          const h = byIp.get(row.ip) ?? null;
+          row.hostname = h;
+          if (h) row.hostnameSource = 'reverse-dns';
+        }
+      }
+    }
+
+    res.status(200).json({ fromMs, toMs, table, sources, destinations });
   } catch (error) {
     console.error('Error querying top talkers:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -123,21 +211,32 @@ router.get('/flows/internet', requireAuth, requirePermission('flows:read'), asyn
       params.push(deviceId);
       deviceClause = `AND "srcDeviceId" = $${params.length}`;
     }
+    // Site filter: egress FROM this site → the source device must belong to it.
+    const site = await resolveSiteFilter(params, q, false);
+    if (site.kind === 'unknown') return res.status(400).json({ error: `Unknown site id: ${String(q.siteId)}` });
 
-    const perDevice = await pool.query(
-      `SELECT "srcDeviceId", SUM("estBytes")::bigint AS est_bytes, COUNT(DISTINCT "dstIp")::int AS distinct_destinations
-       FROM ${table}
-       WHERE bucket >= $1 AND bucket < $2 AND "dstClass" = 'internet' AND "srcDeviceId" IS NOT NULL ${deviceClause}
-       GROUP BY "srcDeviceId" ORDER BY est_bytes DESC LIMIT 50`,
-      params
-    );
+    let perDevice;
+    let totalRes;
+    if (site.kind === 'ok' && site.empty) {
+      perDevice = { rows: [] };
+      totalRes = { rows: [{ est_bytes: 0, distinct_destinations: 0 }] };
+    } else {
+      const siteClause = site.kind === 'ok' ? site.clause : '';
+      perDevice = await pool.query(
+        `SELECT "srcDeviceId", SUM("estBytes")::bigint AS est_bytes, COUNT(DISTINCT "dstIp")::int AS distinct_destinations
+         FROM ${table}
+         WHERE bucket >= $1 AND bucket < $2 AND "dstClass" = 'internet' AND "srcDeviceId" IS NOT NULL ${deviceClause}${siteClause}
+         GROUP BY "srcDeviceId" ORDER BY est_bytes DESC LIMIT 50`,
+        params
+      );
 
-    const totalRes = await pool.query(
-      `SELECT COALESCE(SUM("estBytes"), 0)::bigint AS est_bytes, COUNT(DISTINCT "dstIp")::int AS distinct_destinations
-       FROM ${table}
-       WHERE bucket >= $1 AND bucket < $2 AND "dstClass" = 'internet' ${deviceClause}`,
-      params
-    );
+      totalRes = await pool.query(
+        `SELECT COALESCE(SUM("estBytes"), 0)::bigint AS est_bytes, COUNT(DISTINCT "dstIp")::int AS distinct_destinations
+         FROM ${table}
+         WHERE bucket >= $1 AND bucket < $2 AND "dstClass" = 'internet' ${deviceClause}${siteClause}`,
+        params
+      );
+    }
 
     const deviceIds = perDevice.rows.map((r) => String(r.src_device_id ?? r.srcDeviceId));
     const names = await loadDeviceNames(deviceIds);
@@ -171,19 +270,58 @@ router.get('/flows/pairs', requireAuth, requirePermission('flows:read'), async (
     const use5m = toMs - fromMs <= 31 * 86_400_000;
     const table = use5m ? 'flow_agg_5m' : 'flow_agg_1h';
 
-    const res2 = await pool.query(
-      `SELECT "srcDeviceId", "dstDeviceId", SUM("estBytes")::bigint AS est_bytes, COUNT(DISTINCT ("srcIp" || '|' || "dstIp"))::int AS distinct_pairs
-       FROM ${table}
-       WHERE bucket >= $1 AND bucket < $2
-         AND "srcClass" = 'internal' AND "dstClass" = 'internal'
-         AND "srcDeviceId" IS NOT NULL AND "dstDeviceId" IS NOT NULL
-         AND "srcDeviceId" <> "dstDeviceId"
-       GROUP BY "srcDeviceId", "dstDeviceId" ORDER BY est_bytes DESC LIMIT $3`,
-      [new Date(fromMs).toISOString(), new Date(toMs).toISOString(), limit]
-    );
+    // Site filter: a pair is interesting when EITHER endpoint belongs to the site.
+    const params: unknown[] = [new Date(fromMs).toISOString(), new Date(toMs).toISOString()];
+    const site = await resolveSiteFilter(params, q, true);
+    if (site.kind === 'unknown') return res.status(400).json({ error: `Unknown site id: ${String(q.siteId)}` });
+
+    let res2;
+    let topRes = { rows: [] as any[] };
+    if (site.kind === 'ok' && site.empty) {
+      res2 = { rows: [] };
+    } else {
+      const siteClause = site.kind === 'ok' ? site.clause : '';
+      [res2, topRes] = await Promise.all([
+        pool.query(
+          `SELECT "srcDeviceId", "dstDeviceId", SUM("estBytes")::bigint AS est_bytes, COUNT(DISTINCT ("srcIp" || '|' || "dstIp"))::int AS distinct_pairs
+           FROM ${table}
+           WHERE bucket >= $1 AND bucket < $2
+             AND "srcClass" = 'internal' AND "dstClass" = 'internal'
+             AND "srcDeviceId" IS NOT NULL AND "dstDeviceId" IS NOT NULL
+             AND "srcDeviceId" <> "dstDeviceId"${siteClause}
+           GROUP BY "srcDeviceId", "dstDeviceId" ORDER BY est_bytes DESC LIMIT $${params.length + 1}`,
+          [...params, limit]
+        ),
+        // The single busiest IP on each side of every pair — the actual host
+        // (container/VM) behind the device-level rollup. Same filters as above;
+        // ranked per (srcDeviceId, dstDeviceId) by estBytes.
+        pool.query(
+          `WITH ranked AS (
+             SELECT "srcDeviceId", "dstDeviceId", "srcIp", "dstIp",
+                    SUM("estBytes")::bigint AS pair_bytes,
+                    MAX("srcHostname") AS src_hostname, MAX("dstHostname") AS dst_hostname,
+                    ROW_NUMBER() OVER (PARTITION BY "srcDeviceId", "dstDeviceId" ORDER BY SUM("estBytes") DESC) AS rn
+             FROM ${table}
+             WHERE bucket >= $1 AND bucket < $2
+               AND "srcClass" = 'internal' AND "dstClass" = 'internal'
+               AND "srcDeviceId" IS NOT NULL AND "dstDeviceId" IS NOT NULL
+               AND "srcDeviceId" <> "dstDeviceId"${siteClause}
+             GROUP BY "srcDeviceId", "dstDeviceId", "srcIp", "dstIp"
+           )
+           SELECT * FROM ranked WHERE rn = 1`,
+          params
+        ),
+      ]);
+    }
 
     const deviceIds = [...new Set(res2.rows.flatMap((r) => [String(r.src_device_id ?? r.srcDeviceId), String(r.dst_device_id ?? r.dstDeviceId)]))];
     const names = await loadDeviceNames(deviceIds);
+
+    // Top-IP lookup keyed by (srcDeviceId|dstDeviceId).
+    const topByPair = new Map<string, any>();
+    for (const t of topRes.rows) {
+      topByPair.set(`${String(t.src_device_id ?? t.srcDeviceId)}|${String(t.dst_device_id ?? t.dstDeviceId)}`, t);
+    }
 
     res.status(200).json({
       fromMs,
@@ -192,7 +330,16 @@ router.get('/flows/pairs', requireAuth, requirePermission('flows:read'), async (
       pairs: res2.rows.map((r) => {
         const s = String(r.src_device_id ?? r.srcDeviceId);
         const d = String(r.dst_device_id ?? r.dstDeviceId);
-        return { srcDeviceId: s, dstDeviceId: d, srcName: names.get(s) ?? null, dstName: names.get(d) ?? null, estBytes: Number(r.est_bytes), distinctPairs: Number(r.distinct_pairs) };
+        const t = topByPair.get(`${s}|${d}`);
+        return {
+          srcDeviceId: s, dstDeviceId: d, srcName: names.get(s) ?? null, dstName: names.get(d) ?? null,
+          estBytes: Number(r.est_bytes), distinctPairs: Number(r.distinct_pairs),
+          // The busiest host on each side — "which container/VM actually talks".
+          srcTopIp: t ? String(t.src_ip ?? t.srcIp) : null,
+          srcTopHost: t && (t.src_hostname ?? t.srcHostname) != null ? String(t.src_hostname ?? t.srcHostname) : null,
+          dstTopIp: t ? String(t.dst_ip ?? t.dstIp) : null,
+          dstTopHost: t && (t.dst_hostname ?? t.dstHostname) != null ? String(t.dst_hostname ?? t.dstHostname) : null,
+        };
       }),
     });
   } catch (error) {
@@ -219,32 +366,190 @@ router.get('/flows/timeseries', requireAuth, requirePermission('flows:read'), as
     let whereExtra = '';
     if (deviceId) { params.push(deviceId); whereExtra += ` AND "srcDeviceId" = $${params.length}`; }
     if (cls) { params.push(cls); whereExtra += ` AND "dstClass" = $${params.length}`; }
+    // Site filter: traffic FROM this site → the source device must belong to it.
+    const site = await resolveSiteFilter(params, q, false);
+    if (site.kind === 'unknown') return res.status(400).json({ error: `Unknown site id: ${String(q.siteId)}` });
 
-    const res2 = await pool.query(
-      `SELECT bucket, SUM("estBytes")::bigint AS est_bytes FROM ${table}
-       WHERE bucket >= $1 AND bucket < $2${whereExtra} GROUP BY bucket ORDER BY bucket`,
-      params
-    );
-
-    // Fill gaps with zeros so the chart's x-axis is continuous.
+    let points: { bucket: string; estBytes: number }[];
     const stepMs = bucket === '1h' ? 3600_000 : 300_000;
-    const byBucket = new Map<number, number>();
-    for (const r of res2.rows) {
-      // timestamptz normally arrives as a JS Date — but drizzle's pool setup can
-      // leave pg-types returning the raw text in this process, so accept both.
-      const b: unknown = r.bucket;
-      const d: Date = b instanceof Date ? b : new Date(String(b));
-      if (Number.isNaN(d.getTime())) continue;
-      byBucket.set(Math.floor(d.getTime() / stepMs) * stepMs, Number(r.est_bytes));
-    }
-    const points: { bucket: string; estBytes: number }[] = [];
-    for (let t = Math.ceil(fromMs / stepMs) * stepMs; t < toMs; t += stepMs) {
-      points.push({ bucket: new Date(t).toISOString(), estBytes: byBucket.get(t) ?? 0 });
+    if (site.kind === 'ok' && site.empty) {
+      // Site has no devices — return a zero-filled series so the chart stays continuous.
+      points = [];
+      for (let t = Math.ceil(fromMs / stepMs) * stepMs; t < toMs; t += stepMs) {
+        points.push({ bucket: new Date(t).toISOString(), estBytes: 0 });
+      }
+    } else {
+      const siteClause = site.kind === 'ok' ? site.clause : '';
+      const res2 = await pool.query(
+        `SELECT bucket, SUM("estBytes")::bigint AS est_bytes FROM ${table}
+         WHERE bucket >= $1 AND bucket < $2${whereExtra}${siteClause} GROUP BY bucket ORDER BY bucket`,
+        params
+      );
+
+      // Fill gaps with zeros so the chart's x-axis is continuous.
+      const byBucket = new Map<number, number>();
+      for (const r of res2.rows) {
+        // timestamptz normally arrives as a JS Date — but drizzle's pool setup can
+        // leave pg-types returning the raw text in this process, so accept both.
+        const b: unknown = r.bucket;
+        const d: Date = b instanceof Date ? b : new Date(String(b));
+        if (Number.isNaN(d.getTime())) continue;
+        byBucket.set(Math.floor(d.getTime() / stepMs) * stepMs, Number(r.est_bytes));
+      }
+      points = [];
+      for (let t = Math.ceil(fromMs / stepMs) * stepMs; t < toMs; t += stepMs) {
+        points.push({ bucket: new Date(t).toISOString(), estBytes: byBucket.get(t) ?? 0 });
+      }
     }
 
     res.status(200).json({ fromMs, toMs, table, bucket, points });
   } catch (error) {
     console.error('Error querying flow timeseries:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /v1/flows/ports?from&to&limit&ip=&siteId= — top L4 ports by estimated
+ * bytes, separately for SOURCE and DESTINATION ports. `ip` drills down to one
+ * host (its outgoing source ports + incoming destination ports). Port 0 means
+ * "no transport header" (ICMP etc.) and is included so totals add up.
+ */
+router.get('/flows/ports', requireAuth, requirePermission('flows:read'), async (req: Request, res: Response) => {
+  const q = req.query as Record<string, unknown>;
+  const { fromMs, toMs } = resolveWindow(q);
+  const limit = parseLimit(q.limit, 20, 100);
+  const ip = typeof q.ip === 'string' && q.ip ? q.ip : null;
+
+  try {
+    const use5m = toMs - fromMs <= 31 * 86_400_000;
+    const table = use5m ? 'flow_agg_5m' : 'flow_agg_1h';
+
+    // Shared params (window + site filter) — both direction queries reference
+    // them. The ip drilldown param is pushed into a PER-QUERY array: one shared
+    // array would leave an unreferenced bind parameter in each query ("could
+    // not determine data type of parameter $N").
+    const params: unknown[] = [new Date(fromMs).toISOString(), new Date(toMs).toISOString()];
+    if (ip) {
+      try {
+        // Validate early — an invalid inet literal would fail deep in the query.
+        await pool.query(`SELECT $1::inet`, [ip]);
+      } catch {
+        return res.status(400).json({ error: `Invalid ip: ${ip}` });
+      }
+    }
+
+    const site = await resolveSiteFilter(params, q, true);
+    if (site.kind === 'unknown') return res.status(400).json({ error: `Unknown site id: ${String(q.siteId)}` });
+
+    let srcRes;
+    let dstRes;
+    if (site.kind === 'ok' && site.empty) {
+      srcRes = { rows: [] };
+      dstRes = { rows: [] };
+    } else {
+      const siteClause = site.kind === 'ok' ? site.clause : '';
+      const srcParams = ip ? [...params, ip] : params;
+      const dstParams = ip ? [...params, ip] : params;
+      const ipClauseSrc = ip ? ` AND "srcIp" = $${srcParams.length}::inet` : '';
+      const ipClauseDst = ip ? ` AND "dstIp" = $${dstParams.length}::inet` : '';
+      [srcRes, dstRes] = await Promise.all([
+        pool.query(
+          `SELECT "srcPort"::int AS port, proto, SUM("estBytes")::bigint AS est_bytes, SUM(bytes)::bigint AS reported_bytes
+           FROM ${table} WHERE bucket >= $1 AND bucket < $2${ipClauseSrc}${siteClause}
+           GROUP BY 1, 2 ORDER BY est_bytes DESC LIMIT $${srcParams.length + 1}`,
+          [...srcParams, limit]
+        ),
+        pool.query(
+          `SELECT "dstPort"::int AS port, proto, SUM("estBytes")::bigint AS est_bytes, SUM(bytes)::bigint AS reported_bytes
+           FROM ${table} WHERE bucket >= $1 AND bucket < $2${ipClauseDst}${siteClause}
+           GROUP BY 1, 2 ORDER BY est_bytes DESC LIMIT $${dstParams.length + 1}`,
+          [...dstParams, limit]
+        ),
+      ]);
+    }
+
+    const shape = (rows: any[]) => rows.map((r) => ({
+      port: Number(r.port),
+      proto: Number(r.proto),
+      estBytes: Number(r.est_bytes),
+      reportedBytes: Number(r.reported_bytes),
+    }));
+
+    res.status(200).json({ fromMs, toMs, table, ip: ip ?? undefined, sourcePorts: shape(srcRes.rows), destinationPorts: shape(dstRes.rows) });
+  } catch (error) {
+    console.error('Error querying flow ports:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /v1/flows/networks?from&to&limit&siteId= — traffic per inventoried
+ * network (name + VLAN), split by direction. Endpoints without a matching
+ * inventory network are grouped under "(unknown)". Powers the drilldown from
+ * "which networks carry the most flow".
+ */
+router.get('/flows/networks', requireAuth, requirePermission('flows:read'), async (req: Request, res: Response) => {
+  const q = req.query as Record<string, unknown>;
+  const { fromMs, toMs } = resolveWindow(q);
+  const limit = parseLimit(q.limit, 20, 100);
+
+  try {
+    const use5m = toMs - fromMs <= 31 * 86_400_000;
+    const table = use5m ? 'flow_agg_5m' : 'flow_agg_1h';
+
+    const params: unknown[] = [new Date(fromMs).toISOString(), new Date(toMs).toISOString()];
+    const site = await resolveSiteFilter(params, q, true);
+    if (site.kind === 'unknown') return res.status(400).json({ error: `Unknown site id: ${String(q.siteId)}` });
+
+    let srcRes;
+    let dstRes;
+    if (site.kind === 'ok' && site.empty) {
+      srcRes = { rows: [] };
+      dstRes = { rows: [] };
+    } else {
+      const siteClause = site.kind === 'ok' ? site.clause : '';
+      [srcRes, dstRes] = await Promise.all([
+        pool.query(
+          `SELECT COALESCE("srcNetworkName", '(unknown)') AS name, MAX("srcVlanId")::int AS vlan_id,
+                  SUM("estBytes")::bigint AS est_bytes
+           FROM ${table} WHERE bucket >= $1 AND bucket < $2${siteClause}
+           GROUP BY 1 ORDER BY est_bytes DESC LIMIT $${params.length + 1}`,
+          [...params, limit]
+        ),
+        pool.query(
+          `SELECT COALESCE("dstNetworkName", '(unknown)') AS name, MAX("dstVlanId")::int AS vlan_id,
+                  SUM("estBytes")::bigint AS est_bytes
+           FROM ${table} WHERE bucket >= $1 AND bucket < $2${siteClause}
+           GROUP BY 1 ORDER BY est_bytes DESC LIMIT $${params.length + 1}`,
+          [...params, limit]
+        ),
+      ]);
+    }
+
+    // Merge both directions into one row per (name, vlan).
+    const byNet = new Map<string, { name: string; vlanId: number | null; srcEstBytes: number; dstEstBytes: number }>();
+    for (const r of [...srcRes.rows.map((x) => ({ ...x, dir: 's' as const })), ...dstRes.rows.map((x) => ({ ...x, dir: 'd' as const }))]) {
+      const name = String(r.name);
+      const vlanId = r.vlan_id === null || r.vlan_id === undefined ? null : Number(r.vlan_id);
+      const key = `${name}|${vlanId ?? ''}`;
+      let row = byNet.get(key);
+      if (!row) {
+        row = { name, vlanId, srcEstBytes: 0, dstEstBytes: 0 };
+        byNet.set(key, row);
+      }
+      const v = Number(r.est_bytes);
+      if (r.dir === 's') row.srcEstBytes += v; else row.dstEstBytes += v;
+    }
+
+    const networks = [...byNet.values()]
+      .map((r) => ({ name: r.name, vlanId: r.vlanId, srcEstBytes: r.srcEstBytes, dstEstBytes: r.dstEstBytes, estBytes: r.srcEstBytes + r.dstEstBytes }))
+      .sort((a, b) => b.estBytes - a.estBytes)
+      .slice(0, limit);
+
+    res.status(200).json({ fromMs, toMs, table, networks });
+  } catch (error) {
+    console.error('Error querying flow networks:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

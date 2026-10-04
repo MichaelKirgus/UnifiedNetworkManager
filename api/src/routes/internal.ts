@@ -557,8 +557,9 @@ export function internalRouter() {
       }
 
       // Compact wire shape per sample: { s: srcIp, d: dstIp, p: proto,
-      // b: bytes, k: packets, n: sampleCount, r: sampleRate } — small keys keep
-      // the payloads compact at high tuple counts.
+      // sp: srcPort, dp: dstPort, b: bytes, k: packets, n: sampleCount,
+      // r: sampleRate } — small keys keep the payloads compact at high tuple
+      // counts. Ports are optional (older collectors don't send them → 0).
       const rows = [];
       for (const e of samples.slice(0, MAX_FLOW_SAMPLES_PER_REQUEST)) {
         if (!e || typeof e !== 'object') continue;
@@ -571,6 +572,8 @@ export function internalRouter() {
           srcIp,
           dstIp,
           proto: Number.isFinite(Number(e.p)) ? Math.max(0, Math.min(255, Number(e.p))) : 0,
+          srcPort: Number.isFinite(Number(e.sp)) ? Math.max(0, Math.min(65_535, Number(e.sp))) : 0,
+          dstPort: Number.isFinite(Number(e.dp)) ? Math.max(0, Math.min(65_535, Number(e.dp))) : 0,
           bytes: Number.isFinite(Number(e.b)) ? Math.max(0, Number(e.b)) : 0,
           packets: Number.isFinite(Number(e.k)) ? Math.max(0, Number(e.k)) : 0,
           sampleCount: Number.isFinite(Number(e.n)) ? Math.max(1, Number(e.n)) : 1,

@@ -125,6 +125,8 @@ interface FlowTuple {
   srcIp: string;
   dstIp: string;
   proto: number;
+  srcPort: number;
+  dstPort: number;
   bytes: number;
   packets: number;
   sampleCount: number;
@@ -132,7 +134,7 @@ interface FlowTuple {
 }
 
 /** Aggregation map key. */
-type TupleKey = string; // `${src}|${dst}|${proto}`
+type TupleKey = string; // `${src}|${dst}|${proto}|${sp}|${dp}`
 
 const stats = {
   samplesReceivedTotal: 0,
@@ -153,11 +155,11 @@ let windowTuples = new Map<TupleKey, FlowTuple>();
 /** Bounded push queue (oldest dropped on overflow). */
 const pushQueue: FlowTuple[] = [];
 
-function addSample(srcIp: string, dstIp: string, proto: number, bytes: number, packets: number, sampleRate: number): void {
-  const key = `${srcIp}|${dstIp}|${proto}`;
+function addSample(srcIp: string, dstIp: string, proto: number, srcPort: number, dstPort: number, bytes: number, packets: number, sampleRate: number): void {
+  const key = `${srcIp}|${dstIp}|${proto}|${srcPort}|${dstPort}`;
   let t = windowTuples.get(key);
   if (!t) {
-    t = { ts: new Date(windowStartMs).toISOString(), srcIp, dstIp, proto, bytes: 0, packets: 0, sampleCount: 0, sampleRate };
+    t = { ts: new Date(windowStartMs).toISOString(), srcIp, dstIp, proto, srcPort, dstPort, bytes: 0, packets: 0, sampleCount: 0, sampleRate };
     windowTuples.set(key, t);
   }
   t.bytes += bytes;
@@ -192,7 +194,7 @@ function startSflowSocket(): void {
   sock.on('message', (msg) => {
     stats.samplesReceivedTotal += 1;
     for (const f of parseFlowDatagram(msg)) {
-      addSample(f.srcIp, f.dstIp, f.proto, f.bytes, f.packets, f.sampleRate);
+      addSample(f.srcIp, f.dstIp, f.proto, f.srcPort, f.dstPort, f.bytes, f.packets, f.sampleRate);
     }
   });
   sock.on('error', (err) => {
@@ -216,7 +218,7 @@ const api = axios.create({
 async function pushBatch(rows: FlowTuple[]): Promise<void> {
   const body = {
     pluginId: identity.effectiveUuid,
-    samples: rows.map((t) => ({ s: t.srcIp, d: t.dstIp, p: t.proto, b: t.bytes, k: t.packets, n: t.sampleCount, r: t.sampleRate, ts: t.ts })),
+    samples: rows.map((t) => ({ s: t.srcIp, d: t.dstIp, p: t.proto, sp: t.srcPort, dp: t.dstPort, b: t.bytes, k: t.packets, n: t.sampleCount, r: t.sampleRate, ts: t.ts })),
   };
   try {
     await api.post('/plugin/flows', body);

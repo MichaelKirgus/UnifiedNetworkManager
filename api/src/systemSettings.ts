@@ -1,4 +1,5 @@
 import { db, pool } from './db';
+import { parseCidrList } from './utils/ipClassification';
 
 /**
  * Central registry of runtime-tunable system settings (the Settings page).
@@ -49,6 +50,12 @@ export interface SettingDescriptor {
    * logged, never propagated — the settings write itself already succeeded.
    */
   onChange?: () => Promise<void> | void;
+  /**
+   * Optional structured validation for string settings that a regex cannot
+   * express (e.g. comma-separated CIDR lists). Called with the coerced value
+   * AFTER pattern/length checks; throwing rejects the update with a 400.
+   */
+  validate?: (value: string) => void;
 }
 
 /** A setting as presented to the Settings page (effective value + metadata). */
@@ -205,6 +212,35 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     envVar: 'FLOW_AGG_1H_RETENTION_DAYS',
     help:
       'How many days of hourly flow aggregates are kept — the long-term trend tier.',
+  },
+
+  // Flow IP classification (Flows page). The internal/external range lists
+  // replace the hardcoded RFC 1918 assumption so each deployment can define
+  // its own "inside" (e.g. a CGNAT range, or a public block that is actually
+  // your own infrastructure).
+  {
+    key: 'flowInternalRanges',
+    label: 'Flow internal IP ranges',
+    type: 'string',
+    category: 'Flows',
+    default: '10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16',
+    envVar: 'UNM_FLOW_INTERNAL_RANGES',
+    maxLength: 4096,
+    validate: (v) => { parseCidrList(v); }, // throws on a malformed CIDR → 400
+    help:
+      'Comma-separated IPv4 CIDR blocks classified as INTERNAL on the Flows page (default: RFC 1918 private space). Longest prefix wins; an IP matching a known device or network is always internal regardless of these lists. Add your own ranges here — e.g. "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10" for CGNAT space.',
+  },
+  {
+    key: 'flowExternalRanges',
+    label: 'Flow external IP ranges',
+    type: 'string',
+    category: 'Flows',
+    default: '',
+    envVar: 'UNM_FLOW_EXTERNAL_RANGES',
+    maxLength: 4096,
+    validate: (v) => { parseCidrList(v); }, // throws on a malformed CIDR → 400
+    help:
+      'Optional comma-separated IPv4 CIDR blocks classified as EXTERNAL (internet) even when they fall inside "Flow internal IP ranges" or an inventoried network — e.g. a public block you own but want counted as egress ("203.0.113.0/24"). Carve-outs beat the broad range/network matches, but an IP that is a known device (exact inventory hit) still counts as internal. Empty = no carve-outs.',
   },
 
   // Certificate monitoring (Certificates page).
@@ -729,6 +765,7 @@ export async function updateSetting(key: string, rawValue: unknown): Promise<Set
       throw new Error(`"${key}" must be at most ${d.maxLength} characters`);
     if (d.pattern && !new RegExp(d.pattern).test(s))
       throw new Error(`"${key}" does not match the required pattern`);
+    d.validate?.(s); // structured check (e.g. CIDR list) — throws → 400
     value = s;
   }
 

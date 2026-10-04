@@ -1,5 +1,13 @@
 import { pool } from '../db';
-import { getEffectiveSettingValue } from '../systemSettings';
+import { getEffectiveSettingValue, getEffectiveValues } from '../systemSettings';
+import {
+  classifyIp,
+  ipv4CidrToNetMask,
+  lookupNetworkContext,
+  parseCidrList,
+  type NetworkEntry,
+  type RangeLists,
+} from '../utils/ipClassification';
 
 /**
  * Flow-data worker (sFlow/NetFlow collector feature).
@@ -35,6 +43,9 @@ export interface FlowMicroRow {
   srcIp: string;
   dstIp: string;
   proto: number;
+  /** L4 ports (0 when the sample carried no transport header). NOT part of the PK — see db.ts. */
+  srcPort: number;
+  dstPort: number;
   bytes: number;
   packets: number;
   sampleCount: number;
@@ -80,48 +91,22 @@ export function getFlowIngestStats(): {
   };
 }
 
-// ── IPv4 helpers (enrichment CIDR matching — no external dependency) ────────
-
-function ipv4ToInt(ip: string): number | null {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
-  if (!m) return null;
-  let n = 0;
-  for (let i = 1; i <= 4; i++) {
-    const octet = Number(m[i]);
-    if (octet > 255) return null;
-    n = (n << 8) | octet;
-  }
-  return n >>> 0;
-}
-
-/** Prefix network + mask for "a.b.c.d/p" (or bare IP → /32). */
-function ipv4CidrToNetMask(cidr: string): { net: number; mask: number } | null {
-  const [ipPart, prefixPart] = cidr.split('/');
-  const ip = ipv4ToInt(ipPart.trim());
-  if (ip === null) return null;
-  const prefix = prefixPart !== undefined ? Number(prefixPart) : 32;
-  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return null;
-  const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
-  return { net: (ip & mask) >>> 0, mask };
-}
-
 // ── Enrichment map (inventory → IP classification) ──────────────────────────
-
-interface CidrEntry {
-  net: number;
-  mask: number;
-  prefixLen: number; // longest-prefix wins on ties
-  deviceId: string | null;
-}
+// The pure classifier + range parsing live in utils/ipClassification.ts so
+// they can be unit-tested without a database.
 
 interface EnrichmentMap {
-  /** Exact-IP hits (hosts + device_ips): ip → first-seen deviceId. */
+  /** Exact-IP hits (hosts + device_ips + devices.managementAddress): ip → first-seen deviceId. */
   exact: Map<string, string>;
   /** IPv4 CIDR entries from the networks inventory (longest-prefix match). */
-  cidrs: CidrEntry[];
+  cidrs: NetworkEntry[];
+  /** Per-IP hostnames from the live hosts inventory — identifies WHICH host on a
+   *  device an IP belongs to (e.g. container "torserver01" on KIRGUSBANDE), not
+   *  just which device. Newest lastSeenAt wins per ip. */
+  hostnames: Map<string, string>;
 }
 
-let enrichment: EnrichmentMap = { exact: new Map(), cidrs: [] };
+let enrichment: EnrichmentMap = { exact: new Map(), cidrs: [], hostnames: new Map() };
 let lastEnrichmentRefresh = 0;
 
 /**
@@ -135,7 +120,10 @@ async function refreshEnrichment(): Promise<void> {
 
   try {
     const [hosts, deviceIps, devices, networks] = await Promise.all([
-      pool.query(`SELECT ip, "deviceId" FROM hosts WHERE ip <> ''`),
+      // Hostname + deviceId in one pass — the hostname is what identifies the
+      // actual host behind an IP (container/VM name from the docker plugin,
+      // DHCP/WLAN lease names from routers).
+      pool.query(`SELECT ip, "deviceId", hostname FROM hosts WHERE ip <> '' ORDER BY "lastSeenAt" DESC NULLS LAST`),
       // device_ips stores the address in `address` (not `ip`) — alias it.
       pool.query(`SELECT address AS ip, "deviceId" FROM device_ips WHERE address IS NOT NULL AND address <> ''`),
       // A device's PRIMARY address is devices.managementAddress — exporters
@@ -144,15 +132,18 @@ async function refreshEnrichment(): Promise<void> {
         `SELECT "managementAddress" AS ip, id AS "deviceId" FROM devices WHERE "managementAddress" <> '' AND enabled = TRUE`
       ),
       pool.query(
-        `SELECT ip, prefix, version, "deviceId" FROM networks WHERE ip <> '' AND prefix IS NOT NULL`
+        `SELECT ip, prefix, version, name, "vlanId", "deviceId" FROM networks WHERE ip <> '' AND prefix IS NOT NULL`
       ),
     ]);
 
     // First-seen wins; most specific first (probe-derived hosts > secondary
     // device_ips > primary management address).
     const exact = new Map<string, string>();
+    // Newest lease wins per ip — the query is ordered by lastSeenAt DESC.
+    const hostnames = new Map<string, string>();
     for (const r of hosts.rows) {
       if (!exact.has(r.ip)) exact.set(String(r.ip), String(r.deviceId));
+      if (r.hostname && !hostnames.has(String(r.ip))) hostnames.set(String(r.ip), String(r.hostname));
     }
     for (const r of deviceIps.rows) {
       if (!exact.has(r.ip)) exact.set(String(r.ip), String(r.deviceId));
@@ -161,16 +152,20 @@ async function refreshEnrichment(): Promise<void> {
       if (!exact.has(r.ip)) exact.set(String(r.ip), String(r.deviceId));
     }
 
-    const cidrs: CidrEntry[] = [];
+    const cidrs: NetworkEntry[] = [];
     for (const r of networks.rows) {
       // Only IPv4 participates in the CIDR match; v6 inventory is skipped.
       if (String(r.version ?? '').toLowerCase() === 'v6') continue;
       const cm = ipv4CidrToNetMask(`${r.ip}/${Number(r.prefix)}`);
       if (!cm) continue;
-      cidrs.push({ net: cm.net, mask: cm.mask, prefixLen: Number(r.prefix), deviceId: String(r.deviceId) });
+      cidrs.push({
+        net: cm.net, mask: cm.mask, prefixLen: Number(r.prefix), deviceId: String(r.deviceId),
+        name: r.name ? String(r.name) : null,
+        vlanId: r.vlanId !== null && r.vlanId !== undefined ? Number(r.vlanId) : null,
+      });
     }
 
-    enrichment = { exact, cidrs };
+    enrichment = { exact, cidrs, hostnames };
     lastEnrichmentRefresh = now;
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -178,45 +173,19 @@ async function refreshEnrichment(): Promise<void> {
   }
 }
 
-/** Classify one endpoint IP: internal (known device/network) | internet | unknown. */
-function classifyIp(ip: string): { cls: 'internal' | 'internet' | 'unknown'; deviceId: string | null } {
-  const exactHit = enrichment.exact.get(ip);
-  if (exactHit) return { cls: 'internal', deviceId: exactHit };
-
-  const n = ipv4ToInt(ip);
-  if (n !== null) {
-    // RFC1918 private ranges are internal by definition (even without an
-    // inventory match). NOTE: `&` yields a SIGNED int32 in JS, so both sides of
-    // each comparison must be normalized with `>>> 0` — otherwise masks whose
-    // result has the high bit set (172.16/12, 192.168/16, …) compare against a
-    // positive literal and never match.
-    if (((n & 0xff00_0000) >>> 0) === 0x0a00_0000 || // 10/8
-        ((n & 0xfff0_0000) >>> 0) === 0xac10_0000 || // 172.16/12
-        ((n & 0xffff_0000) >>> 0) === 0xc0a8_0000) { // 192.168/16
-      return { cls: 'internal', deviceId: null };
-    }
-    if (((n & 0xffff_ff00) >>> 0) === 0xa9fe_0000 || // 169.254/16 link-local
-        ((n & 0xff00_0000) >>> 0) === 0x0000_0000 || // 0.0.0.0/8
-        ((n & 0xf800_0000) >>> 0) === 0xe000_0000 || // 224/4 multicast + 240/4 reserved
-        ((n & 0xff00_0000) >>> 0) === 0xff00_0000) { // 255.255.255.x
-      return { cls: 'unknown', deviceId: null };
-    }
-
-    let best: CidrEntry | null = null;
-    for (const c of enrichment.cidrs) {
-      // Same signed-int32 caveat as above — normalize both sides.
-      if (((n & c.mask) >>> 0) === c.net && (!best || c.prefixLen > best.prefixLen)) best = c;
-    }
-    if (best) return { cls: 'internal', deviceId: best.deviceId };
-
-    // Public IPv4 that matches no internal network → internet.
-    return { cls: 'internet', deviceId: null };
+/** Load the configured internal/external range lists (settings, cached). */
+async function loadRangeLists(): Promise<RangeLists> {
+  try {
+    const values = await getEffectiveValues();
+    return {
+      internal: parseCidrList(String(values.flowInternalRanges)),
+      external: parseCidrList(String(values.flowExternalRanges)),
+    };
+  } catch (err) {
+    // Malformed stored value — fall back to RFC1918 defaults; never break the rollup.
+    console.warn('[flows] invalid flow range settings, using RFC1918 defaults:', (err as Error).message);
+    return { internal: parseCidrList('10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16'), external: [] };
   }
-
-  // IPv6 or unparseable: not link-local/ULA we can cheaply test here — treat as
-  // unknown (v6 internet classification is a deliberate v1 simplification).
-  if (ip.includes(':')) return { cls: 'unknown', deviceId: null };
-  return { cls: 'unknown', deviceId: null };
 }
 
 // ── Loop A: ingest drain ─────────────────────────────────────────────────────
@@ -227,26 +196,52 @@ const INSERT_BATCH_SIZE = 5_000;
 async function drainQueue(): Promise<void> {
   if (queue.length === 0) return;
 
-  const batch = queue.splice(0, Math.min(queue.length, INSERT_BATCH_SIZE));
+  const rawBatch = queue.splice(0, Math.min(queue.length, INSERT_BATCH_SIZE));
+  // The plugin pre-aggregates per (src|dst|proto|sp|dp), but flow_micro's PK is
+  // (ts, srcIp, dstIp, proto, collectorId) — ports are NOT key columns. One push
+  // can therefore carry several rows with the SAME pk and different ports; a
+  // single multi-row INSERT rejects that ("ON CONFLICT DO UPDATE command cannot
+  // affect row a second time"). Merge duplicates by PK first — same math as the
+  // DO UPDATE clause (sum counters, GREATEST rate/ports).
+  const merged = new Map<string, FlowMicroRow>();
+  for (const r of rawBatch) {
+    const key = `${r.ts}|${r.collectorId}|${r.srcIp}|${r.dstIp}|${r.proto}`;
+    const m = merged.get(key);
+    if (!m) {
+      merged.set(key, { ...r });
+    } else {
+      m.bytes += r.bytes;
+      m.packets += r.packets;
+      m.sampleCount += r.sampleCount;
+      if (r.sampleRate > m.sampleRate) m.sampleRate = r.sampleRate;
+      if (r.srcPort > m.srcPort) m.srcPort = r.srcPort;
+      if (r.dstPort > m.dstPort) m.dstPort = r.dstPort;
+    }
+  }
+  const batch = [...merged.values()];
   // Chunk the batch into statement-sized pieces.
   for (let i = 0; i < batch.length; i += 1_000) {
     const chunk = batch.slice(i, i + 1_000);
     const params: unknown[] = [];
     let p = 1;
     const values = chunk.map((r) => {
-      params.push(r.ts, r.collectorId, r.srcIp, r.dstIp, r.proto, r.bytes, r.packets, r.sampleCount, r.sampleRate);
-      return `($${p++}, $${p++}, $${p++}::inet, $${p++}::inet, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`;
+      params.push(r.ts, r.collectorId, r.srcIp, r.dstIp, r.proto, r.bytes, r.packets, r.sampleCount, r.sampleRate, r.srcPort, r.dstPort);
+      return `($${p++}, $${p++}, $${p++}::inet, $${p++}::inet, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`;
     });
 
     try {
       await pool.query(
-        `INSERT INTO flow_micro (ts, "collectorId", "srcIp", "dstIp", proto, bytes, packets, "sampleCount", "sampleRate")
+        `INSERT INTO flow_micro (ts, "collectorId", "srcIp", "dstIp", proto, bytes, packets, "sampleCount", "sampleRate", "srcPort", "dstPort")
          VALUES ${values.join(', ')}
          ON CONFLICT (ts, "srcIp", "dstIp", proto, "collectorId") DO UPDATE SET
            bytes = flow_micro.bytes + EXCLUDED.bytes,
            packets = flow_micro.packets + EXCLUDED.packets,
            "sampleCount" = flow_micro."sampleCount" + EXCLUDED."sampleCount",
-           "sampleRate" = GREATEST(flow_micro."sampleRate", EXCLUDED."sampleRate")`,
+           "sampleRate" = GREATEST(flow_micro."sampleRate", EXCLUDED."sampleRate"),
+           -- Ports are not key columns: on a merge keep the highest seen so a
+           -- real port is never overwritten by a 0 from an ICMP/UDP-less sample.
+           "srcPort" = GREATEST(flow_micro."srcPort", EXCLUDED."srcPort"),
+           "dstPort" = GREATEST(flow_micro."dstPort", EXCLUDED."dstPort")`,
         params
       );
       insertedTotal += chunk.length;
@@ -280,7 +275,9 @@ async function rollupTo5m(): Promise<void> {
   const rows = await pool.query(
     `SELECT date_trunc('minute', ts) AS minute, "srcIp", "dstIp", proto,
             SUM(bytes)::bigint AS bytes, SUM(packets)::bigint AS packets,
-            MAX("sampleRate")::int AS sample_rate
+            MAX("sampleRate")::int AS sample_rate,
+            -- Representative ports: highest seen in the window (0 = no transport header).
+            MAX("srcPort")::int AS src_port, MAX("dstPort")::int AS dst_port
      FROM flow_micro
      WHERE ts >= $1 AND ts < $2
      GROUP BY 1, 2, 3, 4`,
@@ -301,6 +298,8 @@ async function rollupTo5m(): Promise<void> {
     bytes: number;
     packets: number;
     sampleRate: number;
+    srcPort: number;
+    dstPort: number;
   }
   // Defensive normalization: node-postgres normally returns timestamptz as a JS
   // Date, but in some process states (pg-types parser state) it can come back
@@ -322,38 +321,83 @@ async function rollupTo5m(): Promise<void> {
     const key = `${bucketMs}|${r.srcIp}|${r.dstIp}|${r.proto}`;
     let a = byKey.get(key);
     if (!a) {
-      a = { bucket: new Date(bucketMs).toISOString(), srcIp: String(r.srcIp), dstIp: String(r.dstIp), proto: Number(r.proto), bytes: 0, packets: 0, sampleRate: 1 };
+      a = { bucket: new Date(bucketMs).toISOString(), srcIp: String(r.srcIp), dstIp: String(r.dstIp), proto: Number(r.proto), bytes: 0, packets: 0, sampleRate: 1, srcPort: 0, dstPort: 0 };
       byKey.set(key, a);
     }
     a.bytes += Number(r.bytes);
     a.packets += Number(r.packets);
     if (Number(r.sample_rate) > a.sampleRate) a.sampleRate = Number(r.sample_rate);
+    // Representative ports — MAX across the minutes of this 5-min bucket.
+    const sp = Number(r.src_port ?? 0), dp = Number(r.dst_port ?? 0);
+    if (sp > a.srcPort) a.srcPort = sp;
+    if (dp > a.dstPort) a.dstPort = dp;
   }
 
-  const params: unknown[] = [];
-  let p = 1;
-  const values: string[] = [];
+  // Load the configured range lists once per tick (settings are cached).
+  const ranges = await loadRangeLists();
+
+  interface RollupRow {
+    bucket: string; srcIp: string; dstIp: string; proto: number; bytes: number; packets: number; estBytes: number;
+    srcPort: number; dstPort: number;
+    srcDeviceId: string | null; dstDeviceId: string | null; srcClass: string; dstClass: string;
+    srcNetworkName: string | null; dstNetworkName: string | null; srcVlanId: number | null; dstVlanId: number | null;
+    srcHostname: string | null; dstHostname: string | null;
+  }
+  const aggRows: RollupRow[] = [];
   for (const a of byKey.values()) {
-    const src = classifyIp(a.srcIp);
-    const dst = classifyIp(a.dstIp);
+    const src = classifyIp(a.srcIp, enrichment.exact.get(a.srcIp) ?? null, enrichment.cidrs, ranges);
+    const dst = classifyIp(a.dstIp, enrichment.exact.get(a.dstIp) ?? null, enrichment.cidrs, ranges);
+    // Network display context (name + VLAN) via longest-prefix inventory match.
+    const srcNet = lookupNetworkContext(a.srcIp, enrichment.cidrs);
+    const dstNet = lookupNetworkContext(a.dstIp, enrichment.cidrs);
     // estBytes: reported bytes × sampling rate, capped at int8.
-    const estBytes = Math.min(Number.MAX_SAFE_INTEGER, a.bytes * a.sampleRate);
-    params.push(
-      a.bucket, a.srcIp, a.dstIp, a.proto, a.bytes, a.packets, estBytes,
-      src.deviceId, dst.deviceId, src.cls, dst.cls
-    );
-    values.push(`($${p++}, $${p++}::inet, $${p++}::inet, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
+    aggRows.push({
+      bucket: a.bucket, srcIp: a.srcIp, dstIp: a.dstIp, proto: a.proto, bytes: a.bytes, packets: a.packets,
+      estBytes: Math.min(Number.MAX_SAFE_INTEGER, a.bytes * a.sampleRate),
+      srcPort: a.srcPort, dstPort: a.dstPort,
+      srcDeviceId: src.deviceId, dstDeviceId: dst.deviceId, srcClass: src.cls, dstClass: dst.cls,
+      srcNetworkName: srcNet?.name ?? null, dstNetworkName: dstNet?.name ?? null,
+      srcVlanId: srcNet?.vlanId ?? null, dstVlanId: dstNet?.vlanId ?? null,
+      // Which host on the device — container/VM name or DHCP lease hostname.
+      srcHostname: enrichment.hostnames.get(a.srcIp) ?? null, dstHostname: enrichment.hostnames.get(a.dstIp) ?? null,
+    });
   }
 
-  await pool.query(
-    `INSERT INTO flow_agg_5m (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass")
-     VALUES ${values.join(', ')}
-     ON CONFLICT (bucket, "srcIp", "dstIp", proto) DO UPDATE SET
-       bytes = flow_agg_5m.bytes + EXCLUDED.bytes,
-       packets = flow_agg_5m.packets + EXCLUDED.packets,
-       "estBytes" = flow_agg_5m."estBytes" + EXCLUDED."estBytes"`,
-    params
-  );
+  // Chunk the INSERT — Postgres caps bind parameters at 65535 (int16) per
+  // statement; a busy catch-up window can easily exceed that. 4000 rows ×
+  // 17 params = 68k would overflow, so 3_500 → 59.5k, safely under the limit
+  // (same pattern as drainQueue).
+  const ROLLUP_INSERT_CHUNK_ROWS = 3_000;
+  for (let i = 0; i < aggRows.length; i += ROLLUP_INSERT_CHUNK_ROWS) {
+    const chunk = aggRows.slice(i, i + ROLLUP_INSERT_CHUNK_ROWS);
+    const params: unknown[] = [];
+    let p = 1;
+    const values = chunk.map((r) => {
+      params.push(r.bucket, r.srcIp, r.dstIp, r.proto, r.bytes, r.packets, r.estBytes, r.srcPort, r.dstPort, r.srcDeviceId, r.dstDeviceId, r.srcClass, r.dstClass, r.srcNetworkName, r.dstNetworkName, r.srcVlanId, r.dstVlanId, r.srcHostname, r.dstHostname);
+      return `($${p++}, $${p++}::inet, $${p++}::inet, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`;
+    });
+    await pool.query(
+      `INSERT INTO flow_agg_5m (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname")
+       VALUES ${values.join(', ')}
+       ON CONFLICT (bucket, "srcIp", "dstIp", proto) DO UPDATE SET
+         bytes = flow_agg_5m.bytes + EXCLUDED.bytes,
+         packets = flow_agg_5m.packets + EXCLUDED.packets,
+         "estBytes" = flow_agg_5m."estBytes" + EXCLUDED."estBytes",
+         -- Representative ports: keep the highest seen across ticks.
+         "srcPort" = GREATEST(flow_agg_5m."srcPort", EXCLUDED."srcPort"),
+         "dstPort" = GREATEST(flow_agg_5m."dstPort", EXCLUDED."dstPort"),
+         -- Network context may have been NULL on an earlier tick (inventory
+         -- was empty then) — fill gaps, never overwrite known values.
+         "srcNetworkName" = COALESCE(EXCLUDED."srcNetworkName", flow_agg_5m."srcNetworkName"),
+         "dstNetworkName" = COALESCE(EXCLUDED."dstNetworkName", flow_agg_5m."dstNetworkName"),
+         "srcVlanId" = COALESCE(EXCLUDED."srcVlanId", flow_agg_5m."srcVlanId"),
+         "dstVlanId" = COALESCE(EXCLUDED."dstVlanId", flow_agg_5m."dstVlanId"),
+         -- Hostnames: fill gaps, never overwrite known values.
+         "srcHostname" = COALESCE(EXCLUDED."srcHostname", flow_agg_5m."srcHostname"),
+         "dstHostname" = COALESCE(EXCLUDED."dstHostname", flow_agg_5m."dstHostname")`,
+      params
+    );
+  }
 
   lastRolled5mBucketMs = nowBucketMs;
   // eslint-disable-next-line no-console
@@ -373,23 +417,39 @@ async function rollupTo1h(): Promise<void> {
 
   const fromMs = Math.max(lastRolled1hBucketMs, nowBucketMs - ROLLUP_1H_MAX_CATCHUP_MS);
   const res = await pool.query(
-    `INSERT INTO flow_agg_1h (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass")
+     `INSERT INTO flow_agg_1h (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname")
      SELECT date_trunc('hour', bucket), "srcIp", "dstIp", proto,
             SUM(bytes)::bigint, SUM(packets)::bigint, SUM("estBytes")::bigint,
+            MAX("srcPort"), MAX("dstPort"),
             MAX("srcDeviceId"), MAX("dstDeviceId"),
             -- 'internal' wins over 'internet'/'unknown' when a tuple's endpoints
             -- were classified differently across the hour (inventory changed).
             CASE WHEN BOOL_OR("srcClass" = 'internal') THEN 'internal'
                  WHEN BOOL_OR("srcClass" = 'internet') THEN 'internet' ELSE 'unknown' END,
             CASE WHEN BOOL_OR("dstClass" = 'internal') THEN 'internal'
-                 WHEN BOOL_OR("dstClass" = 'internet') THEN 'internet' ELSE 'unknown' END
+                 WHEN BOOL_OR("dstClass" = 'internet') THEN 'internet' ELSE 'unknown' END,
+            MAX("srcNetworkName"), MAX("dstNetworkName"),
+            MAX("srcVlanId"), MAX("dstVlanId"),
+            MAX("srcHostname"), MAX("dstHostname")
      FROM flow_agg_5m
      WHERE bucket >= $1 AND bucket < $2
      GROUP BY 1, 2, 3, 4
      ON CONFLICT (bucket, "srcIp", "dstIp", proto) DO UPDATE SET
        bytes = flow_agg_1h.bytes + EXCLUDED.bytes,
        packets = flow_agg_1h.packets + EXCLUDED.packets,
-       "estBytes" = flow_agg_1h."estBytes" + EXCLUDED."estBytes"`,
+       "estBytes" = flow_agg_1h."estBytes" + EXCLUDED."estBytes",
+       -- Representative ports: keep the highest seen across ticks.
+       "srcPort" = GREATEST(flow_agg_1h."srcPort", EXCLUDED."srcPort"),
+       "dstPort" = GREATEST(flow_agg_1h."dstPort", EXCLUDED."dstPort"),
+       -- Network context: prefer what is already stored (a later tick may have
+       -- rolled a window whose rows predate the inventory enrichment).
+       "srcNetworkName" = COALESCE(flow_agg_1h."srcNetworkName", EXCLUDED."srcNetworkName"),
+       "dstNetworkName" = COALESCE(flow_agg_1h."dstNetworkName", EXCLUDED."dstNetworkName"),
+       "srcVlanId" = COALESCE(flow_agg_1h."srcVlanId", EXCLUDED."srcVlanId"),
+       "dstVlanId" = COALESCE(flow_agg_1h."dstVlanId", EXCLUDED."dstVlanId"),
+       -- Hostnames: prefer what is already stored.
+       "srcHostname" = COALESCE(flow_agg_1h."srcHostname", EXCLUDED."srcHostname"),
+       "dstHostname" = COALESCE(flow_agg_1h."dstHostname", EXCLUDED."dstHostname")`,
     [new Date(fromMs).toISOString(), new Date(nowBucketMs).toISOString()]
   );
 

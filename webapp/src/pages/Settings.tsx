@@ -62,6 +62,7 @@ const CATEGORY_STYLES: Record<string, string> = {
   Security: 'bg-danger text-danger-fg',
   Execution: 'bg-success text-success-fg',
   Discovery: 'bg-muted text-secondary',
+  Flows: 'bg-accent-teal text-accent-teal-fg',
 };
 
 /** Inline editor for one expanded setting — owns its own draft state. */

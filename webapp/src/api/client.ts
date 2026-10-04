@@ -1153,6 +1153,15 @@ export interface FlowTalker {
   deviceId: string | null;
   deviceName: string | null;
   internal: boolean;
+  /** Hostname — inventory name for known hosts (container/VM, DHCP lease) or
+   *  best-effort reverse-DNS for external IPs (null when unknown). */
+  hostname: string | null;
+  /** Where the hostname came from ('inventory' = hosts table, 'reverse-dns'). */
+  hostnameSource?: 'inventory' | 'reverse-dns' | null;
+  /** Inventoried network this IP lives in (longest-prefix match), e.g. "LAN". */
+  networkName: string | null;
+  /** VLAN id of that network (null = untagged/unknown). */
+  vlanId: number | null;
 }
 
 export interface FlowTopTalkersResponse {
@@ -1162,6 +1171,40 @@ export interface FlowTopTalkersResponse {
   table: 'flow_agg_5m' | 'flow_agg_1h';
   sources: FlowTalker[];
   destinations: FlowTalker[];
+}
+
+/** One L4 port row by estimated bytes (GET /flows/ports). Port 0 = no transport header. */
+export interface FlowPortRow {
+  port: number;
+  proto: number;
+  estBytes: number;
+  reportedBytes: number;
+}
+
+export interface FlowPortsResponse {
+  fromMs: number;
+  toMs: number;
+  table: 'flow_agg_5m' | 'flow_agg_1h';
+  /** Set when the drilldown was scoped to one host. */
+  ip?: string;
+  sourcePorts: FlowPortRow[];
+  destinationPorts: FlowPortRow[];
+}
+
+/** One inventoried network by traffic (GET /flows/networks). */
+export interface FlowNetworkRow {
+  name: string;
+  vlanId: number | null;
+  srcEstBytes: number;
+  dstEstBytes: number;
+  estBytes: number;
+}
+
+export interface FlowNetworksResponse {
+  fromMs: number;
+  toMs: number;
+  table: 'flow_agg_5m' | 'flow_agg_1h';
+  networks: FlowNetworkRow[];
 }
 
 /** Per-device internet egress row (GET /flows/internet). */
@@ -1188,6 +1231,14 @@ export interface FlowPair {
   dstName: string | null;
   estBytes: number;
   distinctPairs: number;
+  /** Busiest source IP of this pair (the actual host behind the device). */
+  srcTopIp?: string | null;
+  /** Hostname of that IP from the hosts inventory (container/VM name, DHCP lease). */
+  srcTopHost?: string | null;
+  /** Busiest destination IP of this pair. */
+  dstTopIp?: string | null;
+  /** Hostname of that IP from the hosts inventory. */
+  dstTopHost?: string | null;
 }
 
 export interface FlowPairsResponse {
@@ -3248,39 +3299,62 @@ export const api = {
     return apiFetch<TopologyResponse>(`/topology${suffix}`);
   },
   // Flows page — sFlow/NetFlow traffic visibility (aggregate tables only).
-  flowsTopTalkers: (params?: { from?: string; to?: string; limit?: number }) => {
+  flowsTopTalkers: (params?: { from?: string; to?: string; limit?: number; siteId?: string }) => {
     const qs = new URLSearchParams();
     if (params?.from) qs.set('from', params.from);
     if (params?.to) qs.set('to', params.to);
     if (params?.limit) qs.set('limit', String(params.limit));
+    if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<FlowTopTalkersResponse>(`/flows/top-talkers${suffix}`);
   },
-  flowsInternet: (params?: { from?: string; to?: string; deviceId?: string }) => {
+  flowsInternet: (params?: { from?: string; to?: string; deviceId?: string; siteId?: string }) => {
     const qs = new URLSearchParams();
     if (params?.from) qs.set('from', params.from);
     if (params?.to) qs.set('to', params.to);
     if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<FlowInternetResponse>(`/flows/internet${suffix}`);
   },
-  flowsPairs: (params?: { from?: string; to?: string; limit?: number }) => {
+  flowsPairs: (params?: { from?: string; to?: string; limit?: number; siteId?: string }) => {
     const qs = new URLSearchParams();
     if (params?.from) qs.set('from', params.from);
     if (params?.to) qs.set('to', params.to);
     if (params?.limit) qs.set('limit', String(params.limit));
+    if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<FlowPairsResponse>(`/flows/pairs${suffix}`);
   },
-  flowsTimeseries: (params?: { from?: string; to?: string; bucket?: '5m' | '1h'; deviceId?: string; class?: 'internet' | 'internal' }) => {
+  flowsTimeseries: (params?: { from?: string; to?: string; bucket?: '5m' | '1h'; deviceId?: string; class?: 'internet' | 'internal'; siteId?: string }) => {
     const qs = new URLSearchParams();
     if (params?.from) qs.set('from', params.from);
     if (params?.to) qs.set('to', params.to);
     if (params?.bucket) qs.set('bucket', params.bucket);
     if (params?.deviceId) qs.set('deviceId', params.deviceId);
     if (params?.class) qs.set('class', params.class);
+    if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<FlowTimeseriesResponse>(`/flows/timeseries${suffix}`);
+  },
+  flowsPorts: (params?: { from?: string; to?: string; limit?: number; ip?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    if (params?.ip) qs.set('ip', params.ip);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<FlowPortsResponse>(`/flows/ports${suffix}`);
+  },
+  flowsNetworks: (params?: { from?: string; to?: string; limit?: number; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<FlowNetworksResponse>(`/flows/networks${suffix}`);
   },
   flowCollectors: () => apiFetch<FlowCollectorsResponse>('/flow-collectors'),
   // Plugin log entries (global Logs page + per-device section in DeviceDetail).

@@ -1,10 +1,28 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Globe, Radio, ArrowLeftRight, Server } from 'lucide-react';
+import { Activity, Globe, Radio, ArrowLeftRight, Server, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { formatBytes, formatNumber } from '../components/formatMetric';
-import { api, FlowTalker, FlowInternetDevice, FlowPair } from '../api/client';
+import { can } from '../auth/permissions';
+import { api, FlowTalker, FlowInternetDevice, FlowPair, FlowPortRow, FlowNetworkRow } from '../api/client';
+
+/** Well-known L4 port names for the port-stats tables (0 = no transport header). */
+const PORT_NAMES: Record<number, string> = {
+  0: '—', 53: 'DNS', 67: 'DHCP', 68: 'DHCP', 80: 'HTTP', 123: 'NTP', 443: 'HTTPS',
+  445: 'SMB', 465: 'SMTPS', 587: 'Submission', 993: 'IMAPS', 995: 'POP3S', 1433: 'MSSQL',
+  2049: 'NFS', 2222: 'SSH-alt', 3000: 'Web-3000', 3389: 'RDP', 5000: 'UPnP/RTSP', 5355: 'mDNS',
+  6343: 'sFlow', 8080: 'HTTP-alt', 8443: 'HTTPS-alt', 12345: 'NetFlow', 1900: 'SSDP',
+};
+
+/** IANA protocol numbers → short names for the port tables. */
+const PROTO_NAMES: Record<number, string> = {
+  1: 'ICMP', 6: 'TCP', 17: 'UDP', 41: 'IPv6', 47: 'GRE', 50: 'ESP', 58: 'ICMPv6', 89: 'OSPF',
+};
+
+function portLabel(port: number): string {
+  return PORT_NAMES[port] ? `${port} (${PORT_NAMES[port]})` : String(port);
+}
 
 /** Time-range presets (v1: presets only — the API resolves `from`/`to`). */
 const TIME_RANGES = [
@@ -64,6 +82,10 @@ function orDash(v?: string | null): string {
  */
 export default function Flows() {
   const [range, setRange] = useState<TimeRange>('24h');
+  // Site filter — '' = all sites. Options come from /sites (gated on sites:read).
+  const [siteId, setSiteId] = useState('');
+  // Port drilldown — click a talker IP to scope the port tables to that host.
+  const [drillIp, setDrillIp] = useState<string | null>(null);
 
   // The `from` bound is computed at fetch time so "last hour" keeps sliding as
   // the page refetches. Rollups land every 5 minutes — refresh on that cadence.
@@ -72,27 +94,43 @@ export default function Flows() {
     const from = new Date(Date.now() - RANGE_MS[range]);
     return { from: from.toISOString(), to: to.toISOString() };
   };
+  // Every flow query shares the site filter (null = no filter).
+  const siteParam = () => (siteId || undefined);
+
+  const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: () => api.sites(), enabled: can('sites:read') });
 
   const talkersQuery = useQuery({
-    queryKey: ['flows', 'top-talkers', range],
-    queryFn: () => api.flowsTopTalkers({ ...windowParams(), limit: 20 }),
+    queryKey: ['flows', 'top-talkers', range, siteId],
+    queryFn: () => api.flowsTopTalkers({ ...windowParams(), limit: 20, siteId: siteParam() }),
     refetchInterval: 60_000,
   });
   const internetQuery = useQuery({
-    queryKey: ['flows', 'internet', range],
-    queryFn: () => api.flowsInternet(windowParams()),
+    queryKey: ['flows', 'internet', range, siteId],
+    queryFn: () => api.flowsInternet({ ...windowParams(), siteId: siteParam() }),
     refetchInterval: 60_000,
   });
   const pairsQuery = useQuery({
-    queryKey: ['flows', 'pairs', range],
-    queryFn: () => api.flowsPairs({ ...windowParams(), limit: 20 }),
+    queryKey: ['flows', 'pairs', range, siteId],
+    queryFn: () => api.flowsPairs({ ...windowParams(), limit: 20, siteId: siteParam() }),
     refetchInterval: 60_000,
   });
   // Internet egress over time — the page's headline chart. Hourly buckets for
   // multi-day ranges keep the point count sane; 5-minute otherwise.
   const seriesQuery = useQuery({
-    queryKey: ['flows', 'timeseries', range],
-    queryFn: () => api.flowsTimeseries({ ...windowParams(), bucket: range === '7d' || range === '30d' ? '1h' : '5m', class: 'internet' }),
+    queryKey: ['flows', 'timeseries', range, siteId],
+    queryFn: () => api.flowsTimeseries({ ...windowParams(), bucket: range === '7d' || range === '30d' ? '1h' : '5m', class: 'internet', siteId: siteParam() }),
+    refetchInterval: 60_000,
+  });
+  // Port usage — top source/destination ports (optionally scoped to one host).
+  const portsQuery = useQuery({
+    queryKey: ['flows', 'ports', range, siteId, drillIp],
+    queryFn: () => api.flowsPorts({ ...windowParams(), limit: 15, ip: drillIp ?? undefined, siteId: siteParam() }),
+    refetchInterval: 60_000,
+  });
+  // Traffic per inventoried network (name + VLAN) — the "which networks" view.
+  const networksQuery = useQuery({
+    queryKey: ['flows', 'networks', range, siteId],
+    queryFn: () => api.flowsNetworks({ ...windowParams(), limit: 20, siteId: siteParam() }),
     refetchInterval: 60_000,
   });
   const collectorsQuery = useQuery({
@@ -105,8 +143,30 @@ export default function Flows() {
     {
       header: 'IP',
       key: 'ip',
-      width: 150,
-      render: (row) => <span className="font-mono text-xs">{row.ip}</span>,
+      width: 170,
+      exportValue: (row) => row.hostname ? `${row.ip} (${row.hostname})` : row.ip,
+      render: (row) => (
+        <div className="flex flex-col">
+          {/* Clickable → scopes the port tables to this host (drilldown). */}
+          <button
+            type="button"
+            onClick={() => setDrillIp(drillIp === row.ip ? null : row.ip)}
+            title={`Show ports for ${row.ip}`}
+            className={`text-left font-mono text-xs hover:underline ${drillIp === row.ip ? 'text-accent-solid' : ''}`}
+          >
+            {row.ip}
+          </button>
+          {row.hostname && (
+            <span
+              className="truncate text-[11px] text-faint"
+              title={row.hostnameSource === 'reverse-dns' ? `${row.hostname} (reverse DNS)` : row.hostname}
+            >
+              {row.hostname}
+              {row.hostnameSource === 'reverse-dns' && <span className="ml-1 opacity-60">(rDNS)</span>}
+            </span>
+          )}
+        </div>
+      ),
     },
     {
       header: 'Class',
@@ -121,6 +181,20 @@ export default function Flows() {
       width: 200,
       exportValue: (row) => row.deviceName ?? '',
       render: (row) => (row.deviceName ? <span className="text-sm">{row.deviceName}</span> : <span className="text-faint">—</span>),
+    },
+    {
+      header: 'Network / VLAN',
+      key: 'networkName',
+      width: 150,
+      exportValue: (row) => row.networkName ? `${row.networkName}${row.vlanId != null ? ` (VLAN ${row.vlanId})` : ''}` : '',
+      render: (row) => (row.networkName || row.vlanId != null ? (
+        <span className="text-xs">
+          {row.networkName ?? '—'}
+          {row.vlanId != null && <span className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] font-medium">{row.vlanId}</span>}
+        </span>
+      ) : (
+        <span className="text-faint">—</span>
+      )),
     },
     {
       header: 'Est. Bytes',
@@ -162,18 +236,38 @@ export default function Flows() {
     },
   ];
 
+  // Busiest host on one side of a pair — the actual container/VM behind the device.
+  const topHostCell = (ip: string | null | undefined, host: string | null | undefined) => (
+    ip ? (
+      <span className="text-[11px] text-faint">
+        {host && <span title={host}>{host}</span>}
+        {!host && <span className="font-mono">{ip}</span>}
+      </span>
+    ) : null
+  );
+
   const pairColumns: DataTableColumn<FlowPair>[] = [
     {
       header: 'Source',
       key: 'srcName',
       width: 240,
-      render: (row) => <span className="font-medium text-foreground">{orDash(row.srcName)}</span>,
+      render: (row) => (
+        <div className="flex flex-col">
+          <span className="font-medium text-foreground">{orDash(row.srcName)}</span>
+          {topHostCell(row.srcTopIp, row.srcTopHost)}
+        </div>
+      ),
     },
     {
       header: 'Destination',
       key: 'dstName',
       width: 240,
-      render: (row) => <span className="font-medium text-foreground">{orDash(row.dstName)}</span>,
+      render: (row) => (
+        <div className="flex flex-col">
+          <span className="font-medium text-foreground">{orDash(row.dstName)}</span>
+          {topHostCell(row.dstTopIp, row.dstTopHost)}
+        </div>
+      ),
     },
     {
       header: 'Est. Bytes',
@@ -191,6 +285,68 @@ export default function Flows() {
     },
   ];
 
+  // Port tables share one column shape — the direction only changes the header.
+  const portColumns = (direction: 'Source' | 'Destination'): DataTableColumn<FlowPortRow>[] => [
+    {
+      header: `${direction} Port`,
+      key: 'port',
+      width: 160,
+      sortAccessor: (row) => row.port,
+      render: (row) => <span className="font-mono text-xs">{portLabel(row.port)}</span>,
+    },
+    {
+      header: 'Proto',
+      key: 'proto',
+      width: 80,
+      sortAccessor: (row) => row.proto,
+      render: (row) => <span className="text-xs">{PROTO_NAMES[row.proto] ?? `#${row.proto}`}</span>,
+    },
+    {
+      header: 'Est. Bytes',
+      key: 'estBytes',
+      width: 120,
+      sortAccessor: (row) => row.estBytes,
+      render: (row) => <span className="font-mono text-xs">{formatBytes(row.estBytes)}</span>,
+    },
+  ];
+
+  const networkColumns: DataTableColumn<FlowNetworkRow>[] = [
+    {
+      header: 'Network',
+      key: 'name',
+      width: 240,
+      render: (row) => <span className="font-medium text-foreground">{orDash(row.name)}</span>,
+    },
+    {
+      header: 'VLAN',
+      key: 'vlanId',
+      width: 80,
+      sortAccessor: (row) => row.vlanId ?? -1,
+      render: (row) => (row.vlanId != null ? <span className="rounded bg-muted px-1.5 py-0.5 text-xs font-medium">{row.vlanId}</span> : <span className="text-faint">—</span>),
+    },
+    {
+      header: 'Inbound',
+      key: 'dstEstBytes',
+      width: 120,
+      sortAccessor: (row) => row.dstEstBytes,
+      render: (row) => <span className="font-mono text-xs">{formatBytes(row.dstEstBytes)}</span>,
+    },
+    {
+      header: 'Outbound',
+      key: 'srcEstBytes',
+      width: 120,
+      sortAccessor: (row) => row.srcEstBytes,
+      render: (row) => <span className="font-mono text-xs">{formatBytes(row.srcEstBytes)}</span>,
+    },
+    {
+      header: 'Total',
+      key: 'estBytes',
+      width: 120,
+      sortAccessor: (row) => row.estBytes,
+      render: (row) => <span className="font-mono text-xs">{formatBytes(row.estBytes)}</span>,
+    },
+  ];
+
   const seriesValues = (seriesQuery.data?.points ?? []).map((p) => p.estBytes);
   const topSource = talkersQuery.data?.sources[0];
   const topPair = pairsQuery.data?.pairs[0];
@@ -199,7 +355,7 @@ export default function Flows() {
 
   return (
     <Layout title="Flows">
-      {/* Filter bar — time-range preset. */}
+      {/* Filter bar — time-range preset + site filter. */}
       <div className="mb-3 flex shrink-0 items-center gap-2">
         <select
           className="w-full max-w-xs rounded-md border border-border px-2.5 py-1.5 text-sm"
@@ -212,6 +368,32 @@ export default function Flows() {
             </option>
           ))}
         </select>
+        {can('sites:read') && (
+          <select
+            className="w-full max-w-xs rounded-md border border-border px-2.5 py-1.5 text-sm"
+            value={siteId}
+            onChange={(e) => setSiteId(e.target.value)}
+          >
+            <option value="">All sites</option>
+            {(sitesQuery.data ?? []).map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        )}
+        {/* Port drilldown indicator — set by clicking a talker IP. */}
+        {drillIp && (
+          <button
+            type="button"
+            onClick={() => setDrillIp(null)}
+            className="flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1.5 text-xs hover:bg-muted"
+            title="Clear port drilldown"
+          >
+            ports for <span className="font-mono">{drillIp}</span>
+            <X size={12} />
+          </button>
+        )}
       </div>
 
       {/* Summary strip — internet egress total, top talker, busiest pair. */}
@@ -225,7 +407,12 @@ export default function Flows() {
           {topSource && (
             <span className="flex items-center gap-2 text-secondary">
               <Radio size={13} className="text-muted-foreground" />
-              top talker: <span className="font-mono">{topSource.ip}</span> ({formatBytes(topSource.estBytes)})
+              top talker:{' '}
+              <span className="font-mono">
+                {topSource.ip}
+                {topSource.hostname ? ` (${topSource.hostname})` : ''}
+              </span>{' '}
+              ({formatBytes(topSource.estBytes)})
             </span>
           )}
           {topPair && (
@@ -284,6 +471,59 @@ export default function Flows() {
             storageKey="flows-talkers-dst"
             searchPlaceholder="Search destination IPs…"
             emptyMessage="No traffic recorded in this window."
+          />
+        )}
+      </div>
+
+      {/* Port usage — most used L4 ports, source and destination. */}
+      <div className="mt-3 shrink-0 rounded-lg border border-border bg-card px-4 py-2">
+        <p className="flex items-center gap-2 text-xs font-medium text-secondary">
+          <Activity size={13} /> Port usage{drillIp ? (
+            <>
+              {' '}for <span className="font-mono">{drillIp}</span>
+              <button type="button" onClick={() => setDrillIp(null)} className="text-faint hover:text-foreground" title="Clear drilldown">
+                <X size={12} />
+              </button>
+            </>
+          ) : (
+            ' — click a talker IP to drill down'
+          )}
+        </p>
+        {portsQuery.isLoading && <p className="mt-1 text-sm text-muted-foreground">Loading…</p>}
+        {!portsQuery.isLoading && portsQuery.data && (
+          <div className="mt-2 grid grid-cols-1 gap-3 xl:grid-cols-2">
+            <DataTable
+              columns={portColumns('Source')}
+              rows={portsQuery.data.sourcePorts}
+              rowKey={(row) => `s|${row.port}|${row.proto}`}
+              storageKey="flows-ports-src"
+              emptyMessage="No source ports recorded in this window."
+            />
+            <DataTable
+              columns={portColumns('Destination')}
+              rows={portsQuery.data.destinationPorts}
+              rowKey={(row) => `d|${row.port}|${row.proto}`}
+              storageKey="flows-ports-dst"
+              emptyMessage="No destination ports recorded in this window."
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Traffic per network — which documented networks the traffic lives on. */}
+      <div className="mt-3 shrink-0 rounded-lg border border-border bg-card px-4 py-2">
+        <p className="flex items-center gap-2 text-xs font-medium text-secondary">
+          <Globe size={13} /> Traffic per network
+        </p>
+        {networksQuery.isLoading && <p className="mt-1 text-sm text-muted-foreground">Loading…</p>}
+        {!networksQuery.isLoading && networksQuery.data && (
+          <DataTable
+            columns={networkColumns}
+            rows={networksQuery.data.networks}
+            rowKey={(row) => `${row.name}|${row.vlanId ?? ''}`}
+            storageKey="flows-networks"
+            searchPlaceholder="Search networks…"
+            emptyMessage="No network context recorded in this window — document your networks (Networks page) to see per-network traffic."
           />
         )}
       </div>

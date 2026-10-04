@@ -30,28 +30,45 @@ import { compressIpv6, readRawIp4, readRawIp6, type ParsedFlow } from './ipHelpe
 /** Normalized flow shape — shared with the NetFlow parsers (re-exported). */
 export type { ParsedFlow };
 
-/** Parse an Ethernet frame header to extract src/dst IP + protocol. */
-function parseEthernetHeader(hdr: Buffer): { srcIp: string; dstIp: string; proto: number } | null {
+/** Parse an Ethernet frame header to extract src/dst IP + protocol (+ TCP/UDP ports when present). */
+function parseEthernetHeader(hdr: Buffer): { srcIp: string; dstIp: string; proto: number; srcPort: number; dstPort: number } | null {
   if (hdr.length < 34) return null;
   const ethertype = hdr.readUInt16BE(12);
   if (ethertype === 0x800 && hdr.length >= 34) {
-    // IPv4: proto at +9, srcIp at +12..15, dstIp at +16..19.
+    // IPv4: proto at +9, srcIp at +12..15, dstIp at +16..19. TCP/UDP headers
+    // start right after the fixed 20-byte IPv4 header (no option skipping —
+    // sampled frames rarely carry IP options; ports default to 0 otherwise).
     const ipStart = 14;
+    const proto = hdr[ipStart + 9];
+    let srcPort = 0, dstPort = 0;
+    if ((proto === 6 || proto === 17) && hdr.length >= ipStart + 32) {
+      srcPort = hdr.readUInt16BE(ipStart + 20);
+      dstPort = hdr.readUInt16BE(ipStart + 22);
+    }
     return {
-      proto: hdr[ipStart + 9],
+      proto,
       srcIp: `${hdr[ipStart + 12]}.${hdr[ipStart + 13]}.${hdr[ipStart + 14]}.${hdr[ipStart + 15]}`,
       dstIp: `${hdr[ipStart + 16]}.${hdr[ipStart + 17]}.${hdr[ipStart + 18]}.${hdr[ipStart + 19]}`,
+      srcPort,
+      dstPort,
     };
   }
   if (ethertype === 0x86dd && hdr.length >= 54) {
-    // IPv6: nextHeader at +6, srcIp at +8..23, dstIp at +24..39.
+    // IPv6: nextHeader at +6, srcIp at +8..23, dstIp at +24..39. TCP/UDP start
+    // after the fixed 40-byte header (extension headers not followed).
     const ipStart = 14;
+    const proto = hdr[ipStart + 6];
+    let srcPort = 0, dstPort = 0;
+    if ((proto === 6 || proto === 17) && hdr.length >= ipStart + 52) {
+      srcPort = hdr.readUInt16BE(ipStart + 40);
+      dstPort = hdr.readUInt16BE(ipStart + 42);
+    }
     const groups: number[] = [];
     for (let i = 0; i < 16; i += 2) groups.push(hdr.readUInt16BE(ipStart + 8 + i));
     const srcIp = compressIpv6(groups);
     const groups6: number[] = [];
     for (let i = 0; i < 16; i += 2) groups6.push(hdr.readUInt16BE(ipStart + 24 + i));
-    return { proto: hdr[ipStart + 6], srcIp, dstIp: compressIpv6(groups6) };
+    return { proto, srcIp, dstIp: compressIpv6(groups6), srcPort, dstPort };
   }
   return null;
 }
@@ -109,7 +126,12 @@ export function parseSflowDatagram(buf: Buffer): ParsedFlow[] {
           const srcIp = readRawIp4(buf, payloadStart + 8);
           const dstIp = readRawIp4(buf, payloadStart + 12);
           if (srcIp && dstIp) {
-            flows.push({ srcIp, dstIp, proto, bytes: pktLen, packets: 1, sampleRate: samplingRate });
+            flows.push({
+              srcIp, dstIp, proto,
+              srcPort: buf.readUInt32BE(payloadStart + 16),
+              dstPort: buf.readUInt32BE(payloadStart + 20),
+              bytes: pktLen, packets: 1, sampleRate: samplingRate,
+            });
           }
         } else if (recType === 4 && recLen >= 56) {
           // IPv6 flow record payload (56 bytes): pktLen(4) proto(4) srcIP(16) dstIP(16)
@@ -119,7 +141,12 @@ export function parseSflowDatagram(buf: Buffer): ParsedFlow[] {
           const srcIp = readRawIp6(buf, payloadStart + 8);
           const dstIp = readRawIp6(buf, payloadStart + 24);
           if (srcIp && dstIp) {
-            flows.push({ srcIp, dstIp, proto, bytes: pktLen, packets: 1, sampleRate: samplingRate });
+            flows.push({
+              srcIp, dstIp, proto,
+              srcPort: buf.readUInt32BE(payloadStart + 40),
+              dstPort: buf.readUInt32BE(payloadStart + 44),
+              bytes: pktLen, packets: 1, sampleRate: samplingRate,
+            });
           }
         } else if (recType === 1 && recLen >= 20) {
           // Raw packet flow record payload: hdrProto(4) frameLen(4) stripped(4) hdrLen(4)
@@ -130,7 +157,7 @@ export function parseSflowDatagram(buf: Buffer): ParsedFlow[] {
           if (hdrMax >= 34) {
             const parsed = parseEthernetHeader(buf.subarray(payloadStart + 16, payloadStart + 16 + hdrMax));
             if (parsed) {
-              flows.push({ srcIp: parsed.srcIp, dstIp: parsed.dstIp, proto: parsed.proto, bytes: frameLen, packets: 1, sampleRate: samplingRate });
+              flows.push({ srcIp: parsed.srcIp, dstIp: parsed.dstIp, proto: parsed.proto, srcPort: parsed.srcPort, dstPort: parsed.dstPort, bytes: frameLen, packets: 1, sampleRate: samplingRate });
             }
           }
         }

@@ -1165,6 +1165,17 @@ export async function initDb(): Promise<void> {
       "sampleRate" INTEGER NOT NULL DEFAULT 1,
       PRIMARY KEY (ts, "srcIp", "dstIp", proto, "collectorId")
     ) PARTITION BY RANGE (ts)`);
+  // L4 ports — added after the table went live. Deliberately NOT part of the
+  // PK: changing a partitioned table's PK would require recreating every
+  // existing partition (data loss). Consequence: two tuples with the same
+  // window/collector/IP-pair/proto but DIFFERENT ports merge into one row and
+  // keep the first-seen ports — port statistics are therefore approximate for
+  // co-occurring ports on the same IP pair within a 5 s collector window.
+  // Ports are INTEGER, not SMALLINT — L4 ports go up to 65535 (smallint max is 32767).
+  await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "srcPort" INTEGER NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "dstPort" INTEGER NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE flow_micro ALTER COLUMN "srcPort" TYPE INTEGER`);
+  await pool.query(`ALTER TABLE flow_micro ALTER COLUMN "dstPort" TYPE INTEGER`);
   await pool.query(`CREATE INDEX IF NOT EXISTS brin_flow_micro_ts ON flow_micro USING BRIN (ts)`);
 
   // Enriched 5-minute aggregates: one row per (bucket, srcIp, dstIp, proto)
@@ -1184,6 +1195,26 @@ export async function initDb(): Promise<void> {
       "dstClass" TEXT NOT NULL DEFAULT 'unknown',
       PRIMARY KEY (bucket, "srcIp", "dstIp", proto)
     ) PARTITION BY RANGE (bucket)`);
+  // Network context + representative L4 ports — added after the table went
+  // live (ADD COLUMN only; PKs of partitioned tables cannot change without
+  // recreating partitions). Ports are ATTRIBUTES, not key columns: they do
+  // not multiply tuple cardinality. "Representative" = MAX() over the window
+  // (see workers/flows.ts) — accurate for destination ports in the common
+  // case; source ports of long-lived pairs with many ephemeral connections
+  // collapse to one value per tuple.
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "srcPort" INTEGER NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "dstPort" INTEGER NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE flow_agg_5m ALTER COLUMN "srcPort" TYPE INTEGER`);
+  await pool.query(`ALTER TABLE flow_agg_5m ALTER COLUMN "dstPort" TYPE INTEGER`);
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "srcNetworkName" TEXT`);
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "dstNetworkName" TEXT`);
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "srcVlanId" INTEGER`);
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "dstVlanId" INTEGER`);
+  // Per-endpoint hostnames from the live hosts inventory — identifies WHICH
+  // host on a device an IP belongs to (container/VM name, DHCP lease), not
+  // just which device. Filled at rollup time + backfilled for history.
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "srcHostname" TEXT`);
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "dstHostname" TEXT`);
   await pool.query(`CREATE INDEX IF NOT EXISTS brin_flow_agg_5m_bucket ON flow_agg_5m USING BRIN (bucket)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_src_device ON flow_agg_5m ("srcDeviceId")`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_dst_device ON flow_agg_5m ("dstDeviceId")`);
@@ -1204,9 +1235,29 @@ export async function initDb(): Promise<void> {
       "dstClass" TEXT NOT NULL DEFAULT 'unknown',
       PRIMARY KEY (bucket, "srcIp", "dstIp", proto)
     ) PARTITION BY RANGE (bucket)`);
+  // Representative L4 ports on the hourly tier (MAX over the hour — see the
+  // 5m comment for why these are attributes, not key columns).
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "srcPort" INTEGER NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "dstPort" INTEGER NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE flow_agg_1h ALTER COLUMN "srcPort" TYPE INTEGER`);
+  await pool.query(`ALTER TABLE flow_agg_1h ALTER COLUMN "dstPort" TYPE INTEGER`);
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "srcNetworkName" TEXT`);
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "dstNetworkName" TEXT`);
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "srcVlanId" INTEGER`);
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "dstVlanId" INTEGER`);
+  // Per-endpoint hostnames (see the flow_agg_5m comment above).
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "srcHostname" TEXT`);
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "dstHostname" TEXT`);
   await pool.query(`CREATE INDEX IF NOT EXISTS brin_flow_agg_1h_bucket ON flow_agg_1h USING BRIN (bucket)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_src_device ON flow_agg_1h ("srcDeviceId")`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_dst_device ON flow_agg_1h ("dstDeviceId")`);
+
+  // NOTE: no separate per-port aggregate tables. Port statistics are computed
+  // directly from the representative "srcPort"/"dstPort" columns on the two
+  // agg tiers (GROUP BY port) — a dedicated (ip, direction, port) table would
+  // only add rows for the same information that is already merged into each
+  // tuple at ingest time (flow_micro's PK cannot gain ports without dropping
+  // existing partitions).
 
   // WebAuthn passkeys per user + credential policies (see schema.ts). The
   // global policy row (userId IS NULL) is seeded once; it defaults to the

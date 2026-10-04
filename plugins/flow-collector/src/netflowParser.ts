@@ -51,6 +51,8 @@ export function parseNetflowV5Datagram(buf: Buffer): ParsedFlow[] {
       srcIp,
       dstIp,
       proto: buf[off + 38],
+      srcPort: buf.readUInt16BE(off + 32),
+      dstPort: buf.readUInt16BE(off + 34),
       bytes: buf.readUInt32BE(off + 20), // dOctets — reported (sampled) count
       packets: buf.readUInt32BE(off + 16), // dPkts
       sampleRate,
@@ -100,6 +102,8 @@ function decodeV9Record(buf: Buffer, recStart: number, recEnd: number, fields: V
   let bytes = 0;
   let packets = 0;
   let sampleRate = 1;
+  let srcPort = 0;
+  let dstPort = 0;
 
   for (const f of fields) {
     if (off + f.length > recEnd || off + f.length > buf.length) return null; // truncated — stop safely
@@ -109,6 +113,8 @@ function decodeV9Record(buf: Buffer, recStart: number, recEnd: number, fields: V
       case 12: dstIp = readRawIp4(buf, off); break; // IPV4_DST_ADDR
       case 28: dstIp = readRawIp6(buf, off); break; // IPV6_DST_ADDR
       case 4: if (f.length >= 1) proto = buf[off]; break; // PROTOCOL
+      case 10: if (f.length >= 2) srcPort = buf.readUInt16BE(off); break; // L4_SRC_PORT
+      case 11: if (f.length >= 2) dstPort = buf.readUInt16BE(off); break; // L4_DST_PORT
       case 1: if (f.length >= 4) bytes += buf.readUInt32BE(off); break; // IN_BYTES
       case 23: if (f.length >= 4) bytes += buf.readUInt32BE(off); break; // OUT_BYTES
       case 2: if (f.length >= 4) packets += buf.readUInt32BE(off); break; // IN_PKTS
@@ -121,7 +127,7 @@ function decodeV9Record(buf: Buffer, recStart: number, recEnd: number, fields: V
   }
 
   if (!srcIp || !dstIp || proto < 0) return null;
-  return { srcIp, dstIp, proto, bytes, packets, sampleRate };
+  return { srcIp, dstIp, proto, srcPort, dstPort, bytes, packets, sampleRate };
 }
 
 /** Parse one NetFlow v9 datagram (20B header + flow sets). Never throws. */

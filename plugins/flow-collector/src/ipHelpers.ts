@@ -8,6 +8,10 @@ export interface ParsedFlow {
   srcIp: string;
   dstIp: string;
   proto: number;
+  /** L4 source port (0 when the record carries no transport header — ICMP, raw packets without TCP/UDP, …). */
+  srcPort: number;
+  /** L4 destination port (0 when unknown, see `srcPort`). */
+  dstPort: number;
   /**
    * REPORTED (sampled) bytes — the byte count as observed by the exporter
    * (packet/frame length for sFlow, dOctets for NetFlow v5). The sampling
