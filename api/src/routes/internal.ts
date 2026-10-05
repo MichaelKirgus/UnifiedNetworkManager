@@ -558,8 +558,10 @@ export function internalRouter() {
 
       // Compact wire shape per sample: { s: srcIp, d: dstIp, p: proto,
       // sp: srcPort, dp: dstPort, b: bytes, k: packets, n: sampleCount,
-      // r: sampleRate } — small keys keep the payloads compact at high tuple
-      // counts. Ports are optional (older collectors don't send them → 0).
+      // r: sampleRate, a: agentIp (best-observation exporter), ac: distinct
+      // exporter count } — small keys keep the payloads compact at high tuple
+      // counts. Ports + agent fields are optional (older collectors don't
+      // send them → 0/NULL).
       const rows = [];
       for (const e of samples.slice(0, MAX_FLOW_SAMPLES_PER_REQUEST)) {
         if (!e || typeof e !== 'object') continue;
@@ -578,6 +580,8 @@ export function internalRouter() {
           packets: Number.isFinite(Number(e.k)) ? Math.max(0, Number(e.k)) : 0,
           sampleCount: Number.isFinite(Number(e.n)) ? Math.max(1, Number(e.n)) : 1,
           sampleRate: Number.isFinite(Number(e.r)) ? Math.max(1, Number(e.r)) : 1,
+          agentIp: typeof e.a === 'string' && e.a.trim() !== '' ? String(e.a).trim() : null,
+          agentCount: Number.isFinite(Number(e.ac)) ? Math.max(0, Math.min(65_535, Number(e.ac))) : 0,
         });
       }
 

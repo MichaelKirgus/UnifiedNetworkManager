@@ -123,7 +123,10 @@ router.get('/flows/top-talkers', requireAuth, requirePermission('flows:read'), a
           `SELECT "srcIp" AS ip, SUM("estBytes")::bigint AS est_bytes, SUM(bytes)::bigint AS reported_bytes,
                   MAX("srcDeviceId") AS device_id, BOOL_OR("srcClass" = 'internal') AS is_internal,
                   MAX("srcNetworkName") AS network_name, MAX("srcVlanId") AS vlan_id,
-                  MAX("srcHostname") AS hostname
+                  MAX("srcHostname") AS hostname,
+                  -- Multi-exporter dedup: how many distinct exporters observed
+                  -- this IP's flows (0/NULL = pre-dedup data or single exporter).
+                  GREATEST(MAX(COALESCE("agentCount", 0)), 0)::int AS agent_count
            FROM ${table} WHERE bucket >= $1 AND bucket < $2${siteClause}
            GROUP BY "srcIp" ORDER BY est_bytes DESC LIMIT $${params.length + 1}`,
           [...params, limit]
@@ -132,7 +135,8 @@ router.get('/flows/top-talkers', requireAuth, requirePermission('flows:read'), a
           `SELECT "dstIp" AS ip, SUM("estBytes")::bigint AS est_bytes, SUM(bytes)::bigint AS reported_bytes,
                   MAX("dstDeviceId") AS device_id, BOOL_OR("dstClass" = 'internal') AS is_internal,
                   MAX("dstNetworkName") AS network_name, MAX("dstVlanId") AS vlan_id,
-                  MAX("dstHostname") AS hostname
+                  MAX("dstHostname") AS hostname,
+                  GREATEST(MAX(COALESCE("agentCount", 0)), 0)::int AS agent_count
            FROM ${table} WHERE bucket >= $1 AND bucket < $2${siteClause}
            GROUP BY "dstIp" ORDER BY est_bytes DESC LIMIT $${params.length + 1}`,
           [...params, limit]
@@ -149,7 +153,7 @@ router.get('/flows/top-talkers', requireAuth, requirePermission('flows:read'), a
     const shape = (rows: any[]) => rows.map((r): {
       ip: string; estBytes: number; reportedBytes: number; deviceId: string | null; deviceName: string | null;
       internal: boolean; hostname: string | null; hostnameSource: 'inventory' | 'reverse-dns' | null;
-      networkName: string | null; vlanId: number | null;
+      networkName: string | null; vlanId: number | null; observedBy: number;
     } => ({
       ip: String(r.ip),
       estBytes: Number(r.est_bytes),
@@ -157,6 +161,9 @@ router.get('/flows/top-talkers', requireAuth, requirePermission('flows:read'), a
       deviceId: r.device_id ? String(r.device_id) : null,
       deviceName: r.device_id ? names.get(String(r.device_id)) ?? null : null,
       internal: Boolean(r.is_internal),
+      // >1 = the same flows were exported by several devices on the path and
+      // deduplicated to a single best observation (see workers/flows.ts).
+      observedBy: Number(r.agent_count ?? 0),
       // Inventory hostname (hosts table — container/VM name, DHCP lease). For
       // external talkers this is usually null and filled below via reverse DNS.
       hostname: r.hostname !== null && r.hostname !== undefined ? String(r.hostname) : null,

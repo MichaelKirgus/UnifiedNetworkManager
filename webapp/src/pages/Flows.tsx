@@ -204,6 +204,21 @@ export default function Flows() {
       render: (row) => <span className="font-mono text-xs">{formatBytes(row.estBytes)}</span>,
     },
     {
+      // Multi-exporter dedup indicator — >1 means several devices on the path
+      // exported this traffic and it was collapsed to one best observation.
+      header: 'Observed by',
+      key: 'observedBy',
+      width: 100,
+      sortAccessor: (row) => row.observedBy,
+      render: (row) => (row.observedBy > 1 ? (
+        <span className="rounded bg-accent-sky px-1.5 py-0.5 text-[10px] font-medium" title={`Seen by ${row.observedBy} exporters — deduplicated to the best observation`}>
+          {row.observedBy}×
+        </span>
+      ) : (
+        <span className="text-faint">—</span>
+      )),
+    },
+    {
       header: 'Reported',
       key: 'reportedBytes',
       width: 120,

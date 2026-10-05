@@ -50,6 +50,17 @@ export interface FlowMicroRow {
   packets: number;
   sampleCount: number;
   sampleRate: number;
+  /**
+   * Exporter identity (multi-exporter dedup): the exporter whose counters were
+   * kept for this tuple — when several devices on the path export the SAME flow,
+   * every one sees ~100% of its packets, so summing all exporters would
+   * overcount ×N. The collector plugin already dedups per window (best
+   * observation = highest estimated bytes) and reports agentCount = how many
+   * distinct exporters saw the tuple (>1 = deduped). NULL/0 on rows from older
+   * collector versions that predate exporter tracking.
+   */
+  agentIp: string | null;
+  agentCount: number;
 }
 
 const MAX_QUEUE_ROWS = 100_000; // bounded memory; overflow drops OLDEST rows
@@ -210,12 +221,28 @@ async function drainQueue(): Promise<void> {
     if (!m) {
       merged.set(key, { ...r });
     } else {
+      const prevBytes = m.bytes;
       m.bytes += r.bytes;
       m.packets += r.packets;
       m.sampleCount += r.sampleCount;
       if (r.sampleRate > m.sampleRate) m.sampleRate = r.sampleRate;
       if (r.srcPort > m.srcPort) m.srcPort = r.srcPort;
       if (r.dstPort > m.dstPort) m.dstPort = r.dstPort;
+      // Exporter identity: keep the agent of the larger contribution; counts
+      // merge as a union approximation (same agent → max, distinct → sum).
+      const hasM = m.agentIp !== null && m.agentIp !== '';
+      const hasR = r.agentIp !== null && r.agentIp !== '';
+      if (!hasM && hasR) {
+        m.agentIp = r.agentIp;
+        m.agentCount = Math.max(m.agentCount, r.agentCount);
+      } else if (hasM && hasR && m.agentIp !== r.agentIp) {
+        // Two different best agents for the same 5-tuple — keep the bigger
+        // contributor's identity and union-approximate the counts.
+        if (r.bytes > prevBytes) m.agentIp = r.agentIp;
+        m.agentCount += r.agentCount;
+      } else {
+        m.agentCount = Math.max(m.agentCount, r.agentCount);
+      }
     }
   }
   const batch = [...merged.values()];
@@ -225,13 +252,13 @@ async function drainQueue(): Promise<void> {
     const params: unknown[] = [];
     let p = 1;
     const values = chunk.map((r) => {
-      params.push(r.ts, r.collectorId, r.srcIp, r.dstIp, r.proto, r.bytes, r.packets, r.sampleCount, r.sampleRate, r.srcPort, r.dstPort);
-      return `($${p++}, $${p++}, $${p++}::inet, $${p++}::inet, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`;
+      params.push(r.ts, r.collectorId, r.srcIp, r.dstIp, r.proto, r.bytes, r.packets, r.sampleCount, r.sampleRate, r.srcPort, r.dstPort, r.agentIp ?? null, Math.max(0, r.agentCount | 0));
+      return `($${p++}, $${p++}, $${p++}::inet, $${p++}::inet, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`;
     });
 
     try {
       await pool.query(
-        `INSERT INTO flow_micro (ts, "collectorId", "srcIp", "dstIp", proto, bytes, packets, "sampleCount", "sampleRate", "srcPort", "dstPort")
+        `INSERT INTO flow_micro (ts, "collectorId", "srcIp", "dstIp", proto, bytes, packets, "sampleCount", "sampleRate", "srcPort", "dstPort", "agentIp", "agentCount")
          VALUES ${values.join(', ')}
          ON CONFLICT (ts, "srcIp", "dstIp", proto, "collectorId") DO UPDATE SET
            bytes = flow_micro.bytes + EXCLUDED.bytes,
@@ -241,7 +268,11 @@ async function drainQueue(): Promise<void> {
            -- Ports are not key columns: on a merge keep the highest seen so a
            -- real port is never overwritten by a 0 from an ICMP/UDP-less sample.
            "srcPort" = GREATEST(flow_micro."srcPort", EXCLUDED."srcPort"),
-           "dstPort" = GREATEST(flow_micro."dstPort", EXCLUDED."dstPort")`,
+           "dstPort" = GREATEST(flow_micro."dstPort", EXCLUDED."dstPort"),
+           -- Exporter identity: fill gaps, never overwrite known values; the
+           -- count is a union approximation across re-pushed windows.
+           "agentIp" = COALESCE(flow_micro."agentIp", EXCLUDED."agentIp"),
+           "agentCount" = GREATEST(flow_micro."agentCount", EXCLUDED."agentCount")`,
         params
       );
       insertedTotal += chunk.length;
@@ -272,15 +303,22 @@ async function rollupTo5m(): Promise<void> {
   if (nowBucketMs <= lastRolled5mBucketMs) return; // nothing new yet
 
   const fromMs = Math.max(lastRolled5mBucketMs, nowBucketMs - ROLLUP_MAX_CATCHUP_MS);
+  // Grouped per EXPORTER (agentIp) as well — the JS pass below keeps only the
+  // best observation per tuple (multi-exporter dedup, see db.ts comment).
   const rows = await pool.query(
     `SELECT date_trunc('minute', ts) AS minute, "srcIp", "dstIp", proto,
+            COALESCE("agentIp", '') AS agent_ip,
             SUM(bytes)::bigint AS bytes, SUM(packets)::bigint AS packets,
             MAX("sampleRate")::int AS sample_rate,
             -- Representative ports: highest seen in the window (0 = no transport header).
-            MAX("srcPort")::int AS src_port, MAX("dstPort")::int AS dst_port
+            MAX("srcPort")::int AS src_port, MAX("dstPort")::int AS dst_port,
+            -- Union-approximate observer count from the plugin (per-window
+            -- distinct exporters) — an agent that never WON best-observation
+            -- in any window is still counted here.
+            MAX(GREATEST("agentCount", 0))::int AS agent_count
      FROM flow_micro
      WHERE ts >= $1 AND ts < $2
-     GROUP BY 1, 2, 3, 4`,
+     GROUP BY 1, 2, 3, 4, 5`,
     [new Date(fromMs).toISOString(), new Date(nowBucketMs).toISOString()]
   );
 
@@ -289,17 +327,24 @@ async function rollupTo5m(): Promise<void> {
     return;
   }
 
-  // Group by 5-minute bucket in JS (the query returns per-minute rows).
-  interface AggRow {
-    bucket: string;
-    srcIp: string;
-    dstIp: string;
-    proto: number;
+  // Group by 5-minute bucket in JS (the query returns per-minute rows),
+  // keeping the counters PER EXPORTER so the best observation can be picked.
+  interface AgentAgg {
     bytes: number;
     packets: number;
     sampleRate: number;
     srcPort: number;
     dstPort: number;
+  }
+  interface AggRow {
+    bucket: string;
+    srcIp: string;
+    dstIp: string;
+    proto: number;
+    /** Per-exporter counters; '' = unknown (rows from pre-dedup collectors). */
+    agents: Map<string, AgentAgg>;
+    /** Max of the plugin's per-window union counts across this bucket. */
+    maxAgentCount: number;
   }
   // Defensive normalization: node-postgres normally returns timestamptz as a JS
   // Date, but in some process states (pg-types parser state) it can come back
@@ -321,16 +366,24 @@ async function rollupTo5m(): Promise<void> {
     const key = `${bucketMs}|${r.srcIp}|${r.dstIp}|${r.proto}`;
     let a = byKey.get(key);
     if (!a) {
-      a = { bucket: new Date(bucketMs).toISOString(), srcIp: String(r.srcIp), dstIp: String(r.dstIp), proto: Number(r.proto), bytes: 0, packets: 0, sampleRate: 1, srcPort: 0, dstPort: 0 };
+      a = { bucket: new Date(bucketMs).toISOString(), srcIp: String(r.srcIp), dstIp: String(r.dstIp), proto: Number(r.proto), agents: new Map(), maxAgentCount: 0 };
       byKey.set(key, a);
     }
-    a.bytes += Number(r.bytes);
-    a.packets += Number(r.packets);
-    if (Number(r.sample_rate) > a.sampleRate) a.sampleRate = Number(r.sample_rate);
+    const ac = Number(r.agent_count ?? 0);
+    if (ac > a.maxAgentCount) a.maxAgentCount = ac;
+    const agentKey = String(r.agent_ip ?? '');
+    let ag = a.agents.get(agentKey);
+    if (!ag) {
+      ag = { bytes: 0, packets: 0, sampleRate: 1, srcPort: 0, dstPort: 0 };
+      a.agents.set(agentKey, ag);
+    }
+    ag.bytes += Number(r.bytes);
+    ag.packets += Number(r.packets);
+    if (Number(r.sample_rate) > ag.sampleRate) ag.sampleRate = Number(r.sample_rate);
     // Representative ports — MAX across the minutes of this 5-min bucket.
     const sp = Number(r.src_port ?? 0), dp = Number(r.dst_port ?? 0);
-    if (sp > a.srcPort) a.srcPort = sp;
-    if (dp > a.dstPort) a.dstPort = dp;
+    if (sp > ag.srcPort) ag.srcPort = sp;
+    if (dp > ag.dstPort) ag.dstPort = dp;
   }
 
   // Load the configured range lists once per tick (settings are cached).
@@ -339,12 +392,27 @@ async function rollupTo5m(): Promise<void> {
   interface RollupRow {
     bucket: string; srcIp: string; dstIp: string; proto: number; bytes: number; packets: number; estBytes: number;
     srcPort: number; dstPort: number;
+    agentIp: string | null; agentCount: number;
     srcDeviceId: string | null; dstDeviceId: string | null; srcClass: string; dstClass: string;
     srcNetworkName: string | null; dstNetworkName: string | null; srcVlanId: number | null; dstVlanId: number | null;
     srcHostname: string | null; dstHostname: string | null;
   }
   const aggRows: RollupRow[] = [];
   for (const a of byKey.values()) {
+    // Multi-exporter dedup — several devices on the path export the SAME flow
+    // and each sees ~100% of its packets, so summing all exporters would
+    // overcount ×N. Keep only the BEST OBSERVATION: the exporter with the
+    // highest estimated bytes (reported × rate; comparable across different
+    // sampling rates — an agent whose port was down part of the window has
+    // fewer bytes and loses). agentCount = distinct exporters that saw it.
+    let bestIp = '';
+    let best: AgentAgg | null = null;
+    for (const [ip, ag] of a.agents) {
+      if (!best || ag.bytes * ag.sampleRate > best.bytes * best.sampleRate) {
+        bestIp = ip;
+        best = ag;
+      }
+    }
     const src = classifyIp(a.srcIp, enrichment.exact.get(a.srcIp) ?? null, enrichment.cidrs, ranges);
     const dst = classifyIp(a.dstIp, enrichment.exact.get(a.dstIp) ?? null, enrichment.cidrs, ranges);
     // Network display context (name + VLAN) via longest-prefix inventory match.
@@ -352,9 +420,13 @@ async function rollupTo5m(): Promise<void> {
     const dstNet = lookupNetworkContext(a.dstIp, enrichment.cidrs);
     // estBytes: reported bytes × sampling rate, capped at int8.
     aggRows.push({
-      bucket: a.bucket, srcIp: a.srcIp, dstIp: a.dstIp, proto: a.proto, bytes: a.bytes, packets: a.packets,
-      estBytes: Math.min(Number.MAX_SAFE_INTEGER, a.bytes * a.sampleRate),
-      srcPort: a.srcPort, dstPort: a.dstPort,
+      bucket: a.bucket, srcIp: a.srcIp, dstIp: a.dstIp, proto: a.proto, bytes: best!.bytes, packets: best!.packets,
+      estBytes: Math.min(Number.MAX_SAFE_INTEGER, best!.bytes * best!.sampleRate),
+      srcPort: best!.srcPort, dstPort: best!.dstPort,
+      // Distinct agents that WON at least one window + the plugin's per-window
+      // union count (catches agents that observed but never won) — take the
+      // stronger lower bound of both.
+      agentIp: bestIp === '' ? null : bestIp, agentCount: Math.max(a.agents.size, a.maxAgentCount),
       srcDeviceId: src.deviceId, dstDeviceId: dst.deviceId, srcClass: src.cls, dstClass: dst.cls,
       srcNetworkName: srcNet?.name ?? null, dstNetworkName: dstNet?.name ?? null,
       srcVlanId: srcNet?.vlanId ?? null, dstVlanId: dstNet?.vlanId ?? null,
@@ -373,11 +445,11 @@ async function rollupTo5m(): Promise<void> {
     const params: unknown[] = [];
     let p = 1;
     const values = chunk.map((r) => {
-      params.push(r.bucket, r.srcIp, r.dstIp, r.proto, r.bytes, r.packets, r.estBytes, r.srcPort, r.dstPort, r.srcDeviceId, r.dstDeviceId, r.srcClass, r.dstClass, r.srcNetworkName, r.dstNetworkName, r.srcVlanId, r.dstVlanId, r.srcHostname, r.dstHostname);
-      return `($${p++}, $${p++}::inet, $${p++}::inet, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`;
+      params.push(r.bucket, r.srcIp, r.dstIp, r.proto, r.bytes, r.packets, r.estBytes, r.srcPort, r.dstPort, r.agentIp ?? null, Math.max(0, r.agentCount | 0), r.srcDeviceId, r.dstDeviceId, r.srcClass, r.dstClass, r.srcNetworkName, r.dstNetworkName, r.srcVlanId, r.dstVlanId, r.srcHostname, r.dstHostname);
+      return `($${p++}, $${p++}::inet, $${p++}::inet, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`;
     });
     await pool.query(
-      `INSERT INTO flow_agg_5m (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname")
+      `INSERT INTO flow_agg_5m (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "agentIp", "agentCount", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname")
        VALUES ${values.join(', ')}
        ON CONFLICT (bucket, "srcIp", "dstIp", proto) DO UPDATE SET
          bytes = flow_agg_5m.bytes + EXCLUDED.bytes,
@@ -386,6 +458,10 @@ async function rollupTo5m(): Promise<void> {
          -- Representative ports: keep the highest seen across ticks.
          "srcPort" = GREATEST(flow_agg_5m."srcPort", EXCLUDED."srcPort"),
          "dstPort" = GREATEST(flow_agg_5m."dstPort", EXCLUDED."dstPort"),
+         -- Exporter identity: fill gaps, never overwrite known values; the
+         -- count is a union approximation across ticks.
+         "agentIp" = COALESCE(flow_agg_5m."agentIp", EXCLUDED."agentIp"),
+         "agentCount" = GREATEST(flow_agg_5m."agentCount", EXCLUDED."agentCount"),
          -- Network context may have been NULL on an earlier tick (inventory
          -- was empty then) — fill gaps, never overwrite known values.
          "srcNetworkName" = COALESCE(EXCLUDED."srcNetworkName", flow_agg_5m."srcNetworkName"),
@@ -417,10 +493,14 @@ async function rollupTo1h(): Promise<void> {
 
   const fromMs = Math.max(lastRolled1hBucketMs, nowBucketMs - ROLLUP_1H_MAX_CATCHUP_MS);
   const res = await pool.query(
-     `INSERT INTO flow_agg_1h (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname")
+     `INSERT INTO flow_agg_1h (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "agentIp", "agentCount", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname")
      SELECT date_trunc('hour', bucket), "srcIp", "dstIp", proto,
             SUM(bytes)::bigint, SUM(packets)::bigint, SUM("estBytes")::bigint,
             MAX("srcPort"), MAX("dstPort"),
+            -- Exporter identity: the agent of the largest 5-min observation
+            // wins (NULL-safe). MAX (not SUM) across buckets — the exporter set
+            // on a path is stable within an hour, so summing would overcount ×N.
+            (ARRAY_AGG("agentIp" ORDER BY bytes DESC NULLS LAST))[1], MAX(GREATEST("agentCount", 0))::int,
             MAX("srcDeviceId"), MAX("dstDeviceId"),
             -- 'internal' wins over 'internet'/'unknown' when a tuple's endpoints
             -- were classified differently across the hour (inventory changed).
@@ -441,6 +521,9 @@ async function rollupTo1h(): Promise<void> {
        -- Representative ports: keep the highest seen across ticks.
        "srcPort" = GREATEST(flow_agg_1h."srcPort", EXCLUDED."srcPort"),
        "dstPort" = GREATEST(flow_agg_1h."dstPort", EXCLUDED."dstPort"),
+       -- Exporter identity: fill gaps, never overwrite known values.
+       "agentIp" = COALESCE(flow_agg_1h."agentIp", EXCLUDED."agentIp"),
+       "agentCount" = GREATEST(flow_agg_1h."agentCount", EXCLUDED."agentCount"),
        -- Network context: prefer what is already stored (a later tick may have
        -- rolled a window whose rows predate the inventory enrichment).
        "srcNetworkName" = COALESCE(flow_agg_1h."srcNetworkName", EXCLUDED."srcNetworkName"),

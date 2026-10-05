@@ -1162,6 +1162,12 @@ export interface FlowTalker {
   networkName: string | null;
   /** VLAN id of that network (null = untagged/unknown). */
   vlanId: number | null;
+  /**
+   * How many distinct exporters observed this IP's flows in the window. >1 =
+   * several devices on the path exported the same traffic and it was
+   * deduplicated to a single best observation (0 = pre-dedup data or one exporter).
+   */
+  observedBy: number;
 }
 
 export interface FlowTopTalkersResponse {

@@ -7438,6 +7438,7 @@ components:
         hostnameSource: { type: [string, 'null'], enum: ['inventory', 'reverse-dns', null], description: "Where the hostname came from — 'inventory' = hosts table, 'reverse-dns' = PTR lookup" }
         networkName: { type: [string, 'null'], description: "Inventoried network this IP lives in (longest-prefix match), e.g. 'LAN' — null when no inventory network matches" }
         vlanId: { type: [integer, 'null'], description: "VLAN id of the matching inventoried network (null when untagged or unknown)" }
+        observedBy: { type: integer, description: "How many distinct exporters (sFlow/NetFlow agents) observed this IP's flows in the window. >1 = several devices on the path exported the same traffic and it was deduplicated to a single best observation; 0 = pre-dedup data or a single exporter" }
 
     FlowPortRow:
       type: object

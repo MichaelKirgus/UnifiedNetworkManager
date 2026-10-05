@@ -5,6 +5,13 @@
 
 /** One normalized flow extracted from a datagram (any protocol). */
 export interface ParsedFlow {
+  /**
+   * The EXPORTER that observed this flow — sFlow's agent address from the
+   * datagram header, or the UDP source address for NetFlow v5/v9 (which carry
+   * no in-payload exporter identity). Used by the pre-aggregation window to
+   * deduplicate the same flow seen by several exporters on the path.
+   */
+  agentIp: string;
   srcIp: string;
   dstIp: string;
   proto: number;

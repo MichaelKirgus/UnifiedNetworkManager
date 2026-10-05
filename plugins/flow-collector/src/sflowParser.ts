@@ -91,6 +91,9 @@ export function parseSflowDatagram(buf: Buffer): ParsedFlow[] {
   const agentAddrLen = agentAddrType === 1 ? 4 : agentAddrType === 2 ? 16 : 0;
   if (agentAddrLen === 0 || buf.length < 8 + agentAddrLen + 16) return flows; // malformed header
 
+  // The exporter's own address — identifies WHICH device observed the flow.
+  const agentIp = agentAddrType === 1 ? readRawIp4(buf, 8)! : readRawIp6(buf, 8)!;
+
   // After the agent address: subAgentId(4) seqNo(4) uptime(4), THEN numSamples.
   const numSamples = buf.readUInt32BE(8 + agentAddrLen + 12);
   let off = 8 + agentAddrLen + 16;
@@ -127,7 +130,7 @@ export function parseSflowDatagram(buf: Buffer): ParsedFlow[] {
           const dstIp = readRawIp4(buf, payloadStart + 12);
           if (srcIp && dstIp) {
             flows.push({
-              srcIp, dstIp, proto,
+              agentIp, srcIp, dstIp, proto,
               srcPort: buf.readUInt32BE(payloadStart + 16),
               dstPort: buf.readUInt32BE(payloadStart + 20),
               bytes: pktLen, packets: 1, sampleRate: samplingRate,
@@ -142,7 +145,7 @@ export function parseSflowDatagram(buf: Buffer): ParsedFlow[] {
           const dstIp = readRawIp6(buf, payloadStart + 24);
           if (srcIp && dstIp) {
             flows.push({
-              srcIp, dstIp, proto,
+              agentIp, srcIp, dstIp, proto,
               srcPort: buf.readUInt32BE(payloadStart + 40),
               dstPort: buf.readUInt32BE(payloadStart + 44),
               bytes: pktLen, packets: 1, sampleRate: samplingRate,
@@ -157,7 +160,7 @@ export function parseSflowDatagram(buf: Buffer): ParsedFlow[] {
           if (hdrMax >= 34) {
             const parsed = parseEthernetHeader(buf.subarray(payloadStart + 16, payloadStart + 16 + hdrMax));
             if (parsed) {
-              flows.push({ srcIp: parsed.srcIp, dstIp: parsed.dstIp, proto: parsed.proto, srcPort: parsed.srcPort, dstPort: parsed.dstPort, bytes: frameLen, packets: 1, sampleRate: samplingRate });
+              flows.push({ agentIp, srcIp: parsed.srcIp, dstIp: parsed.dstIp, proto: parsed.proto, srcPort: parsed.srcPort, dstPort: parsed.dstPort, bytes: frameLen, packets: 1, sampleRate: samplingRate });
             }
           }
         }

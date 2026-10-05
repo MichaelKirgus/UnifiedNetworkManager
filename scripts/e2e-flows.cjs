@@ -128,8 +128,14 @@ async function main() {
   // ── 1. mock burst (sFlow + NetFlow v5/v9 in parallel on the same port) ───
   console.log(`\n[mock] sending sFlow + NetFlow v5/v9 datagrams to udp://${HOST}:${PORT} for ${BURST_MS / 1000}s`);
   const env = { ...process.env, SFLOW_SEND_INTERVAL_MS: '2000', NF_SEND_INTERVAL_MS: '2000' };
+  // Second sFlow exporter (agent 192.168.1.2) sends ONLY the internal→internal
+  // record — it duplicates exactly one tuple so we can verify multi-exporter
+  // dedup (best observation kept, agentCount = 2). Same SAMPLE_RATE as the
+  // first agent keeps the estBytes invariant check valid.
+  const envSecondAgent = { ...env, AGENT_IP: '192.168.1.2', ONLY_INTERNAL: '1' };
   const procs = [
     spawn('node', [path.join(__dirname, 'mock-sflow.cjs'), HOST, String(PORT)], { stdio: 'inherit', env }),
+    spawn('node', [path.join(__dirname, 'mock-sflow.cjs'), HOST, String(PORT)], { stdio: 'inherit', env: envSecondAgent }),
     spawn('node', [path.join(__dirname, 'mock-netflow.cjs'), HOST, String(PORT)], { stdio: 'inherit', env }),
   ];
   await sleep(BURST_MS);
@@ -159,6 +165,24 @@ async function main() {
   const nf5 = await pool.query("SELECT count(*)::int n FROM flow_micro WHERE \"dstIp\" = '192.168.1.20'");
   check('NetFlow v5 flows ingested', nf5.rows[0].n > 0, `rows=${nf5.rows[0].n}`);
 
+  // ── Multi-exporter dedup ────────────────────────────────────────
+  // The internal→internal TCP tuple (192.168.1.50 → .10) is observed by THREE
+  // exporters: sFlow agent 192.168.1.1, the second sFlow agent 192.168.1.2
+  // (ONLY_INTERNAL), and NetFlow v5 (agent = UDP source address). Dedup keeps
+  // ONE best observation per window — agentCount records how many agents saw it.
+  const dedup = await pool.query(
+    `SELECT MAX("agentCount")::int AS "maxAgents", SUM(bytes)::bigint AS "totalBytes", count(*)::int AS rows
+     FROM flow_micro WHERE "srcIp" = '192.168.1.50' AND "dstIp" = '192.168.1.10' AND proto = 6`
+  );
+  console.log(`    dedup tuple .50→.10/6: rows=${dedup.rows[0].rows} maxAgentCount=${dedup.rows[0].maxAgents} totalBytes=${dedup.rows[0].totalBytes}`);
+  check('dedup: shared tuple observed by >= 2 exporters (agentCount)', dedup.rows[0].maxAgents >= 2, `agentCount=${dedup.rows[0].maxAgents}`);
+
+  // Tuples seen by exactly ONE exporter must NOT be flagged multi-observed.
+  const single = await pool.query(
+    'SELECT MAX("agentCount")::int AS "maxAgents" FROM flow_micro WHERE "srcIp" = \'192.168.1.75\''
+  );
+  check('dedup: single-exporter tuple has agentCount = 1', single.rows[0].maxAgents === 1, `agentCount=${single.rows[0].maxAgents}`);
+
   if (WAIT_ROLLUP) await waitForRollup(pool);
 
   // ── 3. routes ────────────────────────────────────────────────────
@@ -172,6 +196,12 @@ async function main() {
     const j = await talkers.json();
     check('top-talkers has sources', Array.isArray(j.sources) && j.sources.length > 0, `sources=${j.sources?.length}`);
     console.log(`    top source: ${JSON.stringify(j.sources?.[0] ?? null)}`);
+    // The shared tuple's endpoints must surface ALL THREE exporters: the two
+    // sFlow agents + NetFlow v5. observedBy >= 3 proves the rollup carries the
+    // plugin's per-window union count (an agent that never won best-observation
+    // in any window would be invisible to a distinct-winners-only count).
+    const multi = [...(j.sources ?? []), ...(j.destinations ?? [])].filter((t) => t.ip === '192.168.1.50' || t.ip === '192.168.1.10');
+    check('top-talkers: shared-tuple IPs report observedBy >= 3 (all exporters)', multi.length > 0 && multi.every((t) => (t.observedBy ?? 0) >= 3), JSON.stringify(multi));
   }
 
   const internet = await authed(`/flows/internet?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);

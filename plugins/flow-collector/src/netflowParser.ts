@@ -32,8 +32,12 @@ import { readRawIp4, readRawIp6, type ParsedFlow } from './ipHelpers';
 
 // ── NetFlow v5 ──────────────────────────────────────────────────────────────
 
-/** Parse one NetFlow v5 datagram (24B header + 48B records). Never throws. */
-export function parseNetflowV5Datagram(buf: Buffer): ParsedFlow[] {
+/**
+ * Parse one NetFlow v5 datagram (24B header + 48B records). Never throws.
+ * `agentIp` = the UDP source address of the datagram — v5 carries no
+ * in-payload exporter identity, so the socket peer IS the exporter.
+ */
+export function parseNetflowV5Datagram(buf: Buffer, agentIp: string): ParsedFlow[] {
   const flows: ParsedFlow[] = [];
   if (buf.length < 24) return flows;
   if (buf.readUInt16BE(0) !== 5) return flows;
@@ -48,6 +52,7 @@ export function parseNetflowV5Datagram(buf: Buffer): ParsedFlow[] {
     const dstIp = readRawIp4(buf, off + 4);
     if (!srcIp || !dstIp) break; // truncated — stop safely
     flows.push({
+      agentIp,
       srcIp,
       dstIp,
       proto: buf[off + 38],
@@ -94,7 +99,7 @@ function readTemplateFields(buf: Buffer, off: number, end: number, fieldCount: n
 }
 
 /** Decode one v9 data record against a template. Returns null when the tuple can't be normalized. */
-function decodeV9Record(buf: Buffer, recStart: number, recEnd: number, fields: V9Field[]): ParsedFlow | null {
+function decodeV9Record(buf: Buffer, recStart: number, recEnd: number, fields: V9Field[], agentIp: string): ParsedFlow | null {
   let off = recStart;
   let srcIp: string | null = null;
   let dstIp: string | null = null;
@@ -127,11 +132,15 @@ function decodeV9Record(buf: Buffer, recStart: number, recEnd: number, fields: V
   }
 
   if (!srcIp || !dstIp || proto < 0) return null;
-  return { srcIp, dstIp, proto, srcPort, dstPort, bytes, packets, sampleRate };
+  return { agentIp, srcIp, dstIp, proto, srcPort, dstPort, bytes, packets, sampleRate };
 }
 
-/** Parse one NetFlow v9 datagram (20B header + flow sets). Never throws. */
-export function parseNetflowV9Datagram(buf: Buffer): ParsedFlow[] {
+/**
+ * Parse one NetFlow v9 datagram (20B header + flow sets). Never throws.
+ * `agentIp` = the UDP source address of the datagram — v9 carries no
+ * in-payload exporter identity, so the socket peer IS the exporter.
+ */
+export function parseNetflowV9Datagram(buf: Buffer, agentIp: string): ParsedFlow[] {
   const flows: ParsedFlow[] = [];
   if (buf.length < 20) return flows;
   if (buf.readUInt16BE(0) !== 9) return flows;
@@ -169,7 +178,7 @@ export function parseNetflowV9Datagram(buf: Buffer): ParsedFlow[] {
         const recordLen = fields.reduce((s, f) => s + f.length, 0);
         if (recordLen > 0) {
           for (let r = setStart; r + recordLen <= setEnd; r += recordLen) {
-            const flow = decodeV9Record(buf, r, r + recordLen, fields);
+            const flow = decodeV9Record(buf, r, r + recordLen, fields, agentIp);
             if (flow) flows.push(flow);
           }
         }

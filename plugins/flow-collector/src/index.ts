@@ -11,6 +11,17 @@
  * api/src/workers/flows.ts). Pre-aggregation here is what keeps the volume
  * manageable: tens of millions of raw samples/day become ~1-10M tuples.
  *
+ * Multi-exporter dedup: several devices on the path (distribution switch,
+ * core switch, router) all export the SAME flow. Every one of them sees ~100%
+ * of its packets, so summing all exporters would overcount ×N. The window
+ * therefore accumulates per (tuple, exporter) and at flush keeps only the
+ * BEST OBSERVATION — the agent with the highest estimated bytes (reported ×
+ * sampling rate, comparable across different rates; an agent whose port was
+ * down part of the window has fewer bytes and loses). `agentCount` records how
+ * many distinct exporters saw the tuple so the UI can show where dedup kicked
+ * in. Caveat: with ECMP/LACP path-splitting no single exporter sees 100%, so
+ * best-observation is then an undercount — still far closer than ×N overcount.
+ *
  * Backpressure model: the UDP receive path NEVER blocks on the API. Parsed
  * tuples go into a bounded in-memory queue; overflow drops the OLDEST tuples
  * (counted + surfaced via self-metrics). Pushes are fire-and-forget with one
@@ -70,6 +81,7 @@ const METRIC_DESCRIPTORS: MetricDescriptor[] = [
   { key: 'flow.queueDepth', label: 'Push queue depth', type: 'number', visualization: 'plot', group: 'Flow', color: '#f59e0b' },
   { key: 'flow.pushesTotal', label: 'Push batches (total)', type: 'number', visualization: 'text', group: 'Flow' },
   { key: 'flow.pushFailuresTotal', label: 'Failed pushes (total)', type: 'number', visualization: 'text', group: 'Flow' },
+  { key: 'flow.multiObservedTuples', label: 'Multi-observed tuples (deduped, total)', type: 'number', visualization: 'text', group: 'Flow' },
 ];
 
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
@@ -92,6 +104,7 @@ const server = createPluginServer({
     flowQueueDepth: pushQueue.length,
     flowPushesTotal: stats.pushesTotal,
     flowPushFailuresTotal: stats.pushFailuresTotal,
+    flowMultiObservedTuples: stats.multiObservedTuplesTotal,
   }),
 });
 
@@ -107,6 +120,7 @@ server.app.post('/monitoring', (_req, res) => {
     'flow.queueDepth': pushQueue.length,
     'flow.pushesTotal': stats.pushesTotal,
     'flow.pushFailuresTotal': stats.pushFailuresTotal,
+    'flow.multiObservedTuples': stats.multiObservedTuplesTotal,
   };
   res.status(200).json({
     collectedAt: new Date().toISOString(),
@@ -131,10 +145,22 @@ interface FlowTuple {
   packets: number;
   sampleCount: number;
   sampleRate: number;
+  /** Exporter that contributed the (deduplicated) counters — best observation. */
+  agentIp: string;
+  /** How many distinct exporters observed this tuple in the window (>1 = deduped). */
+  agentCount: number;
 }
 
 /** Aggregation map key. */
 type TupleKey = string; // `${src}|${dst}|${proto}|${sp}|${dp}`
+
+/** Per-agent counters for one tuple within the current window. */
+interface AgentAccum {
+  bytes: number;
+  packets: number;
+  sampleCount: number;
+  sampleRate: number;
+}
 
 const stats = {
   samplesReceivedTotal: 0,
@@ -143,37 +169,70 @@ const stats = {
   parseErrorsTotal: 0,
   pushesTotal: 0,
   pushFailuresTotal: 0,
+  multiObservedTuplesTotal: 0,
   lastPushAt: null as string | null,
   samplesPerSec: 0,
   tuplesPerSec: 0,
 };
 
-// Rolling pre-aggregation window.
+// Rolling pre-aggregation window — per tuple, per EXPORTER (see the module
+// header for why the flush keeps only the best observation).
 let windowStartMs = Date.now();
-let windowTuples = new Map<TupleKey, FlowTuple>();
+let windowTuples = new Map<TupleKey, Map<string, AgentAccum>>();
 
 /** Bounded push queue (oldest dropped on overflow). */
 const pushQueue: FlowTuple[] = [];
 
-function addSample(srcIp: string, dstIp: string, proto: number, srcPort: number, dstPort: number, bytes: number, packets: number, sampleRate: number): void {
+function addSample(srcIp: string, dstIp: string, proto: number, srcPort: number, dstPort: number, bytes: number, packets: number, sampleRate: number, agentIp: string): void {
   const key = `${srcIp}|${dstIp}|${proto}|${srcPort}|${dstPort}`;
-  let t = windowTuples.get(key);
-  if (!t) {
-    t = { ts: new Date(windowStartMs).toISOString(), srcIp, dstIp, proto, srcPort, dstPort, bytes: 0, packets: 0, sampleCount: 0, sampleRate };
-    windowTuples.set(key, t);
+  let agents = windowTuples.get(key);
+  if (!agents) {
+    agents = new Map();
+    windowTuples.set(key, agents);
   }
-  t.bytes += bytes;
-  t.packets += packets;
-  t.sampleCount += 1;
-  if (sampleRate > t.sampleRate) t.sampleRate = sampleRate;
+  let a = agents.get(agentIp);
+  if (!a) {
+    a = { bytes: 0, packets: 0, sampleCount: 0, sampleRate };
+    agents.set(agentIp, a);
+  }
+  a.bytes += bytes;
+  a.packets += packets;
+  a.sampleCount += 1;
+  if (sampleRate > a.sampleRate) a.sampleRate = sampleRate;
 }
 
 /** Flush the current window into the push queue. */
 function flushWindow(): void {
   if (windowTuples.size === 0) return;
-  for (const t of windowTuples.values()) {
-    pushQueue.push(t);
+  for (const [key, agents] of windowTuples) {
+    // Best-observation dedup — see module header: keep the agent with the
+    // highest ESTIMATED bytes (reported × rate; comparable across different
+    // sampling rates), count how many exporters saw the tuple.
+    let bestIp = '';
+    let bestAcc: AgentAccum | null = null;
+    for (const [ip, acc] of agents) {
+      if (!bestAcc || acc.bytes * acc.sampleRate > bestAcc.bytes * bestAcc.sampleRate) {
+        bestIp = ip;
+        bestAcc = acc;
+      }
+    }
+    const [srcIp, dstIp, protoStr, spStr, dpStr] = key.split('|');
+    pushQueue.push({
+      ts: new Date(windowStartMs).toISOString(),
+      srcIp,
+      dstIp,
+      proto: Number(protoStr),
+      srcPort: Number(spStr),
+      dstPort: Number(dpStr),
+      bytes: bestAcc!.bytes,
+      packets: bestAcc!.packets,
+      sampleCount: bestAcc!.sampleCount,
+      sampleRate: bestAcc!.sampleRate,
+      agentIp: bestIp,
+      agentCount: agents.size,
+    });
     stats.tuplesEmittedTotal += 1;
+    if (agents.size > 1) stats.multiObservedTuplesTotal += 1;
   }
   const overflow = pushQueue.length - MAX_QUEUE_TUPLES;
   if (overflow > 0) {
@@ -191,10 +250,12 @@ function startSflowSocket(): void {
   // Large receive buffer — flow bursts are the norm, not the exception.
   try { sock.setRecvBufferSize(8 * 1024 * 1024); } catch { /* best effort */ }
 
-  sock.on('message', (msg) => {
+  sock.on('message', (msg, rinfo) => {
     stats.samplesReceivedTotal += 1;
-    for (const f of parseFlowDatagram(msg)) {
-      addSample(f.srcIp, f.dstIp, f.proto, f.srcPort, f.dstPort, f.bytes, f.packets, f.sampleRate);
+    // NetFlow carries no in-payload exporter identity — the UDP source IS it.
+    for (const f of parseFlowDatagram(msg, rinfo.address)) {
+      // f.agentIp = sFlow header agent address or the UDP source (NetFlow).
+      addSample(f.srcIp, f.dstIp, f.proto, f.srcPort, f.dstPort, f.bytes, f.packets, f.sampleRate, f.agentIp);
     }
   });
   sock.on('error', (err) => {
@@ -218,7 +279,8 @@ const api = axios.create({
 async function pushBatch(rows: FlowTuple[]): Promise<void> {
   const body = {
     pluginId: identity.effectiveUuid,
-    samples: rows.map((t) => ({ s: t.srcIp, d: t.dstIp, p: t.proto, sp: t.srcPort, dp: t.dstPort, b: t.bytes, k: t.packets, n: t.sampleCount, r: t.sampleRate, ts: t.ts })),
+    // a = agentIp (best-observation exporter), ac = distinct-exporter count.
+    samples: rows.map((t) => ({ s: t.srcIp, d: t.dstIp, p: t.proto, sp: t.srcPort, dp: t.dstPort, b: t.bytes, k: t.packets, n: t.sampleCount, r: t.sampleRate, ts: t.ts, a: t.agentIp, ac: t.agentCount })),
   };
   try {
     await api.post('/plugin/flows', body);

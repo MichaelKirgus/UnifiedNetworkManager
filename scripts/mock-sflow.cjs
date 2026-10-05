@@ -34,6 +34,8 @@ const DEFAULTS = {
   dstInternalIp: (process.env.DST_INTERNAL_IP || '192.168.1.10').split('.').map(Number),
   dstInternetIp: (process.env.DST_INTERNET_IP || '8.8.8.8').split('.').map(Number),
   sampleRate: Number(process.env.SAMPLE_RATE) || 100,
+  // ONLY_INTERNAL=1 → send just the internal→internal record (dedup test).
+  onlyInternal: process.env.ONLY_INTERNAL === '1',
 };
 
 const HOST = process.argv[2] || '127.0.0.1';
@@ -143,7 +145,12 @@ function counterSample(seq, records) {
 /** Build one full sFlow datagram with the standard mock flow set. */
 function buildDatagram(seqNo, opts = {}) {
   const d = { ...DEFAULTS, ...opts };
-  const samples = [
+  // onlyInternal (env ONLY_INTERNAL=1): send JUST the internal→internal record —
+  // used by the multi-exporter dedup test so a second agent duplicates exactly
+  // one tuple while leaving the others single-observed.
+  const samples = d.onlyInternal ? [
+    flowSample(seqNo, [ipv4FlowRecord(d.srcIp, d.dstInternalIp, 6, 1_500)], d.sampleRate),
+  ] : [
     // Internal → internal (TCP/443) + internal → internet (UDP/53).
     flowSample(seqNo, [
       ipv4FlowRecord(d.srcIp, d.dstInternalIp, 6, 1_500),

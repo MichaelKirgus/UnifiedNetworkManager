@@ -14,8 +14,13 @@ import { parseSflowDatagram } from './sflowParser';
 import { parseNetflowV5Datagram, parseNetflowV9Datagram } from './netflowParser';
 import type { ParsedFlow } from './ipHelpers';
 
-/** Parse one UDP datagram as sFlow or NetFlow v5/v9. Never throws. */
-export function parseFlowDatagram(buf: Buffer): ParsedFlow[] {
+/**
+ * Parse one UDP datagram as sFlow or NetFlow v5/v9. Never throws.
+ * `agentIp` = the UDP source address of the datagram — the exporter identity
+ * for NetFlow (which carries none in-payload); sFlow ignores it and uses its
+ * own header agent address instead.
+ */
+export function parseFlowDatagram(buf: Buffer, agentIp: string): ParsedFlow[] {
   if (buf.length < 8) return [];
 
   const u32v = buf.readUInt32BE(0);
@@ -25,8 +30,8 @@ export function parseFlowDatagram(buf: Buffer): ParsedFlow[] {
   }
 
   const u16v = buf.readUInt16BE(0);
-  if (u16v === 5 && buf.length >= 24) return parseNetflowV5Datagram(buf);
-  if (u16v === 9 && buf.length >= 20) return parseNetflowV9Datagram(buf);
+  if (u16v === 5 && buf.length >= 24) return parseNetflowV5Datagram(buf, agentIp);
+  if (u16v === 9 && buf.length >= 20) return parseNetflowV9Datagram(buf, agentIp);
 
   return [];
 }

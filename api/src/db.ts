@@ -1176,10 +1176,15 @@ export async function initDb(): Promise<void> {
   await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "dstPort" INTEGER NOT NULL DEFAULT 0`);
   await pool.query(`ALTER TABLE flow_micro ALTER COLUMN "srcPort" TYPE INTEGER`);
   await pool.query(`ALTER TABLE flow_micro ALTER COLUMN "dstPort" TYPE INTEGER`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS brin_flow_micro_ts ON flow_micro USING BRIN (ts)`);
-
-  // Enriched 5-minute aggregates: one row per (bucket, srcIp, dstIp, proto)
-  // merged across all collectors. estBytes = reported bytes × sampling rate.
+// Exporter identity (multi-exporter dedup, added after the table went live):
+// agentIp = the exporter whose counters were kept for this tuple — when several
+// devices on the path export the SAME flow, every one sees ~100% of its packets,
+// so summing all exporters would overcount ×N. The collector plugin dedups per
+// window (best observation = highest estimated bytes) and reports agentCount =
+// how many distinct exporters saw the tuple (>1 = deduped). NULL/0 on rows from
+// older collector versions that predate exporter tracking.
+await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentIp" TEXT`);
+await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" INTEGER NOT NULL DEFAULT 0`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS flow_agg_5m (
       bucket TIMESTAMPTZ NOT NULL,
@@ -1215,6 +1220,10 @@ export async function initDb(): Promise<void> {
   // just which device. Filled at rollup time + backfilled for history.
   await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "srcHostname" TEXT`);
   await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "dstHostname" TEXT`);
+  // Exporter identity carried through from flow_micro (see the flow_micro
+  // comment): which exporter's counters were kept + how many exporters saw it.
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "agentIp" TEXT`);
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "agentCount" INTEGER NOT NULL DEFAULT 0`);
   await pool.query(`CREATE INDEX IF NOT EXISTS brin_flow_agg_5m_bucket ON flow_agg_5m USING BRIN (bucket)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_src_device ON flow_agg_5m ("srcDeviceId")`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_dst_device ON flow_agg_5m ("dstDeviceId")`);
@@ -1248,6 +1257,9 @@ export async function initDb(): Promise<void> {
   // Per-endpoint hostnames (see the flow_agg_5m comment above).
   await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "srcHostname" TEXT`);
   await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "dstHostname" TEXT`);
+  // Exporter identity carried through from the 5-minute tier (see there).
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "agentIp" TEXT`);
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "agentCount" INTEGER NOT NULL DEFAULT 0`);
   await pool.query(`CREATE INDEX IF NOT EXISTS brin_flow_agg_1h_bucket ON flow_agg_1h USING BRIN (bucket)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_src_device ON flow_agg_1h ("srcDeviceId")`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_dst_device ON flow_agg_1h ("dstDeviceId")`);
