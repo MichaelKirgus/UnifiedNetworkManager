@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { db } from '../db';
-import { and, eq, desc, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import * as schema from '../db/schema';
 
@@ -589,6 +589,130 @@ export function internalRouter() {
       res.status(202).json({ accepted: rows.length });
     } catch (error) {
       console.error('Error ingesting flow samples:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // POST /plugin/firewall-events - accept a batch of firewall event-log rows
+  // from one plugin (e.g. OPNsense's /api/diagnostics/firewall/log stream).
+  // Append-only log: rows are inserted with on-conflict-ignore keyed on the
+  // appliance's per-row unique id (vendorEventId), so a re-sent batch after a
+  // lost ack is harmless. Growth is bounded by the retention worker
+  // (firewallEventRetentionDays). Direct insert — at firewall-log volume this
+  // stays well within request budgets, no off-band queue needed.
+  const MAX_FIREWALL_EVENTS_PER_REQUEST = 5_000;
+  router.post('/plugin/firewall-events', pluginAuth, async (req: Request, res: Response) => {
+    const body = req.body ?? {};
+    const pluginId = typeof body.pluginId === 'string' ? body.pluginId : '';
+    if (!pluginId) {
+      return res.status(400).json({ error: 'pluginId is required' });
+    }
+    const events = Array.isArray(body.events) ? body.events : null;
+    if (!events || events.length === 0) {
+      return res.status(400).json({ error: '"events" array with at least one entry is required' });
+    }
+
+    try {
+      const plugin = await db.query.plugins.findFirst({ where: eq(schema.plugins.id, pluginId) });
+      if (!plugin) {
+        return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
+      }
+
+      let accepted = 0;
+      const batch = events.slice(0, MAX_FIREWALL_EVENTS_PER_REQUEST);
+      if (events.length > MAX_FIREWALL_EVENTS_PER_REQUEST) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[firewall-events] plugin ${pluginId} sent ${events.length} rows in one request; ` +
+            `dropping the last ${events.length - MAX_FIREWALL_EVENTS_PER_REQUEST}`
+        );
+      }
+
+      const str = (v: unknown, maxLen = 512): string | null => {
+        if (typeof v !== 'string') return null;
+        const t = v.trim();
+        return t === '' ? null : t.slice(0, maxLen);
+      };
+      const intOrNull = (v: unknown): number | null => {
+        const n = typeof v === 'number' ? v : Number(v);
+        return Number.isFinite(n) && n >= 0 && n <= 65_535 ? Math.trunc(n) : null;
+      };
+      // The appliance's `__timestamp__` is a LOCAL wall clock without offset
+      // ("2026-10-06T19:20:22"). To build the queryable tsMs axis we subtract
+      // the device's known UTC offset — taken from its latest device_times row
+      // (the plugin reports system.deviceTime with a resolved offset on every
+      // poll). No clock reading yet → fall back to treating it as UTC.
+      // The batch carries ONE device (body.deviceId); rows may also carry their
+      // own deviceId (per-row wins). Without the fallback every row would be
+      // skipped as "unusable" and the push would 201 with accepted=0 while the
+      // plugin's cursor still advanced — silent data loss.
+      const topDeviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
+
+      const deviceIdsInBatch = new Set<string>();
+      for (const e of batch) {
+        if (!e || typeof e !== 'object') continue;
+        const d = str(e.deviceId, 128) ?? (topDeviceId || null);
+        if (d) deviceIdsInBatch.add(d);
+      }
+      const offsetMinutesByDevice = new Map<string, number>();
+      if (deviceIdsInBatch.size > 0) {
+        const clockRows = await db.query.deviceTimes.findMany({
+          where: inArray(schema.deviceTimes.deviceId, [...deviceIdsInBatch]),
+        });
+        for (const c of clockRows) {
+          if (typeof c.utcOffsetMinutes === 'number' && Number.isFinite(c.utcOffsetMinutes)) {
+            offsetMinutesByDevice.set(c.deviceId, c.utcOffsetMinutes);
+          }
+        }
+      }
+      const tsToMs = (v: string, deviceId: string): number | null => {
+        let iso = v.trim();
+        if (!/([zZ]|[+-]\d{2}:?\d{2})$/.test(iso)) iso += 'Z'; // appliance-local → assume UTC base
+        const ms = Date.parse(iso);
+        if (!Number.isFinite(ms)) return null;
+        const offsetMin = offsetMinutesByDevice.get(deviceId) ?? 0;
+        return ms - offsetMin * 60_000;
+      };
+
+      const rows = [];
+      for (const e of batch) {
+        if (!e || typeof e !== 'object') continue;
+        const vendorEventId = str(e.vendorEventId, 128);
+        const ts = str(e.ts, 64);
+        const deviceId = str(e.deviceId, 128) ?? (topDeviceId || null);
+        if (!vendorEventId || !ts || !deviceId) continue; // unusable row — skip
+
+        rows.push({
+          id: uuidv4(),
+          pluginId,
+          deviceId,
+          ts,
+          tsMs: tsToMs(ts, deviceId),
+          action: str(e.action, 32)?.toLowerCase() ?? 'unknown',
+          reason: str(e.reason, 128),
+          interfaceName: (str(e.interfaceName, 128) ?? '').slice(0, 128),
+          srcIp: str(e.srcIp, 64) ?? '',
+          dstIp: str(e.dstIp, 64) ?? '',
+          proto: str(e.proto, 32)?.toLowerCase() ?? null,
+          srcPort: intOrNull(e.srcPort),
+          dstPort: intOrNull(e.dstPort),
+          ruleId: str(e.ruleId, 128),
+          ruleName: str(e.ruleName, 512),
+          vendorEventId,
+        });
+      }
+
+      if (rows.length > 0) {
+        // One batched insert; on-conflict-ignore makes re-sent batches harmless.
+        await db.insert(schema.firewallEvents).values(rows).onConflictDoNothing({
+          target: [schema.firewallEvents.deviceId, schema.firewallEvents.pluginId, schema.firewallEvents.vendorEventId],
+        });
+      }
+      accepted = rows.length;
+
+      res.status(201).json({ accepted });
+    } catch (error) {
+      console.error('Error ingesting firewall events:', error);
       res.status(500).json({ error: 'Internal server error' });
     }
   });

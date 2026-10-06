@@ -4,7 +4,82 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { RuleAddressCell } from '../components/FirewallAddressCell';
 import { formatBytes } from '../components/formatMetric';
-import { api, FirewallRuleRow } from '../api/client';
+import { api, FirewallRuleRow, FirewallSessionRow } from '../api/client';
+
+/** "1h 23m" / "45s" style compact duration for session ages. */
+function fmtDurationSec(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return '—';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+/**
+ * Live connection-state overview — one card per device reporting session data.
+ * Reads the latest telemetry snapshot server-side (GET /firewall-sessions), so
+ * this section tracks the same poll cadence as the rest of the page.
+ */
+function SessionsSection() {
+  const sessionsQuery = useQuery({
+    queryKey: ['firewall-sessions'],
+    queryFn: () => api.firewallSessions(),
+    refetchInterval: 30_000,
+  });
+
+  if (sessionsQuery.isLoading) return null; // don't flash an empty card while the rules table loads too
+  const devices = sessionsQuery.data?.devices ?? [];
+  if (devices.length === 0) return null; // no firewall-capable device reporting yet — section stays hidden
+
+  return (
+    <div className="mb-4 rounded-md border border-border bg-card p-3 shadow-sm">
+      <h2 className="mb-2 text-sm font-semibold text-foreground">Sessions</h2>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {devices.map((d) => (
+          <SessionCard key={d.deviceId} row={d} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SessionCard({ row }: { row: FirewallSessionRow }) {
+  const pct = typeof row.stateLimit === 'number' && row.stateLimit > 0 ? (row.totalSessions / row.stateLimit) * 100 : null;
+  return (
+    <div className="rounded-md border border-border bg-muted/30 p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="truncate text-sm font-medium">{row.deviceName ?? row.deviceId}</span>
+        {pct !== null && (
+          <span
+            className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-mono ${
+              pct >= 90 ? 'bg-danger/20 text-danger-fg' : pct >= 70 ? 'bg-warning/20 text-warning-fg' : 'bg-muted text-secondary'
+            }`}
+          >
+            {pct.toFixed(1)}% of limit
+          </span>
+        )}
+      </div>
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+        <dt className="text-muted-foreground">Active sessions</dt>
+        <dd className="text-right font-mono">{row.totalSessions.toLocaleString()}{typeof row.stateLimit === 'number' ? ` / ${row.stateLimit.toLocaleString()}` : ''}</dd>
+        <dt className="text-muted-foreground">Oldest session</dt>
+        <dd className="text-right font-mono">{row.oldestAgeSec !== null && row.oldestAgeSec !== undefined ? fmtDurationSec(row.oldestAgeSec) : '—'}</dd>
+        <dt className="text-muted-foreground">Adaptive timeouts</dt>
+        <dd className={`text-right font-medium ${row.adaptiveEnabled === true ? 'text-success-fg' : row.adaptiveEnabled === false ? 'text-warning-fg' : 'text-faint'}`}>
+          {row.adaptiveEnabled === null ? '—' : row.adaptiveEnabled ? `on (≥ ${(row.adaptiveStartStates ?? 0).toLocaleString()} states)` : 'off'}
+        </dd>
+        <dt className="text-muted-foreground">State table</dt>
+        <dd className="text-right font-mono text-faint" title="state-table lookups per second (latest inventory cycle)">
+          {row.stateTableSearchesRate !== null && row.stateTableSearchesRate !== undefined
+            ? `${(row.stateTableSearchesRate ?? 0).toFixed(1)}/s`
+            : '—'}
+        </dd>
+      </dl>
+    </div>
+  );
+}
 
 /** Small colored pill for the rule kind (filter vs. NAT kinds). */
 const TYPE_STYLES: Record<FirewallRuleRow['ruleType'], string> = {
@@ -202,6 +277,9 @@ export default function Firewall() {
 
   return (
     <Layout title="Firewall">
+
+      {/* Live connection-state overview — hidden until a device reports session data. */}
+      <SessionsSection />
 
       {firewallQuery.isLoading && <p className="text-sm text-muted-foreground">Loading firewall rules...</p>}
       {firewallQuery.isError && (

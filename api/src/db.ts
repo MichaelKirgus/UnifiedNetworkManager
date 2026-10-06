@@ -1118,6 +1118,38 @@ export async function initDb(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_plugin_logs_timestamp
       ON plugin_logs (timestamp)`);
 
+  // Firewall event-log rows (Firewall Events page) — append-only log pushed by
+  // plugins via POST /plugin/firewall-events. Dedupe key = vendorEventId
+  // (the appliance's per-row __digest__); swept after firewallEventRetentionDays.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS firewall_events (
+      id TEXT PRIMARY KEY,
+      "pluginId" TEXT NOT NULL,
+      "deviceId" TEXT NOT NULL,
+      ts TEXT NOT NULL,
+      "tsMs" BIGINT,
+      action TEXT NOT NULL DEFAULT 'unknown',
+      reason TEXT,
+      "interfaceName" TEXT NOT NULL DEFAULT '',
+      "srcIp" TEXT NOT NULL DEFAULT '',
+      "dstIp" TEXT NOT NULL DEFAULT '',
+      proto TEXT,
+      "srcPort" INTEGER,
+      "dstPort" INTEGER,
+      "ruleId" TEXT,
+      "ruleName" TEXT,
+      "vendorEventId" TEXT NOT NULL
+    )`);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_firewall_events_vendor
+      ON firewall_events ("deviceId", "pluginId", "vendorEventId")`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_firewall_events_device_ts_ms
+      ON firewall_events ("deviceId", "tsMs")`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_firewall_events_ts_ms
+      ON firewall_events ("tsMs")`);
+
   // Self-metrics samples of the plugin processes themselves (see schema.pluginMetrics).
   // Polled by workers/pluginMetrics.ts from each plugin's GET /metrics endpoint.
   await pool.query(`

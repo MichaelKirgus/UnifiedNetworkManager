@@ -5335,6 +5335,89 @@ paths:
         '401':
           description: Authentication required
 
+  /firewall-events:
+    get:
+      tags: [Inventory]
+      summary: Firewall event-log rows across devices (blocked/allowed traffic)
+      description: >-
+        Cross-device view of the `firewall_events` log table, populated by
+        plugins pushing their appliance's firewall log via POST /plugin/firewall-events
+        (OPNsense today). Each row is one allowed/blocked/NAT'd packet event with
+        source/destination, protocol, ports and the matched rule. Rows are windowed
+        on `tsMs` — epoch ms resolved at ingest from the appliance-local timestamp
+        plus the device's known UTC offset — so time filters compare like-for-like
+        across devices in different zones. Device-scoped callers only see rows of
+        their own devices. Retention is swept hourly (default 7 days).
+      parameters:
+        - in: query
+          name: from
+          required: false
+          schema: { type: string }
+          description: "Window start — ISO-8601 or epoch ms (default: one hour before `to`)"
+        - in: query
+          name: to
+          required: false
+          schema: { type: string }
+          description: "Window end — ISO-8601 or epoch ms (default: now). Range capped at 400 days."
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: action
+          required: false
+          schema:
+            type: string
+            enum: [pass, block, rdr, nat, binat, other]
+          description: "Filter by event action; 'other' = the rdr/nat/binat group"
+        - in: query
+          name: search
+          required: false
+          schema: { type: string }
+          description: Case-insensitive match on source IP, destination IP or rule name
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 2000 }
+          description: Max rows to return (default 500)
+      responses:
+        '200':
+          description: Firewall event rows + per-action summary counts over the same window/filters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FirewallEventsResponse'
+        '400':
+          description: Invalid action filter value
+        '401':
+          description: Authentication required
+
+  /firewall-sessions:
+    get:
+      tags: [Inventory]
+      summary: Per-device live connection-state overview (sessions + adaptive timeouts)
+      description: >-
+        One row per device whose latest telemetry snapshot reports firewall session
+        data (`firewall.states.*` — collected every poll by OS-capable plugins,
+        OPNsense today). Carries the current state count vs. limit, oldest session
+        age, the adaptive-timeout status (disabled at 0 states) and the state-table
+        counter rates from the inventory cycle. Non-firewall devices never appear.
+      responses:
+        '200':
+          description: Per-device session overview rows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FirewallSessionsResponse'
+        '401':
+          description: Authentication required
+
   /wifi:
     get:
       tags: [Inventory]
@@ -8776,6 +8859,79 @@ components:
           additionalProperties: true
           description: "Protocol-specific extras (uuid, description, gatewayStatus, gatewayLatencyMs for OPNsense; rtgTag, peer, rawType for LCOS)"
         collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this route" }
+
+    FirewallEventRow:
+      type: object
+      required: [id, deviceId, pluginId, ts, action]
+      properties:
+        id: { type: string, description: "UNM row id (uuid)" }
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device this event was logged on" }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id that reported this event" }
+        pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
+        ts: { type: string, description: "Appliance-local timestamp as logged (no timezone), e.g. 2026-10-06T19:20:22" }
+        tsMs: { type: [integer, 'null'], format: int64, description: "Epoch ms resolved at ingest from `ts` minus the device's known UTC offset; null when unparseable (excluded from windowed queries)" }
+        action:
+          type: string
+          enum: [pass, block, rdr, nat, binat, unknown]
+          description: "The appliance's verdict for this packet event"
+        reason: { type: [string, 'null'], description: "Why the event was logged (e.g. rule match detail)" }
+        interfaceName: { type: string, description: "Interface the event was observed on; '' = unknown" }
+        srcIp: { type: string, description: "Source address; '' = unknown" }
+        dstIp: { type: string, description: "Destination address; '' = unknown" }
+        proto: { type: [string, 'null'], description: "Protocol name (tcp, udp, icmp, ...); null when not reported (e.g. IPv6 rows)" }
+        srcPort: { type: [integer, 'null'] }
+        dstPort: { type: [integer, 'null'] }
+        ruleId: { type: [string, 'null'], description: "Appliance-side rule identity (uuid); null when the event matched no rule" }
+        ruleName: { type: [string, 'null'], description: "The matched rule's description text as reported by the appliance" }
+        vendorEventId: { type: string, description: "Appliance per-row unique id — dedupe key at ingest (unique with deviceId + pluginId)" }
+
+    FirewallEventsResponse:
+      type: object
+      required: [fromMs, toMs, rows, summary]
+      properties:
+        fromMs: { type: integer, format: int64, description: "Effective window start (epoch ms) after clamping" }
+        toMs: { type: integer, format: int64, description: "Effective window end (epoch ms)" }
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/FirewallEventRow'
+          description: "Newest-first event rows within the window"
+        summary:
+          type: object
+          required: [blocked, passed, other]
+          properties:
+            blocked: { type: integer, description: "Count of block events over the same window/filters (SQL-side)" }
+            passed: { type: integer, description: "Count of pass events" }
+            other: { type: integer, description: "Count of rdr/nat/binat events" }
+
+    FirewallSessionRow:
+      type: object
+      required: [deviceId, collectedAt, totalSessions]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        collectedAt: { type: string, format: date-time, description: "When the reporting plugin last polled this device" }
+        totalSessions: { type: integer, description: "Current connection-state (session) count on the firewall" }
+        stateLimit: { type: [integer, 'null'], description: "Configured state-table limit (pfstates limit); null when not reported" }
+        oldestAgeSec: { type: [number, 'null'], description: "Lifetime of the oldest live session in seconds; null when no states or unreadable" }
+        adaptiveEnabled: { type: [boolean, 'null'], description: "Whether pf's adaptive timeouts are active (adaptive.start > 0); null when not reported" }
+        adaptiveStartStates: { type: [integer, 'null'], description: "State count at which adaptive timeouts kick in; 0 = disabled" }
+        stateTableSearchesRate: { type: [number, 'null'], description: "State-table lookups per second (latest inventory cycle)" }
+        stateTableInsertsRate: { type: [number, 'null'] }
+        stateTableRemovalsRate: { type: [number, 'null'] }
+        synfloodsDetectedTotal: { type: [integer, 'null'], description: "Cumulative SYN-flood detections (limit counter)" }
+
+    FirewallSessionsResponse:
+      type: object
+      required: [devices]
+      properties:
+        devices:
+          type: array
+          items:
+            $ref: '#/components/schemas/FirewallSessionRow'
 
     FirewallRuleRow:
       type: object

@@ -1085,6 +1085,60 @@ export interface FirewallRuleRow {
   collectedAt: string;
 }
 
+/** One firewall event-log row (blocked/allowed/NAT'd packet) from the `firewall_events` table. */
+export interface FirewallEventRow {
+  id: string;
+  deviceId: string;
+  deviceName?: string | null;
+  siteName?: string | null;
+  pluginId: string;
+  /** Display name of the reporting plugin instance (e.g. "OPNsense Plugin"). */
+  pluginName?: string | null;
+  /** Appliance-local timestamp as logged (no timezone), e.g. 2026-10-06T19:20:22. */
+  ts: string;
+  /** Epoch ms resolved at ingest from `ts` minus the device's known UTC offset; null when unparseable. */
+  tsMs?: number | null;
+  action: 'pass' | 'block' | 'rdr' | 'nat' | 'binat' | 'unknown';
+  reason?: string | null;
+  interfaceName?: string;
+  srcIp?: string;
+  dstIp?: string;
+  proto?: string | null;
+  srcPort?: number | null;
+  dstPort?: number | null;
+  /** Appliance-side rule identity (uuid); null when the event matched no rule. */
+  ruleId?: string | null;
+  /** The matched rule's description text as reported by the appliance. */
+  ruleName?: string | null;
+}
+
+/** Response of GET /firewall-events — windowed rows + per-action summary counts. */
+export interface FirewallEventsResponse {
+  fromMs: number;
+  toMs: number;
+  rows: FirewallEventRow[];
+  summary: { blocked: number; passed: number; other: number };
+}
+
+/** Per-device live connection-state overview (Firewall page, Sessions section). */
+export interface FirewallSessionRow {
+  deviceId: string;
+  deviceName?: string | null;
+  siteName?: string | null;
+  collectedAt: string;
+  totalSessions: number;
+  stateLimit?: number | null;
+  oldestAgeSec?: number | null;
+  /** Whether pf's adaptive timeouts are active (adaptive.start > 0); null when not reported. */
+  adaptiveEnabled?: boolean | null;
+  /** State count at which adaptive timeouts kick in; 0 = disabled. */
+  adaptiveStartStates?: number | null;
+  stateTableSearchesRate?: number | null;
+  stateTableInsertsRate?: number | null;
+  stateTableRemovalsRate?: number | null;
+  synfloodsDetectedTotal?: number | null;
+}
+
 /** A physical port as reported by a device's latest telemetry snapshot. */
 export interface TopologyPort {
   name: string;
@@ -3240,6 +3294,21 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<FirewallRuleRow[]>(`/firewall-rules${suffix}`);
   },
+  /** Firewall event-log rows (blocked/allowed traffic) across devices. */
+  firewallEvents: (params?: { from?: string; to?: string; deviceId?: string; siteId?: string; action?: 'pass' | 'block' | 'rdr' | 'nat' | 'binat' | 'other'; search?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.action) qs.set('action', params.action);
+    if (params?.search) qs.set('search', params.search);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<FirewallEventsResponse>(`/firewall-events${suffix}`);
+  },
+  /** Per-device live connection-state overview (sessions + adaptive timeouts). */
+  firewallSessions: () => apiFetch<{ devices: FirewallSessionRow[] }>('/firewall-sessions'),
   routes: (params?: { deviceId?: string; siteId?: string; protocol?: 'static' | 'connected' | 'ospf' | 'bgp' | 'rip' | 'other' }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);

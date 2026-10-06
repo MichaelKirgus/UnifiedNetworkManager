@@ -162,6 +162,19 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'How many days of raw telemetry snapshots are kept. At a 30 s beat this table grows fast (≈1M rows/day per 200 devices), so keep it as short as your history needs allow.',
   },
   {
+    key: 'firewallEventRetentionDays',
+    label: 'Firewall event retention',
+    type: 'integer',
+    category: 'Retention',
+    unit: 'days',
+    min: 1,
+    max: 365,
+    default: 7,
+    envVar: 'FIREWALL_EVENT_RETENTION_DAYS',
+    help:
+      'How many days of firewall event-log rows (blocked/allowed traffic events pushed by plugins) are kept before the hourly retention sweep deletes them.',
+  },
+  {
     key: 'notificationRetentionDays',
     label: 'Notification retention',
     type: 'integer',

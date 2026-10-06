@@ -44,6 +44,7 @@ export const LEADER_KEYS = {
   ntpReferences: 9010,
   flows: 9011,
   geoip: 9012,
+  firewallEventRetention: 9013,
 } as const;
 
 /**

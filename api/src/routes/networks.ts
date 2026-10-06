@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, like, lt, or, sql } from 'drizzle-orm';
 import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
@@ -1260,6 +1260,242 @@ router.get('/firewall-rules', requireAuth, requirePermission('firewall:read'), a
         };
       })
     );
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// GET /firewall-events - Firewall event-log rows across devices (Firewall Events page).
+// Append-only log pushed by plugins via POST /plugin/firewall-events — blocked/allowed
+// traffic events from the appliance's firewall log. Newest-first, windowed on tsMs
+// (epoch ms resolved at ingest from the appliance-local timestamp + device offset).
+// Query params: from/to (ISO or epoch-ms; default last hour), deviceId, siteId,
+// action ('pass'|'block'|'rdr'|'nat'|'binat', or 'other' = rdr/nat/binat group),
+// search (matches src/dst IP or rule name), limit (default 500, max 2000).
+const FIREWALL_EVENT_ACTIONS = new Set(['pass', 'block', 'rdr', 'nat', 'binat']);
+router.get('/firewall-events', requireAuth, requirePermission('firewall:read'), async (_req, res: Response) => {
+  try {
+    const q = _req.query as Record<string, string | undefined>;
+
+    // --- Window (same pattern as routes/flows.ts resolveWindow) -------------
+    const parseTimeParam = (v: unknown): number | null => {
+      if (typeof v !== 'string' || !v.trim()) return null;
+      const t = Date.parse(v);
+      return Number.isFinite(t) ? t : null;
+    };
+    const now = Date.now();
+    let toMs = parseTimeParam(q.to) ?? now;
+    let fromMs = parseTimeParam(q.from) ?? toMs - 3600_000; // default: last hour
+    if (fromMs >= toMs) fromMs = toMs - 3600_000;
+    const MAX_RANGE_MS = 400 * 86_400_000;
+    if (toMs - fromMs > MAX_RANGE_MS) fromMs = toMs - MAX_RANGE_MS;
+
+    // --- Filters -------------------------------------------------------------
+    let actionClause;
+    if (q.action && q.action !== 'all') {
+      const actions = q.action === 'other' ? ['rdr', 'nat', 'binat'] : [q.action];
+      for (const a of actions) {
+        if (!FIREWALL_EVENT_ACTIONS.has(a)) {
+          res.status(400).json({ error: `"action" must be one of: pass, block, rdr, nat, binat, other` });
+          return;
+        }
+      }
+      actionClause = inArray(schema.firewallEvents.action, actions);
+    }
+
+    const search = typeof q.search === 'string' ? q.search.trim() : '';
+    let searchClause;
+    if (search) {
+      // LIKE on the three text fields — good enough at this volume.
+      const pat = `%${search.replace(/[%_]/g, '')}%`;
+      searchClause = or(like(schema.firewallEvents.srcIp, pat), like(schema.firewallEvents.dstIp, pat), like(schema.firewallEvents.ruleName, pat));
+    }
+
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json({ fromMs, toMs, rows: [], summary: { blocked: 0, passed: 0, other: 0 } });
+      return;
+    }
+    if (q.deviceId && allowed !== null && !allowed.has(q.deviceId)) {
+      res.status(200).json({ fromMs, toMs, rows: [], summary: { blocked: 0, passed: 0, other: 0 } });
+      return;
+    }
+
+    let deviceClause;
+    if (q.deviceId && q.siteId) {
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, q.deviceId) });
+      if (!device || device.siteId !== q.siteId) {
+        res.status(200).json({ fromMs, toMs, rows: [], summary: { blocked: 0, passed: 0, other: 0 } });
+        return;
+      }
+      deviceClause = eq(schema.firewallEvents.deviceId, q.deviceId);
+    } else if (q.deviceId) {
+      deviceClause = eq(schema.firewallEvents.deviceId, q.deviceId);
+    } else if (q.siteId) {
+      let siteDeviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, q.siteId) })).map((d) => d.id);
+      if (allowed !== null) siteDeviceIds = siteDeviceIds.filter((id) => allowed.has(id));
+      if (siteDeviceIds.length === 0) {
+        res.status(200).json({ fromMs, toMs, rows: [], summary: { blocked: 0, passed: 0, other: 0 } });
+        return;
+      }
+      deviceClause = inArray(schema.firewallEvents.deviceId, siteDeviceIds);
+    } else if (allowed !== null) {
+      deviceClause = inArray(schema.firewallEvents.deviceId, [...allowed]);
+    }
+
+    const limitParam = Number(q.limit);
+    const limit = Math.max(1, Math.min(2000, Number.isFinite(limitParam) ? Math.floor(limitParam) : 500));
+
+    // tsMs is the queryable axis; rows with an unparseable timestamp (tsMs NULL)
+    // are excluded from windowed queries rather than mis-ordered.
+    const baseClauses = [gte(schema.firewallEvents.tsMs, fromMs), lt(schema.firewallEvents.tsMs, toMs)];
+    if (deviceClause) baseClauses.push(deviceClause);
+    if (actionClause) baseClauses.push(actionClause);
+    if (searchClause) baseClauses.push(searchClause);
+
+    const where = and(...baseClauses);
+    // Rows + per-action counts over the SAME window/filters (SQL-side, cheap).
+    const [rows, summaryAgg] = await Promise.all([
+      db.query.firewallEvents.findMany({ where, orderBy: [desc(schema.firewallEvents.tsMs)], limit }),
+      db.select({
+        blocked: sql<number>`count(*) filter (where ${schema.firewallEvents.action} = 'block')`,
+        passed: sql<number>`count(*) filter (where ${schema.firewallEvents.action} = 'pass')`,
+        other: sql<number>`count(*) filter (where ${schema.firewallEvents.action} in ('rdr','nat','binat'))`,
+      }).from(schema.firewallEvents).where(where),
+    ]);
+
+    // Device + plugin display names for the rows.
+    const deviceViews = await loadDeviceViews(Array.from(new Set(rows.map((r) => r.deviceId))));
+    const pluginNames = await loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId))));
+
+    res.status(200).json({
+      fromMs,
+      toMs,
+      rows: rows.map((r) => ({
+        ...r,
+        deviceName: deviceViews.get(r.deviceId)?.name ?? null,
+        siteName: deviceViews.get(r.deviceId)?.siteName ?? null,
+        pluginName: pluginNames.get(r.pluginId) ?? null,
+      })),
+      summary: {
+        blocked: Number(summaryAgg[0]?.blocked ?? 0),
+        passed: Number(summaryAgg[0]?.passed ?? 0),
+        other: Number(summaryAgg[0]?.other ?? 0),
+      },
+    });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// GET /firewall-sessions - Per-device live connection-state overview (Firewall page, Sessions section).
+// Reads each device's LATEST telemetry row and extracts the `firewall.states.*` metrics
+// (collected every poll by OS-capable plugins — OPNsense today) plus the inventory-cycle
+// `firewall.stateConfig` / `firewall.stats` objects. Telemetry stores FLAT dotted keys
+// (`"firewall.states.total": 42`, not nested), so the SQL pre-filter uses jsonb key-existence
+// and the TS parsing reads flat keys. Non-firewall devices never appear because their
+// snapshots lack the key entirely. collectedAt is an ISO string, so lexicographic max = newest.
+router.get('/firewall-sessions', requireAuth, requirePermission('firewall:read'), async (_req, res: Response) => {
+  try {
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json({ devices: [] });
+      return;
+    }
+
+    // Latest telemetry row per device that reports session data. We use a text LIKE
+    // existence check rather than casting to jsonb: some devices emit metric values
+    // containing raw control bytes (e.g. NUL) which make Postgres reject the `::jsonb`
+    // cast for the ENTIRE table, and there is no index on metrics anyway — so a plain
+    // text match on the flat dotted key is both safer and just as fast at this size.
+    const { rows: latest } = await pool.query<{ deviceId: string; collectedAt: string; metrics: string }>(
+      `SELECT t."deviceId", t."collectedAt", t."metrics"
+         FROM telemetry t
+        WHERE t.id IN (
+          SELECT DISTINCT ON ("deviceId") id
+            FROM telemetry
+           WHERE "metrics" LIKE '%"firewall.states.total":%'
+           ORDER BY "deviceId", "collectedAt" DESC
+        )`,
+    );
+
+    const devices: {
+      deviceId: string;
+      deviceName: string | null;
+      siteName: string | null;
+      collectedAt: string;
+      totalSessions: number | null;
+      stateLimit: number | null;
+      oldestAgeSec: number | null;
+      adaptiveEnabled: boolean | null;
+      adaptiveStartStates: number | null;
+      stateTableSearchesRate: number | null;
+      stateTableInsertsRate: number | null;
+      stateTableRemovalsRate: number | null;
+      synfloodsDetectedTotal: number | null;
+    }[] = [];
+
+    for (const row of latest) {
+      if (allowed !== null && !allowed.has(row.deviceId)) continue;
+      let m: Record<string, unknown> = {};
+      try {
+        m = JSON.parse(row.metrics);
+      } catch {
+        continue; // corrupt snapshot — skip rather than fail the whole page
+      }
+      // Flat dotted keys (see plugin emission): "firewall.states.total" etc.
+      const total = m['firewall.states.total'];
+      if (typeof total !== 'number') continue;
+
+      const timeouts = (m['firewall.stateConfig'] ?? {}) as Record<string, unknown>;
+      let adaptiveEnabled: boolean | null = null;
+      let adaptiveStartStates: number | null = null;
+      // Plugin camelCases the pf keys: "adaptive.start" → "adaptiveStart".
+      const startRaw = typeof timeouts['adaptiveStart'] === 'string' ? (timeouts['adaptiveStart'] as string) : '';
+      if (startRaw !== '') {
+        // "0 states" = disabled, "10000 states" = enabled at that threshold.
+        adaptiveStartStates = parseInt(startRaw, 10);
+        if (!Number.isNaN(adaptiveStartStates)) adaptiveEnabled = adaptiveStartStates > 0;
+      }
+
+      const stats = (m['firewall.stats'] ?? {}) as Record<string, unknown>;
+      const numOrNull = (v: unknown): number | null => {
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (typeof v === 'string') {
+          const n = Number(v);
+          if (v.trim() !== '' && Number.isFinite(n)) return n;
+        }
+        return null;
+      };
+
+      devices.push({
+        deviceId: row.deviceId,
+        deviceName: null, // filled below
+        siteName: null,
+        collectedAt: row.collectedAt,
+        totalSessions: total,
+        stateLimit: numOrNull(m['firewall.states.limit']),
+        oldestAgeSec: numOrNull(m['firewall.states.oldestAgeSec']),
+        adaptiveEnabled,
+        adaptiveStartStates,
+        stateTableSearchesRate: numOrNull(stats.stateTableSearchesRate),
+        stateTableInsertsRate: numOrNull(stats.stateTableInsertsRate),
+        stateTableRemovalsRate: numOrNull(stats.stateTableRemovalsRate),
+        synfloodsDetectedTotal: numOrNull(stats.synfloodsDetectedTotal),
+      });
+    }
+
+    const views = await loadDeviceViews(devices.map((d) => d.deviceId));
+    for (const d of devices) {
+      d.deviceName = views.get(d.deviceId)?.name ?? null;
+      d.siteName = views.get(d.deviceId)?.siteName ?? null;
+    }
+    devices.sort((a, b) => (a.deviceName ?? '').localeCompare(b.deviceName ?? ''));
+
+    res.status(200).json({ devices });
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

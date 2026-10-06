@@ -37,6 +37,7 @@ import { filesRouter, internalFileRepoRouter } from './routes/files';
 import { startNotificationsWorker } from './workers/notifications';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startTelemetryRetentionWorker } from './workers/telemetryRetention';
+import { startFirewallEventRetentionWorker } from './workers/firewallEventRetention';
 import { startPluginDiscovery } from './plugins/discovery';
 import { startConfigJobWorker } from './workers/configJob';
 import { startPlanExecutorWorker } from './workers/planExecutor';
@@ -253,6 +254,11 @@ async function main(): Promise<void> {
     }).then((stop) => workerStops.push(stop));
     void runAsLeader(LEADER_KEYS.telemetryRetention, 'telemetryRetention', () => {
       const timer = startTelemetryRetentionWorker();
+      return () => clearInterval(timer);
+    }).then((stop) => workerStops.push(stop));
+    // Firewall event-log retention (append-only log pushed via /plugin/firewall-events).
+    void runAsLeader(LEADER_KEYS.firewallEventRetention, 'firewallEventRetention', () => {
+      const timer = startFirewallEventRetentionWorker();
       return () => clearInterval(timer);
     }).then((stop) => workerStops.push(stop));
     void runAsLeader(LEADER_KEYS.pluginMetrics, 'pluginMetrics', () => startPluginMetricsWorker()).then((stop) => workerStops.push(stop));

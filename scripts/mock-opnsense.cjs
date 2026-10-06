@@ -73,6 +73,51 @@ function uuid(prefix) {
   return `${prefix}-${crypto.randomBytes(4).toString('hex')}`;
 }
 
+// --- Firewall event log + state-table behavior ---------------------------------
+// Models the /api/diagnostics/firewall/* surface (live-verified on OPNsense 26.x):
+//   - `log` is a BARE array, newest-first, with per-row unique `__digest__`; passing
+//     `digest=D` returns rows at-or-newer-than D (inclusive). Digests are zero-padded
+//     and assigned chronologically, so "newer" == string >= compare.
+//   - `query_states` / `pf_states` / `pf_statistics/*` return the aggregate shapes
+//     the plugin's firewallEvents client consumes.
+const fwEvents = []; // {__digest__, __timestamp__, action, reason, interface, src, dst, protoname, srcport, dstport, rid, label}
+let fwSeq = 0;
+function addFwEvent(e) {
+  fwSeq += 1;
+  const digest = `evt-${String(fwSeq).padStart(6, '0')}`;
+  fwEvents.push({ ...e, __digest__: digest });
+  return digest;
+}
+function seedFwEvents() {
+  // Appliance-local wall clock "YYYY-MM-DDTHH:MM:SS" (no TZ), newest last. The
+  // field name MUST be `__timestamp__` — that is what the real appliance emits
+  // and what the plugin's RawEventRow parser reads.
+  const t = (offsetSec) => new Date(Date.now() - offsetSec * 1000).toISOString().slice(0, 19);
+  addFwEvent({ __timestamp__: t(3600), action: 'pass', reason: '', interface: 'lan', src: '192.168.1.50', dst: '93.184.216.34', protoname: 'tcp', srcport: 51234, dstport: 443, rid: 'rule-allow-web', label: 'Allow LAN web' });
+  addFwEvent({ __timestamp__: t(3000), action: 'block', reason: 'matched rule', interface: 'wan', src: '203.0.113.9', dst: '192.168.1.1', protoname: 'tcp', srcport: 4444, dstport: 22, rid: 'rule-block-ssh', label: 'Block WAN ssh' });
+  addFwEvent({ __timestamp__: t(2000), action: 'pass', reason: '', interface: 'lan', src: '192.168.1.77', dst: '142.250.0.1', protoname: 'udp', srcport: 53000, dstport: 53, rid: 'rule-allow-dns', label: 'Allow DNS' });
+  addFwEvent({ __timestamp__: t(1000), action: 'rdr', reason: '', interface: 'wan', src: '203.0.113.9', dst: '10.0.0.2', protoname: 'tcp', srcport: 80, dstport: 8080, rid: 'rule-rdr-http', label: 'RDR http' });
+}
+function resetFw() {
+  fwEvents.length = 0;
+  fwSeq = 0;
+  seedFwEvents();
+}
+seedFwEvents();
+
+/** "at or newer than digest (inclusive)", newest-first. */
+function fwLogRows(digest) {
+  let rows = fwEvents;
+  if (digest) rows = fwEvents.filter((e) => e.__digest__ >= digest);
+  return [...rows].reverse();
+}
+
+const FW_STATE_ROWS = [
+  { label: 'rule-allow-web', descr: 'Allow LAN web', iface: 'lan', proto: 'tcp', ipproto: '6', direction: 'out', src_addr: '192.168.1.50', src_port: '51234', dst_addr: '93.184.216.34', dst_port: '443', state: 'ESTABLISHED:ESTABLISHED', age: '00:01:23', expires: '00:58:37', pkts: [10, 9], bytes: [1000, 900], rule: '1', id: 's1' },
+  { label: 'rule-allow-dns', descr: 'Allow DNS', iface: 'lan', proto: 'udp', ipproto: '17', direction: 'out', src_addr: '192.168.1.77', src_port: '53000', dst_addr: '142.250.0.1', dst_port: '53', state: 'UDP', age: '00:00:05', expires: '00:01:55', pkts: [2, 2], bytes: [200, 200], rule: '2', id: 's2' },
+  { label: 'rule-allow-web', descr: 'Allow LAN web', iface: 'lan', proto: 'tcp', ipproto: '6', direction: 'out', src_addr: '192.168.1.50', src_port: '51300', dst_addr: '93.184.216.34', dst_port: '443', state: 'ESTABLISHED:ESTABLISHED', age: '01:23:45', expires: '02:36:15', pkts: [50, 49], bytes: [5000, 4900], rule: '1', id: 's3' },
+];
+
 function handleOpnsense(req, res, user, body) {
   const url = (req.url ?? '/').split('?')[0];
   const json = (status, data) => {
@@ -156,6 +201,35 @@ function handleOpnsense(req, res, user, body) {
       return json(200, { uuid: uuid(`peer-${user}`) });
     case '/api/wireguard/service/reconfigure':
       return json(200, {});
+    // Firewall event log + state table (Firewall Events page / Sessions section).
+    case '/api/diagnostics/firewall/log': {
+      const q = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      return json(200, fwLogRows(q.get('digest')));
+    }
+    case '/api/diagnostics/firewall/query_states': {
+      // The plugin sends {rowCount, current, sort:{age:'desc'}} — honor the cap.
+      const n = Math.max(1, Math.min(50, Number(body?.rowCount) || 5));
+      return json(200, { rows: FW_STATE_ROWS.slice(0, n), rowCount: n, total: FW_STATE_ROWS.length, current: 1 });
+    }
+    case '/api/diagnostics/firewall/pf_states':
+      // Strings on the real appliance — the plugin numOrNull()s them.
+      return json(200, { current: '42', limit: '65536' });
+    case '/api/diagnostics/firewall/pf_statistics/timeouts':
+      return json(200, {
+        timeouts: {
+          'tcp.first': '10s', 'tcp.opening': '80s', 'tcp.established': '3600s',
+          'udp.single': '60s', 'icmp.first': '5s',
+          'adaptive.start': '1000 states', 'adaptive.end': '5000 states',
+        },
+      });
+    case '/api/diagnostics/firewall/pf_statistics/info':
+      return json(200, {
+        info: {
+          'state-table': { 'current-entries': { total: 42 }, searches: { total: 1000, rate: 3.5 }, inserts: { total: 100, rate: 0.5 }, removals: { total: 98, rate: 0.4 } },
+          counters: { 'state-mismatch': { total: 2 } },
+          'limit-counters': { 'synfloods-detected': { total: 7 } },
+        },
+      });
     default:
       return json(404, { error: 'not found' });
   }
@@ -183,6 +257,7 @@ function handler(req, res) {
     if (url === '/__reset') {
       captured.length = 0;
       servers.clear();
+      resetFw();
       res.writeHead(204);
       return res.end();
     }

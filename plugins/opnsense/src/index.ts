@@ -1,4 +1,5 @@
 import path from 'path';
+import axios from 'axios';
 import {
   Health,
   MetricDescriptor,
@@ -57,6 +58,13 @@ import { searchGateways } from './client/routes';
 import { collectTunnels, attachTunnelRates, enrichTunnelsWithLiveState, TunnelRow } from './tunnels';
 import { collectRoutes, deriveConnectedAndDefaultRoutes, enrichRoutesWithGatewayStatus, RouteRow } from './routes';
 import { collectFirewallRules, fetchFilterRuleStats } from './firewall';
+import {
+  fetchFirewallEvents,
+  fetchStateSummary,
+  fetchStateTimeouts,
+  fetchPfStats,
+  FirewallEventRow,
+} from './client/firewallEvents';
 import { collectServices } from './services';
 import { collectZfsViaSsh } from './zfsSsh';
 import { collectSecurityChecks, DEFAULT_WATCHED_FILES, type SecuritySettings } from './security';
@@ -67,9 +75,10 @@ import { PREFLIGHT_RESOLVERS } from './actions/preflight';
 import { InventorySnapshot } from './inventoryTypes';
 import { buildOpnsenseState } from './state';
 
-// Base UUID + shared state store live in ./stateStore so the monitoring path and
-// the security actions both bind to the SAME instance-scoped effective uuid.
-import { PLUGIN_UUID } from './stateStore';
+// Base UUID + shared state store live in ./stateStore so the monitoring path,
+// the security actions AND the firewall-event cursor all bind to the SAME
+// instance-scoped effective uuid.
+import { PLUGIN_UUID, stateStore } from './stateStore';
 export { PLUGIN_UUID };
 export const PLUGIN_NAME = 'OPNsense Plugin';
 
@@ -795,6 +804,26 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
   if (typeof metrics['memory.total'] === 'number') {
     push({ key: 'memory.total', label: 'Memory Total', unit: 'bytes', format: 'bytes', type: 'number', visualization: 'text', group: 'System', intervalMs: LIVE_INTERVAL_MS });
   }
+  // Firewall state table (Sessions section) — live on every beat.
+  if (typeof metrics['firewall.states.total'] === 'number') {
+    push({ key: 'firewall.states.total', label: 'Active Sessions', type: 'number', visualization: 'plot', group: 'Firewall', summary: true, intervalMs: LIVE_INTERVAL_MS });
+  }
+  if (typeof metrics['firewall.states.limit'] === 'number') {
+    push({ key: 'firewall.states.limit', label: 'State Limit', type: 'number', visualization: 'text', group: 'Firewall', intervalMs: LIVE_INTERVAL_MS });
+  }
+  if (typeof metrics['firewall.states.oldestAgeSec'] === 'number') {
+    push({ key: 'firewall.states.oldestAgeSec', label: 'Oldest Session Age', unit: 's', format: 'duration', type: 'number', visualization: 'plot', group: 'Firewall', intervalMs: LIVE_INTERVAL_MS });
+  }
+
+  // Adaptive-timeout settings + pf counters — inventory cadence, quasi-static.
+  if (metrics['firewall.stateConfig'] && typeof metrics['firewall.stateConfig'] === 'object') {
+    const timeouts = metrics['firewall.stateConfig'] as Record<string, unknown>;
+    push({ key: 'firewall.stateConfig', label: 'State Timeouts (adaptive)', type: 'string', visualization: 'table', group: 'Firewall', columns: Object.keys(timeouts).slice(0, 24), intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  if (metrics['firewall.stats'] && typeof metrics['firewall.stats'] === 'object') {
+    push({ key: 'firewall.stats', label: 'State Table Counters', type: 'string', visualization: 'table', group: 'Firewall', columns: ['stateTableSearchesRate', 'stateTableInsertsRate', 'stateTableRemovalsRate'], intervalMs: INVENTORY_INTERVAL_MS });
+  }
+
   // Identity (hostname + version) — inventory, slow refresh.
   if (metrics['hostname'] !== undefined) {
     push({ key: 'hostname', label: 'Hostname', type: 'string', visualization: 'text', group: 'Inventory', intervalMs: INVENTORY_INTERVAL_MS });
@@ -1273,6 +1302,34 @@ async function collectMetrics(
     // best-effort
   }
 
+  // Firewall state table (Sessions section) — LIVE on every beat: total +
+  // capacity from pf_states plus the oldest session age from a tiny sample.
+  // Two cheap calls, independent of the inventory gate; best-effort like the
+  // other live scalars (a failure simply omits the keys → no wipe).
+  try {
+    const fwClient = createClient(host, { apiKey, apiSecret }, transport, ports);
+    const summary = await fetchStateSummary(fwClient);
+    if (summary) {
+      metrics['firewall.states.total'] = summary.totalSessions;
+      if (summary.stateLimit !== null) metrics['firewall.states.limit'] = summary.stateLimit;
+      if (summary.oldestAgeSec !== null) metrics['firewall.states.oldestAgeSec'] = summary.oldestAgeSec;
+    }
+  } catch {
+    /* best-effort — a dead states endpoint must never break the poll */
+  }
+
+  // Adaptive-timeout settings + pf counters — quasi-static, inventory cadence.
+  if (wantsInventory(collectInventory)) {
+    try {
+      const fwClient = createClient(host, { apiKey, apiSecret }, transport, ports);
+      const [timeouts, pfStats] = await Promise.all([fetchStateTimeouts(fwClient), fetchPfStats(fwClient)]);
+      if (timeouts) metrics['firewall.stateConfig'] = timeouts;
+      if (pfStats) metrics['firewall.stats'] = pfStats;
+    } catch {
+      /* best-effort */
+    }
+  }
+
   // Inventory (hostname, version, ARP + NDP neighbor tables) — slow-changing.
   // Served from the in-memory cache; the appliance is only re-polled when the
   // TTL elapses (see getInventory). Gated by the API's collectInventory flag:
@@ -1453,6 +1510,88 @@ async function collectMetrics(
   return { metrics, interfaces };
 }
 
+// --- Firewall events push pipeline (fire-and-forget batches) ------------------
+// The appliance's firewall log is an append-only stream; instead of shipping it
+// through the telemetry snapshot we PUSH new rows to the API's internal
+// /plugin/firewall-events endpoint (same pattern as flow-collector → /plugin/flows).
+// Incremental reads use the per-row `__digest__` cursor: GET .../log?digest=D
+// returns the rows at-or-newer-than D, so we store the newest-seen digest in the
+// shared state store and dedupe by vendorEventId on ingest (unique index).
+
+const EVENT_STATE_NAMESPACE = 'firewall-events';
+/** Max events fetched + pushed per beat — backlog protection on busy firewalls. */
+const EVENT_FETCH_LIMIT = 2000;
+
+const eventApi = axios.create({
+  baseURL: (process.env.UNM_API_URL ?? 'http://localhost:3000/v1').replace(/\/+$/, ''),
+  timeout: 5_000,
+  headers: process.env.PLUGIN_API_KEY ? { 'x-plugin-api-key': process.env.PLUGIN_API_KEY } : undefined,
+});
+
+/** Pushes one batch with a single retry; resolves true when the API accepted it. */
+async function pushEventBatch(deviceId: string, events: FirewallEventRow[]): Promise<boolean> {
+  const body = { pluginId: identity.effectiveUuid, deviceId, events };
+  try {
+    await eventApi.post('/plugin/firewall-events', body);
+    return true;
+  } catch {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      await eventApi.post('/plugin/firewall-events', body);
+      return true;
+    } catch (err) {
+      logger.warn(`Dropped firewall-event batch of ${events.length} rows for device ${deviceId}`, { context: { error: String((err as Error)?.message ?? err) } });
+      return false; // cursor NOT advanced — the same rows are re-fetched next beat
+    }
+  }
+}
+
+/**
+ * Collects new firewall events for one host and pushes them to the API. Runs
+ * fire-and-forget from /monitoring (never blocks or fails the poll). The digest
+ * cursor lives in the shared state store keyed by management address, so it
+ * survives container restarts; a missing cursor takes a ≤2000-row baseline of
+ * the newest events.
+ */
+async function collectAndPushFirewallEvents(
+  host: string,
+  deviceId: string | null | undefined,
+  apiKey: string,
+  apiSecret: string,
+  transport?: OpnsenseTransport,
+  ports?: OpnsensePorts
+): Promise<void> {
+  if (!deviceId) return; // no device scope → nothing to attribute rows to
+  const key = host;
+  let cursor: string | null = null;
+  try {
+    const stored = await stateStore.get(EVENT_STATE_NAMESPACE, key);
+    if (stored && typeof stored === 'object' && typeof (stored as Record<string, unknown>)['digest'] === 'string') {
+      cursor = ((stored as Record<string, unknown>)['digest'] as string) || null;
+    }
+  } catch { /* best-effort — no cursor means a fresh baseline */ }
+
+  const client = createClient(host, { apiKey, apiSecret }, transport, ports);
+  let rows: FirewallEventRow[];
+  try {
+    rows = await fetchFirewallEvents(client, { digest: cursor, limit: EVENT_FETCH_LIMIT });
+  } catch {
+    return; // best-effort — a dead endpoint must never break the poll
+  }
+  if (rows.length === 0) return;
+
+  const ok = await pushEventBatch(String(deviceId), rows);
+  if (!ok) return; // cursor NOT advanced — the same rows are re-fetched next beat
+
+  // Advance the cursor only after a successful push. The API dedupes by
+  // (deviceId, pluginId, vendorEventId), so even a lost-ack race can't create
+  // duplicate rows.
+  const newest = rows[0]; // appliance returns newest-first
+  try {
+    await stateStore.put([{ namespace: EVENT_STATE_NAMESPACE, key, value: { digest: newest.vendorEventId }, deviceId: String(deviceId) }]);
+  } catch { /* best-effort — worst case the next beat re-sends and dedupe absorbs it */ }
+}
+
 // --- Updates page: live firmware status --------------------------------------
 // Reads the appliance's CACHED update check (fast GET — no synchronous probe)
 // and turns it into UpdateRows:
@@ -1555,6 +1694,12 @@ app.post('/monitoring', async (req, res) => {
     await assertPinned(req, managementAddress, transport, ports);
 
     const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret, transport, deviceId, credentials, collectInventory, ports, sshPort);
+
+    // Firewall events: fetch new log rows since the last digest cursor and push
+    // them to the API's internal endpoint. Fire-and-forget — NOT awaited, so it
+    // runs in parallel with the response below and can never block or fail this
+    // poll; all failures are contained inside collectAndPushFirewallEvents.
+    void collectAndPushFirewallEvents(managementAddress, deviceId, apiKey, apiSecret, transport, ports).catch(() => { /* best-effort */ });
 
     // Echo of the user-selected model/firmware (mirrors the LANCOM plugin) —
     // informational only; shown as text cards in the device detail view.

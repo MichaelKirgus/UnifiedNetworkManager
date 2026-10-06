@@ -22,6 +22,7 @@ import Tunnels from './pages/Tunnels';
 import Services from './pages/Services';
 import Mail from './pages/Mail';
 import Firewall from './pages/Firewall';
+import FirewallEvents from './pages/FirewallEvents';
 import Certificates from './pages/Certificates';
 import RoutesPage from './pages/Routes';
 import Logs from './pages/Logs';
@@ -76,6 +77,8 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   // Cross-device mail inventory — domains, mailboxes and aliases (mailcow).
   { path: '/mail', permission: 'mail:read' },
   { path: '/firewall', permission: 'firewall:read' },
+  // Firewall event log (blocked/allowed traffic) — same read perm as the rules page.
+  { path: '/firewall-events', permission: 'firewall:read' },
   { path: '/certificates', permission: 'certificates:read' },
   { path: '/routes', permission: 'routes:read' },
   { path: '/logs', permission: 'logs:read' },
@@ -172,6 +175,8 @@ export default function App() {
       <Route path="/services" element={<Page permission="services:read"><Services /></Page>} />
       <Route path="/mail" element={<Page permission="mail:read"><Mail /></Page>} />
       <Route path="/firewall" element={<Page permission="firewall:read"><Firewall /></Page>} />
+      {/* Firewall event log — which traffic is allowed and which is blocked. */}
+      <Route path="/firewall-events" element={<Page permission="firewall:read"><FirewallEvents /></Page>} />
       <Route path="/certificates" element={<Page permission="certificates:read"><Certificates /></Page>} />
       <Route path="/routes" element={<Page permission="routes:read"><RoutesPage /></Page>} />
       <Route path="/logs" element={<Page permission="logs:read"><Logs /></Page>} />

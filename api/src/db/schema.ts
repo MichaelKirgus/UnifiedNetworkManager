@@ -430,6 +430,61 @@ export const pluginLogs = pgTable(
   }
 );
 
+// Firewall event-log rows pushed by plugins via POST /plugin/firewall-events
+// (see routes/internal.ts) — append-only traffic events (blocked/allowed/NAT)
+// from the appliance's firewall log. Powers the cross-device "Firewall Events"
+// page. Unlike inventory tables this is a LOG: rows are never upserted or
+// deleted-on-absent; growth is bounded by the retention worker after
+// FIREWALL_EVENT_RETENTION_DAYS (see workers/firewallEventRetention.ts).
+// `ts` is the appliance-local timestamp verbatim ("YYYY-MM-DDTHH:MM:SS", no TZ)
+// — lexicographic ordering matches chronological order, so the cutoff DELETE
+// works like telemetry's. Dedupe key = vendorEventId (the appliance's per-row
+// __digest__), unique per device+plugin; ingest uses on-conflict-ignore.
+export const firewallEvents = pgTable(
+  'firewall_events',
+  {
+    id: text('id').primaryKey(),
+    // Self-reported by the sender (its effectiveUuid); validated against the
+    // plugins table at ingest — unknown ids are rejected with a 400.
+    pluginId: text('pluginId').notNull(),
+    deviceId: text('deviceId').notNull(),
+    // Appliance-local event timestamp, verbatim from the appliance (no TZ).
+    ts: text('ts').notNull(),
+    // Epoch ms of `ts` parsed as UTC at ingest — the queryable time axis. The
+    // raw string is appliance-LOCAL (no offset), so lexicographic comparison
+    // against a UTC cutoff would skew by the device's offset; tsMs gives range
+    // queries + retention one sane numeric column. NULL when unparseable.
+    tsMs: bigint('tsMs', { mode: 'number' }),
+    // pass | block | rdr | nat | binat (vendor-specific; 'unknown' fallback).
+    action: text('action').notNull().default('unknown'),
+    reason: text('reason'),
+    interfaceName: text('interfaceName').notNull().default(''),
+    srcIp: text('srcIp').notNull().default(''),
+    dstIp: text('dstIp').notNull().default(''),
+    proto: text('proto'),
+    srcPort: integer('srcPort'),
+    dstPort: integer('dstPort'),
+    // Rule uuid on the appliance (null when the event matched no rule).
+    ruleId: text('ruleId'),
+    // The rule's description text as reported by the appliance.
+    ruleName: text('ruleName'),
+    // The appliance's per-row unique id (__digest__) — dedupe key at ingest.
+    vendorEventId: text('vendorEventId').notNull(),
+  },
+  (table) => {
+    return {
+      uqFirewallEventsVendor: uniqueIndex('uq_firewall_events_vendor').on(
+        table.deviceId,
+        table.pluginId,
+        table.vendorEventId,
+      ),
+      idxFirewallEventsDeviceTsMs: index('idx_firewall_events_device_ts_ms').on(table.deviceId, table.tsMs),
+      // Epoch-ms index for the retention sweep (DELETE WHERE tsMs < cutoff).
+      idxFirewallEventsTsMs: index('idx_firewall_events_ts_ms').on(table.tsMs),
+    };
+  }
+);
+
 // Self-metrics samples of the plugin processes themselves (see workers/pluginMetrics.ts).
 // The API polls each registered plugin's GET /metrics endpoint (auto-mounted by
 // @unm/plugin-sdk) and stores one row per sample. Powers the per-plugin health

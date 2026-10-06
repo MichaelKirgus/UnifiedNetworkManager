@@ -25,6 +25,7 @@ import {
   Shield,
   ShieldHalf,
   ShieldCheck,
+  Radar,
   FileKey2,
   Globe,
   NotebookPen,
@@ -77,6 +78,8 @@ export const NAV_ITEMS: NavItem[] = [
   // Firewall rules across devices (filter + NAT kinds) — ShieldHalf reads as a
   // protective barrier and is distinct from the Roles (Shield) entry.
   { to: '/firewall', label: 'Firewall', icon: ShieldHalf, requiresPermission: 'firewall:read' },
+  // Firewall event log — which traffic is allowed and which is blocked.
+  { to: '/firewall-events', label: 'Firewall Events', icon: Radar, requiresPermission: 'firewall:read' },
   // TLS certs + SSH host keys across devices (expiry/chain validation). The
   // badge counts endpoints that are NOT healthy right now — expired leaf or
   // issuer, chain-invalid, or presenting a different key than trusted.
