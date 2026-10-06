@@ -571,9 +571,12 @@ function preferredLabel(g: MergedNetwork): string {
 let flowNetIndex: { at: number; groups: FlowNetworkGroup[]; vlanToLabel: Map<number, string> } | null = null;
 async function loadFlowNetworkGroups(): Promise<FlowNetworkGroup[]> {
   if (flowNetIndex && Date.now() - flowNetIndex.at < 30_000) return flowNetIndex.groups;
+  // ORDER BY mirrors GET /networks' drizzle orderBy — mergeNetworkRows is order-
+  // dependent (VLAN→subnet bridging is first-wins), so the grouping must be fed
+  // identically-ordered rows to stay consistent with the Networks page.
   const res = await pool.query(
     `SELECT "deviceId", "pluginId", name, ip, prefix, version, "vlanId", mac, status, "collectedAt"
-     FROM networks`
+     FROM networks ORDER BY "deviceId", name`
   );
   // ALL rows — exactly what GET /networks feeds mergeNetworkRows. IP-less
   // named interfaces (e.g. a router's tagged port with only a VLAN id) are
@@ -703,6 +706,127 @@ router.get('/flows/networks', requireAuth, requirePermission('flows:read'), asyn
     res.status(200).json({ fromMs, toMs, table, networks });
   } catch (error) {
     console.error('Error querying flow networks:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /v1/flows/inventory?from&to — traffic statistics keyed the way the
+ * Hosts and Networks pages already present their rows, so those pages can
+ * render a "Traffic (24h)" column without running flow queries themselves:
+ *   - perIp: estimated bytes sent/received per endpoint IP over the window.
+ *     The webapp sums these across each host's addresses client-side.
+ *   - perNetwork: the same split keyed by the LOGICAL network's canonical
+ *     identity (subnet:<cidr> / vlan:<id> / name:<interface>) — exactly the
+ *     `key` field GET /networks returns for its rows, so joining is trivial.
+ * Endpoints classified as 'internet' are excluded from perNetwork (they belong
+ * to no inventoried network) but stay in perIp. No limit param: distinct
+ * endpoints over a window stay small and the pages need complete data.
+ */
+router.get('/flows/inventory', requireAuth, requirePermission('flows:read'), async (req: Request, res: Response) => {
+  const q = req.query as Record<string, unknown>;
+  const { fromMs, toMs } = resolveWindow(q);
+
+  try {
+    const use5m = toMs - fromMs <= 31 * 86_400_000;
+    const table = use5m ? 'flow_agg_5m' : 'flow_agg_1h';
+
+    const params: unknown[] = [new Date(fromMs).toISOString(), new Date(toMs).toISOString()];
+    const site = await resolveSiteFilter(params, q, true);
+    if (site.kind === 'unknown') return res.status(400).json({ error: `Unknown site id: ${String(q.siteId)}` });
+
+    let srcRes;
+    let dstRes;
+    if (site.kind === 'ok' && site.empty) {
+      srcRes = { rows: [] };
+      dstRes = { rows: [] };
+    } else {
+      const siteClause = site.kind === 'ok' ? site.clause : '';
+      [srcRes, dstRes] = await Promise.all([
+        pool.query(
+          `SELECT host("srcIp") AS ip, MAX("srcVlanId")::int AS vlan_id,
+                  MAX("srcClass") AS ip_class, SUM("estBytes")::bigint AS est_bytes
+           FROM ${table} WHERE bucket >= $1 AND bucket < $2${siteClause}
+           GROUP BY 1 ORDER BY est_bytes DESC LIMIT 50000`,
+          params
+        ),
+        pool.query(
+          `SELECT host("dstIp") AS ip, MAX("dstVlanId")::int AS vlan_id,
+                  MAX("dstClass") AS ip_class, SUM("estBytes")::bigint AS est_bytes
+           FROM ${table} WHERE bucket >= $1 AND bucket < $2${siteClause}
+           GROUP BY 1 ORDER BY est_bytes DESC LIMIT 50000`,
+          params
+        ),
+      ]);
+    }
+
+    // Per-endpoint totals — the Hosts page sums these across each host's addresses.
+    const perIp = new Map<string, { ip: string; srcEstBytes: number; dstEstBytes: number }>();
+    for (const r of srcRes.rows) {
+      const ip = String(r.ip);
+      let row = perIp.get(ip);
+      if (!row) { row = { ip, srcEstBytes: 0, dstEstBytes: 0 }; perIp.set(ip, row); }
+      row.srcEstBytes += Number(r.est_bytes);
+    }
+    for (const r of dstRes.rows) {
+      const ip = String(r.ip);
+      let row = perIp.get(ip);
+      if (!row) { row = { ip, srcEstBytes: 0, dstEstBytes: 0 }; perIp.set(ip, row); }
+      row.dstEstBytes += Number(r.est_bytes);
+    }
+
+    // Per logical network — the SAME grouping as GET /networks (mergeNetworkRows),
+    // keyed by its canonical identity so the webapp joins on `key`. Longest-prefix
+    // subnet match per endpoint, VLAN fallback when no subnet matches. The ORDER
+    // BY must mirror GET /networks' drizzle orderBy: mergeNetworkRows is order-
+    // dependent (VLAN→subnet bridging is first-wins), so differently-ordered input
+    // rows would produce different group keys and break the webapp's join.
+    const netRes = await pool.query(
+      `SELECT "deviceId", "pluginId", name, ip, prefix, version, "vlanId", mac, status, "collectedAt"
+       FROM networks ORDER BY "deviceId", name`
+    );
+    const merged = mergeNetworkRows(netRes.rows as any[]);
+    const subnetToKey: { cidr: string; len: number; key: string }[] = [];
+    for (const g of merged) {
+      for (const s of g.subnets ?? []) subnetToKey.push({ cidr: s, len: Number(s.split('/')[1] ?? 0), key: g.key });
+    }
+    const vlanToKey = new Map<number, string>();
+    for (const g of merged) if (g.vlanId !== null && g.vlanId !== undefined) vlanToKey.set(g.vlanId, g.key);
+
+    const matchKey = (ip: string, vlanId: number | null): string | null => {
+      let best: { len: number; key: string } | null = null;
+      for (const s of subnetToKey) {
+        if (!ipInCidr(ip, s.cidr)) continue;
+        if (!best || s.len > best.len) best = { len: s.len, key: s.key };
+      }
+      if (best) return best.key;
+      if (vlanId !== null && vlanId > 0) return vlanToKey.get(vlanId) ?? null;
+      return null;
+    };
+
+    const perNetwork = new Map<string, { srcEstBytes: number; dstEstBytes: number }>();
+    const addNet = (key: string | null, bytes: number, dir: 's' | 'd') => {
+      if (!key) return; // internet-classified or unmatched — no inventoried network
+      let row = perNetwork.get(key);
+      if (!row) { row = { srcEstBytes: 0, dstEstBytes: 0 }; perNetwork.set(key, row); }
+      if (dir === 's') row.srcEstBytes += bytes; else row.dstEstBytes += bytes;
+    };
+    for (const r of srcRes.rows) {
+      if (r.ip_class === 'internet') continue;
+      addNet(matchKey(String(r.ip), r.vlan_id === null || r.vlan_id === undefined ? null : Number(r.vlan_id)), Number(r.est_bytes), 's');
+    }
+    for (const r of dstRes.rows) {
+      if (r.ip_class === 'internet') continue;
+      addNet(matchKey(String(r.ip), r.vlan_id === null || r.vlan_id === undefined ? null : Number(r.vlan_id)), Number(r.est_bytes), 'd');
+    }
+
+    res.status(200).json({
+      fromMs, toMs, table,
+      perIp: [...perIp.values()],
+      perNetwork: Array.from(perNetwork.entries()).map(([key, v]) => ({ key, ...v, estBytes: v.srcEstBytes + v.dstEstBytes })),
+    });
+  } catch (error) {
+    console.error('Error querying flow inventory stats:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

@@ -1,10 +1,22 @@
+import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { IpGroupChips } from '../components/IpGroups';
+import { formatBytes } from '../components/formatMetric';
 import { api, HostRow } from '../api/client';
+import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
+
+/** Fixed window for the traffic column — matches what the header advertises. */
+const TRAFFIC_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** One host's traffic totals over the window (null = no flows observed). */
+interface HostTraffic {
+  sent: number;
+  received: number;
+}
 
 /** Color-coded pill for one discovery source; a merged host shows all of its sources. */
 function SourceBadges({ sources }: { sources: HostRow['sources'] }) {
@@ -40,6 +52,38 @@ export default function Hosts() {
     queryFn: () => api.hosts(),
     refetchInterval: 30_000,
   });
+
+  // Traffic over the last 24h per endpoint IP — summed across each host's
+  // addresses below. Rollups land every 5 minutes; refresh on that cadence.
+  const trafficQuery = useQuery({
+    queryKey: ['flows', 'inventory'],
+    queryFn: () => {
+      const to = new Date();
+      return api.flowsInventory({ from: new Date(Date.now() - TRAFFIC_WINDOW_MS).toISOString(), to: to.toISOString() });
+    },
+    enabled: can('flows:read'),
+    refetchInterval: 300_000,
+  });
+
+  const trafficByIp = useMemo(() => {
+    const map = new Map<string, HostTraffic>();
+    for (const r of trafficQuery.data?.perIp ?? []) {
+      map.set(r.ip, { sent: Number(r.srcEstBytes), received: Number(r.dstEstBytes) });
+    }
+    return map;
+  }, [trafficQuery.data]);
+
+  const hostTraffic = (row: HostRow): HostTraffic | null => {
+    let sent = 0;
+    let received = 0;
+    for (const ip of row.ips) {
+      const t = trafficByIp.get(ip);
+      if (!t) continue;
+      sent += t.sent;
+      received += t.received;
+    }
+    return sent > 0 || received > 0 ? { sent, received } : null;
+  };
 
   const columns: DataTableColumn<HostRow>[] = [
     {
@@ -107,6 +151,31 @@ export default function Hosts() {
       width: 180,
       sortAccessor: (row) => new Date(row.lastSeenAt).getTime(),
       render: (row) => formatDateTime(row.lastSeenAt),
+    },
+    {
+      // Flow-collector traffic over the last 24h — estimated bytes sent/received
+      // across ALL of the host's addresses. "—" when no flows were observed.
+      header: 'Traffic (24h)',
+      key: 'traffic',
+      width: 170,
+      sortAccessor: (row) => {
+        const t = hostTraffic(row);
+        return t ? t.sent + t.received : null;
+      },
+      exportValue: (row) => {
+        const t = hostTraffic(row);
+        return t ? `${t.sent} sent / ${t.received} received` : '';
+      },
+      render: (row) => {
+        const t = hostTraffic(row);
+        if (!t) return <span className="text-faint">—</span>;
+        return (
+          <div className="flex flex-col leading-tight" title={`Last 24h — sent ${formatBytes(t.sent)}, received ${formatBytes(t.received)}`}>
+            <span className="font-mono text-xs"><span className="text-faint">↑</span> {formatBytes(t.sent)}</span>
+            <span className="font-mono text-xs"><span className="text-faint">↓</span> {formatBytes(t.received)}</span>
+          </div>
+        );
+      },
     },
   ];
 

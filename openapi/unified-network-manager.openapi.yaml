@@ -3951,6 +3951,60 @@ paths:
         '401':
           description: Authentication required
 
+  /flows/inventory:
+    get:
+      tags: [Flows]
+      summary: Traffic statistics keyed for the Hosts/Networks pages
+      description: >-
+        Estimated bytes over a window, keyed the way the Hosts and Networks
+        pages present their rows so those pages can render a traffic column
+        without running flow queries themselves. perIp is one entry per
+        endpoint IP (sent = sourced from it, received = destined for it); the
+        webapp sums these across each host's addresses. perNetwork uses the
+        SAME canonical identity GET /networks returns per row (`key`:
+        subnet:<cidr> / vlan:<id> / name:<interface>) — endpoints are mapped
+        by longest-prefix subnet match with a stored-VLAN fallback; internet-
+        classified endpoints belong to no inventoried network and only appear
+        in perIp. No limit param: distinct endpoints over a window stay small
+        and the pages need complete data.
+      parameters:
+        - in: query
+          name: from
+          required: false
+          schema: { type: string }
+          description: "Window start (ISO-8601). Default: one hour before `to`"
+        - in: query
+          name: to
+          required: false
+          schema: { type: string }
+          description: "Window end (ISO-8601, exclusive). Default: now"
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: "Filter to traffic where either endpoint belongs to a device at this site (400 for an unknown id)"
+      responses:
+        '200':
+          description: Per-endpoint and per-network traffic totals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fromMs: { type: integer }
+                  toMs: { type: integer }
+                  table: { type: string, enum: [flow_agg_5m, flow_agg_1h] }
+                  perIp:
+                    type: array
+                    items: { $ref: '#/components/schemas/FlowInventoryIp' }
+                  perNetwork:
+                    type: array
+                    items: { $ref: '#/components/schemas/FlowInventoryNetwork' }
+        '400':
+          description: Unknown siteId
+        '401':
+          description: Authentication required
+
   /flow-collectors:
     get:
       tags: [Flows]
@@ -7569,6 +7623,35 @@ components:
         name: { type: string, description: "Logical-network label (named interface, canonical subnet, or 'VLAN <id>'); '(external)' for internet-classified traffic, '(unknown)' for unmatched internal" }
         vlanId: { type: [integer, 'null'], description: "VLAN id when the group carries exactly one VLAN (null otherwise)" }
         subnets: { type: array, items: { type: string }, description: "All subnets of the group, IPv4 first — empty for unknown/VLAN-only rows" }
+        srcEstBytes: { type: integer, format: int64 }
+        dstEstBytes: { type: integer, format: int64 }
+        estBytes: { type: integer, format: int64 }
+
+    FlowInventoryIp:
+      type: object
+      description: >-
+        One endpoint IP by traffic (GET /flows/inventory). srcEstBytes is the
+        estimated bytes SOURCED from this IP over the window; dstEstBytes the
+        bytes DESTINED to it. The Hosts page sums these across each host's
+        addresses.
+      required: [ip, srcEstBytes, dstEstBytes]
+      properties:
+        ip: { type: string }
+        srcEstBytes: { type: integer, format: int64 }
+        dstEstBytes: { type: integer, format: int64 }
+
+    FlowInventoryNetwork:
+      type: object
+      description: >-
+        One LOGICAL network by traffic (GET /flows/inventory). `key` is exactly
+        the canonical identity GET /networks returns per row (subnet:<cidr>,
+        vlan:<id> or name:<interface>) — endpoints are mapped to it via
+        longest-prefix subnet match with a stored-VLAN fallback. Internet-
+        classified endpoints belong to no inventoried network and never appear
+        here.
+      required: [key, srcEstBytes, dstEstBytes, estBytes]
+      properties:
+        key: { type: string, description: "Canonical identity of the logical network (subnet:<cidr>, vlan:<id> or name:<interface>)" }
         srcEstBytes: { type: integer, format: int64 }
         dstEstBytes: { type: integer, format: int64 }
         estBytes: { type: integer, format: int64 }

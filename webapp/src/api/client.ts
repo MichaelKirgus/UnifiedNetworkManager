@@ -1225,6 +1225,33 @@ export interface FlowNetworksResponse {
   networks: FlowNetworkRow[];
 }
 
+/** One endpoint IP by traffic (GET /flows/inventory). */
+export interface FlowInventoryIp {
+  ip: string;
+  /** Estimated bytes SENT from this IP over the window. */
+  srcEstBytes: number;
+  /** Estimated bytes RECEIVED by this IP over the window. */
+  dstEstBytes: number;
+}
+
+/** One LOGICAL network by traffic (GET /flows/inventory) — `key` is exactly
+ * the canonical identity GET /networks returns per row, so joining is direct. */
+export interface FlowInventoryNetwork {
+  key: string;
+  srcEstBytes: number;
+  dstEstBytes: number;
+  estBytes: number;
+}
+
+/** Traffic statistics keyed for the Hosts/Networks pages (GET /flows/inventory). */
+export interface FlowsInventoryResponse {
+  fromMs: number;
+  toMs: number;
+  table: 'flow_agg_5m' | 'flow_agg_1h';
+  perIp: FlowInventoryIp[];
+  perNetwork: FlowInventoryNetwork[];
+}
+
 /** Per-device internet egress row (GET /flows/internet). */
 export interface FlowInternetDevice {
   deviceId: string;
@@ -3399,6 +3426,16 @@ export const api = {
     if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<FlowNetworksResponse>(`/flows/networks${suffix}`);
+  },
+  /** Traffic statistics keyed for the Hosts/Networks pages (per endpoint IP +
+   * per logical network) — powers their "Traffic" columns. */
+  flowsInventory: (params?: { from?: string; to?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<FlowsInventoryResponse>(`/flows/inventory${suffix}`);
   },
   flowCollectors: () => apiFetch<FlowCollectorsResponse>('/flow-collectors'),
   // Plugin log entries (global Logs page + per-device section in DeviceDetail).

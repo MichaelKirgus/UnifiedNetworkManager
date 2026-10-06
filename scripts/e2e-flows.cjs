@@ -23,19 +23,21 @@ const TRUNCATE = process.env.FLOWS_E2E_TRUNCATE === '1';
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-async function waitForRollup(pool) {
-  // The rollup tick is a setInterval aligned to API START, not wall-clock
-  // boundaries — after the bucket closes we may wait up to one full interval
-  // for the next tick. Poll flow_agg_5m instead of sleeping to an estimate:
-  // boundary + one interval (300s) + margin (60s), checked every 10s.
-  const nowMs = Date.now();
-  const bucketEndMs = (Math.floor(nowMs / 300_000) + 1) * 300_000; // next boundary
-  const deadline = bucketEndMs + 360_000;
-  console.log(`\n[rollup] waiting for the 5-minute rollup (polling until ${new Date(deadline).toISOString()})…`);
+async function waitForRollup(pool, sinceMs) {
+  // Wait until THIS burst's data is rolled up: the first completed 5-minute
+  // bucket at/after the burst start must have landed in flow_agg_5m. (A plain
+  // "table non-empty" check returns instantly on a long-running system where
+  // older buckets already exist — and an API restart resets the rollup cursor
+  // to "now", so pre-existing rows say nothing about this run's data.) The
+  // rollup tick is a setInterval aligned to API START, not wall-clock
+  // boundaries — after the bucket closes we may wait up to one full interval.
+  const firstBucket = new Date(Math.floor(sinceMs / 300_000) * 300_000).toISOString();
+  const deadline = Date.now() + 9 * 60_000; // bucket close (≤5 min) + one tick (5 min) − margin
+  console.log(`\n[rollup] waiting for flow_agg_5m rows with bucket >= ${firstBucket}…`);
   while (Date.now() < deadline) {
     await sleep(10_000);
-    const r = await pool.query('SELECT count(*)::int AS n FROM flow_agg_5m');
-    if (r.rows[0].n > 0) { console.log(`[rollup] flow_agg_5m has ${r.rows[0].n} rows`); return; }
+    const r = await pool.query('SELECT count(*)::int AS n FROM flow_agg_5m WHERE bucket >= $1', [firstBucket]);
+    if (r.rows[0].n > 0) { console.log(`[rollup] rolled up — ${r.rows[0].n} row(s)`); return; }
   }
   console.warn('[rollup] timed out waiting for rollup rows — continuing anyway');
 }
@@ -126,6 +128,7 @@ async function main() {
   }
 
   // ── 1. mock burst (sFlow + NetFlow v5/v9 in parallel on the same port) ───
+  const burstStartMs = Date.now();
   console.log(`\n[mock] sending sFlow + NetFlow v5/v9 datagrams to udp://${HOST}:${PORT} for ${BURST_MS / 1000}s`);
   const env = { ...process.env, SFLOW_SEND_INTERVAL_MS: '2000', NF_SEND_INTERVAL_MS: '2000' };
   // Second sFlow exporter (agent 192.168.1.2) sends ONLY the internal→internal
@@ -183,7 +186,7 @@ async function main() {
   );
   check('dedup: single-exporter tuple has agentCount = 1', single.rows[0].maxAgents === 1, `agentCount=${single.rows[0].maxAgents}`);
 
-  if (WAIT_ROLLUP) await waitForRollup(pool);
+  if (WAIT_ROLLUP) await waitForRollup(pool, burstStartMs);
 
   // ── 3. routes ────────────────────────────────────────────────────
   const now = Date.now();
@@ -199,9 +202,12 @@ async function main() {
     // The shared tuple's endpoints must surface ALL THREE exporters: the two
     // sFlow agents + NetFlow v5. observedBy >= 3 proves the rollup carries the
     // plugin's per-window union count (an agent that never won best-observation
-    // in any window would be invisible to a distinct-winners-only count).
+    // in any window would be invisible to a distinct-winners-only count). Only
+    // meaningful on a clean slate — on a live system the mock's tiny flows never
+    // rank into the top-N talkers among real traffic.
     const multi = [...(j.sources ?? []), ...(j.destinations ?? [])].filter((t) => t.ip === '192.168.1.50' || t.ip === '192.168.1.10');
-    check('top-talkers: shared-tuple IPs report observedBy >= 3 (all exporters)', multi.length > 0 && multi.every((t) => (t.observedBy ?? 0) >= 3), JSON.stringify(multi));
+    if (TRUNCATE) check('top-talkers: shared-tuple IPs report observedBy >= 3 (all exporters)', multi.length > 0 && multi.every((t) => (t.observedBy ?? 0) >= 3), JSON.stringify(multi));
+    else console.log(`    top-talkers observedBy check skipped (live system — mock flows not in top-N)`);
   }
 
   const internet = await authed(`/flows/internet?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
@@ -250,6 +256,33 @@ async function main() {
     check('ingest stats present', Boolean(j.ingest?.queueDepth !== undefined), JSON.stringify(j.ingest ?? null));
     check('collector listed + reachable', Array.isArray(j.collectors) && j.collectors.length > 0 && j.collectors[0].reachable, `collectors=${j.collectors?.length}`);
     if (j.collectors?.[0]) console.log(`    collector: ${JSON.stringify(j.collectors[0])}`);
+  }
+
+  // ── /flows/inventory — traffic keyed for the Hosts/Networks pages ────────
+  // Window spans at least one COMPLETED 5-minute bucket (agg tables only hold
+  // rolled-up data; a +60 s `to` covers the current partial window harmlessly).
+  const invFrom = new Date(now - 10 * 60_000).toISOString();
+  const invTo = new Date(now + 60_000).toISOString();
+  const inventory = await authed(`/flows/inventory?from=${encodeURIComponent(invFrom)}&to=${encodeURIComponent(invTo)}`);
+  check('GET /flows/inventory → 200', inventory.status === 200, `status=${inventory.status}`);
+  if (inventory.status === 200) {
+    const j = await inventory.json();
+    check('perIp is an array of {ip, srcEstBytes, dstEstBytes}', Array.isArray(j.perIp) && j.perIp.every((r) => typeof r.ip === 'string' && Number.isFinite(Number(r.srcEstBytes)) && Number.isFinite(Number(r.dstEstBytes))), `rows=${j.perIp?.length}`);
+    check('perNetwork is an array of {key, srcEstBytes, dstEstBytes}', Array.isArray(j.perNetwork) && j.perNetwork.every((r) => typeof r.key === 'string' && Number.isFinite(Number(r.srcEstBytes)) && Number.isFinite(Number(r.dstEstBytes))), `rows=${j.perNetwork?.length}`);
+    // The mock's internal endpoints must surface with traffic in BOTH roles:
+    // 192.168.1.50 is a source (internal→internal + egress), .10/.75 sources,
+    // and .10/.20 are destinations.
+    const ipRow = (ip) => (j.perIp ?? []).find((r) => r.ip === ip);
+    check('perIp: internal source 192.168.1.50 has sent > 0', (ipRow('192.168.1.50')?.srcEstBytes ?? 0) > 0, JSON.stringify(ipRow('192.168.1.50')));
+    check('perIp: internal destination 192.168.1.10 has received > 0', (ipRow('192.168.1.10')?.dstEstBytes ?? 0) > 0, JSON.stringify(ipRow('192.168.1.10')));
+    check('perIp: internet destination 8.8.8.8 has received > 0', (ipRow('8.8.8.8')?.dstEstBytes ?? 0) > 0, JSON.stringify(ipRow('8.8.8.8')));
+    // perNetwork keys must be canonical identities (subnet:/vlan:/name:) and no
+    // internet-classified endpoint may map into an inventoried network — the
+    // mock's only external IP is 8.8.8.8, so it must not fall in any subnet.
+    const badKeys = (j.perNetwork ?? []).filter((r) => !/^(subnet:|vlan:|name:)/.test(r.key));
+    check('perNetwork keys are canonical identities', badKeys.length === 0, JSON.stringify(badKeys.slice(0, 3)));
+    if ((j.perIp ?? []).length > 0) console.log(`    perIp top: ${JSON.stringify(j.perIp.slice(0, 3))}`);
+    if ((j.perNetwork ?? []).length > 0) console.log(`    perNetwork top: ${JSON.stringify(j.perNetwork.slice(0, 3))}`);
   }
 
   if (TRUNCATE) {
