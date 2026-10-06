@@ -63,6 +63,10 @@ const CATEGORY_STYLES: Record<string, string> = {
   Execution: 'bg-success text-success-fg',
   Discovery: 'bg-muted text-secondary',
   Flows: 'bg-accent-teal text-accent-teal-fg',
+  Files: 'bg-accent-sky text-accent-sky-fg',
+  Time: 'bg-accent-violet text-accent-violet-fg',
+  'Web Fetch': 'bg-accent-cyan text-accent-cyan-fg',
+  GeoIP: 'bg-accent-indigo text-accent-indigo-fg',
 };
 
 /** Inline editor for one expanded setting — owns its own draft state. */

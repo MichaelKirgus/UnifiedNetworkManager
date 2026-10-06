@@ -1168,6 +1168,12 @@ export interface FlowTalker {
    * deduplicated to a single best observation (0 = pre-dedup data or one exporter).
    */
   observedBy: number;
+  /** ISO-3166 alpha-2 country code from the active GeoIP database (null when no DB / no entry). */
+  countryCode?: string | null;
+  /** English country name from the active GeoIP database. */
+  countryName?: string | null;
+  /** Most-specific populated place (city, or subdivision fallback for MMDB sources). */
+  city?: string | null;
 }
 
 export interface FlowTopTalkersResponse {

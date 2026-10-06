@@ -3,6 +3,7 @@ import { pool } from '../db';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { pluginAxios } from '../utils/pluginHttp';
 import { reverseLookup } from '../utils/reverseDns';
+import { lookupGeoIp } from '../utils/geoIp';
 import { getFlowIngestStats } from '../workers/flows';
 import { mergeNetworkRows } from './networks';
 import type { MergedNetwork } from './networks';
@@ -154,6 +155,7 @@ router.get('/flows/top-talkers', requireAuth, requirePermission('flows:read'), a
       ip: string; estBytes: number; reportedBytes: number; deviceId: string | null; deviceName: string | null;
       internal: boolean; hostname: string | null; hostnameSource: 'inventory' | 'reverse-dns' | null;
       networkName: string | null; vlanId: number | null; observedBy: number;
+      countryCode: string | null; countryName: string | null; city: string | null;
     } => ({
       ip: String(r.ip),
       estBytes: Number(r.est_bytes),
@@ -170,6 +172,10 @@ router.get('/flows/top-talkers', requireAuth, requirePermission('flows:read'), a
       hostnameSource: r.hostname !== null && r.hostname !== undefined ? 'inventory' : null,
       networkName: r.network_name !== null && r.network_name !== undefined ? String(r.network_name) : null,
       vlanId: r.vlan_id === null || r.vlan_id === undefined ? null : Number(r.vlan_id),
+      // Filled below for external talkers via the active GeoIP database.
+      countryCode: null,
+      countryName: null,
+      city: null,
     }));
 
     const sources = shape(srcRes.rows);
@@ -191,6 +197,26 @@ router.get('/flows/top-talkers', requireAuth, requirePermission('flows:read'), a
           const h = byIp.get(row.ip) ?? null;
           row.hostname = h;
           if (h) row.hostnameSource = 'reverse-dns';
+        }
+      }
+    }
+
+    // Best-effort GeoIP for EXTERNAL talkers — country/city from the active
+    // database file (Settings → GeoIP). lookupGeoIp is a no-op returning null
+    // while geoipEnabled=false or no active file, so this block degrades to
+    // all-null fields when the feature is off. Results are cached per IP 10 min.
+    const externalTalkers = new Set(allRows.filter((r) => !r.internal && !r.deviceId).map((r) => r.ip));
+    if (externalTalkers.size > 0) {
+      const geos = await Promise.all(
+        [...externalTalkers].map(async (ip) => [ip, await lookupGeoIp(ip)] as const),
+      );
+      const geoByIp = new Map(geos);
+      for (const row of allRows) {
+        if (!row.internal && !row.deviceId) {
+          const g = geoByIp.get(row.ip) ?? null;
+          row.countryCode = g?.countryCode ?? null;
+          row.countryName = g?.countryName ?? null;
+          row.city = g?.city ?? null;
         }
       }
     }

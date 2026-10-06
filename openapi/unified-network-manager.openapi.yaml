@@ -3983,6 +3983,63 @@ paths:
         '401':
           description: Authentication required
 
+  /geoip/status:
+    get:
+      tags: [Flows]
+      summary: GeoIP database status (source config + active file + last fetch outcome)
+      description: >-
+        Current state of the GeoIP feature that enriches Flows top-talkers with
+        country/city. Reports the configured source preset (maxmind, dpip,
+        ip2location-lite, ipinfo or custom), whether a custom URL and an egress
+        proxy are configured, the active database file in the files repo
+        (name/size/sha256) and the worker-managed status rows — last attempt,
+        last success and the most recent error message. The geoip worker runs
+        on a configurable interval (`geoipFetchIntervalHours`) through the
+        web-fetch plugin; see POST /geoip/refresh to trigger one cycle now.
+        Gated on `flows:read`.
+      responses:
+        '200':
+          description: Current GeoIP status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeoIpStatus'
+        '401':
+          description: Authentication required
+
+  /geoip/refresh:
+    post:
+      tags: [Flows]
+      summary: Run one GeoIP fetch cycle now (bypasses the interval)
+      description: >-
+        Triggers a single geoip worker cycle immediately — resolves the source
+        URL, downloads through the web-fetch plugin (optionally via the
+        configured egress proxy), stores the result in the files repo under
+        category 'geoip', points `geoipActiveFileId` at it and prunes older
+        GeoIP files when `geoipDeleteOldFiles` is set. The worker's normal
+        cadence is untouched. Returns the same payload as GET /geoip/status;
+        502 with an `error` field when the cycle failed AND no active file
+        exists yet (first-ever fetch failure). Gated on `system:write`.
+      responses:
+        '200':
+          description: Cycle finished — status after the run (may still carry a lastError if serving the previous good file)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeoIpStatus'
+        '401':
+          description: Authentication required
+        '502':
+          description: Cycle failed and no active database file exists yet
+          content:
+            application/json:
+              schema:
+                type: object
+                allOf:
+                  - $ref: '#/components/schemas/GeoIpStatus'
+                  - properties:
+                      error: { type: string }
+
   /hosts:
     get:
       tags: [Inventory]
@@ -7439,6 +7496,34 @@ components:
         networkName: { type: [string, 'null'], description: "Inventoried network this IP lives in (longest-prefix match), e.g. 'LAN' — null when no inventory network matches" }
         vlanId: { type: [integer, 'null'], description: "VLAN id of the matching inventoried network (null when untagged or unknown)" }
         observedBy: { type: integer, description: "How many distinct exporters (sFlow/NetFlow agents) observed this IP's flows in the window. >1 = several devices on the path exported the same traffic and it was deduplicated to a single best observation; 0 = pre-dedup data or a single exporter" }
+        countryCode: { type: [string, 'null'], description: "ISO-3166 alpha-2 country code from the active GeoIP database (e.g. 'US') — null when no database is configured/active or the IP has no entry" }
+        countryName: { type: [string, 'null'], description: "English country name from the active GeoIP database (e.g. 'United States')" }
+        city: { type: [string, 'null'], description: "Most-specific populated place from the active GeoIP database (city for MMDB sources; subdivision fallback when no city is recorded)" }
+
+    GeoIpStatus:
+      type: object
+      description: >-
+        State of the GeoIP feature — source configuration, the active database
+        file in the files repo and the worker-managed fetch status rows. The
+        geoip worker downloads through the web-fetch plugin on a configurable
+        interval; `geoipActiveFileId` points at the newest successful download
+        (older 'geoip' category files are pruned when deleteOldFiles is set).
+      required: [enabled, source, customUrlConfigured, fetchIntervalHours, deleteOldFiles, proxyConfigured]
+      properties:
+        enabled: { type: boolean, description: "Master switch — lookups return null while disabled" }
+        source: { type: string, enum: [maxmind, dpip, ip2location-lite, ipinfo, custom], description: "Source preset. maxmind/dpip have no stable direct URL (license key / download portal) and require geoipCustomUrl; ip2location-lite and ipinfo resolve to a built-in URL" }
+        customUrlConfigured: { type: boolean, description: "True when geoipCustomUrl is set — it wins over the preset's built-in URL" }
+        fetchIntervalHours: { type: integer, description: "Worker cadence in hours (default 720 = 30 days)" }
+        deleteOldFiles: { type: boolean, description: "Prune all other 'geoip' category files after a successful fetch" }
+        proxyConfigured: { type: boolean, description: "True when webFetchProxyUrl is set — downloads tunnel through that egress proxy (CONNECT for https)" }
+        activeFileId: { type: [string, 'null'], description: "Files-repo id of the active database file" }
+        activeFileName: { type: [string, 'null'] }
+        activeFileSizeBytes: { type: [integer, 'null'], format: int64 }
+        activeFileSha256: { type: [string, 'null'] }
+        activeFileCreatedAt: { type: [string, 'null'], format: date-time }
+        lastAttemptAt: { type: [string, 'null'], format: date-time, description: "When the worker (or a manual refresh) last ran a cycle" }
+        lastSuccessAt: { type: [string, 'null'], format: date-time, description: "When the newest active file was fetched successfully" }
+        lastError: { type: string, description: "Most recent failure message — empty when the last cycle succeeded" }
 
     FlowPortRow:
       type: object

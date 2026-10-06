@@ -84,7 +84,7 @@ services:
       # Docker bridge networks). Ensures the provider plugins are registered.
       # All plugins listen on the conventional internal port 4080 (see
       # docs/PLUGIN-DEVELOPMENT.md); compose maps distinct HOST ports to it.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://file-repo-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080,http://openwrt-plugin:4080,http://generic-ssh-plugin:4080,http://generic-http-plugin:4080,http://generic-ntp-plugin:4080,http://mailcow-plugin:4080,http://zabbix-plugin:4080,http://flow-collector-plugin:4080}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://file-repo-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080,http://openwrt-plugin:4080,http://generic-ssh-plugin:4080,http://generic-http-plugin:4080,http://generic-ntp-plugin:4080,http://mailcow-plugin:4080,http://zabbix-plugin:4080,http://flow-collector-plugin:4080,http://web-fetch-plugin:4080}
       # mTLS (Stage 1): enroll the API itself against the CA (identity "api") and
       # open a TLS listener on :8443. Off by default — set UNM_TLS=1 in .env to
       # enable it together with the plugins' enrollment.
@@ -636,6 +636,45 @@ services:
       - api
     restart: unless-stopped
 
+  # Web-fetch plugin (capability `webFetch`): GLOBAL service — no device
+  # assignment, no credentials. Downloads files/web content from the internet
+  # on behalf of UNM (POST /fetch), plain or through an egress proxy with
+  # CONNECT tunneling for HTTPS targets. This is what lets the API container
+  # live in a network segment WITHOUT internet access while this plugin sits
+  # behind one that has it — deploy it wherever egress exists and point
+  # WEBFETCH_PROXY_URL at your corporate proxy if plain TLS is not allowed.
+  # The GeoIP worker (api/src/workers/geoip.ts) uses it to pull database files
+  # into the central file repository; host port 4022 = HTTP control plane.
+  web-fetch-plugin:
+    build:
+      context: .
+      dockerfile: plugins/web-fetch/Dockerfile
+    ports:
+      - "4022:4080"
+    # Lets the plugin reach host-network services (e.g. a mock download server
+    # on :9199 during e2e) as http://host.docker.internal — plain Linux Docker
+    # has no such name by default.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - PORT=4080
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://web-fetch-plugin:4080
+      # Base URL of the API's internal endpoints (plugin -> API) — log shipping.
+      - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+      # Deployment-level egress proxy (empty = direct connection). The API's
+      # "Web Fetch" settings can override this per request; set here for a
+      # fixed corporate-proxy topology, e.g. http://proxy.corp:3128 or
+      # http://user:pass@proxy.corp:3128.
+      - WEBFETCH_PROXY_URL=${WEBFETCH_PROXY_URL:-}
+    depends_on:
+      - api
+    restart: unless-stopped
+
   # MCP server for AI agents: exposes the API's OpenAPI operations as MCP tools
   # over Streamable HTTP. Two endpoints:
   #   POST :3901/mcp        — production-safe (OpenAPI tools only; scope the
@@ -669,7 +708,7 @@ services:
       # Same database as the API — used by the debug SQL tool only.
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
       # Endpoints probed by the plugin_probe debug tool (same list as the api).
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080,http://openwrt-plugin:4080,http://generic-ssh-plugin:4080,http://generic-http-plugin:4080,http://generic-ntp-plugin:4080,http://mailcow-plugin:4080,http://zabbix-plugin:4080,http://flow-collector-plugin:4080}
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080,http://openwrt-plugin:4080,http://generic-ssh-plugin:4080,http://generic-http-plugin:4080,http://generic-ntp-plugin:4080,http://mailcow-plugin:4080,http://zabbix-plugin:4080,http://flow-collector-plugin:4080,http://web-fetch-plugin:4080}
     volumes:
       # mTLS (Stage 2): the CA config volume READ-ONLY — MCP only reads
       # root_ca.crt from it to build its trust bundle. The PKI volume is never

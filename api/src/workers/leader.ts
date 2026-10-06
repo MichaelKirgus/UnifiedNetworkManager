@@ -43,6 +43,7 @@ export const LEADER_KEYS = {
   planScheduler: 9009,
   ntpReferences: 9010,
   flows: 9011,
+  geoip: 9012,
 } as const;
 
 /**

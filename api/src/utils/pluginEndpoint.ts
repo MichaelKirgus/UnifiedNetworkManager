@@ -36,7 +36,9 @@ const SERVICE_HOST_PORTS: Record<string, number> = {
   'generic-ntp-plugin': 4017,
   'mailcow-plugin': 4018, // pre-existing gap — added with the flow-collector entry
   'zabbix-plugin': 4019,
+  'file-repo-plugin': 4020, // pre-existing gap — added with the web-fetch entry
   'flow-collector-plugin': 4021,
+  'web-fetch-plugin': 4022,
 };
 
 /** True when the API is running on the host (not inside a Docker container). */

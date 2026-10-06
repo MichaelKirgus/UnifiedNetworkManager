@@ -20,6 +20,7 @@ import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import plansRouter from './routes/plans';
 import networksRouter from './routes/networks';
 import flowsRouter from './routes/flows';
+import geoipRouter from './routes/geoip';
 import mailRouter from './routes/mail';
 import documentedHostsRouter from './routes/documentedHosts';
 import documentedNetworksRouter from './routes/documentedNetworks';
@@ -43,6 +44,7 @@ import { startPlanSchedulerWorker } from './workers/planScheduler';
 import { startLogRetentionWorker } from './workers/logRetention';
 import { startPluginMetricsWorker } from './workers/pluginMetrics';
 import { startNtpReferencesWorker } from './workers/ntpReferences';
+import { startGeoIpWorker } from './workers/geoip';
 import { startFlowsWorker } from './workers/flows';
 import { startInactiveUsersWorker } from './workers/inactiveUsers';
 import { LEADER_KEYS, runAsLeader } from './workers/leader';
@@ -154,6 +156,8 @@ async function main(): Promise<void> {
   // Traffic visibility (Flows page): top talkers, internet egress, device
   // pairs, timeseries + collector stats. All aggregate-table reads only.
   api.use(flowsRouter);
+  // GeoIP database status + manual refresh (Settings page "GeoIP" category).
+  api.use(geoipRouter);
   // Cross-device mail inventory (/mail/domains, /mail/mailboxes, /mail/aliases).
   api.use(mailRouter);
   // User-maintained host documentation (/documented-hosts + CSV import).
@@ -261,6 +265,9 @@ async function main(): Promise<void> {
     // Flow data: drains the POST /plugin/flows queue into flow_micro and runs
     // the 5m/hourly rollups + partition maintenance (sFlow/NetFlow feature).
     void runAsLeader(LEADER_KEYS.flows, 'flows', () => startFlowsWorker()).then((stop) => workerStops.push(stop));
+
+    // GeoIP database refresh (leader-gated; cadence from geoipFetchIntervalHours).
+    void runAsLeader(LEADER_KEYS.geoip, 'geoip', () => startGeoIpWorker()).then((stop) => workerStops.push(stop));
 
     // CA config rendering: the API owns ca.json (rendered from global settings)
     // on the shared volume; the CA service SIGHUPs itself when it changes.

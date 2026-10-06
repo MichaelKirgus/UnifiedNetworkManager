@@ -75,6 +75,35 @@ function orDash(v?: string | null): string {
   return v && v.trim() !== '' ? v : '—';
 }
 
+/** ISO-3166 alpha-2 → flag emoji (regional indicators), e.g. "US" → 🇺🇸. */
+function flagEmoji(code: string | null | undefined): string {
+  if (!code || code.length !== 2) return '';
+  const upper = code.toUpperCase();
+  if (!/^[A-Z]{2}$/.test(upper)) return '';
+  try {
+    return String.fromCodePoint(...[...upper].map((c) => 0x1F1E6 + c.charCodeAt(0) - 65));
+  } catch {
+    return '';
+  }
+}
+
+/** GeoIP location cell — "City, 🇺🇸 United States" or a faint dash. */
+function LocationCell({ row }: { row: FlowTalker }) {
+  const city = row.city?.trim() || null;
+  const countryName = row.countryName?.trim() || null;
+  if (!city && !countryName) return <span className="text-faint">—</span>;
+  const flag = flagEmoji(row.countryCode);
+  return (
+    <span className="truncate text-xs" title={[city, `${flag} ${countryName}`.trim()].filter(Boolean).join(', ')}>
+      {city && <>{city}{countryName ? ', ' : ''}</>}
+      {countryName && <>
+        {flag && <span className="mr-1">{flag}</span>}
+        {countryName}
+      </>}
+    </span>
+  );
+}
+
 /**
  * Flows — sFlow/NetFlow traffic visibility. Shows who talks to the internet and
  * which devices talk to each other, aggregated from flow-collector plugin
@@ -195,6 +224,16 @@ export default function Flows() {
       ) : (
         <span className="text-faint">—</span>
       )),
+    },
+    {
+      // GeoIP location for external talkers — city + country from the active
+      // database file (Settings → GeoIP). Empty while no DB is configured.
+      header: 'Location',
+      key: 'countryCode',
+      width: 180,
+      exportValue: (row) => [row.city, row.countryName].filter(Boolean).join(', '),
+      sortAccessor: (row) => row.countryCode ?? '',
+      render: (row) => <LocationCell row={row} />,
     },
     {
       header: 'Est. Bytes',

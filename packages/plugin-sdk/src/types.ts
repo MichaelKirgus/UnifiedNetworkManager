@@ -103,6 +103,13 @@ export const CAPABILITIES = [
   // plugin through its own options + actions. Advertise when /discover carries an
   // inventory-sync action in `actions`.
   'inventorySync',
+  // Serves POST /fetch — downloads files/web content from the internet, plain or
+  // through an egress proxy (CONNECT tunneling), so UNM and device plugins never
+  // handle outbound TLS/proxy/egress themselves. The plugin may be deployed on a
+  // network segment with internet access while the API container has none. Used by
+  // the GeoIP worker to pull database files into the file repository (and available
+  // to any future web-data feature).
+  'webFetch',
 ] as const;
 export type PluginCapability = (typeof CAPABILITIES)[number];
 

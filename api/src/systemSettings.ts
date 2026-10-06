@@ -537,6 +537,131 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     help:
       'How often the time-base worker re-queries every configured public NTP reference. One lightweight SNTP request per server — keep it at or above one minute to stay a polite client of public pools.',
   },
+
+  // Web fetch (the web-fetch plugin, capability `webFetch`) — outbound internet
+  // egress for UNM: the GeoIP worker and any future web-data feature download
+  // through this plugin instead of from the API container itself.
+  {
+    key: 'webFetchProxyUrl',
+    label: 'Egress proxy URL',
+    type: 'string',
+    category: 'Web Fetch',
+    default: '',
+    envVar: 'WEBFETCH_PROXY_URL',
+    maxLength: 500,
+    help:
+      'Optional forward proxy every web fetch goes through — required in enterprise environments where plain egress TLS is not allowed. Format: scheme://[user:pass@]host:port (e.g. http://proxy.corp.example.com:3128). HTTPS targets are tunneled with CONNECT, so the proxy never sees the URL or payload. Empty = direct connection. The web-fetch plugin\'s own WEBFETCH_PROXY_URL env acts as a deployment-level default when this setting is empty.',
+  },
+  {
+    key: 'webFetchTimeoutMs',
+    label: 'Fetch timeout',
+    type: 'integer',
+    category: 'Web Fetch',
+    unit: 'ms',
+    min: 5_000,
+    max: 600_000,
+    default: 120_000,
+    envVar: 'WEBFETCH_TIMEOUT_MS',
+    help:
+      'Maximum time a single web fetch may take (connect + download). Large GeoIP databases through a slow corporate proxy can need several minutes — raise this if refreshes time out.',
+  },
+  {
+    key: 'webFetchMaxBytes',
+    label: 'Max download size',
+    type: 'integer',
+    category: 'Web Fetch',
+    unit: 'bytes',
+    min: 1_048_576,
+    max: 2_147_483_648,
+    default: 536_870_912,
+    envVar: 'WEBFETCH_MAX_BYTES',
+    help:
+      'Hard ceiling for a single download (default 512 MiB). Responses larger than this are aborted — GeoIP databases are well under 100 MiB, so keep the default unless you fetch something bigger.',
+  },
+
+  // GeoIP enrichment (Flows page "Location" column) — the geoip worker pulls a
+  // database file through the web-fetch plugin into the central file repository
+  // and the lookup engine resolves external IPs at request time.
+  {
+    key: 'geoipEnabled',
+    label: 'GeoIP enrichment',
+    type: 'boolean',
+    category: 'GeoIP',
+    default: true,
+    help:
+      'Master switch for GeoIP database fetching + IP location lookups on the Flows page. Disable to stop periodic downloads and hide country/city from top talkers (existing files are kept).',
+  },
+  {
+    key: 'geoipSource',
+    label: 'Database source',
+    type: 'string',
+    category: 'GeoIP',
+    default: 'maxmind',
+    pattern: '^(maxmind|dpip|ip2location-lite|ipinfo|custom)$',
+    help:
+      'Where the GeoIP database comes from. "maxmind" — MaxMind GeoLite2-City (MMDB, needs a free license key in the custom URL); "dpip" — dp-ip.com free CSV; "ip2location-lite" — IP2Location LITE zip (CSV inside); "ipinfo" — ipinfo.io mmdb-lite; "custom" — any direct file/archive URL you provide. The source presets the download URL only when "Custom download URL" is empty.',
+  },
+  {
+    key: 'geoipCustomUrl',
+    label: 'Custom download URL',
+    type: 'string',
+    category: 'GeoIP',
+    default: '',
+    maxLength: 2048,
+    help:
+      'Full HTTPS/HTTP URL of the database file or archive (.mmdb / .csv / .tar.gz / .zip) — wins over the source preset. For MaxMind use their download endpoint with your license key in the query string (https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-City&license_key=…&type=tar.gz&suf=tar.gz). Archives are opened automatically and the first .mmdb/.csv member is stored.',
+  },
+  {
+    key: 'geoipAuthHeader',
+    label: 'Authorization header',
+    type: 'string',
+    category: 'GeoIP',
+    default: '',
+    maxLength: 500,
+    help:
+      'Optional raw HTTP header sent with the download request — e.g. "Authorization: Bearer <token>" for ipinfo.io or a private mirror. Leave empty when the URL itself carries all credentials.',
+  },
+  {
+    key: 'geoipFetchIntervalHours',
+    label: 'Refresh interval',
+    type: 'integer',
+    category: 'GeoIP',
+    unit: 'h',
+    min: 1,
+    max: 8_760,
+    default: 720,
+    help:
+      'How often the worker re-downloads the database (default 720 h = monthly — GeoLite2 is updated monthly). The manual "Refresh now" button on this page bypasses the interval.',
+  },
+  {
+    key: 'geoipDeleteOldFiles',
+    label: 'Delete old files after refresh',
+    type: 'boolean',
+    category: 'GeoIP',
+    default: true,
+    help:
+      'When a new database file is stored successfully, delete the previous GeoIP file(s) from the central file repository (up to the last 5). Disable to keep history — useful when several consumers might still reference an older snapshot.',
+  },
+  {
+    key: 'geoipCsvFormat',
+    label: 'CSV format',
+    type: 'string',
+    category: 'GeoIP',
+    default: 'auto',
+    pattern: '^(auto|dpip|ip2location-lite)$',
+    help:
+      'Column layout for CSV databases (MMDB sources ignore this). "auto" sniffs the header row — FromIP/ToIP columns → IP2Location LITE, otherwise dp-ip single-IP rows. Set explicitly only if a custom CSV uses one of these layouts.',
+  },
+  {
+    key: 'geoipActiveFileId',
+    label: 'Active database file (managed)',
+    type: 'string',
+    category: 'GeoIP',
+    default: '',
+    maxLength: 128,
+    help:
+      'Internal pointer to the currently active GeoIP file in the central repository — written by the geoip worker after each successful refresh. Do not edit manually; clear it to force a re-download on the next cycle.',
+  },
 ];
 
 const BY_KEY: Record<string, SettingDescriptor> = Object.fromEntries(
