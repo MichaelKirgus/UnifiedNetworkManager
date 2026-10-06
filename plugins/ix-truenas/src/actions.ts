@@ -4609,7 +4609,10 @@ const storageSnapshotAction: ActionDescriptor<TruenasActionContext> = {
     let jobId: number | null = null;
     try {
       // Transport-tolerant — a lost response is confirmed by re-reading (the snapshot must exist).
-      const dr = await dispatchWrite(ctx, 'pool.snapshot.create', [{ dataset: name, snapshot_name: `unm-${ts}`, recursive }], {
+      // The field is `name` in TrueNAS's PoolSnapshotCreateWithName schema — NOT
+      // `snapshot_name` (that name belongs to the QUERY filters, not the create payload;
+      // the appliance rejects unknown fields with EINVAL "Extra inputs are not permitted").
+      const dr = await dispatchWrite(ctx, 'pool.snapshot.create', [{ dataset: name, name: `unm-${ts}`, recursive }], {
         verify: async () => {
           try {
             const rows = await ctx.client.call<Record<string, unknown>[]>('pool.snapshot.query', [[['name', '=', snapName]]], ctx.creds);
@@ -4620,7 +4623,7 @@ const storageSnapshotAction: ActionDescriptor<TruenasActionContext> = {
         },
       });
       if (dr.note) notes.push(dr.note);
-      unconfirmed = dr.unconfirmed === true; // response lost AND state unreadable — not proven created
+      unconfirmed = dr.unconfirmed === true; // response lost AND state unreadable — not proven created yet
       const r = dr.value as unknown;
       if (typeof r === 'number') jobId = r;
       else if (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number') jobId = (r as Record<string, unknown>)['id'] as number;
@@ -4632,10 +4635,14 @@ const storageSnapshotAction: ActionDescriptor<TruenasActionContext> = {
     // retention cleanup below sees the new snapshot. (Skipped when the response
     // was lost but the snapshot's existence was already confirmed on re-read.)
     let note = '';
+    // Verification: a normal response or a confirming re-read proves creation;
+    // a job that later reports SUCCESS confirms it even if the re-read raced it.
+    let verified = !unconfirmed;
     if (typeof jobId === 'number') {
       const wait = await waitForJob(ctx, jobId, 240_000);
       if (wait.state === 'RUNNING') note = 'Snapshot job still in progress on the appliance';
       else if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') return { success: false, details: { snapshot: snapName, error: wait.error ?? `Job ended in state ${wait.state}` } };
+      else verified = true;
     }
 
     // Optional retention cleanup — prune prior `unm-*` snapshots older than the
@@ -4646,9 +4653,11 @@ const storageSnapshotAction: ActionDescriptor<TruenasActionContext> = {
       const cutoffMs = Date.now() - retentionRaw * 86_400_000;
       let snaps: Record<string, unknown>[];
       try {
-        snaps = await ctx.client.call<Record<string, unknown>[]>('pool.snapshot.query', [{ dataset: name }], ctx.creds);
+        // TrueNAS filters are LISTS of [field, op, value] tuples — a bare object
+        // is rejected with "filters: Input should be a valid list".
+        snaps = await ctx.client.call<Record<string, unknown>[]>('pool.snapshot.query', [[['dataset', '=', name]]], ctx.creds);
       } catch (e) {
-        return { success: true, applied: true, details: { snapshot: snapName, note: [note, `Retention cleanup skipped: ${e instanceof Error ? e.message : String(e)}`].filter(Boolean).join('; ') || undefined } };
+        return { success: true, applied: true, verified, details: { snapshot: snapName, note: [note, `Retention cleanup skipped: ${e instanceof Error ? e.message : String(e)}`].filter(Boolean).join('; ') || undefined } };
       }
       for (const s of snaps ?? []) {
         const sn = pickString(s, ['name']); // "dataset@unm-YYYYMMDDHHmmss"
@@ -4668,7 +4677,7 @@ const storageSnapshotAction: ActionDescriptor<TruenasActionContext> = {
       }
     }
 
-    return { success: Object.keys(pruneErrors).length === 0 && !unconfirmed, applied: true, details: { snapshot: snapName, pruned, ...(note ? { note } : {}), ...(notes.length > 0 ? { notes } : {}), ...(Object.keys(pruneErrors).length ? { pruneErrors } : {}) } };
+    return { success: Object.keys(pruneErrors).length === 0 && !unconfirmed, applied: true, verified, details: { snapshot: snapName, pruned, ...(note ? { note } : {}), ...(notes.length > 0 ? { notes } : {}), ...(Object.keys(pruneErrors).length ? { pruneErrors } : {}) } };
   },
 };
 
