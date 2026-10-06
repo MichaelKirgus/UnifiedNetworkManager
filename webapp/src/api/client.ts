@@ -1233,12 +1233,23 @@ export interface FlowInternetDevice {
   distinctDestinations: number;
 }
 
+/** Per-country internet egress row (GET /flows/internet). `countryCode` is the
+ * stored GeoIP ISO-3166 alpha-2 code — null for external destinations not yet
+ * resolved by a database (no DB configured, or source without that IP). */
+export interface FlowInternetCountry {
+  countryCode: string | null;
+  estBytes: number;
+  distinctDestinations: number;
+}
+
 export interface FlowInternetResponse {
   fromMs: number;
   toMs: number;
   table: 'flow_agg_5m' | 'flow_agg_1h';
   total: { estBytes: number; distinctDestinations: number };
   perDevice: FlowInternetDevice[];
+  /** Country aggregation over the stored GeoIP codes (empty when no DB). */
+  perCountry?: FlowInternetCountry[];
 }
 
 /** One internal device-to-device pair by estimated bytes (GET /flows/pairs). */

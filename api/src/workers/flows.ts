@@ -1,5 +1,6 @@
 import { pool } from '../db';
 import { getEffectiveSettingValue, getEffectiveValues } from '../systemSettings';
+import { lookupGeoIp } from '../utils/geoIp';
 import {
   classifyIp,
   ipv4CidrToNetMask,
@@ -396,6 +397,9 @@ async function rollupTo5m(): Promise<void> {
     srcDeviceId: string | null; dstDeviceId: string | null; srcClass: string; dstClass: string;
     srcNetworkName: string | null; dstNetworkName: string | null; srcVlanId: number | null; dstVlanId: number | null;
     srcHostname: string | null; dstHostname: string | null;
+    /** Stored GeoIP country (ISO-3166 alpha-2) — enables the /flows/internet
+     *  country aggregation without per-request lookups. */
+    srcCountryCode: string | null; dstCountryCode: string | null;
   }
   const aggRows: RollupRow[] = [];
   for (const a of byKey.values()) {
@@ -418,6 +422,14 @@ async function rollupTo5m(): Promise<void> {
     // Network display context (name + VLAN) via longest-prefix inventory match.
     const srcNet = lookupNetworkContext(a.srcIp, enrichment.cidrs);
     const dstNet = lookupNetworkContext(a.dstIp, enrichment.cidrs);
+    // Stored GeoIP country for EXTERNAL endpoints only — internal/unknown IPs
+    // never get a code (they are not internet destinations). Best-effort: no
+    // active database → null, and the geoip worker backfills later. The lookup
+    // is cached per IP in-process, so repeated tuples cost nothing.
+    const [srcGeo, dstGeo] = await Promise.all([
+      src.cls === 'internet' ? lookupGeoIp(a.srcIp) : Promise.resolve(null),
+      dst.cls === 'internet' ? lookupGeoIp(a.dstIp) : Promise.resolve(null),
+    ]);
     // estBytes: reported bytes × sampling rate, capped at int8.
     aggRows.push({
       bucket: a.bucket, srcIp: a.srcIp, dstIp: a.dstIp, proto: a.proto, bytes: best!.bytes, packets: best!.packets,
@@ -432,24 +444,24 @@ async function rollupTo5m(): Promise<void> {
       srcVlanId: srcNet?.vlanId ?? null, dstVlanId: dstNet?.vlanId ?? null,
       // Which host on the device — container/VM name or DHCP lease hostname.
       srcHostname: enrichment.hostnames.get(a.srcIp) ?? null, dstHostname: enrichment.hostnames.get(a.dstIp) ?? null,
+      srcCountryCode: srcGeo?.countryCode ?? null, dstCountryCode: dstGeo?.countryCode ?? null,
     });
   }
 
   // Chunk the INSERT — Postgres caps bind parameters at 65535 (int16) per
-  // statement; a busy catch-up window can easily exceed that. 4000 rows ×
-  // 17 params = 68k would overflow, so 3_500 → 59.5k, safely under the limit
-  // (same pattern as drainQueue).
-  const ROLLUP_INSERT_CHUNK_ROWS = 3_000;
+  // statement; a busy catch-up window can easily exceed that. 2_500 rows ×
+  // 23 params = 57.5k, safely under the limit (same pattern as drainQueue).
+  const ROLLUP_INSERT_CHUNK_ROWS = 2_500;
   for (let i = 0; i < aggRows.length; i += ROLLUP_INSERT_CHUNK_ROWS) {
     const chunk = aggRows.slice(i, i + ROLLUP_INSERT_CHUNK_ROWS);
     const params: unknown[] = [];
     let p = 1;
     const values = chunk.map((r) => {
-      params.push(r.bucket, r.srcIp, r.dstIp, r.proto, r.bytes, r.packets, r.estBytes, r.srcPort, r.dstPort, r.agentIp ?? null, Math.max(0, r.agentCount | 0), r.srcDeviceId, r.dstDeviceId, r.srcClass, r.dstClass, r.srcNetworkName, r.dstNetworkName, r.srcVlanId, r.dstVlanId, r.srcHostname, r.dstHostname);
-      return `($${p++}, $${p++}::inet, $${p++}::inet, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`;
+      params.push(r.bucket, r.srcIp, r.dstIp, r.proto, r.bytes, r.packets, r.estBytes, r.srcPort, r.dstPort, r.agentIp ?? null, Math.max(0, r.agentCount | 0), r.srcDeviceId, r.dstDeviceId, r.srcClass, r.dstClass, r.srcNetworkName, r.dstNetworkName, r.srcVlanId, r.dstVlanId, r.srcHostname, r.dstHostname, r.srcCountryCode ?? null, r.dstCountryCode ?? null);
+      return `($${p++}, $${p++}::inet, $${p++}::inet, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`;
     });
     await pool.query(
-      `INSERT INTO flow_agg_5m (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "agentIp", "agentCount", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname")
+      `INSERT INTO flow_agg_5m (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "agentIp", "agentCount", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname", "srcCountryCode", "dstCountryCode")
        VALUES ${values.join(', ')}
        ON CONFLICT (bucket, "srcIp", "dstIp", proto) DO UPDATE SET
          bytes = flow_agg_5m.bytes + EXCLUDED.bytes,
@@ -470,7 +482,10 @@ async function rollupTo5m(): Promise<void> {
          "dstVlanId" = COALESCE(EXCLUDED."dstVlanId", flow_agg_5m."dstVlanId"),
          -- Hostnames: fill gaps, never overwrite known values.
          "srcHostname" = COALESCE(EXCLUDED."srcHostname", flow_agg_5m."srcHostname"),
-         "dstHostname" = COALESCE(EXCLUDED."dstHostname", flow_agg_5m."dstHostname")`,
+         "dstHostname" = COALESCE(EXCLUDED."dstHostname", flow_agg_5m."dstHostname"),
+         -- Stored GeoIP country: fill gaps, never overwrite known values.
+         "srcCountryCode" = COALESCE(EXCLUDED."srcCountryCode", flow_agg_5m."srcCountryCode"),
+         "dstCountryCode" = COALESCE(EXCLUDED."dstCountryCode", flow_agg_5m."dstCountryCode")`,
       params
     );
   }
@@ -493,7 +508,7 @@ async function rollupTo1h(): Promise<void> {
 
   const fromMs = Math.max(lastRolled1hBucketMs, nowBucketMs - ROLLUP_1H_MAX_CATCHUP_MS);
   const res = await pool.query(
-     `INSERT INTO flow_agg_1h (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "agentIp", "agentCount", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname")
+     `INSERT INTO flow_agg_1h (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "agentIp", "agentCount", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname", "srcCountryCode", "dstCountryCode")
      SELECT date_trunc('hour', bucket), "srcIp", "dstIp", proto,
             SUM(bytes)::bigint, SUM(packets)::bigint, SUM("estBytes")::bigint,
             MAX("srcPort"), MAX("dstPort"),
@@ -510,7 +525,10 @@ async function rollupTo1h(): Promise<void> {
                  WHEN BOOL_OR("dstClass" = 'internet') THEN 'internet' ELSE 'unknown' END,
             MAX("srcNetworkName"), MAX("dstNetworkName"),
             MAX("srcVlanId"), MAX("dstVlanId"),
-            MAX("srcHostname"), MAX("dstHostname")
+            MAX("srcHostname"), MAX("dstHostname"),
+            -- Stored GeoIP country: an IP's country is stable within an hour —
+            -- MAX ignores NULLs, so a partially-filled hour still carries the code.
+            MAX("srcCountryCode"), MAX("dstCountryCode")
      FROM flow_agg_5m
      WHERE bucket >= $1 AND bucket < $2
      GROUP BY 1, 2, 3, 4
@@ -532,7 +550,10 @@ async function rollupTo1h(): Promise<void> {
        "dstVlanId" = COALESCE(flow_agg_1h."dstVlanId", EXCLUDED."dstVlanId"),
        -- Hostnames: prefer what is already stored.
        "srcHostname" = COALESCE(flow_agg_1h."srcHostname", EXCLUDED."srcHostname"),
-       "dstHostname" = COALESCE(flow_agg_1h."dstHostname", EXCLUDED."dstHostname")`,
+       "dstHostname" = COALESCE(flow_agg_1h."dstHostname", EXCLUDED."dstHostname"),
+       -- Stored GeoIP country: fill gaps, never overwrite known values.
+       "srcCountryCode" = COALESCE(EXCLUDED."srcCountryCode", flow_agg_1h."srcCountryCode"),
+       "dstCountryCode" = COALESCE(EXCLUDED."dstCountryCode", flow_agg_1h."dstCountryCode")`,
     [new Date(fromMs).toISOString(), new Date(nowBucketMs).toISOString()]
   );
 

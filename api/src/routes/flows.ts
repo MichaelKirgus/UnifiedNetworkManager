@@ -253,25 +253,38 @@ router.get('/flows/internet', requireAuth, requirePermission('flows:read'), asyn
 
     let perDevice;
     let totalRes;
+    let perCountry = { rows: [] as any[] };
     if (site.kind === 'ok' && site.empty) {
       perDevice = { rows: [] };
       totalRes = { rows: [{ est_bytes: 0, distinct_destinations: 0 }] };
     } else {
       const siteClause = site.kind === 'ok' ? site.clause : '';
-      perDevice = await pool.query(
-        `SELECT "srcDeviceId", SUM("estBytes")::bigint AS est_bytes, COUNT(DISTINCT "dstIp")::int AS distinct_destinations
-         FROM ${table}
-         WHERE bucket >= $1 AND bucket < $2 AND "dstClass" = 'internet' AND "srcDeviceId" IS NOT NULL ${deviceClause}${siteClause}
-         GROUP BY "srcDeviceId" ORDER BY est_bytes DESC LIMIT 50`,
-        params
-      );
-
-      totalRes = await pool.query(
-        `SELECT COALESCE(SUM("estBytes"), 0)::bigint AS est_bytes, COUNT(DISTINCT "dstIp")::int AS distinct_destinations
-         FROM ${table}
-         WHERE bucket >= $1 AND bucket < $2 AND "dstClass" = 'internet' ${deviceClause}${siteClause}`,
-        params
-      );
+      [perDevice, totalRes, perCountry] = await Promise.all([
+        pool.query(
+          `SELECT "srcDeviceId", SUM("estBytes")::bigint AS est_bytes, COUNT(DISTINCT "dstIp")::int AS distinct_destinations
+           FROM ${table}
+           WHERE bucket >= $1 AND bucket < $2 AND "dstClass" = 'internet' AND "srcDeviceId" IS NOT NULL ${deviceClause}${siteClause}
+           GROUP BY "srcDeviceId" ORDER BY est_bytes DESC LIMIT 50`,
+          params
+        ),
+        pool.query(
+          `SELECT COALESCE(SUM("estBytes"), 0)::bigint AS est_bytes, COUNT(DISTINCT "dstIp")::int AS distinct_destinations
+           FROM ${table}
+           WHERE bucket >= $1 AND bucket < $2 AND "dstClass" = 'internet' ${deviceClause}${siteClause}`,
+          params
+        ),
+        // Country aggregation — GROUP BY the STORED dstCountryCode (filled at
+        // rollup + backfilled by the geoip worker), so this is a plain index/BRIN
+        // scan with no per-row lookups. NULL = external destinations not yet
+        // resolved by GeoIP (no database, or CSV source without that IP).
+        pool.query(
+          `SELECT "dstCountryCode" AS country_code, SUM("estBytes")::bigint AS est_bytes, COUNT(DISTINCT "dstIp")::int AS distinct_destinations
+           FROM ${table}
+           WHERE bucket >= $1 AND bucket < $2 AND "dstClass" = 'internet' ${deviceClause}${siteClause}
+           GROUP BY "dstCountryCode" ORDER BY est_bytes DESC LIMIT 50`,
+          params
+        ),
+      ]);
     }
 
     const deviceIds = perDevice.rows.map((r) => String(r.src_device_id ?? r.srcDeviceId));
@@ -286,6 +299,11 @@ router.get('/flows/internet', requireAuth, requirePermission('flows:read'), asyn
         const id = String(r.src_device_id ?? r.srcDeviceId);
         return { deviceId: id, deviceName: names.get(id) ?? null, estBytes: Number(r.est_bytes), distinctDestinations: Number(r.distinct_destinations) };
       }),
+      perCountry: perCountry.rows.map((r) => ({
+        countryCode: r.country_code != null ? String(r.country_code) : null,
+        estBytes: Number(r.est_bytes),
+        distinctDestinations: Number(r.distinct_destinations),
+      })),
     });
   } catch (error) {
     console.error('Error querying internet egress:', error);

@@ -149,25 +149,27 @@ async function main() {
   );
   console.log(`  seeded rows: ${seedCheck.rows.map((r) => `${String(r.dstIp)}@${r.bucket}=${Number(r.estBytes)}`).join(' | ')}`);
 
-  // Re-upsert the seed rows before every attempt. WHY: flow_agg_5m carries a
-  // BRIN index on `bucket`, and BRIN page summaries go stale for rows that are
-  // UPDATEd in place (our ON CONFLICT DO UPDATE) or inserted into already-
-  // summarized pages — so the route's windowed query (`bucket >= now() - 1h`)
-  // intermittently prunes away the seed rows even though unfiltered point
-  // queries (seq scan) still see them. Re-upserting re-asserts each row in the
-  // CURRENT 5-min bucket; whenever that is a fresh bucket it lands as a new
-  // append on the partition's active page, whose BRIN summary IS maintained —
-  // making the windowed query reliable again. (Observed: runs failed ~half the
-  // time without this; stable with it.)
+  // Re-assert the seed rows before every attempt — each time with a FRESH proto
+  // value so the statement is an APPEND (a new PK tuple), never an in-place
+  // UPDATE. WHY: flow_agg_5m carries a BRIN index on `bucket`, and its page
+  // summaries go stale for rows that are UPDATEd in place — the route's windowed
+  // query (`bucket >= now() - 1h`) then intermittently prunes them even though
+  // unfiltered point queries (seq scan) still see them. A fresh append lands on
+  // the partition's active page, whose BRIN summary IS maintained, so the row is
+  // reliably visible to the windowed query regardless of where we are in the
+  // 5-minute bucket cycle. (Observed: ON CONFLICT DO UPDATE reseeds were only
+  // reliable across a bucket rollover; proto-appends are deterministic.)
+  let seedProto = 100; // well clear of the initial seed's proto=6 rows
   const reseed = async () => {
     for (const ip of SEED_IPS) {
       await pool.query(
         `INSERT INTO flow_agg_5m (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcClass", "dstClass")
-         VALUES (to_timestamp((EXTRACT(EPOCH FROM now()) / 300)::bigint * 300), $2::inet, $1::inet, 6, 1000, 10, 999999999999, 'internal', 'internet')
-         ON CONFLICT (bucket, "srcIp", "dstIp", proto) DO UPDATE SET "estBytes" = EXCLUDED."estBytes"`,
-        [ip, '192.168.1.50']
+         VALUES (to_timestamp((EXTRACT(EPOCH FROM now()) / 300)::bigint * 300), $2::inet, $1::inet, $3, 1000, 10, 999999999999, 'internal', 'internet')
+         ON CONFLICT (bucket, "srcIp", "dstIp", proto) DO NOTHING`,
+        [ip, '192.168.1.50', seedProto]
       );
     }
+    seedProto += 1; // next reseed appends a different tuple
   };
 
   // Retries: right after an API restart the first few requests can hit a still-
@@ -191,6 +193,34 @@ async function main() {
       await sleep(2500);
     }
     return null;
+  };
+
+  // Poll until a RECENT flow_agg_5m internet row has a stored "dstCountryCode".
+  // Scoped to the last 2 h so it is guaranteed to fall inside the /flows/internet
+  // window below (self-consistent). Deliberately not scoped to the seed IPs: the
+  // backfill fills pending rows in whatever order the partial index yields them,
+  // and this box carries live traffic — continuous new internet rows mean a beat
+  // has filled some recent ones by now. Unfiltered point query = no BRIN flakiness.
+  const anyStoredCode = async () => {
+    for (let i = 0; i < 30; i++) {
+      const q = await pool.query(
+        `SELECT "dstCountryCode" FROM flow_agg_5m WHERE "dstClass" = 'internet' AND "dstCountryCode" IS NOT NULL AND bucket >= now() - interval '2 hours' LIMIT 1`
+      );
+      if (q.rows[0]?.dstCountryCode) return String(q.rows[0].dstCountryCode);
+      await sleep(3_000);
+    }
+    return null;
+  };
+
+  // GET /flows/internet — the per-country aggregation lives in this response.
+  // Explicit 3 h window: wide enough to include anyStoredCode's 2 h scope, narrow
+  // enough to stay fast over live traffic (and ?limit= is not a param of this route).
+  const internet = async () => {
+    const to = Date.now();
+    const from = to - 3 * 3600_000;
+    const r = await authed('GET', `/flows/internet?from=${from}&to=${to}`);
+    if (r.status !== 200) { console.log(`  (/flows/internet answered ${r.status}: ${JSON.stringify(r.data?.error ?? '').slice(0, 160)})`); return null; }
+    return r.data;
   };
 
   // ── 6. MMDB direct ─────────────────────────────────────────────────────────
@@ -271,6 +301,20 @@ async function main() {
   check('lastError recorded', Boolean(st.lastError), String(st.lastError).slice(0, 120));
   t = await talkerRow('8.8.8.8');
   check('lookups still work off the last good file', t?.countryCode === 'US', JSON.stringify({ cc: t?.countryCode }));
+
+  // ── 12. stored geo columns + /flows/internet country aggregation ───────────
+  console.log('\n[12] stored dstCountryCode backfill + per-country egress…');
+  await setSetting('geoipCustomUrl', `${HOST_BASE}/sample.mmdb`); // MMDB knows US + AU (not DE)
+  r = await refresh();
+  checkCycleOk((await status()), 'STORED-REFRESH');
+
+  const code = await anyStoredCode();
+  check('stored dstCountryCode backfilled on flow_agg_5m', Boolean(code), `code=${code}`);
+
+  const net = await internet();
+  check('/flows/internet returns perCountry array', Boolean(net) && Array.isArray(net.perCountry), JSON.stringify(net?.perCountry ?? null).slice(0, 200));
+  const codedRow = (net?.perCountry ?? []).find((c) => c.countryCode != null);
+  check('perCountry has a resolved-country row with egress', Boolean(codedRow) && Number(codedRow.estBytes) > 0, JSON.stringify(codedRow ?? net?.perCountry ?? null).slice(0, 200));
 
   // ── cleanup ────────────────────────────────────────────────────────────────
   console.log('\n[cleanup]…');

@@ -3,7 +3,7 @@ import { getEffectiveValues, invalidateSystemSettingsCache } from '../systemSett
 import { addRepoFile, deleteRepoFile, listRepoFiles } from '../fileRepo';
 import { resolveWebFetchProvider, fetchViaWebFetch } from '../webFetchBroker';
 import { emitNotification, resolveNotificationsByDedupeKeys } from '../notifications';
-import { resetGeoIpCache } from '../utils/geoIp';
+import { lookupGeoIp, resetGeoIpCache } from '../utils/geoIp';
 import { LEADER_KEYS } from './leader';
 import { initWorker, trackBeat } from './stats';
 
@@ -229,6 +229,76 @@ export async function geoipCycle(): Promise<void> {
   }
 }
 
+/** Max distinct external IPs to resolve per tier/direction in one backfill pass. */
+const GEO_BACKFILL_BATCH = 2_000;
+
+/**
+ * Fills the stored "srcCountryCode"/"dstCountryCode" columns on flow aggregate
+ * rows that predate the active database (or were rolled before it loaded). Runs
+ * on every beat while a database is active — cheap and self-limiting:
+ *   - pending IPs are discovered via the partial indexes (index-only scan, so no
+ *     BRIN windowed-query flakiness),
+ *   - each IP is resolved through the cached lookup engine (in-memory read),
+ *   - only FOUND codes are written back; genuinely-absent IPs stay NULL and cost
+ *     one cheap re-check per beat until a fuller database arrives.
+ * Bounded by GEO_BACKFILL_BATCH per tier/direction so a large backlog drains over
+ * several beats instead of one giant transaction. Never throws — the fetch cycle
+ * is unaffected if this fails, and it no-ops when no database has been fetched.
+ */
+export async function backfillStoredGeo(): Promise<void> {
+  const values = await getEffectiveValues();
+  if (!values.geoipEnabled) return;
+  if (!String(values.geoipActiveFileId ?? '').trim()) return; // no DB yet — nothing to fill with
+
+  for (const table of ['flow_agg_5m', 'flow_agg_1h'] as const) {
+    for (const dir of ['src', 'dst'] as const) {
+      const ipCol = `${dir}Ip`;
+      const classCol = `${dir}Class`;
+      const codeCol = `${dir}CountryCode`;
+      try {
+        // Distinct external IPs still missing a country — served by the partial
+        // index idx_flow_agg_*_${dir}_geo_pending (index-only, no seq scan).
+        const pending = await pool.query(
+          `SELECT DISTINCT "${ipCol}" AS ip FROM ${table} WHERE "${classCol}" = 'internet' AND "${codeCol}" IS NULL LIMIT $1`,
+          [GEO_BACKFILL_BATCH]
+        );
+        if (!pending.rows.length) continue;
+
+        // Resolve each IP through the cached engine (in-memory, never throws).
+        const codes: Array<[string, string]> = [];
+        for (const r of pending.rows) {
+          const ip = String(r.ip);
+          const geo = await lookupGeoIp(ip);
+          if (geo?.countryCode) codes.push([ip, geo.countryCode]);
+        }
+        if (!codes.length) continue; // nothing found this pass — retry next beat
+
+        // Write back in one statement: VALUES join on the IP. Bounded by the
+        // batch size so bind params stay well under Postgres's 65535 cap.
+        const params: unknown[] = [];
+        let p = 1;
+        const valuesSql = codes.map(([ip, code]) => {
+          params.push(ip, code);
+          return `($${p++}::inet, $${p++})`;
+        }).join(', ');
+        const res = await pool.query(
+          `UPDATE ${table} t SET "${codeCol}" = v.code
+           FROM (VALUES ${valuesSql}) AS v(ip, code)
+           WHERE t."${ipCol}" = v.ip AND t."${classCol}" = 'internet' AND t."${codeCol}" IS NULL`,
+          params
+        );
+        if (res.rowCount) {
+          // eslint-disable-next-line no-console
+          console.log(`[geoip] backfilled ${res.rowCount} row(s) in ${table}.${codeCol}`);
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(`[geoip] stored-geo backfill failed for ${table}.${codeCol}:`, (err as Error).message);
+      }
+    }
+  }
+}
+
 /**
  * Starts the geoip worker loop. Must be called only after the API has bound its
  * port (same rule as every other worker — see index.ts app.listen).
@@ -242,10 +312,14 @@ export function startGeoIpWorker(): () => void {
   const beat = async (): Promise<void> => {
     const values = await getEffectiveValues();
     if (!values.geoipEnabled) return;
+    // The FETCH is interval-gated (monthly by default); the stored-geo backfill
+    // below runs every beat so newly-rolled rows + pre-existing history fill in.
     const intervalMs = (Number(values.geoipFetchIntervalHours) || 720) * 3_600_000;
-    if (Date.now() - lastCycleAt < intervalMs) return; // not due yet — settings may have been raised mid-flight
-    lastCycleAt = Date.now();
-    await geoipCycle();
+    if (Date.now() - lastCycleAt >= intervalMs) { // fetch due — settings may have been raised mid-flight
+      lastCycleAt = Date.now();
+      await geoipCycle();
+    }
+    await backfillStoredGeo();
   };
 
   void trackBeat('geoip', beat).catch((err) => {

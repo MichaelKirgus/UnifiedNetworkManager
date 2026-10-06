@@ -3718,6 +3718,18 @@ paths:
                         deviceName: { type: [string, 'null'] }
                         estBytes: { type: integer, format: int64 }
                         distinctDestinations: { type: integer }
+                  perCountry:
+                    description: >-
+                      Country aggregation over the stored GeoIP destination codes
+                      (filled at rollup + backfilled by the geoip worker). countryCode is
+                      null for external destinations not yet resolved by a database.
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        countryCode: { type: [string, 'null'] }
+                        estBytes: { type: integer, format: int64 }
+                        distinctDestinations: { type: integer }
         '401':
           description: Authentication required
 

@@ -1224,6 +1224,20 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   // comment): which exporter's counters were kept + how many exporters saw it.
   await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "agentIp" TEXT`);
   await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "agentCount" INTEGER NOT NULL DEFAULT 0`);
+  // Stored GeoIP country (ISO-3166 alpha-2) per endpoint — filled at rollup
+  // time from the active database + backfilled for history by the geoip
+  // worker. STORED (not looked up per request) so /flows/internet can do a
+  // cheap GROUP BY "dstCountryCode" country aggregation over large windows,
+  // and top-talkers enrichment stays O(1) per row instead of one lookup each.
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "srcCountryCode" TEXT`);
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "dstCountryCode" TEXT`);
+  // Partial indexes over the STILL-UNFILLED external rows — let the geoip
+  // worker's backfill discover pending work with an index-only scan instead of
+  // a windowed BRIN query (BRIN summaries go stale for in-place UPDATEs, so a
+  // `bucket >= …` scan would intermittently miss already-updated pages). The
+  // indexes shrink to zero as rows get filled and stay tiny at steady state.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_src_geo_pending ON flow_agg_5m ("srcIp") WHERE "srcClass" = 'internet' AND "srcCountryCode" IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_dst_geo_pending ON flow_agg_5m ("dstIp") WHERE "dstClass" = 'internet' AND "dstCountryCode" IS NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS brin_flow_agg_5m_bucket ON flow_agg_5m USING BRIN (bucket)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_src_device ON flow_agg_5m ("srcDeviceId")`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_dst_device ON flow_agg_5m ("dstDeviceId")`);
@@ -1260,6 +1274,13 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   // Exporter identity carried through from the 5-minute tier (see there).
   await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "agentIp" TEXT`);
   await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "agentCount" INTEGER NOT NULL DEFAULT 0`);
+  // Stored GeoIP country (see the flow_agg_5m comment) — carried through by
+  // the hourly rollup so long-term windows aggregate without lookups.
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "srcCountryCode" TEXT`);
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "dstCountryCode" TEXT`);
+  // Pending-geo partial indexes (see the flow_agg_5m comment).
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_src_geo_pending ON flow_agg_1h ("srcIp") WHERE "srcClass" = 'internet' AND "srcCountryCode" IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_dst_geo_pending ON flow_agg_1h ("dstIp") WHERE "dstClass" = 'internet' AND "dstCountryCode" IS NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS brin_flow_agg_1h_bucket ON flow_agg_1h USING BRIN (bucket)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_src_device ON flow_agg_1h ("srcDeviceId")`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_dst_device ON flow_agg_1h ("dstDeviceId")`);

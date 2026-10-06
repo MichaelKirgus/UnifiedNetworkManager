@@ -5,7 +5,7 @@ import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { formatBytes, formatNumber } from '../components/formatMetric';
 import { can } from '../auth/permissions';
-import { api, FlowTalker, FlowInternetDevice, FlowPair, FlowPortRow, FlowNetworkRow } from '../api/client';
+import { api, FlowTalker, FlowInternetDevice, FlowInternetCountry, FlowPair, FlowPortRow, FlowNetworkRow } from '../api/client';
 
 /** Well-known L4 port names for the port-stats tables (0 = no transport header). */
 const PORT_NAMES: Record<number, string> = {
@@ -100,6 +100,19 @@ function LocationCell({ row }: { row: FlowTalker }) {
         {flag && <span className="mr-1">{flag}</span>}
         {countryName}
       </>}
+    </span>
+  );
+}
+
+/** Country cell for the per-country egress table — "🇺🇸 US" or a faint dash. */
+function CountryCell({ row }: { row: FlowInternetCountry }) {
+  const code = row.countryCode?.trim() || null;
+  if (!code) return <span className="text-faint">—</span>;
+  const flag = flagEmoji(code);
+  return (
+    <span className="flex items-center gap-1.5 text-xs" title={code}>
+      {flag && <span>{flag}</span>}
+      <span className="font-medium uppercase">{code}</span>
     </span>
   );
 }
@@ -273,6 +286,32 @@ export default function Flows() {
       key: 'deviceName',
       width: 240,
       render: (row) => <span className="font-medium text-foreground">{orDash(row.deviceName)}</span>,
+    },
+    {
+      header: 'Egress to Internet',
+      key: 'estBytes',
+      width: 160,
+      sortAccessor: (row) => row.estBytes,
+      render: (row) => <span className="font-mono text-xs">{formatBytes(row.estBytes)}</span>,
+    },
+    {
+      header: 'Distinct Destinations',
+      key: 'distinctDestinations',
+      width: 160,
+      sortAccessor: (row) => row.distinctDestinations,
+      render: (row) => <span className="font-mono text-xs">{formatNumber(row.distinctDestinations)}</span>,
+    },
+  ];
+
+  // Country aggregation over the stored GeoIP codes — only shown when a
+  // database has resolved at least one destination.
+  const countryColumns: DataTableColumn<FlowInternetCountry>[] = [
+    {
+      header: 'Country',
+      key: 'countryCode',
+      width: 160,
+      sortAccessor: (row) => row.countryCode ?? '',
+      render: (row) => <CountryCell row={row} />,
     },
     {
       header: 'Egress to Internet',
@@ -520,6 +559,22 @@ export default function Flows() {
           searchPlaceholder="Search devices…"
           emptyMessage="No internet egress recorded in this window — start the flow-collector plugin and point an sFlow or NetFlow exporter at it."
         />
+      )}
+
+      {/* Internet egress per country — from the stored GeoIP codes (Settings →
+       *  GeoIP). Hidden entirely until a database has resolved ≥1 destination. */}
+      {internetQuery.data?.perCountry && internetQuery.data.perCountry.length > 0 && (
+        <div className="mt-3">
+          <p className="mb-2 text-xs font-medium text-secondary">Internet egress by country</p>
+          <DataTable
+            columns={countryColumns}
+            rows={internetQuery.data.perCountry}
+            rowKey={(row) => `c|${row.countryCode ?? 'unknown'}`}
+            storageKey="flows-internet-countries"
+            searchPlaceholder="Search countries…"
+            emptyMessage="No country data yet — fetch a GeoIP database (Settings → GeoIP)."
+          />
+        </div>
       )}
 
       {/* Top talkers — sources and destinations side by side. */}
