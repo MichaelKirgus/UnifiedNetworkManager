@@ -21,7 +21,6 @@ export const OPENWRT_DEVICE_SUPPORT: DeviceSupport = {
     { name: 'inventory', label: 'Inventory (interfaces, wireless, tunnels, services)' },
     { name: 'configuration', label: 'Configuration actions (firewall, DNS, DHCP, VPN)' },
     { name: 'planning', label: 'Planning / rollouts' },
-    { name: 'updates', label: 'Firmware + package updates' },
     { name: 'securityChecks', label: 'Security checks over SSH' },
   ],
 };

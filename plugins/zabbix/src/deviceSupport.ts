@@ -18,6 +18,9 @@ export const ZABBIX_DEVICE_SUPPORT: DeviceSupport = {
   docPath: 'docs/README.md',
   defaultCapabilities: [
     { name: 'monitoring', label: 'Fleet metrics from a Zabbix server' },
-    { name: 'inventory', label: 'Host inventory sync into Zabbix' },
+    // NOTE: this is the plugin's own `inventorySync` capability — it pushes UNM's
+    // host inventory INTO Zabbix. It does not feed UNM's inventory pages, so it
+    // must NOT be named 'inventory'.
+    { name: 'inventorySync', label: 'Host inventory sync into Zabbix' },
   ],
 };

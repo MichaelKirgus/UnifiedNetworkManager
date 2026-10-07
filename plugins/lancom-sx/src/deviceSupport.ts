@@ -22,5 +22,6 @@ export const LANCOM_SX_DEVICE_SUPPORT: DeviceSupport = {
     { name: 'configuration', label: 'Configuration actions (port mode/speed, VLAN, LACP, PoE)' },
     { name: 'planning', label: 'Planning / rollouts' },
     { name: 'updates', label: 'Firmware updates' },
+    { name: 'deviceState', label: 'Live device state (Config page)' },
   ],
 };

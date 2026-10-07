@@ -32,6 +32,7 @@ export const OPNSENSE_DEVICE_SUPPORT: DeviceSupport = {
     { name: 'inventory', label: 'Inventory (networks, hosts, tunnels, firewall)' },
     { name: 'configuration', label: 'Configuration actions' },
     { name: 'planning', label: 'Planning / rollouts' },
+    { name: 'deviceState', label: 'Live device state (Config page)' },
     { name: 'updates', label: 'Firmware + package updates' },
     // ZFS pool/dataset inventory — the OPNsense API has no ZFS listing, so this
     // rides the SSH slot AND only exists when the appliance actually runs ZFS.

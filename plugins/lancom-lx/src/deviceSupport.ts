@@ -23,5 +23,7 @@ export const LANCOM_LX_DEVICE_SUPPORT: DeviceSupport = {
     { name: 'planning', label: 'Planning / rollouts' },
     { name: 'updates', label: 'Firmware updates' },
     { name: 'securityChecks', label: 'Security checks over SSH' },
+    { name: 'deviceState', label: 'Live device state (Config page)' },
+    { name: 'sshConsole', label: 'Interactive SSH console (LCOS CLI)' },
   ],
 };

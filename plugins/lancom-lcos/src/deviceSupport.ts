@@ -23,5 +23,6 @@ export const LANCOM_LCOS_DEVICE_SUPPORT: DeviceSupport = {
     { name: 'planning', label: 'Planning / rollouts' },
     { name: 'updates', label: 'Firmware updates' },
     { name: 'securityChecks', label: 'Security checks over SSH' },
+    { name: 'sshConsole', label: 'Interactive SSH console (LCOS CLI)' },
   ],
 };

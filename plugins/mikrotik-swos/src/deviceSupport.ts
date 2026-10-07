@@ -22,5 +22,6 @@ export const MIKROTIK_SWOS_DEVICE_SUPPORT: DeviceSupport = {
     { name: 'configuration', label: 'Configuration actions (port config, PoE, LAG, VLAN)' },
     { name: 'planning', label: 'Planning / rollouts' },
     { name: 'updates', label: 'Firmware updates' },
+    { name: 'deviceState', label: 'Live device state (Config page)' },
   ],
 };
