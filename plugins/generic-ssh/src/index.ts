@@ -38,6 +38,7 @@ import {
   dynamicSshHostVerifier,
   resolveSshCredentials,
   buildDeviceTimeInfo,
+  ianaZoneToOffsetMinutes,
   createSftpPool,
   warnOnce,
   type QuickAction,
@@ -46,10 +47,11 @@ import type { ProbeRequestBody, StateRequestBody } from '@unm/plugin-sdk';
 
 import { SshBackend, closeSshPools, resolveGenericSshCredentials } from './client/sshClient';
 import { createElevatedBackend } from './client/privilege';
-import { collectLive, collectMonitoring, getInventory } from './monitoring';
+import { collectLive, collectMonitoring, getInventory, resolveZone } from './monitoring';
 import { collectProbeStates, collectProbeStats, type ProbeContainerStat, type ProbeContainerState } from './containers';
 import { stateStore } from './stateStore';
 import { collectSecurityChecks, DEFAULT_WATCHED_FILES, type SecuritySettings } from './security';
+import { collectAndPushFirewallEvents } from './firewallEvents';
 import { buildPlan, listCatalogWithIntents, PlanningError } from './plan';
 import type { PlanRequest } from './plan';
 import { getAction } from './actions/registry';
@@ -186,6 +188,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     min: 1,
     max: 1_000_000,
     description: 'Unsuccessful logins in the window at or above this count raise a CRITICAL finding (likely an active brute-force attempt).',
+  },
+  {
+    key: 'firewallEventsEnabled',
+    label: 'Collect firewall events',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Read kernel firewall log lines (netfilter DROP/REJECT logging) from the host journal on every poll and push them to UNM\'s cross-device Firewall Events page. The host must actually LOG drops — install the behavior-preserving nftables log rules via the firewall.log.enable action first; without those, no events exist to collect.',
   },
 ];
 
@@ -394,6 +404,15 @@ app.post('/monitoring', async (req, res) => {
       }
     }
 
+    // Firewall events: read new kernel netfilter log lines since the last
+    // cursor and push them to the API's internal endpoint. Fire-and-forget —
+    // NOT awaited, so it runs in parallel with the response below and can
+    // never block or fail this poll; all failures are contained inside
+    // collectAndPushFirewallEvents (which also no-ops without a deviceId).
+    if (settings.firewallEventsEnabled !== false) {
+      void collectAndPushFirewallEvents(host, deviceId, backend).catch(() => { /* best-effort */ });
+    }
+
     if (selectedModel) result.metrics['system.model'] = selectedModel;
     if (selectedFirmware) result.metrics['system.firmwareVersion'] = selectedFirmware;
 
@@ -486,7 +505,11 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
     ]).catch(() => new Map<string, string>());
     const localIso = (sections.get('date') ?? '').trim().split('\n')[0]?.trim() ?? '';
     if (!localIso) throw new Error('SSH date probe returned no data');
-    metrics['system.deviceTime'] = buildDeviceTimeInfo(localIso, null) ?? { localIso };
+    // Resolve the zone + offset so device_times.utcOffsetMinutes is populated —
+    // firewall-events ingest needs it to place rows in the right hour window.
+    const zone = resolveZone(sections.get('tz') ?? '');
+    metrics['system.deviceTime'] =
+      buildDeviceTimeInfo(localIso, zone, ianaZoneToOffsetMinutes(zone ?? '', Date.now())) ?? { localIso };
   } else {
     // systemStats + traffic in ONE combined round-trip.
     const live = await collectLive(backend);

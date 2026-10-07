@@ -14,7 +14,7 @@
  * stored rows, while a present-but-empty array is authoritative.
  */
 
-import { INVENTORY_INTERVAL_MS, buildDeviceTimeInfo, listUpgradablePackages } from '@unm/plugin-sdk';
+import { INVENTORY_INTERVAL_MS, buildDeviceTimeInfo, ianaZoneToOffsetMinutes, listUpgradablePackages } from '@unm/plugin-sdk';
 import type { MetricDescriptor, UpdateRow } from '@unm/plugin-sdk';
 import type { CommandRunner } from './client/privilege';
 import { collectDockerInventory } from './containers';
@@ -216,14 +216,19 @@ export async function collectLive(backend: CommandRunner): Promise<LiveMetrics> 
   const localIso = (sections.get('date') ?? '').trim().split('\n')[0]?.trim() ?? '';
   if (localIso) {
     // `date -Iseconds` carries a UTC offset → epochMs resolves even without the zone.
-    metrics['system.deviceTime'] = buildDeviceTimeInfo(localIso, resolveZone(sections.get('tz') ?? '')) ?? { localIso };
+    // Also resolve utcOffsetMinutes from the IANA zone: the firewall-events ingest
+    // subtracts it to build tsMs, and a NULL offset makes every event row land in
+    // the wrong hour window (appliance-local treated as UTC).
+    const zone = resolveZone(sections.get('tz') ?? '');
+    metrics['system.deviceTime'] =
+      buildDeviceTimeInfo(localIso, zone, ianaZoneToOffsetMinutes(zone ?? '', Date.now())) ?? { localIso };
   }
 
   return { metrics };
 }
 
 /** IANA zone from the labelled TZFILE/SYMLINK probe (see openwrt deviceTime). */
-function resolveZone(tzRaw: string): string | null {
+export function resolveZone(tzRaw: string): string | null {
   const isZone = (s: string): boolean =>
     s.length > 0 && s.length <= 40 && !/\s/.test(s) && /^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/.test(s);
   for (const line of tzRaw.split('\n')) {

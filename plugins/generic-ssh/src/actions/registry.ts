@@ -19,6 +19,7 @@ import { WIREGUARD_ACTIONS } from './wireguard';
 import { PACKAGES_ACTIONS } from './packages';
 import { SECURITY_ACTIONS } from './security';
 import { DOCKER_ACTIONS } from './docker';
+import { FIREWALL_LOG_ACTIONS } from './firewallLog';
 import { networkIntentActions } from './networkIntents';
 
 const ALL_ACTIONS: SdkActionDescriptor<ActionContext>[] = [
@@ -28,6 +29,9 @@ const ALL_ACTIONS: SdkActionDescriptor<ActionContext>[] = [
   ...WIREGUARD_ACTIONS,
   ...PACKAGES_ACTIONS,
   ...SECURITY_ACTIONS,
+  // Kernel firewall drop logging (Firewall Events page) — behavior-preserving
+  // nftables log twins on existing DROP/REJECT rules.
+  ...FIREWALL_LOG_ACTIONS,
   // Docker / Compose (Containers page) — only meaningful on hosts that run a
   // docker daemon; the actions degrade to clear errors elsewhere.
   ...DOCKER_ACTIONS,
