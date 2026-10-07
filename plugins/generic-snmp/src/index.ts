@@ -15,6 +15,8 @@ import {
   resolvePluginIdentity,
   CertificateRow,
 } from '@unm/plugin-sdk';
+import { GENERIC_SNMP_DEVICE_SUPPORT } from './deviceSupport';
+import path from 'node:path';
 import {
   SnmpCredentials,
   SystemInfo,
@@ -114,11 +116,16 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 const server = createPluginServer({
   identity,
   logTag: 'generic-snmp-plugin',
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // Credentials come from the existing 'snmp' secret type (version + community for v1/v2c, USM fields for v3).
     requiredSecretType: 'snmp',
     metrics: DISCOVER_METRICS,
     options: PLUGIN_OPTIONS,
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: GENERIC_SNMP_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

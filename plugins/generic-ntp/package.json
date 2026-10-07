@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-generic-ntp",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin: generic NTP/SNTP time-service checker — verifies a device serves NTP on the configured port (default 123) and reports the time it transmits + drift vs UNM.",
   "main": "dist/src/index.js",

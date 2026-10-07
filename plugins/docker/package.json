@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-docker",
   "version": "0.5.1",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "Generic Docker Engine plugin \u2014 monitoring (tcp/tls/local socket) emitted as the generic `containers[]` metric, plus container start/stop/restart/delete + image delete actions and a short-cycle live probe.",
   "main": "dist/src/index.js",

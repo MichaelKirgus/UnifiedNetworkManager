@@ -25,6 +25,12 @@ RUN cd plugins/icmp && npm run build \
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: link in
 # node_modules resolve exactly like in local development.
+# Static doc/license assets served at /assets/* (proxied by the API's
+# GET /plugins/:id/asset) — referenced from discovery.deviceSupport. Separate
+# COPYs: a multi-source COPY would flatten docs/ into the plugin root.
+COPY plugins/icmp/LICENSE.md plugins/icmp/
+COPY plugins/icmp/docs/ plugins/icmp/docs/
+
 WORKDIR /app/plugins/icmp
 
 EXPOSE 4080

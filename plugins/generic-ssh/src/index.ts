@@ -43,6 +43,7 @@ import {
   warnOnce,
   type QuickAction,
 } from '@unm/plugin-sdk';
+import { GENERIC_SSH_DEVICE_SUPPORT } from './deviceSupport';
 import type { ProbeRequestBody, StateRequestBody } from '@unm/plugin-sdk';
 
 import { SshBackend, closeSshPools, resolveGenericSshCredentials } from './client/sshClient';
@@ -271,6 +272,9 @@ const server = createPluginServer({
   wsUpgrade: consoleUpgrade,
   // Static icon assets, advertised in /discover and fetched by the API's icon proxy.
   iconsDir: path.join(__dirname, '../../icons'),
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // Primary credential = a username/password login OR an SSH key pair — this
     // plugin has no other transport at all. `requiredSecretTypes` drives the
@@ -302,6 +306,8 @@ const server = createPluginServer({
     // reuse the existing console + filesystem dialogs (capability-gated).
     quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/generic-ssh.svg',
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: GENERIC_SSH_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

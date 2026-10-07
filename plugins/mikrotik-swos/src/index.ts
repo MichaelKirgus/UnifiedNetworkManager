@@ -26,6 +26,7 @@ import {
   catalogFirmwareRow,
   type QuickAction,
 } from '@unm/plugin-sdk';
+import { MIKROTIK_SWOS_DEVICE_SUPPORT } from './deviceSupport';
 import { SwosClient, SwosAuthError } from './swosClient';
 import { createPlatform } from './swosPlatform';
 import { DEFAULT_OPTIONS, MonitoringResult, SwosOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
@@ -159,6 +160,9 @@ const server = createPluginServer({
   // Static icon assets (plugin + per-model icons), advertised in /discover and
   // fetched by the API's icon proxy. dist/src/../../icons = <plugin root>/icons.
   iconsDir: path.join(__dirname, '../../icons'),
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // Credentials come from the existing 'usernamePassword' secret type — SwOS
     // uses HTTP Digest authentication with a username/password pair.
@@ -171,6 +175,8 @@ const server = createPluginServer({
     quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/swos.svg',
     deviceModels: DEVICE_MODELS,
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: MIKROTIK_SWOS_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

@@ -1,6 +1,7 @@
 {
   "name": "unm-mcp",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "Model Context Protocol server for UnifiedNetworkManager — exposes the API's OpenAPI operations as MCP tools (stdio, or HTTP with /mcp + /debug/mcp when MCP_PORT is set). Authenticated with a long-lived UNM API token.",
   "type": "module",

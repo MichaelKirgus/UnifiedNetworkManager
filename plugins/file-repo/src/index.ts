@@ -33,6 +33,7 @@ import path from 'path';
 import { createHash, randomUUID } from 'crypto';
 import type { Readable } from 'stream';
 import type { PluginOptionDescriptor } from '@unm/plugin-sdk';
+import { FILE_REPO_DEVICE_SUPPORT } from './deviceSupport';
 import {
   createPluginLogger,
   createPluginServer,
@@ -68,11 +69,16 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 const server = createPluginServer({
   identity,
   logTag: 'file-repo',
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // The `fileRepo` capability is what the API broker looks for (mirrors how
     // secretsProvider advertises its secret types). No per-device metrics.
     fileRepo: { backend: 'local-filesystem' },
     options: PLUGIN_OPTIONS,
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: FILE_REPO_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

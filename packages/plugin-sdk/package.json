@@ -1,6 +1,7 @@
 {
   "name": "@unm/plugin-sdk",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "Shared SDK for UnifiedNetworkManager plugins: the full API<->plugin contract types plus runtime helpers (server factory with /healthz + /discover + mDNS, identity/multi-instance resolution, settings header parsing, metric descriptor factories, action registry + input validation, planning core, counter-rate tracker, TTL cache, internal API client).",
   "main": "dist/index.js",

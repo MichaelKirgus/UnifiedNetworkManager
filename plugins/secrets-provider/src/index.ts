@@ -1,4 +1,6 @@
 import type { PluginOptionDescriptor, SecretField, SecretType } from '@unm/plugin-sdk';
+import { SECRETS_PROVIDER_DEVICE_SUPPORT } from './deviceSupport';
+import path from 'node:path';
 import {
   createPluginLogger,
   createPluginServer,
@@ -163,9 +165,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 const server = createPluginServer({
   identity,
   logTag: 'secrets-provider',
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     secretsProvider: { algorithm: 'aes-256-gcm', secretTypes: SECRET_TYPES },
     options: PLUGIN_OPTIONS,
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: SECRETS_PROVIDER_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

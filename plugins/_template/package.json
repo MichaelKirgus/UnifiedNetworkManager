@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-template",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin TEMPLATE — copy this folder to plugins/<your-plugin>/ and follow docs/PLUGIN-DEVELOPMENT.md.",
   "main": "dist/src/index.js",

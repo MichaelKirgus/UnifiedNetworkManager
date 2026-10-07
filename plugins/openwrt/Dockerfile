@@ -25,6 +25,12 @@ COPY plugins/openwrt/icons/ plugins/openwrt/icons/
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: link in
 # node_modules resolve exactly like in local development.
+# Static doc/license assets served at /assets/* (proxied by the API's
+# GET /plugins/:id/asset) — referenced from discovery.deviceSupport. Separate
+# COPYs: a multi-source COPY would flatten docs/ into the plugin root.
+COPY plugins/openwrt/LICENSE.md plugins/openwrt/
+COPY plugins/openwrt/docs/ plugins/openwrt/docs/
+
 WORKDIR /app/plugins/openwrt
 
 EXPOSE 4080

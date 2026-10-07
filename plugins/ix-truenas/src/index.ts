@@ -48,6 +48,7 @@ import {
   type QuickAction,
   SshError,
 } from '@unm/plugin-sdk';
+import { IX_TRUENAS_DEVICE_SUPPORT } from './deviceSupport';
 import { TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } from './client/truenasClient';
 import {
   collectProbeStates,
@@ -756,6 +757,9 @@ const server = createPluginServer({
   jsonLimit: '12mb',
   // Static icon assets, advertised in /discover and fetched by the API's icon proxy.
   iconsDir: path.join(__dirname, '../../icons'),
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // Primary secret type for device credentials (username/password login).
     requiredSecretType: 'usernamePassword',
@@ -789,6 +793,8 @@ const server = createPluginServer({
     // shell/files reuse the existing console + filesystem dialogs.
     quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/truenas.svg',
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: IX_TRUENAS_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

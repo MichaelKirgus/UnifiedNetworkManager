@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-fbox",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin for AVM FRITZ!Box-class routers — web-UI session monitoring (system/WAN/LAN/WiFi) + inventory propagation.",
   "main": "dist/src/index.js",

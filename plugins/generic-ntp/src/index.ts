@@ -35,6 +35,7 @@ import {
   readSettings,
   resolvePluginIdentity,
 } from '@unm/plugin-sdk';
+import { GENERIC_NTP_DEVICE_SUPPORT } from './deviceSupport';
 import type { NtpQueryResult } from '@unm/plugin-sdk';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-00000000000e';
@@ -180,12 +181,17 @@ const server = createPluginServer({
   logTag: 'generic-ntp-plugin',
   // Static icon assets, advertised in /discover and fetched by the API's icon proxy.
   iconsDir: path.join(__dirname, '../../icons'),
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // No credentials needed — a single UDP NTP datagram to the management address.
     requiredSecretType: null,
     metrics: METRIC_DESCRIPTORS,
     options: PLUGIN_OPTIONS,
     iconUrl: '/icons/generic-ntp.svg',
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: GENERIC_NTP_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

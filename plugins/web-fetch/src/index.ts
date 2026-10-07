@@ -44,6 +44,7 @@ import axios, { AxiosError, type AxiosProxyConfig } from 'axios';
 import tar from 'tar';
 import unzipper from 'unzipper';
 import type { Health, MetricDescriptor } from '@unm/plugin-sdk';
+import { WEB_FETCH_DEVICE_SUPPORT } from './deviceSupport';
 import {
   createPluginLogger,
   createPluginServer,
@@ -104,10 +105,15 @@ const METRIC_DESCRIPTORS: MetricDescriptor[] = [
 const server = createPluginServer({
   identity,
   logTag: 'web-fetch-plugin',
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     requiredSecretType: null,
     metrics: METRIC_DESCRIPTORS,
     options: [],
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: WEB_FETCH_DEVICE_SUPPORT,
   },
   selfMetricsExtra: () => ({
     webfetchFetchesTotal: stats.fetchesTotal,

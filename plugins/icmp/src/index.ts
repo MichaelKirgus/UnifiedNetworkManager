@@ -9,6 +9,8 @@ import {
   readSettings,
   resolvePluginIdentity,
 } from '@unm/plugin-sdk';
+import { ICMP_DEVICE_SUPPORT } from './deviceSupport';
+import path from 'node:path';
 import { pingHost, PingResult } from './ping';
 import { collectInventory, TargetInventory } from './inventory';
 
@@ -155,11 +157,16 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 const server = createPluginServer({
   identity,
   logTag: 'icmp-plugin',
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // No credentials needed — the plugin pings from its own container.
     requiredSecretType: null,
     metrics: METRIC_DESCRIPTORS,
     options: PLUGIN_OPTIONS,
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: ICMP_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

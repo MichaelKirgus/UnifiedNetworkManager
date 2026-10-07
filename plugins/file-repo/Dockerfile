@@ -22,6 +22,12 @@ RUN cd plugins/file-repo && npm run build \
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: link in
 # node_modules resolve exactly like in local development.
+# Static doc/license assets served at /assets/* (proxied by the API's
+# GET /plugins/:id/asset) — referenced from discovery.deviceSupport. Separate
+# COPYs: a multi-source COPY would flatten docs/ into the plugin root.
+COPY plugins/file-repo/LICENSE.md plugins/file-repo/
+COPY plugins/file-repo/docs/ plugins/file-repo/docs/
+
 WORKDIR /app/plugins/file-repo
 
 EXPOSE 4080

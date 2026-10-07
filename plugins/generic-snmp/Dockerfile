@@ -34,6 +34,12 @@ RUN cd plugins/generic-snmp && npm run build \
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: symlink
 # in node_modules resolve exactly like in local development.
+# Static doc/license assets served at /assets/* (proxied by the API's
+# GET /plugins/:id/asset) — referenced from discovery.deviceSupport. Separate
+# COPYs: a multi-source COPY would flatten docs/ into the plugin root.
+COPY plugins/generic-snmp/LICENSE.md plugins/generic-snmp/
+COPY plugins/generic-snmp/docs/ plugins/generic-snmp/docs/
+
 WORKDIR /app/plugins/generic-snmp
 
 EXPOSE 4080

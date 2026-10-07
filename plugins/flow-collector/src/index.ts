@@ -41,6 +41,7 @@ import {
   createPluginServer,
   resolvePluginIdentity,
 } from '@unm/plugin-sdk';
+import { FLOW_COLLECTOR_DEVICE_SUPPORT } from './deviceSupport';
 import axios from 'axios';
 import { parseFlowDatagram } from './dispatch';
 
@@ -91,11 +92,16 @@ const server = createPluginServer({
   identity,
   logTag: 'flow-collector-plugin',
   iconsDir: path.join(__dirname, '../../icons'),
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     requiredSecretType: null,
     metrics: METRIC_DESCRIPTORS,
     options: [],
     iconUrl: '/icons/flow-collector.svg',
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: FLOW_COLLECTOR_DEVICE_SUPPORT,
   },
   selfMetricsExtra: () => ({
     flowSamplesPerSec: stats.samplesPerSec,

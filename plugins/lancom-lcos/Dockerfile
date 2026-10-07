@@ -44,6 +44,12 @@ COPY plugins/lancom-lcos/icons/ plugins/lancom-lcos/icons/
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: symlink
 # in node_modules resolve exactly like in local development.
+# Static doc/license assets served at /assets/* (proxied by the API's
+# GET /plugins/:id/asset) — referenced from discovery.deviceSupport. Separate
+# COPYs: a multi-source COPY would flatten docs/ into the plugin root.
+COPY plugins/lancom-lcos/LICENSE.md plugins/lancom-lcos/
+COPY plugins/lancom-lcos/docs/ plugins/lancom-lcos/docs/
+
 WORKDIR /app/plugins/lancom-lcos
 
 EXPOSE 4080

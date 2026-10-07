@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-mailcow",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin for mailcow-dockerized (REST API: domains, mailboxes and aliases inventory + CRUD).",
   "main": "dist/src/index.js",

@@ -35,6 +35,8 @@ import {
   resolvePluginIdentity,
   validateInput,
 } from '@unm/plugin-sdk';
+import { ZABBIX_DEVICE_SUPPORT } from './deviceSupport';
+import path from 'node:path';
 import { ZabbixActionContext } from './actions';
 import { registry as actionRegistry } from './actions';
 import { buildPlan, PlanningError } from './plan';
@@ -186,6 +188,9 @@ const server = createPluginServer({
   identity,
   logTag: 'zabbix-plugin',
   jsonLimit: '1mb',
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // Zabbix authenticates with an API token (preferred) or a user login.
     requiredSecretType: 'apiKeyNoSecret',
@@ -199,6 +204,8 @@ const server = createPluginServer({
     quickActions: [
       { id: 'sync-inventory', label: 'Sync inventory', kind: 'action' as const, actionId: 'zabbix.host.sync', description: 'Reconcile UNM\'s host inventory into this Zabbix server (create/update/delete per the sync options).' },
     ],
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: ZABBIX_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

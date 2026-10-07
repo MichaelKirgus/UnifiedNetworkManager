@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-mikrotik-routeros",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin for MikroTik RouterOS routers: monitoring via the REST API (/rest, HTTP Basic auth) — system resources, interfaces + throughput rates, IP addresses, ARP, DHCP leases, routes, wireless clients — with network/host/route inventory propagation. Configuration and planning capabilities are planned for a later release.",
   "main": "dist/src/index.js",

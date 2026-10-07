@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-generic-http",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin: generic HTTP(S) web-service reachability + response-time metrics and TLS certificate inventory (Certificates page).",
   "main": "dist/src/index.js",

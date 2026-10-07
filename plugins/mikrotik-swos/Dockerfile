@@ -26,6 +26,12 @@ COPY plugins/mikrotik-swos/icons/ plugins/mikrotik-swos/icons/
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: link in
 # node_modules resolve exactly like in local development.
+# Static doc/license assets served at /assets/* (proxied by the API's
+# GET /plugins/:id/asset) — referenced from discovery.deviceSupport. Separate
+# COPYs: a multi-source COPY would flatten docs/ into the plugin root.
+COPY plugins/mikrotik-swos/LICENSE.md plugins/mikrotik-swos/
+COPY plugins/mikrotik-swos/docs/ plugins/mikrotik-swos/docs/
+
 WORKDIR /app/plugins/mikrotik-swos
 
 EXPOSE 4080

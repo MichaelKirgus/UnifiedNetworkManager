@@ -31,6 +31,7 @@ import {
   readSettings,
   resolvePluginIdentity,
 } from '@unm/plugin-sdk';
+import { GENERIC_HTTP_DEVICE_SUPPORT } from './deviceSupport';
 import type { CertificateRow } from '@unm/plugin-sdk';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-00000000000d';
@@ -171,12 +172,17 @@ const server = createPluginServer({
   logTag: 'generic-http-plugin',
   // Static icon assets, advertised in /discover and fetched by the API's icon proxy.
   iconsDir: path.join(__dirname, '../../icons'),
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // No credentials needed — plain HTTP(S) probes against the management address.
     requiredSecretType: null,
     metrics: METRIC_DESCRIPTORS,
     options: PLUGIN_OPTIONS,
     iconUrl: '/icons/generic-http.svg',
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: GENERIC_HTTP_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

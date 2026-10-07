@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-lancom-lcos",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin: Lancom LCOS router monitoring (system, LAN/WAN throughput, VPN, firewall, temperature) + inventory propagation over the unified LCOS MIB, and config/plan actions via SNMP SET plus HTTP config backup through a web-UI credential slot.",
   "main": "dist/src/index.js",

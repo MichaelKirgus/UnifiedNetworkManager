@@ -22,6 +22,12 @@ RUN cd plugins/secrets-provider && npm run build \
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: link in
 # node_modules resolve exactly like in local development.
+# Static doc/license assets served at /assets/* (proxied by the API's
+# GET /plugins/:id/asset) — referenced from discovery.deviceSupport. Separate
+# COPYs: a multi-source COPY would flatten docs/ into the plugin root.
+COPY plugins/secrets-provider/LICENSE.md plugins/secrets-provider/
+COPY plugins/secrets-provider/docs/ plugins/secrets-provider/docs/
+
 WORKDIR /app/plugins/secrets-provider
 
 EXPOSE 4080

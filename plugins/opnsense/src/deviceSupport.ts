@@ -19,8 +19,8 @@ import type { DeviceSupport } from '@unm/plugin-sdk';
 
 export const OPNSENSE_DEVICE_SUPPORT: DeviceSupport = {
   license: {
-    name: 'MIT',
-    url: 'https://opensource.org/license/mit/',
+    name: 'EUPL-1.2',
+    url: 'https://eupl.eu/1.2/en/',
     file: 'LICENSE.md',
   },
   helpUrl: 'https://docs.opnsense.org/',

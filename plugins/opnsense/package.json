@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-opnsense",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "Reference UnifiedNetworkManager plugin for OPNsense firewalls.",
   "main": "dist/src/index.js",

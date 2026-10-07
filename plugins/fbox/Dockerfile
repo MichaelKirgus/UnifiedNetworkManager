@@ -25,6 +25,12 @@ COPY plugins/fbox/icons/ plugins/fbox/icons/
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: link in
 # node_modules resolve exactly like in local development.
+# Static doc/license assets served at /assets/* (proxied by the API's
+# GET /plugins/:id/asset) — referenced from discovery.deviceSupport. Separate
+# COPYs: a multi-source COPY would flatten docs/ into the plugin root.
+COPY plugins/fbox/LICENSE.md plugins/fbox/
+COPY plugins/fbox/docs/ plugins/fbox/docs/
+
 WORKDIR /app/plugins/fbox
 
 EXPOSE 4080

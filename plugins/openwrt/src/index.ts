@@ -47,6 +47,7 @@ import {
   quickActionHandler,
   buildWebUiUrl,
 } from '@unm/plugin-sdk';
+import { OPENWRT_DEVICE_SUPPORT } from './deviceSupport';
 import type { CertificateRow, ProbeRequestBody, StateRequestBody, QuickAction } from '@unm/plugin-sdk';
 
 import { Backend } from './client/backend';
@@ -275,6 +276,9 @@ const server = createPluginServer({
   wsUpgrade: consoleUpgrade,
   // Static icon assets, advertised in /discover and fetched by the API's icon proxy.
   iconsDir: path.join(__dirname, '../../icons'),
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // Primary credential = a username/password login (the common OpenWRT case —
     // one root login feeds BOTH LuCI session auth and dropbear). An sshKeyPair
@@ -306,6 +310,8 @@ const server = createPluginServer({
     // the existing console dialog.
     quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/openwrt.svg',
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: OPENWRT_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

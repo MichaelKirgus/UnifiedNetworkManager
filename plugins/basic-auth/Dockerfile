@@ -22,6 +22,12 @@ RUN cd plugins/basic-auth && npm run build \
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: link in
 # node_modules resolve exactly like in local development.
+# Static doc/license assets served at /assets/* (proxied by the API's
+# GET /plugins/:id/asset) — referenced from discovery.deviceSupport. Separate
+# COPYs: a multi-source COPY would flatten docs/ into the plugin root.
+COPY plugins/basic-auth/LICENSE.md plugins/basic-auth/
+COPY plugins/basic-auth/docs/ plugins/basic-auth/docs/
+
 WORKDIR /app/plugins/basic-auth
 
 EXPOSE 4080

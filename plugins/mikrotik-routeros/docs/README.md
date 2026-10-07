@@ -50,4 +50,4 @@ specific box has radios, not on the model entry.
 
 ## License
 
-MIT — see [LICENSE.md](../LICENSE.md).
+EUPL-1.2 — see [LICENSE.md](../LICENSE.md).

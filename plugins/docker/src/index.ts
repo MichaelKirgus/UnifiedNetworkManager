@@ -36,6 +36,8 @@ import {
   textMetric,
   validateInput,
 } from '@unm/plugin-sdk';
+import { DOCKER_DEVICE_SUPPORT } from './deviceSupport';
+import path from 'node:path';
 
 import { DockerClientOptions, DockerTlsMaterial, engineVersion, listContainers, listImages } from './client';
 import { buildContainerRows, buildImageRows, ContainerRow as UnmContainerRow, DockerContainerRaw, DockerImageRaw, ImageRow } from './inventory';
@@ -127,6 +129,9 @@ const METRIC_DESCRIPTORS: MetricDescriptor[] = [
 const server = createPluginServer({
   identity,
   logTag: 'docker-plugin',
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // Plain TCP needs no secret; TLS material arrives via the optional slot.
     requiredSecretType: null,
@@ -150,6 +155,8 @@ const server = createPluginServer({
     options: PLUGIN_OPTIONS,
     actions: actionRegistry.listCatalog(), // config-capable — /config + /plan below
     deviceModels: [{ vendor: 'generic', model: 'Docker Host' }],
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: DOCKER_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

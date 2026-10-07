@@ -1,6 +1,7 @@
 {
   "name": "unm-api",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager API service, driven by the OpenAPI spec.",
   "main": "dist/src/index.js",

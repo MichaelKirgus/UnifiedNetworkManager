@@ -25,6 +25,12 @@ COPY plugins/ix-truenas/icons/ plugins/ix-truenas/icons/
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: link in
 # node_modules resolve exactly like in local development.
+# Static doc/license assets served at /assets/* (proxied by the API's
+# GET /plugins/:id/asset) — referenced from discovery.deviceSupport. Separate
+# COPYs: a multi-source COPY would flatten docs/ into the plugin root.
+COPY plugins/ix-truenas/LICENSE.md plugins/ix-truenas/
+COPY plugins/ix-truenas/docs/ plugins/ix-truenas/docs/
+
 WORKDIR /app/plugins/ix-truenas
 
 EXPOSE 4080

@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-flow-collector",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin: sFlow + NetFlow v5/v9 collector — receives flow samples over UDP from network devices, pre-aggregates them into per-window (src,dst,proto) tuples and pushes batches to the UNM API for storage/analysis.",
   "main": "dist/src/index.js",

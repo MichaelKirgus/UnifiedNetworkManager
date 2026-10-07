@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-file-repo",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "Stateless file-repository storage backend for UNM — stores repo file bytes (ISOs, firmware, config backups) on a local volume / docker mount. The API owns all metadata in Postgres and brokers the bytes here.",
   "main": "dist/src/index.js",

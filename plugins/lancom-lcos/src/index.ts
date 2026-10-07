@@ -35,6 +35,7 @@ import {
   CertificateRow,
   type QuickAction,
 } from '@unm/plugin-sdk';
+import { LANCOM_LCOS_DEVICE_SUPPORT } from './deviceSupport';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 
 // The LCOS `lcsStatusTimeCurrentTime` DisplayString is normalized by the shared
@@ -278,6 +279,9 @@ const server = createPluginServer({
   jsonLimit: '32mb',
   // Static icon assets, advertised in /discover and fetched by the API's icon proxy.
   iconsDir: path.join(__dirname, '../../icons'),
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // Primary credential = the existing 'snmp' secret type (community for v1/v2c, USM fields for v3).
     requiredSecretType: 'snmp',
@@ -307,6 +311,8 @@ const server = createPluginServer({
     quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/lancom-lcos.svg',
     deviceModels: DEVICE_MODELS,
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: LANCOM_LCOS_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

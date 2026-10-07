@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-openwrt",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin for OpenWRT routers — dual transport (LuCI ubus-over-HTTP + SSH/uci), monitoring, inventory, configuration actions, planning intents and an interactive SSH console.",
   "main": "dist/src/index.js",

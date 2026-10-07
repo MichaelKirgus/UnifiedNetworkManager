@@ -32,6 +32,7 @@ import {
   CertificateRow,
   type QuickAction,
 } from '@unm/plugin-sdk';
+import { LANCOM_LX_DEVICE_SUPPORT } from './deviceSupport';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
 import { LcosOptions, getLcosInventory, readLcosClock, walkLcosCounters } from './snmpCollector';
 import { deriveSecurityChecks } from './security';
@@ -266,6 +267,9 @@ const server = createPluginServer({
   // Static icon assets (plugin + per-model icons), advertised in /discover and
   // fetched by the API's icon proxy. dist/src/../../icons = <plugin root>/icons.
   iconsDir: path.join(__dirname, '../../icons'),
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // Credentials come from the existing 'snmp' secret type (version + community for v1/v2c, USM fields for v3).
     requiredSecretType: 'snmp',
@@ -292,6 +296,8 @@ const server = createPluginServer({
     // forwarded to /monitoring (model/firmwareVersion) for future per-model logic.
     iconUrl: '/icons/lancom-lx.svg',
     deviceModels: DEVICE_MODELS,
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: LANCOM_LX_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

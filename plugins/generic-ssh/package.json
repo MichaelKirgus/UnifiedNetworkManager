@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-generic-ssh",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin for generic Linux devices reachable over SSH — /proc + POSIX monitoring (CPU/memory/swap/bandwidth), inventory (interfaces+MACs, ARP/NDP, routes, filesystems, disks), an interactive SSH console and an SFTP file manager.",
   "main": "dist/src/index.js",

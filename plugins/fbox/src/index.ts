@@ -30,6 +30,7 @@ import {
   resolveUserPass,
   type QuickAction,
 } from '@unm/plugin-sdk';
+import { FBOX_DEVICE_SUPPORT } from './deviceSupport';
 import { FBoxAuthError, FBoxCredentials, FBoxUnsupportedTargetError, FBoxTransport } from './fboxClient';
 import { DEFAULT_OPTIONS, FBoxApiMode, FBoxOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
 import { FBoxTr064AuthError, getTr064Snapshot } from './tr064';
@@ -140,6 +141,9 @@ const server = createPluginServer({
   logTag: 'fbox-plugin',
   jsonLimit: '100kb',
   iconsDir: path.join(__dirname, '../../icons'),
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // Credentials come from the existing 'usernamePassword' secret type — the
     // web UI logs in with a username/password pair (SID cookie session).
@@ -151,6 +155,8 @@ const server = createPluginServer({
     quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/fbox.svg',
     deviceModels: DEVICE_MODELS,
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: FBOX_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

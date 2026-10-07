@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-secrets-provider",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager secrets provider plugin: encrypts/decrypts and manages device secrets.",
   "main": "dist/src/index.js",

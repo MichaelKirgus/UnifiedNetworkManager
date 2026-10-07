@@ -6,6 +6,8 @@ import {
   requirePluginKey,
   resolvePluginIdentity,
 } from '@unm/plugin-sdk';
+import { BASIC_AUTH_DEVICE_SUPPORT } from './deviceSupport';
+import path from 'node:path';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { verifyTotp } from './totp';
@@ -55,11 +57,16 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 const server = createPluginServer({
   identity,
   logTag: 'basic-auth-plugin',
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // The `identityProvider` capability marks this plugin as an identity provider;
     // `flow` tells the webapp which UI to render.
     identityProvider: { flow: 'password' },
     options: PLUGIN_OPTIONS,
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: BASIC_AUTH_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

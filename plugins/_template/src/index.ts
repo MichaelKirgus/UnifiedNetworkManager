@@ -25,6 +25,8 @@ import {
   readSettings,
   resolvePluginIdentity,
 } from '@unm/plugin-sdk';
+import { _TEMPLATE_DEVICE_SUPPORT } from './deviceSupport';
+import path from 'node:path';
 
 // --- Identity -----------------------------------------------------------------
 // The UUID is the plugin's primary key in the API — generate ONE and never
@@ -77,6 +79,9 @@ const server = createPluginServer({
   logTag: 'template-plugin', // console prefix
   jsonLimit: '100kb', // raise to e.g. '32mb' if /config results carry base64 backups
   // iconsDir: path.join(__dirname, '../../icons'), // uncomment + add an icons/ folder
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // Secret type this plugin expects for device credentials (null = none).
     requiredSecretType: null,
@@ -86,6 +91,8 @@ const server = createPluginServer({
     // modules: listModules(),   // optional grouping hint
     // iconUrl: '/icons/template.svg',
     // deviceModels: DEVICE_MODELS, // optional Model/Firmware dropdown catalog
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: _TEMPLATE_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

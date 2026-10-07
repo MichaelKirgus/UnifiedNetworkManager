@@ -30,6 +30,7 @@ import {
   resolvePluginIdentity,
   validateInput,
 } from '@unm/plugin-sdk';
+import { MAILCOW_DEVICE_SUPPORT } from './deviceSupport';
 import { MailcowActionContext } from './actions';
 import { registry as actionRegistry } from './actions';
 import { collectSecurityChecks } from './security';
@@ -148,6 +149,9 @@ const server = createPluginServer({
   logTag: 'mailcow-plugin',
   jsonLimit: '1mb',
   iconsDir: path.join(__dirname, '../../icons'),
+  // Static doc/license assets served at /assets/* (proxied by the API's
+  // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
+  assetsDir: path.join(__dirname, '../..'),
   discovery: {
     // Generic single-field bearer-key secret type — see secrets-provider.
     requiredSecretType: 'apiKeyNoSecret',
@@ -156,6 +160,8 @@ const server = createPluginServer({
     actions: actionRegistry.listCatalog(),
     modules: actionRegistry.listModules(),
     iconUrl: '/icons/mailcow.svg',
+    // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: MAILCOW_DEVICE_SUPPORT,
   },
 });
 const app = server.app;

@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-icmp",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin: ICMP echo reachability + latency metrics and IP/MAC inventory.",
   "main": "dist/src/index.js",

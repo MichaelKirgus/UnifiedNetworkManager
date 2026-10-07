@@ -1,6 +1,7 @@
 {
   "name": "@unm/lancom-shared",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "Shared LANCOM MIB collection helpers for the lancom-lcos / lancom-lx / lancom-sx plugins: column-first row decoding (length-prefixed OCTET STRING + IP/MAC indices), enum label/integer pickers, the TTL+last-known snapshot cache trio, and the generic slow-path runner (probe → combined walk → quality gate → stale fallback).",
   "main": "dist/index.js",

@@ -1,6 +1,7 @@
 {
   "name": "unm-plugin-lancom-sx",
   "version": "0.1.0",
+  "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin: Lancom SX-Series switch monitoring (system/PSU/fans/temperature, ports + throughput, PoE, LAG/LACP) + network/host inventory over the LCOS-SX MIBs (unified 4.x tree and legacy GS-2310 3.x tree), with config/planning actions via SNMP SET.",
   "main": "dist/src/index.js",

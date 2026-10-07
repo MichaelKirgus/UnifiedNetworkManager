@@ -57,4 +57,4 @@ the plugin works identically on all of them.
 
 ## License
 
-MIT — see [LICENSE.md](../LICENSE.md).
+EUPL-1.2 — see [LICENSE.md](../LICENSE.md).

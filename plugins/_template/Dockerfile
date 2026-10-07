@@ -21,6 +21,12 @@ COPY plugins/template/src/ plugins/template/src/
 RUN cd plugins/template && npm run build \
     && node -e "require('/app/plugins/template/node_modules/@unm/plugin-sdk')"
 
+# Static doc/license assets served at /assets/* (proxied by the API's
+# GET /plugins/:id/asset) — referenced from discovery.deviceSupport. Separate
+# COPYs: a multi-source COPY would flatten docs/ into the plugin root.
+COPY plugins/template/LICENSE.md plugins/template/
+COPY plugins/template/docs/ plugins/template/docs/
+
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: link in
 # node_modules resolve exactly like in local development.
 WORKDIR /app/plugins/template
