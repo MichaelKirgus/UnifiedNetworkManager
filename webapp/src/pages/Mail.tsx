@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { CheckCircle2, ChevronRight, EyeOff, Loader2, Mail as MailIcon, Pencil, Plus, Trash2 } from 'lucide-react';
+import { AtSign, CheckCircle2, ChevronRight, EyeOff, Loader2, Mail as MailIcon, Pencil, Plus, Trash2 } from 'lucide-react';
 import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
@@ -119,7 +119,7 @@ type Tab = 'domains' | 'mailboxes' | 'aliases';
 type DialogState =
   | { kind: 'domain'; mode: 'create' | 'edit'; row?: MailDomainRow }
   | { kind: 'mailbox'; mode: 'create' | 'edit'; row?: MailMailboxRow; presetDevice?: MailDevice; presetDomain?: string }
-  | { kind: 'alias'; mode: 'create' | 'edit'; row?: MailAliasRow; presetDevice?: MailDevice };
+  | { kind: 'alias'; mode: 'create' | 'edit'; row?: MailAliasRow; presetDevice?: MailDevice; presetMailbox?: { username: string; domain: string } };
 
 interface DomainForm {
   deviceId: string;
@@ -154,6 +154,10 @@ interface AliasForm {
   address: string;
   goto: string;
   sogoVisible: boolean;
+  /** Mailbox-bound ("internal") alias — attaches the address to a specific mailbox. */
+  internal: boolean;
+  /** Allow sending as this alias (only meaningful for internal aliases). */
+  senderAllowed: boolean;
   active: boolean;
 }
 
@@ -636,12 +640,18 @@ function AliasDialog({ state, devices, hasAction, onClose }: { state: Extract<Di
   const isReadOnly = execMode === 'readonly';
   const row = state.row;
 
+  // Creating from a mailbox row ("Add alias" on the Mailboxes tab) prefills a
+  // mailbox-bound (internal) alias pointing at that mailbox.
+  const presetMailbox = state.mode === 'create' ? state.presetMailbox : undefined;
+
   const [form, setForm] = useState<AliasForm>(() => ({
     deviceId: row?.deviceId ?? state.presetDevice?.deviceId ?? devices[0]?.deviceId ?? '',
     pluginId: row?.pluginId ?? state.presetDevice?.pluginId ?? devices.find((d) => d.deviceId === (row?.deviceId ?? state.presetDevice?.deviceId))?.pluginId ?? '',
     address: row?.address ?? '',
-    goto: row?.goto ?? '',
+    goto: row?.goto ?? (presetMailbox ? `${presetMailbox.username}@${presetMailbox.domain}` : ''),
     sogoVisible: true,
+    internal: row?.isMailboxBound ?? !!presetMailbox,
+    senderAllowed: row?.senderAllowed ?? true,
     active: row?.active ?? true,
   }));
 
@@ -667,6 +677,11 @@ function AliasDialog({ state, devices, hasAction, onClose }: { state: Extract<Di
       if (form.goto.trim() === '') { setError('At least one forwarding destination is required.'); return; }
       input['goto'] = form.goto.trim();
       input['sogoVisible'] = form.sogoVisible;
+      // Mailbox-bound ("internal") aliases attach the address to a specific mailbox.
+      if (form.internal) {
+        input['internal'] = true;
+        input['senderAllowed'] = form.senderAllowed;
+      }
     } else {
       const id = row?.mailcowId ?? null;
       if (id === null) { setError('This alias has no numeric mailcow id — it cannot be edited. Refresh the device and try again.'); return; }
@@ -674,6 +689,8 @@ function AliasDialog({ state, devices, hasAction, onClose }: { state: Extract<Di
       input['active'] = form.active;
       const goto = form.goto.trim();
       if (goto !== '') input['goto'] = goto;
+      // sender_allowed is only meaningful for mailbox-bound aliases.
+      if (row?.isMailboxBound) input['senderAllowed'] = form.senderAllowed;
     }
 
     setSaving(true);
@@ -756,12 +773,15 @@ function AliasDialog({ state, devices, hasAction, onClose }: { state: Extract<Di
           />
         </Field>
 
-        <Field label="Forward to (comma-separated)">
+        <Field
+          label={form.internal ? 'Mailbox (destination)' : 'Forward to (comma-separated)'}
+          hint={form.internal ? 'The mailbox this address is attached to — mail for the alias lands in this mailbox.' : undefined}
+        >
           <input
             type="text"
             value={form.goto}
             onChange={(e) => setForm((f) => ({ ...f, goto: e.target.value }))}
-            placeholder="admin@example.org, backup@other.org"
+            placeholder={form.internal ? 'mailbox@example.org' : 'admin@example.org, backup@other.org'}
             className={inputCls}
           />
         </Field>
@@ -770,6 +790,31 @@ function AliasDialog({ state, devices, hasAction, onClose }: { state: Extract<Di
           <label className="flex items-center gap-2 text-xs text-secondary">
             <input type="checkbox" checked={form.sogoVisible} onChange={(e) => setForm((f) => ({ ...f, sogoVisible: e.target.checked }))} />
             Selectable as sender in SOGo webmail
+          </label>
+        )}
+
+        {state.mode === 'create' && (
+          <div className="space-y-2 rounded-md border border-border p-3">
+            <label className="flex items-center gap-2 text-xs font-medium text-secondary" title="Internal aliases are only reachable from the own domain or alias domains.">
+              <input type="checkbox" checked={form.internal} onChange={(e) => setForm((f) => ({ ...f, internal: e.target.checked }))} />
+              Mailbox-bound (internal) alias
+            </label>
+            {form.internal && (
+              <div className="pl-5">
+                <p className="mb-2 text-[11px] text-faint">Attaches this address to the mailbox above instead of pure forwarding.</p>
+                <label className="flex items-center gap-2 text-xs text-secondary" title="If disabled, this alias can only receive mail. Use a sender ACL on the mailbox to grant specific senders permission.">
+                  <input type="checkbox" checked={form.senderAllowed} onChange={(e) => setForm((f) => ({ ...f, senderAllowed: e.target.checked }))} />
+                  Allow sending as this alias (otherwise receive-only)
+                </label>
+              </div>
+            )}
+          </div>
+        )}
+
+        {state.mode === 'edit' && row?.isMailboxBound && (
+          <label className="flex items-center gap-2 text-xs text-secondary" title="If disabled, this alias can only receive mail. Use a sender ACL on the mailbox to grant specific senders permission.">
+            <input type="checkbox" checked={form.senderAllowed} onChange={(e) => setForm((f) => ({ ...f, senderAllowed: e.target.checked }))} />
+            Allow sending as this alias (otherwise receive-only)
           </label>
         )}
 
@@ -1130,10 +1175,15 @@ export default function Mail() {
     {
       header: 'Actions',
       key: 'actions',
-      width: 90,
+      width: 120,
       excludeFromExport: true,
       render: (row) => (
         <div className="flex items-center gap-0.5">
+          {!isReadOnly && hasAction(row.pluginId, ACTION_IDS.alias.create) && (
+            <button type="button" aria-label={`Add alias to ${row.username}`} title={`Attach a new address to this mailbox (mailbox-bound alias)`} onClick={() => setDialog({ kind: 'alias', mode: 'create', presetDevice: { deviceId: row.deviceId, pluginId: row.pluginId, deviceName: row.deviceName }, presetMailbox: { username: row.localPart ?? row.username.split('@')[0], domain: row.domain } })} className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground">
+              <AtSign size={14} />
+            </button>
+          )}
           {!isReadOnly && hasAction(row.pluginId, ACTION_IDS.mailbox.update) && (
             <button type="button" aria-label={`Edit ${row.username}`} title={`Edit this mailbox`} onClick={() => setDialog({ kind: 'mailbox', mode: 'edit', row })} className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground">
               <Pencil size={14} />
@@ -1174,6 +1224,15 @@ export default function Mail() {
       width: 90,
       exportValue: (r) => (r.isCatchAll ? 'yes' : 'no'),
       render: (row) => row.isCatchAll ? <span className="font-mono text-xs text-accent-purple-fg">yes</span> : <span className="text-faint">—</span>,
+    },
+    {
+      header: 'Bound to mailbox',
+      key: 'isMailboxBound',
+      width: 130,
+      exportValue: (r) => (r.isMailboxBound ? `yes${r.senderAllowed ? '' : ' (receive-only)'}` : 'no'),
+      render: (row) => row.isMailboxBound
+        ? <span title={row.senderAllowed ? 'Internal alias — the mailbox may send as this address' : 'Internal alias — receive-only'} className="rounded bg-accent-sky px-1.5 py-0.5 text-[10px] font-semibold text-accent-sky-fg">{row.senderAllowed ? 'mailbox' : 'receive-only'}</span>
+        : <span className="text-faint">—</span>,
     },
     {
       header: 'Actions',

@@ -8780,6 +8780,8 @@ components:
         goto: { type: string, description: "Comma-separated list of forwarding targets; '' = none" }
         active: { type: boolean, description: "True when the alias is enabled for mail delivery" }
         isCatchAll: { type: boolean, description: "True when this alias catches all undeliverable mail for its domain" }
+        isMailboxBound: { type: boolean, description: "True for a mailbox-bound (internal) alias — the address is attached to a specific mailbox instead of pure forwarding; `goto` then names that mailbox" }
+        senderAllowed: { type: boolean, description: "Whether the bound mailbox may send as this alias; false = receive-only (only meaningful when isMailboxBound)" }
         mailcowId: { type: [integer, 'null'], description: "Numeric id required by mailcow's edit/delete API; null = not observable" }
         collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this alias" }
 

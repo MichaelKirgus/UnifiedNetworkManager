@@ -991,6 +991,11 @@ export const mailAliases = pgTable(
     goto: text('goto').notNull().default(''),
     active: boolean('active').notNull().default(false),
     isCatchAll: boolean('isCatchAll').notNull().default(false),
+    // Mailbox-bound ("internal") alias — the address is attached to a specific
+    // mailbox (mailcow's per-mailbox "Aliases" tab) instead of pure forwarding.
+    isMailboxBound: boolean('isMailboxBound').notNull().default(false),
+    // Whether the bound mailbox may send as this alias (false = receive-only).
+    senderAllowed: boolean('senderAllowed').notNull().default(true),
     mailcowId: integer('mailcowId'),
     collectedAt: text('collectedAt').notNull(),
   },

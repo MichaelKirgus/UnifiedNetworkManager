@@ -702,6 +702,13 @@ export async function initDb(): Promise<void> {
     )`);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_mail_aliases_device ON mail_aliases ("deviceId")`);
+  // Mailbox-bound alias flags (added after the initial table creation).
+  await pool.query(
+    `ALTER TABLE mail_aliases ADD COLUMN IF NOT EXISTS "isMailboxBound" BOOLEAN NOT NULL DEFAULT FALSE`
+  );
+  await pool.query(
+    `ALTER TABLE mail_aliases ADD COLUMN IF NOT EXISTS "senderAllowed" BOOLEAN NOT NULL DEFAULT TRUE`
+  );
 
   // Certificates inventory table (Certificates page) — same lifecycle as tunnels/routes.
   // One row per certificate endpoint on one device: the management HTTPS cert and/or

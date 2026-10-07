@@ -869,10 +869,14 @@ export interface MailAliasRow {
   /** Alias address ("alias@example.com", catch-all "@example.com"). */
   address: string;
   domain: string;
-  /** Comma-separated list of forwarding targets; '' = none. */
+  /** Comma-separated list of forwarding targets; '' = none. For a mailbox-bound alias this is the mailbox address. */
   goto: string;
   active: boolean;
   isCatchAll: boolean;
+  /** Mailbox-bound ("internal") alias — attached to a specific mailbox (mailcow's per-mailbox "Aliases" tab). */
+  isMailboxBound: boolean;
+  /** Whether the bound mailbox may send as this alias (false = receive-only). */
+  senderAllowed: boolean;
   /** Numeric id required by mailcow's edit/delete API (null = not observable). */
   mailcowId?: number | null;
   collectedAt: string;

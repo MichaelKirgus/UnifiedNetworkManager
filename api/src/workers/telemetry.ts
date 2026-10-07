@@ -767,7 +767,7 @@ async function ingestInventory(
           and(
             eq(schema.mailDomains.deviceId, deviceId),
             eq(schema.mailDomains.pluginId, pluginId),
-            notInArray(schema.mailDomains.domain, staleMailDomains)
+            inArray(schema.mailDomains.domain, staleMailDomains)
           )
         );
       }
@@ -835,7 +835,7 @@ async function ingestInventory(
           and(
             eq(schema.mailMailboxes.deviceId, deviceId),
             eq(schema.mailMailboxes.pluginId, pluginId),
-            notInArray(schema.mailMailboxes.username, staleMailboxes)
+            inArray(schema.mailMailboxes.username, staleMailboxes)
           )
         );
       }
@@ -845,7 +845,8 @@ async function ingestInventory(
     if (rawMailAliases !== null) {
       const values: {
         deviceId: string; pluginId: string; address: string; domain: string; goto: string;
-        active: boolean; isCatchAll: boolean; mailcowId: number | null; collectedAt: string;
+        active: boolean; isCatchAll: boolean; isMailboxBound: boolean; senderAllowed: boolean;
+        mailcowId: number | null; collectedAt: string;
       }[] = [];
       for (const raw of rawMailAliases) {
         if (!raw || typeof raw !== 'object') continue;
@@ -860,6 +861,8 @@ async function ingestInventory(
           goto: typeof r['goto'] === 'string' ? (r['goto'] as string).trim() : '',
           active: typeof r['active'] === 'boolean' ? (r['active'] as boolean) : false,
           isCatchAll: typeof r['isCatchAll'] === 'boolean' ? (r['isCatchAll'] as boolean) : false,
+          isMailboxBound: typeof r['isMailboxBound'] === 'boolean' ? (r['isMailboxBound'] as boolean) : false,
+          senderAllowed: typeof r['senderAllowed'] === 'boolean' ? (r['senderAllowed'] as boolean) : true,
           mailcowId: toIntOrNull(r['mailcowId']),
           collectedAt,
         });
@@ -876,6 +879,8 @@ async function ingestInventory(
             goto: sql`excluded.goto`,
             active: sql`excluded.active`,
             isCatchAll: sql`excluded."isCatchAll"`,
+            isMailboxBound: sql`excluded."isMailboxBound"`,
+            senderAllowed: sql`excluded."senderAllowed"`,
             mailcowId: sql`excluded."mailcowId"`,
             collectedAt: sql`excluded."collectedAt"`,
           },
@@ -892,7 +897,7 @@ async function ingestInventory(
           and(
             eq(schema.mailAliases.deviceId, deviceId),
             eq(schema.mailAliases.pluginId, pluginId),
-            notInArray(schema.mailAliases.address, staleAliases)
+            inArray(schema.mailAliases.address, staleAliases)
           )
         );
       }

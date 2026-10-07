@@ -137,7 +137,7 @@ const METRIC_DESCRIPTORS: MetricDescriptor[] = [
     label: 'Aliases',
     type: 'string',
     visualization: 'table',
-    columns: ['address', 'domain', 'goto', 'active', 'isCatchAll'],
+    columns: ['address', 'domain', 'goto', 'active', 'isCatchAll', 'isMailboxBound', 'senderAllowed'],
     group: 'Mail',
   },
 ];
@@ -289,6 +289,11 @@ function normalizeAlias(r: Record<string, unknown>): Record<string, unknown> {
   if (goto) out['goto'] = goto;
   out['active'] = normBool(r['active']);
   out['isCatchAll'] = normBool(r['is_catch_all']) || String(r['address'] ?? '').startsWith('@');
+  // Mailbox-bound ("internal") aliases attach the address to a specific mailbox —
+  // mailcow's per-mailbox "Aliases" tab. `sender_allowed` controls whether that
+  // mailbox may send as the alias (false = receive-only).
+  out['isMailboxBound'] = normBool(r['internal']);
+  out['senderAllowed'] = normBool(r['sender_allowed']);
   return out;
 }
 

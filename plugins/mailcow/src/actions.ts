@@ -412,15 +412,17 @@ const mailboxDeleteAction: ActionDescriptor<MailcowActionContext> = {
 const aliasCreateAction: ActionDescriptor<MailcowActionContext> = {
   id: 'mail.alias.create',
   label: 'Create mail alias',
-  description: 'Creates a new address alias (add/alias) forwarding to one or more destinations. Use "@domain.tld" for a catch-all.',
+  description: 'Creates a new address alias (add/alias) forwarding to one or more destinations. Use "@domain.tld" for a catch-all. Set internal=true to attach the address to a specific mailbox (a "mailbox-bound" / internal alias).',
   module: 'Mail',
   riskLevel: 'write' as const,
   deviceCount: 1 as const,
   timeoutMs: 60_000,
   inputSchema: {
     address: { type: 'string', required: true, minLength: 3, maxLength: 255, description: 'Alias address (e.g. info@example.org or @example.org for catch-all)' },
-    goto: { type: 'string', required: true, minLength: 5, maxLength: 1000, description: 'Destination address(es), comma separated' },
+    goto: { type: 'string', required: true, minLength: 5, maxLength: 1000, description: 'Destination address(es), comma separated. For a mailbox-bound alias this is the mailbox address.' },
     sogoVisible: { type: 'boolean', required: false, default: true, description: 'Selectable as sender in SOGo webmail' },
+    internal: { type: 'boolean', required: false, default: false, description: 'Mailbox-bound (internal) alias — only reachable from the own/alias domains. Set true to attach this address to a specific mailbox.' },
+    senderAllowed: { type: 'boolean', required: false, default: true, description: 'Allow sending as this alias (only meaningful for internal aliases). If false, the alias can only receive mail.' },
   },
   async execute(ctx: MailcowActionContext, input: Record<string, unknown>): Promise<ActionResult> {
     const address = inStr(input, 'address');
@@ -430,6 +432,11 @@ const aliasCreateAction: ActionDescriptor<MailcowActionContext> = {
     const attr: Record<string, unknown> = { address, goto, active: true };
     const sogoVisible = inBool(input, 'sogoVisible');
     if (sogoVisible !== undefined) attr['sogo_visible'] = sogoVisible;
+    // Mailbox-bound ("internal") aliases attach the address to a specific mailbox.
+    const internal = inBool(input, 'internal');
+    if (internal !== undefined) attr['internal'] = internal;
+    const senderAllowed = inBool(input, 'senderAllowed');
+    if (senderAllowed !== undefined) attr['sender_allowed'] = senderAllowed;
 
     try {
       await addAlias(ctx.client, attr);
@@ -443,9 +450,10 @@ const aliasCreateAction: ActionDescriptor<MailcowActionContext> = {
     let verified = false;
     try {
       const rows = await getAliases(ctx.client);
-      verified = rows.some((r) => String(r['address'] ?? '') === address);
+      const created = rows.find((r) => String(r['address'] ?? '') === address);
+      if (created && (internal === undefined || Number(created['internal']) === (internal ? 1 : 0))) verified = true;
     } catch { /* verification best-effort */ }
-    return { success: true, applied: true, verified, details: { alias: address } };
+    return { success: true, applied: true, verified, details: { alias: address, internal: internal ?? false, senderAllowed: senderAllowed ?? null } };
   },
 };
 
@@ -461,6 +469,8 @@ const aliasUpdateAction: ActionDescriptor<MailcowActionContext> = {
     id: { type: 'number', required: true, min: 1, description: 'Numeric alias id from the inventory (not the address)' },
     goto: { type: 'string', required: false, minLength: 5, maxLength: 1000, description: 'New destination address(es), comma separated' },
     active: { type: 'boolean', required: false, description: 'Activate/deactivate the alias' },
+    senderAllowed: { type: 'boolean', required: false, description: 'Allow sending as this alias (internal aliases). If false, the alias can only receive mail.' },
+    sogoVisible: { type: 'boolean', required: false, description: 'Selectable as sender in SOGo webmail' },
   },
   async execute(ctx: MailcowActionContext, input: Record<string, unknown>): Promise<ActionResult> {
     const id = inNum(input, 'id');
@@ -482,6 +492,10 @@ const aliasUpdateAction: ActionDescriptor<MailcowActionContext> = {
     if (goto !== undefined) attr['goto'] = goto;
     const active = inBool(input, 'active');
     if (active !== undefined) attr['active'] = active;
+    const senderAllowed = inBool(input, 'senderAllowed');
+    if (senderAllowed !== undefined) attr['sender_allowed'] = senderAllowed;
+    const sogoVisible = inBool(input, 'sogoVisible');
+    if (sogoVisible !== undefined) attr['sogo_visible'] = sogoVisible;
 
     try {
       await editAlias(ctx.client, id, attr);
@@ -495,6 +509,7 @@ const aliasUpdateAction: ActionDescriptor<MailcowActionContext> = {
       const now = after.find((r) => Number(r['id']) === id);
       if (!now) verified = false;
       else if (active !== undefined && Number(now['active']) !== (active ? 1 : 0)) verified = false;
+      else if (senderAllowed !== undefined && Number(now['sender_allowed']) !== (senderAllowed ? 1 : 0)) verified = false;
     } catch { /* verification best-effort */ }
     return { success: true, applied: true, verified, details: { aliasId: id, address: String(row['address'] ?? '') } };
   },
