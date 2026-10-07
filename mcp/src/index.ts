@@ -35,8 +35,9 @@ import { startHttpServer } from './httpServer.js';
  *   MCP_PORT           set to enable HTTP mode (container uses 3901)
  *   MCP_DEBUG_KEY      bearer key gating /debug/mcp
  *   MCP_KEY            optional bearer key also gating /mcp
- *   DATABASE_URL       Postgres connection for the debug SQL tool
- *   PLUGIN_POLL_ENDPOINTS  comma-separated plugin endpoints for plugin_probe
+ *   DATABASE_URL       Postgres connection for the debug SQL + plugin_probe tools
+ *                      (plugin_probe reads every registered endpoint from the
+ *                       plugins table — no static list to maintain)
  */
 
 function main(): void {

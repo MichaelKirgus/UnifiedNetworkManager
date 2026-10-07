@@ -124,6 +124,42 @@ export function internalRouter() {
     }
   });
 
+  // --- Plugin self-registration (push-based discovery) ----------------------
+  //
+  // POST /plugin/register — the primary plugin discovery mechanism. Every SDK
+  // plugin POSTs its own /discover payload here on boot (and re-registers on a
+  // slow heartbeat), so UNM needs NO pre-configured endpoint catalog: ship one
+  // container with ADVERTISED_ENDPOINT + UNM_API_URL + PLUGIN_API_KEY and the
+  // plugin appears in the webapp. The body is normalized through the SAME code
+  // path as HTTP-poll discovery (normalizeDiscoverPayload) and persisted via
+  // upsertPluginIdentity — one persistence path, no drift between the two ways
+  // a plugin can be discovered. The endpoint lands in the plugins table, which
+  // the discovery worker re-reads every cycle (registeredEndpoints), so it is
+  // polled for liveness/updates without any UNM-side config naming it.
+  router.post('/plugin/register', pluginAuth, async (req: Request, res: Response) => {
+    try {
+      const raw = (req.body ?? {}) as Record<string, unknown>;
+      if (!raw || typeof raw.uuid !== 'string' || raw.uuid.trim() === '') {
+        return res.status(400).json({ error: '"uuid" is required in the registration payload' });
+      }
+      const endpoint = typeof raw.endpoint === 'string' && raw.endpoint.trim() !== '' ? raw.endpoint.trim() : '';
+      if (!endpoint) {
+        return res.status(400).json({ error: '"endpoint" is required — set ADVERTISED_ENDPOINT on the plugin' });
+      }
+      const identity = require('../plugins/discovery').normalizeDiscoverPayload(raw, endpoint);
+      if (!identity) {
+        return res.status(400).json({ error: 'registration payload did not contain a usable uuid' });
+      }
+      await require('../plugins/discovery').upsertPluginIdentity(identity);
+      // eslint-disable-next-line no-console
+      console.log(`[register] plugin "${identity.name}" (${identity.uuid}) self-registered at ${endpoint}`);
+      res.status(200).json({ ok: true, uuid: identity.uuid });
+    } catch (error) {
+      console.error('Error registering plugin:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   // --- User data under /plugin/users (identity provider access) ------------
 
   // Serialize a user row for plugin consumption. `roles`/`permissions` are

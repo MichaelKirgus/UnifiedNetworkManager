@@ -1,5 +1,11 @@
 .PHONY: setup build test up down stop-api stop-web restart api-dev web-dev clean
 
+# Every real plugin directory = plugins/* with a package.json (the _template
+# starter is excluded by name). Adding a third-party plugin folder is all that's
+# needed — no Makefile edit. Compose service names follow the <name>-plugin
+# convention, so the up target derives them from this list too.
+PLUGINS := $(filter-out _template,$(notdir $(patsubst %/,%,$(dir $(wildcard plugins/*/package.json)))))
+
 # Install all dependencies across the monorepo (in parallel — each folder has
 # its own node_modules, so there are no cross-folder races).
 setup:
@@ -10,27 +16,8 @@ setup:
 	  (cd packages/lancom-shared && npm install) & \
 	  (cd api && npm install) & \
 	  (cd webapp && npm install) & \
-	  (cd plugins/opnsense && npm install) & \
-	  (cd plugins/basic-auth && npm install) & \
-	  (cd plugins/secrets-provider && npm install) & \
-	  (cd plugins/file-repo && npm install) & \
-	  (cd plugins/icmp && npm install) & \
-	  (cd plugins/generic-snmp && npm install) & \
-	  (cd plugins/lancom-lx && npm install) & \
-	  (cd plugins/lancom-lcos && npm install) & \
-	  (cd plugins/mikrotik-swos && npm install) & \
-	  (cd plugins/fbox && npm install) & \
-	  (cd plugins/mikrotik-routeros && npm install) & \
-	  (cd plugins/docker && npm install) & \
-	  (cd plugins/openwrt && npm install) & \
-	  (cd plugins/generic-ssh && npm install) & \
-	  (cd plugins/generic-http && npm install) & \
-	  (cd plugins/generic-ntp && npm install) & \
-	  (cd plugins/flow-collector && npm install) & \
-	  (cd plugins/web-fetch && npm install) & \
-	  (cd plugins/mailcow && npm install) & \
-	  (cd plugins/zabbix && npm install) & \
 	  (cd mcp && npm install) & \
+	  $(foreach p,$(PLUGINS),(cd plugins/$(p) && npm install) & ) \
 	  wait )
 	@echo "Dependencies installed successfully."
 
@@ -50,15 +37,18 @@ build:
 	@echo "Building @unm/lancom-shared..."
 	cd packages/lancom-shared && npm run build
 	@echo "Refreshing file:-linked copies in dependent plugins + api..."
-	for p in icmp generic-snmp lancom-lx lancom-sx lancom-lcos opnsense mikrotik-swos fbox ix-truenas mikrotik-routeros docker openwrt generic-ssh generic-http generic-ntp flow-collector web-fetch mailcow zabbix basic-auth secrets-provider file-repo; do \
+	for p in $(PLUGINS); do \
 	  rm -rf plugins/$$p/node_modules/@unm/plugin-sdk; \
 	  cp -r packages/plugin-sdk plugins/$$p/node_modules/@unm/plugin-sdk; \
 	done
-	for p in generic-snmp lancom-lx lancom-sx lancom-lcos; do \
+	# SNMP-based plugins (depend on @unm/snmp-client) — derived from PLUGINS so a
+	# new snmp plugin only needs to be added to this one filter list.
+	for p in $(filter generic-snmp lancom-%,$(PLUGINS)); do \
 	  rm -rf plugins/$$p/node_modules/@unm/snmp-client; \
 	  cp -r packages/snmp-client plugins/$$p/node_modules/@unm/snmp-client; \
 	done
-	for p in lancom-lx lancom-sx lancom-lcos; do \
+	# Lancom MIB-sharing plugins (depend on @unm/lancom-shared).
+	for p in $(filter lancom-%,$(PLUGINS)); do \
 	  rm -rf plugins/$$p/node_modules/@unm/lancom-shared; \
 	  cp -r packages/lancom-shared plugins/$$p/node_modules/@unm/lancom-shared; \
 	done
@@ -66,28 +56,7 @@ build:
 	cp -r packages/plugin-sdk api/node_modules/@unm/plugin-sdk
 	@echo "Building plugins + MCP server in parallel..."
 	@( \
-	  (cd plugins/opnsense && npm run build) & \
-	  (cd plugins/icmp && npm run build) & \
-	  (cd plugins/generic-snmp && npm run build) & \
-	  (cd plugins/lancom-lx && npm run build) & \
-	  (cd plugins/lancom-sx && npm run build) & \
-	  (cd plugins/lancom-lcos && npm run build) & \
-	  (cd plugins/basic-auth && npm run build) & \
-	  (cd plugins/secrets-provider && npm run build) & \
-	  (cd plugins/file-repo && npm run build) & \
-	  (cd plugins/mikrotik-swos && npm run build) & \
-	  (cd plugins/fbox && npm run build) & \
-	  (cd plugins/ix-truenas && npm run build) & \
-	  (cd plugins/mikrotik-routeros && npm run build) & \
-	  (cd plugins/docker && npm run build) & \
-	  (cd plugins/openwrt && npm run build) & \
-	  (cd plugins/generic-ssh && npm run build) & \
-	  (cd plugins/generic-http && npm run build) & \
-	  (cd plugins/generic-ntp && npm run build) & \
-	  (cd plugins/flow-collector && npm run build) & \
-	  (cd plugins/web-fetch && npm run build) & \
-	  (cd plugins/mailcow && npm run build) & \
-	  (cd plugins/zabbix && npm run build) & \
+	  $(foreach p,$(PLUGINS),(cd plugins/$(p) && npm run build) & ) \
 	  (cd mcp && npm run build) & \
 	  wait )
 	@echo "Build complete."
@@ -96,15 +65,16 @@ build:
 test:
 	./node_modules/.bin/tsx scripts/verify-ip-math.ts
 
-# Start infrastructure (DB and Plugins).
+# Start infrastructure (DB and Plugins). The plugin service list follows the
+# <name>-plugin compose convention derived from PLUGINS — no hand-maintained list.
 # NOTE: no sudo here — setup.sh detects whether the current user can reach the
 # Docker daemon directly (docker group) and only escalates when truly needed.
 up:
 	@echo "Starting infrastructure..."
 	@if command -v docker-compose &> /dev/null; then \
-		docker-compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin file-repo-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-lcos-plugin mikrotik-swos-plugin fbox-plugin ix-truenas-plugin mikrotik-routeros-plugin docker-plugin openwrt-plugin generic-ssh-plugin mailcow-plugin zabbix-plugin flow-collector-plugin web-fetch-plugin mcp; \
+		docker-compose up -d postgres mcp $(addsuffix -plugin,$(PLUGINS)); \
 	else \
-		docker compose up -d postgres opnsense-plugin basic-auth-plugin secrets-provider-plugin file-repo-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin lancom-lcos-plugin mikrotik-swos-plugin fbox-plugin ix-truenas-plugin mikrotik-routeros-plugin docker-plugin openwrt-plugin generic-ssh-plugin mailcow-plugin zabbix-plugin flow-collector-plugin web-fetch-plugin mcp; \
+		docker compose up -d postgres mcp $(addsuffix -plugin,$(PLUGINS)); \
 	fi
 	@echo "Infrastructure is up."
 
@@ -152,5 +122,5 @@ clean:
 		echo "Error: No docker-compose or docker compose found"; \
 		exit 1; \
 	fi
-	rm -rf api/node_modules webapp/node_modules mcp/node_modules packages/plugin-sdk/node_modules packages/snmp-client/node_modules packages/lancom-shared/node_modules plugins/opnsense/node_modules plugins/basic-auth/node_modules plugins/secrets-provider/node_modules plugins/icmp/node_modules plugins/generic-snmp/node_modules plugins/mikrotik-swos/node_modules plugins/fbox/node_modules plugins/ix-truenas/node_modules plugins/mikrotik-routeros/node_modules plugins/lancom-lx/node_modules plugins/lancom-sx/node_modules plugins/lancom-lcos/node_modules plugins/openwrt/node_modules plugins/generic-ssh/node_modules plugins/mailcow/node_modules
+	rm -rf api/node_modules webapp/node_modules mcp/node_modules packages/plugin-sdk/node_modules packages/snmp-client/node_modules packages/lancom-shared/node_modules $(foreach p,$(PLUGINS),plugins/$(p)/node_modules)
 	@echo "Cleanup complete."

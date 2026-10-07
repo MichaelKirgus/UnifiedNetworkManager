@@ -490,13 +490,16 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     label: 'CA allowed DNS names (SAN allow-list)',
     type: 'string',
     category: 'Certificate Authority',
-    default:
-      'unm-ca,localhost,api,mcp,basic-auth-plugin,secrets-provider-plugin,file-repo-plugin,opnsense-plugin,icmp-plugin,generic-snmp-plugin,lancom-lx-plugin,lancom-lcos-plugin,mikrotik-swos-plugin,lancom-sx-plugin,fbox-plugin,ix-truenas-plugin,mikrotik-routeros-plugin,docker-plugin,openwrt-plugin,generic-ssh-plugin,generic-http-plugin,generic-ntp-plugin,mailcow-plugin,zabbix-plugin',
+    // Core UNM service names only — NO plugin catalog here. Every registered
+    // plugin's advertised host is appended automatically at render time
+    // (stepCaConfig.collectAllowedDnsNames), so third-party plugins enroll in
+    // allowlist mode without anyone editing this list.
+    default: 'unm-ca,localhost,api,mcp',
     envVar: 'UNM_CA_ALLOWED_DNS_NAMES',
     maxLength: 8192,
     onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
     help:
-      'Comma-separated DNS names the CA may put into leaf certificates. Only enforced when "ACME enrollment policy" is set to allowlist — in any mode this list is ignored, and in deny mode no ACME enrollment happens at all. Defaults to every UNM compose service name + localhost.',
+      'Comma-separated DNS names the CA may put into leaf certificates. Only enforced when "ACME enrollment policy" is set to allowlist — in any mode this list is ignored, and in deny mode no ACME enrollment happens at all. The hosts of every registered plugin are added automatically on top of this list.',
   },
   {
     key: 'caAcmeChallenges',

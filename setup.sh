@@ -7,26 +7,60 @@ set -e
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API_PORT=3000
 WEB_PORT=5173
-OPNSENSE_PORT=4001
-BASIC_AUTH_PORT=4002
-SECRETS_PORT=4003
-ICMP_PORT=4004
-SNMP_PORT=4005
-LANCOM_LX_PORT=4006
-LANCOM_LCOS_PORT=4008
-SWOS_PORT=4007
-FBOX_PORT=4010
-TRUENAS_PORT=4011
-ROUTEROS_PORT=4012
-DOCKER_PORT=4013
-OPENWRT_PORT=4014
-GENERIC_SSH_PORT=4015
-ZABBIX_PORT=4019
-FLOW_COLLECTOR_PORT=4021
-WEB_FETCH_PORT=4022
-ALL_PORTS=("${API_PORT}" "${WEB_PORT}" "${OPNSENSE_PORT}" "${BASIC_AUTH_PORT}" "${SECRETS_PORT}" "${ICMP_PORT}" "${SNMP_PORT}" "${LANCOM_LX_PORT}" "${LANCOM_LCOS_PORT}" "${SWOS_PORT}" "${FBOX_PORT}" "${TRUENAS_PORT}" "${ROUTEROS_PORT}" "${DOCKER_PORT}" "${OPENWRT_PORT}" "${GENERIC_SSH_PORT}" "${ZABBIX_PORT}" "${FLOW_COLLECTOR_PORT}" "${WEB_FETCH_PORT}")
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/unm-dev.XXXXXX")"
 DEV_PIDS=()
+
+# Plugin service discovery — NO hard-coded plugin list in this script. The set
+# of plugins and their host ports are read from docker-compose.yml at start
+# time, so a third-party plugin added to the compose file is picked up here
+# (waited for + exported to the dev API) with zero changes to setup.sh.
+declare -A PLUGIN_PORTS=()   # service name -> published TCP port
+PLUGIN_SERVICES=()           # ordered list of discovered plugin services
+
+discover_plugin_services() {
+  if ! command -v node &> /dev/null; then
+    fail "node is required (the dev workflow runs the API/webapp with npm)."
+  fi
+  local lines svc port
+  # One line per service: "<name> <published-tcp-port>" — parsed from the
+  # canonical compose JSON, so it always matches what actually gets deployed.
+  if ! lines="$(docker_compose config --format json 2>/dev/null | node -e '
+    let d = "";
+    process.stdin.on("data", (c) => (d += c)).on("end", () => {
+      const j = JSON.parse(d);
+      for (const [name, svc] of Object.entries(j.services)) {
+        if (!name.endsWith("-plugin")) continue;
+        const tcp = (svc.ports ?? []).find((p) => p.protocol === "tcp" && p.published);
+        if (tcp) console.log(name + " " + String(tcp.published));
+      }
+    });
+  ')"; then
+    fail "Could not parse docker-compose.yml (needs Docker Compose v2 with 'config --format json')."
+  fi
+  [ -n "$lines" ] || fail "No *-plugin services with a published TCP port found in docker-compose.yml."
+  while read -r svc port; do
+    PLUGIN_PORTS["$svc"]="$port"
+    PLUGIN_SERVICES+=("$svc")
+  done <<< "$lines"
+}
+
+# Comma-separated `service:port` pairs for the dev API's endpoint rewrite
+# (api/src/utils/pluginEndpoint.ts reads PLUGIN_HOST_PORT_MAP).
+build_host_port_map() {
+  local out="" svc
+  for svc in "${PLUGIN_SERVICES[@]}"; do
+    [ -n "$out" ] && out+=","
+    out+="${svc}:${PLUGIN_PORTS[$svc]}"
+  done
+  printf '%s' "$out"
+}
+
+# All TCP ports to free during cleanup (API + webapp + every discovered plugin).
+all_dev_ports() {
+  local svc
+  echo "${API_PORT}" "${WEB_PORT}"
+  for svc in "${PLUGIN_SERVICES[@]}"; do echo "${PLUGIN_PORTS[$svc]}"; done
+}
 
 # --- Helpers -----------------------------------------------------------------
 ok()   { echo "✅ $1"; }
@@ -150,7 +184,9 @@ kill_dev_processes() {
     done
 
     # Strategy 2: free the dev ports (kills whatever is actually serving).
-    for p in "${ALL_PORTS[@]}"; do
+    # Plugin ports are discovered from docker-compose.yml at start of run;
+    # on a first-ever cleanup they may be empty — API/webapp still covered.
+    for p in $(all_dev_ports); do
       fuser -k "${p}/tcp" >/dev/null 2>&1 || true
     done
 
@@ -202,6 +238,8 @@ kill_lingering() {
 }
 
 echo "🚀 Starting UnifiedNetworkManager dev environment..."
+discover_plugin_services
+echo "🔎 Discovered ${#PLUGIN_SERVICES[@]} plugin services: ${PLUGIN_SERVICES[*]}"
 kill_lingering
 
 # 1. Environment Check
@@ -247,32 +285,19 @@ make build
 ok "Plugins + MCP server built (in parallel)."
 
 # 7. Start the plugin containers (--build: always reflect current source;
-#    reusing stale images silently serves old code — a past source of bugs)
+#    reusing stale images silently serves old code — a past source of bugs).
+#    The service list is DISCOVERED from docker-compose.yml above — adding a
+#    third-party plugin there is all that's needed to have it built + waited on.
 echo "🌐 Starting plugin containers..."
-docker_compose up -d --build opnsense-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-cos-plugin mikrotik-swos-plugin fbox-plugin ix-truenas-plugin mikrotik-routeros-plugin docker-plugin openwrt-plugin generic-ssh-plugin basic-auth-plugin secrets-provider-plugin flow-collector-plugin web-fetch-plugin mcp
+docker_compose up -d --build mcp "${PLUGIN_SERVICES[@]}"
 ok "Plugin + MCP containers started."
 
 # 8. Wait for the plugins to be reachable (basic-auth must be up before the
-#    API can verify credentials; secrets-provider before secret access;
-#    opnsense is needed for device telemetry).
+#    API can verify credentials; secrets-provider before secret access).
 echo "⏳ Waiting for plugins to be ready..."
-wait_for_port "$OPNSENSE_PORT" "opnsense-plugin"
-wait_for_port "$ICMP_PORT" "icmp-plugin"
-wait_for_port "$SNMP_PORT" "generic-snmp-plugin"
-wait_for_port "$LANCOM_LX_PORT" "lancom-lx-plugin"
-wait_for_port "$LANCOM_LCOS_PORT" "lancom-lcos-plugin"
-wait_for_port "$SWOS_PORT" "mikrotik-swos-plugin"
-wait_for_port "$FBOX_PORT" "fbox-plugin"
-wait_for_port "$TRUENAS_PORT" "ix-truenas-plugin"
-wait_for_port "$ROUTEROS_PORT" "mikrotik-routeros-plugin"
-wait_for_port "$DOCKER_PORT" "docker-plugin"
-wait_for_port "$OPENWRT_PORT" "openwrt-plugin"
-wait_for_port "$GENERIC_SSH_PORT" "generic-ssh-plugin"
-wait_for_port "$ZABBIX_PORT" "zabbix-plugin"
-wait_for_port "$FLOW_COLLECTOR_PORT" "flow-collector-plugin"
-wait_for_port "$WEB_FETCH_PORT" "web-fetch-plugin"
-wait_for_port "$BASIC_AUTH_PORT" "basic-auth-plugin"
-wait_for_port "$SECRETS_PORT" "secrets-provider-plugin"
+for svc in "${PLUGIN_SERVICES[@]}"; do
+  wait_for_port "${PLUGIN_PORTS[$svc]}" "$svc"
+done
 ok "Plugins are reachable."
 
 # 8b. Wait for the MCP server (diagnostic endpoints for AI agents).
@@ -281,7 +306,11 @@ wait_for_port 3901 "mcp"
 ok "MCP server is up (POST :3901/mcp, POST :3901/debug/mcp)."
 
 # 9. Start the API and webapp dev servers (hot reload) in the background.
+# The API runs on the HOST, so it cannot resolve compose service names —
+# PLUGIN_HOST_PORT_MAP tells its endpoint resolver which localhost port each
+# published plugin lives on (built from the same discovery as above).
 echo "🚦 Starting API and webapp dev servers..."
+export PLUGIN_HOST_PORT_MAP="$(build_host_port_map)"
 start_dev_server "api" "api"
 start_dev_server "webapp" "web"
 

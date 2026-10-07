@@ -126,15 +126,20 @@ export function buildDebugTools(): DebugTool[] {
     {
       name: 'plugin_probe',
       description:
-        'Probe every plugin endpoint listed in PLUGIN_POLL_ENDPOINTS: fetches /healthz and /discover, returning per-plugin ' +
+        'Probe every registered plugin endpoint (read from the plugins table — plugins self-register, so there is no static list): fetches /healthz and /discover, returning per-plugin ' +
         'reachability plus identity (uuid/name/version) and capabilities. Use to diagnose why a plugin is missing or stale.',
       inputSchema: {},
       handler: async () => {
-        const endpoints = (process.env.PLUGIN_POLL_ENDPOINTS ?? '')
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean);
-        if (endpoints.length === 0) return textResult('PLUGIN_POLL_ENDPOINTS is not set', true);
+        // Endpoints come from the plugins table (push-based self-registration),
+        // not from any static env list — UNM keeps no catalog of plugins.
+        let endpoints: string[] = [];
+        try {
+          const result = await getPool().query('SELECT DISTINCT endpoint FROM plugins WHERE endpoint IS NOT NULL AND endpoint <> \'\'');
+          endpoints = (result.rows as Array<{ endpoint: string }>).map((r) => r.endpoint);
+        } catch (err) {
+          return textResult(`Could not read registered plugin endpoints from the database: ${(err as Error).message}`, true);
+        }
+        if (endpoints.length === 0) return textResult('No plugins are registered in the plugins table yet', true);
 
         const results: unknown[] = [];
         await Promise.all(

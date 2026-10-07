@@ -14,32 +14,55 @@ Start from `plugins/_template/` — a complete, minimal monitoring plugin.
 ## 1. The port model (read this first)
 
 Every plugin container listens on **one conventional internal port: `4080`**.
-The host mapping in `docker-compose.yml` is the only per-plugin choice and it
-exists solely for curl-from-host debugging + `setup.sh`'s `wait_for_port`:
+The host mapping in the compose file is optional and exists solely for
+curl-from-host debugging + `setup.sh`'s readiness wait — UNM itself never needs
+it, because discovery is push-based (below):
 
 ```yaml
 my-plugin:
   build: { context: ., dockerfile: plugins/my-plugin/Dockerfile }
-  ports: ["4010:4080"]          # ← next free HOST port (4001–4009 are taken)
+  ports: ["4030:4080"]          # optional — next free HOST port, debug only
   environment:
     - PORT=4080                 # always the same inside the container
     - ADVERTISED_ENDPOINT=http://my-plugin:4080   # how the API reaches it
+    - UNM_API_URL=http://api:3000/v1              # where to self-register + ship logs
+    - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}  # shared key for both
 ```
 
 - `PORT` — internal listen port. Leave at `4080`; the SDK's
   `resolvePluginIdentity` reads it (default 4080).
-- `ADVERTISED_ENDPOINT` — the URL the plugin advertises in `/discover` + mDNS.
-  Without it the plugin advertises `http://localhost:4080`, which is
-  unreachable from the API's own container. **Always set it to
-  `http://<compose-service-name>:4080`.**
-- New plugins pick the next free HOST port (currently **4010**) and append
-  their endpoint to the api service's `PLUGIN_POLL_ENDPOINTS` list in
-  `docker-compose.yml`.
+- `ADVERTISED_ENDPOINT` — the URL the API calls back on. Without it the plugin
+  advertises `http://localhost:4080`, which is unreachable from the API's own
+  container. **Always set it to `http://<compose-service-name>:4080`.**
+- `UNM_API_URL` + `PLUGIN_API_KEY` — what make the plugin SELF-REGISTER (see
+  below). Every UNM deployment sets both; a plugin without them runs standalone
+  (no registration, no log shipping) and is only reachable via mDNS.
+
+### Discovery: plugins announce themselves — there is no catalog to maintain
+
+UNM keeps **no list of known plugins anywhere in the main app**. On boot the
+SDK's `createPluginServer().listen()` starts a registration loop that POSTs the
+plugin's full `/discover` payload to the API's internal
+`POST /v1/plugin/register` route (gated by `x-plugin-api-key`). The API upserts
+the row into its plugins table, and its discovery worker polls every endpoint
+in that table for liveness + descriptor refresh. So:
+
+- **Deploying a plugin = one container with the env vars above.** No api code,
+  no compose env list, no Makefile edit — this is what makes third-party
+  plugins (built by anyone, outside this repo) drop-in deployable.
+- The loop retries while the API is down and re-registers on a 5-minute
+  heartbeat, so identity/descriptors stay fresh and a wiped or freshly-migrated
+  database self-heals with zero UNM-side config.
+- mDNS/DNS-SD remains a second discovery path (networks where multicast
+  reaches), and the API's optional `PLUGIN_POLL_ENDPOINTS` env var is a legacy
+  fallback for topologies where a plugin cannot reach the API at all — neither
+  is needed in a normal deployment.
 
 Multi-instance: set `PLUGIN_INSTANCE_ID=site-a` (+ optional
 `PLUGIN_DISPLAY_NAME`) on a second service using the same Dockerfile. The SDK
-then advertises `<uuid>:site-a` as a distinct plugin. See the commented
-`icmp-site-a` example in `docker-compose.yml`.
+then advertises `<uuid>:site-a` as a distinct plugin, and each instance
+self-registers independently. See the commented `icmp-site-a` example in
+`docker-compose.yml`.
 
 ---
 
@@ -51,9 +74,14 @@ cp -r plugins/_template plugins/my-plugin
 cd plugins/my-plugin && npm install --legacy-peer-deps && npx tsc --noEmit
 ```
 
-Then register it in `docker-compose.yml` (service block above) and add its
-endpoint to the api's `PLUGIN_POLL_ENDPOINTS`. Add a build line to the
-Makefile's `build:` target if you want `make build` to cover it.
+Then add a service block to `docker-compose.yml` (the shape above — the three
+env vars are all it takes). The Makefile and setup.sh discover every
+`plugins/*/package.json` folder automatically, so no build or bootstrap edit is
+needed. Start it with:
+
+```bash
+docker compose up -d --build my-plugin   # it registers itself within seconds
+```
 
 The Dockerfile uses the **repo root as build context** so it can copy + build
 the shared SDK first — keep that structure when editing.

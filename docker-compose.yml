@@ -80,11 +80,14 @@ services:
       # SECRETS_PLUGIN_ID names the active secrets provider plugin; if unset or
       # offline the API falls back to the built-in secrets-provider plugin.
       - SECRETS_PLUGIN_ID=${SECRETS_PLUGIN_ID:-00000000-0000-4000-8000-000000000002}
-      # Poll these plugin endpoints for discovery (mDNS is often isolated on
-      # Docker bridge networks). Ensures the provider plugins are registered.
-      # All plugins listen on the conventional internal port 4080 (see
-      # docs/PLUGIN-DEVELOPMENT.md); compose maps distinct HOST ports to it.
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://file-repo-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080,http://openwrt-plugin:4080,http://generic-ssh-plugin:4080,http://generic-http-plugin:4080,http://generic-ntp-plugin:4080,http://mailcow-plugin:4080,http://zabbix-plugin:4080,http://flow-collector-plugin:4080,http://web-fetch-plugin:4080}
+      # Plugin discovery is PUSH-BASED: every plugin self-registers with the
+      # API (POST /plugin/register) on boot using UNM_API_URL + PLUGIN_API_KEY,
+      # and the discovery worker polls whatever endpoints are in the plugins
+      # table. There is deliberately NO catalog of plugin endpoints here — a
+      # third-party plugin needs zero changes to this file to appear in UNM.
+      # Optional legacy fallback for topologies where a plugin cannot reach the
+      # API at all (comma-separated list, e.g. http://my-plugin:4080):
+      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-}
       # mTLS (Stage 1): enroll the API itself against the CA (identity "api") and
       # open a TLS listener on :8443. Off by default — set UNM_TLS=1 in .env to
       # enable it together with the plugins' enrollment.
@@ -204,7 +207,7 @@ services:
   # PLUGIN_INSTANCE_ID and its own ADVERTISED_ENDPOINT; it then registers as a
   # separate plugin ("ICMP Plugin (site-a)") that can be assigned independently.
   # PLUGIN_DISPLAY_NAME optionally overrides the auto-generated name.
-  # Also append the endpoint to the api service's PLUGIN_POLL_ENDPOINTS list.
+  # No api-side registration needed — each instance self-registers on boot.
   # icmp-site-a:
   #   build:
   #     context: .
@@ -705,10 +708,10 @@ services:
       - MCP_DEBUG_KEY=${MCP_DEBUG_KEY:-dev-mcp-debug-key}
       # Optional: also gate the plain /mcp endpoint with a bearer key.
       - MCP_KEY=${MCP_KEY:-}
-      # Same database as the API — used by the debug SQL tool only.
+      # Same database as the API — used by the debug SQL tool AND by the
+      # plugin_probe debug tool (it reads every endpoint from the plugins
+      # table, so there is no static endpoint list to maintain here).
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
-      # Endpoints probed by the plugin_probe debug tool (same list as the api).
-      - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-http://basic-auth-plugin:4080,http://secrets-provider-plugin:4080,http://opnsense-plugin:4080,http://icmp-plugin:4080,http://generic-snmp-plugin:4080,http://lancom-lx-plugin:4080,http://lancom-lcos-plugin:4080,http://mikrotik-swos-plugin:4080,http://lancom-sx-plugin:4080,http://fbox-plugin:4080,http://ix-truenas-plugin:4080,http://mikrotik-routeros-plugin:4080,http://docker-plugin:4080,http://openwrt-plugin:4080,http://generic-ssh-plugin:4080,http://generic-http-plugin:4080,http://generic-ntp-plugin:4080,http://mailcow-plugin:4080,http://zabbix-plugin:4080,http://flow-collector-plugin:4080,http://web-fetch-plugin:4080}
     volumes:
       # mTLS (Stage 2): the CA config volume READ-ONLY — MCP only reads
       # root_ca.crt from it to build its trust bundle. The PKI volume is never

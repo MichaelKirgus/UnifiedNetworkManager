@@ -52,6 +52,35 @@ export function splitList(value: unknown): string[] {
   return value.split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+/**
+ * The effective SAN allow-list: the configured names + the host of every
+ * registered plugin's advertised endpoint. Plugins self-register their
+ * endpoints into the plugins table, so third-party services enroll in
+ * allowlist mode without anyone editing caAllowedDnsNames by hand — UNM keeps
+ * no static catalog of plugin service names anywhere. DB errors degrade to
+ * the configured list only (the CA keeps working).
+ */
+async function collectAllowedDnsNames(configured: string[]): Promise<string[]> {
+  const out = [...configured];
+  try {
+    // Lazy require — stepCaConfig is required from systemSettings' onChange
+    // callbacks, so db must not be pulled in at module-eval time here.
+    const { db } = await import('../db');
+    const rows = await db.query.plugins.findMany();
+    for (const row of rows) {
+      try {
+        const host = new URL(row.endpoint).hostname;
+        if (host && !out.includes(host)) out.push(host);
+      } catch {
+        /* malformed endpoint — skip */
+      }
+    }
+  } catch (err) {
+    console.warn('[ca] could not read registered plugin endpoints for the SAN allow-list:', (err as Error).message);
+  }
+  return out;
+}
+
 /** Builds the ca.json document from effective settings + UNM's admin JWK. */
 export async function renderStepCaConfig(): Promise<StepCaConfig> {
   const v = await getEffectiveValues();
@@ -59,10 +88,10 @@ export async function renderStepCaConfig(): Promise<StepCaConfig> {
   const maxDays = Number(v.caLeafMaxDays ?? 365);
   const defaultDays = Number(v.caLeafDefaultDays ?? 90);
 
-  // SAN allow-list: the CA must be able to issue for every compose service name
-  // (plugins + api + mcp) plus localhost/127.0.0.1 for host-dev mode. The admin
-  // extends this list when adding remote instances.
-  const allowedDns = splitList(v.caAllowedDnsNames);
+  // SAN allow-list: the configured core names + every registered plugin's
+  // advertised host (collected from the plugins table — no static catalog).
+  // The admin extends the configured part when adding remote instances.
+  const allowedDns = await collectAllowedDnsNames(splitList(v.caAllowedDnsNames));
 
   // ACME enrollment policy (three modes — see the caAcmeEnrollmentPolicy setting):
   //   any       → no x509 name policy at all; step-ca's engine treats "no policy"

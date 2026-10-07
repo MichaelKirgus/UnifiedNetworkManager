@@ -12,6 +12,7 @@ import cors from 'cors';
 import express, { Express, Request, Response } from 'express';
 import { Bonjour } from 'bonjour-service';
 import { PluginIdentity } from './identity';
+import { startRegistration } from './register';
 import { describeTlsCert, ensureTlsIdentity, resolveTlsIdentifiers, scheduleTlsRenewal, TlsCertInfo, TlsIdentity } from './tlsIdentity';
 import { createSelfMetrics } from './selfMetrics';
 import {
@@ -94,6 +95,15 @@ export interface PluginServerOptions {
    * first, so no advertised-endpoint change is needed.
    */
   tlsEnabled?: boolean;
+  /**
+   * Push-based self-registration with the UNM API (POST /plugin/register).
+   * Defaults to `process.env.PLUGIN_API_KEY !== undefined` — i.e. ON whenever
+   * the plugin runs inside a UNM deployment (every compose service sets the
+   * key) and OFF in standalone mode. The loop retries while the API is down,
+   * then re-registers on a 5-minute heartbeat so identity/descriptors stay
+   * fresh without any pre-configured endpoint list on the API side.
+   */
+  registration?: boolean;
 }
 
 export interface PluginServer {
@@ -433,6 +443,12 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
         const server = app.listen(identity.port, () => {
           console.log(`[${logTag}] listening on port ${identity.port}${tlsEnabled ? ' (mTLS enrollment in progress)' : ''}`);
           startMdnsAdvertising(identity, logTag);
+          // Push-based self-registration: the API needs no pre-configured
+          // endpoint list — the plugin announces itself (see register.ts).
+          const registrationOn = opts.registration ?? process.env.PLUGIN_API_KEY !== undefined;
+          if (registrationOn) {
+            startRegistration(identity, () => buildDiscoverPayload(identity, discoveryWrapped));
+          }
           resolve(identity.port);
         });
         // WebSocket support (SSH console): the handler decides per-path whether to

@@ -145,7 +145,7 @@ Each plugin is responsible for one or more `vendor/deviceType` combinations and 
 - `planning` (multi-step, multi-device plan intents with a step catalog)
 - `secretsProvider` / `identityProvider` (the two broker plugins; swappable via `SECRETS_PLUGIN_ID` / `AUTH_PLUGIN_ID`)
 
-Plugins are discovered automatically (mDNS/DNS-SD + HTTP polling fallback — see `PLUGIN_POLL_ENDPOINTS`) and validated against the plugin schema in the OpenAPI contract. The full developer guide, including the settings loop, credential slots, device-model catalogs, and the logging pipeline, lives in [`docs/PLUGIN-DEVELOPMENT.md`](docs/PLUGIN-DEVELOPMENT.md).
+Plugins are discovered automatically: every plugin SELF-REGISTERS with the API on boot (`POST /v1/plugin/register`, SDK `startRegistration`) using its `UNM_API_URL` + `PLUGIN_API_KEY`, and mDNS/DNS-SD is a second path where multicast reaches. UNM keeps no catalog of known plugins — deploying a third-party plugin needs zero changes to the main app (see [`docs/PLUGIN-DEVELOPMENT.md`](docs/PLUGIN-DEVELOPMENT.md) §1). The full developer guide, including the settings loop, credential slots, device-model catalogs, and the logging pipeline, lives in that document.
 
 ### Plugin log pipeline
 
@@ -164,7 +164,7 @@ Two optional environment variables control this:
 | `PLUGIN_INSTANCE_ID` (e.g. `site-a`) | Makes the advertised identity unique (`<plugin-uuid>:site-a`). Without it, two instances of the same plugin type would collide into one registration. |
 | `PLUGIN_DISPLAY_NAME` (optional) | Overrides the displayed name. If unset, the instance id is appended automatically: `ICMP Plugin (site-a)`. |
 
-With neither set, behavior is exactly as before — single-instance deployments are unaffected. A commented example lives in `docker-compose.yml`; also append the new endpoint to the API's `PLUGIN_POLL_ENDPOINTS` list (or rely on mDNS discovery). Notes: each instance needs a unique `ADVERTISED_ENDPOINT`; settings are per-instance; changing an id/name just restarts it and the old registration goes offline like any stopped plugin.
+With neither set, behavior is exactly as before — single-instance deployments are unaffected. A commented example lives in `docker-compose.yml`. Notes: each instance needs a unique `ADVERTISED_ENDPOINT` (and self-registers independently on boot); settings are per-instance; changing an id/name just restarts it and the old registration goes offline like any stopped plugin.
 
 ## Plans & configuration jobs
 
@@ -233,7 +233,8 @@ The same server also runs in **stdio mode** without Docker (client-launched, pro
 | `TELEMETRY_MAX_CONCURRENCY` | `64` | Max in-flight `/monitoring` calls per poll cycle — keeps the per-beat burst flat regardless of fleet size |
 | `SECRET_CACHE_TTL_MS` | `60000` | How long decrypted secrets are cached for the poll path (write paths always read fresh). Cuts secrets-provider load by orders of magnitude at scale; set `0` to disable |
 | `DATABASE_POOL_MAX` | `20` | Postgres pool size — raise if you see queued writes during poll beats on large fleets |
-| `PLUGIN_POLL_ENDPOINTS` | all 9 plugins on `:4080` | HTTP discovery fallback list (mDNS is often isolated on Docker bridge networks) |
+| `PLUGIN_POLL_ENDPOINTS` | *(empty)* | Optional legacy discovery fallback: comma-separated endpoints to poll when a plugin cannot reach the API at all. Normal deployments leave this unset — plugins self-register instead (see §Plugins) |
+| `PLUGIN_HOST_PORT_MAP` | *(unset)* | Dev-mode only (`setup.sh` sets it): `service:port,…` pairs letting the host-running dev API rewrite compose service names to localhost ports |
 
 ## Scaling & HA
 

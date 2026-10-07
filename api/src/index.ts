@@ -309,19 +309,22 @@ async function main(): Promise<void> {
       }
     })();
 
-    // Discover plugins via mDNS/DNS-SD, with HTTP polling as a fallback for
-    // Docker bridge networks where multicast is isolated. Leader-gated: the
-    // upserts are idempotent but N replicas would N× the /discover traffic and
-    // log noise; one discoverer keeps lastSeenAt fresh for everyone (it writes
-    // to Postgres, which all replicas read).
-    const pollEndpoints = (process.env.PLUGIN_POLL_ENDPOINTS ?? '')
+    // Discover plugins. Primary path: plugins SELF-REGISTER (POST /plugin/register,
+    // SDK startRegistration) and land in the plugins table — no UNM-side catalog
+    // of plugin endpoints exists anymore. The discovery worker re-reads that
+    // table every cycle (registeredEndpoints) and polls each endpoint for
+    // liveness + descriptor refresh; mDNS is a second path on networks where
+    // multicast reaches. PLUGIN_POLL_ENDPOINTS remains only as an optional
+    // legacy fallback for topologies where a plugin cannot reach the API at all.
+    const staticPollEndpoints = (process.env.PLUGIN_POLL_ENDPOINTS ?? '')
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
     initWorker('discovery', LEADER_KEYS.discovery);
     void runAsLeader(LEADER_KEYS.discovery, 'discovery', () => {
       const stopDiscovery = startPluginDiscovery({
-        pollEndpoints,
+        pollEndpoints: staticPollEndpoints,
+        seededEndpoints: require('./plugins/discovery').registeredEndpoints,
         pollIntervalMs: Number(process.env.PLUGIN_POLL_INTERVAL_MS ?? 60_000),
       });
       return stopDiscovery;

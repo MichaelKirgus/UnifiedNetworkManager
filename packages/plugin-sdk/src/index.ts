@@ -11,6 +11,10 @@ export type { PluginIdentity, PluginIdentityInput } from './identity';
 export { createPluginServer, buildDiscoverPayload, requirePluginKey, stateHandler, probeHandler, filesystemHandler, quickActionHandler } from './server';
 export type { TlsEnrollHandle } from './server';
 export type { PluginServerOptions, PluginServer, DiscoveryExtras } from './server';
+// Push-based self-registration with the UNM API (POST /plugin/register) — the
+// primary discovery mechanism; no pre-configured endpoint list needed. See register.ts.
+export { startRegistration, registerWithApi } from './register';
+export type { RegisterOptions } from './register';
 // Interactive SSH console (capability 'sshConsole'): PTY sessions + pool (terminal.ts)
 // and the WebSocket bridge helper plugins pass to createPluginServer (consoleWs.ts).
 export { SshTerminalSession, SshTerminalConnection, createTerminalPool } from './terminal';

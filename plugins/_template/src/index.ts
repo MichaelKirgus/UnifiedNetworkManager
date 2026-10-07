@@ -5,7 +5,9 @@
  * package.json + Dockerfile, then follow docs/PLUGIN-DEVELOPMENT.md:
  *   1. Give it a real UUID (crypto.randomUUID()) and name below.
  *   2. Implement collect() against your device's API.
- *   3. Register it in docker-compose.yml (+ the api's PLUGIN_POLL_ENDPOINTS).
+ *   3. Add a service block to docker-compose.yml with ADVERTISED_ENDPOINT +
+ *      UNM_API_URL + PLUGIN_API_KEY — the plugin self-registers on boot, so
+ *      nothing else in UNM needs to know about it (see docs §1).
  *
  * Everything boring — identity/multi-instance resolution, the express app with
  * /healthz + /discover, mDNS advertising, settings-header parsing, metric

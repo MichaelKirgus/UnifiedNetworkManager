@@ -258,8 +258,10 @@ function normalizeQuickActions(raw: unknown): unknown[] | undefined {
 }
 
 export interface DiscoveryOptions {
-  /** Optional list of plugin HTTP endpoints to poll as a fallback when mDNS is not reachable (e.g. Docker bridge networks). */
+  /** Optional STATIC list of plugin HTTP endpoints to poll (legacy fallback for topologies where a plugin cannot reach the API at all). Plugins normally need no entry here — they self-register via POST /plugin/register and are picked up from the plugins table. */
   pollEndpoints?: string[];
+  /** Returns the endpoints currently known from the plugins table (self-registered + previously discovered). Merged with `pollEndpoints` on every cycle, so a plugin that just registered is polled without any UNM-side config naming it. */
+  seededEndpoints?: () => Promise<string[]>;
   /** Poll interval in milliseconds. Defaults to 60_000. */
   pollIntervalMs?: number;
   /** How long a plugin stays "registered" after its last successful discovery, in ms. Defaults to 5 minutes. */
@@ -345,6 +347,35 @@ interface RawDiscover {
   deviceSupport?: unknown;
 }
 
+/**
+ * Normalizes a raw /discover payload into a PluginIdentity. Shared by the two
+ * discovery paths: HTTP polling (fetchIdentity) and push-based self-registration
+ * (POST /plugin/register — plugins POST their own /discover body). The `source`
+ * endpoint is used when the payload carries no usable one of its own.
+ */
+export function normalizeDiscoverPayload(raw: RawDiscover, sourceEndpoint: string): PluginIdentity | null {
+  if (!raw || typeof raw.uuid !== 'string' || raw.uuid.length === 0) return null;
+  return {
+    uuid: raw.uuid,
+    name: typeof raw.name === 'string' ? raw.name : raw.uuid,
+    version: typeof raw.version === 'string' ? raw.version : 'unknown',
+    vendors: Array.isArray(raw.vendors) ? (raw.vendors as string[]) : [],
+    capabilities: Array.isArray(raw.capabilities) ? (raw.capabilities as string[]) : [],
+    endpoint: typeof raw.endpoint === 'string' && raw.endpoint.length > 0 ? raw.endpoint : sourceEndpoint,
+    authType: typeof raw.authType === 'string' ? raw.authType : 'none',
+    metrics: Array.isArray(raw.metrics) ? raw.metrics : undefined,
+    // Standard scheduling options are injected for every plugin so the
+    // Workers/Plugins settings UIs can tune per-plugin poll windows.
+    options: withStandardOptions(Array.isArray(raw.options) ? (raw.options as PluginOptionDescriptor[]) : undefined),
+    actions: Array.isArray(raw.actions) ? raw.actions : undefined,
+    quickActions: normalizeQuickActions(raw.quickActions),
+    iconUrl: normalizeIconPath(raw.iconUrl),
+    deviceModels: normalizeDeviceModels(raw.deviceModels),
+    credentialSlots: normalizeCredentialSlots(raw.credentialSlots),
+    deviceSupport: normalizeDeviceSupport(raw.deviceSupport as DeviceSupport | undefined),
+  };
+}
+
 async function fetchIdentity(endpoint: string): Promise<PluginIdentity | null> {
   try {
     // Dual-transport probe (mTLS Stage 1): tries the registered transport
@@ -353,36 +384,34 @@ async function fetchIdentity(endpoint: string): Promise<PluginIdentity | null> {
     // updates the API's per-endpoint registry used by every outbound call.
     const { data: raw, transport } = await probePluginEndpoint<RawDiscover>(endpoint, '/discover', DISCOVERY_POLL_TIMEOUT_MS);
     setPluginTransport(endpoint, transport);
-    if (!raw || typeof raw.uuid !== 'string' || raw.uuid.length === 0) {
+    const identity = normalizeDiscoverPayload(raw, endpoint);
+    if (!identity) {
       // eslint-disable-next-line no-console
       console.warn(`[discovery] plugin at ${endpoint} did not return a uuid`);
       return null;
     }
-    return {
-      uuid: raw.uuid,
-      name: typeof raw.name === 'string' ? raw.name : raw.uuid,
-      version: typeof raw.version === 'string' ? raw.version : 'unknown',
-      vendors: Array.isArray(raw.vendors) ? (raw.vendors as string[]) : [],
-      capabilities: Array.isArray(raw.capabilities) ? (raw.capabilities as string[]) : [],
-      endpoint: typeof raw.endpoint === 'string' && raw.endpoint.length > 0 ? raw.endpoint : endpoint,
-      authType: typeof raw.authType === 'string' ? raw.authType : 'none',
-      metrics: Array.isArray(raw.metrics) ? raw.metrics : undefined,
-      // Standard scheduling options are injected for every plugin so the
-      // Workers/Plugins settings UIs can tune per-plugin poll windows.
-      options: withStandardOptions(Array.isArray(raw.options) ? (raw.options as PluginOptionDescriptor[]) : undefined),
-      actions: Array.isArray(raw.actions) ? raw.actions : undefined,
-      quickActions: normalizeQuickActions(raw.quickActions),
-      iconUrl: normalizeIconPath(raw.iconUrl),
-      deviceModels: normalizeDeviceModels(raw.deviceModels),
-      credentialSlots: normalizeCredentialSlots(raw.credentialSlots),
-      deviceSupport: normalizeDeviceSupport(raw.deviceSupport as DeviceSupport | undefined),
-      tlsLive: transport === 'https',
-    };
+    identity.tlsLive = transport === 'https';
+    return identity;
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(`[discovery] failed to fetch identity from ${endpoint}:`, (err as Error).message);
     return null;
   }
+}
+
+/**
+ * Upserts a plugin identity into the plugins table. Exported so the internal
+ * POST /plugin/register route (push-based self-registration) reuses exactly
+ * the same persistence path as discovery polling — one code path, no drift.
+ */
+export async function upsertPluginIdentity(identity: PluginIdentity): Promise<void> {
+  await upsertPlugin(identity);
+}
+
+/** Reads every distinct endpoint currently known from the plugins table. */
+export async function registeredEndpoints(): Promise<string[]> {
+  const rows = await db.query.plugins.findMany();
+  return [...new Set(rows.map((r) => r.endpoint).filter((e): e is string => typeof e === 'string' && e.length > 0))];
 }
 
 async function upsertPlugin(identity: PluginIdentity): Promise<void> {
@@ -507,7 +536,23 @@ async function pollEndpoints(endpoints: string[]): Promise<void> {
  */
 export function startPluginDiscovery(options: DiscoveryOptions = {}): () => void {
   const fallbackIntervalMs = options.pollIntervalMs ?? 60_000;
-  const pollEndpointsList = options.pollEndpoints ?? [];
+  const staticEndpoints = options.pollEndpoints ?? [];
+
+  /** The full poll set for one cycle: the legacy static list + every endpoint
+   *  currently known from the plugins table (self-registered or previously
+   *  discovered). Deduped — a plugin present in both is polled once. */
+  const collectEndpoints = async (): Promise<string[]> => {
+    let seeded: string[] = [];
+    if (options.seededEndpoints) {
+      try {
+        seeded = await options.seededEndpoints();
+      } catch (err) {
+        // DB hiccup — fall back to the static list for this cycle.
+        console.warn('[discovery] could not read registered endpoints:', (err as Error).message);
+      }
+    }
+    return [...new Set([...staticEndpoints, ...seeded])];
+  };
 
   let bonjour: Bonjour | null = null;
   let browser: ReturnType<Bonjour['find']> | null = null;
@@ -536,25 +581,30 @@ export function startPluginDiscovery(options: DiscoveryOptions = {}): () => void
     console.warn('[discovery] mDNS browsing unavailable, using polling only:', (err as Error).message);
   }
 
-  // HTTP polling fallback. The interval is re-read from Settings on every cycle
+  // HTTP polling. The interval is re-read from Settings on every cycle
   // (self-rescheduling timer), so changing the discovery poll interval takes
-  // effect without a restart.
-  if (pollEndpointsList.length > 0) {
-    const scheduleNext = () => {
-      if (stopped) return;
-      void getEffectiveSettingValue('discoveryPollIntervalMs')
-        .then((v) => Number(v) || fallbackIntervalMs)
-        .catch(() => fallbackIntervalMs)
-        .then((ms) => {
-          pollTimer = setTimeout(async () => {
-            await pollEndpoints(pollEndpointsList);
-            scheduleNext();
-          }, ms);
-        });
-    };
-    void pollEndpoints(pollEndpointsList); // initial pass
-    scheduleNext();
-  }
+  // effect without a restart. The endpoint set is RE-COLLECTED every cycle:
+  // plugins self-register via POST /plugin/register and land in the plugins
+  // table, so no UNM-side config ever needs to name them (the static list is
+  // only a legacy fallback for push-less topologies).
+  const scheduleNext = () => {
+    if (stopped) return;
+    void getEffectiveSettingValue('discoveryPollIntervalMs')
+      .then((v) => Number(v) || fallbackIntervalMs)
+      .catch(() => fallbackIntervalMs)
+      .then((ms) => {
+        pollTimer = setTimeout(async () => {
+          const endpoints = await collectEndpoints();
+          if (endpoints.length > 0) await pollEndpoints(endpoints);
+          scheduleNext();
+        }, ms);
+      });
+  };
+  void (async () => {
+    const endpoints = await collectEndpoints(); // initial pass
+    if (endpoints.length > 0) await pollEndpoints(endpoints);
+  })();
+  scheduleNext();
 
   return () => {
     stopped = true;
