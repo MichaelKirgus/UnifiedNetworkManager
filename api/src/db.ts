@@ -1150,6 +1150,28 @@ export async function initDb(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_firewall_events_ts_ms
       ON firewall_events ("tsMs")`);
 
+  // Per-host firewall state-table snapshots (Hosts/Networks "States" columns) —
+  // append-only, pushed by plugins via POST /plugin/host-states. One row per
+  // (device, host IP) per walk; churn deltas are NULL without a baseline.
+  // Swept after hostStateRetentionDays (see workers/hostStateRetention.ts).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS host_states (
+      id TEXT PRIMARY KEY,
+      "pluginId" TEXT NOT NULL,
+      "deviceId" TEXT NOT NULL,
+      "hostIp" TEXT NOT NULL,
+      "walkedAtMs" BIGINT NOT NULL,
+      "openStates" INTEGER NOT NULL DEFAULT 0,
+      "createdSinceLastWalk" INTEGER,
+      "destroyedSinceLastWalk" INTEGER
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_host_states_device_ip_walked_at
+      ON host_states ("deviceId", "hostIp", "walkedAtMs")`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_host_states_walked_at
+      ON host_states ("walkedAtMs")`);
+
   // Self-metrics samples of the plugin processes themselves (see schema.pluginMetrics).
   // Polled by workers/pluginMetrics.ts from each plugin's GET /metrics endpoint.
   await pool.query(`

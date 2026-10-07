@@ -717,6 +717,87 @@ export function internalRouter() {
     }
   });
 
+  // POST /plugin/host-states - accept one state-table walk's per-host snapshot
+  // from a plugin (OPNsense query_states full walk, RouterOS connection table).
+  // Body: { pluginId, deviceId, rows: [ { ip, openStates, created?, destroyed? } ] }.
+  // Append-only snapshots — the API stamps walkedAtMs itself (the plugin clock
+  // is not trusted) and stores one row per endpoint address. `created`/
+  // `destroyed` are the deltas vs the walk's PREVIOUS snapshot; they may be
+  // absent/null when the plugin had no baseline (first walk, restart). Growth
+  // is bounded by the retention worker (hostStateRetentionDays). Direct insert
+  // — a full walk of a busy firewall yields at most a few thousand distinct
+  // endpoint addresses, well within request budgets.
+  const MAX_HOST_STATE_ROWS_PER_REQUEST = 50_000;
+  router.post('/plugin/host-states', pluginAuth, async (req: Request, res: Response) => {
+    const body = req.body ?? {};
+    const pluginId = typeof body.pluginId === 'string' ? body.pluginId : '';
+    if (!pluginId) {
+      return res.status(400).json({ error: 'pluginId is required' });
+    }
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
+    if (!deviceId) {
+      return res.status(400).json({ error: 'deviceId is required' });
+    }
+    const rowsIn = Array.isArray(body.rows) ? body.rows : null;
+    if (!rowsIn || rowsIn.length === 0) {
+      return res.status(400).json({ error: '"rows" array with at least one entry is required' });
+    }
+
+    try {
+      const plugin = await db.query.plugins.findFirst({ where: eq(schema.plugins.id, pluginId) });
+      if (!plugin) {
+        return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
+      }
+
+      let accepted = 0;
+      const batch = rowsIn.slice(0, MAX_HOST_STATE_ROWS_PER_REQUEST);
+      if (rowsIn.length > MAX_HOST_STATE_ROWS_PER_REQUEST) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[host-states] plugin ${pluginId} sent ${rowsIn.length} rows in one request; ` +
+            `dropping the last ${rowsIn.length - MAX_HOST_STATE_ROWS_PER_REQUEST}`
+        );
+      }
+
+      const nonNegInt = (v: unknown): number | null => {
+        if (typeof v === 'boolean' || v === null) return null;
+        const n = typeof v === 'number' ? v : Number(v);
+        return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : null;
+      };
+
+      // One timestamp for the WHOLE walk — rows from a single push share it, so
+      // window sums + "latest snapshot" queries stay consistent even if the
+      // insert takes a moment.
+      const walkedAtMs = Date.now();
+      const rows = [];
+      for (const r of batch) {
+        if (!r || typeof r !== 'object') continue;
+        const ip = typeof r.ip === 'string' ? r.ip.trim() : '';
+        if (ip === '' || ip.length > 64) continue; // unusable endpoint — skip
+        rows.push({
+          id: uuidv4(),
+          pluginId,
+          deviceId,
+          hostIp: ip,
+          walkedAtMs,
+          openStates: nonNegInt(r.openStates) ?? 0,
+          createdSinceLastWalk: nonNegInt(r.created),
+          destroyedSinceLastWalk: nonNegInt(r.destroyed),
+        });
+      }
+
+      if (rows.length > 0) {
+        await db.insert(schema.hostStates).values(rows);
+      }
+      accepted = rows.length;
+
+      res.status(201).json({ accepted, walkedAtMs });
+    } catch (error) {
+      console.error('Error ingesting host states:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   // POST /plugin/notifications - accept notification pushes from one plugin.
   // Body: { pluginId, notifications?: [ {severity?, title, message?, dedupeKey?, deviceId?, context?} ],
   //         resolve?: string[] } — `resolve` lists (plugin-prefixed) dedupe keys

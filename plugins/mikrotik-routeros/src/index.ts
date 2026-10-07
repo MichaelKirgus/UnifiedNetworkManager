@@ -23,6 +23,7 @@ import {
   resolveHttpPort,
   resolveSshPort,
   resolveUserPass,
+  createApiClient,
   quickActionHandler,
   buildWebUiUrl,
   catalogFirmwareRow,
@@ -37,6 +38,7 @@ import { ActionContext, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest } from './plan';
 import { PREFLIGHT_RESOLVERS } from './actions/preflight';
 import { DEFAULT_OPTIONS, MonitoringResult, RouterOsOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
+import { fetchConnectionIdentities, countOpenStates, diffStates, buildHostStateRows } from './hostStates';
 import { collectSecurityChecks, type SecuritySettings } from './security';
 import { DEVICE_MODELS } from './deviceModels';
 
@@ -113,6 +115,16 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     min: 500,
     max: 9_000,
     description: "Timeout for a single REST fetch. Kept well under the API's 10 s poll budget (in auto scheme mode a fallback attempt may cost up to twice this).",
+  },
+  {
+    key: 'stateWalkIntervalSec',
+    label: 'Connection-table walk interval (seconds)',
+    type: 'integer' as const,
+    default: 300,
+    min: 0,
+    max: 86400,
+    description:
+      "How often the plugin walks the router's live connection table (/ip/firewall/connection) to track per-host open states + created/destroyed churn (Hosts/Networks \"States\" columns). The table is small on typical routers, so this is cheap. 0 disables per-host state tracking.",
   },
   {
     key: 'schemeMode',
@@ -399,6 +411,105 @@ function resolveCredentials(body: Record<string, unknown>): { creds?: { username
   return resolveUserPass((body.credentials ?? {}) as Record<string, unknown>, { requireUsername: true });
 }
 
+// --- Per-host connection-table walk (Hosts/Networks "States" columns) ----------
+// The router's live /ip/firewall/connection table is walked at its own cadence
+// (option `stateWalkIntervalSec`, default 5 min — the table is small, so this is
+// cheap). The previous snapshot lives in memory per device; diffing it against
+// the new one yields per-endpoint created/destroyed deltas. Only aggregated
+// rows are pushed to POST /plugin/host-states (never the raw connections). A
+// failed or empty walk keeps the old baseline untouched — no bogus churn spike.
+
+const hostStatesApi = createApiClient(); // shared x-plugin-api-key, UNM_API_URL aware
+
+interface HostStateWalkEntry {
+  lastRunAt: number;
+  /** Previous snapshot's connection identities, keyed by id (null = first walk pending). */
+  prev: Map<string, { srcIp: string; dstIp: string }> | null;
+}
+const hostStateWalks = new Map<string, HostStateWalkEntry>(); // key = management address
+
+/** Pushes one walk's aggregated rows with a single retry. */
+async function pushHostStateBatch(deviceId: string, rows: { ip: string; openStates: number; created: number | null; destroyed: number | null }[]): Promise<boolean> {
+  const body = { pluginId: identity.effectiveUuid, deviceId, rows };
+  try {
+    await hostStatesApi.post('/plugin/host-states', body);
+    return true;
+  } catch {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      await hostStatesApi.post('/plugin/host-states', body);
+      return true;
+    } catch (err) {
+      logger.warn(`Dropped host-state batch of ${rows.length} rows for device ${deviceId}`, { context: { error: String((err as Error)?.message ?? err) } });
+      return false; // baseline NOT advanced — the next walk re-diffs against the same prev
+    }
+  }
+}
+
+/**
+ * Walks one router's full connection table, diffs it against the previous
+ * snapshot, and pushes per-host aggregates to the API. Runs fire-and-forget
+ * from /monitoring (never blocks or fails the poll). The walk is serialized per
+ * device via lastRunAt: overlapping polls simply skip.
+ */
+async function collectAndPushHostStates(
+  host: string,
+  deviceId: string | null,
+  creds: { username: string; password: string },
+  opts: RouterOsOptions,
+  intervalSec?: number
+): Promise<void> {
+  if (!deviceId) return; // no device scope → nothing to attribute rows to
+  const everyMs = Math.max(0, Number(intervalSec ?? 300)) * 1000;
+  if (everyMs === 0) return; // per-host state tracking disabled
+
+  let entry = hostStateWalks.get(host);
+  if (!entry) {
+    entry = { lastRunAt: 0, prev: null };
+    hostStateWalks.set(host, entry);
+  }
+  const now = Date.now();
+  if (now - entry.lastRunAt < everyMs) return; // cadence not elapsed yet
+  entry.lastRunAt = now; // claim the slot BEFORE the walk — no overlap
+
+  const client = new RouterOsClient(host, {
+    username: creds.username,
+    password: creds.password,
+    timeoutMs: Math.max(opts.requestTimeoutMs, 10_000), // the walk gets a generous budget
+    insecureTls: opts.insecureTls,
+    schemeMode: opts.schemeMode,
+    httpsPort: opts.httpsPort,
+    httpPort: opts.httpPort,
+  });
+
+  const states = await fetchConnectionIdentities(client);
+  if (states === null) return; // walk failed — baseline untouched, retry next beat
+
+  const open = countOpenStates(states);
+  const diff = diffStates(entry.prev, states);
+  const rows = buildHostStateRows(open, diff);
+  if (rows.length === 0) {
+    // Nothing to report — no internal endpoints in this snapshot AND no churn
+    // deltas. The API rejects empty batches, so just advance the baseline and
+    // skip the push. A non-empty baseline against an empty table always yields
+    // destroyed-churn rows, so that case is never skipped here.
+    const next = new Map<string, { srcIp: string; dstIp: string }>();
+    for (const s of states) next.set(s.id, { srcIp: s.srcIp, dstIp: s.dstIp });
+    entry.prev = next;
+    return;
+  }
+
+  const ok = await pushHostStateBatch(deviceId, rows);
+  if (!ok) return; // baseline NOT advanced — next walk re-diffs against the same prev
+
+  // Advance the baseline only after a successful push. The API stores snapshots
+  // append-only, so even a lost-ack race can't corrupt history (worst case one
+  // extra snapshot row).
+  const next = new Map<string, { srcIp: string; dstIp: string }>();
+  for (const s of states) next.set(s.id, { srcIp: s.srcIp, dstIp: s.dstIp });
+  entry.prev = next;
+}
+
 app.post('/monitoring', async (req, res) => {
   const body = req.body ?? {};
   const deviceId = typeof body.deviceId === 'string' ? body.deviceId : null;
@@ -495,6 +606,13 @@ app.post('/monitoring', async (req, res) => {
     } catch {
       /* best-effort — a failed check must never sink the poll */
     }
+
+    // Per-host connection-table walk (Hosts/Networks "States" columns): full
+    // table read at its own cadence (option stateWalkIntervalSec), diffed against
+    // the previous snapshot in memory. Fire-and-forget — must never block or
+    // fail this poll.
+    const stateWalkIntervalSec = typeof settings.stateWalkIntervalSec === 'number' ? settings.stateWalkIntervalSec : undefined;
+    void collectAndPushHostStates(managementAddress.trim(), deviceId, creds, opts, stateWalkIntervalSec).catch(() => { /* best-effort */ });
 
     if (health !== 'ok') metrics['system.error'] = warnings.join('; ');
 

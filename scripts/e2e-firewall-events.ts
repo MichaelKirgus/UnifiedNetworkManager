@@ -160,9 +160,54 @@ async function main(): Promise<void> {
   check('session totals (42/65536)', mine?.totalSessions === 42 && mine?.stateLimit === 65536, mine);
   check('adaptive timeouts on at ≥1000 states', mine?.adaptiveEnabled === true && mine?.adaptiveStartStates === 1000, mine);
 
-  // 7. Cleanup: delete device + secret (firewall_events rows are left to the
-  //    retention sweep — they carry no FK and are keyed by deviceId). Also clear
-  //    the host-keyed digest cursor so a later run starts from a fresh baseline.
+  // 7. Host states (per-endpoint open states + created/destroyed churn).
+  //    Override the per-device stateWalkIntervalSec to 1s so each forced poll
+  //    triggers a full state-table walk against the mock's churning table. The
+  //    first walk has no baseline → null churn; subsequent walks diff against it
+  //    → non-null created/destroyed deltas. We assert existence + openStates>0
+  //    (robust to background-poll interleaving) and that churn becomes non-null.
+  const setSettings = await authed('PUT', `/devices/${deviceId}/plugins/${opnsenseId}/settings`, { settings: { stateWalkIntervalSec: 1 } });
+  check('stateWalkIntervalSec override accepted (200)', setSettings.status === 200, (await setSettings.json()));
+
+  interface HostStateRowE2e { deviceId: string; hostIp: string; openStates: number; walkedAtMs: number; createdWindow: number | null; destroyedWindow: number | null; }
+  let hsRows: HostStateRowE2e[] = [];
+  const fetchHostStates = async (): Promise<HostStateRowE2e[]> => {
+    const r = await authed('GET', `/host-states?deviceId=${deviceId}`);
+    if (r.status !== 200) return hsRows;
+    const body = (await r.json()) as { rows?: HostStateRowE2e[] };
+    return ((body.rows ?? []) as HostStateRowE2e[]).filter((x) => x.deviceId === deviceId);
+  };
+
+  // First walk → baseline snapshot lands (churn still null, no prior baseline).
+  await authed('POST', '/devices/refresh', { deviceIds: [deviceId] }).catch(() => undefined);
+  for (let i = 0; i < 30 && hsRows.length === 0; i++) {
+    await sleep(1500);
+    hsRows = await fetchHostStates();
+  }
+  check('host-state snapshots ingested (internal endpoints)', hsRows.length >= 1, { count: hsRows.length });
+  check('open states > 0 for every tracked endpoint', hsRows.length > 0 && hsRows.every((r) => r.openStates > 0), Object.fromEntries(hsRows.map((r) => [r.hostIp, r.openStates])));
+
+  // More walks → diff against the baseline → non-null churn deltas appear.
+  let sawChurn = false;
+  for (let i = 0; i < 25 && !sawChurn; i++) {
+    await authed('POST', '/devices/refresh', { deviceIds: [deviceId] }).catch(() => undefined);
+    await sleep(1500);
+    hsRows = await fetchHostStates();
+    sawChurn = hsRows.some((row) => row.createdWindow !== null || row.destroyedWindow !== null);
+  }
+  check('created/destroyed churn non-null after baseline', sawChurn, Object.fromEntries(hsRows.map((r) => [r.hostIp, { c: r.createdWindow, d: r.destroyedWindow }])));
+
+  // windowHours is honored + echoed back (clamped to 1..336).
+  const hsWin = await authed('GET', `/host-states?deviceId=${deviceId}&windowHours=48`);
+  const hsWinBody = (await hsWin.json()) as { windowHours?: number; devices?: Record<string, unknown> };
+  check('windowHours echoed + device view present', hsWin.status === 200 && hsWinBody.windowHours === 48 && Boolean(hsWinBody.devices?.[deviceId]), { windowHours: hsWinBody.windowHours });
+
+  // 8. Cleanup: reset the per-device override, delete this device's host_states
+  //    rows (no FK — keyed by deviceId), then delete device + secret.
+  await authed('DELETE', `/devices/${deviceId}/plugins/${opnsenseId}/settings`).catch(() => undefined);
+  await pool.query(`DELETE FROM host_states WHERE "deviceId"=$1`, [deviceId]);
+  // firewall_events rows are left to the retention sweep. Also clear the
+  //    host-keyed digest cursor so a later run starts from a fresh baseline.
   await pool.query(`DELETE FROM plugin_state WHERE "namespace"='firewall-events' AND key=$1`, [MOCK_HOSTNAME]);
   const delDev = await authed('DELETE', `/devices/${deviceId}`);
   check('DELETE /devices/:id → 204', delDev.status === 204);

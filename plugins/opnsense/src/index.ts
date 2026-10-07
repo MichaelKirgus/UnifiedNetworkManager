@@ -65,6 +65,7 @@ import {
   fetchPfStats,
   FirewallEventRow,
 } from './client/firewallEvents';
+import { fetchStateIdentities, countOpenStates, diffStates, buildHostStateRows } from './client/hostStates';
 import { collectServices } from './services';
 import { collectZfsViaSsh } from './zfsSsh';
 import { collectSecurityChecks, DEFAULT_WATCHED_FILES, type SecuritySettings } from './security';
@@ -913,6 +914,16 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     docsUrl: 'https://docs.opnsense.org/manual/how-tos/monitoring.html',
   },
   {
+    key: 'stateWalkIntervalSec',
+    label: 'State-table walk interval (seconds)',
+    type: 'integer' as const,
+    default: 900,
+    min: 0,
+    max: 86400,
+    description:
+      'How often the plugin walks the appliance\'s FULL live state table to track per-host open states + created/destroyed churn (Hosts/Networks "States" columns). Each walk is one big query_states call — a full table scan on the appliance (~30 s / ~115 MB on a 240k-state box), so keep this slow. 0 disables per-host state tracking.',
+  },
+  {
     key: 'enableInventoryCache',
     label: 'Enable inventory cache',
     type: 'boolean' as const,
@@ -1592,6 +1603,97 @@ async function collectAndPushFirewallEvents(
   } catch { /* best-effort — worst case the next beat re-sends and dedupe absorbs it */ }
 }
 
+// --- Per-host state-table walk (Hosts/Networks "States" columns) --------------
+// The appliance's live pf state table is walked at its own cadence (option
+// `stateWalkIntervalSec`, default 15 min — each walk is a full table scan on the
+// box). The previous snapshot lives in memory per device; diffing it against
+// the new one yields per-endpoint created/destroyed deltas. Only aggregated
+// rows are pushed to POST /plugin/host-states (never the raw states). A failed
+// or empty walk keeps the old baseline untouched — no bogus churn spike.
+
+interface HostStateWalkEntry {
+  lastRunAt: number;
+  /** Previous snapshot's state identities, keyed by state id (null = first walk pending). */
+  prev: Map<string, { srcIp: string; dstIp: string }> | null;
+}
+const hostStateWalks = new Map<string, HostStateWalkEntry>(); // key = management address
+
+/** Pushes one walk's aggregated rows with a single retry (same pattern as events). */
+async function pushHostStateBatch(deviceId: string, rows: { ip: string; openStates: number; created: number | null; destroyed: number | null }[]): Promise<boolean> {
+  const body = { pluginId: identity.effectiveUuid, deviceId, rows };
+  try {
+    await eventApi.post('/plugin/host-states', body);
+    return true;
+  } catch {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      await eventApi.post('/plugin/host-states', body);
+      return true;
+    } catch (err) {
+      logger.warn(`Dropped host-state batch of ${rows.length} rows for device ${deviceId}`, { context: { error: String((err as Error)?.message ?? err) } });
+      return false; // baseline NOT advanced — the next walk re-diffs against the same prev
+    }
+  }
+}
+
+/**
+ * Walks one appliance's full state table, diffs it against the previous
+ * snapshot, and pushes per-host aggregates to the API. Runs fire-and-forget
+ * from /monitoring (never blocks or fails the poll). The walk is serialized per
+ * device via lastRunAt + a single in-flight guard: overlapping polls simply skip.
+ */
+async function collectAndPushHostStates(
+  host: string,
+  deviceId: string | null | undefined,
+  apiKey: string,
+  apiSecret: string,
+  transport?: OpnsenseTransport,
+  ports?: OpnsensePorts,
+  intervalSec?: number
+): Promise<void> {
+  if (!deviceId) return; // no device scope → nothing to attribute rows to
+  const everyMs = Math.max(0, Number(intervalSec ?? 900)) * 1000;
+  if (everyMs === 0) return; // per-host state tracking disabled
+
+  let entry = hostStateWalks.get(host);
+  if (!entry) {
+    entry = { lastRunAt: 0, prev: null };
+    hostStateWalks.set(host, entry);
+  }
+  const now = Date.now();
+  if (now - entry.lastRunAt < everyMs) return; // cadence not elapsed yet
+  entry.lastRunAt = now; // claim the slot BEFORE the slow walk — no overlap
+
+  const client = createClient(host, { apiKey, apiSecret }, transport, ports);
+  const states = await fetchStateIdentities(client);
+  if (states === null) return; // walk failed — baseline untouched, retry next beat
+
+  const open = countOpenStates(states);
+  const diff = diffStates(entry.prev, states);
+  const rows = buildHostStateRows(open, diff);
+  if (rows.length === 0) {
+    // Nothing to report — no internal endpoints in this snapshot AND no churn
+    // deltas (e.g. empty table with an empty baseline). The API rejects empty
+    // batches, so just advance the baseline and skip the push. A non-empty
+    // baseline against an empty table always yields destroyed-churn rows, so
+    // that case is never skipped here.
+    const next = new Map<string, { srcIp: string; dstIp: string }>();
+    for (const s of states) next.set(s.id, { srcIp: s.srcIp, dstIp: s.dstIp });
+    entry.prev = next;
+    return;
+  }
+
+  const ok = await pushHostStateBatch(String(deviceId), rows);
+  if (!ok) return; // baseline NOT advanced — next walk re-diffs against the same prev
+
+  // Advance the baseline only after a successful push. The API stores snapshots
+  // append-only, so even a lost-ack race can't corrupt history (worst case one
+  // extra snapshot row).
+  const next = new Map<string, { srcIp: string; dstIp: string }>();
+  for (const s of states) next.set(s.id, { srcIp: s.srcIp, dstIp: s.dstIp });
+  entry.prev = next;
+}
+
 // --- Updates page: live firmware status --------------------------------------
 // Reads the appliance's CACHED update check (fast GET — no synchronous probe)
 // and turns it into UpdateRows:
@@ -1700,6 +1802,13 @@ app.post('/monitoring', async (req, res) => {
     // runs in parallel with the response below and can never block or fail this
     // poll; all failures are contained inside collectAndPushFirewallEvents.
     void collectAndPushFirewallEvents(managementAddress, deviceId, apiKey, apiSecret, transport, ports).catch(() => { /* best-effort */ });
+
+    // Per-host state-table walk (Hosts/Networks "States" columns): full table
+    // scan at its own slow cadence (option stateWalkIntervalSec), diffed against
+    // the previous snapshot in memory. Fire-and-forget like the events push —
+    // a 30 s+ walk must never block or fail this poll.
+    const stateWalkIntervalSec = typeof settings.stateWalkIntervalSec === 'number' ? settings.stateWalkIntervalSec : undefined;
+    void collectAndPushHostStates(managementAddress, deviceId, apiKey, apiSecret, transport, ports, stateWalkIntervalSec).catch(() => { /* best-effort */ });
 
     // Echo of the user-selected model/firmware (mirrors the LANCOM plugin) —
     // informational only; shown as text cards in the device detail view.

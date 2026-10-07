@@ -112,11 +112,49 @@ function fwLogRows(digest) {
   return [...rows].reverse();
 }
 
+// Live state table for query_states — models the real appliance's churn so
+// consecutive plugin walks produce non-trivial created/destroyed deltas:
+//   - a STABLE base set (the three rows above, always present), plus
+//   - ROTATING ephemeral states: each call drops one and adds two new ones,
+//     so every walk after the first sees churn on 192.168.1.50 / .77.
+// The plugin walks with ONE huge page (rowCount=1_000_000, current=1) — a full
+// table scan per call, exactly like the real box; pagination is honored for
+// smaller pages too. `__states` (test control) can pin an arbitrary snapshot,
+// including [] to simulate an empty table (e.g. right after a reboot).
 const FW_STATE_ROWS = [
   { label: 'rule-allow-web', descr: 'Allow LAN web', iface: 'lan', proto: 'tcp', ipproto: '6', direction: 'out', src_addr: '192.168.1.50', src_port: '51234', dst_addr: '93.184.216.34', dst_port: '443', state: 'ESTABLISHED:ESTABLISHED', age: '00:01:23', expires: '00:58:37', pkts: [10, 9], bytes: [1000, 900], rule: '1', id: 's1' },
   { label: 'rule-allow-dns', descr: 'Allow DNS', iface: 'lan', proto: 'udp', ipproto: '17', direction: 'out', src_addr: '192.168.1.77', src_port: '53000', dst_addr: '142.250.0.1', dst_port: '53', state: 'UDP', age: '00:00:05', expires: '00:01:55', pkts: [2, 2], bytes: [200, 200], rule: '2', id: 's2' },
   { label: 'rule-allow-web', descr: 'Allow LAN web', iface: 'lan', proto: 'tcp', ipproto: '6', direction: 'out', src_addr: '192.168.1.50', src_port: '51300', dst_addr: '93.184.216.34', dst_port: '443', state: 'ESTABLISHED:ESTABLISHED', age: '01:23:45', expires: '02:36:15', pkts: [50, 49], bytes: [5000, 4900], rule: '1', id: 's3' },
 ];
+let stateTable = [...FW_STATE_ROWS]; // current snapshot (mutated per call)
+let oneShotStates = null; // pinned snapshot served exactly once, then churn resumes
+function ephemeralState(n) {
+  const src = n % 2 === 0 ? '192.168.1.50' : '192.168.1.77';
+  return { label: 'rule-allow-web', descr: 'Allow LAN web', iface: 'lan', proto: 'tcp', ipproto: '6', direction: 'out', src_addr: src, src_port: String(52000 + n), dst_addr: '93.184.216.34', dst_port: '443', state: 'ESTABLISHED:ESTABLISHED', age: '00:00:07', expires: '00:59:53', pkts: [3, 2], bytes: [300, 280], rule: '1', id: `e${n}` };
+}
+function nextStateTable() {
+  // A one-shot pin (set via /__states) is served exactly once — the next call
+  // resumes normal churn from that snapshot. Normal churn: retire the OLDEST
+  // ephemeral, add two fresh ones with ids above every id currently in the
+  // table → unique ids across walks, created+destroyed deltas on every walk.
+  if (oneShotStates !== null) {
+    const pinned = oneShotStates;
+    oneShotStates = null;
+    stateTable = [...pinned];
+    return stateTable;
+  }
+  const base = stateTable.filter((r) => !String(r.id).startsWith('e'));
+  const eph = stateTable
+    .filter((r) => String(r.id).startsWith('e'))
+    .sort((a, b) => Number(String(a.id).slice(1)) - Number(String(b.id).slice(1)));
+  let maxN = 0;
+  for (const r of eph) maxN = Math.max(maxN, Number(String(r.id).slice(1)));
+  return [...base, ...eph.slice(1), ephemeralState(maxN + 1), ephemeralState(maxN + 2)];
+}
+function resetStates() {
+  stateTable = [...FW_STATE_ROWS];
+  oneShotStates = null;
+}
 
 function handleOpnsense(req, res, user, body) {
   const url = (req.url ?? '/').split('?')[0];
@@ -207,9 +245,16 @@ function handleOpnsense(req, res, user, body) {
       return json(200, fwLogRows(q.get('digest')));
     }
     case '/api/diagnostics/firewall/query_states': {
-      // The plugin sends {rowCount, current, sort:{age:'desc'}} — honor the cap.
-      const n = Math.max(1, Math.min(50, Number(body?.rowCount) || 5));
-      return json(200, { rows: FW_STATE_ROWS.slice(0, n), rowCount: n, total: FW_STATE_ROWS.length, current: 1 });
+      // The plugin sends ONE huge page ({rowCount: 1_000_000, current: 1}) — a
+      // full table scan per call, like the real appliance. Advance the churn,
+      // then honor rowCount/current pagination over the snapshot.
+      stateTable = nextStateTable();
+      const total = stateTable.length;
+      const pageSize = Math.max(1, Number(body?.rowCount) || 5);
+      const current = Math.max(1, Number(body?.current) || 1);
+      const start = (current - 1) * pageSize;
+      const rows = stateTable.slice(start, start + pageSize);
+      return json(200, { rows, rowCount: rows.length, total, current });
     }
     case '/api/diagnostics/firewall/pf_states':
       // Strings on the real appliance — the plugin numOrNull()s them.
@@ -254,10 +299,21 @@ function handler(req, res) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(captured));
     }
+    // Pin the NEXT query_states response to an exact snapshot (array of rows)
+    // — served once, then churn resumes from it. Lets e2e tests simulate a
+    // reboot ([] → every previous state destroyed on that walk). `rows: null`
+    // restores the default churning base set.
+    if (url === '/__states') {
+      const v = body?.rows;
+      if (Array.isArray(v)) oneShotStates = v.map((r) => ({ ...r }));
+      else resetStates();
+      return json(200, { total: Array.isArray(v) ? v.length : stateTable.length });
+    }
     if (url === '/__reset') {
       captured.length = 0;
       servers.clear();
       resetFw();
+      resetStates();
       res.writeHead(204);
       return res.end();
     }

@@ -175,6 +175,19 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'How many days of firewall event-log rows (blocked/allowed traffic events pushed by plugins) are kept before the hourly retention sweep deletes them.',
   },
   {
+    key: 'hostStateRetentionDays',
+    label: 'Host state snapshot retention',
+    type: 'integer',
+    category: 'Retention',
+    unit: 'days',
+    min: 1,
+    max: 365,
+    default: 7,
+    envVar: 'HOST_STATE_RETENTION_DAYS',
+    help:
+      'How many days of per-host firewall state snapshots (open states + created/destroyed churn pushed by plugins) are kept before the hourly retention sweep deletes them. The Hosts/Networks pages show a 24h churn window, so 7 days leaves a week of history.',
+  },
+  {
     key: 'notificationRetentionDays',
     label: 'Notification retention',
     type: 'integer',

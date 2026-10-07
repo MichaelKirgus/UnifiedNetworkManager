@@ -5418,6 +5418,48 @@ paths:
         '401':
           description: Authentication required
 
+  /host-states:
+    get:
+      tags: [Inventory]
+      summary: Per-endpoint firewall state snapshots + created/destroyed churn over a window
+      description: >-
+        One row per (device, endpoint IP) from the LATEST state-table walk that
+        device has pushed. Plugins that track per-host states (OPNsense via its
+        full query_states walk, RouterOS via /ip/firewall/connection) push one
+        snapshot batch per walk to POST /plugin/host-states; `openStates` is the
+        newest snapshot's count for that endpoint and `createdWindow` /
+        `destroyedWindow` are SUMs of the per-walk deltas inside the window.
+        Churn fields are null when no walk in the window had a baseline to diff
+        against (first walk after plugin start) — they must not be treated as 0.
+        Only internal endpoint addresses appear (public internet destinations are
+        filtered out on the plugin side). Device-scoped callers only see rows of
+        their own devices. Retention is swept hourly (default 7 days).
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: windowHours
+          required: false
+          schema: { type: number, minimum: 1, maximum: 336 }
+          description: "Churn look-back window in hours (default 24)"
+      responses:
+        '200':
+          description: Per-endpoint state snapshot rows + per-device metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostStatesResponse'
+        '401':
+          description: Authentication required
+
   /wifi:
     get:
       tags: [Inventory]
@@ -8932,6 +8974,41 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/FirewallSessionRow'
+
+    HostStateRow:
+      type: object
+      required: [deviceId, hostIp, openStates, walkedAtMs]
+      properties:
+        deviceId: { type: string }
+        hostIp: { type: string, description: "The endpoint address (internal only — public internet destinations are not tracked)" }
+        openStates: { type: integer, description: "Open states touching this endpoint in the LATEST walk for this device+IP" }
+        walkedAtMs: { type: integer, format: int64, description: "Epoch ms of that latest walk (stamped by the API at ingest)" }
+        createdWindow: { type: [integer, 'null'], description: "States created over the window; null when no walk in the window had a baseline to diff against" }
+        destroyedWindow: { type: [integer, 'null'], description: "States destroyed over the window; null when no walk in the window had a baseline to diff against" }
+
+    HostStateDeviceView:
+      type: object
+      required: [name, managementAddress, lastWalkedAtMs]
+      properties:
+        name: { type: [string, 'null'] }
+        managementAddress: { type: [string, 'null'] }
+        lastWalkedAtMs: { type: [integer, 'null'], format: int64, description: "Epoch ms of the device's most recent walk in this response; null when it has no rows" }
+
+    HostStatesResponse:
+      type: object
+      required: [rows, devices, windowHours]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/HostStateRow'
+          description: "One row per (device, endpoint IP) with a snapshot"
+        devices:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/HostStateDeviceView'
+          description: "Per-device display metadata + last walk time, keyed by deviceId"
+        windowHours: { type: number, description: "Effective churn window in hours after clamping" }
 
     FirewallRuleRow:
       type: object

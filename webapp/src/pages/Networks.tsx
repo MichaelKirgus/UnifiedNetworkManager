@@ -10,6 +10,7 @@ import { formatBytes } from '../components/formatMetric';
 import { api, NetworkRow } from '../api/client';
 import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
+import { ipInCidr } from '../utils/ip';
 
 /** Fixed window for the traffic column — matches what the header advertises. */
 const TRAFFIC_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -18,6 +19,15 @@ const TRAFFIC_WINDOW_MS = 24 * 60 * 60 * 1000;
 interface NetworkTraffic {
   sent: number;
   received: number;
+}
+
+/** One logical network's firewall-state rollup across all of its subnets.
+ * `open` is null when no stateful device tracks any endpoint in this network;
+ * churn fields are null when the window had no walk with a baseline. */
+interface NetworkStates {
+  open: number | null;
+  created24h: number | null;
+  destroyed24h: number | null;
 }
 
 /** Small colored pill for the address family. */
@@ -65,6 +75,43 @@ export default function Networks() {
     }
     return map;
   }, [trafficQuery.data]);
+
+  // Per-endpoint firewall state snapshots (open now + created/destroyed over
+  // the last 24h). Walks run at a slow cadence on the devices, so refresh on
+  // that order — not every 30 s.
+  const statesQuery = useQuery({
+    queryKey: ['host-states'],
+    queryFn: () => api.hostStates({ windowHours: 24 }),
+    enabled: can('hosts:read'),
+    refetchInterval: 300_000,
+  });
+
+  // Roll the per-endpoint snapshots up to LOGICAL networks: an endpoint counts
+  // for a network when its address falls in any of the network's subnets.
+  const statesByNetwork = useMemo(() => {
+    const rows = statesQuery.data?.rows ?? [];
+    if (rows.length === 0) return new Map<string, NetworkStates>();
+    const map = new Map<string, NetworkStates>();
+    for (const net of networksQuery.data ?? []) {
+      const subnets = Array.from(new Set(net.subnets ?? []));
+      if (subnets.length === 0) continue; // pure SSID/VLAN rows have no address space
+      let open = 0;
+      let created: number | null = null;
+      let destroyed: number | null = null;
+      for (const r of rows) {
+        const inNet = subnets.some((c) => ipInCidr(r.hostIp, c));
+        if (!inNet) continue;
+        open += r.openStates;
+        // Null churn = no baseline in the window — skip it (never count as 0).
+        if (r.createdWindow !== null) created = (created ?? 0) + r.createdWindow;
+        if (r.destroyedWindow !== null) destroyed = (destroyed ?? 0) + r.destroyedWindow;
+      }
+      if (open > 0 || created !== null || destroyed !== null) {
+        map.set(net.key, { open, created24h: created, destroyed24h: destroyed });
+      }
+    }
+    return map;
+  }, [statesQuery.data, networksQuery.data]);
 
   const columns: DataTableColumn<NetworkRow>[] = [
     {
@@ -167,6 +214,40 @@ export default function Networks() {
           <div className="flex flex-col leading-tight" title={`Last 24h — sent ${formatBytes(t.sent)}, received ${formatBytes(t.received)}`}>
             <span className="font-mono text-xs"><span className="text-faint">↑</span> {formatBytes(t.sent)}</span>
             <span className="font-mono text-xs"><span className="text-faint">↓</span> {formatBytes(t.received)}</span>
+          </div>
+        );
+      },
+    },
+    {
+      // Firewall state-table rollup from the devices' periodic full walks: open
+      // states now + created/destroyed over the last 24h, summed across every
+      // endpoint address that falls in one of this network's subnets. Counted
+      // per endpoint — a connection between two hosts IN this network counts
+      // once for each of them (the same convention as the Hosts page). "—" when
+      // no stateful device tracks any endpoint here.
+      header: 'States',
+      key: 'states',
+      width: 170,
+      sortAccessor: (row) => {
+        const s = statesByNetwork.get(row.key);
+        return s ? s.open : null;
+      },
+      exportValue: (row) => {
+        const s = statesByNetwork.get(row.key);
+        if (!s) return '';
+        return `${s.open} open / ${s.created24h ?? '—'} created / ${s.destroyed24h ?? '—'} destroyed (24h)`;
+      },
+      render: (row) => {
+        const s = statesByNetwork.get(row.key);
+        if (!s) return <span className="text-faint">—</span>;
+        return (
+          <div className="flex flex-col leading-tight" title={`Open state endpoints in this network now: ${s.open} — created/destroyed over the last 24h`}>
+            <span className="font-mono text-xs"><span className="text-faint">open</span> {s.open}</span>
+            <span className="font-mono text-xs">
+              <span className="text-success">+{s.created24h ?? '—'}</span>{' '}
+              <span className="text-danger">−{s.destroyed24h ?? '—'}</span>
+              <span className="text-faint"> (24h)</span>
+            </span>
           </div>
         );
       },

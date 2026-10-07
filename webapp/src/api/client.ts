@@ -379,6 +379,27 @@ export interface HostRow {
   devices: HostDeviceMember[];
 }
 
+/** One endpoint's firewall state snapshot from GET /host-states.
+ * `openStates` is the LATEST walk for this device+IP ("open now"); the churn
+ * fields are SUMs over the requested window and null when no walk in the
+ * window had a baseline to diff against (first walk after plugin start). */
+export interface HostStateRow {
+  deviceId: string;
+  /** The endpoint address (internal only — public internet destinations are not tracked). */
+  hostIp: string;
+  openStates: number;
+  walkedAtMs: number;
+  createdWindow: number | null;
+  destroyedWindow: number | null;
+}
+
+/** Per-device metadata for the /host-states response (last walk time, display name). */
+export interface HostStateDeviceView {
+  name: string | null;
+  managementAddress: string | null;
+  lastWalkedAtMs: number | null;
+}
+
 // --- Documented hosts (user-maintained host documentation) -------------------
 
 /** One documented IP address of a documented host, enriched with live discovery data. */
@@ -3169,6 +3190,16 @@ export const api = {
     if (params?.source) qs.set('source', params.source);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<HostRow[]>(`/hosts${suffix}`);
+  },
+  /** Per-endpoint firewall state snapshots + churn over a window (default 24h).
+   * Powers the "States" columns on the Hosts and Networks pages. */
+  hostStates: (params?: { deviceId?: string; siteId?: string; windowHours?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.windowHours !== undefined) qs.set('windowHours', String(params.windowHours));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<{ rows: HostStateRow[]; devices: Record<string, HostStateDeviceView>; windowHours: number }>(`/host-states${suffix}`);
   },
   // Documented hosts — the user-maintained host documentation page.
   documentedHosts: (params?: { siteId?: string }) => {

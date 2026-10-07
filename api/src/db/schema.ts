@@ -485,6 +485,50 @@ export const firewallEvents = pgTable(
   }
 );
 
+// Per-host firewall state-table snapshots pushed by plugins via POST
+// /plugin/host-states (see routes/internal.ts) — one row per (device, host IP)
+// per state-table walk. Powers the "States" columns on the Hosts + Networks
+// pages: open states now = latest snapshot; created/destroyed over a window =
+// SUM of the per-walk deltas inside that window. Append-only like
+// firewall_events — growth is bounded by the retention worker after
+// hostStateRetentionDays (see workers/hostStateRetention.ts). The churn deltas
+// are NULL on a device's FIRST walk (no previous snapshot to diff against) and
+// after plugin restarts — consumers must skip nulls, never treat them as 0.
+export const hostStates = pgTable(
+  'host_states',
+  {
+    id: text('id').primaryKey(),
+    // Self-reported by the sender (its effectiveUuid); validated against the
+    // plugins table at ingest — unknown ids are rejected with a 400.
+    pluginId: text('pluginId').notNull(),
+    deviceId: text('deviceId').notNull(),
+    // One endpoint address of the state (src_addr or dst_addr on OPNsense,
+    // src-address/dst-address on RouterOS). A single state contributes to TWO
+    // rows — one per endpoint — so "open states" is a per-endpoint view.
+    hostIp: text('hostIp').notNull(),
+    // Epoch ms of the walk, stamped by the API at ingest (the plugin clock is
+    // not trusted). The queryable time axis for window sums + retention.
+    walkedAtMs: bigint('walkedAtMs', { mode: 'number' }).notNull(),
+    // Open states touching this endpoint in THIS snapshot.
+    openStates: integer('openStates').notNull().default(0),
+    // States created since the previous walk (NULL = no baseline).
+    createdSinceLastWalk: integer('createdSinceLastWalk'),
+    // States destroyed since the previous walk (NULL = no baseline).
+    destroyedSinceLastWalk: integer('destroyedSinceLastWalk'),
+  },
+  (table) => {
+    return {
+      idxHostStatesDeviceIpWalkedAt: index('idx_host_states_device_ip_walked_at').on(
+        table.deviceId,
+        table.hostIp,
+        table.walkedAtMs,
+      ),
+      // Epoch-ms index for the retention sweep (DELETE WHERE walkedAtMs < cutoff).
+      idxHostStatesWalkedAt: index('idx_host_states_walked_at').on(table.walkedAtMs),
+    };
+  }
+);
+
 // Self-metrics samples of the plugin processes themselves (see workers/pluginMetrics.ts).
 // The API polls each registered plugin's GET /metrics endpoint (auto-mounted by
 // @unm/plugin-sdk) and stores one row per sample. Powers the per-plugin health

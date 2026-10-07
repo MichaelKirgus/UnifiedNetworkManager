@@ -1502,6 +1502,114 @@ router.get('/firewall-sessions', requireAuth, requirePermission('firewall:read')
   }
 });
 
+// GET /host-states - Per-endpoint firewall state snapshots + churn over a window.
+// Powers the "States" columns on the Hosts and Networks pages. Data comes from
+// plugins that walk their appliance's live state table (OPNsense query_states,
+// RouterOS connection table) and push per-host aggregates via POST
+// /plugin/host-states — one snapshot row per (device, endpoint IP) per walk.
+//   openStates      = the LATEST snapshot for that device+IP ("open now")
+//   createdWindow   = SUM of createdSinceLastWalk over the window (null when no
+//                     walk in the window had a baseline to diff against)
+//   destroyedWindow = same for destroyedSinceLastWalk
+// Query params: deviceId, siteId, windowHours (default 24, clamped 1..336).
+router.get('/host-states', requireAuth, requirePermission('hosts:read'), async (_req, res: Response) => {
+  try {
+    const { deviceId, siteId } = _req.query as Record<string, string | undefined>;
+    let windowHours = Number(_req.query['windowHours'] ?? 24);
+    if (!Number.isFinite(windowHours)) windowHours = 24;
+    windowHours = Math.min(336, Math.max(1, windowHours));
+
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json({ rows: [], devices: {}, windowHours });
+      return;
+    }
+
+    let deviceFilter: string[] | null = null;
+    if (deviceId && siteId) {
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) {
+        res.status(200).json({ rows: [], devices: {}, windowHours });
+        return;
+      }
+      deviceFilter = [deviceId];
+    } else if (deviceId) {
+      deviceFilter = allowed !== null && !allowed.has(deviceId) ? [] : [deviceId];
+    } else if (siteId) {
+      let ids = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) ids = ids.filter((id) => allowed.has(id));
+      deviceFilter = ids;
+    } else if (allowed !== null) {
+      deviceFilter = [...allowed];
+    }
+    if (deviceFilter !== null && deviceFilter.length === 0) {
+      res.status(200).json({ rows: [], devices: {}, windowHours });
+      return;
+    }
+
+    // Each query gets its OWN param list — node-postgres rejects a statement
+    // whose placeholder count differs from the supplied params. The snapshot
+    // query filters by device only; the churn query adds the window cutoff as $1
+    // (device ids then start at $2).
+    const idClause = deviceFilter !== null ? `AND "deviceId" IN (${deviceFilter.map((_, i) => `$${i + 1}`).join(', ')})` : '';
+    const snapshotParams: (string | number)[] = deviceFilter ?? [];
+
+    // Latest snapshot per (device, endpoint IP) — the "open now" view.
+    const { rows: latest } = await pool.query<{ deviceId: string; hostIp: string; openStates: number; walkedAtMs: number | bigint }>(
+      `SELECT DISTINCT ON ("deviceId", "hostIp") "deviceId", "hostIp", "openStates", "walkedAtMs"
+         FROM host_states
+        WHERE 1 = 1 ${idClause}
+        ORDER BY "deviceId", "hostIp", "walkedAtMs" DESC`,
+      snapshotParams,
+    );
+
+    // Churn over the window — SUM skips NULL deltas (no baseline); all-NULL
+    // windows stay null so the UI can show "—" instead of a fake zero.
+    const churnParams: (string | number)[] = [Date.now() - windowHours * 60 * 60 * 1000];
+    if (deviceFilter !== null) churnParams.push(...deviceFilter);
+    const churnIdClause = deviceFilter !== null ? `AND "deviceId" IN (${deviceFilter.map((_, i) => `$${i + 2}`).join(', ')})` : '';
+    const { rows: churn } = await pool.query<{ deviceId: string; hostIp: string; created: number | null; destroyed: number | null }>(
+      `SELECT "deviceId", "hostIp", SUM("createdSinceLastWalk") AS created, SUM("destroyedSinceLastWalk") AS destroyed
+         FROM host_states
+        WHERE "walkedAtMs" > $1 ${churnIdClause}
+        GROUP BY "deviceId", "hostIp"`,
+      churnParams,
+    );
+
+    // SUM() over int columns comes back as a BIGINT string from node-postgres —
+    // coerce to number so the webapp can aggregate numerically (string concat
+    // would render "+002" instead of "+2"). NULL stays null (no baseline).
+    const churnByKey = new Map<string, { created: number | null; destroyed: number | null }>();
+    for (const c of churn) churnByKey.set(`${c.deviceId}|${c.hostIp}`, { created: c.created === null ? null : Number(c.created), destroyed: c.destroyed === null ? null : Number(c.destroyed) });
+
+    const rows = latest.map((l) => {
+      const c = churnByKey.get(`${l.deviceId}|${l.hostIp}`);
+      return {
+        deviceId: l.deviceId,
+        hostIp: l.hostIp,
+        openStates: l.openStates,
+        walkedAtMs: Number(l.walkedAtMs),
+        createdWindow: c?.created ?? null,
+        destroyedWindow: c?.destroyed ?? null,
+      };
+    });
+
+    const views = await loadDeviceViews(Array.from(new Set(rows.map((r) => r.deviceId))));
+    const devices: Record<string, { name: string | null; managementAddress: string | null; lastWalkedAtMs: number | null }> = {};
+    for (const r of rows) {
+      const v = views.get(r.deviceId);
+      const d = (devices[r.deviceId] ??= { name: v?.name ?? null, managementAddress: v?.managementAddress ?? null, lastWalkedAtMs: null });
+      if (d.lastWalkedAtMs === null || r.walkedAtMs > d.lastWalkedAtMs) d.lastWalkedAtMs = r.walkedAtMs;
+    }
+
+    res.status(200).json({ rows, devices, windowHours });
+  } catch (err) {
+    const e = err as { status?: number; message: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 // GET /wifi - Cross-device WiFi overview (WiFi page).
 // Groups the normalized `wifi_ssids` rows by SSID name across all devices and
 // joins per-channel airtime (`wifi_channels`) + connected-client counts
