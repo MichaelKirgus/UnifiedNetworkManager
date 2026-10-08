@@ -92,6 +92,8 @@ export interface AuthFlow {
   flow: string;
   /** True when the active provider supports passkey (WebAuthn) step-2. */
   supportsPasskey?: boolean;
+  /** Instance display name (global `instanceName` setting) for the window title. */
+  instanceName?: string;
 }
 
 /** WebAuthn assertion options + nonce for a pending login challenge. */
@@ -2967,7 +2969,7 @@ export const api = {
   verifyWebauthn: (body: { challengeToken: string; response: unknown; nonce: string }) =>
     apiFetch<VerifyResponse>('/auth/webauthn/verify', { method: 'POST', body: JSON.stringify(body) }),
   /** The caller's own profile (no users:read needed). */
-  me: () => apiFetch<User & { effectivePermissions: string[] }>('/auth/me'),
+  me: () => apiFetch<User & { effectivePermissions: string[]; deviceAccessUnrestricted?: boolean; instanceName?: string }>('/auth/me'),
   /** Server-computed session expiry + warning lead time (top-bar countdown chip). */
   sessionInfo: () => apiFetch<SessionInfo>('/auth/session'),
   // Session extension — ALWAYS requires re-proving a second factor (TOTP or

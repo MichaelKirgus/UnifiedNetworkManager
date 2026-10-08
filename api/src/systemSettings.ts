@@ -80,6 +80,20 @@ export interface SettingView {
 // --- The registry -----------------------------------------------------------
 
 export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
+  // Instance identity.
+  {
+    key: 'instanceName',
+    label: 'Instance name',
+    type: 'string',
+    category: 'General',
+    default: 'UnifiedNetworkManager',
+    envVar: 'UNM_INSTANCE_NAME',
+    minLength: 1,
+    maxLength: 64,
+    help:
+      'Display name for this UNM instance. Shown in the webapp window title (browser tab) and on the login page — useful when several instances are open side by side.',
+  },
+
   // Telemetry / worker cadence (previously the only tunable knobs, on the Workers page).
   {
     key: 'telemetryPollIntervalMs',

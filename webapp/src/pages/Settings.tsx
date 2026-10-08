@@ -57,6 +57,7 @@ function enumOptions(pattern?: string | null): string[] | null {
 }
 
 const CATEGORY_STYLES: Record<string, string> = {
+  General: 'bg-accent-purple text-accent-purple-fg',
   Telemetry: 'bg-info text-info-fg',
   Retention: 'bg-warning text-warning-fg',
   Security: 'bg-danger text-danger-fg',

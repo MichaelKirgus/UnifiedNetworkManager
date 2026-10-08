@@ -106,10 +106,21 @@ router.get('/auth/me', requireAuth, async (req, res) => {
     /* keep the optimistic default — enforcement is server-side anyway */
   }
 
+  // Instance display name (global setting) — the webapp renders it in the
+  // window title for every authenticated page.
+  let instanceName = 'UnifiedNetworkManager';
+  try {
+    const v = await getEffectiveSettingValue('instanceName');
+    if (typeof v === 'string' && v.trim() !== '') instanceName = v;
+  } catch {
+    /* keep the default — a settings hiccup must not break /auth/me */
+  }
+
   res.status(200).json({
     ...(await serializeUser(row)),
     effectivePermissions: req.user?.permissions ?? [],
     deviceAccessUnrestricted,
+    instanceName,
   });
 });
 
@@ -413,7 +424,16 @@ router.get('/auth/flow', async (_req, res) => {
       // Provider resolution failed — the login itself will fail too, so just
       // report no passkey support.
     }
-    res.status(200).json({ flow, supportsPasskey });
+    // Instance display name (global setting) — lets the login page show it in
+    // the window title before any credentials are entered.
+    let instanceName = 'UnifiedNetworkManager';
+    try {
+      const v = await getEffectiveSettingValue('instanceName');
+      if (typeof v === 'string' && v.trim() !== '') instanceName = v;
+    } catch {
+      /* keep the default */
+    }
+    res.status(200).json({ flow, supportsPasskey, instanceName });
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Unable to determine auth flow' });

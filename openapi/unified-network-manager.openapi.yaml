@@ -56,6 +56,8 @@ paths:
                     enum: [password, oauth2, ldap, saml]
                   # True when the active provider supports passkey (WebAuthn) step-2.
                   supportsPasskey: { type: boolean }
+                  # Instance display name (global `instanceName` setting) for the window title.
+                  instanceName: { type: string }
         '503':
           description: No identity provider available
 
@@ -338,6 +340,8 @@ paths:
         the explicit grants stored on the account.
         `deviceAccessUnrestricted` indicates whether the caller can see every
         device (true) or is limited by their effective device-scope rules (false).
+        `instanceName` is the instance display name from the global settings —
+        the webapp renders it in the window title.
       responses:
         '200':
           description: Own profile
@@ -354,6 +358,9 @@ paths:
                       deviceAccessUnrestricted:
                         type: boolean
                         description: "True when the caller can access every device (devices:all or no scope rules)"
+                      instanceName:
+                        type: string
+                        description: "Instance display name (global `instanceName` setting) for the window title"
         '401':
           description: Authentication required
 

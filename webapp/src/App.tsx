@@ -50,6 +50,7 @@ import Workers from './pages/Workers';
 import Settings from './pages/Settings';
 import CredentialPolicies from './pages/CredentialPolicies';
 import MyAccount from './pages/MyAccount';
+import { useInstanceTitle } from './hooks/useInstanceTitle';
 import { can } from './auth/permissions';
 
 /**
@@ -145,6 +146,9 @@ function HomeRedirect() {
 }
 
 export default function App() {
+  // Reflect the instance display name in the browser tab title on every page.
+  useInstanceTitle();
+
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
