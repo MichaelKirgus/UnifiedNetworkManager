@@ -105,6 +105,8 @@ export async function serializeUser(row: typeof schema.users.$inferSelect) {
     // the inactivity auto-disable sweep.
     disabled: Boolean(row.disabled),
     lastLoginAt: row.lastLoginAt ?? null,
+    // First-run onboarding — NULL until the setup wizard is completed/skipped.
+    onboardedAt: row.onboardedAt ?? null,
     // Device-level access control — the user's OWN scope rules (role scopes are
     // unioned on top server-side; see deviceAccess.ts).
     deviceScope: parseDeviceScope(row.deviceScope),

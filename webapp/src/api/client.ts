@@ -2180,6 +2180,8 @@ export interface User {
   disabled?: boolean;
   /** Most recent successful authentication (drives the inactivity auto-disable sweep). */
   lastLoginAt?: string | null;
+  /** Set when the first-run setup wizard is completed or skipped (null = not yet). */
+  onboardedAt?: string | null;
 }
 
 /** Credential policy — 2FA requirements, password rules and session caps. A per-user override wins over the global default field by field. */
@@ -2985,6 +2987,8 @@ export const api = {
   /** Rotate the caller's own password (forced-change flow after an expired login). */
   changeOwnPassword: (body: { currentPassword: string; newPassword: string }) =>
     apiFetch<User>('/auth/me/password', { method: 'POST', body: JSON.stringify(body) }),
+  /** Mark the caller's first-run setup wizard as done/skipped (idempotent). */
+  onboardingComplete: () => apiFetch<User>('/auth/onboarding/complete', { method: 'POST' }),
   devices: () => apiFetch<Device[]>('/devices'),
   createDevice: (body: DeviceCreateRequest) =>
     apiFetch<Device & { plugins?: DevicePluginAssignment[] }>('/devices', {

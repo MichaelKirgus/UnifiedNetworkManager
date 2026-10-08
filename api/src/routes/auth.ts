@@ -695,4 +695,32 @@ router.post('/auth/me/password', requireAuth, async (req, res) => {
   res.status(200).json(await serializeUser(updated!));
 });
 
+// POST /auth/onboarding/complete — the CALLER marks their first-run setup
+// wizard as done (or skipped). Idempotent; stamps users.onboardedAt so the
+// webapp never redirects them to /onboarding again. Self-only by design —
+// there is no admin override because re-running the wizard for someone else
+// would be meaningless (it edits their own password/2FA + instance settings).
+router.post('/auth/onboarding/complete', requireAuth, async (req, res) => {
+  const userId = req.user!.sub;
+  try {
+    // First completion wins — re-calls keep the original timestamp.
+    const existing = await db.query.users.findFirst({ where: eq(schema.users.id, userId) });
+    if (!existing?.onboardedAt) {
+      await db.update(schema.users)
+        .set({ onboardedAt: new Date().toISOString() })
+        .where(eq(schema.users.id, userId));
+    }
+  } catch (err) {
+    console.error('[auth] onboarding complete failed:', err);
+    res.status(500).json({ error: 'Internal server error' });
+    return;
+  }
+  const row = await db.query.users.findFirst({ where: eq(schema.users.id, userId) });
+  if (!row) {
+    res.status(401).json({ error: 'User no longer exists' });
+    return;
+  }
+  res.status(200).json(await serializeUser(row));
+});
+
 export default router;

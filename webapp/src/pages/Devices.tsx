@@ -110,7 +110,8 @@ export default function Devices() {
 
   // Clone handoff from DeviceDetail (?edit=<id>): once the device list has
   // loaded, open the edit form pre-filled with that (cloned) device so the
-  // user can change the IP or other settings before saving.
+  // user can change the IP or other settings before saving. ?new=1 (from the
+  // onboarding wizard) opens the empty create form instead.
   const [searchParams, setSearchParams] = useSearchParams();
   useEffect(() => {
     const editId = searchParams.get('edit');
@@ -121,6 +122,12 @@ export default function Devices() {
       setSearchParams({}, { replace: true });
     }
   }, [searchParams, devicesQuery.data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!canWriteDevices || searchParams.get('new') !== '1' || editingId) return;
+    setShowForm(true);
+    setSearchParams({}, { replace: true });
+  }, [searchParams, canWriteDevices, editingId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Model catalog for the selected vendor, merged across ALL plugins currently
   // assigned in the form (a device can have several — e.g. LANCOM + SNMP).

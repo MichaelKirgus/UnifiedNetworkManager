@@ -27,6 +27,10 @@ export const users = pgTable('users', {
   // see any device matching ANY of the listed rules. '{}' = unrestricted.
   // Only enforced when the user's effective permissions lack 'devices:all'.
   deviceScope: text('deviceScope').notNull().default('{}'),
+  // First-run onboarding (see routes/auth.ts POST /auth/onboarding/complete).
+  // NULL until the initial admin has finished or skipped the setup wizard —
+  // the webapp redirects them there on their very first login.
+  onboardedAt: text('onboardedAt'),
 });
 
 // Long-lived bearer tokens for agents/scripts (e.g. the MCP server). The raw

@@ -597,6 +597,24 @@ paths:
         '403':
           description: Account is disabled (error code `user_disabled`)
 
+  /auth/onboarding/complete:
+    post:
+      tags: [Authentication]
+      summary: Mark the caller's first-run setup wizard as done
+      description: >-
+        The authenticated user marks their own onboarding as completed or
+        skipped. Idempotent — stamps `users.onboardedAt` so the webapp never
+        redirects them to /onboarding again. Self-only; there is no admin
+        override (the wizard edits the caller's own password/2FA).
+      responses:
+        '200':
+          description: Updated user profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401':
+          description: Authentication required
+
   # --- Credential policies (2FA requirements + gate AMRs) -------------------
   # A per-user row overrides the global default entirely (user policy wins).
   # The require2FA gate reads these rows LIVE on every privileged request.
@@ -7308,6 +7326,7 @@ components:
         # Credential-policy state: disabled accounts are rejected at login and their live sessions terminate.
         disabled: { type: boolean, description: "Whether the account is disabled (manual or inactivity auto-disable)" }
         lastLoginAt: { type: [string, 'null'], format: date-time, description: "Most recent successful authentication; drives the inactivity sweep" }
+        onboardedAt: { type: [string, 'null'], format: date-time, description: "Set when the first-run setup wizard is completed or skipped (NULL = not yet)" }
 
     # --- Per-user UI preferences (nav order + hidden pages) -----------------
 

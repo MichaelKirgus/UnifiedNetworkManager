@@ -1470,6 +1470,8 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "disabled" BOOLEAN NOT NULL DEFAULT FALSE`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "lastLoginAt" TEXT`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "passwordChangedAt" TEXT`);
+  // First-run onboarding flag (NULL = wizard not yet completed/skipped).
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "onboardedAt" TEXT`);
 
   // Extended credential-policy fields (per-user override of password/session rules).
   await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "minPasswordLength" INTEGER`);
