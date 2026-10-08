@@ -4,7 +4,8 @@
  * A plain-HTTP server on an ephemeral port that answers GET with a small JSON
  * body and records every request (method, path, headers) so plugin suites can
  * assert WHAT the plugin asked for. Ported from the pattern in the old
- * scripts/mock-webserver.cjs — but importable + ephemeral instead of a
+ * the standalone geoip web fixture (../fixtures/geoipWebserver.cjs) — but
+ * importable + ephemeral instead of a
  * standalone compose service.
  */
 

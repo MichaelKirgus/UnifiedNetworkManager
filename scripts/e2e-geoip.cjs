@@ -3,7 +3,8 @@
  * E2E test for the GeoIP feature (web-fetch plugin + geoip worker + lookup engine):
  *   1. login (admin/admin, TOTP-aware)
  *   2. wait until a webFetch-capable plugin is registered/online
- *   3. start scripts/mock-webserver.cjs on :9199 (+ a --proxy instance on :9198)
+ *   3. start the kit's geoip web fixture (packages/plugin-test-kit/src/fixtures/geoipWebserver.cjs)
+ *      on :9199 (+ a --proxy instance on :9198)
  *   4. point the geoip worker at the mock (source=custom, interval=1h, deleteOld=true)
  *   5. POST /geoip/refresh with each fixture in turn and assert:
  *        - MMDB direct      → active file + top-talkers US/AU enrichment
@@ -86,10 +87,11 @@ async function main() {
   if (!wf) { pool.end(); process.exit(1); }
 
   // ── 2. start the mock servers (direct + proxy mode) ───────────────────────
-  console.log(`\n[2] starting mock-webserver on :${MOCK_PORT} and :${PROXY_PORT} (--proxy)…`);
+  const FIX = path.join(__dirname, '..', 'packages', 'plugin-test-kit', 'src', 'fixtures');
+  console.log(`\n[2] starting geoip web fixture on :${MOCK_PORT} and :${PROXY_PORT} (--proxy)…`);
   const mocks = [
-    spawn('node', [path.join(__dirname, 'mock-webserver.cjs'), String(MOCK_PORT)], { stdio: 'inherit' }),
-    spawn('node', [path.join(__dirname, 'mock-webserver.cjs'), String(PROXY_PORT), '--proxy'], { stdio: 'inherit' }),
+    spawn('node', [path.join(FIX, 'geoipWebserver.cjs'), String(MOCK_PORT)], { stdio: 'inherit' }),
+    spawn('node', [path.join(FIX, 'geoipWebserver.cjs'), String(PROXY_PORT), '--proxy'], { stdio: 'inherit' }),
   ];
   const health = async (port) => {
     try { return (await fetch(`http://127.0.0.1:${port}/health`)).status === 200; } catch { return false; }

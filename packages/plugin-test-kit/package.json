@@ -8,7 +8,8 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./mocks/*": "./src/mocks/*.js"
+    "./mocks/*": "./src/mocks/*.js",
+    "./fixtures/*": "./src/fixtures/*.cjs"
   },
   "bin": {
     "unm-plugin-test": "./bin/run.mjs",

@@ -72,6 +72,28 @@ All bind ephemeral ports on 127.0.0.1 and expose `{port, url?, requests?, stop()
 Phase 2 will add an in-process SSH server mock (`ssh2` Server) for the appliance
 plugins that collect over SSH; Phase 3 a pure-JS SNMP agent (UDP GET/BULKWALK).
 
+## Standalone fixtures (`src/fixtures/`)
+
+Full-stack e2e test doubles — plain CJS scripts (no kit imports, no build step),
+run as separate processes against the LIVE dev stack. These are the single home
+for every mock appliance/exporter in the repo:
+
+- `netflowExporter.cjs` — NetFlow v5 + v9 UDP exporter (v9 sends one template
+  datagram at startup, then data-only packets). Exports byte builders for unit tests.
+- `sflowExporter.cjs` — sFlow v5 UDP exporter (IPv4/IPv6 flow samples + counter
+  samples). Exports record builders for unit tests.
+- `geoipWebserver.cjs` — GeoIP MMDB/CSV fixture server with an optional
+  `--proxy` mode (CONNECT tunnel) for the webFetch proxy chain.
+- `opnsenseAppliance.cjs` — mock OPNsense appliance on host :80/:443 (self-signed
+  TLS from `tls/`, request capture at `/__requests`). Mounted by the compose
+  service `mock-appliance`.
+
+Consumers: `scripts/e2e-flows.cjs`, `scripts/e2e-geoip.cjs` (spawn them),
+`scripts/verify-netflow-parser.cjs` / `verify-sflow-parser.cjs` (require their
+byte builders). The kit's in-process mocks above are what the T1–T8 contract
+suite uses; these fixtures exist because those e2e scripts exercise the live
+API + DB pipeline, which the standalone suite does not.
+
 ## Adding a new plugin's suite
 
 1. `cp -r plugins/_template plugins/my-plugin` → implement it.

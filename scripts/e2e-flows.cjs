@@ -136,10 +136,11 @@ async function main() {
   // dedup (best observation kept, agentCount = 2). Same SAMPLE_RATE as the
   // first agent keeps the estBytes invariant check valid.
   const envSecondAgent = { ...env, AGENT_IP: '192.168.1.2', ONLY_INTERNAL: '1' };
+  const FIX = path.join(__dirname, '..', 'packages', 'plugin-test-kit', 'src', 'fixtures');
   const procs = [
-    spawn('node', [path.join(__dirname, 'mock-sflow.cjs'), HOST, String(PORT)], { stdio: 'inherit', env }),
-    spawn('node', [path.join(__dirname, 'mock-sflow.cjs'), HOST, String(PORT)], { stdio: 'inherit', env: envSecondAgent }),
-    spawn('node', [path.join(__dirname, 'mock-netflow.cjs'), HOST, String(PORT)], { stdio: 'inherit', env }),
+    spawn('node', [path.join(FIX, 'sflowExporter.cjs'), HOST, String(PORT)], { stdio: 'inherit', env }),
+    spawn('node', [path.join(FIX, 'sflowExporter.cjs'), HOST, String(PORT)], { stdio: 'inherit', env: envSecondAgent }),
+    spawn('node', [path.join(FIX, 'netflowExporter.cjs'), HOST, String(PORT)], { stdio: 'inherit', env }),
   ];
   await sleep(BURST_MS);
   for (const p of procs) p.kill();

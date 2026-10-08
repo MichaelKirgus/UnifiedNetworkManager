@@ -21,7 +21,7 @@
  *                portSrc(4) portDst(4) tcpFlags(4) priority(4)
  *   counter sample: format(4)=2 sampleLen(4) seq(4) srcIdClass(4) numRecords(4) records…
  *
- * Run standalone:  node scripts/mock-sflow.cjs [host] [port]     (default 127.0.0.1 6343)
+ * Run standalone:  node packages/plugin-test-kit/src/fixtures/sflowExporter.cjs [host] [port]     (default 127.0.0.1 6343)
  * Env overrides:   SRC_IP DST_INTERNAL_IP DST_INTERNET_IP AGENT_IP SAMPLE_RATE
  */
 

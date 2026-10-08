@@ -2,7 +2,8 @@
 /**
  * Unit test for the flow-collector NetFlow v5/v9 parsers + dispatcher.
  *
- * Feeds datagrams built by scripts/mock-netflow.cjs (the same byte construction
+ * Feeds datagrams built by the kit's netflow fixture
+ * (packages/plugin-test-kit/src/fixtures/netflowExporter.cjs — the same byte construction
  * a real exporter would produce) through the compiled parsers and asserts every
  * expected flow is extracted with correct IPs, protocol, reported bytes and
  * sampling rate — including v9 template caching across datagrams.
@@ -26,8 +27,9 @@ if (!fs.existsSync(PARSER_JS)) {
 
 const { parseNetflowV5Datagram, parseNetflowV9Datagram, clearNetflowV9TemplateCache } = require(PARSER_JS);
 const { parseFlowDatagram } = require(path.join(PLUGIN_DIR, 'dist', 'src', 'dispatch.js'));
-const mock = require(path.join(ROOT, 'scripts', 'mock-netflow.cjs'));
-const sflowMock = require(path.join(ROOT, 'scripts', 'mock-sflow.cjs'));
+const FIXTURES = path.join(ROOT, 'packages', 'plugin-test-kit', 'src', 'fixtures');
+const mock = require(path.join(FIXTURES, 'netflowExporter.cjs'));
+const sflowMock = require(path.join(FIXTURES, 'sflowExporter.cjs'));
 
 let failures = 0;
 function check(label, cond) {

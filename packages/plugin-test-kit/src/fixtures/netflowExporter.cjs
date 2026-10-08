@@ -18,7 +18,7 @@
  * The v9 mock sends ONE template datagram at startup, then DATA-ONLY datagrams —
  * proving the collector's per-SourceID template cache works across packets.
  *
- * Run standalone:  node scripts/mock-netflow.cjs [host] [port]     (default 127.0.0.1 6343)
+ * Run standalone:  node packages/plugin-test-kit/src/fixtures/netflowExporter.cjs [host] [port]     (default 127.0.0.1 6343)
  * Env overrides:   SRC_IP DST_INTERNAL_IP DST_INTERNET_IP V9_SRC_IP SAMPLE_RATE V9_SAMPLE_RATE
  */
 

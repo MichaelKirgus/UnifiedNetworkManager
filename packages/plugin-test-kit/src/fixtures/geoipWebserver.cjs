@@ -18,7 +18,7 @@
  * The e2e points webFetchProxyUrl at it to prove the whole chain works when
  * plain egress is unavailable and every hop must go through a proxy.
  *
- * Usage: node scripts/mock-webserver.cjs [port] [--proxy]
+ * Usage: node packages/plugin-test-kit/src/fixtures/geoipWebserver.cjs [port] [--proxy]
  */
 const http = require('http');
 const net = require('net');

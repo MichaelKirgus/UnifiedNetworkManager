@@ -2,7 +2,8 @@
 /**
  * Unit test for the flow-collector sFlow parser (plugins/flow-collector/src/sflowParser.ts).
  *
- * Feeds datagrams built by scripts/mock-sflow.cjs (the same byte construction a
+ * Feeds datagrams built by the kit's sFlow fixture
+ * (packages/plugin-test-kit/src/fixtures/sflowExporter.cjs — the same byte construction a
  * real exporter would produce) through the compiled parser and asserts every
  * expected flow is extracted with correct IPs, protocol and estimated bytes.
  *
@@ -24,7 +25,8 @@ if (!fs.existsSync(PARSER_JS)) {
 }
 
 const { parseSflowDatagram } = require(PARSER_JS);
-const mock = require(path.join(ROOT, 'scripts', 'mock-sflow.cjs'));
+const FIXTURES = path.join(ROOT, 'packages', 'plugin-test-kit', 'src', 'fixtures');
+const mock = require(path.join(FIXTURES, 'sflowExporter.cjs'));
 
 let failures = 0;
 function check(label, cond) {

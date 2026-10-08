@@ -725,20 +725,8 @@ services:
       - api
     restart: unless-stopped
 
-  # Mock NTP/SNTP server for end-to-end tests of the generic-ntp plugin (this
-  # host blocks outbound UDP/123). Serves a stratum-2 "current time" reply to any
-  # client request. Reachable from the plugin container as `mock-ntp` on the
-  # default compose network — set a throwaway device's managementAddress to that
-  # name (bare hostname, no scheme/port) and assign the generic-ntp plugin.
-  # Start on demand: `docker compose up -d mock-ntp`.
-  mock-ntp:
-    image: node:20-alpine
-    entrypoint: ["node", "/mock/mock.js"]
-    volumes:
-      - ./scripts/mock-ntp-server.cjs:/mock/mock.js:ro
-    restart: "no"
-
-  # Mock OPNsense appliance for end-to-end plan-execution tests. Host network
+  # Mock OPNsense appliance for end-to-end plan-execution tests (the script now
+  # lives in the plugin-test-kit fixtures). Host network
   # so it can bind :80/:443 directly; reachable from the plugin containers as
   # http(s)://host.docker.internal (bare hostname — device managementAddress
   # never carries a scheme/port). Captured requests are served at GET /__requests.
@@ -748,10 +736,10 @@ services:
     network_mode: host
     entrypoint: ["node", "/mock/mock.js"]
     volumes:
-      - ./scripts/mock-opnsense.cjs:/mock/mock.js:ro
+      - ./packages/plugin-test-kit/src/fixtures/opnsenseAppliance.cjs:/mock/mock.js:ro
       # Self-signed TLS material generated on the host (openssl req -x509);
       # node:20-alpine has no openssl and apk access is unreliable here.
-      - ./scripts/mock-tls:/mock/tls:ro
+      - ./packages/plugin-test-kit/src/fixtures/tls:/mock/tls:ro
     restart: "no"
   # Identity provider plugin: local users + TOTP (2FA). Performs credential
   # verification on behalf of the API. It does NOT own a database: the API
