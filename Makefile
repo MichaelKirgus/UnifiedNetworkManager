@@ -61,9 +61,19 @@ build:
 	  wait )
 	@echo "Build complete."
 
-# Run the offline test suites (no Docker / live services required).
+# Run the offline test suites (no Docker / live services required):
+#   1. API unit checks (IP math)
+#   2. The standardized per-plugin contract suite — every built plugin is
+#      spawned standalone against in-process mock appliances and checked for
+#      fatal flaws (healthz, /discover validation, monitoring happy-path +
+#      dead-target handling). Requires `make build` first (tests dist/ output).
 test:
 	./node_modules/.bin/tsx scripts/verify-ip-math.ts
+	node packages/plugin-test-kit/bin/run-all.mjs
+
+# Just the per-plugin contract suite (see packages/plugin-test-kit/README.md).
+plugin-tests:
+	node packages/plugin-test-kit/bin/run-all.mjs
 
 # Start infrastructure (DB and Plugins). The plugin service list follows the
 # <name>-plugin compose convention derived from PLUGINS — no hand-maintained list.

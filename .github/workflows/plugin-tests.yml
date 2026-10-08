@@ -1,0 +1,43 @@
+# Standardized per-plugin contract suite — see packages/plugin-test-kit/README.md.
+#
+# Every built plugin is spawned as a standalone process against in-process mock
+# appliances and checked for fatal flaws (healthz, /discover validation,
+# monitoring happy-path + dead-target handling). No Docker needed: plain Node.
+name: Plugin tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  plugin-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Install every workspace's dependencies (mirrors `make setup`).
+      - name: Install dependencies
+        run: |
+          set -e
+          for d in packages/plugin-sdk packages/snmp-client packages/lancom-shared api webapp mcp; do
+            (cd "$d" && npm install --no-audit --no-fund) &
+          done
+          for p in plugins/*/package.json; do
+            dir=$(dirname "$p")
+            [ "$(basename "$dir")" = "_template" ] && continue
+            (cd "$dir" && npm install --legacy-peer-deps --no-audit --no-fund) &
+          done
+          wait
+
+      # Build shared packages + all plugins (the suite tests dist/ output).
+      - name: Build
+        run: make build
+
+      # Run the contract suite for every plugin.
+      - name: Plugin contract suite
+        run: node packages/plugin-test-kit/bin/run-all.mjs

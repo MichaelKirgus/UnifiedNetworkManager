@@ -656,3 +656,26 @@ cd ../../packages/plugin-sdk && npm run build       # then re-run `make setup`/b
 Then, from the repo root: `make build`, and for a live check
 `docker compose up -d --build <your-plugin> api` — confirm `/discover` returns
 the expected catalog and the API registers the plugin.
+
+### 11a. The standardized contract suite (CI gate)
+
+Every plugin is covered by the **plugin test kit** (`packages/plugin-test-kit`)
+— a Docker-free harness that spawns your BUILT plugin standalone against
+in-process mock appliances and runs a capability-driven contract suite:
+`/healthz`, full `/discover` descriptor validation, settings robustness,
+monitoring happy-path (T4) + dead-target handling (T5), and — when you advertise
+them — the `/config`, `/plan` and `/probe` contracts. This is what CI runs to
+catch fatal flaws before a plugin ships:
+
+```bash
+make build                                        # the kit tests dist/ output
+node packages/plugin-test-kit/bin/run.mjs <name>  # one plugin
+node packages/plugin-test-kit/bin/run-all.mjs     # every plugin (CI entry point)
+# or simply: make test / make plugin-tests
+```
+
+To give your plugin a real T4 happy-path, add `plugins/<your-plugin>/test/config.mjs`
+pointing the suite at a mock appliance (shared mocks for HTTP, SNTP and the Docker
+Engine API live in the kit; see its README). Without one, only the
+transport-agnostic tests run. New plugins get the baseline automatically — no
+registration anywhere is needed.

@@ -442,7 +442,12 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
       return new Promise<number>((resolve) => {
         const server = app.listen(identity.port, () => {
           console.log(`[${logTag}] listening on port ${identity.port}${tlsEnabled ? ' (mTLS enrollment in progress)' : ''}`);
-          startMdnsAdvertising(identity, logTag);
+          // mDNS advertising is best-effort discovery sugar. Standalone runs —
+          // above all the contract test suite — silence it with MDNS_ADVERTISE=0
+          // so a test child never shares the LAN's _unm-plugin._tcp namespace
+          // (names + UUIDs) with a live dev stack: zero shared state, no
+          // name-collision queries.
+          if (process.env.MDNS_ADVERTISE !== '0') startMdnsAdvertising(identity, logTag);
           // Push-based self-registration: the API needs no pre-configured
           // endpoint list — the plugin announces itself (see register.ts).
           const registrationOn = opts.registration ?? process.env.PLUGIN_API_KEY !== undefined;

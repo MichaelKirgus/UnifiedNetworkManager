@@ -1,0 +1,17 @@
+{
+  "name": "@unm/plugin-test-kit",
+  "version": "0.1.0",
+  "license": "EUPL-1.2",
+  "private": true,
+  "description": "Standardized per-plugin test suite for UnifiedNetworkManager: spawns each built plugin standalone against in-process mock appliances and runs a capability-driven contract suite (healthz, /discover validation, monitoring happy-path + dead-target handling). No Docker required — plain Node.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./mocks/*": "./src/mocks/*.js"
+  },
+  "bin": {
+    "unm-plugin-test": "./bin/run.mjs",
+    "unm-plugin-test-all": "./bin/run-all.mjs"
+  }
+}
