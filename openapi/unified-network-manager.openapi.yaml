@@ -112,6 +112,10 @@ paths:
                 required: [challengeToken, twoFactorRequired]
                 properties:
                   challengeToken: { type: string }
+                  # True when the account has a second factor enrolled (TOTP or
+                  # passkey) and must complete step 2. False = password-only
+                  # completion via POST /auth/login/complete (today: the initial
+                  # admin before onboarding, who has no TOTP secret yet).
                   twoFactorRequired: { type: boolean }
                   # True when the user's password has exceeded its max age — the
                   # client must force a change right after sign-in completes.
@@ -328,6 +332,40 @@ paths:
                 $ref: '#/components/schemas/LoginSessionResponse'
         '401':
           description: Invalid or expired 2FA challenge/token
+
+  /auth/login/complete:
+    post:
+      tags: [Authentication]
+      summary: Complete a password-only login (no second factor enrolled)
+      security: []
+      description: >-
+        Step 2 for a challenge whose account has NO second factor enrolled —
+        the provider re-checks enrollment live and answers 403
+        `two_factor_required` when one now exists, so this can only mint a
+        bare-`pwd` session (today: the initial admin before onboarding). The
+        webapp calls it when POST /auth/login reported twoFactorRequired:false.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challengeToken]
+              properties:
+                challengeToken: { type: string }
+      responses:
+        '200':
+          description: Authenticated (amr carries `pwd` only)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginSessionResponse'
+        '401':
+          description: Invalid or expired challenge token
+        '403':
+          description: >-
+            A second factor is now enrolled for this account (error code
+            `two_factor_required`) — use the normal TOTP/passkey step instead.
 
   /auth/me:
     get:
@@ -602,10 +640,14 @@ paths:
       tags: [Authentication]
       summary: Mark the caller's first-run setup wizard as done
       description: >-
-        The authenticated user marks their own onboarding as completed or
-        skipped. Idempotent — stamps `users.onboardedAt` so the webapp never
-        redirects them to /onboarding again. Self-only; there is no admin
-        override (the wizard edits the caller's own password/2FA).
+        The authenticated user marks their own onboarding as completed. Idempotent
+        — stamps `users.onboardedAt` so the webapp never redirects them to
+        /onboarding again. Self-only; there is no admin override (the wizard edits
+        the caller's own password/2FA). For the INITIAL ADMIN this also re-enables
+        2FA: first sign-in was allowed to be password-only, so on completion the
+        account's credential policy is rewritten to require whatever second factor
+        was enrolled (totp and/or webauthn) — from the next login onward a matching
+        second factor is mandatory again.
       responses:
         '200':
           description: Updated user profile
@@ -6256,6 +6298,47 @@ paths:
           description: Missing users:self-credentials / users:manage-credentials permission
         '404':
           description: User not found
+
+  /users/{id}/totp/confirm:
+    post:
+      tags: [Users]
+      summary: Confirm the caller's own TOTP enrollment (self-only)
+      description: >-
+        Verifies a TOTP code against the CALLER'S OWN enrolled secret and returns
+        `{ valid }`. Self-only by design — it never touches another account, so no
+        users:* permission is needed beyond being authenticated as that user. Used
+        by the first-run setup wizard to prove the initial admin actually scanned
+        their freshly generated QR before onboarding can be completed.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, minLength: 6, maxLength: 6, pattern: "^\\d{6}$" }
+      responses:
+        '200':
+          description: Code checked (valid true/false)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [valid]
+                properties:
+                  valid: { type: boolean }
+        '401':
+          description: Authentication required
+        '403':
+          description: The id does not match the caller's own user id
+        '409':
+          description: No TOTP secret is enrolled on this account
 
   /users/{id}/totp:
     delete:

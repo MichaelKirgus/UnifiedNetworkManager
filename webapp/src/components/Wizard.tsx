@@ -68,13 +68,16 @@ interface WizardLayoutProps {
   current: number;
   /** Called by the "Cancel" button in the top bar (and Escape). */
   onExit: () => void;
+  /** Hide the built-in Cancel button — for MANDATORY wizards that cannot be
+   *  abandoned (e.g. first-run setup, which must finish before use). */
+  hideCancel?: boolean;
   /** Extra top-bar actions rendered to the LEFT of Cancel (e.g. a primary CTA). */
   actions?: ReactNode;
   children: ReactNode;
 }
 
 /** Full-page wizard: app shell + step indicator + content column. */
-export function WizardLayout({ title, icon, steps, current, onExit, actions, children }: WizardLayoutProps) {
+export function WizardLayout({ title, icon, steps, current, onExit, hideCancel, actions, children }: WizardLayoutProps) {
   return (
     <Layout
       title={
@@ -86,13 +89,15 @@ export function WizardLayout({ title, icon, steps, current, onExit, actions, chi
       actions={
         <>
           {actions}
-          <button
-            type="button"
-            onClick={onExit}
-            className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted"
-          >
-            <X className="h-4 w-4" /> Cancel
-          </button>
+          {!hideCancel && (
+            <button
+              type="button"
+              onClick={onExit}
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted"
+            >
+              <X className="h-4 w-4" /> Cancel
+            </button>
+          )}
         </>
       }
     >

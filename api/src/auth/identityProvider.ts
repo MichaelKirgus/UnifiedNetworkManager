@@ -285,8 +285,25 @@ export async function verify2fa(challengeToken: string, code: string): Promise<I
   return data.identity;
 }
 
-/**
- * Step 2 (passkey variant): fetch WebAuthn assertion options for a pending
+/** * Step 2 (password-only variant): complete a challenge whose policy requires NO
+ * second factor. The provider re-checks the user's LIVE credential policy and
+ * refuses with `two_factor_required` if one is now enrolled/required — so this
+ * path can only ever mint a bare-`pwd` session for accounts that genuinely have
+ * no 2FA requirement (today: the initial admin before onboarding). Returns the
+ * same identity assertion shape as verify2fa.
+ */
+export async function completeLogin(challengeToken: string): Promise<IdentityAssertion> {
+  const provider = await resolveActiveProvider();
+  const data = await callProvider<{ identity?: IdentityAssertion }>(provider, '/auth/login/complete', { challengeToken });
+
+  if (!data.identity) {
+    throw Object.assign(new Error('Identity provider did not return a verified identity'), { status: 502 });
+  }
+
+  return data.identity;
+}
+
+/** * Step 2 (passkey variant): fetch WebAuthn assertion options for a pending
  * challenge. The API generates the nonce + options (it owns the RP identity);
  * the provider binds the nonce to its in-memory challenge entry so the later
  * verify call can reject replays/mismatches.

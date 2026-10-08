@@ -5,7 +5,7 @@ import { and, eq } from 'drizzle-orm';
 import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
-import { generateSecret, buildOtpAuthUri } from '../auth/totp';
+import { generateSecret, buildOtpAuthUri, verifyTotp } from '../auth/totp';
 import { buildRegistrationOptions, verifyRegistration } from '../auth/webauthn';
 import { ALL_PERMISSIONS, PERMISSION_DESCRIPTIONS, KNOWN_ROLES, INITIAL_ADMIN_USERNAME } from '../auth/permissions';
 import { parseDeviceScope, invalidateDeviceAccessCache } from '../deviceAccess';
@@ -486,6 +486,28 @@ router.post('/users/:id/totp/enroll', requireAuth, async (req: Request, res: Res
 
   const updated = await db.query.users.findFirst({ where: eq(schema.users.id, existing.id) });
   res.status(200).json({ user: await serializeUser(updated!), enrollment: enrollmentPayload(existing.username, totpSecret) });
+});
+
+// POST /users/:id/totp/confirm — SELF-ONLY. Verifies a TOTP code against the
+// caller's OWN enrolled secret and returns { valid }. Used by the first-run
+// setup wizard to prove the initial admin actually scanned their freshly
+// generated QR before we stamp onboarding complete (a half-done enrollment must
+// not be skippable). No permission beyond being authenticated as that user —
+// it never touches another account, so no users:* grant is needed.
+router.post('/users/:id/totp/confirm', requireAuth, async (req: Request, res: Response) => {
+  if (!req.user?.sub || req.user.sub !== req.params.id) {
+    res.status(403).json({ error: 'You can only confirm your own TOTP enrollment' });
+    return;
+  }
+
+  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, req.params.id) });
+  if (!existing || !existing.totpSecret) {
+    res.status(409).json({ error: 'No TOTP secret is enrolled on this account' });
+    return;
+  }
+
+  const code = typeof req.body?.code === 'string' ? req.body.code : '';
+  res.status(200).json({ valid: verifyTotp(existing.totpSecret, code) });
 });
 
 // DELETE /users/:id/totp — disable TOTP for a user (clears the secret).

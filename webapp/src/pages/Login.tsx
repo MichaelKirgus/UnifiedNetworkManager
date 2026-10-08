@@ -84,10 +84,29 @@ export default function Login() {
     setLoading(true);
     try {
       const res = await api.login({ username, password });
-      setChallengeToken(res.challengeToken);
       // Remember whether the policy says this password must be rotated — we act
       // on it once sign-in (incl. 2FA) has actually completed below.
       setForceChange(Boolean(res.passwordExpired));
+
+      if (!res.twoFactorRequired) {
+        // No second factor is enrolled for this account (today: the initial
+        // admin before onboarding). Complete password-only and enter the app —
+        // the mandatory setup wizard then forces a new password + 2FA. If a
+        // factor was enrolled in the meantime, fall back to the normal step-2 UI.
+        try {
+          const session = await api.completeLogin(res.challengeToken);
+          finishSignIn(session);
+          return;
+        } catch (cErr) {
+          if (cErr instanceof ApiError && cErr.code === 'two_factor_required') {
+            setChallengeToken(res.challengeToken);
+            return;
+          }
+          throw cErr;
+        }
+      }
+
+      setChallengeToken(res.challengeToken);
     } catch (err) {
       if (err instanceof ApiError && err.code === 'no_2fa_enrolled') {
         setError(
@@ -327,10 +346,7 @@ export default function Login() {
                   onChange={(e) => setTotpCode(e.target.value)}
                   placeholder="000000"
                 />
-                <p className="mt-1 text-xs text-faint">
-                  Enter the 6-digit code from your authenticator app. Accounts without an
-                  enrolled TOTP secret can complete sign-in with any 6-digit value (dev mode only).
-                </p>
+                <p className="mt-1 text-xs text-faint">Enter the 6-digit code from your authenticator app.</p>
               </div>
               <button
                 type="submit"

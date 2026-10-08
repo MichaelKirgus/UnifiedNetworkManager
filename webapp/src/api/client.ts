@@ -2965,6 +2965,9 @@ export const api = {
     apiFetch<LoginResponse>('/auth/login', { method: 'POST', body: JSON.stringify(body) }),
   verify2fa: (body: { challengeToken: string; totpCode: string }) =>
     apiFetch<VerifyResponse>('/auth/2fa/verify', { method: 'POST', body: JSON.stringify(body) }),
+  /** Password-only completion for a login whose account has no second factor enrolled. */
+  completeLogin: (challengeToken: string) =>
+    apiFetch<VerifyResponse>('/auth/login/complete', { method: 'POST', body: JSON.stringify({ challengeToken }) }),
   // Passkey (WebAuthn) step-2 — same session shape as verify2fa.
   webauthnAssertionOptions: (challengeToken: string) =>
     apiFetch<WebauthnAssertionOptions>(`/auth/webauthn/assertion-options?challengeToken=${encodeURIComponent(challengeToken)}`),
@@ -3647,6 +3650,9 @@ export const api = {
     apiFetch<User>(`/users/${id}/password`, { method: 'POST', body: JSON.stringify(body) }),
   enrollTotp: (id: string) =>
     apiFetch<{ user: User; enrollment: TotpEnrollment }>(`/users/${id}/totp/enroll`, { method: 'POST' }),
+  /** Self-only: verify a TOTP code against the caller's own enrolled secret. */
+  confirmTotp: (id: string, code: string) =>
+    apiFetch<{ valid: boolean }>(`/users/${id}/totp/confirm`, { method: 'POST', body: JSON.stringify({ code }) }),
   disableTotp: (id: string) => apiFetch<void>(`/users/${id}/totp`, { method: 'DELETE' }),
   // Passkeys (multiple per user — one row per device).
   passkeys: (userId: string) => apiFetch<PasskeyCredential[]>(`/users/${userId}/passkeys`),

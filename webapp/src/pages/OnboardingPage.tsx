@@ -1,21 +1,24 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowRight, CheckCircle2, KeyRound, Loader2, Server, Sparkles, Wand2 } from 'lucide-react';
+import QRCode from 'react-qr-code';
+import { ArrowRight, CheckCircle2, KeyRound, Loader2, Server, ShieldCheck, Sparkles, Wand2 } from 'lucide-react';
 import { WizardLayout } from '../components/Wizard';
 import { PasskeyManager } from '../components/PasskeyManager';
-import { api } from '../api/client';
+import { api, TotpEnrollment } from '../api/client';
 import { can } from '../auth/permissions';
 
 /**
  * First-run setup wizard for the initial admin account.
  *
  * Triggered automatically (see App.tsx) when the seeded `admin` user signs in
- * and has not yet completed onboarding (`users.onboardedAt IS NULL`). Walks
- * through securing the default credentials, naming the instance, and pointing
- * at a first device — then stamps `onboardedAt` so it never re-appears. The
- * built-in "Cancel" leaves without completing (so it can prompt again); the
- * top-bar "Skip setup" completes + exits immediately.
+ * and has not yet completed onboarding (`users.onboardedAt IS NULL`). The first
+ * sign-in is password-only (no TOTP secret is seeded, so there is nothing to
+ * prompt for), which is exactly why this wizard is MANDATORY: it forces a new
+ * password AND enrollment of a second factor (TOTP or passkey) before the user
+ * can do anything else. There is no Cancel and no Skip — the only way out is to
+ * finish, after which `onboardedAt` is stamped and the account's credential
+ * policy re-enables 2FA for every future login.
  */
 
 const STEPS = [
@@ -30,11 +33,17 @@ export default function OnboardingPage() {
   const queryClient = useQueryClient();
   const [step, setStep] = useState(0);
 
-  // Step 1 — password rotation.
+  // Step 1 — password rotation (mandatory).
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmNew, setConfirmNew] = useState('');
   const [pwError, setPwError] = useState<string | null>(null);
+
+  // Step 1 — second factor (mandatory): TOTP confirm or passkey enrollment.
+  const [twoFactorDone, setTwoFactorDone] = useState(false);
+  const [totpEnrollment, setTotpEnrollment] = useState<TotpEnrollment | null>(null);
+  const [totpCode, setTotpCode] = useState('');
+  const [totpError, setTotpError] = useState<string | null>(null);
 
   // Step 2 — instance name.
   const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me });
@@ -57,9 +66,31 @@ export default function OnboardingPage() {
       setCurrentPassword('');
       setNewPassword('');
       setConfirmNew('');
-      setStep(1);
     },
     onError: (err) => setPwError((err as Error).message),
+  });
+
+  const enrollTotp = useMutation({
+    mutationFn: () => api.enrollTotp(meQuery.data!.id),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ['me'] });
+      setTotpEnrollment(res.enrollment);
+      setTotpError(null);
+    },
+    onError: (err) => setTotpError((err as Error).message),
+  });
+
+  const confirmTotp = useMutation({
+    mutationFn: () => api.confirmTotp(meQuery.data!.id, totpCode.trim()),
+    onSuccess: (res) => {
+      if (!res.valid) {
+        setTotpError('That code did not match. Check the entry in your authenticator app and try again.');
+        return;
+      }
+      setTotpError(null);
+      setTwoFactorDone(true);
+    },
+    onError: (err) => setTotpError((err as Error).message),
   });
 
   const saveName = useMutation({
@@ -75,12 +106,11 @@ export default function OnboardingPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['me'] }),
   });
 
-  /** Finish + leave the wizard (used by "Skip setup" and the Done step). */
-  function finishAndExit() {
-    completeOnboarding.mutate(undefined, {
-      onSuccess: () => navigate('/', { replace: true }),
-    });
-  }
+  // A second factor already enrolled (e.g. re-running the wizard after a prior
+  // partial setup) satisfies the requirement without re-enrolling.
+  useEffect(() => {
+    if (!twoFactorDone && meQuery.data && (meQuery.data.totpEnabled || (meQuery.data.passkeyCount ?? 0) > 0)) setTwoFactorDone(true);
+  }, [meQuery.data, twoFactorDone]);
 
   const me = meQuery.data;
   if (!me) return null; // guard + data not ready yet
@@ -108,6 +138,14 @@ export default function OnboardingPage() {
     saveName.mutate();
   }
 
+  /** Finish + leave the wizard (used by "Register a device now" and Done). */
+  function finishAndExit(to: string) {
+    completeOnboarding.mutate(undefined, { onSuccess: () => navigate(to, { replace: true }) });
+  }
+
+  const passwordChanged = changePassword.isSuccess;
+  const securityComplete = passwordChanged && twoFactorDone;
+
   return (
     <WizardLayout
       title="Setup"
@@ -115,94 +153,157 @@ export default function OnboardingPage() {
       steps={STEPS}
       current={step}
       onExit={() => navigate('/', { replace: true })}
-      actions={
-        <button
-          type="button"
-          onClick={finishAndExit}
-          disabled={completeOnboarding.isPending}
-          className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted disabled:opacity-50"
-        >
-          {completeOnboarding.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-          Skip setup
-        </button>
-      }
+      hideCancel
     >
       {/* ---------------------------------------------------------- Step 1 */}
       {step === 0 && (
         <div className="space-y-5">
+          {/* Password rotation — mandatory. */}
           <div className="rounded-md border border-border bg-card p-4 shadow-sm">
             <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
-              <KeyRound className="h-4 w-4 text-primary" /> Secure your account
+              <KeyRound className="h-4 w-4 text-primary" /> Set a strong password
             </h2>
             <p className="mt-1 text-sm text-secondary">
-              You signed in with the default credentials. Set a strong password before you start managing devices — this is
-              the one step we strongly recommend not skipping.
+              You signed in with the default credentials. Choose a new password before you start managing devices — this
+              step is required.
             </p>
 
-            {me.totpEnabled && (
+            {passwordChanged ? (
               <div className="mt-3 flex items-center gap-2 rounded-md border border-success-border bg-success/10 px-3 py-2 text-sm text-success">
-                <CheckCircle2 className="h-4 w-4" /> Two-factor authentication is enrolled — you used it to sign in.
+                <CheckCircle2 className="h-4 w-4" /> Password updated.
               </div>
-            )}
+            ) : (
+              <>
+                {pwError && (
+                  <div className="mt-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{pwError}</div>
+                )}
 
-            {pwError && (
-              <div className="mt-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{pwError}</div>
+                <form className="mt-4 space-y-3" onSubmit={handlePasswordSubmit}>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-secondary">Current password</label>
+                    <input
+                      type="password"
+                      className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
+                      value={currentPassword}
+                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      autoComplete="current-password"
+                    />
+                    <p className="mt-1 text-xs text-faint">The default password is <code>admin</code>.</p>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-secondary">New password (min 8 chars)</label>
+                    <input
+                      type="password"
+                      className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      autoComplete="new-password"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-secondary">Confirm new password</label>
+                    <input
+                      type="password"
+                      className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
+                      value={confirmNew}
+                      onChange={(e) => setConfirmNew(e.target.value)}
+                      autoComplete="new-password"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={changePassword.isPending || !currentPassword || newPassword.length < 8 || newPassword !== confirmNew}
+                    className="flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
+                  >
+                    {changePassword.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                    Set password
+                  </button>
+                </form>
+              </>
             )}
-
-            <form className="mt-4 space-y-3" onSubmit={handlePasswordSubmit}>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-secondary">Current password</label>
-                <input
-                  type="password"
-                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
-                  value={currentPassword}
-                  onChange={(e) => setCurrentPassword(e.target.value)}
-                  autoComplete="current-password"
-                />
-                <p className="mt-1 text-xs text-faint">The default password is <code>admin</code>.</p>
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-secondary">New password (min 8 chars)</label>
-                <input
-                  type="password"
-                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  autoComplete="new-password"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium text-secondary">Confirm new password</label>
-                <input
-                  type="password"
-                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
-                  value={confirmNew}
-                  onChange={(e) => setConfirmNew(e.target.value)}
-                  autoComplete="new-password"
-                />
-              </div>
-              <div className="flex items-center gap-4">
-                <button
-                  type="submit"
-                  disabled={changePassword.isPending || !currentPassword}
-                  className="flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
-                >
-                  {changePassword.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                  Set password & continue
-                </button>
-                <button type="button" onClick={() => setStep(1)} className="text-sm text-secondary underline-offset-2 hover:underline">
-                  I&apos;ll handle my password later →
-                </button>
-              </div>
-            </form>
           </div>
 
-          {/* Optional passkey enrollment — reuses the shared manager. */}
+          {/* Second factor — mandatory (TOTP or passkey). */}
           <div className="rounded-md border border-border bg-card p-4 shadow-sm">
-            <h3 className="text-sm font-semibold text-secondary">Passkeys (optional)</h3>
-            <p className="mb-2 mt-1 text-xs text-faint">Add a platform passkey for faster, phishing-resistant sign-in.</p>
-            <PasskeyManager userId={me.id} username={me.username} />
+            <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+              <ShieldCheck className="h-4 w-4 text-primary" /> Add a second factor
+            </h2>
+            <p className="mt-1 text-sm text-secondary">
+              Two-factor authentication is required before you can continue. Enroll an authenticator app (TOTP) or a
+              passkey — either one works for signing in from now on.
+            </p>
+
+            {twoFactorDone ? (
+              <div className="mt-3 flex items-center gap-2 rounded-md border border-success-border bg-success/10 px-3 py-2 text-sm text-success">
+                <CheckCircle2 className="h-4 w-4" /> Second factor enrolled — you&apos;re protected.
+              </div>
+            ) : (
+              <div className="mt-4 space-y-5">
+                {/* TOTP path */}
+                {!totpEnrollment ? (
+                  <button
+                    type="button"
+                    disabled={enrollTotp.isPending}
+                    onClick={() => enrollTotp.mutate()}
+                    className="flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
+                  >
+                    {enrollTotp.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                    Enroll authenticator app (TOTP) — show QR code
+                  </button>
+                ) : (
+                  <div className="space-y-3">
+                    <p className="text-sm text-secondary">Scan this QR code with your authenticator app, then enter the 6-digit code it shows to confirm.</p>
+                    <div className="flex flex-col items-start gap-4 sm:flex-row">
+                      <div className="rounded-md border border-border bg-card p-3">
+                        <QRCode value={totpEnrollment.otpauthUri} size={150} />
+                      </div>
+                      <div className="w-full space-y-2">
+                        <label className="mb-1 block text-sm font-medium text-secondary">6-digit code</label>
+                        <input
+                          className="w-full rounded-md border border-border px-3 py-2 text-sm tracking-widest focus:border-focus-ring focus:outline-none"
+                          value={totpCode}
+                          maxLength={6}
+                          inputMode="numeric"
+                          onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ''))}
+                          placeholder="000000"
+                        />
+                        <button
+                          type="button"
+                          disabled={confirmTotp.isPending || totpCode.length !== 6}
+                          onClick={() => confirmTotp.mutate()}
+                          className="flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
+                        >
+                          {confirmTotp.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                          Confirm code
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {totpError && (
+                  <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{totpError}</div>
+                )}
+
+                {/* Passkey path */}
+                <div className="border-t border-border pt-4">
+                  <h3 className="text-sm font-semibold text-secondary">Or add a passkey</h3>
+                  <p className="mb-2 mt-1 text-xs text-faint">Use your device&apos;s built-in authenticator instead of an app.</p>
+                  <PasskeyManager userId={me.id} username={me.username} />
+                </div>
+              </div>
+            )}
           </div>
+
+          {/* Advance — only once BOTH password and 2FA are done. */}
+          <button
+            type="button"
+            disabled={!securityComplete || completeOnboarding.isPending}
+            onClick={() => setStep(1)}
+            className="flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
+          >
+            Continue <ArrowRight className="h-4 w-4" />
+          </button>
         </div>
       )}
 
@@ -275,9 +376,7 @@ export default function OnboardingPage() {
           <div className="mt-4 flex items-center gap-4">
             <button
               type="button"
-              onClick={() => {
-                completeOnboarding.mutate(undefined, { onSuccess: () => navigate('/devices?new=1', { replace: true }) });
-              }}
+              onClick={() => finishAndExit('/devices?new=1')}
               disabled={completeOnboarding.isPending}
               className="flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
             >
@@ -294,7 +393,7 @@ export default function OnboardingPage() {
       {step === 3 && (
         <div className="space-y-5">
           <div className="rounded-md border border-success-border bg-success/10 p-4 text-sm text-success">
-            <CheckCircle2 className="mb-1 h-5 w-5" /> You&apos;re all set. Your instance is ready to manage devices.
+            <CheckCircle2 className="mb-1 h-5 w-5" /> You&apos;re all set. Your account is secured and your instance is ready to manage devices.
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             {[
@@ -315,9 +414,11 @@ export default function OnboardingPage() {
           </div>
           <button
             type="button"
-            onClick={() => navigate('/', { replace: true })}
-            className="flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover"
+            onClick={() => finishAndExit('/')}
+            disabled={completeOnboarding.isPending}
+            className="flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
           >
+            {completeOnboarding.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
             Go to dashboard <ArrowRight className="h-4 w-4" />
           </button>
         </div>

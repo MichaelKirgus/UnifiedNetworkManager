@@ -3,7 +3,6 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { eq, isNull } from 'drizzle-orm';
-import { generateSecret, buildOtpAuthUri } from './auth/totp';
 import { ADMIN_PERMISSIONS } from './auth/permissions';
 import * as schema from './db/schema';
 
@@ -1391,6 +1390,7 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
       [uuidv4(), new Date().toISOString()]
     );
   }
+
   // Notification center (see schema.notifications / notificationPrefs). The
   // partial unique index on dedupeKey is what makes the worker's upsert cheap:
   // one live row per ongoing condition.
@@ -1473,6 +1473,33 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   // First-run onboarding flag (NULL = wizard not yet completed/skipped).
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "onboardedAt" TEXT`);
 
+  // First-run onboarding: a FRESH initial admin (username 'admin', no TOTP
+  // secret yet) signs in with password only until they finish the setup wizard.
+  // That requires a per-user credential-policy override with requiredMethods []
+  // — without it, login step 2 would demand a second factor that doesn't exist
+  // yet and lock them out. Idempotent: only applies while onboardedAt IS NULL
+  // AND no TOTP secret is enrolled (a completed onboarding re-arms the policy via
+  // POST /auth/onboarding/complete; an admin who already has a second factor
+  // keeps their normal 2FA-required login). Runs AFTER the onboardedAt ALTER
+  // above so the column exists for the WHERE clause.
+  const unonboardedAdmin = await pool.query(
+    `SELECT id FROM users WHERE username = 'admin' AND "onboardedAt" IS NULL AND "totpSecret" IS NULL LIMIT 1`
+  );
+  if (unonboardedAdmin.rows.length > 0) {
+    const adminId = unonboardedAdmin.rows[0].id as string;
+    const existingOverride = await pool.query(
+      `SELECT id FROM credential_policies WHERE "userId" = $1 LIMIT 1`,
+      [adminId]
+    );
+    if (existingOverride.rows.length === 0) {
+      await pool.query(
+        `INSERT INTO credential_policies (id, "userId", "requiredMethods", "gateAmrs", "updatedAt")
+         VALUES ($1, $2, '[]', '[]', $3)`,
+        [uuidv4(), adminId, new Date().toISOString()]
+      );
+    }
+  }
+
   // Extended credential-policy fields (per-user override of password/session rules).
   await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "minPasswordLength" INTEGER`);
   await pool.query(`ALTER TABLE credential_policies ADD COLUMN IF NOT EXISTS "passwordMaxAgeDays" INTEGER`);
@@ -1533,24 +1560,42 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   }
 
   const passwordHash = bcrypt.hashSync('admin', 10);
-  const totpSecret = generateSecret();
 
+  // No TOTP secret is seeded: printing one to the container logs (the old
+  // behavior) leaked a working second factor, and it forced a 2FA prompt on the
+  // very first sign-in before any credential was set. The initial admin signs in
+  // with password only (see the no-2FA policy below + the plugin's
+  // twoFactorRequired flag), then MUST enroll TOTP or a passkey during the
+  // mandatory setup wizard — which stamps onboardedAt and re-enables the 2FA
+  // requirement for their account.
+  const adminId = uuidv4();
   await db.insert(schema.users).values({
-    id: uuidv4(),
+    id: adminId,
     username: 'admin',
     passwordHash,
-    totpSecret,
     roles: JSON.stringify(['admin']),
     permissions: JSON.stringify(ADMIN_PERMISSIONS),
     createdAt: new Date().toISOString(),
   });
 
+  // Per-user credential-policy override for the initial admin ONLY: no second
+  // factor required until onboarding completes. This is what makes the very
+  // first sign-in password-only (the plugin reports twoFactorRequired:false and
+  // /auth/login/complete mints a bare-pwd session). POST /auth/onboarding/
+  // complete rewrites this row to require whatever factor was enrolled, so from
+  // the next login onward 2FA is mandatory again. gateAmrs mirrors it so
+  // require2FA-gated endpoints stay locked for the pre-onboarding pwd-only
+  // session (an empty gateAmrs list matches no amr).
+  await db.insert(schema.credentialPolicies).values({
+    id: uuidv4(),
+    userId: adminId,
+    requiredMethods: '[]',
+    gateAmrs: '[]',
+    updatedAt: new Date().toISOString(),
+  });
+
   // eslint-disable-next-line no-console
-  console.log('[db] seeded default admin user (username: admin, password: admin)');
-  // eslint-disable-next-line no-console
-  console.log(`[db] admin TOTP secret (dev only): ${totpSecret}`);
-  // eslint-disable-next-line no-console
-  console.log(`[db] admin otpauth URI (scan with an authenticator app): ${buildOtpAuthUri('admin', totpSecret)}`);
+  console.log('[db] seeded default admin user (username: admin, password: admin) — first sign-in is password-only; the setup wizard enforces a new password + 2FA');
 }
 
 /**

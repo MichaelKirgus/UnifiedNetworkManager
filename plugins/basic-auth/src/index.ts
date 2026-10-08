@@ -125,31 +125,33 @@ app.post('/auth/login', requirePluginKey, async (req, res) => {
     return;
   }
 
-  // Policy check (best-effort — a lookup failure must not lock everyone out).
+  // Enrollment check (best-effort — a lookup failure must not lock everyone out).
   const requiredMethods = Array.isArray(policy?.requiredMethods) ? policy.requiredMethods : [];
+  let hasTotp = Boolean(user.totpSecret);
+  let passkeyCount = 0;
+  try {
+    if (!hasTotp || requiredMethods.includes('webauthn')) {
+      // Fetch credentials when they could satisfy the policy OR we need to know
+      // whether ANY second factor is enrolled (drives twoFactorRequired below).
+      const creds = await getWebauthnCredentials(user.id);
+      passkeyCount = creds.length;
+    }
+  } catch (err) {
+    logger.error(`Second-factor lookup failed during login for "${user.username}": ${(err as Error).message}`);
+    // Fail open on the enrollment check — step 2 still requires a valid TOTP
+    // code or passkey assertion, so no security is lost.
+  }
+
+  const hasAnySecondFactor = hasTotp || passkeyCount > 0;
+
   if (requiredMethods.length > 0) {
-    try {
-      const hasTotp = Boolean(user.totpSecret);
-      let passkeyCount = 0;
-      if (!hasTotp || !requiredMethods.includes('totp')) {
-        // Only fetch credentials when they could satisfy the policy.
-        if (requiredMethods.includes('webauthn')) {
-          const creds = await getWebauthnCredentials(user.id);
-          passkeyCount = creds.length;
-        }
-      }
-      const satisfies =
-        (requiredMethods.includes('totp') && hasTotp) ||
-        (requiredMethods.includes('webauthn') && passkeyCount > 0);
-      if (!satisfies) {
-        logger.warn(`Login blocked for "${user.username}": no enrolled second factor satisfies the credential policy`, { context: { username: user.username, requiredMethods } });
-        res.status(401).json({ error: 'no_2fa_enrolled' });
-        return;
-      }
-    } catch (err) {
-      logger.error(`Credential policy check failed during login for "${user.username}": ${(err as Error).message}`);
-      // Fail open on the 2FA-enrollment check — step 2 still requires a valid
-      // TOTP code or passkey assertion, so no security is lost.
+    const satisfies =
+      (requiredMethods.includes('totp') && hasTotp) ||
+      (requiredMethods.includes('webauthn') && passkeyCount > 0);
+    if (!satisfies) {
+      logger.warn(`Login blocked for "${user.username}": no enrolled second factor satisfies the credential policy`, { context: { username: user.username, requiredMethods } });
+      res.status(401).json({ error: 'no_2fa_enrolled' });
+      return;
     }
   }
 
@@ -157,7 +159,72 @@ app.post('/auth/login', requirePluginKey, async (req, res) => {
   const challengeToken = uuidv4();
   challenges.set(challengeToken, { userId: user.id, expiresAt: Date.now() + CHALLENGE_TTL_MS });
 
-  res.status(200).json({ challengeToken, twoFactorRequired: true });
+  // twoFactorRequired reflects ACTUAL enrollment (not just the policy): an
+  // account with no second factor enrolled completes sign-in password-only via
+  // /auth/login/complete. This is what lets the initial admin — who has no TOTP
+  // secret and a requiredMethods [] override until onboarding — get in at all,
+  // then enroll 2FA during the mandatory setup wizard. Once any factor exists,
+  // step 2 (TOTP code or passkey) is required again.
+  res.status(200).json({ challengeToken, twoFactorRequired: hasAnySecondFactor });
+});
+
+/**
+ * Password-only completion for a challenge whose account has NO second factor
+ * enrolled. Re-checks enrollment LIVE and refuses with `two_factor_required`
+ * when one now exists — so this path can only ever mint a bare-`pwd` session
+ * (today: the initial admin before onboarding). The webapp calls it when
+ * /auth/login reported twoFactorRequired:false.
+ */
+app.post('/auth/login/complete', requirePluginKey, async (req, res) => {
+  const challengeToken = typeof req.body?.challengeToken === 'string' ? req.body.challengeToken : '';
+
+  purgeExpiredChallenges();
+  const entry = challenges.get(challengeToken);
+  if (!entry || entry.expiresAt <= Date.now()) {
+    logger.warn('Password-only completion with an invalid or expired challenge token');
+    res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
+    return;
+  }
+
+  let user;
+  try {
+    user = await getUserById(entry.userId);
+  } catch (err) {
+    logger.error(`User lookup failed during password-only completion: ${(err as Error).message}`);
+    res.status(502).json({ error: 'Identity backend unavailable' });
+    return;
+  }
+  if (!user) {
+    challenges.delete(challengeToken);
+    res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
+    return;
+  }
+
+  // Live re-check: a second factor enrolled AFTER the login step (e.g. during
+  // onboarding) must force the normal TOTP/passkey path, not this one.
+  let hasTotp = Boolean(user.totpSecret);
+  if (!hasTotp) {
+    try {
+      const creds = await getWebauthnCredentials(user.id);
+      if (creds.length > 0) hasTotp = true; // any enrolled factor blocks password-only
+    } catch {
+      /* lookup hiccup — fall through to the TOTP check below */
+    }
+  }
+  if (hasTotp) {
+    challenges.delete(challengeToken);
+    logger.warn(`Password-only completion refused for "${user.username}": a second factor is now enrolled`);
+    res.status(403).json({ error: 'two_factor_required' });
+    return;
+  }
+
+  challenges.delete(challengeToken);
+  const roles = JSON.parse(user.roles) as string[];
+  const permissions = JSON.parse(user.permissions) as string[];
+
+  // amr is bare `pwd` — no second factor was proven, so require2FA-gated
+  // endpoints stay locked for this session.
+  res.status(200).json({ identity: { userId: user.id, username: user.username, roles, permissions, amr: ['pwd'] } });
 });
 
 /**
@@ -225,17 +292,22 @@ app.post('/auth/2fa/verify', requirePluginKey, async (req, res) => {
     return;
   }
 
-  let totpVerified = false;
-  if (user.totpSecret) {
-    const valid = verifyTotp(user.totpSecret, typeof code === 'string' ? code : '');
-    if (!valid) {
-      res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
-      return;
-    }
-    totpVerified = true;
+  if (!user.totpSecret) {
+    // No TOTP secret enrolled: the password-only path (/auth/login/complete) is
+    // the correct completion for such accounts, so a code here can never be
+    // valid. (The old "any 6-digit value works in dev mode" bypass is removed —
+    // it let any caller finish a TOTP step with an arbitrary code.)
+    challenges.delete(challengeToken);
+    res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
+    return;
   }
-  // If no TOTP secret is enrolled, allow completion in dev mode but do NOT
-  // claim `totp` in `amr` — this keeps `require2FA`-gated endpoints locked.
+
+  const valid = verifyTotp(user.totpSecret, typeof code === 'string' ? code : '');
+  if (!valid) {
+    challenges.delete(challengeToken);
+    res.status(401).json({ error: 'Invalid or expired 2FA challenge/token' });
+    return;
+  }
 
   challenges.delete(challengeToken);
 
@@ -248,7 +320,8 @@ app.post('/auth/2fa/verify', requirePluginKey, async (req, res) => {
       username: user.username,
       roles,
       permissions,
-      amr: totpVerified ? ['totp'] : ['pwd'],
+      // A valid TOTP code was just verified above — always claim `totp`.
+      amr: ['totp'],
     },
   });
 });

@@ -21,3 +21,17 @@ export function generateSecret(): string {
 export function buildOtpAuthUri(username: string, secret: string, issuer = 'UnifiedNetworkManager'): string {
   return authenticator.keyuri(username, issuer, secret);
 }
+/**
+ * Verifies a 6-digit TOTP code against a base32 secret (±1 time step). Used by
+ * the onboarding flow to CONFIRM that the initial admin actually scanned their
+ * freshly-enrolled secret before we stamp onboarding complete — so a half-done
+ * enrollment can't be skipped past. Login-time verification still happens in the
+ * identity provider plugin; this is only for the self-service confirm step.
+ */
+export function verifyTotp(secret: string, code: string): boolean {
+  try {
+    return authenticator.verify({ token: (code ?? '').trim(), secret });
+  } catch {
+    return false;
+  }
+}

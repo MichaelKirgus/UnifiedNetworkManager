@@ -1,6 +1,7 @@
 import { Request, Response as ExpressResponse, Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { eq } from 'drizzle-orm';
+import { v4 as uuidv4 } from 'uuid';
 import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { signToken } from '../auth/jwt';
@@ -9,6 +10,7 @@ import { allowedDeviceIds } from '../deviceAccess';
 import {
   login,
   verify2fa,
+  completeLogin,
   revalidateChallenge,
   getFlow,
   getRedirectUrl,
@@ -21,8 +23,51 @@ import { expandRolePermissions } from './roles';
 import { serializeUser } from './users';
 import { getEffectiveSettingValue } from '../systemSettings';
 import { resolveCredentialPolicy, effectiveSessionTtl, effectiveMinPasswordLength } from '../auth/credentialPolicy';
+import { INITIAL_ADMIN_USERNAME } from '../auth/permissions';
 
 const router = Router();
+
+/** The second factors currently enrolled on a user (totp and/or webauthn). */
+async function enrolledSecondFactorMethods(user: typeof schema.users.$inferSelect): Promise<string[]> {
+  const methods: string[] = [];
+  if (user.totpSecret) methods.push('totp');
+  try {
+    const countRow = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM webauthn_credentials WHERE "userId" = $1`,
+      [user.id]
+    );
+    if (Number(countRow.rows[0]?.n ?? 0) > 0) methods.push('webauthn');
+  } catch {
+    /* table missing pre-migration — treat as none */
+  }
+  return methods;
+}
+
+/**
+ * Upserts the initial admin's per-user credential-policy override so login step
+ * 2 requires exactly the second factors they enrolled during onboarding. Called
+ * from /auth/onboarding/complete (first completion only). `gateAmrs` mirrors
+ * `requiredMethods` so require2FA-gated endpoints accept the same AMRs. When no
+ * factor is enrolled we keep the override at requiredMethods [] — but that state
+ * cannot occur in practice, because onboarding completion requires enrolling one.
+ */
+async function upsertInitialAdminPolicy(userId: string, methods: string[]): Promise<void> {
+  const now = new Date().toISOString();
+  const existing = await db.query.credentialPolicies.findFirst({ where: eq(schema.credentialPolicies.userId, userId) });
+  if (existing) {
+    await db.update(schema.credentialPolicies)
+      .set({ requiredMethods: JSON.stringify(methods), gateAmrs: JSON.stringify(methods), updatedAt: now })
+      .where(eq(schema.credentialPolicies.id, existing.id));
+  } else {
+    await db.insert(schema.credentialPolicies).values({
+      id: uuidv4(),
+      userId,
+      requiredMethods: JSON.stringify(methods),
+      gateAmrs: JSON.stringify(methods),
+      updatedAt: now,
+    });
+  }
+}
 
 /**
  * Mints the platform JWT from a verified identity assertion (shared by the
@@ -516,6 +561,30 @@ router.post('/auth/2fa/verify', async (req, res) => {
 });
 
 /**
+ * Password-only completion for a challenge whose policy requires NO second
+ * factor (today: the initial admin before onboarding — see /auth/login's
+ * `twoFactorRequired: false`). The provider re-checks the LIVE credential
+ * policy and answers 403 `two_factor_required` when one is now required, so
+ * this can never mint a session for an account that should have used TOTP or a
+ * passkey. Mints the same session shape as /auth/2fa/verify (amr: ['pwd']).
+ */
+router.post('/auth/login/complete', async (req, res) => {
+  const challengeToken = typeof req.body?.challengeToken === 'string' ? req.body.challengeToken : '';
+
+  try {
+    const identity = await completeLogin(challengeToken);
+    res.status(200).json(await mintSession(identity));
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    if (e.message === 'two_factor_required') {
+      res.status(403).json({ error: 'A second factor is required for this account', code: 'two_factor_required' });
+      return;
+    }
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Authentication failed' });
+  }
+});
+
+/**
  * WebAuthn step 2a: fetch assertion options for a pending challenge. The API
  * generates the nonce + options (it owns the RP identity); the provider binds
  * the nonce to its in-memory challenge entry. The webapp then calls
@@ -696,25 +765,45 @@ router.post('/auth/me/password', requireAuth, async (req, res) => {
 });
 
 // POST /auth/onboarding/complete — the CALLER marks their first-run setup
-// wizard as done (or skipped). Idempotent; stamps users.onboardedAt so the
-// webapp never redirects them to /onboarding again. Self-only by design —
-// there is no admin override because re-running the wizard for someone else
-// would be meaningless (it edits their own password/2FA + instance settings).
+// wizard as done. Idempotent; stamps users.onboardedAt so the webapp never
+// redirects them to /onboarding again. Self-only by design — there is no admin
+// override because re-running the wizard for someone else would be meaningless
+// (it edits their own password/2FA + instance settings).
+//
+// For the INITIAL ADMIN this also RE-ENABLES 2FA: first sign-in was allowed to
+// be password-only (a per-user policy override with requiredMethods [] is seeded
+// alongside the account), so on completion we point that override at whatever
+// second factor they actually enrolled (totp and/or webauthn). From their next
+// login onward a matching second factor is mandatory again. Non-admin callers
+// are unaffected — they never had such an override.
 router.post('/auth/onboarding/complete', requireAuth, async (req, res) => {
   const userId = req.user!.sub;
-  try {
-    // First completion wins — re-calls keep the original timestamp.
-    const existing = await db.query.users.findFirst({ where: eq(schema.users.id, userId) });
-    if (!existing?.onboardedAt) {
+
+  // First completion wins — re-calls keep the original timestamp AND do not
+  // rewrite the credential policy (the enrolled set is fixed at first finish).
+  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, userId) });
+  if (!existing) {
+    res.status(401).json({ error: 'User no longer exists' });
+    return;
+  }
+  if (!existing.onboardedAt) {
+    try {
       await db.update(schema.users)
         .set({ onboardedAt: new Date().toISOString() })
         .where(eq(schema.users.id, userId));
+
+      // Re-arm the initial admin's 2FA requirement from their live enrollment.
+      if (existing.username === INITIAL_ADMIN_USERNAME) {
+        const methods = await enrolledSecondFactorMethods(existing);
+        await upsertInitialAdminPolicy(userId, methods);
+      }
+    } catch (err) {
+      console.error('[auth] onboarding complete failed:', err);
+      res.status(500).json({ error: 'Internal server error' });
+      return;
     }
-  } catch (err) {
-    console.error('[auth] onboarding complete failed:', err);
-    res.status(500).json({ error: 'Internal server error' });
-    return;
   }
+
   const row = await db.query.users.findFirst({ where: eq(schema.users.id, userId) });
   if (!row) {
     res.status(401).json({ error: 'User no longer exists' });
