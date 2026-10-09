@@ -254,8 +254,10 @@ export default function Updates() {
   // Action catalogs of the plugins reporting updates — used to offer actions a
   // plugin actually advertises (e.g. generic-ssh's `packages.dist-upgrade`).
   const catalogPluginIds = useMemo(() => [...new Set(rows.map((r) => r.pluginId))], [rows]);
+  // Distinct key family from the single-plugin `['plugin-actions', pid]` read:
+  // this is a BATCH that stores only action-id lists (not full catalog entries).
   const catalogsQuery = useQuery({
-    queryKey: ['plugin-actions', catalogPluginIds.join('|')],
+    queryKey: ['plugin-action-ids', catalogPluginIds.join('|')],
     queryFn: async () => {
       const out = new Map<string, string[]>();
       await Promise.all(catalogPluginIds.map(async (pid) => {

@@ -156,10 +156,10 @@ export async function reorderAssignments(deviceId: string, orderedPluginIds: str
   const byId = new Map(siblings.map((s) => [s.pluginId, s]));
   const seen = new Set<string>();
   const sequence: string[] = [];
-  for (const pid of orderedPluginIds) {
-    if (!byId.has(pid) || seen.has(pid)) continue;
-    seen.add(pid);
-    sequence.push(pid);
+  for (const pluginId of orderedPluginIds) {
+    if (!byId.has(pluginId) || seen.has(pluginId)) continue;
+    seen.add(pluginId);
+    sequence.push(pluginId);
   }
   for (const s of siblings) {
     if (!seen.has(s.pluginId)) sequence.push(s.pluginId);

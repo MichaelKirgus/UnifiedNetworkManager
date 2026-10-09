@@ -3146,7 +3146,8 @@ export const api = {
       `/devices/${deviceId}/telemetry?limit=${limit}`
     ),
   plugins: () => apiFetch<Plugin[]>('/plugins'),
-  configJobs: (deviceId: string, body: unknown) =>
+  // CREATE (POST), not a list read — named verb-first like every other mutation.
+  createConfigJob: (deviceId: string, body: unknown) =>
     apiFetch<ConfigJob>(`/devices/${deviceId}/config-jobs`, { method: 'POST', body: JSON.stringify(body) }),
   allConfigJobs: () => apiFetch<ConfigJob[]>('/config-jobs'),
   getConfigJob: (jobId: string) => apiFetch<ConfigJob>(`/config-jobs/${jobId}`),

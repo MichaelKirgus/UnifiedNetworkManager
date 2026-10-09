@@ -96,8 +96,10 @@ export default function CreateVmPage() {
     () => Array.from(new Set((devicesQuery.data ?? []).flatMap((d) => (d.plugins ?? []).map((p) => p.pluginId)))),
     [devicesQuery.data],
   );
+  // Same data as the Containers/Create-app "all plugins" catalog — share that
+  // key family so a fresh fetch on one page is reused by the other.
   const catalogsQuery = useQuery({
-    queryKey: ['vms-create-catalogs', allPluginIds.join('|')],
+    queryKey: ['plugin-actions-catalogs-all', allPluginIds.join('|')],
     queryFn: async () => {
       const entries = await Promise.all(
         allPluginIds.map(async (pid) => [pid, (await api.pluginActions(pid)).actions] as const),

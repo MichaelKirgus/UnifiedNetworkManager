@@ -162,10 +162,12 @@ export function internalRouter() {
 
   // --- User data under /plugin/users (identity provider access) ------------
 
-  // Serialize a user row for plugin consumption. `roles`/`permissions` are
-  // returned as stored (JSON strings) to match the column shape; the plugin
-  // parses them.
-  function serializeUser(row: typeof schema.users.$inferSelect) {
+  // Serialize a user row for PLUGIN consumption (identity-provider login flow).
+  // Distinct from routes/users.ts's webapp-facing `serializeUser`: this one is
+  // credential-bearing — it exposes passwordHash + totpSecret so the plugin can
+  // verify logins. `roles`/`permissions` are returned as stored (JSON strings)
+  // to match the column shape; the plugin parses them.
+  function serializeUserForPlugin(row: typeof schema.users.$inferSelect) {
     return {
       id: row.id,
       username: row.username,
@@ -187,7 +189,7 @@ export function internalRouter() {
       if (!row) {
         return res.status(404).json({ error: 'User not found' });
       }
-      res.json(serializeUser(row));
+      res.json(serializeUserForPlugin(row));
     } catch (error) {
       console.error('Error looking up user by username:', error);
       res.status(500).json({ error: 'Internal server error' });
@@ -204,7 +206,7 @@ export function internalRouter() {
       if (!row) {
         return res.status(404).json({ error: 'User not found' });
       }
-      res.json(serializeUser(row));
+      res.json(serializeUserForPlugin(row));
     } catch (error) {
       console.error('Error looking up user by id:', error);
       res.status(500).json({ error: 'Internal server error' });
@@ -242,7 +244,7 @@ export function internalRouter() {
       const row = await db.query.users.findFirst({
         where: (users, { eq }) => eq(users.id, id),
       });
-      res.status(201).json(serializeUser(row!));
+      res.status(201).json(serializeUserForPlugin(row!));
     } catch (error) {
       console.error('Error creating user:', error);
       res.status(500).json({ error: 'Internal server error' });
@@ -282,7 +284,7 @@ export function internalRouter() {
       const row = await db.query.users.findFirst({
         where: (users, { eq }) => eq(users.id, id),
       });
-      res.json(serializeUser(row!));
+      res.json(serializeUserForPlugin(row!));
     } catch (error) {
       console.error('Error updating user:', error);
       res.status(500).json({ error: 'Internal server error' });

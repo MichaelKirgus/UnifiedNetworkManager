@@ -1158,13 +1158,13 @@ router.post('/devices/:deviceId/quick-action', requireAuth, requirePermission('d
     const assignments = await db.query.devicePlugins.findMany({ where: eq(schema.devicePlugins.deviceId, deviceId) });
     const pluginIds = Array.from(new Set(assignments.map((a) => a.pluginId)));
     let found = false;
-    for (const pid of pluginIds) {
-      const row = await db.query.plugins.findFirst({ where: eq(schema.plugins.id, pid) });
+    for (const candidatePluginId of pluginIds) {
+      const row = await db.query.plugins.findFirst({ where: eq(schema.plugins.id, candidatePluginId) });
       if (!row?.quickActions) continue;
       try {
         const list = JSON.parse(row.quickActions);
         if (Array.isArray(list) && list.some((q) => q && typeof q === 'object' && (q as Record<string, unknown>).id === actionId)) {
-          pluginId = pid;
+          pluginId = candidatePluginId;
           found = true;
           break;
         }

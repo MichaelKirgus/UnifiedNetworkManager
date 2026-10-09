@@ -194,8 +194,9 @@ export default function NetworkRolloutPage() {
   }, [targetDevices]);
 
   // Catalog per candidate plugin — only plugins implementing network.create count.
+  // Own key family (stores one filtered entry per plugin, not full catalogs).
   const catalogQueries = useQuery({
-    queryKey: ['rollout-catalogs', candidatePluginIds],
+    queryKey: ['plugin-actions-intent', INTENT_ID, candidatePluginIds.join('|')],
     queryFn: async () => {
       const out = new Map<string, CatalogEntry | null>();
       for (const pid of candidatePluginIds) {

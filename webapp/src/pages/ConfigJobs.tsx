@@ -52,7 +52,7 @@ export default function ConfigJobs() {
 
   const submitJob = useMutation({
     mutationFn: (body: { pluginId: string; action: string; payload: Record<string, unknown> }) =>
-      api.configJobs(deviceId, body),
+      api.createConfigJob(deviceId, body),
     onSuccess: () => {
       setShowForm(false);
       setDeviceId('');
