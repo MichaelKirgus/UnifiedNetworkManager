@@ -21,7 +21,8 @@ function serializeConfigJob(row: any) {
 }
 
 router.get('/config-jobs/:jobId', requireAuth, requirePermission('config-jobs:read'), async (req, res) => {
-  const { jobId } = req.params;
+  // Express 5 types params as string | string[] — coerce.
+  const jobId = String(req.params.jobId ?? '');
   const job = await db.query.configJobs.findFirst({
     where: (configJobs, { eq }) => eq(configJobs.id, jobId),
   });

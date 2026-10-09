@@ -865,8 +865,8 @@ router.get('/plans', requireAuth, requirePermission('plans:read'), async (_req, 
 
 // GET /plans/:id — full plan with ordered steps + provisioned secret metadata.
 router.get('/plans/:id', requireAuth, requirePermission('plans:read'), async (req, res) => {
-  if (!(await assertPlanAccess(req, res, req.params.id))) return;
-  const out = await serializePlan(req.params.id, true);
+  if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+  const out = await serializePlan(String(req.params.id ?? ''), true);
   if (!out) {
     res.status(404).json({ error: 'Plan not found' });
     return;
@@ -882,8 +882,8 @@ router.patch(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
-    const plan = await loadPlan(req.params.id);
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -933,8 +933,8 @@ router.patch(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
-    const plan = await loadPlan(req.params.id);
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -944,7 +944,7 @@ router.patch(
       return;
     }
     const steps = await loadSteps(plan.id);
-    const step = steps.find((s) => s.id === req.params.stepId);
+    const step = steps.find((s) => s.id === String(req.params.stepId ?? ''));
     if (!step) {
       res.status(404).json({ error: 'Step not found' });
       return;
@@ -1035,7 +1035,7 @@ router.post(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    const plan = await loadPlan(req.params.id);
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1136,7 +1136,7 @@ router.post(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    const plan = await loadPlan(req.params.id);
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1243,7 +1243,7 @@ router.delete(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    const plan = await loadPlan(req.params.id);
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1253,7 +1253,7 @@ router.delete(
       return;
     }
     const steps = await loadSteps(plan.id);
-    const step = steps.find((s) => s.id === req.params.stepId);
+    const step = steps.find((s) => s.id === String(req.params.stepId ?? ''));
     if (!step) {
       res.status(404).json({ error: 'Step not found' });
       return;
@@ -1284,7 +1284,7 @@ router.patch(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    const plan = await loadPlan(req.params.id);
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1294,7 +1294,7 @@ router.patch(
       return;
     }
     // Device-level access control (reorder touches every step's device).
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
 
     const body = req.body ?? {};
     const from = typeof body.from === 'number' ? body.from : -1;
@@ -1326,7 +1326,7 @@ router.post(
   require2FA,
   requirePermission('configs:apply'),
   async (req, res) => {
-    const plan = await loadPlan(req.params.id);
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1336,7 +1336,7 @@ router.post(
       return;
     }
     // Device-level access control — executing applies changes to every step's device.
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
 
     await enqueuePlanExecution(plan.id, req.user?.sub ?? null);
     res.status(202).json((await serializePlan(plan.id, true))!);
@@ -1353,7 +1353,7 @@ router.post(
   require2FA,
   requirePermission('configs:apply'),
   async (req, res) => {
-    const plan = await loadPlan(req.params.id);
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1363,7 +1363,7 @@ router.post(
       return;
     }
     // Device-level access control — a retry re-applies every step's device.
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
 
     const steps = await loadSteps(plan.id);
     if (steps.length === 0) {
@@ -1421,12 +1421,12 @@ router.post(
 
 // POST /plans/:id/cancel — cooperative cancel; the executor checks between steps.
 router.post('/plans/:id/cancel', requireAuth, requirePermission('configs:apply'), async (req, res) => {
-  const plan = await loadPlan(req.params.id);
+  const plan = await loadPlan(String(req.params.id ?? ''));
   if (!plan) {
     res.status(404).json({ error: 'Plan not found' });
     return;
   }
-  if (!(await assertPlanAccess(req, res, req.params.id))) return;
+  if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
   if (plan.status !== 'executing') {
     res.status(409).json({ error: `Plan is ${plan.status} — only executing plans can be cancelled` });
     return;
@@ -1444,16 +1444,16 @@ router.post(
   requireAuth,
   requirePermission('secrets:write'),
   async (req, res) => {
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
-    const plan = await loadPlan(req.params.id);
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
     }
     const provisioned = parseJson<Record<string, string>>(plan.provisionedSecrets, {});
-    const secretId = provisioned[req.params.ref];
+    const secretId = provisioned[String(req.params.ref ?? '')];
     if (!secretId) {
-      res.status(404).json({ error: `No provisioned secret with ref "${req.params.ref}"` });
+      res.status(404).json({ error: `No provisioned secret with ref "${String(req.params.ref ?? '')}"` });
       return;
     }
     try {
@@ -1510,8 +1510,8 @@ router.post(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
-    const plan = await loadPlan(req.params.id);
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1563,8 +1563,8 @@ router.delete(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
-    const plan = await loadPlan(req.params.id);
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1593,12 +1593,12 @@ router.delete(
 
 // DELETE /plans/:id — delete a non-executing plan + its steps + provisioned secrets.
 router.delete('/plans/:id', requireAuth, requirePermission('configs:apply'), async (req, res) => {
-  const plan = await loadPlan(req.params.id);
+  const plan = await loadPlan(String(req.params.id ?? ''));
   if (!plan) {
     res.status(404).json({ error: 'Plan not found' });
     return;
   }
-  if (!(await assertPlanAccess(req, res, req.params.id))) return;
+  if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
   if (plan.status === 'executing') {
     res.status(409).json({ error: 'Cancel the plan before deleting it' });
     return;

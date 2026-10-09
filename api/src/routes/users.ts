@@ -269,7 +269,7 @@ router.patch('/users/:id', requireAuth, requirePermission('users:write'), async 
     return;
   }
 
-  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, req.params.id) });
+  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, String(req.params.id ?? '')) });
   if (!existing) {
     res.status(404).json({ error: 'User not found' });
     return;
@@ -312,13 +312,13 @@ router.patch('/users/:id', requireAuth, requirePermission('users:write'), async 
     ...(check.values.deviceScope !== undefined
       ? { deviceScope: JSON.stringify(check.values.deviceScope) }
       : {}),
-  }).where(eq(schema.users.id, req.params.id));
+  }).where(eq(schema.users.id, String(req.params.id ?? '')));
 
   // Scope rules changed — drop the per-user allowed-id caches so the new scope
   // applies immediately (not after the 5 s TTL).
   invalidateDeviceAccessCache();
 
-  const updated = await db.query.users.findFirst({ where: eq(schema.users.id, req.params.id) });
+  const updated = await db.query.users.findFirst({ where: eq(schema.users.id, String(req.params.id ?? '')) });
   if (!updated) {
     res.status(500).json({ error: 'Failed to retrieve updated user' });
     return;
@@ -329,8 +329,7 @@ router.patch('/users/:id', requireAuth, requirePermission('users:write'), async 
 // DELETE /users/:id — remove a user (requires users:write). Refuses self-delete
 // and deleting the last admin.
 router.delete('/users/:id', requireAuth, requirePermission('users:write'), async (req: Request, res: Response) => {
-  const targetId = req.params.id;
-
+  const targetId = String(req.params.id ?? '');
   if (req.user?.sub && req.user.sub === targetId) {
     res.status(409).json({ error: 'You cannot delete your own account.' });
     return;
@@ -375,7 +374,7 @@ router.delete('/users/:id', requireAuth, requirePermission('users:write'), async
 // initial seeded admin can never be disabled (it would lock out the last
 // guaranteed human path into the system).
 router.patch('/users/:id/status', requireAuth, requirePermission('users:write'), async (req, res) => {
-  const targetId = req.params.id;
+  const targetId = String(req.params.id ?? '');
   const body = (req.body ?? {}) as Record<string, unknown>;
   if (typeof body.disabled !== 'boolean') {
     res.status(400).json({ error: '"disabled" must be a boolean' });
@@ -417,7 +416,7 @@ function checkCredentialAccess(req: Request, targetId: string): string | null {
 // users:self-credentials) must prove the current password; resetting another
 // user (requires users:manage-credentials) does not.
 router.post('/users/:id/password', requireAuth, async (req: Request, res: Response) => {
-  const denied = checkCredentialAccess(req, req.params.id);
+  const denied = checkCredentialAccess(req, String(req.params.id ?? ''));
   if (denied) {
     res.status(403).json({ error: denied });
     return;
@@ -429,7 +428,7 @@ router.post('/users/:id/password', requireAuth, async (req: Request, res: Respon
     return;
   }
 
-  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, req.params.id) });
+  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, String(req.params.id ?? '')) });
   if (!existing) {
     res.status(404).json({ error: 'User not found' });
     return;
@@ -467,13 +466,13 @@ router.post('/users/:id/password', requireAuth, async (req: Request, res: Respon
 // otpauth URI so the UI can render a QR code. Re-enrolling replaces any
 // previous secret (old authenticator entries stop working).
 router.post('/users/:id/totp/enroll', requireAuth, async (req: Request, res: Response) => {
-  const denied = checkCredentialAccess(req, req.params.id);
+  const denied = checkCredentialAccess(req, String(req.params.id ?? ''));
   if (denied) {
     res.status(403).json({ error: denied });
     return;
   }
 
-  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, req.params.id) });
+  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, String(req.params.id ?? '')) });
   if (!existing) {
     res.status(404).json({ error: 'User not found' });
     return;
@@ -495,12 +494,12 @@ router.post('/users/:id/totp/enroll', requireAuth, async (req: Request, res: Res
 // not be skippable). No permission beyond being authenticated as that user —
 // it never touches another account, so no users:* grant is needed.
 router.post('/users/:id/totp/confirm', requireAuth, async (req: Request, res: Response) => {
-  if (!req.user?.sub || req.user.sub !== req.params.id) {
+  if (!req.user?.sub || req.user.sub !== String(req.params.id ?? '')) {
     res.status(403).json({ error: 'You can only confirm your own TOTP enrollment' });
     return;
   }
 
-  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, req.params.id) });
+  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, String(req.params.id ?? '')) });
   if (!existing || !existing.totpSecret) {
     res.status(409).json({ error: 'No TOTP secret is enrolled on this account' });
     return;
@@ -512,13 +511,13 @@ router.post('/users/:id/totp/confirm', requireAuth, async (req: Request, res: Re
 
 // DELETE /users/:id/totp — disable TOTP for a user (clears the secret).
 router.delete('/users/:id/totp', requireAuth, async (req: Request, res: Response) => {
-  const denied = checkCredentialAccess(req, req.params.id);
+  const denied = checkCredentialAccess(req, String(req.params.id ?? ''));
   if (denied) {
     res.status(403).json({ error: denied });
     return;
   }
 
-  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, req.params.id) });
+  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, String(req.params.id ?? '')) });
   if (!existing) {
     res.status(404).json({ error: 'User not found' });
     return;
@@ -558,7 +557,7 @@ function serializeCredential(row: typeof schema.webauthnCredentials.$inferSelect
 
 // GET /users/:id/passkeys — list a user's enrolled passkeys.
 router.get('/users/:id/passkeys', requireAuth, async (req: Request, res: Response) => {
-  const denied = checkCredentialAccess(req, req.params.id);
+  const denied = checkCredentialAccess(req, String(req.params.id ?? ''));
   if (denied) {
     res.status(403).json({ error: denied });
     return;
@@ -566,7 +565,7 @@ router.get('/users/:id/passkeys', requireAuth, async (req: Request, res: Respons
 
   try {
     const rows = await db.query.webauthnCredentials.findMany({
-      where: eq(schema.webauthnCredentials.userId, req.params.id),
+      where: eq(schema.webauthnCredentials.userId, String(req.params.id ?? '')),
       orderBy: [schema.webauthnCredentials.createdAt],
     });
     res.status(200).json(rows.map(serializeCredential));
@@ -579,13 +578,13 @@ router.get('/users/:id/passkeys', requireAuth, async (req: Request, res: Respons
 // POST /users/:id/passkeys — start passkey enrollment. Returns WebAuthn
 // registration options for navigator.credentials.create(). Body: { label? }.
 router.post('/users/:id/passkeys', requireAuth, async (req: Request, res: Response) => {
-  const denied = checkCredentialAccess(req, req.params.id);
+  const denied = checkCredentialAccess(req, String(req.params.id ?? ''));
   if (denied) {
     res.status(403).json({ error: denied });
     return;
   }
 
-  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, req.params.id) });
+  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, String(req.params.id ?? '')) });
   if (!existing) {
     res.status(404).json({ error: 'User not found' });
     return;
@@ -619,13 +618,13 @@ router.post('/users/:id/passkeys', requireAuth, async (req: Request, res: Respon
 // { nonce, response (PublicKeyCredentialCreationResponse), label? }. Verifies
 // the attestation and stores the credential on success.
 router.post('/users/:id/passkeys/verify', requireAuth, async (req: Request, res: Response) => {
-  const denied = checkCredentialAccess(req, req.params.id);
+  const denied = checkCredentialAccess(req, String(req.params.id ?? ''));
   if (denied) {
     res.status(403).json({ error: denied });
     return;
   }
 
-  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, req.params.id) });
+  const existing = await db.query.users.findFirst({ where: eq(schema.users.id, String(req.params.id ?? '')) });
   if (!existing) {
     res.status(404).json({ error: 'User not found' });
     return;
@@ -687,7 +686,7 @@ router.post('/users/:id/passkeys/verify', requireAuth, async (req: Request, res:
 
 // DELETE /users/:id/passkeys/:credentialId — remove a passkey (self or admin).
 router.delete('/users/:id/passkeys/:credentialId', requireAuth, async (req: Request, res: Response) => {
-  const denied = checkCredentialAccess(req, req.params.id);
+  const denied = checkCredentialAccess(req, String(req.params.id ?? ''));
   if (denied) {
     res.status(403).json({ error: denied });
     return;
@@ -697,7 +696,7 @@ router.delete('/users/:id/passkeys/:credentialId', requireAuth, async (req: Requ
     // Scope by BOTH user and credential id — a credential can never be deleted
     // "through" another user's account.
     const result = await db.delete(schema.webauthnCredentials)
-      .where(and(eq(schema.webauthnCredentials.userId, req.params.id), eq(schema.webauthnCredentials.credentialId, req.params.credentialId)))
+      .where(and(eq(schema.webauthnCredentials.userId, String(req.params.id ?? '')), eq(schema.webauthnCredentials.credentialId, String(req.params.credentialId ?? ''))))
       .returning({ id: schema.webauthnCredentials.id });
 
     if (!result || result.length === 0) {

@@ -128,7 +128,7 @@ filesRouter.post('/files', requireAuth, requirePermission('files:write'), async 
 // attachment). Records a usage row for the audit trail.
 filesRouter.get('/files/:id', requireAuth, requirePermission('files:read'), async (req: Request, res: Response) => {
   try {
-    const opened = await openRepoFile(req.params.id);
+    const opened = await openRepoFile(String(req.params.id ?? ''));
     if (!opened) {
       res.status(404).json({ error: 'File not found or its content is missing from the repo volume' });
       return;
@@ -154,7 +154,7 @@ filesRouter.get('/files/:id', requireAuth, requirePermission('files:read'), asyn
 // GET /files/:id/uses — the usage audit trail for one file (newest first).
 filesRouter.get('/files/:id/uses', requireAuth, requirePermission('files:read'), async (req: Request, res: Response) => {
   try {
-    const entry = await getRepoFile(req.params.id);
+    const entry = await getRepoFile(String(req.params.id ?? ''));
     if (!entry) {
       res.status(404).json({ error: 'File not found' });
       return;
@@ -170,7 +170,7 @@ filesRouter.get('/files/:id/uses', requireAuth, requirePermission('files:read'),
 // DELETE /files/:id — remove a file (content + metadata). Usage rows are kept.
 filesRouter.delete('/files/:id', requireAuth, requirePermission('files:write'), async (req: Request, res: Response) => {
   try {
-    await deleteRepoFile(req.params.id);
+    await deleteRepoFile(String(req.params.id ?? ''));
     res.status(204).end();
   } catch (err) {
     if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });
@@ -234,7 +234,7 @@ internalFileRepoRouter.post('/plugin/files', pluginAuth, async (req: Request, re
 // GET /plugin/files/:id — metadata for one repo file (name/category/size/sha256).
 internalFileRepoRouter.get('/plugin/files/:id', pluginAuth, async (req: Request, res: Response) => {
   try {
-    const entry = await getRepoFile(req.params.id);
+    const entry = await getRepoFile(String(req.params.id ?? ''));
     if (!entry) {
       res.status(404).json({ error: 'File not found' });
       return;
@@ -251,7 +251,7 @@ internalFileRepoRouter.get('/plugin/files/:id', pluginAuth, async (req: Request,
 // transport (TrueNAS filesystem.put over /_upload, an OPNsense config upload…).
 internalFileRepoRouter.get('/plugin/files/:id/content', pluginAuth, async (req: Request, res: Response) => {
   try {
-    const opened = await openRepoFile(req.params.id);
+    const opened = await openRepoFile(String(req.params.id ?? ''));
     if (!opened) {
       res.status(404).json({ error: 'File not found or its content is missing from the repo volume' });
       return;
@@ -273,7 +273,7 @@ internalFileRepoRouter.get('/plugin/files/:id/content', pluginAuth, async (req: 
 // DELETE /plugin/files/:id — a plugin removes a repo file.
 internalFileRepoRouter.delete('/plugin/files/:id', pluginAuth, async (req: Request, res: Response) => {
   try {
-    await deleteRepoFile(req.params.id);
+    await deleteRepoFile(String(req.params.id ?? ''));
     res.status(204).end();
   } catch (err) {
     if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });
@@ -286,7 +286,7 @@ internalFileRepoRouter.delete('/plugin/files/:id', pluginAuth, async (req: Reque
 internalFileRepoRouter.post('/plugin/files/:id/use', pluginAuth, async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
   try {
-    const use = await recordRepoFileUse(req.params.id, {
+    const use = await recordRepoFileUse(String(req.params.id ?? ''), {
       deviceId: typeof body.deviceId === 'string' && body.deviceId !== '' ? body.deviceId : null,
       note: typeof body.note === 'string' && body.note !== '' ? body.note.slice(0, 500) : null,
       usedBy: 'plugin',

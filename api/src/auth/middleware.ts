@@ -133,7 +133,8 @@ export function requirePermission(permission: string) {
  * requireAuth (it reads req.user) and BEFORE any handler that touches the DB.
  */
 export async function requireDeviceAccess(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const deviceId = req.params.deviceId;
+  // Express 5 types params as string | string[] — coerce (all routes here use single-segment params).
+  const deviceId = String(req.params.deviceId ?? '');
   if (!deviceId || isUnrestricted(req)) {
     next();
     return;

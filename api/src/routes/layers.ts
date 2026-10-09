@@ -111,7 +111,7 @@ router.post('/layers', requireAuth, requirePermission('layers:write'), async (re
 router.patch('/layers/:id', requireAuth, requirePermission('layers:write'), async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as LayerInput;
 
-  const existing = await db.query.networkLayers.findFirst({ where: eq(schema.networkLayers.id, req.params.id) });
+  const existing = await db.query.networkLayers.findFirst({ where: eq(schema.networkLayers.id, String(req.params.id ?? '')) });
   if (!existing) {
     res.status(404).json({ error: 'Layer not found' });
     return;
@@ -172,7 +172,7 @@ router.patch('/layers/:id', requireAuth, requirePermission('layers:write'), asyn
 // are never deletable (the heuristic references their ids); custom layers are
 // refused with 409 while any device's manual override still points at them.
 router.delete('/layers/:id', requireAuth, requirePermission('layers:write'), async (req: Request, res: Response) => {
-  const existing = await db.query.networkLayers.findFirst({ where: eq(schema.networkLayers.id, req.params.id) });
+  const existing = await db.query.networkLayers.findFirst({ where: eq(schema.networkLayers.id, String(req.params.id ?? '')) });
   if (!existing) {
     res.status(404).json({ error: 'Layer not found' });
     return;

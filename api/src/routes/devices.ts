@@ -475,7 +475,8 @@ const UPDATABLE_FIELDS = ['name', 'vendor', 'managementAddress'] as const;
 
 // PATCH /devices/:id - rename a device, change its management address or site.
 router.patch('/devices/:id', requireAuth, requirePermission('devices:write'), async (req, res) => {
-  const { id: deviceId } = req.params;
+  // Express 5 types params as string | string[] — coerce.
+  const deviceId = String(req.params.id ?? '');
   const body = (req.body ?? {}) as Record<string, unknown>;
 
   const updates: Partial<typeof schema.devices.$inferInsert> = {};
@@ -621,7 +622,8 @@ router.patch('/devices/:id', requireAuth, requirePermission('devices:write'), as
 // 'unknown' and the name "<source> (copy)" — the webapp opens the edit form
 // right away so the user can change the IP/name before saving.
 router.post('/devices/:id/clone', requireAuth, requirePermission('devices:write'), async (req, res) => {
-  const { id: deviceId } = req.params;
+  // Express 5 types params as string | string[] — coerce.
+  const deviceId = String(req.params.id ?? '');
   try {
     const source = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
     if (!source) {
@@ -731,7 +733,7 @@ router.post('/devices/:id/clone', requireAuth, requirePermission('devices:write'
 // multi-device intents and deleting one of their targets out from under them
 // would leave dangling steps, so those must be deleted first.
 router.delete('/devices/:id', requireAuth, requirePermission('devices:write'), async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   try {
     const existing = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
     if (!existing) {
@@ -787,7 +789,7 @@ router.delete('/devices/:id', requireAuth, requirePermission('devices:write'), a
 
 // GET /devices/:id/ips - primary address first, then secondary IPs.
 router.get('/devices/:id/ips', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   try {
     const ips = await listDeviceAddresses(deviceId);
     res.status(200).json({ deviceId, ips });
@@ -799,7 +801,7 @@ router.get('/devices/:id/ips', requireAuth, requirePermission('devices:read'), r
 
 // POST /devices/:id/ips - add a secondary IP ({ "address": "10.0.0.5" }).
 router.post('/devices/:id/ips', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   const { address } = req.body ?? {};
   if (!isValidAddress(address)) {
     res.status(400).json({ error: `"address": ${addressError(address)}` });
@@ -816,7 +818,8 @@ router.post('/devices/:id/ips', requireAuth, requirePermission('devices:write'),
 
 // DELETE /devices/:id/ips/:ipId - remove a secondary IP.
 router.delete('/devices/:id/ips/:ipId', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const { deviceId, ipId } = req.params;
+  const deviceId = String(req.params.deviceId ?? '');
+  const ipId = String(req.params.ipId ?? '');
   try {
     await removeDeviceIp(deviceId, ipId);
     res.status(204).send();
@@ -830,7 +833,7 @@ router.delete('/devices/:id/ips/:ipId', requireAuth, requirePermission('devices:
 
 // GET /devices/:id/plugins - all plugin assignments with identity + online state.
 router.get('/devices/:id/plugins', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   try {
     const plugins = await listAssignmentViews(deviceId);
     res.status(200).json({ deviceId, plugins });
@@ -842,7 +845,7 @@ router.get('/devices/:id/plugins', requireAuth, requirePermission('devices:read'
 
 // POST /devices/:id/plugins - assign another plugin to this device.
 router.post('/devices/:id/plugins', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   const { pluginId, secretId, isPrimary, extraCredentials } = req.body ?? {};
   if (!pluginId || typeof pluginId !== 'string') {
     res.status(400).json({ error: '"pluginId" is required' });
@@ -871,7 +874,8 @@ router.post('/devices/:id/plugins', requireAuth, requirePermission('devices:writ
 //   { "extraCredentials": {...} }→ replace bound slot secrets (validated per slot type)
 //   any combination             → applied in one call
 router.patch('/devices/:id/plugins/:pluginId', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const { deviceId, pluginId } = req.params;
+  const deviceId = String(req.params.deviceId ?? '');
+  const pluginId = String(req.params.pluginId ?? '');
   const body = (req.body ?? {}) as Record<string, unknown>;
   try {
     let assignment;
@@ -897,7 +901,8 @@ router.patch('/devices/:id/plugins/:pluginId', requireAuth, requirePermission('d
 
 // DELETE /devices/:id/plugins/:pluginId - remove an assignment.
 router.delete('/devices/:id/plugins/:pluginId', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const { deviceId, pluginId } = req.params;
+  const deviceId = String(req.params.deviceId ?? '');
+  const pluginId = String(req.params.pluginId ?? '');
   try {
     await removeAssignment(deviceId, pluginId);
     res.status(204).send();
@@ -912,7 +917,7 @@ router.delete('/devices/:id/plugins/:pluginId', requireAuth, requirePermission('
 // id becomes primary (the row at order 0); ids not listed keep their relative
 // position after the listed ones. Drives the webapp's drag & drop reordering.
 router.put('/devices/:id/plugins/order', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   const order = (req.body ?? {}).order;
   if (!Array.isArray(order) || !order.every((x) => typeof x === 'string')) {
     res.status(400).json({ error: '"order" must be an array of plugin id strings' });
@@ -931,7 +936,8 @@ router.put('/devices/:id/plugins/order', requireAuth, requirePermission('devices
 
 // GET /devices/:id/plugins/:pluginId/options - descriptors + this device's overrides.
 router.get('/devices/:id/plugins/:pluginId/options', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
-  const { deviceId, pluginId } = req.params;
+  const deviceId = String(req.params.deviceId ?? '');
+  const pluginId = String(req.params.pluginId ?? '');
   try {
     const view = await getDevicePluginOptions(deviceId, pluginId);
     res.status(200).json(view);
@@ -944,7 +950,8 @@ router.get('/devices/:id/plugins/:pluginId/options', requireAuth, requirePermiss
 
 // PUT /devices/:id/plugins/:pluginId/settings - persist this device's overrides.
 router.put('/devices/:id/plugins/:pluginId/settings', requireAuth, requirePermission('plugins:manage'), requireDeviceAccess, async (req, res) => {
-  const { deviceId, pluginId } = req.params;
+  const deviceId = String(req.params.deviceId ?? '');
+  const pluginId = String(req.params.pluginId ?? '');
   const settings = (req.body ?? {}).settings as Record<string, unknown> | undefined;
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
     res.status(400).json({ error: "Body must be { \"settings\": { [key]: value } }" });
@@ -967,7 +974,8 @@ router.put('/devices/:id/plugins/:pluginId/settings', requireAuth, requirePermis
 
 // DELETE /devices/:id/plugins/:pluginId/settings - reset this device's overrides.
 router.delete('/devices/:id/plugins/:pluginId/settings', requireAuth, requirePermission('plugins:manage'), requireDeviceAccess, async (req, res) => {
-  const { deviceId, pluginId } = req.params;
+  const deviceId = String(req.params.deviceId ?? '');
+  const pluginId = String(req.params.pluginId ?? '');
   try {
     await resetDevicePluginSettings(deviceId, pluginId);
     const view = await getDevicePluginOptions(deviceId, pluginId);
@@ -980,7 +988,7 @@ router.delete('/devices/:id/plugins/:pluginId/settings', requireAuth, requirePer
 });
 
 router.get('/devices/:id/monitoring', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
 
   const device = await db.query.devices.findFirst({
     where: (devices, { eq }) => eq(devices.id, deviceId),
@@ -1037,7 +1045,7 @@ router.get('/devices/:id/monitoring', requireAuth, requirePermission('devices:re
 // generic — it only resolves credentials and validates advertised action ids
 // against the plugin's persisted catalog (see deviceState.ts).
 router.get('/devices/:id/state', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   const pluginId = typeof req.query.pluginId === 'string' ? req.query.pluginId : '';
 
   try {
@@ -1075,7 +1083,7 @@ router.get('/devices/:id/state', requireAuth, requirePermission('devices:read'),
 // credentials and forwards verbatim, never interpreting metric content or
 // writing to the DB.
 router.get('/devices/:id/probe', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   const pluginId = typeof req.query.pluginId === 'string' ? req.query.pluginId : '';
   const keysRaw = typeof req.query.keys === 'string' ? req.query.keys : Array.isArray(req.query.keys) ? (req.query.keys as string[]).join(',') : '';
   const keys = keysRaw.split(',').map((k) => k.trim()).filter(Boolean);
@@ -1115,7 +1123,7 @@ router.get('/devices/:id/probe', requireAuth, requirePermission('devices:read'),
 // plugin = the assignment that advertised the quick action. Gated on devices:read
 // (opening a web UI is a read; it transmits NO credentials to the browser).
 router.post('/devices/:id/quick-action', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   const body = (req.body ?? {}) as Record<string, unknown>;
   const actionId = typeof body.actionId === 'string' ? body.actionId : '';
   if (!actionId) {
@@ -1169,7 +1177,7 @@ router.post('/devices/:id/quick-action', requireAuth, requirePermission('devices
 // ops mutate device state (and reads are only useful alongside them). The broker is
 // generic (see deviceFilesystem.ts) — it resolves credentials + forwards verbatim.
 router.post('/devices/:id/filesystem', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   const body = (req.body ?? {}) as Record<string, unknown>;
 
   // No explicit plugin → the device's primary assignment.
@@ -1242,7 +1250,7 @@ router.post('/devices/:id/filesystem', requireAuth, requirePermission('devices:w
 // 'sshConsole' capability (resolveConsoleTarget throws 501 when absent). The webapp
 // then opens GET /devices/:id/console/ws?ticket=… and gets a full xterm.js session.
 router.post('/devices/:id/console', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   const body = (req.body ?? {}) as Record<string, unknown>;
 
   try {
@@ -1285,7 +1293,7 @@ router.post('/devices/:id/console', requireAuth, requirePermission('devices:writ
 // console/filesystem routes themselves (devices:write) — it only ever lists secrets
 // the caller is allowed to use for live sessions on this device.
 router.get('/devices/:id/session-credentials', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   const purpose = typeof req.query.purpose === 'string' ? req.query.purpose : '';
   if (purpose !== 'console' && purpose !== 'filesystem') {
     res.status(400).json({ error: '"purpose" must be "console" or "filesystem"' });
@@ -1305,7 +1313,7 @@ router.get('/devices/:id/session-credentials', requireAuth, requirePermission('d
 // for a device+purpose ({ purpose, secretIds }). First entry = auto-used default;
 // the rest stay available. Non-eligible ids are dropped silently (stale-proof).
 router.put('/devices/:id/session-credentials', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   const body = (req.body ?? {}) as Record<string, unknown>;
   const purpose = typeof body.purpose === 'string' ? body.purpose : '';
   if (purpose !== 'console' && purpose !== 'filesystem') {
@@ -1337,7 +1345,7 @@ router.put('/devices/:id/session-credentials', requireAuth, requirePermission('d
 // for this device across all plugins. Fed by the telemetry worker from each
 // plugin's `metrics['ports']` array — upserted per poll, deleted-on-absent.
 router.get('/devices/:id/ports', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
 
   const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
   if (!device) {
@@ -1376,7 +1384,7 @@ const PORT_ROLES: PortRole[] = ['uplink', 'trunk'];
 
 // GET /devices/:id/port-roles?pluginId=… — all roles for one device (optionally scoped to a plugin).
 router.get('/devices/:id/port-roles', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
   if (!device) {
     res.status(404).json({ error: 'Device not found' });
@@ -1398,7 +1406,7 @@ router.get('/devices/:id/port-roles', requireAuth, requirePermission('devices:re
 // PUT /devices/:id/port-roles — set or clear ONE port's role.
 // Body: { pluginId, portName, role: 'uplink' | 'trunk' | null }
 router.put('/devices/:id/port-roles', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
   if (!device) {
     res.status(404).json({ error: 'Device not found' });
@@ -1434,7 +1442,7 @@ router.put('/devices/:id/port-roles', requireAuth, requirePermission('devices:wr
 
 // GET /devices/:id/telemetry - Recent telemetry history (for plot metrics).
 router.get('/devices/:id/telemetry', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
-  const { id: deviceId } = req.params;
+  const deviceId = String(req.params.id ?? '');
   const limit = Math.min(Number(req.query.limit ?? 30) || 30, 200);
 
   const device = await db.query.devices.findFirst({
@@ -1473,7 +1481,7 @@ router.post(
   requirePermission('configs:apply'),
   requireDeviceAccess,
   async (req, res) => {
-    const { id: deviceId } = req.params;
+    const deviceId = String(req.params.id ?? '');
     const { action, payload, pluginId } = req.body ?? {};
 
     if (!pluginId || typeof pluginId !== 'string') {
