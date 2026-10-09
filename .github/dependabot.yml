@@ -1,0 +1,286 @@
+# Dependabot — dependency + action updates as PRs (never auto-merged).
+#
+# The repo has NO npm workspaces: every package.json is installed independently
+# (see the CI install loops), so each directory needs its own entry. Adding a new
+# workspace means adding one more `npm` block here.
+version: 2
+updates:
+  # GitHub Actions — daily, because action SHAs are pinned in the workflows and
+  # security fixes to actions should land quickly. Dependabot updates the SHA
+  # (and keeps the tag comment consistent with the new release).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: daily
+
+  # npm — weekly, one PR per directory; minor/patch updates are grouped so a
+  # directory gets at most one routine PR plus separate majors.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/api"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/webapp"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/mcp"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/packages/plugin-sdk"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/packages/snmp-client"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/packages/lancom-shared"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/packages/plugin-test-kit"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/basic-auth"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/docker"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/fbox"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/file-repo"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/flow-collector"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/generic-http"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/generic-ntp"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/generic-snmp"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/generic-ssh"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/icmp"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/ix-truenas"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/lancom-lcos"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/lancom-lx"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/lancom-sx"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/mailcow"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/mikrotik-routeros"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/mikrotik-swos"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/openwrt"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/opnsense"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/secrets-provider"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/web-fetch"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/plugins/zabbix"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        dependency-type: "all"
+        update-types: ["minor", "patch"]
