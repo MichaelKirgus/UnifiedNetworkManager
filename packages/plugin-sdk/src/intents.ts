@@ -17,6 +17,9 @@
  * catalog entry advertises exactly what it supports via its own inputSchema
  * (validated per-plugin at plan time). The canonical schemas below are the
  * SUPERSET contract; `canonicalIntentIds` is the registry of known intents.
+ *
+ * Human reference: docs/INTENTS.md — field contracts, naming conventions,
+ * implementation matrix and documented deviations. Keep both in sync.
  */
 
 import type { InputSchema } from './types';
@@ -231,14 +234,13 @@ export function portTrunkStatus(topo: L2Topology, portName: string): { trunk: bo
 /**
  * Canonical input schema for `network.create`. Every field except `name` is
  * optional so a plugin can advertise the subset it supports:
- *   - LCOS: name, vlanId?, cidr|ip+netmask, cidrV6, interface, vlanPorts?, dhcpPool{start,end}, ssid{name}
+ *   - LCOS: name, vlanId?, cidr, cidrV6, interface, vlanPorts?, dhcpPool{start,end}, ssid{name}
  *     (no vlanId → no dedicated L2 VLAN row; L3/DHCP bind to default VLAN 1)
  *   - OPNsense: name, vlanId (→ staged vlan.add + reconfigure)
- * `cidr` and `ip`/`netmask` are alternative forms of the same IPv4 L3 address —
- * a plugin accepts whichever it understands. `cidrV6` is the DUAL-STACK half:
- * an optional IPv6 CIDR that rides alongside `cidr` (both set = dual-stack).
- * A rollout must provide at least one of vlanId / cidr|ip+netmask / cidrV6 /
- * ssid so there is something to create.
+ * `cidr` is the IPv4 L3 address as CIDR — the ONLY v4 form. `cidrV6` is the
+ * DUAL-STACK half: an optional IPv6 CIDR that rides alongside `cidr`
+ * (both set = dual-stack). A rollout must provide at least one of
+ * vlanId / cidr / cidrV6 / ssid so there is something to create.
  *
  * ATTACH POINTS — vendors layer interfaces differently, and the L3 address
  * often sits on a DIFFERENT interface than the VLAN tagging:
@@ -255,10 +257,8 @@ export function portTrunkStatus(topo: L2Topology, portName: string): { trunk: bo
 export const NETWORK_CREATE_SCHEMA: InputSchema = {
   name: { type: 'string', required: true, minLength: 1, maxLength: 64, description: 'Network name (unique per device)' },
   vlanId: { type: 'number', min: 1, max: 4094, description: 'VLAN ID to create/attach (optional — omit for an L3-only network on the default VLAN)' },
-  cidr: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}/\\d{1,2}$', description: 'L3 address as CIDR (e.g. 10.42.0.1/24) — alternative to ip+netmask' },
+  cidr: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}/\\d{1,2}$', description: 'L3 address as CIDR (e.g. 10.42.0.1/24)' },
   cidrV6: { type: 'string', pattern: '^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*/\\d{1,3}$', description: 'Optional IPv6 L3 address as CIDR (e.g. fd00:42::1/64) — dual-stack when set alongside cidr' },
-  ip: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'L3 address (alternative to cidr)' },
-  netmask: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'Netmask for `ip`' },
   interface: { type: 'string', maxLength: 64, description: 'L3 attach point — the device-local interface to bind the address to (bridge/bundle/port; resolved per device in preflight)' },
   vlanPorts: { type: 'array', items: { type: 'string' }, description: 'Optional explicit list of logical ports carrying the VLAN tag at L2 (e.g. ["LAN-1","LAN-2"]); plugin convention applies when omitted' },
   dhcpPool: {

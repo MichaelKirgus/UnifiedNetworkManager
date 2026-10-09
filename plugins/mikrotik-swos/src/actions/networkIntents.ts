@@ -334,7 +334,8 @@ export const l2TopologyReadAction: ActionDescriptor = {
   description: 'Physical ports and the VLAN table as L2 domains — the member-port source for network.create preflight.',
   module: 'Network',
   riskLevel: 'read',
-  deviceCount: 'N' as const,
+  // Single-device READ helper — not a fan-out intent.
+  deviceCount: 1,
   inputSchema: {},
   execute: async (ctx) => {
     const topo = await readSwosL2Topology(ctx);

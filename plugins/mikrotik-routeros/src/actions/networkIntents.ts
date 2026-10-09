@@ -29,22 +29,11 @@ type Row = Record<string, unknown>;
 
 // --- Shared helpers -----------------------------------------------------------------
 
-/** Splits a CIDR into [ip, prefix]; accepts ip+netmask form too. */
+/** Validates an IPv4 CIDR (returns it as-is when well-formed). */
 function parseV4(input: Record<string, unknown>): string | null {
   const cidr = typeof input.cidr === 'string' ? input.cidr.trim() : '';
-  if (cidr) return /^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(cidr) ? cidr : null;
-  const ip = typeof input.ip === 'string' ? input.ip.trim() : '';
-  const netmask = typeof input.netmask === 'string' ? input.netmask.trim() : '';
-  if (!ip || !netmask) return null;
-  const octets = netmask.split('.').map((o) => parseInt(o, 10));
-  if (octets.length !== 4 || octets.some((n) => Number.isNaN(n))) return null;
-  let bits = 0;
-  for (const o of octets) {
-    const table: Record<number, number> = { 255: 8, 254: 7, 252: 6, 248: 5, 240: 4, 224: 3, 192: 2, 128: 1, 0: 0 };
-    if (!(o in table)) return null; // non-contiguous netmask — reject
-    bits += table[o];
-  }
-  return `${ip}/${bits}`;
+  if (!cidr) return null;
+  return /^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(cidr) ? cidr : null;
 }
 
 function parseV6(input: Record<string, unknown>): string | null {
@@ -84,8 +73,6 @@ const NETWORK_CREATE_INPUTS = {
   vlanId: { type: 'number' as const, min: 1, max: 4094, description: 'VLAN ID — a dedicated 802.1q VLAN is created/attached on the attach point' },
   cidr: { type: 'string' as const, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}/\\d{1,2}$', description: 'L3 address as CIDR (e.g. 10.42.0.1/24)' },
   cidrV6: { type: 'string' as const, pattern: '^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*/\\d{1,3}$', description: 'Optional IPv6 L3 address (dual-stack when set alongside cidr)' },
-  ip: { type: 'string' as const, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'L3 address (alternative to cidr)' },
-  netmask: { type: 'string' as const, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'Netmask for `ip`' },
   interface: { type: 'string' as const, maxLength: 64, description: 'L2 attach point (bridge/bundle/port) — resolved per device in preflight' },
   vlanPorts: { type: 'array' as const, items: { type: 'string' } as const, description: 'Physical ports that carry this VLAN tagged on the switch chip (/interface/switch.vlan). Switch-capable SoCs only (hEX/cCR/CRS); ignored on devices without a switch chip.' },
 } as const;
@@ -129,7 +116,8 @@ export const networkCreateAction: ActionDescriptor = {
   label: 'Create network (VLAN + L3 address)',
   module: 'Network',
   riskLevel: 'write',
-  deviceCount: 1,
+  // Canonical fleet intent — FANS OUT across the batch (one step per router).
+  deviceCount: 'N' as const,
   timeoutMs: 60_000,
   inputSchema: { ...NETWORK_CREATE_INPUTS },
   execute: async (ctx, input) => {
@@ -138,7 +126,7 @@ export const networkCreateAction: ActionDescriptor = {
     const v4 = parseV4(input);
     const v6 = parseV6(input);
     if (!v4 && !v6 && vlanId === null) {
-      return { success: false, error: 'nothing to create — provide cidr (or ip+netmask), and/or cidrV6, and/or vlanId' };
+      return { success: false, error: 'nothing to create — provide cidr and/or cidrV6 and/or vlanId' };
     }
 
     // 1. Live state.
@@ -259,7 +247,8 @@ export const networkDeleteAction: ActionDescriptor = {
   label: 'Delete network',
   module: 'Network',
   riskLevel: 'write',
-  deviceCount: 1,
+  // Canonical fleet intent — FANS OUT across the batch (one step per router).
+  deviceCount: 'N' as const,
   timeoutMs: 60_000,
   inputSchema: { name: { type: 'string' as const, required: true, minLength: 1, maxLength: 64, description: 'Network name to remove (the VLAN interface name)' } },
   execute: async (ctx, input) => {

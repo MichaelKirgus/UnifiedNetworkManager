@@ -305,10 +305,8 @@ const networkCreate: ActionDescriptor = {
   inputSchema: {
     name: { type: 'string', required: true, minLength: 1, maxLength: 64, description: 'Network name (unique per device)' },
     vlanId: { type: 'number', min: 1, max: 4094, description: 'VLAN ID to create/attach (optional — omit for an L3-only network on default VLAN 1)' },
-    cidr: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}/\\d{1,2}$', description: 'L3 address as CIDR (e.g. 10.42.0.1/24) — alternative to ip+netmask' },
+    cidr: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}/\\d{1,2}$', description: 'L3 address as CIDR (e.g. 10.42.0.1/24)' },
     cidrV6: { type: 'string', pattern: '^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*/\\d{1,3}$', description: 'Optional IPv6 L3 address as CIDR (e.g. fd00:42::1/64) — dual-stack when set alongside cidr; writes the separate Setup/IPv6 tables' },
-    ip: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'L3 address (alternative to cidr)' },
-    netmask: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'Netmask for `ip`' },
     interface: { type: 'string', maxLength: 64, description: 'L3 attach point — the device-local interface to bind the address to (bridge BRG-x / bundle BUNDLE-x / port LAN-x). Resolved per device from the live L2 topology when omitted; preflight suggests it.' },
     vlanPorts: { type: 'array', items: { type: 'string' }, description: 'Optional explicit list of logical ports carrying the VLAN tag at L2 (e.g. ["LAN-1","LAN-2"]); the device\'s existing convention on the attach bridge is used when omitted' },
     dhcpPool: {
@@ -361,16 +359,13 @@ const networkCreate: ActionDescriptor = {
     steps.push(attachRes.note);
     const vlanPortList = resolveVlanPorts(topo, iface, vlanRows, input.vlanPorts);
 
-    // L3 address — cidr or ip+netmask.
+    // L3 address — cidr.
     let l3Ip: string | null = null;
     let l3Mask: string | null = null;
     if (typeof input.cidr === 'string' && input.cidr) {
       const pair = cidrToIpMask(input.cidr);
       if (!pair) return { success: false, error: `Invalid CIDR '${input.cidr}' (expected IPv4 /8..30).` };
       [l3Ip, l3Mask] = pair;
-    } else if (typeof input.ip === 'string' && input.ip && typeof input.netmask === 'string' && input.netmask) {
-      l3Ip = input.ip;
-      l3Mask = input.netmask;
     }
 
     // L3 address v6 — separate config tree on LCOS (Setup/IPv6/*).

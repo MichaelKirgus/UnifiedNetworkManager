@@ -36,22 +36,11 @@ interface UciIfc {
   ipv6?: string;
 }
 
-/** Splits a CIDR into [ip, prefix]; accepts ip+netmask form too. */
+/** Validates an IPv4 CIDR (returns it as-is when well-formed). */
 function parseV4(input: Record<string, unknown>): string | null {
   const cidr = typeof input.cidr === 'string' ? input.cidr.trim() : '';
-  if (cidr) return /^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(cidr) ? cidr : null;
-  const ip = typeof input.ip === 'string' ? input.ip.trim() : '';
-  const netmask = typeof input.netmask === 'string' ? input.netmask.trim() : '';
-  if (!ip || !netmask) return null;
-  const octets = netmask.split('.').map((o) => parseInt(o, 10));
-  if (octets.length !== 4 || octets.some((n) => Number.isNaN(n))) return null;
-  let bits = 0;
-  for (const o of octets) {
-    const table: Record<number, number> = { 255: 8, 254: 7, 252: 6, 248: 5, 240: 4, 224: 3, 192: 2, 128: 1, 0: 0 };
-    if (!(o in table)) return null; // non-contiguous netmask — reject
-    bits += table[o];
-  }
-  return `${ip}/${bits}`;
+  if (!cidr) return null;
+  return /^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(cidr) ? cidr : null;
 }
 
 function parseV6(input: Record<string, unknown>): string | null {
@@ -183,8 +172,6 @@ const NETWORK_CREATE_INPUTS = {
   vlanId: { type: 'number' as const, min: 1, max: 4094, description: 'VLAN ID — a VLAN sub-interface (device = parent.tag) is created/attached. Omit for an L3-only network on an existing interface.' },
   cidr: { type: 'string' as const, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}/\\d{1,2}$', description: 'Optional static IPv4 address as CIDR (e.g. 10.42.0.1/24) — omit when the device only needs to know the VLAN' },
   cidrV6: { type: 'string' as const, pattern: '^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*/\\d{1,3}$', description: 'Optional static IPv6 address as CIDR (dual-stack when set alongside cidr)' },
-  ip: { type: 'string' as const, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'L3 address (alternative to cidr)' },
-  netmask: { type: 'string' as const, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$', description: 'Netmask for `ip`' },
   interface: { type: 'string' as const, maxLength: 64, description: 'VLAN parent (UCI section name or kernel device) — resolved per device in preflight' },
 } as const;
 
@@ -356,7 +343,8 @@ export const l2TopologyReadAction: ActionDescriptor = {
   description: 'Physical/bridge devices and which of them carry L3 networks from the UCI network package — the attach-point source for network.create preflight.',
   module: 'Network',
   riskLevel: 'read',
-  deviceCount: 'N' as const,
+  // Single-device READ helper — not a fan-out intent.
+  deviceCount: 1,
   inputSchema: {},
   execute: async (ctx) => {
     const topo = await readOpenWrtL2Topology(ctx);

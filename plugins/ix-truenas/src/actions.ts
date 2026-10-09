@@ -6641,6 +6641,7 @@ const l2TopologyReadAction: ActionDescriptor<TruenasActionContext> = {
   description: 'Physical interfaces and bridge groups from interface.query — the attach-point source for network.create preflight.',
   module: 'Network',
   riskLevel: 'read' as const,
+  // Single-device READ helper — not a fan-out intent.
   deviceCount: 1 as const,
   inputSchema: {},
   async execute(ctx: TruenasActionContext): Promise<ActionResult> {

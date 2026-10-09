@@ -277,6 +277,13 @@ Plugins that must remember something ACROSS polls and container restarts — fil
 
 ## 6. Actions, `/config`, and plans (optional)
 
+**Fleet intents** (`network.create`, `network.delete`, `l2.topology.read`) have a
+canonical cross-vendor contract — field names, the superset input schemas,
+preflight expectations and per-plugin deviations are documented in
+[INTENTS.md](./INTENTS.md). The machine-readable source of truth is
+`packages/plugin-sdk/src/intents.ts`. Read it before implementing or changing an
+intent.
+
 Declare actions with the SDK registry (`createRegistry`), advertise them via
 `listCatalog()` in `/discover`, then:
 
