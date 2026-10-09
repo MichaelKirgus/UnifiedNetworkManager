@@ -253,6 +253,11 @@ export const plugins = pgTable('plugins', {
   capabilities: text('capabilities').notNull().default('[]'),
   endpoint: text('endpoint').notNull(),
   authType: text('authType').notNull().default('none'),
+  // Build tag baked into the plugin image at CI build time (branch name or
+  // release tag; empty for local/dev builds). Surfaced via /discover → this
+  // column → GET /plugins. NULL = not advertised (mDNS-only discovery, or an
+  // image built without UNM_BUILD_TAG set).
+  buildTag: text('buildTag'),
   // Metric descriptors declared by the plugin in /discover (JSON array).
   // Drives the webapp's visualization (gauge/plot/text/table) without any
   // webapp code changes per plugin.

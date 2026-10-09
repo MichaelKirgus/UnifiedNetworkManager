@@ -3,6 +3,11 @@
 # alongside the api/ source.
 FROM node:20-alpine
 
+# Build tag baked in at image build time (CI sets UNM_BUILD_TAG to the branch or
+# release tag; empty = local/dev build). Served by GET /v1/info → webapp UI.
+ARG UNM_BUILD_TAG=
+ENV UNM_BUILD_TAG=${UNM_BUILD_TAG}
+
 WORKDIR /app
 
 # Shared SDK — must exist BEFORE `cd api && npm install`: the api has a file:

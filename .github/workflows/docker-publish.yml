@@ -32,6 +32,9 @@ jobs:
     outputs:
       components: ${{ steps.components.outputs.components }}
       tags: ${{ steps.tags.outputs.tags }}
+      # Single primary tag (no ",latest") — baked into every image as the
+      # UNM_BUILD_TAG env so the webapp can show which branch/release it runs.
+      tag: ${{ steps.tags.outputs.tag }}
     steps:
       # Actions are pinned to immutable commit SHAs (tag in comment) so a
       # compromised or moved upstream tag can never change what CI executes.
@@ -67,6 +70,9 @@ jobs:
             EXTRA=""
           fi
           echo "tags=${TAG}${EXTRA}" >> "$GITHUB_OUTPUT"
+          # Single primary tag for the UNM_BUILD_TAG build arg (releases bake
+          # their version, branches bake their name — never "latest").
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
   # ── Gate: the plugin contract suite must pass before any image is built. ───
   tests:
@@ -155,5 +161,9 @@ jobs:
           file: ${{ matrix.dockerfile }}
           push: true
           tags: ghcr.io/${{ github.repository_owner | lowercase }}/${{ github.event.repository.name | lowercase }}/${{ matrix.service }}:${{ needs.meta.outputs.tags }}
+          # Baked into every image (ARG UNM_BUILD_TAG in each Dockerfile) so the
+          # webapp sidebar + Plugins page can show which branch/release runs.
+          build-args: |
+            UNM_BUILD_TAG=${{ needs.meta.outputs.tag }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}

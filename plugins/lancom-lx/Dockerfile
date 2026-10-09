@@ -2,6 +2,11 @@
 # shared @unm/snmp-client package can be copied in alongside this plugin.
 FROM node:20-alpine
 
+# Build tag baked in at image build time (CI sets UNM_BUILD_TAG to the branch or
+# release tag; empty = local/dev build). Surfaced via /discover -> Plugins page.
+ARG UNM_BUILD_TAG=
+ENV UNM_BUILD_TAG=${UNM_BUILD_TAG}
+
 # No system packages needed: @unm/snmp-client speaks SNMP over native UDP via
 # the `net-snmp` npm package (installed below with its own deps). Vendor MIBs
 # are still expected in a mounted volume for manual debugging only.

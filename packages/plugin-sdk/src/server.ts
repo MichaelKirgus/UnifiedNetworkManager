@@ -126,6 +126,9 @@ export function buildDiscoverPayload(identity: PluginIdentity, extras?: Discover
     capabilities: identity.capabilities,
     endpoint: identity.endpoint,
     authType: identity.authType,
+    // Image build tag (CI-baked UNM_BUILD_TAG) — '' for local/dev builds; the
+    // API persists it on the plugin row and the webapp shows it next to version.
+    ...(identity.buildTag ? { buildTag: identity.buildTag } : {}),
     ...(e.requiredSecretType !== undefined ? { requiredSecretType: e.requiredSecretType } : {}),
     ...(Array.isArray(e.requiredSecretTypes) && e.requiredSecretTypes.length > 0 ? { requiredSecretTypes: e.requiredSecretTypes } : {}),
     ...(e.metrics !== undefined ? { metrics: e.metrics } : {}),

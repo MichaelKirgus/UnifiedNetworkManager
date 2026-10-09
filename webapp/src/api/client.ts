@@ -2422,10 +2422,20 @@ export interface DeviceMonitoring {
   snapshots: PluginTelemetrySnapshot[];
 }
 
+/** GET /info — stack identity for the sidebar (product name + API version + build tag). */
+export interface StackInfo {
+  name: string;
+  version: string;
+  /** Build tag baked into the API image at CI build time (branch/release); null = local/dev. */
+  buildTag?: string | null;
+}
+
 export interface Plugin {
   id: string;
   name: string;
   version: string;
+  /** Build tag baked into the plugin image at CI build time (branch/release); null = local/dev or not advertised. */
+  buildTag?: string | null;
   vendors: string[];
   capabilities: string[];
   endpoint: string;
@@ -2959,6 +2969,8 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  /** Stack identity (name/version/build tag) for the sidebar brand block. */
+  info: () => apiFetch<StackInfo>('/info'),
   authFlow: () => apiFetch<AuthFlow>('/auth/flow'),
   authRedirect: () => apiFetch<AuthRedirect>('/auth/redirect'),
   login: (body: { username: string; password: string }) =>

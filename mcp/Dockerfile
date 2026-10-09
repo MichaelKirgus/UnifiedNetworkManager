@@ -5,6 +5,10 @@
 # which the server reads at runtime to generate its tools — can be baked in.
 FROM node:20-alpine
 
+# Build tag baked in at image build time (CI sets UNM_BUILD_TAG; empty = local).
+ARG UNM_BUILD_TAG=
+ENV UNM_BUILD_TAG=${UNM_BUILD_TAG}
+
 WORKDIR /app
 
 # Shared SDK — must exist BEFORE `npm install`: mcp has a file: dependency on it

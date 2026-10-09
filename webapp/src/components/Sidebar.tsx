@@ -10,6 +10,30 @@ import { NavCustomizer } from './NavCustomizer';
 
 const COLLAPSED_KEY = 'unm:sidebar-collapsed';
 
+/**
+ * The webapp's own build tag is baked into dist/manifest.json at image build
+ * time (webapp/Dockerfile writes it from UNM_BUILD_TAG) and served same-origin.
+ * In dev mode the file doesn't exist — a 404 simply means "no tag".
+ */
+function useWebappBuildTag(): string | null {
+  const [tag, setTag] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/manifest.json')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { buildTag?: string } | null) => {
+        if (!cancelled && typeof data?.buildTag === 'string' && data.buildTag !== '') setTag(data.buildTag);
+      })
+      .catch(() => {
+        // No manifest (dev server / pre-build) — nothing to show.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return tag;
+}
+
 /** One sidebar row (icon + label) with an optional count badge. */
 function NavRow({ item, collapsed, count }: { item: NavItem; collapsed: boolean; count?: number }) {
   const Icon = item.icon;
@@ -73,6 +97,15 @@ export function Sidebar() {
     refetchInterval: 30_000,
   });
 
+  // Build tags for the brand block: API's tag comes from GET /info (baked into
+  // the API image at CI build time), the webapp's own from dist/manifest.json.
+  const infoQuery = useQuery({ queryKey: ['stackInfo'], queryFn: api.info, staleTime: Infinity });
+  const webappTag = useWebappBuildTag();
+  const tagParts = [
+    infoQuery.data?.buildTag ? `API ${infoQuery.data.buildTag}` : null,
+    webappTag ? `UI ${webappTag}` : null,
+  ].filter((p): p is string => p !== null);
+
   // Permission-visible items in the user's order (the customizer lists ALL of these,
   // including hidden ones so they can be re-shown).
   const allOrderedItems = useMemo(() => orderedNavItems(prefsQuery.data), [prefsQuery.data]);
@@ -96,7 +129,17 @@ export function Sidebar() {
       <div className={clsx('flex h-14 items-center gap-2 border-b border-border px-3', collapsed && 'justify-center px-0')}>
         <Network className="h-6 w-6 shrink-0 text-foreground" />
         {!collapsed && (
-          <span className="truncate text-sm font-bold text-foreground">UnifiedNetworkManager</span>
+          <div className="min-w-0">
+            <span className="block truncate text-sm font-bold leading-tight text-foreground">UnifiedNetworkManager</span>
+            {tagParts.length > 0 && (
+              <span
+                title={`Build tags — API: ${infoQuery.data?.buildTag ?? '—'} · Webapp: ${webappTag ?? '—'}`}
+                className="block truncate font-mono text-[10px] leading-tight text-secondary"
+              >
+                {tagParts.join(' · ')}
+              </span>
+            )}
+          </div>
         )}
       </div>
 

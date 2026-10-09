@@ -11,6 +11,9 @@
  *   PLUGIN_INSTANCE_ID    multi-instance: advertised uuid becomes
  *                         `<uuid>:<instanceId>` and the name gains " (id)"
  *   PLUGIN_DISPLAY_NAME   optional explicit display-name override
+ *   UNM_BUILD_TAG         image build tag baked in by CI (branch or release
+ *                         tag); surfaced via /discover so the Plugins page can
+ *                         show which build is running. Empty = local/dev.
  */
 
 import { PluginCapability } from './types';
@@ -29,6 +32,8 @@ export interface PluginIdentity {
   authType: string;
   port: number;
   endpoint: string;
+  /** Image build tag (UNM_BUILD_TAG env) — '' when not baked in (local/dev). */
+  buildTag: string;
 }
 
 /** The conventional internal port every UNM plugin listens on. */
@@ -60,5 +65,6 @@ export function resolvePluginIdentity(input: PluginIdentityInput): PluginIdentit
     authType: input.authType ?? 'none',
     port,
     endpoint: process.env.ADVERTISED_ENDPOINT ?? `http://localhost:${port}`,
+    buildTag: process.env.UNM_BUILD_TAG?.trim() ?? '',
   };
 }

@@ -54,6 +54,7 @@ import { initWorker } from './workers/stats';
 import { attachConsoleProxy } from './consoleProxy';
 import { setPluginTransports } from './utils/pluginHttp';
 import { startApiMtls } from './ca/apiMtls';
+import { apiVersion } from './version';
 import { db } from './db';
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -118,10 +119,23 @@ async function main(): Promise<void> {
   const api = express.Router();
   api.use(generalLimiter);
 
+  // Stack identity for the webapp's sidebar (product name + version + build tag).
+  // The build tag is baked into the image at CI build time (UNM_BUILD_TAG env,
+  // set from the branch/release by docker-publish.yml) and empty for local/dev.
+  const infoRouter = express.Router();
+  infoRouter.get('/info', (_req, res) => {
+    res.status(200).json({
+      name: 'UnifiedNetworkManager',
+      version: apiVersion(),
+      buildTag: process.env.UNM_BUILD_TAG?.trim() || null,
+    });
+  });
+
   // Routes not defined in the OpenAPI spec must be mounted ahead of the
   // validator, since the validator 404s any undocumented path. The internal
   // plugin routes are namespaced under /plugin/* (user data included) so they
   // never shadow public paths like POST /users — see routes/internal.ts.
+  api.use(infoRouter);
   api.use(configJobsListRouter);
   api.use(internalRouter());
   // Central file repository — internal plugin routes (/plugin/files/*, gated by

@@ -29,6 +29,8 @@ export interface PluginIdentity {
   capabilities: string[];
   endpoint: string;
   authType: string;
+  /** Build tag baked into the image at CI build time (branch/release); empty for local builds. */
+  buildTag?: string;
   /** Metric descriptors declared by the plugin (drives webapp visualization). */
   metrics?: unknown[];
   /** Option descriptors declared by the plugin (drives the settings form + API-side persistence/validation). */
@@ -337,6 +339,7 @@ interface RawDiscover {
   capabilities?: unknown;
   endpoint?: unknown;
   authType?: unknown;
+  buildTag?: unknown;
   metrics?: unknown;
   options?: unknown;
   actions?: unknown;
@@ -363,6 +366,7 @@ export function normalizeDiscoverPayload(raw: RawDiscover, sourceEndpoint: strin
     capabilities: Array.isArray(raw.capabilities) ? (raw.capabilities as string[]) : [],
     endpoint: typeof raw.endpoint === 'string' && raw.endpoint.length > 0 ? raw.endpoint : sourceEndpoint,
     authType: typeof raw.authType === 'string' ? raw.authType : 'none',
+    buildTag: typeof raw.buildTag === 'string' && raw.buildTag.trim() !== '' ? raw.buildTag : undefined,
     metrics: Array.isArray(raw.metrics) ? raw.metrics : undefined,
     // Standard scheduling options are injected for every plugin so the
     // Workers/Plugins settings UIs can tune per-plugin poll windows.
@@ -464,6 +468,10 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
   // mTLS state: only the HTTP-polling path knows it (mDNS TXT carries none),
   // so an undefined value must never wipe what a probe established.
   const hasTlsLive = typeof identity.tlsLive === 'boolean';
+  // Build tag: same guard — the mDNS TXT path carries none, and an image built
+  // without UNM_BUILD_TAG (local/dev) advertises nothing; neither may wipe a
+  // previously-stored tag.
+  const hasBuildTag = typeof identity.buildTag === 'string' && identity.buildTag.length > 0;
 
   if (existing) {
     await db
@@ -483,6 +491,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
         ...(hasModels ? { deviceModels: deviceModelsJson } : {}),
         ...(hasSlots ? { credentialSlots: credentialSlotsJson } : {}),
         ...(deviceSupportJson !== null ? { deviceSupport: deviceSupportJson } : {}),
+        ...(hasBuildTag ? { buildTag: identity.buildTag } : {}),
         ...(hasTlsLive ? { tlsLive: identity.tlsLive ?? false } : {}),
         lastSeenAt: now,
       })
@@ -504,6 +513,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
       deviceModels: deviceModelsJson,
       credentialSlots: credentialSlotsJson,
       deviceSupport: deviceSupportJson,
+      buildTag: hasBuildTag ? identity.buildTag : null,
       ...(hasTlsLive ? { tlsLive: identity.tlsLive ?? false } : {}),
       createdAt: now,
       lastSeenAt: now,

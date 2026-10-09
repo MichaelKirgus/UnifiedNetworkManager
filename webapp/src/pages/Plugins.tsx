@@ -165,7 +165,7 @@ function PluginDetailsModal({ pluginId, onClose }: { pluginId: string; onClose: 
   return (
     <DialogShell
       title={plugin.name}
-      subtitle={plugin.version}
+      subtitle={plugin.buildTag ? `${plugin.version} · build ${plugin.buildTag}` : plugin.version}
       onClose={onClose}
       zIndex="z-40"
       maxWidth="max-w-2xl"
@@ -341,6 +341,18 @@ export default function Plugins() {
   const columns: DataTableColumn<Plugin>[] = [
     { header: 'Name', key: 'name' },
     { header: 'Version', key: 'version' },
+    {
+      // Build tag baked into the image at CI build time (branch/release); null = local/dev.
+      header: 'Build',
+      key: 'buildTag',
+      width: 120,
+      render: (row) =>
+        row.buildTag ? (
+          <span className="font-mono text-xs">{row.buildTag}</span>
+        ) : (
+          <span className="text-faint">—</span>
+        ),
+    },
     { header: 'Vendors', key: 'vendors', render: (row) => row.vendors.join(', ') },
     { header: 'Capabilities', key: 'capabilities', render: (row) => row.capabilities.join(', ') },
     {
@@ -446,7 +458,7 @@ export default function Plugins() {
       {configurePlugin && (
         <DialogShell
           title={`Settings — ${configurePlugin.name}`}
-          subtitle={configurePlugin.version}
+          subtitle={configurePlugin.buildTag ? `${configurePlugin.version} · build ${configurePlugin.buildTag}` : configurePlugin.version}
           onClose={() => setConfigureId(null)}
           zIndex="z-40"
         >

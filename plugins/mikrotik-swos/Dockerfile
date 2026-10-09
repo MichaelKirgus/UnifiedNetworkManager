@@ -3,6 +3,11 @@
 # Digest auth is pure node:crypto; no extra apk packages needed.
 FROM node:20-alpine
 
+# Build tag baked in at image build time (CI sets UNM_BUILD_TAG to the branch or
+# release tag; empty = local/dev build). Surfaced via /discover -> Plugins page.
+ARG UNM_BUILD_TAG=
+ENV UNM_BUILD_TAG=${UNM_BUILD_TAG}
+
 WORKDIR /app
 
 # Shared SDK (contract types + runtime helpers). The plugin's tsc build follows

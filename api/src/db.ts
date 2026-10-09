@@ -45,6 +45,8 @@ export async function initDb(): Promise<void> {
   await pool.query(
     `ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "optionDescriptors" TEXT`
   );
+  // Build tag (CI branch/release stamped into the image at build time).
+  await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "buildTag" TEXT`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS plugin_settings (
       id TEXT PRIMARY KEY,

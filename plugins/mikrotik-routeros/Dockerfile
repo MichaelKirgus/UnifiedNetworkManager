@@ -3,6 +3,11 @@
 # The RouterOS REST API is plain HTTP(S) + Basic auth — no extra apk packages.
 FROM node:20-alpine
 
+# Build tag baked in at image build time (CI sets UNM_BUILD_TAG to the branch or
+# release tag; empty = local/dev build). Surfaced via /discover -> Plugins page.
+ARG UNM_BUILD_TAG=
+ENV UNM_BUILD_TAG=${UNM_BUILD_TAG}
+
 WORKDIR /app
 
 # Shared SDK (contract types + runtime helpers). The plugin's tsc build follows

@@ -55,6 +55,9 @@ function serializePlugin(row: any) {
     id: row.id,
     name: row.name,
     version: row.version,
+    // Build tag baked into the image at CI build time (branch/release); null =
+    // local/dev build or not advertised. Shown on the Plugins page next to version.
+    buildTag: typeof row.buildTag === 'string' && row.buildTag.length > 0 ? row.buildTag : null,
     vendors: typeof row.vendors === 'string' ? JSON.parse(row.vendors) : row.vendors,
     capabilities: typeof row.capabilities === 'string' ? JSON.parse(row.capabilities) : row.capabilities,
     endpoint: row.endpoint,
