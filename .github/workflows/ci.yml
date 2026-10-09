@@ -1,0 +1,133 @@
+# API + Webapp CI — unit tests, typecheck/build, and a real boot smoke test.
+#
+# Complements plugin-tests.yml (which covers the shared packages + every plugin's
+# contract suite) by gating the two remaining first-party services:
+#   • api    — jest unit tests, tsc build, then a live boot against a Postgres
+#              service container (schema pushed via drizzle-kit) proving /healthz
+#              and /v1/info answer. This is the "the API container actually boots"
+#              guarantee.
+#   • webapp — vitest unit tests + the production build (tsc && vite build).
+#
+# Neither job needs Docker: Postgres runs as a GitHub Actions service container,
+# and both services are exercised with plain Node exactly like their Dockerfiles.
+name: API & Webapp CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: unm
+          POSTGRES_PASSWORD: unm
+          POSTGRES_DB: unm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U unm"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      # Actions are pinned to immutable commit SHAs (tag in comment) so a
+      # compromised or moved upstream tag can never change what CI executes.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '20'
+
+      # The api has a file: dependency on @unm/plugin-sdk (types-only). npm COPIES
+      # the package into api/node_modules at install time, so its dist/ must exist
+      # BEFORE `cd api && npm install` — mirroring api/Dockerfile exactly.
+      - name: "Build @unm/plugin-sdk (api's file: dependency)"
+        run: |
+          cd packages/plugin-sdk
+          npm install --legacy-peer-deps --no-audit --no-fund
+          npm run build
+
+      # npm install — NOT npm ci: the api depends on a sibling package via a file:
+      # link, and CI runners ship npm 10 (Node 20) which rejects the committed
+      # lockfile shape for such workspaces. See plugin-tests.yml for the full note.
+      - name: Install api dependencies
+        run: cd api && npm install --legacy-peer-deps --no-audit --no-fund
+
+      # Typecheck + emit dist/ (the same artifact the container runs). Fails on any
+      # type error, so this is also the API's type gate.
+      - name: Build api (tsc)
+        run: cd api && npm run build
+
+      # Pure-utility unit tests (string arrays, input-schema validation). No DB needed.
+      - name: Unit tests (jest)
+        run: cd api && npm test
+
+      # Create the schema in the service Postgres so initDb's defensive migrations +
+      # backfills have real tables to touch — mirrors setup.sh (`drizzle-kit push`).
+      - name: Push schema to Postgres
+        run: |
+          cd api
+          DATABASE_URL="postgresql://unm:unm@localhost:5432/unm" npx drizzle-kit push
+
+      # Boot the real server and prove it answers. initDb + backfills + OpenAPI spec
+      # load all happen before listen, so a healthy /healthz means the whole boot path
+      # (including DB) succeeded — i.e. the API container would come up in production.
+      - name: Boot smoke test (/healthz + /v1/info)
+        run: |
+          cd api
+          export DATABASE_URL="postgresql://unm:unm@localhost:5432/unm"
+          export PORT=3000
+          node dist/src/index.js > /tmp/api-smoke.log 2>&1 &
+          API_PID=$!
+
+          up=0
+          for i in $(seq 1 90); do
+            if curl -sf http://localhost:3000/healthz >/dev/null 2>&1; then up=1; break; fi
+            sleep 1
+          done
+
+          if [ "$up" != "1" ]; then
+            echo "::error::API did not become healthy within 90s"
+            cat /tmp/api-smoke.log || true
+            kill $API_PID 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "--- GET /healthz ---"
+          curl -sf http://localhost:3000/healthz && echo "" \
+            || { echo "::error::GET /healthz failed"; cat /tmp/api-smoke.log; kill $API_PID 2>/dev/null || true; exit 1; }
+
+          echo "--- GET /v1/info ---"
+          curl -sf http://localhost:3000/v1/info && echo "" \
+            || { echo "::error::GET /v1/info failed"; cat /tmp/api-smoke.log; kill $API_PID 2>/dev/null || true; exit 1; }
+
+          kill $API_PID 2>/dev/null || true
+          wait $API_PID 2>/dev/null || true
+          echo "SMOKE PASS"
+
+  webapp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '20'
+
+      # The webapp has no file: dependencies, so a plain per-workspace install works.
+      - name: Install webapp dependencies
+        run: cd webapp && npm install --legacy-peer-deps --no-audit --no-fund
+
+      # Pure-utility unit tests (address validation, CSV import parsing). No DOM needed.
+      - name: Unit tests (vitest)
+        run: cd webapp && npm test
+
+      # Production build — the same `tsc && vite build` the container runs. Fails on
+      # any type error or bundling problem.
+      - name: Build webapp (tsc + vite)
+        run: cd webapp && npm run build
