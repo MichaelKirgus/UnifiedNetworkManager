@@ -106,15 +106,17 @@ export function DeviceActionsCell({ device }: DeviceActionsCellProps) {
     [boundActions]
   );
   const catalogQueries = useQueries({
-    queries: actionPluginIds.map((pid) => ({
-      queryKey: ['plugin-actions-catalog', pid],
-      queryFn: () => api.pluginActions(pid),
+    queries: actionPluginIds.map((pluginId) => ({
+      // Canonical single-plugin key — shares the cache with every other
+      // per-plugin catalog read (DeviceConfig, PlanDetail, Plans, …).
+      queryKey: ['pluginActions', pluginId],
+      queryFn: () => api.pluginActions(pluginId),
       staleTime: 5 * 60_000,
     })),
   });
   const catalogByPlugin = useMemo(() => {
     const m = new Map<string, CatalogEntry[]>();
-    actionPluginIds.forEach((pid, i) => m.set(pid, catalogQueries[i]?.data?.actions ?? []));
+    actionPluginIds.forEach((pluginId, i) => m.set(pluginId, catalogQueries[i]?.data?.actions ?? []));
     return m;
   }, [actionPluginIds, catalogQueries]);
 
@@ -222,7 +224,7 @@ export function DeviceActionsCell({ device }: DeviceActionsCellProps) {
   }
 
   const activeEntry = active?.kind === 'action' ? catalogEntryOf(active) : null;
-  const viaName = (pid: string) => device.plugins?.find((p) => p.pluginId === pid)?.pluginName ?? '';
+  const viaName = (pluginId: string) => device.plugins?.find((p) => p.pluginId === pluginId)?.pluginName ?? '';
 
   // Action-kind items stay hidden until their catalog is loaded, and are dropped
   // entirely when the entry is unknown or dangerous — `visible` is what can be

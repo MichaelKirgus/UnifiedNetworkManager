@@ -18,7 +18,7 @@ export default function CredentialPolicies() {
   const canEdit = can('auth:policies:write');
 
   const globalPolicyQuery = useQuery({
-    queryKey: ['global-credential-policy'],
+    queryKey: ['globalCredentialPolicy'],
     queryFn: api.globalCredentialPolicy,
   });
 
@@ -30,7 +30,7 @@ export default function CredentialPolicies() {
 
   // Per-user overrides — one policy fetch per user (fine at this scale).
   const overrideQueries = useQuery({
-    queryKey: ['user-policies-all', usersQuery.data?.map((u) => u.id)],
+    queryKey: ['userCredentialPolicies', usersQuery.data?.map((u) => u.id)],
     queryFn: async () => {
       const results = await Promise.all(
         (usersQuery.data ?? []).map(async (u) => ({ user: u, policy: await api.userCredentialPolicy(u.id) }))
@@ -42,7 +42,7 @@ export default function CredentialPolicies() {
 
   const saveGlobal = useMutation({
     mutationFn: (body: Partial<CredentialPolicy>) => api.setGlobalCredentialPolicy(body),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['global-credential-policy'] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['globalCredentialPolicy'] }),
     onError: (err: unknown) => setFormError((err as Error).message),
   });
 

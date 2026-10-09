@@ -90,9 +90,9 @@ export function ClockSyncDialog({ devices, consensusMs, onClose }: ClockSyncDial
     [devices],
   );
   const catalogQueries = useQueries({
-    queries: pluginIds.map((pid) => ({
-      queryKey: ['plugin-actions', pid] as const,
-      queryFn: () => api.pluginActions(pid),
+    queries: pluginIds.map((pluginId) => ({
+      queryKey: ['pluginActions', pluginId] as const,
+      queryFn: () => api.pluginActions(pluginId),
       staleTime: 5 * 60_000,
       retry: false,
     })),
@@ -100,10 +100,10 @@ export function ClockSyncDialog({ devices, consensusMs, onClose }: ClockSyncDial
 
   const clockCapable = useMemo(() => {
     const m = new Map<string, boolean>();
-    pluginIds.forEach((pid, i) => {
+    pluginIds.forEach((pluginId, i) => {
       const actions: CatalogEntry[] | undefined = catalogQueries[i]?.data?.actions;
       if (actions === undefined) return; // still loading — treat as unknown for now
-      m.set(pid, actions.some((a) => a.id === CLOCK_ACTION_ID));
+      m.set(pluginId, actions.some((a) => a.id === CLOCK_ACTION_ID));
     });
     return m;
   }, [pluginIds, catalogQueries]);

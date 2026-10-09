@@ -171,17 +171,17 @@ function nodeCell(key: string, node: VmNode, depth: number, actions?: DeviceActi
     }
     case 'actions': {
       if (!node.row || !actions) return null;
-      const pid = node.row.pluginId;
+      const pluginId = node.row.pluginId;
       // Generic device actions — any dtype that carries an integer id, when the
       // plugin advertises them. Edit (vms.device-update) works on running VMs for
       // hot-pluggable types; detach requires a STOPPED VM (the appliance enforces
       // it too) and is disabled otherwise with an explanatory title.
-      if (node.devId !== undefined && (actions.hasAction(pid, 'vms.device-detach') || actions.hasAction(pid, 'vms.device-update'))) {
+      if (node.devId !== undefined && (actions.hasAction(pluginId, 'vms.device-detach') || actions.hasAction(pluginId, 'vms.device-update'))) {
         const stopped = actions.vmStopped(node.row);
         const blockedByReadOnly = !!actions.readOnly;
         return (
           <span className="inline-flex items-center gap-0.5">
-            {actions.hasAction(pid, 'vms.device-update') && (
+            {actions.hasAction(pluginId, 'vms.device-update') && (
               <button
                 type="button"
                 aria-label={`Edit ${node.dtype ?? 'device'} ${node.label ?? ''}`}
@@ -193,7 +193,7 @@ function nodeCell(key: string, node: VmNode, depth: number, actions?: DeviceActi
                 <Pencil size={13} />
               </button>
             )}
-            {actions.hasAction(pid, 'vms.device-detach') && (
+            {actions.hasAction(pluginId, 'vms.device-detach') && (
               <button
                 type="button"
                 aria-label={`Detach ${node.dtype ?? 'device'} ${node.label ?? ''}`}
@@ -210,7 +210,7 @@ function nodeCell(key: string, node: VmNode, depth: number, actions?: DeviceActi
       }
       // Legacy fallback — NIC detach by MAC (plugins that don't carry device ids).
       if (node.dtype !== 'NIC' || !node.label) return null;
-      if (!actions.hasAction(pid, 'vms.nic-detach')) return null;
+      if (!actions.hasAction(pluginId, 'vms.nic-detach')) return null;
       const blockedByReadOnly = !!actions.readOnly;
       return (
         <button
@@ -1565,10 +1565,10 @@ export default function Vms() {
     [vmsQuery.data],
   );
   const catalogsQuery = useQuery({
-    queryKey: ['plugin-actions-catalogs', catalogPluginIds.join('|')],
+    queryKey: ['pluginActionCatalogs', catalogPluginIds.join('|')],
     queryFn: async () => {
       const entries = await Promise.all(
-        catalogPluginIds.map(async (pid) => [pid, (await api.pluginActions(pid)).actions] as const),
+        catalogPluginIds.map(async (pluginId) => [pluginId, (await api.pluginActions(pluginId)).actions] as const),
       );
       return Object.fromEntries(entries);
     },
@@ -1609,7 +1609,7 @@ export default function Vms() {
 
   const probeResults = useQueries({
     queries: probeTargets.map((t) => ({
-      queryKey: ['device-probe', t.deviceId, 'vmStates+vmStats'],
+      queryKey: ['deviceProbe', t.deviceId, 'vmStates+vmStats'],
       queryFn: () => api.deviceProbe(t.deviceId, ['vmStates', 'vmStats'], t.pluginId),
       refetchInterval: 3_000,
       // Same rationale as the Containers page probe — no retry storm on a

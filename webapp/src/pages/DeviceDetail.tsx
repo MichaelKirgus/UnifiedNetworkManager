@@ -88,7 +88,7 @@ export default function DeviceDetail() {
       invalidateDevice();
       queryClient.invalidateQueries({ queryKey: ['deviceTelemetry', deviceId] });
       // Inventory tables were re-ingested — refresh the cross-device views too.
-      for (const key of ['networks', 'hosts', 'tunnels', 'services', 'routes', 'firewall-rules', 'wifi', 'storage', 'containers', 'vms']) {
+      for (const key of ['networks', 'hosts', 'tunnels', 'services', 'routes', 'firewallRules', 'wifi', 'storage', 'containers', 'vms']) {
         queryClient.invalidateQueries({ queryKey: [key] });
       }
       const r = data.results[0];

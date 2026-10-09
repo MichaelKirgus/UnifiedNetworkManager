@@ -97,10 +97,10 @@ export default function Services() {
     [servicesQuery.data],
   );
   const catalogsQuery = useQuery({
-    queryKey: ['plugin-actions-catalogs', 'services', catalogPluginIds.join('|')],
+    queryKey: ['pluginActionCatalogs', 'services', catalogPluginIds.join('|')],
     queryFn: async () => {
       const entries = await Promise.all(
-        catalogPluginIds.map(async (pid) => [pid, (await api.pluginActions(pid)).actions] as const),
+        catalogPluginIds.map(async (pluginId) => [pluginId, (await api.pluginActions(pluginId)).actions] as const),
       );
       return Object.fromEntries(entries);
     },

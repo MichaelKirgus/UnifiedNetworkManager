@@ -3,16 +3,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { api, PostgresTableStat, SystemEvent, WorkerRuntime } from '../api/client';
+import { formatMs } from '../components/formatMetric';
 import { useTimeFormat } from '../utils/time';
 import { can } from '../auth/permissions';
 import { Activity, ChevronDown, ChevronRight, Cpu, Database, Gauge, Save, ServerCog, TimerReset } from 'lucide-react';
-
-/** Human-friendly duration (ms → "1.2 s" / "340 ms"). */
-function fmtMs(ms?: number | null): string {
-  if (ms === null || ms === undefined) return '—';
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  return `${(ms / 1000).toFixed(1)} s`;
-}
 
 /** Window duration in compact form (ms → "15 min" / "2 h" / "90 s"). */
 function fmtWindow(ms?: number | null): string {
@@ -68,14 +62,14 @@ export default function Workers() {
 
   // Status auto-refreshes every 10 s so leadership changes + beat stats stay current.
   const statusQuery = useQuery({
-    queryKey: ['system-status'],
+    queryKey: ['systemStatus'],
     queryFn: api.systemStatus,
     refetchInterval: 10_000,
   });
 
   // Settings form state (initialized from the effective values once loaded).
   const settingsQuery = useQuery({
-    queryKey: ['system-settings'],
+    queryKey: ['systemSettings'],
     queryFn: api.systemSettings,
   });
 
@@ -93,7 +87,7 @@ export default function Workers() {
   const saveMutation = useMutation({
     mutationFn: api.saveSystemSettings,
     onSuccess: (data) => {
-      queryClient.setQueryData(['system-settings'], data);
+      queryClient.setQueryData(['systemSettings'], data);
       setIntervalMs(null); // re-sync the form to the saved values
       setInventoryWindowMs(null);
       setConcurrency(null);
@@ -151,7 +145,7 @@ export default function Workers() {
       key: 'lastBeatDurationMs',
       width: 120,
       sortAccessor: (row) => row.lastBeatDurationMs ?? -1,
-      render: (row) => <span className="font-mono text-sm">{fmtMs(row.lastBeatDurationMs)}</span>,
+      render: (row) => <span className="font-mono text-sm">{formatMs(row.lastBeatDurationMs)}</span>,
     },
     {
       header: 'Errors',
@@ -288,7 +282,7 @@ export default function Workers() {
         {/* Telemetry dispatcher stats */}
         {status && (
           <section className="grid grid-cols-2 gap-3 md:grid-cols-6">
-            <Stat label="Polls completed" value={status.telemetry.cyclesCompleted.toLocaleString()} sub={`last took ${fmtMs(status.telemetry.lastPollDurationMs)}`} />
+            <Stat label="Polls completed" value={status.telemetry.cyclesCompleted.toLocaleString()} sub={`last took ${formatMs(status.telemetry.lastPollDurationMs)}`} />
             <Stat
               label="In flight"
               value={status.telemetry.pollsInFlight ?? 0}

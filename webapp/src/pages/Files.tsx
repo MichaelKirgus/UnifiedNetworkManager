@@ -98,7 +98,7 @@ export default function Files() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const filesQuery = useQuery({
-    queryKey: ['repo-files', category],
+    queryKey: ['repoFiles', category],
     queryFn: () => api.repoFiles(category || undefined),
   });
   const files = filesQuery.data?.files ?? [];
@@ -106,7 +106,7 @@ export default function Files() {
   // Registered file-repo backends + the effective default (system setting /
   // env). Refreshed periodically so online state stays current.
   const providersQuery = useQuery({
-    queryKey: ['file-repo-providers'],
+    queryKey: ['fileRepoProviders'],
     queryFn: () => api.fileRepoProviders(),
     refetchInterval: 30_000,
   });
@@ -135,7 +135,7 @@ export default function Files() {
     return providers.find((p) => p.id === f.providerId)?.name ?? 'unknown repo';
   };
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['repo-files'] });
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['repoFiles'] });
 
   const uploadMutation = useMutation({
     mutationFn: (file: File) => api.uploadRepoFile(file, uploadCategory || undefined, uploadProvider || undefined),

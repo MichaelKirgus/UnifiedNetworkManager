@@ -85,7 +85,7 @@ export default function Security() {
   // The API polls plugins every 30s and upserts findings on inventory-due polls —
   // refresh at the same cadence so the view tracks live checks.
   const securityQuery = useQuery({
-    queryKey: ['security-checks'],
+    queryKey: ['securityChecks'],
     queryFn: () => api.securityChecks(),
     refetchInterval: 30_000,
   });

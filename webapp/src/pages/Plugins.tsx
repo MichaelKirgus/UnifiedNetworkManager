@@ -7,6 +7,7 @@ import { OptionForm } from '../components/OptionForm';
 import { Markdown } from '../components/Markdown';
 import { DialogShell } from '../components/DialogShell';
 import { api, DeviceSupportProfile, Plugin, PluginSelfMetricsSample, SupportCondition } from '../api/client';
+import { formatMs } from '../components/formatMetric';
 import { can } from '../auth/permissions';
 
 // A plugin is considered online if it was seen within the last 5 minutes.
@@ -23,13 +24,6 @@ function formatBytes(bytes: number | null): string {
   const mb = bytes / (1024 * 1024);
   if (mb >= 1024) return `${(mb / 1024).toFixed(2)} GB`;
   return `${mb.toFixed(1)} MB`;
-}
-
-/** Human-readable duration in ms. */
-function formatMs(ms: number | null): string {
-  if (ms === null || !Number.isFinite(ms)) return '—';
-  if (ms >= 1000) return `${(ms / 1000).toFixed(1)} s`;
-  return `${Math.round(ms)} ms`;
 }
 
 /** Human-readable uptime. */

@@ -387,10 +387,10 @@ export default function Shares() {
     [sharesQuery.data],
   );
   const catalogsQuery = useQuery({
-    queryKey: ['plugin-actions-catalogs', 'shares', catalogPluginIds.join('|')],
+    queryKey: ['pluginActionCatalogs', 'shares', catalogPluginIds.join('|')],
     queryFn: async () => {
       const entries = await Promise.all(
-        catalogPluginIds.map(async (pid) => [pid, (await api.pluginActions(pid)).actions] as const),
+        catalogPluginIds.map(async (pluginId) => [pluginId, (await api.pluginActions(pluginId)).actions] as const),
       );
       return Object.fromEntries(entries);
     },

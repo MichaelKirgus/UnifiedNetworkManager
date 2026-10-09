@@ -80,7 +80,7 @@ export default function Networks() {
   // the last 24h). Walks run at a slow cadence on the devices, so refresh on
   // that order — not every 30 s.
   const statesQuery = useQuery({
-    queryKey: ['host-states'],
+    queryKey: ['hostStates'],
     queryFn: () => api.hostStates({ windowHours: 24 }),
     enabled: can('hosts:read'),
     refetchInterval: 300_000,

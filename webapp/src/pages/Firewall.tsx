@@ -24,7 +24,7 @@ function fmtDurationSec(sec: number): string {
  */
 function SessionsSection() {
   const sessionsQuery = useQuery({
-    queryKey: ['firewall-sessions'],
+    queryKey: ['firewallSessions'],
     queryFn: () => api.firewallSessions(),
     refetchInterval: 30_000,
   });
@@ -163,7 +163,7 @@ export default function Firewall() {
   // The API polls plugins every 30s and upserts these rows — refresh at the
   // same cadence so the view tracks live inventory.
   const firewallQuery = useQuery({
-    queryKey: ['firewall-rules'],
+    queryKey: ['firewallRules'],
     queryFn: () => api.firewallRules(),
     refetchInterval: 30_000,
   });

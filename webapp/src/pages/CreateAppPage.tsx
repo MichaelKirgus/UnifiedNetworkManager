@@ -123,10 +123,10 @@ export default function CreateAppPage() {
     [devicesQuery.data],
   );
   const allCatalogsQuery = useQuery({
-    queryKey: ['plugin-actions-catalogs-all', allPluginIds.join('|')],
+    queryKey: ['pluginActionCatalogsAll', allPluginIds.join('|')],
     queryFn: async () => {
       const entries = await Promise.all(
-        allPluginIds.map(async (pid) => [pid, (await api.pluginActions(pid)).actions] as const),
+        allPluginIds.map(async (pluginId) => [pluginId, (await api.pluginActions(pluginId)).actions] as const),
       );
       return Object.fromEntries(entries);
     },

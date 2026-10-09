@@ -17,15 +17,8 @@ import { ipFamily, ipv4FromInt, ipv4ToInt, ipv6FromBigInt, ipv6ToBigInt, ipInCid
 // MAC helpers (mirror of api/src/routes/documentedHosts.ts)
 // ---------------------------------------------------------------------------
 
-/** Normalizes a MAC to lowercase colon form ("aa:bb:…"); null when not 12 hex digits. */
-export function normalizeMac(value: string): string | null {
-  const compact = value.toLowerCase().replace(/[^0-9a-f]/g, '');
-  if (compact.length !== 12) return null;
-  return compact.replace(/([0-9a-f]{2})(?=[0-9a-f])/g, '$1:');
-}
-
-/** Strips separators — the canonical comparison key for MACs. */
-export function macKey(value: string): string {
+/** Strips separators — the canonical comparison key for MACs (internal). */
+function macKey(value: string): string {
   return value.toLowerCase().replace(/[^0-9a-f]/g, '');
 }
 
@@ -111,40 +104,6 @@ export interface NetworkOption {
   label: string;
   cidrs: string[];
   vlanId?: number | null;
-}
-
-/** Best (largest) prefix of a CIDR in `opt` that contains `addr`; -1 when none match. */
-export function networkMatchScore(opt: NetworkOption, addr: string): number {
-  let best = -1;
-  for (const c of opt.cidrs) {
-    // ipInCidr already enforces family matching — a v4 address never matches a v6 subnet.
-    if (!ipInCidr(addr, c)) continue;
-    const s = splitCidr(c);
-    if (!s || s.prefix <= best) continue;
-    best = s.prefix;
-  }
-  return best;
-}
-
-/** All known networks that could contain this address, most specific first. */
-export function suggestNetworks(addr: string, options: NetworkOption[]): NetworkOption[] {
-  const scored = options
-    .map((o) => ({ o, s: networkMatchScore(o, addr) }))
-    .filter((x) => x.s >= 0);
-  scored.sort((a, b) => (b.s !== a.s ? b.s - a.s : a.o.label.localeCompare(b.o.label)));
-  return scored.map((x) => x.o);
-}
-
-/** Label of the best-matching known network for an address; null when none match. */
-export function bestNetworkLabel(addr: string, options: NetworkOption[]): string | null {
-  const n = bestNetwork(addr, options);
-  return n ? n.label : null;
-}
-
-/** The best-matching known network for an address (most specific subnet); null when none match. */
-export function bestNetwork(addr: string, options: NetworkOption[]): NetworkOption | null {
-  const matches = suggestNetworks(addr, options);
-  return matches.length > 0 ? matches[0] : null;
 }
 
 // ---------------------------------------------------------------------------

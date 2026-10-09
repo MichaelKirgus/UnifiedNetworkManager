@@ -46,7 +46,7 @@ export default function Users() {
   const [currentPassword, setCurrentPassword] = useState('');
 
   const usersQuery = useQuery({ queryKey: ['users'], queryFn: api.users });
-  const catalogQuery = useQuery({ queryKey: ['permissions-catalog'], queryFn: api.permissionCatalog });
+  const catalogQuery = useQuery({ queryKey: ['permissionCatalog'], queryFn: api.permissionCatalog });
 
   const updateUser = useMutation({
     mutationFn: (body: { roles?: string[]; permissions?: string[]; deviceScope?: DeviceScope }) => api.updateUser(editingId!, body),
@@ -108,7 +108,7 @@ export default function Users() {
   // Per-user credential policy override (requires auth:policies:write).
   const canEditPolicies = can('auth:policies:write');
   const userPolicyQuery = useQuery({
-    queryKey: ['user-policy', credsId],
+    queryKey: ['userCredentialPolicy', credsId],
     queryFn: () => api.userCredentialPolicy(credsId!),
     enabled: Boolean(credsId) && canEditPolicies,
   });
@@ -116,7 +116,7 @@ export default function Users() {
   const saveUserPolicy = useMutation({
     mutationFn: (body: Partial<CredentialPolicy>) => api.setUserCredentialPolicy(credsId!, body),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['user-policy', credsId] });
+      queryClient.invalidateQueries({ queryKey: ['userCredentialPolicy', credsId] });
       setFormError(null);
     },
     onError: (err: unknown) => setFormError((err as Error).message),
@@ -125,7 +125,7 @@ export default function Users() {
   const clearUserPolicy = useMutation({
     mutationFn: () => api.clearUserCredentialPolicy(credsId!),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['user-policy', credsId] });
+      queryClient.invalidateQueries({ queryKey: ['userCredentialPolicy', credsId] });
       setFormError(null);
     },
     onError: (err: unknown) => setFormError((err as Error).message),

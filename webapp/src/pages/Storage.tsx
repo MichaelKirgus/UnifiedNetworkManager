@@ -489,10 +489,10 @@ export default function Storage() {
     [storageQuery.data],
   );
   const catalogsQuery = useQuery({
-    queryKey: ['plugin-actions-catalogs', 'storage', catalogPluginIds.join('|')],
+    queryKey: ['pluginActionCatalogs', 'storage', catalogPluginIds.join('|')],
     queryFn: async () => {
       const entries = await Promise.all(
-        catalogPluginIds.map(async (pid) => [pid, (await api.pluginActions(pid)).actions] as const),
+        catalogPluginIds.map(async (pluginId) => [pluginId, (await api.pluginActions(pluginId)).actions] as const),
       );
       return Object.fromEntries(entries);
     },

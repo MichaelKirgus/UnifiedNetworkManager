@@ -3814,7 +3814,7 @@ export const api = {
   renewPluginTls: (pluginId: string) =>
     apiFetch<{ renewed: boolean; ok: boolean }>(`/plugins/${pluginId}/tls/renew`, { method: 'POST' }),
   // Force a fresh mTLS leaf for one of UNM's own services ('api' | 'mcp').
-  caRenew: (subject: 'api' | 'mcp') =>
+  renewServiceTls: (subject: 'api' | 'mcp') =>
     apiFetch<{ renewed: boolean; ok: boolean }>('/ca/renew', { method: 'POST', body: JSON.stringify({ subject }) }),
   // In-session 2FA re-validation (mint a fresh token without a full re-login).
   revalidateChallenge: () => apiFetch<RevalidateChallenge>('/auth/revalidate/challenge', { method: 'POST' }),

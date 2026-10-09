@@ -79,7 +79,7 @@ export default function FirewallEvents() {
   // The `from` bound is computed at fetch time so "last hour" keeps sliding as
   // the page refetches. Newest-first, capped by the API (default 500 rows).
   const eventsQuery = useQuery({
-    queryKey: ['firewall-events', action, deviceId, search, range],
+    queryKey: ['firewallEvents', action, deviceId, search, range],
     queryFn: () => {
       const from = new Date(Date.now() - RANGE_MS[range]).toISOString();
       return api.firewallEvents({

@@ -150,7 +150,7 @@ export default function Time() {
   // Telemetry baseline: the API reads each device's latest `system.deviceTime`
   // metric and pre-computes drift. Poll at the telemetry cadence (30 s).
   const timeQuery = useQuery({
-    queryKey: ['device-time'],
+    queryKey: ['deviceTime'],
     queryFn: () => api.deviceTime(),
     refetchInterval: 30_000,
   });
@@ -159,7 +159,7 @@ export default function Time() {
   // configured public NTP references (polled server-side by the ntpReferences
   // worker — this page only reads the freshest stored rows).
   const ntpRefQuery = useQuery({
-    queryKey: ['ntp-references'],
+    queryKey: ['ntpReferences'],
     queryFn: () => api.ntpReferences(),
     refetchInterval: 30_000,
   });
@@ -204,7 +204,7 @@ export default function Time() {
 
   const probeResults = useQueries({
     queries: probeTargets.map((t) => ({
-      queryKey: ['device-probe', t.deviceId, t.kind],
+      queryKey: ['deviceProbe', t.deviceId, t.kind],
       queryFn: () => api.deviceProbe(t.deviceId, [t.kind === 'ntpServed' ? 'ntpServed' : 'deviceTime'], t.pluginId),
       refetchInterval: 5_000,
       // Short-cycle live data — a failed poll is retried by the NEXT interval tick;

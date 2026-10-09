@@ -57,7 +57,7 @@ export default function PlanDetail() {
   // Action catalog for labels + the step editor (single-device actions only).
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const parentActionsQuery = useQuery({
-    queryKey: ['plugin-actions', plan?.pluginId ?? ''],
+    queryKey: ['pluginActions', plan?.pluginId ?? ''],
     queryFn: () => api.pluginActions(plan!.pluginId),
     enabled: Boolean(plan?.pluginId) && can('plugins:read'),
   });
@@ -550,9 +550,10 @@ function StepEditor({ step, planId, onSaved, onClose }: {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
-  // Plan context (provisioned secrets + other steps) and the plugin's action
-  // catalog, fetched locally so this modal is self-contained.
-  const catalogQuery = useQuery({ queryKey: ['plan-editor-catalog', planId], queryFn: () => api.getPlan(planId) });
+  // Plan context (provisioned secrets + other steps) — same key as the
+  // parent's query, so React Query serves its cache instead of refetching.
+  const planDataQuery = useQuery({ queryKey: ['plan', planId], queryFn: () => api.getPlan(planId) });
+  const planData = planDataQuery.data;
   const actionsQuery = useCatalogByPlanId(planId);
 
   const saveMutation = useMutation({
@@ -608,11 +609,11 @@ function StepEditor({ step, planId, onSaved, onClose }: {
             ) : null;
           })()}
 
-          {(catalogQuery.data?.provisionedSecrets.length ?? 0) > 0 && (
+          {(planData?.provisionedSecrets.length ?? 0) > 0 && (
             <div>
               <label className="mb-1 block text-sm font-medium text-secondary">Provisioned secrets</label>
               <div className="space-y-1">
-                {catalogQuery.data!.provisionedSecrets.map((ps) => (
+                {planData!.provisionedSecrets.map((ps) => (
                   <label key={ps.ref} className="flex items-center gap-2 text-sm text-secondary">
                     <input type="checkbox" checked={secretRefs.includes(ps.ref)}
                       onChange={(e) => setSecretRefs((prev) => e.target.checked ? [...prev, ps.ref] : prev.filter((r) => r !== ps.ref))}
@@ -625,11 +626,11 @@ function StepEditor({ step, planId, onSaved, onClose }: {
             </div>
           )}
 
-          {(catalogQuery.data?.steps.length ?? 0) > 1 && (
+          {(planData?.steps.length ?? 0) > 1 && (
             <div>
               <label className="mb-1 block text-sm font-medium text-secondary">Runs after</label>
               <div className="space-y-1">
-                {catalogQuery.data!.steps.filter((s) => s.id !== step.id).map((s) => (
+                {planData!.steps.filter((s) => s.id !== step.id).map((s) => (
                   <label key={s.id} className="flex items-center gap-2 text-sm text-secondary">
                     <input type="checkbox" checked={dependsOn.includes(s.stepIndex)}
                       onChange={(e) => setDependsOn((prev) => e.target.checked ? [...prev, s.stepIndex] : prev.filter((d) => d !== s.stepIndex))}
@@ -654,16 +655,17 @@ function StepEditor({ step, planId, onSaved, onClose }: {
 /** Loads a plan's plugin action catalog, filtered to single-device actions (the only valid step targets). */
 function useCatalogByPlanId(planId: string) {
   const [pluginId, setPluginId] = useState<string | null>(null);
+  // Same key + queryFn as the parent's plan query — React Query dedupes to one fetch.
   const planRefQuery = useQuery({
-    queryKey: ['plan-plugin-id', planId],
-    queryFn: async () => (await api.getPlan(planId)).pluginId,
+    queryKey: ['plan', planId],
+    queryFn: () => api.getPlan(planId),
     enabled: Boolean(planId),
   });
   useEffect(() => {
-    if (planRefQuery.data) setPluginId(planRefQuery.data);
+    if (planRefQuery.data) setPluginId(planRefQuery.data.pluginId);
   }, [planRefQuery.data]);
   const actionsQuery = useQuery({
-    queryKey: ['plugin-actions', pluginId ?? ''],
+    queryKey: ['pluginActions', pluginId ?? ''],
     queryFn: () => api.pluginActions(pluginId!),
     enabled: Boolean(pluginId),
   });

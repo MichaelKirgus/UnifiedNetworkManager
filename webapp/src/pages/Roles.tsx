@@ -22,7 +22,7 @@ export default function Roles() {
   const [createScope, setCreateScope] = useState<DeviceScope>({});
 
   const rolesQuery = useQuery({ queryKey: ['roles'], queryFn: api.roles });
-  const catalogQuery = useQuery({ queryKey: ['permissions-catalog'], queryFn: api.permissionCatalog });
+  const catalogQuery = useQuery({ queryKey: ['permissionCatalog'], queryFn: api.permissionCatalog });
 
   const createRole = useMutation({
     mutationFn: (body: { name: string; description?: string; permissions: string[]; deviceScope?: DeviceScope }) => api.createRole(body),

@@ -99,10 +99,10 @@ export default function CreateVmPage() {
   // Same data as the Containers/Create-app "all plugins" catalog — share that
   // key family so a fresh fetch on one page is reused by the other.
   const catalogsQuery = useQuery({
-    queryKey: ['plugin-actions-catalogs-all', allPluginIds.join('|')],
+    queryKey: ['pluginActionCatalogsAll', allPluginIds.join('|')],
     queryFn: async () => {
       const entries = await Promise.all(
-        allPluginIds.map(async (pid) => [pid, (await api.pluginActions(pid)).actions] as const),
+        allPluginIds.map(async (pluginId) => [pluginId, (await api.pluginActions(pluginId)).actions] as const),
       );
       return Object.fromEntries(entries);
     },

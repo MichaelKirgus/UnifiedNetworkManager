@@ -136,7 +136,7 @@ export const OptionForm = forwardRef<OptionFormHandle, OptionFormProps>(function
   // inside a parent form — only the footer buttons are additionally hidden.
   const bare = compact || hideFooter;
   const optionsQuery = useQuery({
-    queryKey: scoped ? ['device-plugin-options', deviceId, pluginId] : ['plugin-options', pluginId],
+    queryKey: scoped ? ['devicePluginOptions', deviceId, pluginId] : ['pluginOptions', pluginId],
     queryFn: () => (scoped ? api.devicePluginOptions(deviceId!, pluginId) : api.pluginOptions(pluginId)),
   });
 

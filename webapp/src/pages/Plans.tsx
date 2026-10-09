@@ -453,7 +453,7 @@ function CreatePlan({ onDone, onCancel }: { onDone: () => void; onCancel: () => 
   // Only plugins that advertise an action catalog can seed a plan.
   const [pluginId, setPluginId] = useState('');
   const actionsQuery = useQuery({
-    queryKey: ['plugin-actions', pluginId],
+    queryKey: ['pluginActions', pluginId],
     queryFn: () => api.pluginActions(pluginId),
     enabled: Boolean(pluginId),
   });

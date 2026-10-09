@@ -20,7 +20,7 @@ export default function ConfigJobs() {
   // only requires config-jobs:read.
   const canApply = can('configs:apply');
   const jobsQuery = useQuery({
-    queryKey: ['config-jobs'],
+    queryKey: ['configJobs'],
     queryFn: api.allConfigJobs,
     refetchInterval: 10_000,
   });

@@ -44,9 +44,9 @@ interface DeviceRolloutState {
 
 const EMPTY_DEVICE_STATE: DeviceRolloutState = { ipEnabled: null, portMode: 'all', customPorts: [] };
 
-function effectiveIpEnabled(pid: string, st: DeviceRolloutState | undefined): boolean {
+function effectiveIpEnabled(pluginId: string, st: DeviceRolloutState | undefined): boolean {
   if (st?.ipEnabled != null) return st.ipEnabled;
-  return !L2_ONLY_PLUGINS.has(pid);
+  return !L2_ONLY_PLUGINS.has(pluginId);
 }
 
 /** Port names selected for a device given its mode + the preflight port list. */
@@ -196,15 +196,15 @@ export default function NetworkRolloutPage() {
   // Catalog per candidate plugin — only plugins implementing network.create count.
   // Own key family (stores one filtered entry per plugin, not full catalogs).
   const catalogQueries = useQuery({
-    queryKey: ['plugin-actions-intent', INTENT_ID, candidatePluginIds.join('|')],
+    queryKey: ['pluginActionsIntent', INTENT_ID, candidatePluginIds.join('|')],
     queryFn: async () => {
       const out = new Map<string, CatalogEntry | null>();
-      for (const pid of candidatePluginIds) {
+      for (const pluginId of candidatePluginIds) {
         try {
-          const res = await api.pluginActions(pid);
-          out.set(pid, res.actions.find((a) => a.id === INTENT_ID) ?? null);
+          const res = await api.pluginActions(pluginId);
+          out.set(pluginId, res.actions.find((a) => a.id === INTENT_ID) ?? null);
         } catch {
-          out.set(pid, null);
+          out.set(pluginId, null);
         }
       }
       return out;
@@ -216,7 +216,7 @@ export default function NetworkRolloutPage() {
     const m = catalogQueries.data;
     if (!m) return new Map<string, CatalogEntry>();
     const out = new Map<string, CatalogEntry>();
-    for (const [pid, entry] of m.entries()) if (entry) out.set(pid, entry);
+    for (const [pluginId, entry] of m.entries()) if (entry) out.set(pluginId, entry);
     return out;
   }, [catalogQueries.data]);
 
@@ -313,17 +313,17 @@ export default function NetworkRolloutPage() {
       const perPlugin = new Map<string, PreflightResultDto[]>();
       setProbeProgress({ totalPlugins: groups.size, donePlugins: 0, totalDevices: totalTargets, doneDevices: 0, status: {} });
 
-      await Promise.all([...groups.entries()].map(async ([pid, devs]) => {
-        setProbeProgress((p) => p ? { ...p, status: { ...p.status, [pid]: 'probing' } } : p);
+      await Promise.all([...groups.entries()].map(async ([pluginId, devs]) => {
+        setProbeProgress((p) => p ? { ...p, status: { ...p.status, [pluginId]: 'probing' } } : p);
         try {
-          const r = await api.plansPreflight({ pluginId: pid, intentActionId: INTENT_ID, inputs: sharedInputs, deviceIds: devs.map((d) => d.id) }, signal ? { signal } : undefined);
-          perPlugin.set(pid, r.results);
+          const r = await api.plansPreflight({ pluginId, intentActionId: INTENT_ID, inputs: sharedInputs, deviceIds: devs.map((d) => d.id) }, signal ? { signal } : undefined);
+          perPlugin.set(pluginId, r.results);
         } catch (e) {
           if (cancelledRef.current || (signal?.aborted)) throw e; // let the whole run abort cleanly
-          perPlugin.set(pid, devs.map((d) => ({ deviceId: d.id, values: [], degraded: true, error: e instanceof Error ? e.message : String(e) })));
+          perPlugin.set(pluginId, devs.map((d) => ({ deviceId: d.id, values: [], degraded: true, error: e instanceof Error ? e.message : String(e) })));
         }
         if (cancelledRef.current || signal?.aborted) throw new Error('cancelled');
-        setProbeProgress((p) => p ? { ...p, donePlugins: p.donePlugins + 1, doneDevices: p.doneDevices + devs.length, status: { ...p.status, [pid]: perPlugin.get(pid)?.some((x) => x.degraded) ? 'degraded' : 'done' } } : p);
+        setProbeProgress((p) => p ? { ...p, donePlugins: p.donePlugins + 1, doneDevices: p.doneDevices + devs.length, status: { ...p.status, [pluginId]: perPlugin.get(pluginId)?.some((x) => x.degraded) ? 'degraded' : 'done' } } : p);
       }));
 
       if (cancelledRef.current || signal?.aborted) throw new Error('cancelled');
@@ -379,18 +379,18 @@ export default function NetworkRolloutPage() {
     if (!sug) return out;
     const p4 = cidr.trim().split('/').pop();
     const p6 = cidrV6.trim().split('/').pop();
-    for (const [pid, devs] of groups.entries()) {
+    for (const [pluginId, devs] of groups.entries()) {
       for (const d of devs) {
         const s = sug[d.id];
         if (!s) continue;
         const patch: Partial<DeviceRolloutState> = {};
         // Only pre-fill when the device will actually get an IP (smart default
         // is ON except L2-only plugins — respect an explicit toggle choice too).
-        if (effectiveIpEnabled(pid, undefined)) {
+        if (effectiveIpEnabled(pluginId, undefined)) {
           if (s.v4 && p4) patch.cidr = `${s.v4}/${p4}`;
           if (s.v6 && p6) patch.cidrV6 = `${s.v6}/${p6}`;
         }
-        if (Object.keys(patch).length > 0) out[`${pid}:${d.id}`] = { ...EMPTY_DEVICE_STATE, ...patch };
+        if (Object.keys(patch).length > 0) out[`${pluginId}:${d.id}`] = { ...EMPTY_DEVICE_STATE, ...patch };
       }
     }
     return out;
@@ -407,10 +407,11 @@ export default function NetworkRolloutPage() {
   /** Mark/clear a port's role — then re-run the preflight so the merged live+role
    *  flags refresh immediately (the API ORs device_port_roles into ports). */
   const markRole = useMutation({
-    mutationFn: async ({ pid, deviceId, portName, role }: { pid: string; deviceId: string; portName: string; role: 'uplink' | 'trunk' | null }) => {
-      await api.setDevicePortRole(deviceId, { pluginId: pid, portName, role });
+    mutationFn: async ({ pluginId, deviceId, portName, role }: { pluginId: string; deviceId: string; portName: string; role: 'uplink' | 'trunk' | null }) => {
+      await api.setDevicePortRole(deviceId, { pluginId, portName, role });
     },
-    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['rollout-preflight'] }); preflightQuery.mutate(undefined); },
+    // No query cache to invalidate — the preflight is a mutation; just re-run it.
+    onSuccess: () => { preflightQuery.mutate(undefined); },
   });
 
   // Which chip's role menu is open (keyed `${deviceId}:${portName}`), if any.
@@ -426,16 +427,16 @@ export default function NetworkRolloutPage() {
   const createPlans = useMutation({
     mutationFn: async () => {
       const deviceInputs: Record<string, Record<string, unknown>> = {};
-      for (const [pid, devs] of groups.entries()) {
+      for (const [pluginId, devs] of groups.entries()) {
         for (const d of devs) {
-          const st = deviceState[`${pid}:${d.id}`];
+          const st = deviceState[`${pluginId}:${d.id}`];
           if (!st) continue;
-          const r = preflightQuery.data?.get(pid)?.find((x) => x.deviceId === d.id);
+          const r = preflightQuery.data?.get(pluginId)?.find((x) => x.deviceId === d.id);
           const perDevice: Record<string, unknown> = {};
           // IP toggle — explicit nulls clear the shared L3 address for this
           // device only (L2-only rollout: e.g. a switch gets the VLAN but no
           // IP). Plugins treat null as "absent" in their input validation.
-          if (!effectiveIpEnabled(pid, st)) {
+          if (!effectiveIpEnabled(pluginId, st)) {
             perDevice['cidr'] = null;
             perDevice['cidrV6'] = null;
           } else {
@@ -499,8 +500,8 @@ export default function NetworkRolloutPage() {
   function bulkSetIp(on: boolean) {
     setDeviceState((prev) => {
       const next = { ...prev };
-      for (const [pid, devs] of groups.entries()) for (const d of devs) {
-        const k = `${pid}:${d.id}`;
+      for (const [pluginId, devs] of groups.entries()) for (const d of devs) {
+        const k = `${pluginId}:${d.id}`;
         next[k] = { ...(next[k] ?? EMPTY_DEVICE_STATE), ipEnabled: on };
       }
       return next;
@@ -511,11 +512,11 @@ export default function NetworkRolloutPage() {
   function bulkSetMode(mode: PortMode) {
     setDeviceState((prev) => {
       const next = { ...prev };
-      for (const [pid, devs] of groups.entries()) {
+      for (const [pluginId, devs] of groups.entries()) {
         for (const d of devs) {
-          const r = preflightQuery.data?.get(pid)?.find((x) => x.deviceId === d.id);
+          const r = preflightQuery.data?.get(pluginId)?.find((x) => x.deviceId === d.id);
           if (!r?.capabilities?.vlanPorts || !r.ports?.length) continue;
-          const k = `${pid}:${d.id}`;
+          const k = `${pluginId}:${d.id}`;
           next[k] = { ...(next[k] ?? EMPTY_DEVICE_STATE), portMode: mode, customPorts: [] };
         }
       }
@@ -694,15 +695,15 @@ export default function NetworkRolloutPage() {
                 </div>
                 {/* Detail steps — one row per supporting plugin. */}
                 <ul className="mt-3 space-y-1">
-                  {[...groups.entries()].map(([pid, devs]) => {
-                    const st = probeProgress.status[pid] ?? 'probing';
+                  {[...groups.entries()].map(([pluginId, devs]) => {
+                    const st = probeProgress.status[pluginId] ?? 'probing';
                     return (
-                      <li key={pid} className="flex items-center gap-2 text-xs">
+                      <li key={pluginId} className="flex items-center gap-2 text-xs">
                         {st === 'done' && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" />}
                         {st === 'degraded' && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" title="probe failed — defaults apply" />}
                         {st === 'probing' && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" />}
                         <span className={clsx('truncate', st === 'probing' ? 'text-secondary' : 'text-faint')}>
-                          {pluginName(pid)} — {devs.length} device{devs.length === 1 ? '' : 's'}
+                          {pluginName(pluginId)} — {devs.length} device{devs.length === 1 ? '' : 's'}
                         </span>
                         {st === 'degraded' && <span className="ml-auto shrink-0 text-warning-fg">probe failed</span>}
                       </li>
@@ -746,19 +747,19 @@ export default function NetworkRolloutPage() {
                 </>)}
               </div>
 
-              {[...groups.entries()].map(([pid, devs]) => {
-                const results = preflightQuery.data?.get(pid) ?? [];
+              {[...groups.entries()].map(([pluginId, devs]) => {
+                const results = preflightQuery.data?.get(pluginId) ?? [];
                 return (
-                  <section key={pid} className="rounded-md border border-border bg-background p-3">
-                    <h3 className="mb-2 text-sm font-semibold text-secondary">{pluginName(pid)} — {devs.length} device{devs.length === 1 ? '' : 's'}</h3>
+                  <section key={pluginId} className="rounded-md border border-border bg-background p-3">
+                    <h3 className="mb-2 text-sm font-semibold text-secondary">{pluginName(pluginId)} — {devs.length} device{devs.length === 1 ? '' : 's'}</h3>
                     <div className="space-y-1.5">
                       {devs.map((d) => {
                         const r = results.find((x) => x.deviceId === d.id);
-                        const k = `${pid}:${d.id}`;
+                        const k = `${pluginId}:${d.id}`;
                         const st = deviceState[k] ?? EMPTY_DEVICE_STATE;
                         const setSt = (patch: Partial<DeviceRolloutState>) =>
                           setDeviceState((prev) => ({ ...prev, [k]: { ...(prev[k] ?? EMPTY_DEVICE_STATE), ...patch } }));
-                        const ipOn = effectiveIpEnabled(pid, st);
+                        const ipOn = effectiveIpEnabled(pluginId, st);
                         const portCapable = !!r?.capabilities?.vlanPorts && (r.ports?.length ?? 0) > 0;
                         const expanded = expandedIds.has(d.id);
                         return (
@@ -853,10 +854,10 @@ export default function NetworkRolloutPage() {
                                             {roleMenu === menuKey && (
                                               <div className="absolute right-0 top-full z-10 mt-0.5 w-40 rounded-md border border-border bg-card p-1 text-xs shadow-lg" onClick={(e) => e.stopPropagation()}>
                                                 <p className="px-2 py-1 font-medium text-secondary">{p.name}</p>
-                                                <button type="button" onClick={() => { setRoleMenu(null); markRole.mutate({ pid, deviceId: d.id, portName: p.name, role: 'uplink' }); }} className={clsx('block w-full rounded px-2 py-1 text-left hover:bg-muted', p.uplink && 'font-medium text-primary')}>Mark as uplink</button>
-                                                <button type="button" onClick={() => { setRoleMenu(null); markRole.mutate({ pid, deviceId: d.id, portName: p.name, role: 'trunk' }); }} className={clsx('block w-full rounded px-2 py-1 text-left hover:bg-muted', !p.uplink && p.trunk && 'font-medium text-primary')}>Mark as trunk</button>
+                                                <button type="button" onClick={() => { setRoleMenu(null); markRole.mutate({ pluginId, deviceId: d.id, portName: p.name, role: 'uplink' }); }} className={clsx('block w-full rounded px-2 py-1 text-left hover:bg-muted', p.uplink && 'font-medium text-primary')}>Mark as uplink</button>
+                                                <button type="button" onClick={() => { setRoleMenu(null); markRole.mutate({ pluginId, deviceId: d.id, portName: p.name, role: 'trunk' }); }} className={clsx('block w-full rounded px-2 py-1 text-left hover:bg-muted', !p.uplink && p.trunk && 'font-medium text-primary')}>Mark as trunk</button>
                                                 {(p.uplink || p.trunk) && (
-                                                  <button type="button" onClick={() => { setRoleMenu(null); markRole.mutate({ pid, deviceId: d.id, portName: p.name, role: null }); }} className={clsx('block w-full rounded px-2 py-1 text-left hover:bg-muted', !p.uplink && !p.trunk ? 'hidden' : '')}>Clear role</button>
+                                                  <button type="button" onClick={() => { setRoleMenu(null); markRole.mutate({ pluginId, deviceId: d.id, portName: p.name, role: null }); }} className={clsx('block w-full rounded px-2 py-1 text-left hover:bg-muted', !p.uplink && !p.trunk ? 'hidden' : '')}>Clear role</button>
                                                 )}
                                               </div>
                                             )}

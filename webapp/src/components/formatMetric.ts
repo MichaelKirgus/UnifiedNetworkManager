@@ -45,6 +45,13 @@ export function formatDuration(seconds: number): string {
   return parts.join(' ');
 }
 
+/** Human-readable duration in milliseconds ("340 ms" / "1.2 s"); null/undefined/non-finite → '—'. */
+export function formatMs(ms?: number | null): string {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—';
+  if (Math.abs(ms) < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
 export function formatNumber(value: number, unit?: string): string {
   const num = Number.isInteger(value) ? value.toLocaleString() : value.toFixed(1);
   return unit ? `${num} ${unit}` : num;

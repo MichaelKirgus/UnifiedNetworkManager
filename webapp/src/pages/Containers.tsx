@@ -806,19 +806,19 @@ interface ChildActionContext {
  * plugin does; TrueNAS manages apps as units and advertises none, so its child
  * rows stay action-free). States are lowercase docker states from both plugins. */
 function ContainerNodeActions({ node, ctx }: { node: TreeNode; ctx: ChildActionContext }) {
-  const pid = node.pluginId ?? '';
+  const pluginId = node.pluginId ?? '';
   const state = (node.state ?? '').toLowerCase();
   const running = state === 'running' || state === 'restarting';
   const actions: { id: string; label: string; icon: ReactNode; available: boolean; eligible: boolean; danger?: boolean }[] = [
-    { id: 'containers.start-one', label: 'Start', icon: <Play size={13} />, available: ctx.hasAction(pid, 'containers.start-one'), eligible: !running },
-    { id: 'containers.stop-one', label: 'Stop', icon: <Square size={12} />, available: ctx.hasAction(pid, 'containers.stop-one'), eligible: running, danger: true },
-    { id: 'containers.restart-one', label: 'Restart', icon: <RotateCw size={13} />, available: ctx.hasAction(pid, 'containers.restart-one'), eligible: true },
-    { id: 'containers.delete-one', label: 'Delete', icon: <Trash2 size={13} />, available: ctx.hasAction(pid, 'containers.delete-one'), eligible: true, danger: true },
+    { id: 'containers.start-one', label: 'Start', icon: <Play size={13} />, available: ctx.hasAction(pluginId, 'containers.start-one'), eligible: !running },
+    { id: 'containers.stop-one', label: 'Stop', icon: <Square size={12} />, available: ctx.hasAction(pluginId, 'containers.stop-one'), eligible: running, danger: true },
+    { id: 'containers.restart-one', label: 'Restart', icon: <RotateCw size={13} />, available: ctx.hasAction(pluginId, 'containers.restart-one'), eligible: true },
+    { id: 'containers.delete-one', label: 'Delete', icon: <Trash2 size={13} />, available: ctx.hasAction(pluginId, 'containers.delete-one'), eligible: true, danger: true },
   ];
   // Interactive console (capability 'sshConsole') — a full shell INSIDE this
   // container via `docker exec -it` over the bound SSH credential. Rendered
   // alongside the lifecycle actions; only when the plugin advertises it.
-  const canConsole = !!ctx.canConsole && ctx.canConsole(pid);
+  const canConsole = !!ctx.canConsole && ctx.canConsole(pluginId);
   return (
     <div className="flex items-center gap-0.5">
       {actions.map((a) => {
@@ -1031,10 +1031,10 @@ export default function Containers() {
     [containersQuery.data],
   );
   const catalogsQuery = useQuery({
-    queryKey: ['plugin-actions-catalogs', catalogPluginIds.join('|')],
+    queryKey: ['pluginActionCatalogs', catalogPluginIds.join('|')],
     queryFn: async () => {
       const entries = await Promise.all(
-        catalogPluginIds.map(async (pid) => [pid, (await api.pluginActions(pid)).actions] as const),
+        catalogPluginIds.map(async (pluginId) => [pluginId, (await api.pluginActions(pluginId)).actions] as const),
       );
       return Object.fromEntries(entries);
     },
@@ -1058,10 +1058,10 @@ export default function Containers() {
     [devicesQuery.data],
   );
   const allCatalogsQuery = useQuery({
-    queryKey: ['plugin-actions-catalogs-all', allPluginIds.join('|')],
+    queryKey: ['pluginActionCatalogsAll', allPluginIds.join('|')],
     queryFn: async () => {
       const entries = await Promise.all(
-        allPluginIds.map(async (pid) => [pid, (await api.pluginActions(pid)).actions] as const),
+        allPluginIds.map(async (pluginId) => [pluginId, (await api.pluginActions(pluginId)).actions] as const),
       );
       return Object.fromEntries(entries);
     },
@@ -1145,7 +1145,7 @@ export default function Containers() {
 
   const probeResults = useQueries({
     queries: probeTargets.map((t) => ({
-      queryKey: ['device-probe', t.deviceId, 'containerStats+containerStates'],
+      queryKey: ['deviceProbe', t.deviceId, 'containerStats+containerStates'],
       queryFn: () => api.deviceProbe(t.deviceId, ['containerStats', 'containerStates'], t.pluginId),
       refetchInterval: 3_000,
       // Short-cycle live data — a failed poll is retried by the NEXT interval
@@ -1311,7 +1311,7 @@ export default function Containers() {
     queries: fastProbeTargets.map((t) => ({
       // Distinct key from the page-wide probe — this one carries a `names`
       // selection, so its (partial) response must not clobber the full cache.
-      queryKey: ['device-probe-fast', t.deviceId, 'containerStates', t.names.join(',')],
+      queryKey: ['deviceProbeFast', t.deviceId, 'containerStates', t.names.join(',')],
       queryFn: () => api.deviceProbe(t.deviceId, ['containerStates'], t.pluginId, t.names),
       refetchInterval: 1_500,
       // Short-cycle transition probe — no retry storm; the next tick retries.

@@ -69,7 +69,7 @@ export default function DeviceConfig() {
   });
 
   const actionsQuery = useQuery({
-    queryKey: ['plugin-actions', activePluginId],
+    queryKey: ['pluginActions', activePluginId],
     queryFn: () => api.pluginActions(activePluginId as string),
     enabled: Boolean(activePluginId) && can('plugins:read'),
   });

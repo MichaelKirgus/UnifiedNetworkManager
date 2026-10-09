@@ -3,18 +3,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { api, SettingView } from '../api/client';
+import { formatMs } from '../components/formatMetric';
 import { can } from '../auth/permissions';
 import { ChevronDown, ChevronRight, RotateCcw, Save, Settings2, X } from 'lucide-react';
-
-/** Compact duration for ms values ("30 s" / "15 min" / "2 h"). */
-function fmtMs(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s} s`;
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m} min`;
-  return `${Math.round(m / 60)} h`;
-}
 
 /** Compact duration for seconds values ("1 h" / "30 min"). */
 function fmtSeconds(s: number): string {
@@ -32,7 +23,7 @@ function fmtValue(v: number | string | boolean, unit?: string | null): string {
   if (typeof v === 'string') return v;
   switch (unit) {
     case 'ms':
-      return fmtMs(v);
+      return formatMs(v);
     case 's':
       return fmtSeconds(v);
     case 'days':

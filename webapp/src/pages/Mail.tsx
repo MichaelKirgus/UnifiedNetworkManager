@@ -884,10 +884,10 @@ export default function Mail() {
     [allDomains, allMailboxes, allAliases],
   );
   const catalogsQuery = useQuery({
-    queryKey: ['plugin-actions-catalogs', 'mail', catalogPluginIds.join('|')],
+    queryKey: ['pluginActionCatalogs', 'mail', catalogPluginIds.join('|')],
     queryFn: async () => {
       const entries = await Promise.all(
-        catalogPluginIds.map(async (pid) => [pid, (await api.pluginActions(pid)).actions] as const),
+        catalogPluginIds.map(async (pluginId) => [pluginId, (await api.pluginActions(pluginId)).actions] as const),
       );
       return Object.fromEntries(entries);
     },
