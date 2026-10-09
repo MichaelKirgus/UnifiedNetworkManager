@@ -108,12 +108,34 @@ jobs:
         include: ${{ fromJson(needs.meta.outputs.components) }}
 
     steps:
+      # Fail fast BEFORE any expensive build: the token must exist and be a live,
+      # unexpired credential. (GITHUB_TOKEN is always injected for pushes to this
+      # repo — but an explicit check turns "empty/revoked" into a clear error.)
+      - name: Preflight — GITHUB_TOKEN present + valid
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::GITHUB_TOKEN is empty — cannot publish to GHCR."
+            exit 1
+          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" https://api.github.com/user)
+          if [ "$code" != "200" ]; then
+            echo "::error::GITHUB_TOKEN rejected by the GitHub API (HTTP $code)."
+            exit 1
+          fi
+          echo "GITHUB_TOKEN is present and valid."
+
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       # GHCR image names must be lowercase — the repo is lowercased explicitly.
+      # This login also performs the real registry auth handshake, so a token
+      # that is valid for the API but lacks `packages: write` (see top-level
+      # permissions) fails HERE — before any layer is built or pushed.
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
