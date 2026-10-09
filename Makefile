@@ -22,7 +22,7 @@ setup:
 	  wait )
 	@echo "Dependencies installed successfully."
 
-# Build the shared packages + all plugins + the MCP server.
+# Build the shared packages + all plugins + the MCP server + api + webapp.
 #
 # Ordering: @unm/plugin-sdk and @unm/snmp-client must build FIRST — every
 # plugin (and the api, types-only) depends on them via `file:` links, which npm
@@ -30,7 +30,8 @@ setup:
 # (it depends on each). We refresh those copies from the fresh dist before
 # building the plugins so they compile against current shared code; everything
 # else then runs concurrently (tsc builds are CPU-bound and independent of
-# each other).
+# each other). The api and webapp join the parallel section — their file: deps
+# were already refreshed above, and both build with plain tsc.
 build:
 	@echo "Building @unm/plugin-sdk + @unm/snmp-client..."
 	cd packages/plugin-sdk && npm run build
@@ -58,11 +59,13 @@ build:
 	# POSIX sh (no arrays): PIDs are collected as a space-separated string and
 	# each one is waited on individually — a bare `wait` would return 0 if ANY
 	# job succeeded, silently hiding type errors in the other jobs.
-	@echo "Building plugins + MCP server in parallel..."
+	@echo "Building plugins + MCP server + api + webapp in parallel..."
 	@( \
 	  pids=""; \
 	  for p in $(PLUGINS); do (cd plugins/$$p && npm run build) & pids="$$pids $$!"; done; \
 	  (cd mcp && npm run build) & pids="$$pids $$!"; \
+	  (cd api && npm run build) & pids="$$pids $$!"; \
+	  (cd webapp && npm run build) & pids="$$pids $$!"; \
 	  fail=0; \
 	  for pid in $$pids; do wait $$pid || fail=1; done; \
 	  exit $$fail )
@@ -74,9 +77,13 @@ build:
 #      spawned standalone against in-process mock appliances and checked for
 #      fatal flaws (healthz, /discover validation, monitoring happy-path +
 #      dead-target handling). Requires `make build` first (tests dist/ output).
+#   3. API unit tests (jest) — pure utilities, no DB needed.
+#   4. Webapp unit tests (vitest) — pure utilities, no DOM needed.
 test:
 	./node_modules/.bin/tsx scripts/verify-ip-math.ts
 	node packages/plugin-test-kit/bin/run-all.mjs
+	cd api && npm test
+	cd webapp && npm test
 
 # Just the per-plugin contract suite (see packages/plugin-test-kit/README.md).
 plugin-tests:
