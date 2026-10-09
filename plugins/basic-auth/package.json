@@ -18,7 +18,7 @@
     "bonjour-service": "^1.2.1",
     "cors": "^2.8.5",
     "express": "^4.18.2",
-    "otplib": "^12.0.1",
+    "otplib": "^13.5.0",
     "uuid": "^9.0.0"
   },
   "devDependencies": {
