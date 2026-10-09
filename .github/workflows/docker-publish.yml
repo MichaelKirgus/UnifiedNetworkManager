@@ -84,6 +84,16 @@ jobs:
         with:
           node-version: '20'
 
+      # Root deps (js-yaml for the spec validator) — cheap, and lets us fail on
+      # a broken OpenAPI spec BEFORE spending time on installs/builds/tests.
+      - name: Install root dependencies
+        run: npm ci --no-audit --no-fund
+
+      # The API is driven by openapi/unified-network-manager.openapi.yaml — a
+      # malformed or structurally-broken spec must never reach the build.
+      - name: Validate OpenAPI spec
+        run: node validate-openapi.cjs
+
       # Install every workspace's dependencies (mirrors `make setup`).
       # npm ci — NOT npm install: installs exactly the committed lockfile and
       # FAILS if package.json and its lockfile disagree, so dependency drift

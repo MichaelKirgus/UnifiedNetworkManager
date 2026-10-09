@@ -1,9 +1,13 @@
 {
   "license": "EUPL-1.2",
+  "scripts": {
+    "validate:openapi": "node validate-openapi.cjs"
+  },
   "dependencies": {
     "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {
-    "drizzle-kit": "^0.31.10"
+    "drizzle-kit": "^0.31.10",
+    "js-yaml": "^4.3.1"
   }
 }

@@ -1,17 +1,14 @@
-/* Temp validator: parse + basic structural checks on the OpenAPI spec. */
+/* OpenAPI spec validator: parse + basic structural checks.
+ * js-yaml is a root devDependency — run `npm install` at the repo root first. */
 const fs = require('fs');
 const path = require('path');
 
 let yaml;
 try {
-  yaml = require(path.join(__dirname, 'node_modules', 'js-yaml'));
-} catch {
-  try {
-    yaml = require('/home/michael/Git/MichaelKirgus/UnifiedNetworkManager/api/node_modules/js-yaml');
-  } catch (e) {
-    console.error('js-yaml not found:', e.message);
-    process.exit(2);
-  }
+  yaml = require('js-yaml');
+} catch (e) {
+  console.error('js-yaml not found — run `npm install` at the repository root:', e.message);
+  process.exit(2);
 }
 
 const specPath = path.join(__dirname, 'openapi', 'unified-network-manager.openapi.yaml');
