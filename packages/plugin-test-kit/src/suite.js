@@ -37,11 +37,11 @@ export class CheckRecorder {
 }
 
 /** Builds a minimal MonitoringRequestBody for the plugin under test. */
-function monitoringBody({ address, settings = {}, collectInventory = true }) {
+function monitoringBody({ address, settings = {}, credentials = {}, collectInventory = true }) {
   const body = {
     deviceId: 'test-device-0001',
     managementAddress: address,
-    credentials: {},
+    credentials,
     model: null,
     firmwareVersion: null,
   };
@@ -128,7 +128,10 @@ export async function runContractSuite({ url, config = {} }) {
       rec.skip('T4', 'monitoring happy-path', 'no test/config.mjs monitoringAddress for this plugin');
     } else {
       try {
-        const { body, settingsHeader } = monitoringBody({ address: config.monitoringAddress, settings: config.settings });
+        // collectInventory=false skips the slow inventory window (filesystems,
+        // security checks, firmware rows) — health still derives from the core
+        // liveness call. Keeps T4 fast for plugins whose mock only fakes that.
+        const { body, settingsHeader } = monitoringBody({ address: config.monitoringAddress, settings: config.settings, credentials: config.credentials ?? {}, collectInventory: config.collectInventory !== false });
         const r = await callPlugin(url, 'POST', '/monitoring', { body, headers: { 'x-unm-settings': settingsHeader }, timeoutMs: 30_000 });
         rec.check('T4', '/monitoring → 200 (always-200 contract)', r.status === 200, `got ${r.status}: ${r.text.slice(0, 200)}`);
         const j = r.json ?? {};
@@ -156,7 +159,10 @@ export async function runContractSuite({ url, config = {} }) {
       const dead = config.deadAddress ?? `127.0.0.1:${await getDeadTcpPort()}`;
       try {
         const startedAt = Date.now();
-        const { body, settingsHeader } = monitoringBody({ address: dead, settings: config.settingsForDead ?? {} });
+        // Same collectInventory flag as T4 — some plugins (e.g. generic-ssh) add
+        // inventory keys unconditionally, which would keep metrics non-empty on a
+        // dead target and yield 'warning' instead of the expected 'critical'.
+        const { body, settingsHeader } = monitoringBody({ address: dead, settings: config.settingsForDead ?? {}, credentials: config.credentials ?? {}, collectInventory: config.collectInventory !== false });
         const r = await callPlugin(url, 'POST', '/monitoring', { body, headers: { 'x-unm-settings': settingsHeader }, timeoutMs: 30_000 });
         const elapsed = Date.now() - startedAt;
         rec.check('T5', 'dead target → 200 (no transport error)', r.status === 200, `got ${r.status}`);

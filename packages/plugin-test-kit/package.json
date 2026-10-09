@@ -14,5 +14,9 @@
   "bin": {
     "unm-plugin-test": "./bin/run.mjs",
     "unm-plugin-test-all": "./bin/run-all.mjs"
+  },
+  "dependencies": {
+    "ssh2": "^1.16.0",
+    "ws": "^8.21.3"
   }
 }

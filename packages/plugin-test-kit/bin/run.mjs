@@ -78,12 +78,12 @@ async function main() {
   // Mocks + final suite config. Either the declarative `mocks` block (first mock's
   // port is substituted into ${mockPort} in monitoringAddress) or an async
   // setup() hook that starts its own mocks and returns the full suite config.
-  const { startHttpMock, startNtpMock, startDockerDaemonMock } = await import('../src/mocks/index.js');
+  const mocksApi = await import('../src/mocks/index.js');
   const { getDeadTcpPort, getDeadUdpPort } = await import('../src/harness.js');
   const mocks = [];
   let suiteConfig;
   if (typeof config.setup === 'function') {
-    const started = await config.setup({ startHttpMock, startNtpMock, startDockerDaemonMock, getDeadTcpPort, getDeadUdpPort });
+    const started = await config.setup({ ...mocksApi, getDeadTcpPort, getDeadUdpPort });
     mocks.push(...(started.mocks ?? []));
     suiteConfig = { ...config, ...(started.config ?? {}) };
     delete suiteConfig.setup;

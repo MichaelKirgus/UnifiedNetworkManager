@@ -49,8 +49,12 @@ export default {
   assumeCaps: ['monitoring'], // opt in when /discover advertises no capabilities
   env: { SFLOW_PORT: '...' }, // extra child-process env
 
-  // OR full control — start your own mocks and return the suite config:
-  async setup({ startHttpMock, startNtpMock, startDockerDaemonMock, getDeadTcpPort, getDeadUdpPort }) {
+  // OR full control — start your own mocks and return the suite config. The runner
+  // spreads the WHOLE mock barrel (see "Shared mock appliances"), so every starter is
+  // available by name: startHttpMock, startNtpMock, startDockerDaemonMock,
+  // startOpnsenseMock, startMailcowMock, startZabbixMock, startFboxMock,
+  // startOpenwrtMock, startRouterOsMock, startTruenasMock, startSshMock, startSnmpMock.
+  async setup({ startHttpMock, getDeadTcpPort, getDeadUdpPort }) {
     const http = await startHttpMock();
     return { mocks: [http], config: { monitoringAddress: `127.0.0.1:${http.port}`, ... } };
   },
@@ -64,13 +68,65 @@ export default {
 
 ## Shared mock appliances (`src/mocks/`)
 
+All bind ephemeral ports on 127.0.0.1 and expose `{port, url?, requests?, stop()}`.
+Re-exported through the barrel `src/mocks/index.js`, which the runner spreads into a
+config's `setup({ …mocksApi, getDeadTcpPort, getDeadUdpPort })` — so every starter
+below is available by name in any `test/config.mjs`.
+
+**Transport primitives:**
 - `startHttpMock({path,status,body})` — plain HTTP server + request capture.
 - `startNtpMock({stratum,precision})` — RFC 1305 SNTP responder (current time).
 - `startDockerDaemonMock()` — Engine API read endpoints (`/version`, `/containers/json`, `/images/json`).
 
-All bind ephemeral ports on 127.0.0.1 and expose `{port, url?, requests?, stop()}`.
-Phase 2 will add an in-process SSH server mock (`ssh2` Server) for the appliance
-plugins that collect over SSH; Phase 3 a pure-JS SNMP agent (UDP GET/BULKWALK).
+**Phase 2 — plain-HTTP appliance fixtures** (`applianceHttp.js`; each speaks just
+enough of that appliance's REST/session API to make a `/monitoring` poll report
+health `ok`. Configs force plain HTTP via an explicit `http://…` address or a
+`transport:'http'` setting so no in-process TLS/cert generation is needed):
+- `startOpnsenseMock()` — Basic auth; health from `GET /api/core/system/status`.
+- `startMailcowMock()` — `X-API-Key`; decisive `GET /api/v1/get/status/version`.
+- `startZabbixMock()` — JSON-RPC over POST `/zabbix/api_jsonrpc.php` (answers by method).
+- `startFboxMock()` — classic-UI session flow (`/login_sid.lua` → SID cookie) + `/systeminfo64.json`.
+- `startOpenwrtMock()` — LuCI session flow; answers the ubus `network.interface dump` + per-interface status (the only live metric in LuCI-only mode).
+- `startRouterOsMock()` — RouterOS REST API (`/rest/<table>`, Basic auth); probe gate `/rest/system/resource` + `/rest/interface` rows.
+
+**Phase 2 — TrueNAS:** `truenasMock.js` → `startTruenasMock()`: JSON-RPC 2.0 over
+WebSocket (`ws`). Config forces `transport:'http'` for a plain `ws://`.
+
+**Phase 3 — SSH appliance:** `sshMock.js` → `startSshMock()`: an in-process `ssh2`
+Server that accepts any password auth and answers exec channels with canned output,
+including the marker-batched live-metrics script (`UNM_SECTION:<name>:BEGIN/END`).
+
+**Phase 3 — pure-JS SNMP v2c agent:** `snmpMock.js` → `startSnmpMock({mib, community})`:
+a dependency-free RFC 3416 agent over UDP answering GET / GETBULK. Value types in a
+MIB profile: `'int'`→Integer32, `'str'`→OCTET STRING, `'c64'`→Counter64 (tag `0x46`).
+Two MIB-profile modules ship with it:
+- `lancomMibs.js` → `lcosMib()`, `sx4Mib()`, `lxMib()` — LANCOM **column-first** tables (`<table>.1.<col>.<idx>`); text indexes are length-prefixed ASCII sub-ids, MACs raw 6-byte Buffers.
+- `standardIfMib.js` → `genericSnmpMib()` — standard IF-MIB/SNMPv2-MIB layout (`<table>.<field>.<ifIndex>`).
+
+The SNMP plugins take a non-default agent port via the plugin option `snmpPort`
+(default 161) because UDP/161 is not bindable as a non-root user. Verified against
+the real `@unm/snmp-client` by `bin/verify-snmp-mock.mjs` (standalone, no plugin).
+
+## Monitoring coverage matrix
+
+| Plugin | T4/T5 mock | Notes |
+| --- | --- | --- |
+| generic-http / generic-ntp / docker / icmp / flow-collector / web-fetch | http / ntp / docker-daemon / — | transport primitives (pre-existing) |
+| opnsense, mailcow, zabbix, fbox, openwrt, mikrotik-routeros | `applianceHttp.js` fixtures | Phase 2 HTTP appliances |
+| ix-truenas | `truenasMock.js` | JSON-RPC over WebSocket |
+| generic-ssh | `sshMock.js` | dead-target floor is `warning`, not `critical` (see below) |
+| lancom-lcos / lancom-sx / lancom-lx, generic-snmp | `snmpMock.js` + MIB profiles | dead-target health is `unknown` by design |
+| mikrotik-swos | — (basic-only) | binary `.b` protocol; T1–T3 + capability negatives only |
+
+Two deliberate "floor" decisions worth knowing:
+- **generic-ssh** reports `warning` (not `critical`) on a dead target because its
+  collector unconditionally emits the stored `system.privilege` field, so metrics is
+  never empty. Only a *missing* credential yields `critical`. The config asserts the
+  real contract (`expectDeadHealth: 'warning'`).
+- **LANCOM** plugins report `unknown` (not `critical`) on a failed probe by design —
+  "may simply be assigned to the wrong device type". Configs use
+  `expectDeadHealth: 'unknown'` and a distinct dead host (`127.0.0.2`) because their
+  snapshot cache is keyed by bare host, not port.
 
 ## Standalone fixtures (`src/fixtures/`)
 

@@ -14,6 +14,7 @@ setup:
 	  (cd packages/plugin-sdk && npm install) & \
 	  (cd packages/snmp-client && npm install) & \
 	  (cd packages/lancom-shared && npm install) & \
+	  (cd packages/plugin-test-kit && npm install) & \
 	  (cd api && npm install) & \
 	  (cd webapp && npm install) & \
 	  (cd mcp && npm install) & \

@@ -24,8 +24,8 @@ jobs:
       - name: Install dependencies
         run: |
           set -e
-          for d in packages/plugin-sdk packages/snmp-client packages/lancom-shared api webapp mcp; do
-            (cd "$d" && npm install --no-audit --no-fund) &
+          for d in packages/plugin-sdk packages/snmp-client packages/lancom-shared packages/plugin-test-kit api webapp mcp; do
+            (cd "$d" && npm install --legacy-peer-deps --no-audit --no-fund) &
           done
           for p in plugins/*/package.json; do
             dir=$(dirname "$p")

@@ -84,6 +84,16 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     description: 'How many times an SNMP request is retried before giving up.',
   },
   {
+    key: 'snmpPort',
+    label: 'SNMP port',
+    type: 'integer' as const,
+    default: 161,
+    min: 1,
+    max: 65_535,
+    description:
+      "UDP port of the device's SNMP agent (default 161). Override only if the agent listens elsewhere — e.g. a test harness.",
+  },
+  {
     key: 'inventoryTtlMs',
     label: 'Inventory refresh interval (ms)',
     type: 'integer' as const,
@@ -140,6 +150,7 @@ function resolveOptions(settings: Record<string, unknown>): WalkOptions {
   return {
     timeoutMs: clampInt(settings.timeoutMs, 1_000, 30_000, 5_000),
     retries: clampInt(settings.retries, 0, 10, 2),
+    port: clampInt(settings.snmpPort, 1, 65_535, 161),
     inventoryTtlMs: clampInt(settings.inventoryTtlMs, 60_000, 86_400_000, INVENTORY_INTERVAL_MS),
     // WiFi collection is ON by default — only an explicit false disables it.
     collectWifi: settings.collectWifi !== false,
