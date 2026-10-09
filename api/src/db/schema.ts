@@ -425,16 +425,16 @@ export const pluginLogs = pgTable(
     // JSON object with structured details ({endpoint, httpStatus, oid, ...}).
     context: text('context'),
     // ISO-8601 timestamp from the plugin's clock (stored as received).
-    timestamp: text('timestamp').notNull(),
+    emittedAt: text('emittedAt').notNull(),
   },
   (table) => {
     return {
-      idxPluginLogsDeviceTimestamp: index('idx_plugin_logs_device_timestamp')
-        .on(table.deviceId, table.timestamp),
-      idxPluginLogsPluginTimestamp: index('idx_plugin_logs_plugin_timestamp')
-        .on(table.pluginId, table.timestamp),
-      // Plain timestamp index for the retention sweep (DELETE WHERE timestamp < cutoff).
-      idxPluginLogsTimestamp: index('idx_plugin_logs_timestamp').on(table.timestamp),
+      idxPluginLogsDeviceEmittedAt: index('idx_plugin_logs_device_emitted_at')
+        .on(table.deviceId, table.emittedAt),
+      idxPluginLogsPluginEmittedAt: index('idx_plugin_logs_plugin_emitted_at')
+        .on(table.pluginId, table.emittedAt),
+      // Plain emittedAt index for the retention sweep (DELETE WHERE emittedAt < cutoff).
+      idxPluginLogsEmittedAt: index('idx_plugin_logs_emitted_at').on(table.emittedAt),
     };
   }
 );
@@ -565,14 +565,15 @@ export const pluginMetrics = pgTable(
     emittedMetricsCount: integer('emittedMetricsCount'),
     // Pending entries in the plugin logger queue (null = no logger registered).
     logQueueDepth: integer('logQueueDepth'),
-    timestamp: text('timestamp').notNull(),
+    // ISO-8601 sample time, stamped by the API at ingest (server clock).
+    sampledAt: text('sampledAt').notNull(),
   },
   (table) => {
     return {
-      idxPluginMetricsPluginTimestamp: index('idx_plugin_metrics_plugin_timestamp')
-        .on(table.pluginId, table.timestamp),
-      // Plain timestamp index for the retention sweep.
-      idxPluginMetricsTimestamp: index('idx_plugin_metrics_timestamp').on(table.timestamp),
+      idxPluginMetricsPluginSampledAt: index('idx_plugin_metrics_plugin_sampled_at')
+        .on(table.pluginId, table.sampledAt),
+      // Plain sampledAt index for the retention sweep.
+      idxPluginMetricsSampledAt: index('idx_plugin_metrics_sampled_at').on(table.sampledAt),
     };
   }
 );

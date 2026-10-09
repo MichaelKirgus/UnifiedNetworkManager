@@ -19,10 +19,10 @@ const SWEEP_INTERVAL_MS = 3_600_000; // hourly — log volume makes this cheap e
 async function sweepExpiredLogs(): Promise<void> {
   const retentionDays = Number(await getEffectiveSettingValue('logRetentionDays')) || 7;
   const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
-  await db.delete(schema.pluginLogs).where(lt(schema.pluginLogs.timestamp, cutoff));
+  await db.delete(schema.pluginLogs).where(lt(schema.pluginLogs.emittedAt, cutoff));
   // Self-metrics samples share the retention window (one row per plugin per
   // 30s — ~2.9k rows/plugin/week at default settings; cheap to keep a week).
-  await db.delete(schema.pluginMetrics).where(lt(schema.pluginMetrics.timestamp, cutoff));
+  await db.delete(schema.pluginMetrics).where(lt(schema.pluginMetrics.sampledAt, cutoff));
 }
 
 /**

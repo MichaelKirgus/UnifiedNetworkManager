@@ -72,10 +72,10 @@ checkNullable(doc, 'doc');
 
 // 4. New multi-plugin surface exists.
 const requiredPaths = [
-  '/devices/{deviceId}/plugins',
-  '/devices/{deviceId}/plugins/{pluginId}',
-  '/devices/{deviceId}/plugins/{pluginId}/options',
-  '/devices/{deviceId}/plugins/{pluginId}/settings',
+  '/devices/{id}/plugins',
+  '/devices/{id}/plugins/{pluginId}',
+  '/devices/{id}/plugins/{pluginId}/options',
+  '/devices/{id}/plugins/{pluginId}/settings',
 ];
 for (const p of requiredPaths) {
   if (!doc.paths[p]) errors.push(`Missing path: ${p}`);

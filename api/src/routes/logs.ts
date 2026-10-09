@@ -54,8 +54,8 @@ router.get(
         const pattern = `%${q.search}%`;
         clauses.push(or(ilike(schema.pluginLogs.message, pattern), ilike(schema.pluginLogs.context, pattern)));
       }
-      if (q.from) clauses.push(gte(schema.pluginLogs.timestamp, q.from));
-      if (q.to) clauses.push(lt(schema.pluginLogs.timestamp, q.to));
+      if (q.from) clauses.push(gte(schema.pluginLogs.emittedAt, q.from));
+      if (q.to) clauses.push(lt(schema.pluginLogs.emittedAt, q.to));
 
       // Device-level access control — scoped callers only see logs of their own
       // devices. Device-less plugin logs are excluded for them too (they may
@@ -71,7 +71,7 @@ router.get(
 
       const rows = await db.query.pluginLogs.findMany({
         ...(clauses.length > 0 ? { where: and(...clauses) } : {}),
-        orderBy: [desc(schema.pluginLogs.timestamp)],
+        orderBy: [desc(schema.pluginLogs.emittedAt)],
         limit,
       });
 
@@ -96,7 +96,7 @@ router.get(
           level: r.level,
           message: r.message,
           context: r.context ? safeParseJson(r.context) : null,
-          timestamp: r.timestamp,
+          emittedAt: r.emittedAt,
         }))
       );
     } catch (err) {

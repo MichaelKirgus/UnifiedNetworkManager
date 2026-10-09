@@ -124,7 +124,7 @@ export function requirePermission(permission: string) {
 }
 
 /**
- * Device-level access gate for routes parameterized by `:deviceId`. Callers
+ * Device-level access gate for routes parameterized by `:id`. Callers
  * carrying the `devices:all` permission pass through untouched; everyone else
  * is checked against their effective device scope (own rules ∪ role rules,
  * resolved live with a short in-memory cache — see deviceAccess.ts). Out-of-

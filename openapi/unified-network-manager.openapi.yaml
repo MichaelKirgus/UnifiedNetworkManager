@@ -829,18 +829,18 @@ paths:
         '422':
           description: Plugin assignment payload is invalid
 
-  /devices/{deviceId}:
+  /devices/{id}:
     patch:
       tags: [Devices]
       summary: Update a device (rename, change management address or site, ...)
       description: >-
         Updates the identity fields of an existing device. Only the provided
         fields are changed; plugin assignments and their settings are managed
-        via the /devices/{deviceId}/plugins endpoints. `siteId` may be set to
+        via the /devices/{id}/plugins endpoints. `siteId` may be set to
         null to unassign the site.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       requestBody:
@@ -902,7 +902,7 @@ paths:
         to the device are NOT deleted; they remain available for reuse.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       responses:
@@ -917,7 +917,7 @@ paths:
         '409':
           description: Device is still referenced by plan steps
 
-  /devices/{deviceId}/clone:
+  /devices/{id}/clone:
     post:
       tags: [Devices]
       summary: Clone a device (all settings reused)
@@ -931,7 +931,7 @@ paths:
         or other settings before saving.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       responses:
@@ -993,7 +993,7 @@ paths:
         '403':
           description: Missing devices:write permission
 
-  /devices/{deviceId}/plugins:
+  /devices/{id}/plugins:
     get:
       tags: [Devices]
       summary: List a device's plugin assignments
@@ -1003,7 +1003,7 @@ paths:
         plugins at once (e.g. OPNsense API + SNMP + SSH).
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       responses:
@@ -1035,7 +1035,7 @@ paths:
         optional — plugins without credentials omit it).
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       requestBody:
@@ -1062,7 +1062,7 @@ paths:
         '409':
           description: Plugin is already assigned to this device
 
-  /devices/{deviceId}/plugins/{pluginId}:
+  /devices/{id}/plugins/{pluginId}:
     patch:
       tags: [Devices]
       summary: Update a plugin assignment (primary flag and/or credentials)
@@ -1078,7 +1078,7 @@ paths:
         changes.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
         - in: path
@@ -1113,7 +1113,7 @@ paths:
         exactly one primary.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
         - in: path
@@ -1130,7 +1130,7 @@ paths:
         '404':
           description: Device not found or plugin is not assigned to it
 
-  /devices/{deviceId}/plugins/order:
+  /devices/{id}/plugins/order:
     put:
       tags: [Devices]
       summary: Reorder a device's plugin list (drag & drop)
@@ -1143,7 +1143,7 @@ paths:
         reordering in the device create/edit form.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       requestBody:
@@ -1180,7 +1180,7 @@ paths:
         '404':
           description: Device not found
 
-  /devices/{deviceId}/plugins/{pluginId}/options:
+  /devices/{id}/plugins/{pluginId}/options:
     get:
       tags: [Devices]
       summary: Get a device's settings for one of its plugins
@@ -1190,7 +1190,7 @@ paths:
         device override → global override → descriptor default.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
         - in: path
@@ -1209,7 +1209,7 @@ paths:
         '404':
           description: Device not found or plugin is not assigned to it
 
-  /devices/{deviceId}/plugins/{pluginId}/settings:
+  /devices/{id}/plugins/{pluginId}/settings:
     put:
       tags: [Devices]
       summary: Save a device's settings overrides for one of its plugins
@@ -1219,7 +1219,7 @@ paths:
         global setting or descriptor default.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
         - in: path
@@ -1271,7 +1271,7 @@ paths:
         the global setting (or descriptor default) instead of being wiped.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
         - in: path
@@ -1292,7 +1292,7 @@ paths:
         '404':
           description: Device not found or plugin is not assigned to it
 
-  /devices/{deviceId}/ips:
+  /devices/{id}/ips:
     get:
       tags: [Devices]
       summary: List a device's IP addresses (primary first)
@@ -1302,7 +1302,7 @@ paths:
         default target plugins reach; secondaries are additional interfaces.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       responses:
@@ -1328,12 +1328,12 @@ paths:
       summary: Add a secondary IP to a device
       description: >-
         Registers an additional address (IPv4, IPv6, or DNS name) the plugins
-        may reach. The primary address is managed via PATCH /devices/{deviceId}
+        may reach. The primary address is managed via PATCH /devices/{id}
         (`managementAddress`) and cannot be added here. Duplicate of the
         primary or an existing secondary → 409.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       requestBody:
@@ -1363,16 +1363,16 @@ paths:
         '409':
           description: Address is already registered for this device
 
-  /devices/{deviceId}/ips/{ipId}:
+  /devices/{id}/ips/{ipId}:
     delete:
       tags: [Devices]
       summary: Remove a secondary IP from a device
       description: >-
         Deletes the given secondary address. The primary (managementAddress)
-        cannot be removed here — change it via PATCH /devices/{deviceId}.
+        cannot be removed here — change it via PATCH /devices/{id}.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
         - in: path
@@ -1389,13 +1389,13 @@ paths:
         '404':
           description: Device not found or address is not registered for it
 
-  /devices/{deviceId}/monitoring:
+  /devices/{id}/monitoring:
     get:
       tags: [Monitoring]
       summary: Get normalized device telemetry
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       responses:
@@ -1410,7 +1410,7 @@ paths:
         '404':
           description: Device not found
 
-  /devices/{deviceId}/state:
+  /devices/{id}/state:
     get:
       tags: [Devices]
       summary: Get live device state from a plugin (Config page)
@@ -1424,7 +1424,7 @@ paths:
         `pluginId` query param the device's primary assignment is used.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
         - in: query
@@ -1450,7 +1450,7 @@ paths:
         '502':
           description: Plugin failed to report device state
 
-  /devices/{deviceId}/probe:
+  /devices/{id}/probe:
     get:
       tags: [Devices]
       summary: Get live short-cycle telemetry from a plugin (probe)
@@ -1464,7 +1464,7 @@ paths:
         path — nothing is written to the database.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
         - in: query
@@ -1504,7 +1504,7 @@ paths:
         '502':
           description: Plugin failed to report probe data
 
-  /devices/{deviceId}/quick-action:
+  /devices/{id}/quick-action:
     post:
       tags: [Devices]
       summary: Resolve a kind:'url' quick action into the device's web-UI URL
@@ -1518,7 +1518,7 @@ paths:
         opening a web UI transmits NO credentials to the browser.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       requestBody:
@@ -1547,7 +1547,7 @@ paths:
         '502':
           description: Plugin failed to resolve the URL (unknown action / bad address)
 
-  /devices/{deviceId}/filesystem:
+  /devices/{id}/filesystem:
     post:
       tags: [Devices]
       summary: Perform one file operation on a device's filesystem (SFTP)
@@ -1593,7 +1593,7 @@ paths:
         '502':
           description: Plugin failed to perform the file operation
 
-  /devices/{deviceId}/session-credentials:
+  /devices/{id}/session-credentials:
     get:
       tags: [Devices]
       summary: List the caller's eligible session credentials for a device + purpose
@@ -1607,7 +1607,7 @@ paths:
         console/filesystem routes themselves.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
         - in: query
@@ -1637,7 +1637,7 @@ paths:
         for this user+purpose are dropped silently, so stale rows never break resolution.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       requestBody:
@@ -1671,7 +1671,7 @@ paths:
         '403':
           description: Missing required permission / device out of scope
 
-  /devices/{deviceId}/console:
+  /devices/{id}/console:
     post:
       tags: [Devices]
       summary: Mint a short-lived ticket for an interactive SSH console
@@ -1680,7 +1680,7 @@ paths:
         and returns a single-use, 60-second CONSOLE TICKET. This is the only
         authenticated step of the console flow — browsers cannot set headers on a
         WebSocket upgrade, so the ticket itself becomes the bearer credential for
-        the companion endpoint `GET /devices/{deviceId}/console/ws?ticket=…`.
+        the companion endpoint `GET /devices/{id}/console/ws?ticket=…`.
         Authorization happens here: JWT + `devices:write` + the assigned plugin's
         `sshConsole` capability. The body may carry a `pluginId` (default = primary
         assignment) and a plugin-owned `context` naming what to attach to — e.g.
@@ -1722,14 +1722,14 @@ paths:
         '501':
           description: This plugin does not support an SSH console
 
-  /devices/{deviceId}/console/ws:
+  /devices/{id}/console/ws:
     get:
       tags: [Devices]
       summary: Open the interactive SSH console WebSocket (ticket-authenticated)
       description: >-
         The WebSocket PROXY for an SSH console. Browsers cannot attach an
         Authorization header to a WS upgrade, so this endpoint authenticates via
-        the single-use ticket minted by `POST /devices/{deviceId}/console` — which
+        the single-use ticket minted by `POST /devices/{id}/console` — which
         already enforced JWT + `devices:write` + capability checks for exactly this
         device/assignment. The proxy redeems the ticket once, resolves FRESH
         credentials and pipes frames VERBATIM between the browser's xterm.js and
@@ -1742,13 +1742,13 @@ paths:
         for documentation only; clients open it as `ws(s)://…/v1/devices/{id}/console/ws?ticket=…`.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
         - in: query
           name: ticket
           required: true
-          description: "Single-use console ticket from POST /devices/{deviceId}/console"
+          description: "Single-use console ticket from POST /devices/{id}/console"
           schema: { type: string }
       responses:
         '101':
@@ -1758,7 +1758,7 @@ paths:
         '502':
           description: Plugin console unreachable / failed to open the PTY
 
-  /devices/{deviceId}/ports:
+  /devices/{id}/ports:
     get:
       tags: [Devices]
       summary: Get normalized port inventory for a device
@@ -1768,7 +1768,7 @@ paths:
         `metrics['ports']` array — upserted per poll, deleted-on-absent.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       responses:
@@ -1783,7 +1783,7 @@ paths:
         '404':
           description: Device not found
 
-  /devices/{deviceId}/port-roles:
+  /devices/{id}/port-roles:
     get:
       tags: [Devices]
       summary: Get persistent port roles for a device
@@ -1796,7 +1796,7 @@ paths:
         `devices:read`.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
         - in: query
@@ -1825,7 +1825,7 @@ paths:
         `devices:write`.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       requestBody:
@@ -1855,7 +1855,7 @@ paths:
         '404':
           description: Device not found
 
-  /devices/{deviceId}/config-jobs:
+  /devices/{id}/config-jobs:
     post:
       tags: [Configuration]
       summary: Queue asynchronous configuration action
@@ -1863,7 +1863,7 @@ paths:
       x-2fa-required: true
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
       requestBody:
@@ -3108,7 +3108,7 @@ paths:
         '404':
           description: Plugin not found
 
-  /devices/{deviceId}/telemetry:
+  /devices/{id}/telemetry:
     get:
       tags: [Devices]
       summary: Get recent telemetry history for a device
@@ -3117,7 +3117,7 @@ paths:
         device. Used to render 'plot' metrics over time.
       parameters:
         - in: path
-          name: deviceId
+          name: id
           required: true
           schema: { type: string }
         - in: query
@@ -7115,7 +7115,7 @@ components:
           additionalProperties: true
           description: "Pre-filled input values merged under the action schema defaults (kind 'action')"
 
-    # Response of POST /devices/{deviceId}/quick-action.
+    # Response of POST /devices/{id}/quick-action.
     QuickActionResult:
       type: object
       required: [deviceId, url]
@@ -7214,7 +7214,7 @@ components:
           additionalProperties: { type: [string, 'null'] }
           description: "Extra credential slots to bind (slot name → secrets.id; null clears a slot). Validated against the plugin's declared slots."
 
-    # Optional body for PATCH /devices/{deviceId}/plugins/{pluginId}.
+    # Optional body for PATCH /devices/{id}/plugins/{pluginId}.
     DevicePluginAssignmentUpdate:
       type: object
       maxProperties: 3
@@ -7681,7 +7681,7 @@ components:
         POST /plugin/logs endpoint). `context` is an arbitrary JSON object with
         structured details ({endpoint, httpStatus, oid, ...}) — null when the
         plugin sent none.
-      required: [id, pluginId, level, message, timestamp]
+      required: [id, pluginId, level, message, emittedAt]
       properties:
         id: { type: string }
         pluginId: { type: string, description: "Plugin instance id (the sender's effective UUID)" }
@@ -7693,7 +7693,7 @@ components:
           enum: [debug, info, warn, error]
         message: { type: string, description: "Human-readable message (truncated at ~2KB on ingest)" }
         context: { type: object, additionalProperties: true, nullable: true, description: "Structured details; null when absent" }
-        timestamp: { type: string, format: date-time, description: "ISO-8601 timestamp from the plugin's clock" }
+        emittedAt: { type: string, format: date-time, description: "ISO-8601 timestamp from the plugin's clock (stored as received)" }
 
     Notification:
       type: object
@@ -7756,7 +7756,7 @@ components:
         worker from the plugin's auto-mounted GET /metrics endpoint. All
         fields are nullable — older plugin images (predating the SDK feature)
         or partial payloads simply omit what they don't report.
-      required: [id, pluginId, timestamp]
+      required: [id, pluginId, sampledAt]
       properties:
         id: { type: string }
         pluginId: { type: string }
@@ -7771,7 +7771,7 @@ components:
         errorRatePercent: { type: [number, 'null'], description: "Failure rate of the plugin's last N work requests (0-100)" }
         emittedMetricsCount: { type: [integer, 'null'], description: "Metric keys in the plugin's last /monitoring payload (per-poll telemetry weight)" }
         logQueueDepth: { type: [integer, 'null'], description: "Pending entries in the plugin logger queue; null when no logger is registered" }
-        timestamp: { type: string, format: date-time }
+        sampledAt: { type: string, format: date-time, description: "ISO-8601 sample time, stamped by the API at ingest (server clock)" }
 
     FlowTalker:
       type: object

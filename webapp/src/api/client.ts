@@ -1495,7 +1495,8 @@ export interface LogEntry {
   message: string;
   /** Structured details ({endpoint, httpStatus, oid, ...}); null when absent. */
   context?: Record<string, unknown> | null;
-  timestamp: string;
+  /** ISO-8601 timestamp from the plugin's clock (stored as received). */
+  emittedAt: string;
 }
 
 // --- Notification center ------------------------------------------------------
@@ -2471,7 +2472,8 @@ export interface PluginSelfMetricsSample {
   errorRatePercent: number | null;
   emittedMetricsCount: number | null;
   logQueueDepth: number | null;
-  timestamp: string;
+  /** ISO-8601 sample time, stamped by the API at ingest (server clock). */
+  sampledAt: string;
 }
 
 export interface MetricDescriptor {

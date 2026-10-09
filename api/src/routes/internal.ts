@@ -553,7 +553,8 @@ export function internalRouter() {
           level: LOG_LEVELS.has(String(e.level)) ? String(e.level) : 'info',
           message: String(e.message ?? '').slice(0, MAX_MESSAGE_LENGTH),
           context,
-          timestamp: typeof e.timestamp === 'string' && e.timestamp ? e.timestamp : now,
+          // Wire field stays `timestamp` (plugin SDK contract); column is emittedAt.
+          emittedAt: typeof e.timestamp === 'string' && e.timestamp ? e.timestamp : now,
         };
       });
 

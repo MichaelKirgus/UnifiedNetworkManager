@@ -1114,17 +1114,26 @@ export async function initDb(): Promise<void> {
       level TEXT NOT NULL DEFAULT 'info',
       message TEXT NOT NULL,
       context TEXT,
-      timestamp TEXT NOT NULL
+      "emittedAt" TEXT NOT NULL
     )`);
+  // Repair for pre-rename DBs: the column was `timestamp` — rename it so
+  // Drizzle's quoted identifier matches. No-op once fixed (or on fresh installs).
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_plugin_logs_device_timestamp
-      ON plugin_logs ("deviceId", timestamp)`);
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'plugin_logs' AND column_name = 'timestamp')
+         AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'plugin_logs' AND column_name = 'emittedAt') THEN
+        ALTER TABLE plugin_logs RENAME COLUMN timestamp TO "emittedAt";
+      END IF;
+    END $$`);
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_plugin_logs_plugin_timestamp
-      ON plugin_logs ("pluginId", timestamp)`);
+    CREATE INDEX IF NOT EXISTS idx_plugin_logs_device_emitted_at
+      ON plugin_logs ("deviceId", "emittedAt")`);
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_plugin_logs_timestamp
-      ON plugin_logs (timestamp)`);
+    CREATE INDEX IF NOT EXISTS idx_plugin_logs_plugin_emitted_at
+      ON plugin_logs ("pluginId", "emittedAt")`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_plugin_logs_emitted_at
+      ON plugin_logs ("emittedAt")`);
 
   // Firewall event-log rows (Firewall Events page) — append-only log pushed by
   // plugins via POST /plugin/firewall-events. Dedupe key = vendorEventId
@@ -1197,14 +1206,23 @@ export async function initDb(): Promise<void> {
       "errorRatePercent" DOUBLE PRECISION,
       "emittedMetricsCount" INTEGER,
       "logQueueDepth" INTEGER,
-      timestamp TEXT NOT NULL
+      "sampledAt" TEXT NOT NULL
     )`);
+  // Repair for pre-rename DBs: the column was `timestamp` — rename it so
+  // Drizzle's quoted identifier matches. No-op once fixed (or on fresh installs).
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_plugin_metrics_plugin_timestamp
-      ON plugin_metrics ("pluginId", timestamp)`);
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'plugin_metrics' AND column_name = 'timestamp')
+         AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'plugin_metrics' AND column_name = 'sampledAt') THEN
+        ALTER TABLE plugin_metrics RENAME COLUMN timestamp TO "sampledAt";
+      END IF;
+    END $$`);
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_plugin_metrics_timestamp
-      ON plugin_metrics (timestamp)`);
+    CREATE INDEX IF NOT EXISTS idx_plugin_metrics_plugin_sampled_at
+      ON plugin_metrics ("pluginId", "sampledAt")`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_plugin_metrics_sampled_at
+      ON plugin_metrics ("sampledAt")`);
 
   // ── Flow data (sFlow/NetFlow collector feature) ────────────────────────────
   // Deliberate exception to the repo's TEXT-timestamp convention: this is true

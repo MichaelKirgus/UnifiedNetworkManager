@@ -319,7 +319,7 @@ router.get('/plugins/:id/self-metrics', requireAuth, requirePermission('plugins:
 
   const samples = await db.query.pluginMetrics.findMany({
     where: (metrics, { eq }) => eq(metrics.pluginId, id),
-    orderBy: [desc(schema.pluginMetrics.timestamp)],
+    orderBy: [desc(schema.pluginMetrics.sampledAt)],
     limit,
   });
 

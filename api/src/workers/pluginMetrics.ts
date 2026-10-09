@@ -82,7 +82,7 @@ async function pollOne(pluginId: string, pluginName: string, endpoint: string): 
       errorRatePercent: num(d.errorRatePercent),
       emittedMetricsCount: num(d.emittedMetricsCount),
       logQueueDepth: num(d.logQueueDepth),
-      timestamp: new Date().toISOString(),
+      sampledAt: new Date().toISOString(),
     });
   } catch (err) {
     // No sample this cycle — the plugin is offline or predates /metrics.

@@ -767,7 +767,7 @@ export default function DeviceDetail() {
                     {logsQuery.data.map((entry) => (
                       <tr key={entry.id} className="border-b border-border last:border-0">
                         <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-muted-foreground">
-                          {formatDateTime(entry.timestamp)}
+                          {formatDateTime(entry.emittedAt)}
                         </td>
                         <td className="px-3 py-2">
                           <span

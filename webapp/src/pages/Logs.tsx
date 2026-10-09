@@ -90,10 +90,10 @@ export default function Logs() {
   const columns: DataTableColumn<LogEntry>[] = [
     {
       header: 'Time',
-      key: 'timestamp',
+      key: 'emittedAt',
       width: 180,
-      sortAccessor: (row) => new Date(row.timestamp).getTime(),
-      render: (row) => <span className="font-mono text-xs">{formatDateTime(row.timestamp)}</span>,
+      sortAccessor: (row) => new Date(row.emittedAt).getTime(),
+      render: (row) => <span className="font-mono text-xs">{formatDateTime(row.emittedAt)}</span>,
     },
     {
       header: 'Level',
