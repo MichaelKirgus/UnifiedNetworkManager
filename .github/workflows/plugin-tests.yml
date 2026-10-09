@@ -47,15 +47,35 @@ jobs:
       - name: Install dependencies
         run: |
           set -e
+          # Each workspace install is retried up to 3 times with a short backoff.
+          # Under ~29 concurrent installs on one runner, esbuild's postinstall can
+          # transiently hit ETXTBSY ("text file busy") when it execs the binary it
+          # just extracted — a filesystem race that almost always clears on retry.
+          # A genuinely broken install still fails (after 3 attempts) and is caught
+          # by the per-PID wait below, so this only absorbs transient flakes.
+          install_with_retry() {
+            dir="$1"
+            attempt=1
+            while [ "$attempt" -le 3 ]; do
+              if (cd "$dir" && npm install --legacy-peer-deps --no-audit --no-fund); then
+                return 0
+              fi
+              echo "::warning::install $dir failed (attempt $attempt/3) — retrying in 5s." >&2
+              sleep 5
+              attempt=$((attempt + 1))
+            done
+            echo "::error::install $dir failed after 3 attempts." >&2
+            return 1
+          }
           pids=()
           for d in packages/plugin-sdk packages/snmp-client packages/lancom-shared packages/plugin-test-kit api webapp mcp; do
-            (cd "$d" && npm install --legacy-peer-deps --no-audit --no-fund) &
+            (install_with_retry "$d") &
             pids+=($!)
           done
           for p in plugins/*/package.json; do
             dir=$(dirname "$p")
             [ "$(basename "$dir")" = "_template" ] && continue
-            (cd "$dir" && npm install --legacy-peer-deps --no-audit --no-fund) &
+            (install_with_retry "$dir") &
             pids+=($!)
           done
           fail=0
