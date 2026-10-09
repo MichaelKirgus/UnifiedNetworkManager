@@ -14,23 +14,28 @@ jobs:
   plugin-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to immutable commit SHAs (tag in comment) so a
+      # compromised or moved upstream tag can never change what CI executes.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
 
       # Install every workspace's dependencies (mirrors `make setup`).
+      # npm ci — NOT npm install: installs exactly the committed lockfile and
+      # FAILS if package.json and its lockfile disagree, so dependency drift
+      # can never sneak into CI builds.
       - name: Install dependencies
         run: |
           set -e
           for d in packages/plugin-sdk packages/snmp-client packages/lancom-shared packages/plugin-test-kit api webapp mcp; do
-            (cd "$d" && npm install --legacy-peer-deps --no-audit --no-fund) &
+            (cd "$d" && npm ci --legacy-peer-deps --no-audit --no-fund) &
           done
           for p in plugins/*/package.json; do
             dir=$(dirname "$p")
             [ "$(basename "$dir")" = "_template" ] && continue
-            (cd "$dir" && npm install --legacy-peer-deps --no-audit --no-fund) &
+            (cd "$dir" && npm ci --legacy-peer-deps --no-audit --no-fund) &
           done
           wait
 

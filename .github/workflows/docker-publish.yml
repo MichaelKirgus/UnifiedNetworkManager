@@ -33,7 +33,9 @@ jobs:
       components: ${{ steps.components.outputs.components }}
       tags: ${{ steps.tags.outputs.tags }}
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to immutable commit SHAs (tag in comment) so a
+      # compromised or moved upstream tag can never change what CI executes.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # Derive the buildable components from docker-compose.yml itself — every
       # service with a `build:` block becomes one image named after its service.
@@ -70,23 +72,26 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
 
       # Install every workspace's dependencies (mirrors `make setup`).
+      # npm ci — NOT npm install: installs exactly the committed lockfile and
+      # FAILS if package.json and its lockfile disagree, so dependency drift
+      # can never sneak into CI builds.
       - name: Install dependencies
         run: |
           set -e
           for d in packages/plugin-sdk packages/snmp-client packages/lancom-shared packages/plugin-test-kit api webapp mcp; do
-            (cd "$d" && npm install --legacy-peer-deps --no-audit --no-fund) &
+            (cd "$d" && npm ci --legacy-peer-deps --no-audit --no-fund) &
           done
           for p in plugins/*/package.json; do
             dir=$(dirname "$p")
             [ "$(basename "$dir")" = "_template" ] && continue
-            (cd "$dir" && npm install --legacy-peer-deps --no-audit --no-fund) &
+            (cd "$dir" && npm ci --legacy-peer-deps --no-audit --no-fund) &
           done
           wait
 
@@ -127,24 +132,24 @@ jobs:
           fi
           echo "GITHUB_TOKEN is present and valid."
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       # GHCR image names must be lowercase — the repo is lowercased explicitly.
       # This login also performs the real registry auth handshake, so a token
       # that is valid for the API but lacks `packages: write` (see top-level
       # permissions) fails HERE — before any layer is built or pushed.
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push ${{ matrix.service }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
