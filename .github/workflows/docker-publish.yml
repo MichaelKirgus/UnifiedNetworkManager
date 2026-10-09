@@ -35,6 +35,11 @@ jobs:
       # Single primary tag (no ",latest") — baked into every image as the
       # UNM_BUILD_TAG env so the webapp can show which branch/release it runs.
       tag: ${{ steps.tags.outputs.tag }}
+      # Lowercased ghcr.io/<owner>/<repo> prefix for the image names. Computed
+      # in bash (tr) instead of an expression filter pipe — GitHub's workflow
+      # validator rejects `|` inside expressions with "Unexpected symbol: '|'",
+      # which would invalidate the ENTIRE file and silently disable publishing.
+      imagePrefix: ${{ steps.tags.outputs.imagePrefix }}
     steps:
       # Actions are pinned to immutable commit SHAs (tag in comment) so a
       # compromised or moved upstream tag can never change what CI executes.
@@ -73,6 +78,8 @@ jobs:
           # Single primary tag for the UNM_BUILD_TAG build arg (releases bake
           # their version, branches bake their name — never "latest").
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          # GHCR package names must be lowercase; GITHUB_REPOSITORY is always set.
+          echo "imagePrefix=ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
   # ── Gate: the plugin contract suite must pass before any image is built. ───
   tests:
@@ -183,7 +190,7 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           push: true
-          tags: ghcr.io/${{ github.repository_owner | lowercase }}/${{ github.event.repository.name | lowercase }}/${{ matrix.service }}:${{ needs.meta.outputs.tags }}
+          tags: ${{ needs.meta.outputs.imagePrefix }}/${{ matrix.service }}:${{ needs.meta.outputs.tags }}
           # Baked into every image (ARG UNM_BUILD_TAG in each Dockerfile) so the
           # webapp sidebar + Plugins page can show which branch/release runs.
           build-args: |
