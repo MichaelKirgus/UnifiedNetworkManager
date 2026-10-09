@@ -242,7 +242,8 @@ app.get('/secrets', requirePluginKey, async (_req, res) => {
  * and decrypts it locally (it owns the key).
  */
 app.get('/secrets/:id', requirePluginKey, async (req, res) => {
-  const { id } = req.params;
+  // Express 5 types params as string | string[] — coerce like file-repo does.
+  const id = String(req.params.id ?? '');
   logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
   try {
     const record = await getSecret(id);
@@ -262,7 +263,8 @@ app.get('/secrets/:id', requirePluginKey, async (req, res) => {
  * Delete a secret.
  */
 app.delete('/secrets/:id', requirePluginKey, async (req, res) => {
-  const { id } = req.params;
+  // Express 5 types params as string | string[] — coerce like file-repo does.
+  const id = String(req.params.id ?? '');
   logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
   try {
     await deleteSecret(id);

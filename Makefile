@@ -55,11 +55,17 @@ build:
 	done
 	rm -rf api/node_modules/@unm/plugin-sdk; \
 	cp -r packages/plugin-sdk api/node_modules/@unm/plugin-sdk
+	# POSIX sh (no arrays): PIDs are collected as a space-separated string and
+	# each one is waited on individually — a bare `wait` would return 0 if ANY
+	# job succeeded, silently hiding type errors in the other jobs.
 	@echo "Building plugins + MCP server in parallel..."
 	@( \
-	  $(foreach p,$(PLUGINS),(cd plugins/$(p) && npm run build) & ) \
-	  (cd mcp && npm run build) & \
-	  wait )
+	  pids=""; \
+	  for p in $(PLUGINS); do (cd plugins/$$p && npm run build) & pids="$$pids $$!"; done; \
+	  (cd mcp && npm run build) & pids="$$pids $$!"; \
+	  fail=0; \
+	  for pid in $$pids; do wait $$pid || fail=1; done; \
+	  exit $$fail )
 	@echo "Build complete."
 
 # Run the offline test suites (no Docker / live services required):
