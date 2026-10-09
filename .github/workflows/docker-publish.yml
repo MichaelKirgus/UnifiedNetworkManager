@@ -47,15 +47,29 @@ jobs:
 
       # Derive the buildable components from docker-compose.yml itself — every
       # service with a `build:` block becomes one image named after its service.
+      # Both paths are emitted relative to the WORKSPACE ROOT: compose resolves
+      # `context` to an absolute path in its JSON output, and buildx (via
+      # docker/build-push-action) resolves a relative `--file` against the caller
+      # CWD — which is the workspace root here — NOT against the context. That is
+      # why webapp (no explicit `dockerfile:` key → default "Dockerfile") failed
+      # with "open Dockerfile: no such file or directory": its Dockerfile lives at
+      # webapp/Dockerfile, not at the repo root. Every plugin already carried an
+      # explicit root-relative dockerfile, so only webapp was affected.
       - name: Components
         id: components
         run: |
           node -e '
             const { execSync } = require("node:child_process");
+            const path = require("node:path");
             const cfg = JSON.parse(execSync("docker compose config --format json", { encoding: "utf8" }));
             const out = Object.entries(cfg.services ?? {})
               .filter(([, s]) => s.build)
-              .map(([name, s]) => ({ service: name, context: (s.build.context || ".").replace(/^\.\//, ""), dockerfile: s.build.dockerfile || "Dockerfile" }));
+              .map(([name, s]) => {
+                const ctx = path.relative(process.cwd(), (s.build.context || ".")) || ".";
+                // Compose `dockerfile` is relative to the CONTEXT dir; buildx needs
+                // it relative to CWD → join with the context.
+                return { service: name, context: ctx, dockerfile: path.join(ctx, s.build.dockerfile || "Dockerfile") };
+              });
             if (!out.length) throw new Error("no buildable services found in docker-compose.yml");
             require("fs").writeFileSync(process.env.GITHUB_OUTPUT, `components<<EOF\n${JSON.stringify(out)}\nEOF`);
           '
