@@ -33,21 +33,34 @@ jobs:
         run: node validate-openapi.cjs
 
       # Install every workspace's dependencies (mirrors `make setup`).
-      # npm ci — NOT npm install: installs exactly the committed lockfile and
-      # FAILS if package.json and its lockfile disagree, so dependency drift
-      # can never sneak into CI builds.
+      # npm install — NOT npm ci: these workspaces depend on sibling packages via
+      # file: links, and the committed lockfiles store those as versioned entries.
+      # Local npm 9 accepts that shape; CI runners ship npm 10 (with Node 20), which
+      # rejects it — `npm ci` fails with EUSAGE "Missing: @unm/… from lock file" in
+      # every such workspace. npm install uses the committed package-lock.json as its
+      # starting point and works on both, so installs stay reproducible.
+      # The root workspace has no file: deps — it keeps strict `npm ci` above.
+      #
+      # Every job's exit code is collected explicitly: a bare `wait` returns 0 if ANY
+      # backgrounded job succeeded, which would let a broken install silently reach
+      # the build step (and surface as confusing downstream errors instead).
       - name: Install dependencies
         run: |
           set -e
+          pids=()
           for d in packages/plugin-sdk packages/snmp-client packages/lancom-shared packages/plugin-test-kit api webapp mcp; do
-            (cd "$d" && npm ci --legacy-peer-deps --no-audit --no-fund) &
+            (cd "$d" && npm install --legacy-peer-deps --no-audit --no-fund) &
+            pids+=($!)
           done
           for p in plugins/*/package.json; do
             dir=$(dirname "$p")
             [ "$(basename "$dir")" = "_template" ] && continue
-            (cd "$dir" && npm ci --legacy-peer-deps --no-audit --no-fund) &
+            (cd "$dir" && npm install --legacy-peer-deps --no-audit --no-fund) &
+            pids+=($!)
           done
-          wait
+          fail=0
+          for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
+          [ "$fail" = "0" ] || { echo "::error::One or more workspace installs failed — see output above." >&2; exit 1; }
 
       # Build shared packages + all plugins (the suite tests dist/ output).
       - name: Build
