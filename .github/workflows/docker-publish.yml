@@ -149,10 +149,13 @@ jobs:
         include: ${{ fromJson(needs.meta.outputs.components) }}
 
     steps:
-      # Fail fast BEFORE any expensive build: the token must exist and be a live,
-      # unexpired credential. (GITHUB_TOKEN is always injected for pushes to this
-      # repo — but an explicit check turns "empty/revoked" into a clear error.)
-      - name: Preflight — GITHUB_TOKEN present + valid
+      # Fail fast BEFORE any expensive build: the credential must exist AND be
+      # accepted by GHCR for this repository. We validate against the registry —
+      # the same token exchange docker login performs — rather than api.github.com:
+      # this workflow's job token is scoped to `contents` + `packages` only, so a
+      # call like GET /user answers 403 even for a perfectly good publishing
+      # credential (the scope restriction, not the token, causes it).
+      - name: Preflight — GITHUB_TOKEN present + accepted by GHCR
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -160,13 +163,16 @@ jobs:
             echo "::error::GITHUB_TOKEN is empty — cannot publish to GHCR."
             exit 1
           fi
-          code=$(curl -sS -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $TOKEN" https://api.github.com/user)
-          if [ "$code" != "200" ]; then
-            echo "::error::GITHUB_TOKEN rejected by the GitHub API (HTTP $code)."
+          repo="$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          code=$(curl -sS -o /tmp/ghcr-token.json -w '%{http_code}' \
+            -u "${GITHUB_ACTOR}:${TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull")
+          if [ "$code" != "200" ] || ! grep -q '"token"' /tmp/ghcr-token.json; then
+            echo "::error::GITHUB_TOKEN rejected by GHCR (HTTP $code) — cannot publish."
             exit 1
           fi
-          echo "GITHUB_TOKEN is present and valid."
+          rm -f /tmp/ghcr-token.json
+          echo "GITHUB_TOKEN is present and accepted by GHCR for ${repo}."
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
