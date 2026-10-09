@@ -1,6 +1,7 @@
 # UnifiedNetworkManager (UNM)
 
 [![Plugin tests](https://github.com/MichaelKirgus/UnifiedNetworkManager/actions/workflows/plugin-tests.yml/badge.svg)](https://github.com/MichaelKirgus/UnifiedNetworkManager/actions/workflows/plugin-tests.yml)
+[![Docker publish](https://github.com/MichaelKirgus/UnifiedNetworkManager/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/MichaelKirgus/UnifiedNetworkManager/actions/workflows/docker-publish.yml)
 [![License: EUPL-1.2](https://img.shields.io/badge/License-EUPL--1.2-blue.svg)](LICENSE.md)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-brightgreen)](https://nodejs.org/)
 [![Docker](https://img.shields.io/badge/Docker-required-2496ed)](https://www.docker.com/)
@@ -17,6 +18,7 @@ Currently supported vendors: **OPNsense** (routing/firewall), **LANCOM LCOS-LX**
 - [Getting started](#getting-started)
   - [First login](#first-login)
   - [Manual / containerized run](#manual--containerized-run)
+  - [Pre-built images (GHCR)](#pre-built-images-ghcr)
 - [Security model](#security-model)
 - [Device addressing (multi-IP)](#device-addressing-multi-ip)
 - [Plugin model](#plugin-model)
@@ -128,6 +130,16 @@ docker compose up -d --build postgres api \
 ```
 
 Dev mode with hot reload (API + webapp on the host, plugins in Docker): `make api-dev` / `make web-dev`. Other targets: `make up|down|restart`, `make stop-api|stop-web`, `make clean` (removes containers **and** volumes).
+
+### Pre-built images (GHCR)
+
+Every component is published to the [GitHub Container Registry](https://ghcr.io) after the plugin contract suite passes — no local build needed. Image names follow `ghcr.io/michaelkirgus/unifiednetworkmanager/<service>`, where `<service>` is the compose service name (`api`, `webapp`, `mcp`, `unm-ca`, and every `*-plugin`):
+
+```bash
+docker pull ghcr.io/michaelkirgus/unifiednetworkmanager/api:dev
+```
+
+Tag scheme: **branch pushes** are tagged with the branch name (`main` → `dev`), and **release tags** (`v0.1.0`) additionally move `latest`. So `latest` always points at the newest release, never at dev-branch builds — pin `:latest` for stable deployments or a version tag to be explicit.
 
 ## Security model
 

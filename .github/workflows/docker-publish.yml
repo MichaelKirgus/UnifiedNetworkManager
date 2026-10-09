@@ -1,0 +1,132 @@
+# Build + publish all component images to GitHub Container Registry (GHCR).
+#
+# Tag scheme:
+#   - push to a branch  → image tag = branch name ("main" maps to "dev")
+#   - push to a v* tag  → image tag = the release version (e.g. v0.1.0) AND
+#                         "latest" is moved to that release (never to dev).
+#
+# Images are only built/published AFTER the plugin contract suite passes.
+# The component list is derived from docker-compose.yml at runtime, so adding a
+# new service with a `build:` block needs no change here.
+
+name: Docker publish
+
+on:
+  push:
+    branches: ['*']
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ── Lightweight metadata job: component matrix + tag scheme. ───────────────
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      components: ${{ steps.components.outputs.components }}
+      tags: ${{ steps.tags.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Derive the buildable components from docker-compose.yml itself — every
+      # service with a `build:` block becomes one image named after its service.
+      - name: Components
+        id: components
+        run: |
+          node -e '
+            const { execSync } = require("node:child_process");
+            const cfg = JSON.parse(execSync("docker compose config --format json", { encoding: "utf8" }));
+            const out = Object.entries(cfg.services ?? {})
+              .filter(([, s]) => s.build)
+              .map(([name, s]) => ({ service: name, context: (s.build.context || ".").replace(/^\.\//, ""), dockerfile: s.build.dockerfile || "Dockerfile" }));
+            if (!out.length) throw new Error("no buildable services found in docker-compose.yml");
+            require("fs").writeFileSync(process.env.GITHUB_OUTPUT, `components<<EOF\n${JSON.stringify(out)}\nEOF`);
+          '
+
+      # Tag scheme: v* release tag → version + latest; main → dev; else branch name.
+      - name: Resolve image tags
+        id: tags
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"          # e.g. v0.1.0
+            EXTRA=",latest"                        # releases — and only releases — own "latest"
+          elif [ "$GITHUB_REF_NAME" = "main" ]; then
+            TAG="dev"                              # default branch maps to dev
+            EXTRA=""
+          else
+            TAG="$(echo "$GITHUB_REF_NAME" | tr '/' '-' | tr '[:upper:]' '[:lower:]')"
+            EXTRA=""
+          fi
+          echo "tags=${TAG}${EXTRA}" >> "$GITHUB_OUTPUT"
+
+  # ── Gate: the plugin contract suite must pass before any image is built. ───
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Install every workspace's dependencies (mirrors `make setup`).
+      - name: Install dependencies
+        run: |
+          set -e
+          for d in packages/plugin-sdk packages/snmp-client packages/lancom-shared packages/plugin-test-kit api webapp mcp; do
+            (cd "$d" && npm install --legacy-peer-deps --no-audit --no-fund) &
+          done
+          for p in plugins/*/package.json; do
+            dir=$(dirname "$p")
+            [ "$(basename "$dir")" = "_template" ] && continue
+            (cd "$dir" && npm install --legacy-peer-deps --no-audit --no-fund) &
+          done
+          wait
+
+      # Build shared packages + all plugins (the suite tests dist/ output).
+      - name: Build
+        run: make build
+
+      # Run the contract suite for every plugin.
+      - name: Plugin contract suite
+        run: node packages/plugin-test-kit/bin/run-all.mjs
+
+  # ── Build + push every compose component to GHCR (one job per component). ───
+  publish:
+    needs: [meta, tests]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.meta.outputs.components) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # GHCR image names must be lowercase — the repo is lowercased explicitly.
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ghcr.io/${{ github.repository_owner | lowercase }}/${{ github.event.repository.name | lowercase }}/${{ matrix.service }}:${{ needs.meta.outputs.tags }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
