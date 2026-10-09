@@ -142,7 +142,8 @@ for every mock appliance/exporter in the repo:
   `--proxy` mode (CONNECT tunnel) for the webFetch proxy chain.
 - `opnsenseAppliance.cjs` — mock OPNsense appliance on host :80/:443 (self-signed
   TLS from `tls/`, request capture at `/__requests`). Mounted by the compose
-  service `mock-appliance`.
+  service `mock-appliance` (profile `test` — start with
+  `docker compose --profile test up -d mock-appliance`; plain `up` never starts it).
 
 Consumers: `scripts/e2e-flows.cjs`, `scripts/e2e-geoip.cjs` (spawn them),
 `scripts/verify-netflow-parser.cjs` / `verify-sflow-parser.cjs` (require their

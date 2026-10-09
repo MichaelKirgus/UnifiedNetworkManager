@@ -2,7 +2,7 @@
  * End-to-end verification for the action-propagation feature (plans API + executor).
  *
  * Runs against the LIVE dev stack started by setup.sh, plus the mock OPNsense
- * appliance (`docker compose up -d mock-appliance`, host network :80/:443):
+ * appliance (`docker compose --profile test up -d mock-appliance`, host network :80/:443):
  *   1. logs in via the real auth flow (TOTP minted from the seeded admin secret)
  *   2. creates two devices assigned to the real OPNsense plugin (apiKey secrets),
  *      pointing at http(s)://host.docker.internal (the mock appliance)
@@ -13,7 +13,7 @@
  *   5. cleans up everything it created (plan, devices, secrets)
  *
  * Usage (from the repo root):
- *   docker compose up -d mock-appliance          # once (host network :80/:443)
+ *   docker compose --profile test up -d mock-appliance  # once (host network :80/:443)
  *   ./node_modules/.bin/tsx scripts/e2e-plans.ts
  */
 

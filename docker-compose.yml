@@ -730,8 +730,11 @@ services:
   # so it can bind :80/:443 directly; reachable from the plugin containers as
   # http(s)://host.docker.internal (bare hostname — device managementAddress
   # never carries a scheme/port). Captured requests are served at GET /__requests.
-  # Start on demand: `docker compose up -d mock-appliance`.
+  # TEST-ONLY: hidden behind the "test" profile so plain `docker compose up`
+  # (and `make up`) can never start it in a productive environment.
+  # Start on demand: `docker compose --profile test up -d mock-appliance`.
   mock-appliance:
+    profiles: ["test"]
     image: node:20-alpine
     network_mode: host
     entrypoint: ["node", "/mock/mock.js"]
