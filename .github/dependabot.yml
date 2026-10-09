@@ -21,7 +21,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -30,7 +30,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -39,7 +39,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -48,7 +48,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -57,7 +57,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -66,7 +66,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -75,7 +75,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -84,7 +84,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -93,7 +93,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -102,7 +102,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -111,7 +111,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -120,7 +120,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -129,7 +129,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -138,7 +138,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -147,7 +147,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -156,7 +156,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -165,7 +165,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -174,7 +174,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -183,7 +183,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -192,7 +192,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -201,7 +201,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -210,7 +210,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -219,7 +219,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -228,7 +228,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -237,7 +237,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -246,7 +246,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -255,7 +255,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -264,7 +264,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -273,7 +273,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
@@ -282,5 +282,5 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dependencies:
-        dependency-type: "all"
+        # no dependency-type → groups production AND development deps together
         update-types: ["minor", "patch"]
