@@ -1,6 +1,7 @@
 # UnifiedNetworkManager (UNM)
 
 [![Plugin tests](https://github.com/MichaelKirgus/UnifiedNetworkManager/actions/workflows/plugin-tests.yml/badge.svg)](https://github.com/MichaelKirgus/UnifiedNetworkManager/actions/workflows/plugin-tests.yml)
+[![API & Webapp CI](https://github.com/MichaelKirgus/UnifiedNetworkManager/actions/workflows/ci.yml/badge.svg)](https://github.com/MichaelKirgus/UnifiedNetworkManager/actions/workflows/ci.yml)
 [![Docker publish](https://github.com/MichaelKirgus/UnifiedNetworkManager/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/MichaelKirgus/UnifiedNetworkManager/actions/workflows/docker-publish.yml)
 [![License: EUPL-1.2](https://img.shields.io/badge/License-EUPL--1.2-blue.svg)](LICENSE.md)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-brightgreen)](https://nodejs.org/)
