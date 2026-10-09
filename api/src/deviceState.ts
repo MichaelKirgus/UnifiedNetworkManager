@@ -5,6 +5,7 @@ import * as schema from './db/schema';
 import { getSecretFresh } from './secretsProvider';
 import { settingsHeaders } from './pluginSettings';
 import { parseExtraCredentials } from './types/credentialSlots';
+import type { DeviceAddressView } from './types/deviceAddressView';
 import { decryptCredentialSlots, withSlots } from './utils/slotCredentials';
 
 /**
@@ -20,11 +21,7 @@ import { decryptCredentialSlots, withSlots } from './utils/slotCredentials';
  * new device kinds (file systems, ZFS pools, …) cost zero API changes.
  */
 
-/** One address of the device as presented to plugins (primary flag included). */
-interface DeviceAddressView {
-  address: string;
-  isPrimary: boolean;
-}
+// DeviceAddressView comes from types/deviceAddressView (shared).
 
 /** The state document a plugin returns — mirrored from @unm/plugin-sdk types. */
 export interface StateActionRef {

@@ -21,41 +21,11 @@ import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { allowedDeviceIds } from '../deviceAccess';
 import { getStackUpdateInfo } from '../stackUpdates';
+import { loadDeviceViews, loadPluginNames } from '../utils/deviceViews';
 
 const router = Router();
 
-interface DeviceView {
-  id: string;
-  name: string;
-  managementAddress: string;
-  siteName: string | null;
-}
-
-async function loadDeviceViews(deviceIds: string[]): Promise<Map<string, DeviceView>> {
-  const map = new Map<string, DeviceView>();
-  if (deviceIds.length === 0) return map;
-  const devices = await db.query.devices.findMany({ where: inArray(schema.devices.id, deviceIds) });
-  const siteIds = Array.from(new Set(devices.map((d) => d.siteId).filter((s): s is string => !!s)));
-  const sites = siteIds.length > 0 ? await db.query.sites.findMany({ where: inArray(schema.sites.id, siteIds) }) : [];
-  const siteNameById = new Map(sites.map((s) => [s.id, s.name] as const));
-  for (const d of devices) {
-    map.set(d.id, {
-      id: d.id,
-      name: d.name,
-      managementAddress: d.managementAddress,
-      siteName: d.siteId ? (siteNameById.get(d.siteId) ?? null) : null,
-    });
-  }
-  return map;
-}
-
-async function loadPluginNames(pluginIds: string[]): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
-  if (pluginIds.length === 0) return map;
-  const plugins = await db.query.plugins.findMany({ where: inArray(schema.plugins.id, pluginIds) });
-  for (const p of plugins) map.set(p.id, p.name);
-  return map;
-}
+// DeviceView / loadDeviceViews / loadPluginNames come from utils/deviceViews (shared).
 
 function safeParseJson<T>(raw: string): T {
   try {

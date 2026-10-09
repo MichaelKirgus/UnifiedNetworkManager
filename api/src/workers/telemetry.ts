@@ -6,9 +6,10 @@ import * as schema from '../db/schema';
 import { getSecret } from '../secretsProvider';
 import { getEffectiveSettings, settingsHeaders } from '../pluginSettings';
 import { parseExtraCredentials } from '../types/credentialSlots';
+import type { DeviceAddressView } from '../types/deviceAddressView';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
 import { getEffectiveSettingValue, getSystemSettings, type SystemSettings } from '../systemSettings';
-import { parseDeviceTimeToEpochMs } from '@unm/plugin-sdk';
+import { parseDeviceTimeToEpochMs, type Health } from '@unm/plugin-sdk';
 import {
   deviceStatusDedupeKey,
   emitNotification,
@@ -87,16 +88,13 @@ function clampInt(v: number, min: number, max: number): number {
 }
 
 interface MonitoringResponse {
-  health?: string;
+  /** Plugin monitoring health — the SDK's canonical vocabulary (ok/warning/critical/unknown). */
+  health?: Health;
   metrics?: Record<string, unknown>;
   metricDescriptors?: unknown[];
 }
 
-/** A device address as presented to plugins (primary flag included). */
-interface DeviceAddressView {
-  address: string;
-  isPrimary: boolean;
-}
+// DeviceAddressView comes from types/deviceAddressView (shared).
 
 /** One plugin's view of a device (assignment + its plugin row). */
 interface AssignmentTarget {
@@ -126,7 +124,8 @@ interface AssignmentTarget {
  * (forced refresh reports it back to the caller; the scheduler ignores it).
  */
 interface PollOutcome {
-  health: string;
+  /** The plugin's reported monitoring health (SDK Health vocabulary). */
+  health: Health;
   reachable: boolean;
   inventoryEmitted: boolean;
   /** Transport-level failure reason (set when `reachable` is false). */
@@ -2679,7 +2678,7 @@ export interface ForceRefreshDeviceResult {
   /** Number of plugin assignments that were re-polled (0 = none possible). */
   assignmentsPolled: number;
   /** Per-assignment outcomes (plugin id + health, or the transport error). */
-  results: { pluginId: string; health: string; reachable: boolean; error?: string }[];
+  results: { pluginId: string; health: Health; reachable: boolean; error?: string }[];
   /** Device-level problem (unknown device / polling disabled) — no polls ran. */
   error?: string;
 }

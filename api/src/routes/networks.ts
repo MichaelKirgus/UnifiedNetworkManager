@@ -9,6 +9,7 @@ import { consensusDrift } from '../workers/ntpReferences';
 import { suggestFreeRanges } from '../utils/networkCheck';
 import { buildFirewallInventoryIndex, enrichFirewallAddress, getCachedFirewallIndex } from '../utils/firewallEnrichment';
 import type { FirewallAddressResolution } from '../utils/firewallEnrichment';
+import { loadDeviceViews, loadPluginNames } from '../utils/deviceViews';
 
 /** One stored row of the `networks` table (per device + plugin instance). */
 type StoredNetwork = typeof schema.networks.$inferSelect;
@@ -21,46 +22,9 @@ const router = Router();
  * from each plugin's /monitoring metrics. Every response row is joined with
  * the device it was collected on and the plugin instance that produced it —
  * plugins.name carries multi-instance suffixes ("OPNsense Plugin (site-a)").
+ *
+ * DeviceView / loadDeviceViews / loadPluginNames come from utils/deviceViews (shared).
  */
-
-interface DeviceView {
-  id: string;
-  name: string;
-  managementAddress: string;
-  siteName: string | null;
-}
-
-/**
- * Batch-loads device + site display data for the given ids. Returns a map of
- * deviceId -> view (missing devices are simply absent — stale rows are swept
- * by the worker, but a delete race must not break the response).
- */
-async function loadDeviceViews(deviceIds: string[]): Promise<Map<string, DeviceView>> {
-  const map = new Map<string, DeviceView>();
-  if (deviceIds.length === 0) return map;
-  const devices = await db.query.devices.findMany({ where: inArray(schema.devices.id, deviceIds) });
-  const siteIds = Array.from(new Set(devices.map((d) => d.siteId).filter((s): s is string => !!s)));
-  const sites = siteIds.length > 0 ? await db.query.sites.findMany({ where: inArray(schema.sites.id, siteIds) }) : [];
-  const siteNameById = new Map(sites.map((s) => [s.id, s.name] as const));
-  for (const d of devices) {
-    map.set(d.id, {
-      id: d.id,
-      name: d.name,
-      managementAddress: d.managementAddress,
-      siteName: d.siteId ? (siteNameById.get(d.siteId) ?? null) : null,
-    });
-  }
-  return map;
-}
-
-/** Batch-loads plugin display names for the given ids. */
-async function loadPluginNames(pluginIds: string[]): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
-  if (pluginIds.length === 0) return map;
-  const plugins = await db.query.plugins.findMany({ where: inArray(schema.plugins.id, pluginIds) });
-  for (const p of plugins) map.set(p.id, p.name);
-  return map;
-}
 
 /** One device+plugin instance that observed a merged host. */
 interface HostDeviceMember {

@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { db } from './db';
 import * as schema from './db/schema';
 import { isValidAddress, addressError } from './utils/address';
+import type { DeviceAddressView } from './types/deviceAddressView';
 
 /**
  * Device IP-address broker.
@@ -21,13 +22,7 @@ export interface DeviceIp {
   createdAt: string;
 }
 
-/** Address as presented to the UI (primary flag + row id for deletion). */
-export interface DeviceAddressView {
-  address: string;
-  isPrimary: boolean;
-  /** Row id of a secondary IP; null for the primary (which lives on the device). */
-  id?: string | null;
-}
+// DeviceAddressView comes from types/deviceAddressView (shared).
 
 /** Error carrying an HTTP status so routes can map it directly. */
 export class IpError extends Error {

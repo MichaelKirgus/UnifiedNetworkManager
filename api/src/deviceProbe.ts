@@ -5,6 +5,7 @@ import * as schema from './db/schema';
 import { getSecretFresh } from './secretsProvider';
 import { settingsHeaders } from './pluginSettings';
 import { parseExtraCredentials } from './types/credentialSlots';
+import type { DeviceAddressView } from './types/deviceAddressView';
 import { decryptCredentialSlots, withSlots } from './utils/slotCredentials';
 
 /**
@@ -21,11 +22,7 @@ import { decryptCredentialSlots, withSlots } from './utils/slotCredentials';
  * writes NOTHING to the DB (a live read path, not a telemetry cycle).
  */
 
-/** One address of the device as presented to plugins (primary flag included). */
-interface DeviceAddressView {
-  address: string;
-  isPrimary: boolean;
-}
+// DeviceAddressView comes from types/deviceAddressView (shared).
 
 /** The probe snapshot a plugin returns — mirrored from @unm/plugin-sdk types. */
 export interface ProbeResult {

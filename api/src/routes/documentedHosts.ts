@@ -9,6 +9,7 @@ import { requireAuth, requirePermission } from '../auth/middleware';
 import { mergeHostRows, mergeNetworkRows, type MergedHost } from './networks';
 import { loadSuggestedLayers } from './topology';
 import { classifyLayer } from '../utils/topology';
+import { readStringArray, parseStringArrayField } from '../utils/stringArrays';
 
 const router = Router();
 
@@ -62,35 +63,7 @@ function formatMac(compact: string): string {
   return compact.replace(/([0-9a-f]{2})(?=[0-9a-f])/g, '$1:');
 }
 
-/** Parses a stored JSON string array defensively (bad data → []). Same basis as devices.tags. */
-function readStringArray(raw: unknown): string[] {
-  let arr: unknown = raw;
-  if (typeof raw === 'string') {
-    try { arr = JSON.parse(raw); } catch { return []; }
-  }
-  if (!Array.isArray(arr)) return [];
-  const out: string[] = [];
-  for (const v of arr) {
-    if (typeof v !== 'string') continue;
-    const t = v.trim();
-    if (t !== '' && !out.includes(t)) out.push(t);
-  }
-  return out;
-}
-
-/** Validates a request-body field as an array of non-empty strings (deduped, trimmed). */
-function parseStringArrayField(raw: unknown, field: string): { value?: string[]; error?: string } {
-  if (!Array.isArray(raw)) return { error: `"${field}" must be an array of strings` };
-  for (const v of raw as unknown[]) {
-    if (typeof v !== 'string' || v.trim() === '') return { error: `"${field}" entries must be non-empty strings` };
-  }
-  const out: string[] = [];
-  for (const v of raw as string[]) {
-    const t = v.trim();
-    if (!out.includes(t)) out.push(t);
-  }
-  return { value: out };
-}
+// readStringArray / parseStringArrayField come from utils/stringArrays (shared).
 
 /** Case-insensitive union of tag lists — first occurrence's casing wins. */
 function mergeTagLists(...lists: string[][]): string[] {

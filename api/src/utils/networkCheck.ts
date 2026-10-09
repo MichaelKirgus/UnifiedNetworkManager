@@ -3,6 +3,7 @@ import * as schema from '../db/schema';
 import { cidrsOverlap, ipScope, ipv4ToInt, ipv6ToBigInt, ipv6FromBigInt, splitCidr } from '@unm/plugin-sdk';
 import { mergeNetworkRows } from '../routes/networks';
 import { getEffectiveValues } from '../systemSettings';
+import type { IpSuggestion } from './ipAllocation';
 
 /**
  * Server-side network-overlap checks for the fleet rollout wizard.
@@ -45,11 +46,8 @@ export interface NetworkCheckSuggestions {
   lowestFreeVlanId: number | null;
 }
 
-/** Per-device next-free host address inside the rollout's CIDR(s) (auto-assignment). */
-export interface IpSuggestion {
-  v4?: string | null;
-  v6?: string | null;
-}
+// Re-exported so callers can name the type without importing ipAllocation directly.
+export type { IpSuggestion };
 
 export interface NetworkCheckResult {
   warnings: NetworkCheckWarning[];

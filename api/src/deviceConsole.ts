@@ -5,6 +5,7 @@ import { getSecretFresh } from './secretsProvider';
 import { parseExtraCredentials } from './types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from './utils/slotCredentials';
 import { getEffectiveSettings } from './pluginSettings';
+import type { DeviceAddressView } from './types/deviceAddressView';
 
 /**
  * Device-console broker (capability 'sshConsole').
@@ -20,11 +21,7 @@ import { getEffectiveSettings } from './pluginSettings';
  * exactly like every other SSH data path in this codebase.
  */
 
-/** One address of the device as presented to plugins (primary flag included). */
-export interface DeviceAddressView {
-  address: string;
-  isPrimary: boolean;
-}
+// DeviceAddressView comes from types/deviceAddressView (shared).
 
 /** The resolved console target — everything the WS proxy needs for one connection. */
 export interface ConsoleTarget {
