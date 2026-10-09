@@ -156,14 +156,39 @@ export function ipInCidr(addr: string, cidr: string): boolean {
   return !!a && !!n && v6PrefixMatch(a, n, s.prefix);
 }
 
+/**
+ * True when the two CIDR networks intersect (one contains part of the other).
+ * Families must match; malformed inputs never overlap. The wider prefix wins:
+ * two networks intersect iff the narrower one's network address falls inside
+ * the wider one — i.e. they share their top `min(prefixA, prefixB)` bits.
+ */
+export function cidrsOverlap(a: string, b: string): boolean {
+  const sa = splitCidr(a);
+  const sb = splitCidr(b);
+  if (!sa || !sb) return false;
+  const aV4 = !sa.net.includes(':');
+  const bV4 = !sb.net.includes(':');
+  if (aV4 !== bV4) return false; // different families never intersect
+  const wide = sa.prefix <= sb.prefix ? sa : sb;
+  const narrow = sa.prefix <= sb.prefix ? sb : sa;
+  if (wide.net.includes(':')) {
+    const w = ipv6ToWords(wide.net);
+    const n = ipv6ToWords(narrow.net);
+    return !!w && !!n && v6PrefixMatch(w, n, wide.prefix);
+  }
+  const w = ipv4ToInt(wide.net);
+  const n = ipv4ToInt(narrow.net);
+  return w !== null && n !== null && v4PrefixMatch(w, n, wide.prefix);
+}
+
 /** True when the two IPv4 ints share their top `prefix` bits. */
-function v4PrefixMatch(a: number, n: number, prefix: number): boolean {
+export function v4PrefixMatch(a: number, n: number, prefix: number): boolean {
   const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
   return (a & mask) === (n & mask);
 }
 
 /** True when the two IPv6 word arrays share their top `prefix` bits. */
-function v6PrefixMatch(a: number[], n: number[], prefix: number): boolean {
+export function v6PrefixMatch(a: number[], n: number[], prefix: number): boolean {
   const big = ipv6ToBigIntFromWords(a)!;
   const net = ipv6ToBigIntFromWords(n)!;
   const mask = prefix === 0 ? 0n : ((1n << 128n) - 1n) ^ ((1n << BigInt(128 - prefix)) - 1n);
@@ -177,6 +202,33 @@ function ipv6ToBigIntFromWords(words: number[]): bigint {
   return v;
 }
 
+/**
+ * Computes the network prefix ("192.168.1.0/24", "fd00::/64") for an IP
+ * literal + prefix length — used to group interface rows into logical networks
+ * across devices (several interfaces with addresses in the same subnet are ONE
+ * network). Returns null when either part is missing or not a valid IP literal;
+ * callers fall back to other grouping keys.
+ */
+export function subnetOf(ip: string, prefix: number | null): string | null {
+  if (!ip || prefix === null) return null;
+  const family = ipFamily(ip);
+  if (family === 'v4' && Number.isInteger(prefix) && prefix >= 0 && prefix <= 32) {
+    const a = ipv4ToInt(ip)!;
+    const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+    return `${ipv4FromInt(a & mask)}/${prefix}`;
+  }
+  if (family === 'v6' && Number.isInteger(prefix) && prefix >= 0 && prefix <= 128) {
+    const words = ipv6ToWords(ip)!;
+    for (let i = 0; i < 8; i++) {
+      const bitsInGroup = Math.max(0, Math.min(16, prefix - i * 16));
+      if (bitsInGroup === 0) words[i] = 0;
+      else if (bitsInGroup < 16) words[i] &= 0xffff << (16 - bitsInGroup);
+    }
+    return `${ipv6FromWords(words)}/${prefix}`;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Scope classification — loopback / link-local / private / multicast / public
 // ---------------------------------------------------------------------------
@@ -185,7 +237,7 @@ function ipv6ToBigIntFromWords(words: number[]): bigint {
 export type IpScope = 'loopback' | 'link-local' | 'private' | 'public' | 'multicast' | 'reserved';
 
 /** True for RFC 1918 private IPv4 space (10/8, 172.16/12, 192.168/16). */
-function isPrivateIpv4(addr: string): boolean {
+export function isPrivateIpv4(addr: string): boolean {
   const v = stripZoneId(addr);
   if (!v.includes('.')) return false;
   const o = v.split('.').map(Number);
@@ -196,7 +248,7 @@ function isPrivateIpv4(addr: string): boolean {
 }
 
 /** True for IPv4 loopback (127/8). */
-function isLoopbackIpv4(addr: string): boolean {
+export function isLoopbackIpv4(addr: string): boolean {
   const v = stripZoneId(addr);
   if (!v.includes('.')) return false;
   const o = v.split('.').map(Number);
@@ -204,7 +256,7 @@ function isLoopbackIpv4(addr: string): boolean {
 }
 
 /** True for IPv4 link-local (APIPA, 169.254/16). */
-function isLinkLocalIpv4(addr: string): boolean {
+export function isLinkLocalIpv4(addr: string): boolean {
   const v = stripZoneId(addr);
   if (!v.includes('.')) return false;
   const o = v.split('.').map(Number);
@@ -212,7 +264,7 @@ function isLinkLocalIpv4(addr: string): boolean {
 }
 
 /** True for IPv4 multicast (224.0.0.0/4). */
-function isMulticastIpv4(addr: string): boolean {
+export function isMulticastIpv4(addr: string): boolean {
   const v = stripZoneId(addr);
   if (!v.includes('.')) return false;
   const o = v.split('.').map(Number);
@@ -225,8 +277,28 @@ export function isUlaIpv6(addr: string): boolean {
   return !!w && (w[0] & 0xfe00) === 0xfc00;
 }
 
+/** True for IPv6 loopback (::1). */
+export function isLoopbackIpv6(addr: string): boolean {
+  const v = stripZoneId(addr);
+  if (!v.includes(':')) return false;
+  // Only the exact loopback literal — "::" (unspecified) is NOT loopback.
+  return ipv6ToBigInt(v) === 1n;
+}
+
+/** True for IPv6 link-local (fe80::/10). */
+export function isLinkLocalIpv6(addr: string): boolean {
+  const w = ipv6ToWords(addr);
+  return !!w && (w[0] & 0xffc0) === 0xfe80;
+}
+
+/** True for IPv6 multicast (ff00::/8). */
+export function isMulticastIpv6(addr: string): boolean {
+  const w = ipv6ToWords(addr);
+  return !!w && (w[0] & 0xff00) === 0xff00;
+}
+
 /** True for IPv4 addresses in the reserved space (240.0.0.0/4, incl. 255.255.255.255 broadcast). */
-function isReservedIpv4(addr: string): boolean {
+export function isReservedIpv4(addr: string): boolean {
   const v = stripZoneId(addr);
   if (!v.includes('.')) return false;
   const o = v.split('.').map(Number);
@@ -234,9 +306,17 @@ function isReservedIpv4(addr: string): boolean {
 }
 
 /** True for IPv6 documentation space (2001:db8::/32, RFC 3849). */
-function isDocumentationIpv6(addr: string): boolean {
+export function isDocumentationIpv6(addr: string): boolean {
   const w = ipv6ToWords(addr);
   return !!w && w[0] === 0x2001 && w[1] === 0xdb8;
+}
+
+/** True for a publicly routable IPv4 address (RFC 1918, loopback, link-local, multicast and reserved space count as internal). */
+export function isPublicIpv4(addr: string): boolean {
+  if (ipv4ToInt(stripZoneId(addr)) === null) return false;
+  if (isLoopbackIpv4(addr) || isLinkLocalIpv4(addr) || isPrivateIpv4(addr)) return false;
+  if (isMulticastIpv4(addr) || isReservedIpv4(addr)) return false;
+  return true;
 }
 
 /** True for a publicly routable IPv6 address — i.e. global unicast (2000::/3), excluding ULA, link-local, loopback, multicast and documentation space. */
@@ -278,4 +358,63 @@ export function ipScope(value: string): IpScope | null {
   if (isDocumentationIpv6(addrPart)) return 'reserved'; // 2001:db8::/32
   if ((w[0] & 0xe000) === 0x2000) return 'public'; // 2000::/3 GUA
   return 'reserved'; // unspecified, benchmarking, reserved space…
+}
+
+// ---------------------------------------------------------------------------
+// Address allocation — next free host address inside a CIDR
+// ---------------------------------------------------------------------------
+
+/** Hard cap on candidate scans so a pathological (fully-allocated) subnet can't hang the caller. */
+const MAX_ADDRESS_SCAN = 1_000_000;
+
+/**
+ * Finds the next free host address in a CIDR, skipping structurally reserved
+ * addresses and everything in `used` (zone ids stripped on comparison).
+ *
+ *   - IPv4: skips the network address and the broadcast. /31 and /32 are fully
+ *     usable per RFC 3021 (point-to-point) — no skip there.
+ *   - IPv6: skips only the first address of the subnet (the "network" address,
+ *     mirroring v4 convention); /127 and /128 are fully usable per RFC 6164.
+ *
+ * Returns null when the CIDR is malformed or no free candidate exists within
+ * the scan cap. Pure — `used` may be any iterable of address literals.
+ */
+export function nextFreeAddressInCidr(cidr: string, used: Iterable<string>): string | null {
+  const s = splitCidr(cidr);
+  if (!s) return null;
+  const usedSet = new Set(Array.from(used).map((a: string) => stripZoneId(a)));
+
+  if (!s.net.includes(':')) {
+    // --- IPv4 (32-bit int math) -------------------------------------------
+    const netInt = ipv4ToInt(s.net);
+    if (netInt === null) return null;
+    const mask = s.prefix === 0 ? 0 : (~0 << (32 - s.prefix)) >>> 0;
+    const network = (netInt & mask) >>> 0;
+    const size = ((~mask) >>> 0) + 1; // addresses in the block
+    // /31, /32: every address is usable (RFC 3021). Otherwise skip network + broadcast.
+    let start = s.prefix >= 31 ? network : (network + 1) >>> 0;
+    const endExclusive = s.prefix === 32 ? (network + 1) >>> 0 : s.prefix === 31 ? (network + 2) >>> 0 : (network + size - 1) >>> 0; // broadcast addr, exclusive bound
+    for (let i = 0; i < MAX_ADDRESS_SCAN && start < endExclusive; i++) {
+      const lit = ipv4FromInt(start);
+      if (!usedSet.has(lit)) return lit;
+      start = (start + 1) >>> 0;
+    }
+    return null;
+  }
+
+  // --- IPv6 (BigInt math) ---------------------------------------------------
+  const netBig = ipv6ToBigInt(s.net);
+  if (netBig === null) return null;
+  const mask = s.prefix === 0 ? 0n : ((1n << 128n) - 1n) ^ ((1n << BigInt(128 - s.prefix)) - 1n);
+  const network = netBig & mask;
+  const size = 1n << BigInt(128 - s.prefix);
+  // /127, /128: every address is usable (RFC 6164). Otherwise skip the first address.
+  let start = s.prefix >= 127 ? network : network + 1n;
+  const endExclusive = network + size;
+  for (let i = 0n; i < BigInt(MAX_ADDRESS_SCAN) && start < endExclusive; i += 1n) {
+    const lit = ipv6FromBigInt(start);
+    if (!usedSet.has(lit)) return lit;
+    start += 1n;
+  }
+  return null;
 }
