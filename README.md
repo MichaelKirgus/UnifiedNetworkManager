@@ -1,8 +1,32 @@
 # UnifiedNetworkManager (UNM)
 
+[![Plugin tests](https://github.com/MichaelKirgus/UnifiedNetworkManager/actions/workflows/plugin-tests.yml/badge.svg)](https://github.com/MichaelKirgus/UnifiedNetworkManager/actions/workflows/plugin-tests.yml)
+[![License: EUPL-1.2](https://img.shields.io/badge/License-EUPL--1.2-blue.svg)](LICENSE.md)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-brightgreen)](https://nodejs.org/)
+[![Docker](https://img.shields.io/badge/Docker-required-2496ed)](https://www.docker.com/)
+
 Open-source network management and monitoring platform for mixed-vendor environments. A central control plane that manages devices through **pluggable vendor adapters** — each plugin is a small microservice speaking one common contract, so adding a new device family never means touching the core.
 
 Currently supported vendors: **OPNsense** (routing/firewall), **LANCOM LCOS-LX** (Wi-Fi 6/7 access points), **LANCOM LCOS** (routers), **LANCOM SX-Series** (managed switches, both 4.x and legacy GS-2310 firmware lines), **MikroTik SwOS / SwOS Lite** (switches), **AVM FRITZ!Box-class routers** (FBox plugin — web-UI session monitoring + inventory), plus generic **SNMP** and **ICMP ping** plugins for anything else.
+
+## Contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Repository layout](#repository-layout)
+- [Getting started](#getting-started)
+  - [First login](#first-login)
+  - [Manual / containerized run](#manual--containerized-run)
+- [Security model](#security-model)
+- [Device addressing (multi-IP)](#device-addressing-multi-ip)
+- [Plugin model](#plugin-model)
+  - [Plugin log pipeline](#plugin-log-pipeline)
+  - [Multi-instance plugins (remote sites)](#multi-instance-plugins-remote-sites)
+- [Plans & configuration jobs](#plans--configuration-jobs)
+- [MCP server (AI agent access)](#mcp-server-ai-agent-access)
+- [Development workflow](#development-workflow)
+  - [Key environment variables (API)](#key-environment-variables-api)
+- [Scaling & HA](#scaling--ha)
 
 ## Features
 
