@@ -3368,7 +3368,7 @@ paths:
                   files:
                     type: array
                     items:
-                      $ref: '#/components/schemas/FileRepoEntry'
+                      $ref: '#/components/schemas/RepoFileEntry'
         '401':
           description: Authentication required (requires files:read)
     post:
@@ -3407,7 +3407,7 @@ paths:
                 type: object
                 properties:
                   file:
-                    $ref: '#/components/schemas/FileRepoEntry'
+                    $ref: '#/components/schemas/RepoFileEntry'
                   deduplicated: { type: boolean }
         '400':
           description: Missing x-file-name header or JSON body sent instead of octet-stream
@@ -3523,7 +3523,7 @@ paths:
                   uses:
                     type: array
                     items:
-                      $ref: '#/components/schemas/FileRepoUse'
+                      $ref: '#/components/schemas/RepoFileUse'
         '401':
           description: Authentication required (requires files:read)
         '404':
@@ -9972,7 +9972,7 @@ components:
           $ref: '#/components/schemas/FilesystemResult'
 
     # --- Central file repository (device-independent store) -------------------
-    FileRepoEntry:
+    RepoFileEntry:
       type: object
       required: [id, name, category, sizeBytes, sha256, createdAt]
       properties:
@@ -9986,7 +9986,7 @@ components:
         createdAt: { type: string, format: date-time, description: "When the file was uploaded" }
         providerId: { type: string, nullable: true, description: "File-repo plugin storing the bytes (capability `fileRepo`); null = api-local volume (legacy)" }
 
-    FileRepoUse:
+    RepoFileUse:
       type: object
       required: [id, fileId, createdAt]
       properties:

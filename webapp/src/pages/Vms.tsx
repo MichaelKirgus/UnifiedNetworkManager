@@ -12,7 +12,7 @@ import { ReauthDialog } from '../components/ReauthDialog';
 import { DialogShell } from '../components/DialogShell';
 import { defaultValues, SchemaForm, validateSchema } from '../components/SchemaForm';
 import { READONLY_MESSAGE, runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
-import { api, ApiError, CatalogEntry, Device, FileRepoEntry, InputSchema, VmDevice, VmNic, VmRow } from '../api/client';
+import { api, ApiError, CatalogEntry, Device, RepoFileEntry, InputSchema, VmDevice, VmNic, VmRow } from '../api/client';
 import { useTimeFormat } from '../utils/time';
 import type { CreateVmTarget } from './CreateVmPage';
 
@@ -398,7 +398,7 @@ function AttachDeviceDialog({ target, stopped, onClose }: { target: NicAttachTar
   // CD-ROM/ISO source data — loaded when the CDROM type is selected (repo files,
   // appliance datasets and per-dataset ISO lists). The `source` field in values
   // picks which of these sections renders.
-  const [cdromRepoFiles, setCdromRepoFiles] = useState<FileRepoEntry[]>([]);
+  const [cdromRepoFiles, setCdromRepoFiles] = useState<RepoFileEntry[]>([]);
   const [cdromDatasets, setCdromDatasets] = useState<{ name: string; mountpoint: string }[]>([]);
   const [cdromIsoFiles, setCdromIsoFiles] = useState<{ path: string; name: string; sizeBytes: number | null }[]>([]);
   const [cdromIsoPath, setCdromIsoPath] = useState('');
@@ -459,7 +459,7 @@ function AttachDeviceDialog({ target, stopped, onClose }: { target: NicAttachTar
     (async () => {
       try {
         const [filesRes, choicesRes] = await Promise.all([
-          api.repoFiles('iso').catch(() => ({ files: [] as FileRepoEntry[] })),
+          api.repoFiles('iso').catch(() => ({ files: [] as RepoFileEntry[] })),
           api.executePluginAction(row.pluginId, { deviceId: row.deviceId, actionId: 'vms.create-choices', input: {} }).catch(() => null),
         ]);
         if (cancelled) return;
@@ -870,7 +870,7 @@ function EditDeviceDialog({ target, stopped, onClose }: { target: DeviceEditTarg
   const [choiceData, setChoiceData] = useState<{ list: VmDeviceChoice[]; iommu?: boolean } | null>(null);
   // CD-ROM ISO source data (same sources as the attach dialog). The manual path
   // itself lives in values['path'] — prefilled with the device's current ISO.
-  const [cdromRepoFiles, setCdromRepoFiles] = useState<FileRepoEntry[]>([]);
+  const [cdromRepoFiles, setCdromRepoFiles] = useState<RepoFileEntry[]>([]);
   const [cdromDatasets, setCdromDatasets] = useState<{ name: string; mountpoint: string }[]>([]);
   const [cdromIsoFiles, setCdromIsoFiles] = useState<{ path: string; name: string; sizeBytes: number | null }[]>([]);
   const [cdromIsoPath, setCdromIsoPath] = useState('');
@@ -931,7 +931,7 @@ function EditDeviceDialog({ target, stopped, onClose }: { target: DeviceEditTarg
     (async () => {
       try {
         const [filesRes, choicesRes] = await Promise.all([
-          api.repoFiles('iso').catch(() => ({ files: [] as FileRepoEntry[] })),
+          api.repoFiles('iso').catch(() => ({ files: [] as RepoFileEntry[] })),
           api.executePluginAction(row.pluginId, { deviceId: row.deviceId, actionId: 'vms.create-choices', input: {} }).catch(() => null),
         ]);
         if (cancelled) return;

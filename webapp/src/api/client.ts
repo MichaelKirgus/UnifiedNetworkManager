@@ -2117,7 +2117,7 @@ export interface VmsOverview {
 
 /** One file in the central repository (device-independent store of ISOs, firmware,
  * config backups and scripts — files live on a volume only the API mounts). */
-export interface FileRepoEntry {
+export interface RepoFileEntry {
   id: string;
   /** Original file name as uploaded. */
   name: string;
@@ -2134,7 +2134,7 @@ export interface FileRepoEntry {
 }
 
 /** A registered file-repo storage backend (GET /files/providers). */
-export interface FileRepoProvider {
+export interface RepoFileProvider {
   id: string;
   name: string;
   endpoint: string;
@@ -2142,7 +2142,7 @@ export interface FileRepoProvider {
 }
 
 /** One usage record of a repo file (audit trail — which device, when). */
-export interface FileRepoUse {
+export interface RepoFileUse {
   id: string;
   fileId: string;
   deviceId: string | null;
@@ -3424,16 +3424,16 @@ export const api = {
   /** Lists repo files, newest first. Optional category filter. */
   repoFiles: (category?: string) => {
     const suffix = category ? `?category=${encodeURIComponent(category)}` : '';
-    return apiFetch<{ files: FileRepoEntry[] }>(`/files${suffix}`);
+    return apiFetch<{ files: RepoFileEntry[] }>(`/files${suffix}`);
   },
   /** Lists the registered file-repo storage backends + online state, plus the
    * effective default (what new uploads go to when no repo is picked). */
-  fileRepoProviders: () => apiFetch<{ providers: FileRepoProvider[]; defaultProviderId: string | null }>('/files/providers'),
+  repoFileProviders: () => apiFetch<{ providers: RepoFileProvider[]; defaultProviderId: string | null }>('/files/providers'),
   /** Uploads a file to the repo. RAW octet-stream body + x-file-name header —
    * multi-GB ISOs stream through without base64/buffering. Identical content is
    * deduplicated (existing entry returned, deduplicated: true). `providerId`
    * optionally targets a specific file-repo backend (multi-segment repos). */
-  uploadRepoFile: async (file: File, category?: string, providerId?: string): Promise<{ file: FileRepoEntry; deduplicated: boolean }> => {
+  uploadRepoFile: async (file: File, category?: string, providerId?: string): Promise<{ file: RepoFileEntry; deduplicated: boolean }> => {
     const token = getToken();
     const res = await fetch(`${BASE}/files`, {
       method: 'POST',
@@ -3451,7 +3451,7 @@ export const api = {
       try { const b = await res.json(); if (b?.error) message = b.error; } catch { /* keep generic */ }
       throw new ApiError(message, res.status);
     }
-    return res.json() as Promise<{ file: FileRepoEntry; deduplicated: boolean }>;
+    return res.json() as Promise<{ file: RepoFileEntry; deduplicated: boolean }>;
   },
   /** Downloads a repo file as a Blob (authed — the API records a usage row). */
   downloadRepoFile: async (id: string): Promise<Blob> => {
@@ -3469,7 +3469,7 @@ export const api = {
   /** Deletes a repo file (content + metadata). Usage rows are kept. */
   deleteRepoFile: (id: string) => apiFetch<void>(`/files/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   /** The usage audit trail of one repo file (newest first). */
-  repoFileUses: (id: string) => apiFetch<{ fileId: string; uses: FileRepoUse[] }>(`/files/${encodeURIComponent(id)}/uses`),
+  repoFileUses: (id: string) => apiFetch<{ fileId: string; uses: RepoFileUse[] }>(`/files/${encodeURIComponent(id)}/uses`),
   /** Cross-device update center — available updates + stack self-update info. */
   updates: (params?: { deviceId?: string; siteId?: string; kind?: 'firmware' | 'os-package' | 'docker-image' | 'app' }) => {
     const qs = new URLSearchParams();

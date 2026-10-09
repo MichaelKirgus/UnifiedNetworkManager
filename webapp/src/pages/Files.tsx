@@ -6,7 +6,7 @@ import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { formatBytes } from '../components/formatMetric';
-import { api, ApiError, FileRepoEntry, FileRepoUse } from '../api/client';
+import { api, ApiError, RepoFileEntry, RepoFileUse } from '../api/client';
 import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
 
@@ -38,9 +38,9 @@ function saveBlob(blob: Blob, name: string): void {
 }
 
 /** Usage-history dialog for one repo file (the "which device, when" audit trail). */
-function UsesDialog({ entry, onClose }: { entry: FileRepoEntry; onClose: () => void }) {
+function UsesDialog({ entry, onClose }: { entry: RepoFileEntry; onClose: () => void }) {
   const { formatDateTime } = useTimeFormat();
-  const [uses, setUses] = useState<FileRepoUse[] | null>(null);
+  const [uses, setUses] = useState<RepoFileUse[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   (async () => {
@@ -94,7 +94,7 @@ export default function Files() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [usesEntry, setUsesEntry] = useState<FileRepoEntry | null>(null);
+  const [usesEntry, setUsesEntry] = useState<RepoFileEntry | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const filesQuery = useQuery({
@@ -106,8 +106,8 @@ export default function Files() {
   // Registered file-repo backends + the effective default (system setting /
   // env). Refreshed periodically so online state stays current.
   const providersQuery = useQuery({
-    queryKey: ['fileRepoProviders'],
-    queryFn: () => api.fileRepoProviders(),
+    queryKey: ['repoFileProviders'],
+    queryFn: () => api.repoFileProviders(),
     refetchInterval: 30_000,
   });
   const providers = providersQuery.data?.providers ?? [];
@@ -130,7 +130,7 @@ export default function Files() {
     try { localStorage.setItem(UPLOAD_PROVIDER_KEY, id); } catch { /* ignore */ }
   }
 
-  const providerName = (f: FileRepoEntry): string => {
+  const providerName = (f: RepoFileEntry): string => {
     if (!f.providerId) return 'local';
     return providers.find((p) => p.id === f.providerId)?.name ?? 'unknown repo';
   };
@@ -168,7 +168,7 @@ export default function Files() {
     uploadMutation.mutate(list[0]);
   }
 
-  async function download(entry: FileRepoEntry) {
+  async function download(entry: RepoFileEntry) {
     setError(null);
     try {
       const blob = await api.downloadRepoFile(entry.id);
@@ -179,7 +179,7 @@ export default function Files() {
     }
   }
 
-  function remove(entry: FileRepoEntry) {
+  function remove(entry: RepoFileEntry) {
     if (!window.confirm(`Delete "${entry.name}" (${formatBytes(entry.sizeBytes)}) from the repository? This removes the stored file. Usage history is kept.`)) return;
     deleteMutation.mutate(entry.id);
   }
@@ -188,7 +188,7 @@ export default function Files() {
 
   // DataTable columns — the Repository column only exists when multiple file-repo
   // backends are registered; SHA-256 is available but hidden by default.
-  const columns: DataTableColumn<FileRepoEntry>[] = [
+  const columns: DataTableColumn<RepoFileEntry>[] = [
     {
       header: 'Name',
       key: 'name',
@@ -222,9 +222,9 @@ export default function Files() {
         header: 'Repository',
         key: 'providerId',
         width: 140,
-        sortAccessor: (row: FileRepoEntry) => providerName(row),
-        render: (row: FileRepoEntry) => <span className="block truncate text-xs text-secondary" title={providerName(row)}>{providerName(row)}</span>,
-      } satisfies DataTableColumn<FileRepoEntry>,
+        sortAccessor: (row: RepoFileEntry) => providerName(row),
+        render: (row: RepoFileEntry) => <span className="block truncate text-xs text-secondary" title={providerName(row)}>{providerName(row)}</span>,
+      } satisfies DataTableColumn<RepoFileEntry>,
     ] : []),
     {
       header: 'Uploaded by',
