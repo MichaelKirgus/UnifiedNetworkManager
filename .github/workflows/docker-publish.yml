@@ -11,6 +11,10 @@
 # Images are only built/published AFTER the plugin contract suite passes.
 # The component list is derived from docker-compose.yml at runtime, so adding a
 # new service with a `build:` block needs no change here.
+#
+# Every published package is set to PUBLIC visibility by a per-component step in
+# the publish job — GHCR keeps packages private even for public repos, and this
+# is what makes anonymous `docker pull` (the README's standard deployment) work.
 
 name: Docker publish
 
@@ -278,8 +282,60 @@ jobs:
           # webapp sidebar + Plugins page can show which branch/release runs.
           build-args: |
             UNM_BUILD_TAG=${{ needs.meta.outputs.tag }}
-          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-from: type=gha,mode=max,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      # Make this component's GHCR package publicly pullable WITHOUT a token.
+      # Package visibility is per-package (one container package per service) and
+      # stays PRIVATE even when the repo itself is public — pushing never flips
+      # it, so we set it explicitly on every publish. The workflow GITHUB_TOKEN
+      # carries `packages: write` (top-level permissions), which covers both API
+      # calls below. Idempotent; the listing lookup is retried because a
+      # just-pushed package can take a moment to appear in api.github.com.
+      # If this repo ever moves to an organization, switch /user/packages →
+      # /orgs/<owner>/packages (same body).
+      - name: Set GHCR package visibility to public
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SERVICE: ${{ matrix.service }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -e
+          api() { curl -sS -H "Authorization: Bearer ${TOKEN}" -H 'Accept: application/vnd.github+json' "$@"; }
+          owner_lc="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
+
+          # 1) Find the numeric package id (one container package per service).
+          pkg_id=""
+          for attempt in 1 2 3; do
+            code=$(api -o /tmp/pkg-list.json -w '%{http_code}' \
+              "https://api.github.com/user/packages?package_type=container&per_page=100")
+            if [ "$code" = "401" ] || [ "$code" = "403" ]; then
+              echo "::error::Package listing rejected (HTTP ${code}) — the workflow token needs 'packages: write'." >&2
+              exit 1
+            fi
+            pkg_id=$(jq -r --arg name "$SERVICE" --arg owner "$owner_lc" \
+              '.[] | select(.name == $name and (.owner.login | ascii_downcase) == $owner) | .id' \
+              /tmp/pkg-list.json | head -n 1 || true)
+            [ -n "$pkg_id" ] && break
+            echo "Package '${SERVICE}' not in the listing yet (attempt ${attempt}/3) — retrying in 5s." >&2
+            sleep 5
+          done
+          if [ -z "$pkg_id" ]; then
+            echo "::error::GHCR package '${SERVICE}' not found via api.github.com — cannot set visibility to public." >&2
+            exit 1
+          fi
+
+          # 2) Flip it to public (idempotent no-op when already public).
+          code=$(api -X PATCH -o /tmp/pkg-resp.json -w '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            "https://api.github.com/user/packages/${pkg_id}" \
+            --data '{"visibility":"public"}')
+          if [ "$code" != "204" ] && [ "$code" != "200" ]; then
+            echo "::error::PATCH /user/packages/${pkg_id} → HTTP ${code}: $(cat /tmp/pkg-resp.json)" >&2
+            exit 1
+          fi
+          rm -f /tmp/pkg-list.json /tmp/pkg-resp.json
+          echo "GHCR package '${SERVICE}' is public — anonymous pulls work without docker login."
 
   # ── Announce stable releases — AFTER every image is pushed. ────────────────
   # Runs only for strict semver tag pushes (vX.Y.Z). The images already exist at

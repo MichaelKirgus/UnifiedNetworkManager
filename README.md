@@ -143,7 +143,7 @@ On first boot the API seeds an **admin** user (password `admin`) — see [First 
 
 ### Pre-built images (GHCR)
 
-Every component is published to the [GitHub Container Registry](https://ghcr.io) after the plugin contract suite passes. The standard `docker-compose.yml` (end-user deployment, no build step) is **generated** from `docker-compose.dev.yml` by `scripts/generate-registry-compose.cjs` — change the dev file and regenerate; never edit the generated one by hand. Image names follow `ghcr.io/michaelkirgus/unifiednetworkmanager/<service>`, where `<service>` is the compose service name (`api`, `webapp`, `mcp`, `unm-ca`, and every `*-plugin`):
+Every component is published to the [GitHub Container Registry](https://ghcr.io) after the plugin contract suite passes. All packages are set to **public** visibility on every publish (a step in `.github/workflows/docker-publish.yml`), so pulling needs no `docker login`. The standard `docker-compose.yml` (end-user deployment, no build step) is **generated** from `docker-compose.dev.yml` by `scripts/generate-registry-compose.cjs` — change the dev file and regenerate; never edit the generated one by hand. Image names follow `ghcr.io/michaelkirgus/unifiednetworkmanager/<service>`, where `<service>` is the compose service name (`api`, `webapp`, `mcp`, `unm-ca`, and every `*-plugin`):
 
 ```bash
 docker pull ghcr.io/michaelkirgus/unifiednetworkmanager/api:dev
