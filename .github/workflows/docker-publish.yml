@@ -12,9 +12,10 @@
 # The component list is derived from docker-compose.yml at runtime, so adding a
 # new service with a `build:` block needs no change here.
 #
-# Every published package is set to PUBLIC visibility by a per-component step in
-# the publish job — GHCR keeps packages private even for public repos, and this
-# is what makes anonymous `docker pull` (the README's standard deployment) work.
+# Every published package is set to PUBLIC visibility by the post-publish
+# package-visibility job — GHCR keeps packages private even for public repos,
+# and this is what makes anonymous `docker pull` (the README's standard
+# deployment) work.
 
 name: Docker publish
 
@@ -285,57 +286,122 @@ jobs:
           cache-from: type=gha,mode=max,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-      # Make this component's GHCR package publicly pullable WITHOUT a token.
-      # Package visibility is per-package (one container package per service) and
-      # stays PRIVATE even when the repo itself is public — pushing never flips
-      # it, so we set it explicitly on every publish. The workflow GITHUB_TOKEN
-      # carries `packages: write` (top-level permissions), which covers both API
-      # calls below. Idempotent; the listing lookup is retried because a
-      # just-pushed package can take a moment to appear in api.github.com.
-      # If this repo ever moves to an organization, switch /user/packages →
-      # /orgs/<owner>/packages (same body).
-      - name: Set GHCR package visibility to public
+  # ── Make all published packages publicly pullable (no docker login needed). ─
+  # GHCR keeps container packages PRIVATE even when the repo is public, and
+  # pushing never flips that — so after every successful publish we set each
+  # component's package to visibility=public via the Packages API. This runs as
+  # ONE job SEQUENTIALLY over all components (not per matrix job) so the burst
+  # of api.github.com calls stays inside rate limits; a just-pushed package can
+  # lag in the listing, so missing ones get up to two more passes (60s apart).
+  # The workflow GITHUB_TOKEN carries `packages: write` (top-level permissions),
+  # which covers both API calls. Idempotent — already-public packages are no-ops.
+  package-visibility:
+    needs: [meta, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set all GHCR packages to public visibility
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SERVICE: ${{ matrix.service }}
-          OWNER: ${{ github.repository_owner }}
+          COMPONENTS: ${{ needs.meta.outputs.components }}
         run: |
           set -e
-          api() { curl -sS -H "Authorization: Bearer ${TOKEN}" -H 'Accept: application/vnd.github+json' "$@"; }
-          owner_lc="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          services="$(printf '%s' "$COMPONENTS" | jq -r '.[].service' | sort)"
 
-          # 1) Find the numeric package id (one container package per service).
-          pkg_id=""
-          for attempt in 1 2 3; do
-            code=$(api -o /tmp/pkg-list.json -w '%{http_code}' \
-              "https://api.github.com/user/packages?package_type=container&per_page=100")
-            if [ "$code" = "401" ] || [ "$code" = "403" ]; then
-              echo "::error::Package listing rejected (HTTP ${code}) — the workflow token needs 'packages: write'." >&2
-              exit 1
+          # api METHOD URL [JSON_BODY] → 0 on 2xx; body to /tmp/api-resp.json,
+          # headers to /tmp/api-headers.txt. Retries 429/5xx up to 5 times with
+          # backoff (honoring Retry-After); 401/403 fail immediately — that is a
+          # permission problem, not transient.
+          api() {
+            method="$1"; url="$2"; data="${3:-}"
+            attempt=1
+            while :; do
+              if [ -n "$data" ]; then
+                code=$(curl -sS -X "$method" -D /tmp/api-headers.txt -o /tmp/api-resp.json \
+                  -w '%{http_code}' -H "Authorization: Bearer ${TOKEN}" \
+                  -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' \
+                  --data "$data" "$url") || code="000"
+              else
+                code=$(curl -sS -X "$method" -D /tmp/api-headers.txt -o /tmp/api-resp.json \
+                  -w '%{http_code}' -H "Authorization: Bearer ${TOKEN}" \
+                  -H 'Accept: application/vnd.github+json' "$url") || code="000"
+              fi
+              case "$code" in
+                2*) return 0 ;;
+                401|403)
+                  echo "::error::GitHub API rejected the workflow token (HTTP ${code}): $(cat /tmp/api-resp.json)" >&2
+                  echo "This step needs the top-level 'permissions: packages: write'." >&2
+                  return 1 ;;
+                *)
+                  if [ "$attempt" -ge 5 ]; then
+                    echo "::error::GitHub API ${method} ${url} → HTTP ${code}: $(cat /tmp/api-resp.json)" >&2
+                    return 1
+                  fi
+                  retry_after="$(grep -i '^retry-after:' /tmp/api-headers.txt | tr -d '\r' | awk '{print $2}' || true)"
+                  sleep_s="${retry_after:-$((attempt * 30))}"
+                  echo "GitHub API ${code} (attempt ${attempt}/5) — sleeping ${sleep_s}s." >&2
+                  sleep "$sleep_s"
+                  attempt=$((attempt + 1)) ;;
+              esac
+            done
+          }
+
+          # Map every component to its numeric package id. The listing is scoped
+          # to THIS repo (no cross-repo name collisions); one pass covers all
+          # services, paginated until a short page.
+          declare -A pkg_ids=()
+          for svc in $services; do pkg_ids["$svc"]=""; done
+
+          pass=1
+          while [ "$pass" -le 3 ]; do
+            : > /tmp/pkg-rows.txt
+            page=1
+            while :; do
+              api GET "https://api.github.com/repos/${GITHUB_REPOSITORY}/packages?package_type=container&per_page=100&page=${page}" || exit 1
+              if ! count="$(jq 'length' /tmp/api-resp.json 2>/dev/null)"; then
+                echo "::error::Unexpected listing response (not a JSON array): $(cat /tmp/api-resp.json)" >&2
+                exit 1
+              fi
+              jq -r '.[] | "\(.name)\t\(.id)"' /tmp/api-resp.json >> /tmp/pkg-rows.txt
+              if [ "$count" -lt 100 ]; then break; fi
+              page=$((page + 1))
+            done
+
+            for svc in $services; do
+              if [ -z "${pkg_ids[$svc]}" ]; then
+                id="$(awk -F'\t' -v s="$svc" '$1 == s { print $2; exit }' /tmp/pkg-rows.txt)"
+                if [ -n "$id" ]; then pkg_ids["$svc"]="$id"; fi
+              fi
+            done
+
+            remaining=0
+            for svc in $services; do
+              if [ -z "${pkg_ids[$svc]}" ]; then remaining=$((remaining + 1)); fi
+            done
+            if [ "$remaining" -eq 0 ]; then break; fi
+            if [ "$pass" -lt 3 ]; then
+              echo "Still missing ${remaining} package(s) in the listing (pass ${pass}/3) — waiting 60s." >&2
+              sleep 60
             fi
-            pkg_id=$(jq -r --arg name "$SERVICE" --arg owner "$owner_lc" \
-              '.[] | select(.name == $name and (.owner.login | ascii_downcase) == $owner) | .id' \
-              /tmp/pkg-list.json | head -n 1 || true)
-            [ -n "$pkg_id" ] && break
-            echo "Package '${SERVICE}' not in the listing yet (attempt ${attempt}/3) — retrying in 5s." >&2
-            sleep 5
+            pass=$((pass + 1))
           done
-          if [ -z "$pkg_id" ]; then
-            echo "::error::GHCR package '${SERVICE}' not found via api.github.com — cannot set visibility to public." >&2
-            exit 1
-          fi
 
-          # 2) Flip it to public (idempotent no-op when already public).
-          code=$(api -X PATCH -o /tmp/pkg-resp.json -w '%{http_code}' \
-            -H 'Content-Type: application/json' \
-            "https://api.github.com/user/packages/${pkg_id}" \
-            --data '{"visibility":"public"}')
-          if [ "$code" != "204" ] && [ "$code" != "200" ]; then
-            echo "::error::PATCH /user/packages/${pkg_id} → HTTP ${code}: $(cat /tmp/pkg-resp.json)" >&2
-            exit 1
-          fi
-          rm -f /tmp/pkg-list.json /tmp/pkg-resp.json
-          echo "GHCR package '${SERVICE}' is public — anonymous pulls work without docker login."
+          # Flip every found package to public; fail if any service never appeared.
+          failed=0
+          for svc in $services; do
+            id="${pkg_ids[$svc]}"
+            if [ -z "$id" ]; then
+              echo "::error::GHCR package '${svc}' not found via api.github.com — cannot set visibility to public." >&2
+              failed=1
+              continue
+            fi
+            if api PATCH "https://api.github.com/user/packages/${id}" '{"visibility":"public"}'; then
+              echo "Package '${svc}' (id ${id}) is public — anonymous pulls work without docker login."
+            else
+              echo "::error::Failed to set visibility for package '${svc}' (id ${id})." >&2
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then exit 1; fi
 
   # ── Announce stable releases — AFTER every image is pushed. ────────────────
   # Runs only for strict semver tag pushes (vX.Y.Z). The images already exist at
