@@ -8,7 +8,10 @@ import { generateSecret as otpGenerateSecret, generateURI, verifySync } from 'ot
 export function verifyTotp(secret: string, code: string): boolean {
   try {
     return verifySync({ token: code, secret }).valid;
-  } catch {
+  } catch (err) {
+    // Log the real reason (e.g. SecretTooShortError for a legacy/corrupt stored
+    // secret) — but never the secret or the attempted code themselves.
+    console.error('[basic-auth] TOTP verification error:', err instanceof Error ? err.message : String(err));
     return false;
   }
 }
