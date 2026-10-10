@@ -5,9 +5,13 @@ build/
 *.db-journal
 .env
 .env.*
+!.env.example
 .DS_Store
 *.log
 npm-debug.log*
 .vite/
 coverage/
-.vscode/settings.json
+# Personal VS Code settings (auto-approve rules, machine paths) stay local.
+# .vscode/mcp.json is intentionally tracked — it documents the MCP wiring for contributors.
+.vscode/*
+!.vscode/mcp.json

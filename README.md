@@ -114,6 +114,14 @@ The default `docker-compose.yml` is the end-user deployment: same services, env 
 
 The **MCP server is not exposed to the host by default** — it carries an API token with full agent capabilities, so publishing it on all interfaces is a deliberate choice. If you need remote MCP access, add your own mapping (e.g. `UNM_MCP_PORT=8081`) behind auth or a reverse proxy.
 
+For a production deployment, copy the annotated template to `.env` and change at least the values marked **MUST CHANGE** (`MASTER_KEY`, `CRYPTO_SALT`, `POSTGRES_PASSWORD`, `PLUGIN_API_KEY`) — they are insecure dev defaults:
+
+```bash
+cp .env.example .env
+# edit .env → set a strong MASTER_KEY (openssl rand -hex 32), CRYPTO_SALT, POSTGRES_PASSWORD, PLUGIN_API_KEY
+docker compose up -d
+```
+
 Tear down with `docker compose down` (add `-v` to also remove the Postgres volume).
 
 ### First login
