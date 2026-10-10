@@ -157,18 +157,16 @@ services:
       # The byte store. Named volume by default; set to a host path (e.g.
       # /opt/unm/file-repo) or another named volume per instance if preferred.
       - ${FILE_REPO_PLUGIN_VOLUME:-filerepo-plugin}:/data/file-repo
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -201,18 +199,16 @@ services:
       - OPNSENSE_HOST=${OPNSENSE_HOST:-https://opnsense.local}
       - OPNSENSE_KEY=${OPNSENSE_KEY:-}
       - OPNSENSE_SECRET=${OPNSENSE_SECRET:-}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -237,18 +233,16 @@ services:
       # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -297,18 +291,16 @@ services:
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/generic-snmp/mibs:/app/mibs:ro
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -336,18 +328,16 @@ services:
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/lancom-lx/mibs:/app/mibs:ro
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -377,18 +367,16 @@ services:
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/lancom-lcos/mibs:/app/mibs:ro
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -418,18 +406,16 @@ services:
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/lancom-sx/mibs:/app/mibs:ro
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -453,18 +439,16 @@ services:
       # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -489,18 +473,16 @@ services:
       # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -526,18 +508,16 @@ services:
       # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -562,18 +542,16 @@ services:
       # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -596,18 +574,16 @@ services:
       # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -631,18 +607,16 @@ services:
       # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -672,18 +646,16 @@ services:
       # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -709,18 +681,16 @@ services:
       # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -747,18 +717,16 @@ services:
       # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -787,18 +755,16 @@ services:
       # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -826,18 +792,16 @@ services:
       # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -867,18 +831,16 @@ services:
       # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -918,18 +880,16 @@ services:
       # fixed corporate-proxy topology, e.g. http://proxy.corp:3128 or
       # http://user:pass@proxy.corp:3128.
       - WEBFETCH_PROXY_URL=${WEBFETCH_PROXY_URL:-}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -1041,18 +1001,16 @@ services:
       # verification accepts the options generated by the API.
       - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-localhost}
       - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-http://localhost:5173}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
@@ -1082,18 +1040,16 @@ services:
       # Crypto key material (the plugin is the crypto holder).
       - MASTER_KEY=${MASTER_KEY:-default-master-key-must-be-changed-in-production}
       - CRYPTO_SALT=${CRYPTO_SALT:-salt}
-    # Self-check of its own /healthz on :4080. Dual-mode: when the mTLS leaf
-    # is enrolled (/data/tls exists, UNM_TLS=1) it probes over TLS presenting
-    # this container's OWN leaf as client cert and verifying the chain against
-    # its CA bundle (hostname check skipped — we probe via loopback while the
-    # leaf SANs are DNS names); otherwise plain HTTP. A dead process, a broken
-    # TLS swap or a failed enrollment all fail this check.
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
