@@ -9,7 +9,11 @@
 
 Open-source network management and monitoring platform for mixed-vendor environments. A central control plane that manages devices through **pluggable vendor adapters** — each plugin is a small microservice speaking one common contract, so adding a new device family never means touching the core.
 
-UNM ships a growing set of vendor adapter plugins covering routers, switches, Wi-Fi access points, NAS/mail platforms and consumer boxes — plus generic SNMP / ICMP / HTTP(S) / NTP / SSH adapters for anything else. The full list of supported vendors and devices lives in [docs/PLUGINS.md](docs/PLUGINS.md).
+> ## ⚠️ Read this first
+>
+> **UNM is a management appliance — never expose the web UI to the public internet.** It holds credentials for every device it manages and can *write* their configuration. Keep it reachable only via VPN, or behind a reverse proxy with additional authentication (TLS termination + auth). Security has layers: even with best practices in place, direct exposure of an admin plane is how networks get owned.
+>
+> Also note: UNM is **not affiliated with any device vendor** — see [Trademark disclaimer](#trademark-disclaimer) at the bottom.
 
 ## Contents
 
@@ -21,6 +25,7 @@ UNM ships a growing set of vendor adapter plugins covering routers, switches, Wi
   - [For developers: hot-reload dev setup](#for-developers-hot-reload-dev-setup)
   - [Pre-built images (GHCR)](#pre-built-images-ghcr)
 - [Security model](#security-model)
+  - [Network exposure — keep it off the public internet](#network-exposure--keep-it-off-the-public-internet)
 - [Device addressing (multi-IP)](#device-addressing-multi-ip)
 - [Plugin model](#plugin-model)
   - [Plugin log pipeline](#plugin-log-pipeline)
@@ -187,6 +192,19 @@ Permission catalog (current):
 | `users:read` / `users:write` / `users:create` | View users; edit roles/permissions & manage roles; create users with initial password + TOTP enrollment |
 | `users:manage-credentials` / `users:self-credentials` | Reset passwords and manage 2FA of other users / own account |
 
+### Network exposure — keep it off the public internet
+
+> **UNM is a management appliance. The web UI must never, ever be made available on the public internet.**
+>
+> It authenticates as *admin* to every device it manages and can rewrite their configuration (firewalls included). Exposing it directly means handing an attacker your entire network's keys.
+>
+> **Only expose it via:**
+>
+> - a **VPN** (WireGuard/IPsec/OpenVPN — UNM itself can plan those for you), or
+> - a **reverse proxy with additional authentication** in front (TLS termination + auth, e.g. an SSO/OAuth proxy or mutual TLS), ideally combined with source-IP allow-listing.
+>
+> Security has layers: even if every best practice above is applied, each layer only matters while the others hold. A single vulnerability — in UNM, its dependencies, or a misconfigured proxy — becomes fatal when the admin plane sits directly on the internet. Treat "reachable from anywhere" as an incident, not a convenience.
+
 ## Device addressing (multi-IP)
 
 Each device has exactly one **primary address** (`managementAddress`) plus any number of **secondary IPs**. All addresses must be a bare IPv4 literal, an IPv6 literal, or a DNS name — no scheme (`https://…`), because choosing the transport is each plugin's own decision.
@@ -315,3 +333,7 @@ The API is designed to run as **N replicas** behind a load balancer while exactl
 | 150–400+ devices | Raise `TELEMETRY_POLL_INTERVAL_MS` (60 s) and/or keep the concurrency cap; consider a second API replica for HA — polling load stays on one leader, HTTP scales out. |
 
 The normalized inventory tables (`networks`, `hosts`, …) hold only current state and are swept at 24 h independently of telemetry retention.
+
+## Trademark disclaimer
+
+UnifiedNetworkManager (UNM) is an independent, open-source project. It has **no connection to, affiliation with, or endorsement by** any vendor whose devices it supports — including but not limited to OPNsense, MikroTik, LANCOM Systems, TrueNAS/iXsystems, FRITZ!Box (AVM), OpenWrt, Zabbix and Mailcow. All product names, trademarks and brands mentioned in this repository are the property of their respective owners and are used solely to identify compatible hardware and software — not to imply any partnership, sponsorship or official status.
