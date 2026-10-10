@@ -271,13 +271,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # meta emits a COMMA list of bare tag names (e.g. "v0.1.0,latest" for
+      # releases, "nightly-20261010,nightly" for the nightly lane). buildx splits
+      # that list and treats every entry as a full reference — so only the FIRST
+      # tag may carry the registry prefix; the rest must be qualified here or
+      # they resolve to docker.io/library/<tag> (401 on push, seen in v0.1.0).
+      - name: Qualify image tags for buildx
+        id: qualify
+        env:
+          PREFIX: ${{ needs.meta.outputs.imagePrefix }}/${{ matrix.service }}
+          TAGS: ${{ needs.meta.outputs.tags }}
+        run: |
+          out=""
+          IFS=',' read -ra parts <<< "$TAGS"
+          for t in "${parts[@]}"; do
+            [ -n "$t" ] && out="${out:+$out,}${PREFIX}:${t}"
+          done
+          echo "tags=${out}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push ${{ matrix.service }}
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b7be995525d1152c80650db49fa4d46cf046f510c3 # v7.4.0
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           push: true
-          tags: ${{ needs.meta.outputs.imagePrefix }}/${{ matrix.service }}:${{ needs.meta.outputs.tags }}
+          tags: ${{ steps.qualify.outputs.tags }}
           # Baked into every image (ARG UNM_BUILD_TAG in each Dockerfile) so the
           # webapp sidebar + Plugins page can show which branch/release runs.
           build-args: |
