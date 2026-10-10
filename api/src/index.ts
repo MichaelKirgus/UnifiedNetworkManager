@@ -16,7 +16,6 @@ import credentialPoliciesRouter from './routes/credentialPolicies';
 import rolesRouter from './routes/roles';
 import tokensRouter from './routes/tokens';
 import { internalRouter } from './routes/internal';
-import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import plansRouter from './routes/plans';
 import networksRouter from './routes/networks';
 import flowsRouter from './routes/flows';
@@ -40,7 +39,6 @@ import { startTelemetryRetentionWorker } from './workers/telemetryRetention';
 import { startFirewallEventRetentionWorker } from './workers/firewallEventRetention';
 import { startHostStateRetentionWorker } from './workers/hostStateRetention';
 import { startPluginDiscovery } from './plugins/discovery';
-import { startConfigJobWorker } from './workers/configJob';
 import { startPlanExecutorWorker } from './workers/planExecutor';
 import { startPlanSchedulerWorker } from './workers/planScheduler';
 import { startLogRetentionWorker } from './workers/logRetention';
@@ -136,7 +134,6 @@ async function main(): Promise<void> {
   // plugin routes are namespaced under /plugin/* (user data included) so they
   // never shadow public paths like POST /users — see routes/internal.ts.
   api.use(infoRouter);
-  api.use(configJobsListRouter);
   api.use(internalRouter());
   // Central file repository — internal plugin routes (/plugin/files/*, gated by
   // x-plugin-api-key). Mounted before the OpenAPI validator like the other
@@ -166,7 +163,6 @@ async function main(): Promise<void> {
   api.use(rolesRouter);
   // API tokens (self-service + admin) — long-lived bearer credentials for agents.
   api.use(tokensRouter);
-  api.use(configJobsRouter);
   // Cross-device inventory views (/networks, /hosts) — self-defining paths.
   api.use(networksRouter);
   // Traffic visibility (Flows page): top talkers, internet egress, device
@@ -256,8 +252,6 @@ async function main(): Promise<void> {
     } else {
       console.log('[api] UNM_TLS not set — skipping API self-enrollment (plain HTTP only)');
     }
-
-    startConfigJobWorker();
 
     void runAsLeader(LEADER_KEYS.telemetry, 'telemetry', () => startTelemetryWorker()).then((stop) => workerStops.push(stop));
     void runAsLeader(LEADER_KEYS.planExecutor, 'planExecutor', () => startPlanExecutorWorker()).then((stop) => workerStops.push(stop));

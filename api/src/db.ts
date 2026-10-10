@@ -20,7 +20,6 @@ export const db = drizzle(pool, { schema });
 export type User = typeof schema.users.$inferSelect;
 export type Device = typeof schema.devices.$inferSelect;
 export type Plugin = typeof schema.plugins.$inferSelect;
-export type ConfigJob = typeof schema.configJobs.$inferSelect;
 export type Telemetry = typeof schema.telemetry.$inferSelect;
 export type Secret = typeof schema.secrets.$inferSelect;
 

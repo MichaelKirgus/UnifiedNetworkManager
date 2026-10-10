@@ -355,8 +355,9 @@ async function processPlan(planId: string): Promise<void> {
     let waitHintMs: number | null = null;
     let attempts = 0;
     for (;;) {
-      // Traceability: mirror each dispatched attempt as a config job row (terminal
-      // status set here — the legacy configJob worker only picks up 'queued' rows).
+      // Traceability: mirror each dispatched attempt as a config_jobs row for
+      // full audit history of every dispatch — status is set to its terminal
+      // value below, so no worker ever picks these rows up.
       const jobId = crypto.randomUUID();
       const nowStart = new Date().toISOString();
       await db.insert(schema.configJobs).values({

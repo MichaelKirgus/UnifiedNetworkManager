@@ -1,11 +1,10 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { db, Device, Plugin, Telemetry, ConfigJob } from '../db';
-import { requireAuth, requirePermission, require2FA, requireDeviceAccess } from '../auth/middleware';
+import { db, Device, Plugin, Telemetry } from '../db';
+import { requireAuth, requirePermission, requireDeviceAccess } from '../auth/middleware';
 import { allowedDeviceIds, invalidateDeviceAccessCache } from '../deviceAccess';
 import { mintConsoleTicket } from '../consoleTickets';
 import { DeviceConsoleError, resolveConsoleTarget } from '../deviceConsole';
-import { configJobQueue } from '../queue';
 import { asc, eq, and, desc, inArray } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { DeviceStateError, fetchDeviceState } from '../deviceState';
@@ -1473,74 +1472,6 @@ router.get('/devices/:id/telemetry', requireAuth, requirePermission('devices:rea
 
   res.status(200).json({ deviceId, history });
 });
-
-router.post(
-  '/devices/:id/config-jobs',
-  requireAuth,
-  require2FA,
-  requirePermission('configs:apply'),
-  requireDeviceAccess,
-  async (req, res) => {
-    const deviceId = String(req.params.id ?? '');
-    const { action, payload, pluginId } = req.body ?? {};
-
-    if (!pluginId || typeof pluginId !== 'string') {
-      res.status(400).json({ error: '"pluginId" is required — pick which assigned plugin applies the change' });
-      return;
-    }
-
-    const device = await db.query.devices.findFirst({
-      where: (devices, { eq }) => eq(devices.id, deviceId),
-    });
-    if (!device) {
-      res.status(404).json({ error: 'Device not found' });
-      return;
-    }
-
-    const assignment = await db.query.devicePlugins.findFirst({
-      where: and(eq(schema.devicePlugins.deviceId, deviceId), eq(schema.devicePlugins.pluginId, pluginId)),
-    });
-    if (!assignment) {
-      res.status(400).json({ error: 'Plugin is not assigned to this device' });
-      return;
-    }
-
-    const id = uuidv4();
-    const createdAt = new Date().toISOString();
-
-    await db.insert(schema.configJobs).values({
-      id,
-      deviceId,
-      pluginId,
-      action,
-      status: 'queued',
-      payload: JSON.stringify(payload ?? {}),
-      result: null,
-      createdAt,
-      finishedAt: null,
-    });
-
-    configJobQueue.add(id, { jobId: id, deviceId });
-
-    const created = await db.query.configJobs.findFirst({
-      where: (configJobs, { eq }) => eq(configJobs.id, id),
-    });
-    if (!created) {
-      res.status(500).json({ error: 'Failed to retrieve created config job' });
-      return;
-    }
-    res.status(202).json({
-      id: created.id,
-      deviceId: created.deviceId,
-      pluginId: created.pluginId ?? undefined,
-      action: created.action,
-      status: created.status,
-      result: created.result ? (typeof created.result === 'string' ? JSON.parse(created.result) : created.result) : undefined,
-      createdAt: created.createdAt,
-      finishedAt: created.finishedAt ?? undefined,
-    });
-  }
-);
 
 // POST /devices/refresh - Force an immediate re-poll of one or more devices.
 // Bypasses the staggered scheduling windows (metrics AND inventory), so both

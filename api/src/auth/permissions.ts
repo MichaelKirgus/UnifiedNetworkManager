@@ -84,7 +84,6 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // (env-driven) in v1.
   'flows:read': 'View the Flows page (traffic flows between devices and to the internet)',
   'sites:read': 'View sites',
-  'config-jobs:read': 'View configuration jobs',
   'plans:read': 'View execution plans and their steps',
   'plugins:read': 'View plugins, their options and self-metrics',
   // Logs can carry critical details (endpoints, error payloads), so they get

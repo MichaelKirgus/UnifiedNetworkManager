@@ -28,13 +28,6 @@ class InProcessQueue<T> {
   }
 }
 
-export interface ConfigJobMessage {
-  jobId: string;
-  deviceId: string;
-}
-
-export const configJobQueue = new InProcessQueue<ConfigJobMessage>();
-
 /** One message per plan execution request (see workers/planExecutor.ts). */
 export interface PlanExecutionMessage {
   planId: string;

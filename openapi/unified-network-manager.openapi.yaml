@@ -16,7 +16,6 @@ tags:
   - name: Authentication
   - name: Devices
   - name: Monitoring
-  - name: Configuration
   - name: Plugins
   - name: Secrets
   - name: Sites
@@ -592,8 +591,7 @@ paths:
       description: >-
         Returns actionable item counts for the sidebar badges in a single call.
         Each key is present only when the caller holds that page's read
-        permission. Keys: `notifications` (open), `configJobs` (queued+running),
-        `plans` (executing/ready/draft).
+        permission. Keys: `notifications` (open), `plans` (executing/ready/draft).
       responses:
         '200':
           description: Count object (keys omitted for missing permissions)
@@ -1854,58 +1852,6 @@ paths:
           description: Missing required permission
         '404':
           description: Device not found
-
-  /devices/{id}/config-jobs:
-    post:
-      tags: [Configuration]
-      summary: Queue asynchronous configuration action
-      description: Requires 2FA-completed session and permission `configs:apply`.
-      x-2fa-required: true
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ConfigJobRequest'
-      responses:
-        '202':
-          description: Job accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ConfigJob'
-        '401':
-          description: Authentication required
-        '403':
-          description: Missing required permission
-        '404':
-          description: Device not found
-
-  /config-jobs/{jobId}:
-    get:
-      tags: [Configuration]
-      summary: Get configuration job status
-      parameters:
-        - in: path
-          name: jobId
-          required: true
-          schema: { type: string }
-      responses:
-        '200':
-          description: Job status
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ConfigJob'
-        '401':
-          description: Authentication required
-        '404':
-          description: Job not found
 
   # --- Execution plans -------------------------------------------------------
   # A plan is the persisted output of a plugin's /plan endpoint (e.g. an
@@ -7441,7 +7387,6 @@ components:
       description: "Keys present only when the caller has the corresponding read permission"
       properties:
         notifications: { type: integer, minimum: 0, description: "Open notifications visible to the user" }
-        configJobs: { type: integer, minimum: 0, description: "Config jobs in queued or running state" }
         plans: { type: integer, minimum: 0, description: "Plans in executing/ready/draft state" }
 
     UserCreateRequest:
@@ -10120,38 +10065,6 @@ components:
         # `null` clears the marker; otherwise one of uplink | trunk.
         role: { type: ['string', 'null'], enum: [uplink, trunk, null] }
 
-    ConfigJobRequest:
-      type: object
-      required: [pluginId, action, payload]
-      properties:
-        # Which assigned plugin applies the change (a device can have several).
-        pluginId: { type: string }
-        action:
-          type: string
-          enum: [applyConfig, rollbackConfig, syncState]
-        payload:
-          type: object
-          additionalProperties: true
-
-    ConfigJob:
-      type: object
-      required: [id, deviceId, action, status, createdAt]
-      properties:
-        id: { type: string }
-        deviceId: { type: string }
-        pluginId: { type: string, description: "The assignment that executes this job" }
-        action:
-          type: string
-          enum: [applyConfig, rollbackConfig, syncState]
-        status:
-          type: string
-          enum: [queued, running, succeeded, failed]
-        result:
-          type: object
-          additionalProperties: true
-        createdAt: { type: string, format: date-time }
-        finishedAt: { type: string, format: date-time }
-
     # --- Execution plans -----------------------------------------------------
 
     PlanCreateRequest:
@@ -10820,7 +10733,7 @@ components:
       type: object
       required: [name, leaderKey, isLeader, beatsCompleted]
       properties:
-        name: { type: string, description: "Worker role id (telemetry, planExecutor, retention, telemetryRetention, pluginMetrics, discovery, configJob)" }
+        name: { type: string, description: "Worker role id (telemetry, planExecutor, retention, telemetryRetention, pluginMetrics, discovery)" }
         leaderKey: { type: integer, description: "Advisory-lock key for this role (-1 = not leader-gated; every replica runs it)" }
         isLeader: { type: boolean, description: "True while THIS instance holds the leadership lock" }
         becameLeaderAt: { type: [string, 'null'], format: date-time, description: "When this instance acquired leadership (null = standby)" }

@@ -17,7 +17,7 @@ const router = Router();
  */
 interface CountSpec {
   /** Response key + the permission required to see it. */
-  key: 'notifications' | 'configJobs' | 'plans' | 'certificates' | 'updates' | 'securityChecks';
+  key: 'notifications' | 'plans' | 'certificates' | 'updates' | 'securityChecks';
   permission: string;
   compute: (req: Request, userId: string) => Promise<number>;
 }
@@ -28,26 +28,6 @@ const COUNTS: CountSpec[] = [
     key: 'notifications',
     permission: 'notifications:read',
     compute: (_req, userId) => countOpenForUser(userId),
-  },
-  {
-    // Config jobs still in flight or waiting for a worker — scoped to the
-    // caller's devices (device-level access control).
-    key: 'configJobs',
-    permission: 'config-jobs:read',
-    compute: async (req) => {
-      const allowed = await allowedDeviceIds(req);
-      if (allowed !== null && allowed.size === 0) return 0;
-      const [row] = await db
-        .select({ n: sql<number>`count(*)::int` })
-        .from(schema.configJobs)
-        .where(
-          and(
-            inArray(schema.configJobs.status, ['queued', 'running']),
-            allowed !== null ? inArray(schema.configJobs.deviceId, [...allowed]) : undefined
-          )
-        );
-      return row?.n ?? 0;
-    },
   },
   {
     // Certificate endpoints that are NOT healthy right now: expired leaf or
