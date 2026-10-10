@@ -116,6 +116,17 @@ The **MCP server is not exposed to the host by default** — it carries an API t
 
 Tear down with `docker compose down` (add `-v` to also remove the Postgres volume).
 
+### First login
+
+On a fresh deployment the API seeds an **admin** user (username `admin`, password `admin`). Sign in at <http://localhost:8080> — no `.env` file is needed, every variable has a sane default.
+
+The first sign-in is **password-only**: you are then redirected into a mandatory setup wizard that forces you to
+
+1. change the initial password, and
+2. enroll a second factor (TOTP authenticator or passkey)
+
+before you can use anything else. There is no skip — once the wizard completes, 2FA is required for every subsequent login of that account.
+
 ### For developers: hot-reload dev setup
 
 If you're working on UNM itself, use `setup.sh` instead — it needs Node.js ≥ 20 and builds everything from source (it works against `docker-compose.dev.yml`, which carries the `build:` blocks). The script detects whether you can reach the Docker daemon without sudo and only escalates when truly needed.
@@ -128,7 +139,7 @@ This installs all dependencies (`make setup`), starts Postgres, syncs the schema
 
 Other targets: `make up|down|restart`, `make stop-api|stop-web`, `make clean` (removes containers **and** volumes).
 
-On first boot the API seeds an **admin** user (password `admin`) and prints its generated TOTP secret + `otpauth://` URI to the console — scan it with an authenticator app, then complete 2FA at login. Accounts created without an enrolled TOTP can pass 2FA with any 6-digit code in dev mode but will **not** receive the `amr: totp` claim required by 2FA-gated endpoints (config jobs, plan execution).
+On first boot the API seeds an **admin** user (password `admin`) — see [First login](#first-login): the initial sign-in is password-only and a mandatory setup wizard then forces a new password + second-factor enrollment. Accounts without an enrolled second factor cannot pass 2FA at all, so they are locked out of 2FA-gated endpoints (config jobs, plan execution) until one is enrolled.
 
 ### Pre-built images (GHCR)
 
