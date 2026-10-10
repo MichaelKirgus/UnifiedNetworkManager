@@ -23,6 +23,14 @@ services:
       - 5432:5432
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-unm} -d ${POSTGRES_DB:-unm}
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
   unm-ca:
     environment:
@@ -36,7 +44,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - step ca health --ca-url https://unm-ca:9000 | grep '^ok' >/dev/null
+        - step ca health --ca-url https://unm-ca:9000 --root /data/ca/root_ca.crt | grep '^ok' >/dev/null
       interval: 30s
       timeout: 10s
       retries: 3
@@ -64,6 +72,14 @@ services:
       - filerepo:/data/file-repo
       - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca
       - ${UNM_API_TLS_VOLUME:-unm-api-tls}:/data/tls
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:3000,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - postgres
       - unm-ca
@@ -81,6 +97,14 @@ services:
       - FILE_REPO_PATH=/data/file-repo
     volumes:
       - ${FILE_REPO_PLUGIN_VOLUME:-filerepo-plugin}:/data/file-repo
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -99,6 +123,14 @@ services:
       - OPNSENSE_HOST=${OPNSENSE_HOST:-https://opnsense.local}
       - OPNSENSE_KEY=${OPNSENSE_KEY:-}
       - OPNSENSE_SECRET=${OPNSENSE_SECRET:-}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -112,6 +144,14 @@ services:
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -127,6 +167,14 @@ services:
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/generic-snmp/mibs:/app/mibs:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -142,6 +190,14 @@ services:
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/lancom-lx/mibs:/app/mibs:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -157,6 +213,14 @@ services:
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/lancom-lcos/mibs:/app/mibs:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -172,6 +236,14 @@ services:
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/lancom-sx/mibs:/app/mibs:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -185,6 +257,14 @@ services:
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -198,6 +278,14 @@ services:
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -211,6 +299,14 @@ services:
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -224,6 +320,14 @@ services:
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -237,6 +341,14 @@ services:
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -250,6 +362,14 @@ services:
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -265,6 +385,14 @@ services:
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -278,6 +406,14 @@ services:
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -291,6 +427,14 @@ services:
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -304,6 +448,14 @@ services:
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -317,6 +469,14 @@ services:
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -331,6 +491,14 @@ services:
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -347,6 +515,14 @@ services:
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
       - WEBFETCH_PROXY_URL=${WEBFETCH_PROXY_URL:-}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -366,6 +542,14 @@ services:
     volumes:
       - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca:ro
       - ${UNM_MCP_TLS_VOLUME:-unm-mcp-tls}:/data/tls
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:3901,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
       - api
     restart: unless-stopped
@@ -381,6 +565,14 @@ services:
     volumes:
       - ./packages/plugin-test-kit/src/fixtures/opnsenseAppliance.cjs:/mock/mock.js:ro
       - ./packages/plugin-test-kit/src/fixtures/tls:/mock/tls:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:80,path:"/__requests"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     restart: no
   basic-auth-plugin:
     ports:
@@ -393,6 +585,14 @@ services:
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
       - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-localhost}
       - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-http://localhost:5173}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -408,6 +608,14 @@ services:
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
       - MASTER_KEY=${MASTER_KEY:-default-master-key-must-be-changed-in-production}
       - CRYPTO_SALT=${CRYPTO_SALT:-salt}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'const fs=require("fs"),http=require("http");function plain(){return new Promise(function(res){var r=http.get({host:"127.0.0.1",port:4080,path:"/healthz"},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}(async function(){var mtls=false;try{var key=fs.readFileSync("/data/tls/tls.key"),cert=fs.readFileSync("/data/tls/tls.crt"),ca=fs.readFileSync("/data/tls/ca-bundle.pem");mtls=await new Promise(function(res){var r=require("https").get({host:"127.0.0.1",port:4080,path:"/healthz",key:key,cert:cert,ca:ca,rejectUnauthorized:true,checkServerIdentity:function(){}},function(x){res(x.statusCode===200)});r.on("error",function(){res(false)})})}catch(e){}process.exit((mtls||await plain())?0:1)})();'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       - api
     restart: unless-stopped
@@ -415,6 +623,14 @@ services:
   webapp:
     ports:
       - 5173:5173
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:5173,path:"/manifest.json"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     depends_on:
       - api
     restart: unless-stopped
