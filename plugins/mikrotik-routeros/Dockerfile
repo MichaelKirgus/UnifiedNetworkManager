@@ -22,9 +22,13 @@ RUN cd packages/plugin-sdk && npm install --legacy-peer-deps && npm run build
 COPY plugins/mikrotik-routeros/package*.json plugins/mikrotik-routeros/tsconfig.json plugins/mikrotik-routeros/
 RUN cd plugins/mikrotik-routeros && npm install --legacy-peer-deps
 
+
 COPY plugins/mikrotik-routeros/src/ plugins/mikrotik-routeros/src/
 RUN cd plugins/mikrotik-routeros && npm run build \
-    && node -e "require('/app/plugins/mikrotik-routeros/node_modules/@unm/plugin-sdk')"
+    && node -e "require('/app/plugins/mikrotik-routeros/node_modules/@unm/plugin-sdk')" && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 # Static icon assets served at /icons (proxied by the API's GET /plugins/:id/icon).
 COPY plugins/mikrotik-routeros/icons/ plugins/mikrotik-routeros/icons/

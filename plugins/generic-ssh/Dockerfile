@@ -21,9 +21,13 @@ RUN cd packages/plugin-sdk && npm install --legacy-peer-deps && npm run build
 COPY plugins/generic-ssh/package*.json plugins/generic-ssh/tsconfig.json plugins/generic-ssh/
 RUN cd plugins/generic-ssh && npm install --legacy-peer-deps
 
+
 COPY plugins/generic-ssh/src/ plugins/generic-ssh/src/
 RUN cd plugins/generic-ssh && npm run build \
-    && node -e "require('/app/plugins/generic-ssh/node_modules/@unm/plugin-sdk')"
+    && node -e "require('/app/plugins/generic-ssh/node_modules/@unm/plugin-sdk')" && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 # Static icon assets served at /icons (proxied by the API's GET /plugins/:id/icon).
 COPY plugins/generic-ssh/icons/ plugins/generic-ssh/icons/

@@ -23,7 +23,10 @@ RUN cd api && npm install --legacy-peer-deps
 COPY openapi ./openapi
 COPY api ./api
 
-RUN cd api && npm run build
+RUN cd api && npm run build && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 WORKDIR /app/api
 EXPOSE 3000

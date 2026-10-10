@@ -21,9 +21,13 @@ RUN cd packages/plugin-sdk && npm install --legacy-peer-deps && npm run build
 COPY plugins/opnsense/package*.json plugins/opnsense/tsconfig.json plugins/opnsense/
 RUN cd plugins/opnsense && npm install --legacy-peer-deps
 
+
 COPY plugins/opnsense/src/ plugins/opnsense/src/
 RUN cd plugins/opnsense && npm run build \
-    && node -e "require('/app/plugins/opnsense/node_modules/@unm/plugin-sdk')"
+    && node -e "require('/app/plugins/opnsense/node_modules/@unm/plugin-sdk')" && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 # Static icon assets served at /icons (proxied by the API's GET /plugins/:id/icon).
 COPY plugins/opnsense/icons/ plugins/opnsense/icons/

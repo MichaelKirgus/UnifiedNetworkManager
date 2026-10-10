@@ -40,9 +40,13 @@ RUN cd packages/lancom-shared && npm install --legacy-peer-deps && npm run build
 COPY plugins/lancom-lx/package*.json plugins/lancom-lx/tsconfig.json plugins/lancom-lx/
 RUN cd plugins/lancom-lx && npm install --legacy-peer-deps
 
+
 COPY plugins/lancom-lx/src/ plugins/lancom-lx/src/
 RUN cd plugins/lancom-lx && npm run build \
-    && node -e "require('/app/plugins/lancom-lx/node_modules/@unm/snmp-client')"
+    && node -e "require('/app/plugins/lancom-lx/node_modules/@unm/snmp-client')" && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 # Static icon assets served at /icons (proxied by the API's GET /plugins/:id/icon).
 COPY plugins/lancom-lx/icons/ plugins/lancom-lx/icons/

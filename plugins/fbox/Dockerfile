@@ -21,9 +21,13 @@ RUN cd packages/plugin-sdk && npm install --legacy-peer-deps && npm run build
 COPY plugins/fbox/package*.json plugins/fbox/tsconfig.json plugins/fbox/
 RUN cd plugins/fbox && npm install --legacy-peer-deps
 
+
 COPY plugins/fbox/src/ plugins/fbox/src/
 RUN cd plugins/fbox && npm run build \
-    && node -e "require('/app/plugins/fbox/node_modules/@unm/plugin-sdk')"
+    && node -e "require('/app/plugins/fbox/node_modules/@unm/plugin-sdk')" && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 # Static icon assets served at /icons (proxied by the API's GET /plugins/:id/icon).
 COPY plugins/fbox/icons/ plugins/fbox/icons/

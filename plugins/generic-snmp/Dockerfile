@@ -33,12 +33,16 @@ RUN cd packages/snmp-client && npm install --legacy-peer-deps && npm run build
 COPY plugins/generic-snmp/package*.json plugins/generic-snmp/tsconfig.json plugins/generic-snmp/
 RUN cd plugins/generic-snmp && npm install --legacy-peer-deps
 
+
 # Whole src/ (like every other plugin): a per-file list here is a fossil from
 # the snmp → generic-snmp rename and silently dropped deviceSupport.ts, which
 # broke the in-image tsc build with "Cannot find module './deviceSupport'".
 COPY plugins/generic-snmp/src/ plugins/generic-snmp/src/
 RUN cd plugins/generic-snmp && npm run build \
-    && node -e "require('/app/plugins/generic-snmp/node_modules/@unm/snmp-client')"
+    && node -e "require('/app/plugins/generic-snmp/node_modules/@unm/snmp-client')" && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: symlink
 # in node_modules resolve exactly like in local development.

@@ -21,9 +21,13 @@ RUN cd packages/plugin-sdk && npm install --legacy-peer-deps && npm run build
 COPY plugins/ix-truenas/package*.json plugins/ix-truenas/tsconfig.json plugins/ix-truenas/
 RUN cd plugins/ix-truenas && npm install --legacy-peer-deps
 
+
 COPY plugins/ix-truenas/src/ plugins/ix-truenas/src/
 RUN cd plugins/ix-truenas && npm run build \
-    && node -e "require('/app/plugins/ix-truenas/node_modules/@unm/plugin-sdk')"
+    && node -e "require('/app/plugins/ix-truenas/node_modules/@unm/plugin-sdk')" && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 # Static icon assets served at /icons (proxied by the API's GET /plugins/:id/icon).
 COPY plugins/ix-truenas/icons/ plugins/ix-truenas/icons/

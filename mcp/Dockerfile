@@ -24,12 +24,17 @@ RUN cd packages/plugin-sdk && npm install --legacy-peer-deps && npm run build
 COPY mcp/package*.json ./mcp/
 RUN cd mcp && npm install --legacy-peer-deps
 
+
+
 COPY mcp/tsconfig.json ./mcp/
 COPY mcp/src ./mcp/src
 # The spec is resolved from here at runtime (UNM_OPENAPI_SPEC below).
 COPY openapi/unified-network-manager.openapi.yaml /app/openapi/
 
-RUN cd mcp && npm run build
+RUN cd mcp && npm run build && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 WORKDIR /app/mcp
 

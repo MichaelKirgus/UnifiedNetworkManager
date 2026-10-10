@@ -24,9 +24,13 @@ RUN cd packages/plugin-sdk && npm install --legacy-peer-deps && npm run build
 COPY plugins/icmp/package*.json plugins/icmp/tsconfig.json plugins/icmp/
 RUN cd plugins/icmp && npm install --legacy-peer-deps
 
+
 COPY plugins/icmp/src/ plugins/icmp/src/
 RUN cd plugins/icmp && npm run build \
-    && node -e "require('/app/plugins/icmp/node_modules/@unm/plugin-sdk')"
+    && node -e "require('/app/plugins/icmp/node_modules/@unm/plugin-sdk')" && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: link in
 # node_modules resolve exactly like in local development.

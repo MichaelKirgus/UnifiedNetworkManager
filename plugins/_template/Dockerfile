@@ -17,9 +17,13 @@ RUN cd packages/plugin-sdk && npm install --legacy-peer-deps && npm run build
 COPY plugins/template/package*.json plugins/template/tsconfig.json plugins/template/
 RUN cd plugins/template && npm install --legacy-peer-deps
 
+
 COPY plugins/template/src/ plugins/template/src/
 RUN cd plugins/template && npm run build \
-    && node -e "require('/app/plugins/template/node_modules/@unm/plugin-sdk')"
+    && node -e "require('/app/plugins/template/node_modules/@unm/plugin-sdk')" && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 # Static doc/license assets served at /assets/* (proxied by the API's
 # GET /plugins/:id/asset) — referenced from discovery.deviceSupport. Separate
