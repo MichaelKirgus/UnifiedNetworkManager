@@ -1,5 +1,23 @@
-version: "3.9"
+# UNM — standard deployment compose (END USERS: no local build required).
+#
+# Generated from docker-compose.dev.yml by scripts/generate-registry-compose.cjs —
+# do not edit by hand; change the dev compose and regenerate. Every service that
+# is built locally in the dev compose is pulled here as a GHCR image instead
+# (same service names, env vars and volumes).
+#
+#   docker compose up -d
+#
+# Overrides (.env or environment):
+#   UNM_REGISTRY    registry prefix  (default ghcr.io/michaelkirgus/unifiednetworkmanager)
+#   UNM_IMAGE_TAG   image tag        (default dev; use a release tag like v0.1.0)
+#   UNM_WEB_PORT    webapp host port (default 8080)
+#
+# The MCP server is NOT published to the host by default — it carries an API
+# token with full agent capabilities, so exposing it on all interfaces is a
+# deliberate choice. If you need remote MCP access, add your own mapping in .env
+# or a reverse proxy (with auth), e.g. UNM_MCP_PORT=8081.
 
+version: "3.9"
 services:
   postgres:
     image: postgres:16-alpine
@@ -8,31 +26,19 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-unm}
       POSTGRES_DB: ${POSTGRES_DB:-unm}
     ports:
-      - "5432:5432"
+      - 5432:5432
     volumes:
       - pgdata:/var/lib/postgresql/data
-    # Accepting-connections check (no auth) with the initdb user/database.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-unm} -d ${POSTGRES_DB:-unm}"]
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-unm} -d ${POSTGRES_DB:-unm}
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 15s
     restart: unless-stopped
-
-  # Certificate Authority (step-ca, Apache 2.0 — see ca/Dockerfile). Issues the
-  # mTLS leaf certificates for every plugin + the API via RFC 8555 ACME.
-  # Two volumes with deliberately different exposure:
-  #   unm-ca-pki  CA-ONLY: root/intermediate certs + intermediate key. Mounted
-  #               here ONLY — no other service (incl. the API) ever sees keys.
-  #   unm-ca-cfg  shared with the api: ca.json (rendered by the API from global
-  #               settings; SIGHUP-reloaded on change) + step-ca's state DB.
-  # The CA listens on :9000 inside the compose network only — NOT published to
-  # the host. ACME directory: https://unm-ca:9000/acme/acme/directory.
   unm-ca:
-    build:
-      context: .
-      dockerfile: ca/Dockerfile
     environment:
       - TZ=${TZ:-UTC}
     volumes:
@@ -41,85 +47,41 @@ services:
     depends_on:
       - postgres
     restart: unless-stopped
-    # step-ca's `ca health` needs BOTH flags or it errors out and the container
-    # shows "(unhealthy)" even though enrollment works fine: --ca-url (the CA has
-    # no IP SANs, so address it by DNS name) AND --root pointing at a root PEM.
-    # The entrypoint mirrors /pki/root_ca.crt → /data/ca/ on every boot, so the
-    # public root is always present on the shared cfg volume for this check.
     healthcheck:
-      test: ["CMD-SHELL", "step ca health --ca-url https://unm-ca:9000 --root /data/ca/root_ca.crt | grep '^ok' >/dev/null"]
+      test:
+        - CMD-SHELL
+        - step ca health --ca-url https://unm-ca:9000 --root /data/ca/root_ca.crt | grep '^ok' >/dev/null
       interval: 30s
       timeout: 10s
       retries: 3
-
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/unm-ca:${UNM_IMAGE_TAG:-dev}
   api:
-    build:
-      context: .
-      dockerfile: api/Dockerfile
     ports:
-      - "3000:3000"
+      - 3000:3000
     environment:
       - PORT=3000
       - JWT_SECRET=dev-secret
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
-      # Identity provider selection (the API is a pure auth broker).
-      # AUTH_PLUGIN_ID names the active identity provider plugin; if unset or
-      # offline the API falls back to the built-in basic-auth plugin.
       - AUTH_PLUGIN_ID=${AUTH_PLUGIN_ID:-00000000-0000-4000-8000-000000000001}
-      # Shared key the API presents to plugins (x-plugin-api-key).
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-      # WebAuthn (passkey) relying-party identity. Production MUST set these to
-      # your real domain + https origin(s), e.g.
-      #   WEBAUTHN_RP_ID=unm.example.com  WEBAUTHN_ORIGIN=https://unm.example.com
       - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-localhost}
-      - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-http://localhost:5173}
-      # How many days of plugin log entries are kept before the retention sweep deletes them.
+      - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-http://localhost:8080}
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
-      # Central file repository metadata lives in Postgres; the BYTES live in a
-      # file-repo plugin (capability `fileRepo`). FILE_REPO_PLUGIN_ID names the
-      # default provider for new uploads; if unset or offline the API falls back
-      # to its own local volume (legacy rows with no providerId always read from it).
       - FILE_REPO_PLUGIN_ID=${FILE_REPO_PLUGIN_ID:-00000000-0000-4000-8000-000000000011}
-      # Legacy api-local file-repo volume (fallback + pre-plugin rows). Only the
-      # api container mounts it — plugins reach files through the API's
-      # /plugin/files/* routes and never see any filesystem.
       - FILE_REPO_PATH=${FILE_REPO_PATH:-/data/file-repo}
-      # Secrets provider selection (the API is a pure secrets broker).
-      # SECRETS_PLUGIN_ID names the active secrets provider plugin; if unset or
-      # offline the API falls back to the built-in secrets-provider plugin.
       - SECRETS_PLUGIN_ID=${SECRETS_PLUGIN_ID:-00000000-0000-4000-8000-000000000002}
-      # Plugin discovery is PUSH-BASED: every plugin self-registers with the
-      # API (POST /plugin/register) on boot using UNM_API_URL + PLUGIN_API_KEY,
-      # and the discovery worker polls whatever endpoints are in the plugins
-      # table. There is deliberately NO catalog of plugin endpoints here — a
-      # third-party plugin needs zero changes to this file to appear in UNM.
-      # Optional legacy fallback for topologies where a plugin cannot reach the
-      # API at all (comma-separated list, e.g. http://my-plugin:4080):
       - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-}
-      # mTLS (Stage 1): enroll the API itself against the CA (identity "api") and
-      # open a TLS listener on :8443. Off by default — set UNM_TLS=1 in .env to
-      # enable it together with the plugins' enrollment.
       - UNM_TLS=${UNM_TLS:-}
-      # mTLS (Stage 2): broker POST /ca/renew for subject 'mcp' through the MCP
-      # server's own /tls/renew endpoint (gated by its debug key).
       - MCP_DEBUG_KEY=${MCP_DEBUG_KEY:-dev-mcp-debug-key}
       - UNM_MCP_URL=http://mcp:3901
     volumes:
-      # Legacy api-local file-repo volume (fallback + pre-plugin rows). The
-      # active byte store is the file-repo plugin's own volume below.
       - filerepo:/data/file-repo
-      # CA config volume (shared with unm-ca): the API renders ca.json here from
-      # global settings and persists its own admin JWK key. The PKI volume is
-      # deliberately NOT mounted — the API never sees CA signing keys.
       - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca
-      # mTLS (Stage 1): the API's OWN ACME account + leaf keys persist here so a
-      # container rebuild does not re-enroll (the old leaf stays valid until its
-      # renewal window). Only UNM-owned material — no CA signing keys.
       - ${UNM_API_TLS_VOLUME:-unm-api-tls}:/data/tls
-    # Plain-HTTP self-check on :3000 (the mTLS listener on :8443 is an
-    # additional endpoint and does not gate this check).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:3000,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:3000,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -128,41 +90,23 @@ services:
       - postgres
       - unm-ca
     restart: unless-stopped
-
-  # File-repository storage backend (capability `fileRepo`). STATELESS with
-  # respect to UNM metadata — it stores only raw bytes, content-addressed by
-  # SHA-256, on its own volume. The API owns all repo_files/repo_file_uses rows
-  # in Postgres and brokers every read/write here (see api/src/fileRepoBroker.ts).
-  # Mount FILE_REPO_PLUGIN_PATH at a host path or named volume to persist bytes;
-  # run multiple instances (PLUGIN_INSTANCE_ID) for repos in different segments.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/api:${UNM_IMAGE_TAG:-dev}
   file-repo-plugin:
-    build:
-      context: .
-      dockerfile: plugins/file-repo/Dockerfile
     ports:
-      - "4020:4080"
+      - 4020:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://file-repo-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-      # On-disk store root inside this container (the ONLY mount that holds bytes).
       - FILE_REPO_PATH=/data/file-repo
     volumes:
-      # The byte store. Named volume by default; set to a host path (e.g.
-      # /opt/unm/file-repo) or another named volume per instance if preferred.
       - ${FILE_REPO_PLUGIN_VOLUME:-filerepo-plugin}:/data/file-repo
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -170,41 +114,25 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/file-repo-plugin:${UNM_IMAGE_TAG:-dev}
   opnsense-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/opnsense/Dockerfile
     ports:
-      - "4001:4080"
-    # Lets the plugin reach host-network services (e.g. mock-appliance on :80/:443)
-    # as http(s)://host.docker.internal — plain Linux Docker has no such name by default.
+      - 4001:4080
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - host.docker.internal:host-gateway
     environment:
-      # Conventional internal port for ALL plugins; the host mapping above is
-      # only for curl-from-host debugging + setup.sh wait_for_port.
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
-      # Without this the plugin advertises http://localhost:4080, which is
-      # unreachable from the API container.
       - ADVERTISED_ENDPOINT=http://opnsense-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
       - OPNSENSE_HOST=${OPNSENSE_HOST:-https://opnsense.local}
       - OPNSENSE_KEY=${OPNSENSE_KEY:-}
       - OPNSENSE_SECRET=${OPNSENSE_SECRET:-}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -212,33 +140,20 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # ICMP plugin: reachability / latency metrics plus IP+MAC inventory,
-  # measured from inside its own container via system ping (ICMP echo). No
-  # credentials needed — it probes whatever host the device's settings point at.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/opnsense-plugin:${UNM_IMAGE_TAG:-dev}
   icmp-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/icmp/Dockerfile
     ports:
-      - "4004:4080"
+      - 4004:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://icmp-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -246,57 +161,22 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # ── Multi-instance example ────────────────────────────────────────────────
-  # Every plugin supports running multiple instances of the same type (e.g. one
-  # ICMP plugin per remote site). Each instance needs a unique
-  # PLUGIN_INSTANCE_ID and its own ADVERTISED_ENDPOINT; it then registers as a
-  # separate plugin ("ICMP Plugin (site-a)") that can be assigned independently.
-  # PLUGIN_DISPLAY_NAME optionally overrides the auto-generated name.
-  # No api-side registration needed — each instance self-registers on boot.
-  # icmp-site-a:
-  #   build:
-  #     context: .
-  #     dockerfile: plugins/icmp/Dockerfile
-  #   ports:
-  #     - "4010:4080"   # next free HOST port — the container port is always 4080
-  #   environment:
-  #     - PORT=4080
-  #     - ADVERTISED_ENDPOINT=http://icmp-site-a:4080
-  #     - PLUGIN_INSTANCE_ID=site-a
-  #     # - PLUGIN_DISPLAY_NAME=HQ ICMP
-  #   restart: unless-stopped
-
-  # Generic SNMP plugin: SNMPv1/v2c monitoring (system group + interface
-  # throughput) and inventory over native UDP (@unm/snmp-client). Credentials
-  # come from an snmp-type secret assigned per device (community + version).
-  # Vendor MIB files can be dropped into ./plugins/generic-snmp/mibs — mounted
-  # read-only at /app/mibs for manual debugging only.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/icmp-plugin:${UNM_IMAGE_TAG:-dev}
   generic-snmp-plugin:
-    # Root context — the image also builds the shared @unm/snmp-client package.
-    build:
-      context: .
-      dockerfile: plugins/generic-snmp/Dockerfile
     ports:
-      - "4005:4080"
+      - 4005:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://generic-snmp-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/generic-snmp/mibs:/app/mibs:ro
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -304,36 +184,22 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # LANCOM LX plugin: vendor-specific monitoring for LCOS-LX access points via
-  # the LCOS-LX-MIB (radios, SSIDs, stations/clients, RF environment, WDS,
-  # CAPWAP/LMC) plus network + WLAN-client inventory propagation. Intended to
-  # be assigned IN ADDITION TO the generic SNMP plugin on the same devices.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/generic-snmp-plugin:${UNM_IMAGE_TAG:-dev}
   lancom-lx-plugin:
-    # Root context — the image also builds the shared @unm/snmp-client package.
-    build:
-      context: .
-      dockerfile: plugins/lancom-lx/Dockerfile
     ports:
-      - "4006:4080"
+      - 4006:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://lancom-lx-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/lancom-lx/mibs:/app/mibs:ro
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -341,38 +207,22 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-  # LANCOM LCOS router plugin: vendor-specific monitoring for Lancom LCOS
-  # routers via the unified LCOS MIB (system/hardware, LAN/WAN throughput,
-  # VPN connections, firewall counters, temperature) plus network/ARP/DHCP
-  # inventory propagation. Config + plan actions run over SNMP SET against the
-  # lcsSetup tree; config backup/restore goes through the router's web UI via
-  # a separate username/password credential slot ("web"). Intended to be
-  # assigned IN ADDITION TO the generic SNMP plugin on the same devices.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/lancom-lx-plugin:${UNM_IMAGE_TAG:-dev}
   lancom-lcos-plugin:
-    # Root context — the image also builds the shared @unm/snmp-client package.
-    build:
-      context: .
-      dockerfile: plugins/lancom-lcos/Dockerfile
     ports:
-      - "4008:4080"
+      - 4008:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://lancom-lcos-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/lancom-lcos/mibs:/app/mibs:ro
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -380,38 +230,22 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-  # LANCOM SX-Series switch plugin: vendor-specific monitoring for Lancom
-  # GS/IGS/XS switches over the LCOS-SX MIBs (system/PSU/fans/temperature,
-  # ports + throughput, PoE, LAG/LACP) plus network/host inventory propagation.
-  # Supports BOTH firmware lines — the unified 4.x tree (lcosSX, base
-  # .1.3.6.1.4.1.2356.14) and the legacy GS-2310 3.x tree (base
-  # .1.3.6.1.4.1.2356.800.3.2313) — auto-detected per device. Config + plan
-  # actions run over SNMP SET against the port/PoE/LACP/VLAN tables.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/lancom-lcos-plugin:${UNM_IMAGE_TAG:-dev}
   lancom-sx-plugin:
-    # Root context — the image also builds the shared @unm/snmp-client package.
-    build:
-      context: .
-      dockerfile: plugins/lancom-sx/Dockerfile
     ports:
-      - "4009:4080"
+      - 4009:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://lancom-sx-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
     volumes:
       - ./plugins/lancom-sx/mibs:/app/mibs:ro
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -419,32 +253,20 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-  # FBox plugin: AVM FRITZ!Box-class router monitoring over the box's own web-UI
-  # session API (login_sid.lua + JSON/lua data endpoints) — system/WAN/LAN/WiFi
-  # metrics plus LAN-device, WLAN-client and SSID inventory propagation.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/lancom-sx-plugin:${UNM_IMAGE_TAG:-dev}
   fbox-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/fbox/Dockerfile
     ports:
-      - "4010:4080"
+      - 4010:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://fbox-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -452,33 +274,20 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-  # MikroTik SwOS plugin: MikroTik SwOS / SwOS Lite switch monitoring (system,
-  # ports, PoE, LAG/LACP, VLANs, SFP, SNMP) via the .b-file HTTP API with Digest
-  # auth, plus plan/config actions and network/MAC inventory propagation. SwOS
-  # only — RouterOS devices get their own plugin later.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/fbox-plugin:${UNM_IMAGE_TAG:-dev}
   mikrotik-swos-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/mikrotik-swos/Dockerfile
     ports:
-      - "4007:4080"
+      - 4007:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://mikrotik-swos-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -486,34 +295,20 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-  # MikroTik RouterOS plugin: RouterOS router monitoring via the REST API
-  # (/rest, HTTP Basic auth) — system resources (CPU/memory/uptime), interfaces
-  # + throughput rates, IP addresses, ARP, DHCP leases, routes, wireless clients,
-  # with network/host/route inventory propagation. Configuration + planning are
-  # planned for a later release.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/mikrotik-swos-plugin:${UNM_IMAGE_TAG:-dev}
   mikrotik-routeros-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/mikrotik-routeros/Dockerfile
     ports:
-      - "4012:4080"
+      - 4012:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://mikrotik-routeros-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -521,33 +316,20 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-  # TrueNAS plugin: iXsystems TrueNAS SCALE appliance monitoring over the
-  # JSON-RPC API (POST /api, bearer-token auth) — system CPU/memory/swap,
-  # pool usage + status table, active alerts → health. Credentials:
-  # username/password secret or an optional bound API-key slot.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/mikrotik-routeros-plugin:${UNM_IMAGE_TAG:-dev}
   ix-truenas-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/ix-truenas/Dockerfile
     ports:
-      - "4011:4080"
+      - 4011:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://ix-truenas-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -555,31 +337,20 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # Mailcow plugin: mailcow-dockerized REST API — domains/mailboxes/aliases
-  # inventory (Mail page) + CRUD actions through the plans system.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/ix-truenas-plugin:${UNM_IMAGE_TAG:-dev}
   mailcow-plugin:
-    build:
-      context: .
-      dockerfile: plugins/mailcow/Dockerfile
     ports:
-      - "4018:4080"
+      - 4018:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://mailcow-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -587,32 +358,20 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # Docker plugin: generic Docker Engine monitoring over the REST API — plain
-  # TCP (2375), client-cert TLS (2376) or a locally mounted unix socket. Emits
-  # the generic `containers[]` metric → Containers page, zero other changes.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/mailcow-plugin:${UNM_IMAGE_TAG:-dev}
   docker-plugin:
-    build:
-      context: .
-      dockerfile: plugins/docker/Dockerfile
     ports:
-      - "4013:4080"
+      - 4013:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://docker-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -620,38 +379,22 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-    # Needed for transport=socket devices (daemon on the UNM host itself).
-    # Grants the plugin full control of that daemon — enable deliberately.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-
-  # OpenWRT plugin: dual-transport monitoring + configuration for OpenWrt
-  # routers. LuCI ubus-over-HTTP for structured reads when reachable, SSH
-  # (dropbear) for uci config writes, /proc metrics and the interactive shell.
-  # Transport mode is configurable per device: auto | luci | ssh.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/docker-plugin:${UNM_IMAGE_TAG:-dev}
   openwrt-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/openwrt/Dockerfile
     ports:
-      - "4014:4080"
+      - 4014:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://openwrt-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -659,34 +402,20 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # Generic SSH plugin (Linux): vendor-agnostic management for ANY device that
-  # allows access over SSH. /proc + POSIX monitoring (CPU/memory/swap/bandwidth),
-  # inventory (interfaces+MACs, ARP/NDP tables, routes, filesystems, disks), an
-  # interactive web shell (/console) and an SFTP file manager (/filesystem).
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/openwrt-plugin:${UNM_IMAGE_TAG:-dev}
   generic-ssh-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/generic-ssh/Dockerfile
     ports:
-      - "4015:4080"
+      - 4015:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://generic-ssh-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -694,35 +423,20 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # Generic HTTP(S) plugin: vendor-agnostic web-service health check for ANY host
-  # that serves HTTP(S). Checks the configured endpoints (default port 80 and/or
-  # 443, adjustable in settings), reports response time + status code as live
-  # metrics, and probes the TLS endpoint's certificate into the cross-device
-  # Certificates page. No credentials needed — plain TCP/TLS connects.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/generic-ssh-plugin:${UNM_IMAGE_TAG:-dev}
   generic-http-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/generic-http/Dockerfile
     ports:
-      - "4016:4080"
+      - 4016:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://generic-http-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -730,37 +444,20 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # Zabbix plugin: fleet monitoring for a Zabbix server over its JSON-RPC API
-  # (api_jsonrpc.php) — version, monitored-host table and active problems as UNM
-  # metrics. ALSO the first consumer of the 'inventorySync' capability: it keeps
-  # the external monitoring system in step with UNM's host inventory via a
-  # plan-gated sync action (create/update/delete), driven by flexible plugin
-  # options (name template, groups, template link, tag filter, orphan policy).
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/generic-http-plugin:${UNM_IMAGE_TAG:-dev}
   zabbix-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/zabbix/Dockerfile
     ports:
-      - "4019:4080"
+      - 4019:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://zabbix-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log
-      # shipping AND the brokered inventory read (GET /v1/plugin/inventory/hosts).
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -768,36 +465,20 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # Generic (S)NTP plugin: vendor-agnostic NTP/SNTP time-service checker for ANY
-  # host that serves NTP. Sends one SNTP request to the configured port (default
-  # 123, adjustable in settings), verifies a well-formed server reply arrives,
-  # and reports the time it transmits + stratum/reference as live metrics —
-  # ingested into the cross-device Time page SEPARATELY from each device's own
-  # system clock. No credentials needed — one UDP datagram.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/zabbix-plugin:${UNM_IMAGE_TAG:-dev}
   generic-ntp-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/generic-ntp/Dockerfile
     ports:
-      - "4017:4080"
+      - 4017:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://generic-ntp-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -805,38 +486,21 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # Flow collector plugin (sFlow/NetFlow feature): GLOBAL service — no device
-  # assignment, no credentials. Listens on UDP for flow samples pushed by
-  # network devices (LANCOM LX / OPNsense / …), pre-aggregates them into
-  # per-window (src,dst,proto) tuples and pushes batches to the API's internal
-  # POST /plugin/flows endpoint; a leader-gated worker persists + enriches +
-  # rolls them up (api/src/workers/flows.ts). Host port 4021 = HTTP control
-  # plane (conventional 4080 mapping); 6343/udp = sFlow receive port.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/generic-ntp-plugin:${UNM_IMAGE_TAG:-dev}
   flow-collector-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/flow-collector/Dockerfile
     ports:
-      - "4021:4080"
-      - "6343:6343/udp"
+      - 4021:4080
+      - 6343:6343/udp
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://flow-collector-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — flow batch pushes + logs.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -844,48 +508,23 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # Web-fetch plugin (capability `webFetch`): GLOBAL service — no device
-  # assignment, no credentials. Downloads files/web content from the internet
-  # on behalf of UNM (POST /fetch), plain or through an egress proxy with
-  # CONNECT tunneling for HTTPS targets. This is what lets the API container
-  # live in a network segment WITHOUT internet access while this plugin sits
-  # behind one that has it — deploy it wherever egress exists and point
-  # WEBFETCH_PROXY_URL at your corporate proxy if plain TLS is not allowed.
-  # The GeoIP worker (api/src/workers/geoip.ts) uses it to pull database files
-  # into the central file repository; host port 4022 = HTTP control plane.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/flow-collector-plugin:${UNM_IMAGE_TAG:-dev}
   web-fetch-plugin:
-    build:
-      context: .
-      dockerfile: plugins/web-fetch/Dockerfile
     ports:
-      - "4022:4080"
-    # Lets the plugin reach host-network services (e.g. a mock download server
-    # on :9199 during e2e) as http://host.docker.internal — plain Linux Docker
-    # has no such name by default.
+      - 4022:4080
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - host.docker.internal:host-gateway
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://web-fetch-plugin:4080
-      # Base URL of the API's internal endpoints (plugin -> API) — log shipping.
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-      # Deployment-level egress proxy (empty = direct connection). The API's
-      # "Web Fetch" settings can override this per request; set here for a
-      # fixed corporate-proxy topology, e.g. http://proxy.corp:3128 or
-      # http://user:pass@proxy.corp:3128.
       - WEBFETCH_PROXY_URL=${WEBFETCH_PROXY_URL:-}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -893,54 +532,24 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # MCP server for AI agents: exposes the API's OpenAPI operations as MCP tools
-  # over Streamable HTTP. Two endpoints:
-  #   POST :3901/mcp        — production-safe (OpenAPI tools only; scope the
-  #                           UNM_API_TOKEN to control what an agent can do)
-  #   POST :3901/debug/mcp  — extended debug: + read-only SQL against Postgres
-  #                           and live plugin probes. Requires Authorization:
-  #                           Bearer <MCP_DEBUG_KEY>.
-  # Create the UNM_API_TOKEN in the webapp (Tokens page) or via POST /v1/tokens.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/web-fetch-plugin:${UNM_IMAGE_TAG:-dev}
   mcp:
-    build:
-      context: .
-      dockerfile: mcp/Dockerfile
-    ports:
-      - "3901:3901"
     environment:
       - MCP_PORT=3901
-      # Base URL the OpenAPI tools call (container-to-container).
       - UNM_API_BASE=http://api:3000/v1
-      # mTLS (Stage 2): enroll this server against the CA (identity "mcp") and
-      # talk to the API's mTLS listener on :8443 + mTLS-live plugins. Off by
-      # default — set UNM_TLS=1 in .env together with the fleet. Plain HTTP
-      # fallback keeps working while enrollment is pending or if it fails.
       - UNM_TLS=${UNM_TLS:-}
       - UNM_API_TLS_BASE=https://api:8443/v1
-      # Long-lived API token for the OpenAPI tools — REQUIRED.
       - UNM_API_TOKEN=${UNM_API_TOKEN:-}
-      # Bearer key gating /debug/mcp (read-only SQL + plugin probes).
       - MCP_DEBUG_KEY=${MCP_DEBUG_KEY:-dev-mcp-debug-key}
-      # Optional: also gate the plain /mcp endpoint with a bearer key.
       - MCP_KEY=${MCP_KEY:-}
-      # Same database as the API — used by the debug SQL tool AND by the
-      # plugin_probe debug tool (it reads every endpoint from the plugins
-      # table, so there is no static endpoint list to maintain here).
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
     volumes:
-      # mTLS (Stage 2): the CA config volume READ-ONLY — MCP only reads
-      # root_ca.crt from it to build its trust bundle. The PKI volume is never
-      # mounted here (no CA signing keys), and ca.json/state are irrelevant.
       - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca:ro
-      # mTLS (Stage 2): the MCP's OWN ACME account + leaf keys persist here so a
-      # container rebuild does not re-enroll (the old leaf stays valid until its
-      # renewal window). Only UNM-owned material — no CA signing keys.
       - ${UNM_MCP_TLS_VOLUME:-unm-mcp-tls}:/data/tls
-    # Plain-HTTP self-check on :3901 (the MCP listener never goes TLS —
-    # mTLS enrollment only affects its OUTBOUND calls to the API/plugins).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:3901,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:3901,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -948,65 +557,42 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # Mock OPNsense appliance for end-to-end plan-execution tests (the script now
-  # lives in the plugin-test-kit fixtures). Host network
-  # so it can bind :80/:443 directly; reachable from the plugin containers as
-  # http(s)://host.docker.internal (bare hostname — device managementAddress
-  # never carries a scheme/port). Captured requests are served at GET /__requests.
-  # TEST-ONLY: hidden behind the "test" profile so plain `docker compose up`
-  # (and `make up`) can never start it in a productive environment.
-  # Start on demand: `docker compose --profile test up -d mock-appliance`.
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/mcp:${UNM_IMAGE_TAG:-dev}
   mock-appliance:
-    profiles: ["test"]
+    profiles:
+      - test
     image: node:20-alpine
     network_mode: host
-    entrypoint: ["node", "/mock/mock.js"]
+    entrypoint:
+      - node
+      - /mock/mock.js
     volumes:
       - ./packages/plugin-test-kit/src/fixtures/opnsenseAppliance.cjs:/mock/mock.js:ro
-      # Self-signed TLS material generated on the host (openssl req -x509);
-      # node:20-alpine has no openssl and apk access is unreliable here.
       - ./packages/plugin-test-kit/src/fixtures/tls:/mock/tls:ro
-    # Test-only fixture (profile "test", host network): plain-HTTP check of
-    # the captured-request endpoint on :80.
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:80,path:"/__requests"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:80,path:"/__requests"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
-    restart: "no"
-  # Identity provider plugin: local users + TOTP (2FA). Performs credential
-  # verification on behalf of the API. It does NOT own a database: the API
-  # owns the `users` table and this plugin reads/writes user records through
-  # the API's internal user-data endpoints (UNM_API_URL + x-plugin-api-key).
+    restart: no
   basic-auth-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/basic-auth/Dockerfile
     ports:
-      - "4002:4080"
+      - 4002:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://basic-auth-plugin:4080
-      # Base URL of the API's internal user-data endpoints (plugin -> API).
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-      # WebAuthn RP identity — MUST match the api service's values so assertion
-      # verification accepts the options generated by the API.
       - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-localhost}
-      - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-http://localhost:5173}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
+      - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-http://localhost:8080}
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -1014,38 +600,22 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # Secrets provider plugin: encrypts/decrypts and manages device secrets.
-  # It is the crypto holder (owns MASTER_KEY) and the management logic. It does
-  # NOT own a database: the API owns the `secrets` table and this plugin
-  # stores/reads ciphertext through the API's internal endpoints
-  # (UNM_API_URL + x-plugin-api-key).
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/basic-auth-plugin:${UNM_IMAGE_TAG:-dev}
   secrets-provider-plugin:
-    # Root context — the image also builds the shared @unm/plugin-sdk package.
-    build:
-      context: .
-      dockerfile: plugins/secrets-provider/Dockerfile
     ports:
-      - "4003:4080"
+      - 4003:4080
     environment:
       - PORT=4080
-      # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://secrets-provider-plugin:4080
-      # Base URL of the API's internal secrets-data endpoints (plugin -> API).
       - UNM_API_URL=http://api:3000/v1
-      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
-      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
-      # Crypto key material (the plugin is the crypto holder).
       - MASTER_KEY=${MASTER_KEY:-default-master-key-must-be-changed-in-production}
       - CRYPTO_SALT=${CRYPTO_SALT:-salt}
-    # Liveness check against the SDK's dedicated plain-HTTP health listener on
-    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
-    # so no client cert is needed. A dead process fails this; a broken TLS swap
-    # or failed enrollment does NOT (the main API plane stays up independently).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -1053,24 +623,14 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/secrets-provider-plugin:${UNM_IMAGE_TAG:-dev}
   webapp:
-    build:
-      context: ./webapp
-      # VITE_API_URL is compiled into the static bundle at build time (Vite
-      # inlines import.meta.env.VITE_* at build, not at container runtime),
-      # so it must be passed as a build arg here rather than as a plain
-      # `environment:` entry below, which the already-built assets would
-      # never see. The value is the URL the *browser* (not the container)
-      # uses to reach the API, i.e. the host's published api port.
-      args:
-        VITE_API_URL: http://localhost:3000/v1
     ports:
-      - "5173:5173"
-    # Static-serve self-check on :5173 (the baked build-tag manifest is a
-    # stable same-origin URL that exists in every image).
+      - ${UNM_WEB_PORT:-8080}:5173
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:5173,path:"/manifest.json"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:5173,path:"/manifest.json"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3
@@ -1078,34 +638,12 @@ services:
     depends_on:
       - api
     restart: unless-stopped
-
-  # Optional: uncomment to back the job queue with real Redis/BullMQ instead
-  # of the in-process fallback queue used by default in api/src/queue.ts.
-  # redis:
-  #   image: redis:7-alpine
-  #   ports:
-  #     - "6379:6379"
-
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/webapp:${UNM_IMAGE_TAG:-dev}
 volumes:
-  pgdata:
-  # CA PKI material (root/intermediate certs + intermediate key) — mounted on
-  # the unm-ca service ONLY. Override with UNM_CA_PKI_VOLUME=<host-path> in .env
-  # to back it up / migrate; losing this volume = re-keying the whole fleet.
-  unm-ca-pki:
-  # CA config + state (ca.json rendered by the API, step-ca's Badger DB) —
-  # mTLS (Stage 1): the API's own ACME account key + enrolled leaf, persisted
-  # across container rebuilds. Contains ONLY UNM-owned material — CA signing
-  # keys never leave the CA-only volume above.
-  unm-api-tls:
-  # mounted on BOTH unm-ca and api. Override with UNM_CA_CONFIG_VOLUME if needed.
-  unm-ca-cfg:
-  # mTLS (Stage 2): the MCP server's own ACME account key + enrolled leaf,
-  # persisted across container rebuilds. Same content rules as unm-api-tls —
-  # only UNM-owned material, no CA signing keys.
-  unm-mcp-tls:
-  # Legacy api-local file-repo volume (fallback + pre-plugin rows). Mounted on
-  # the api service ONLY — plugins access files through the API, never directly.
-  filerepo:
-  # Active file-repo byte store — mounted on the file-repo-plugin service only.
-  # Override with FILE_REPO_PLUGIN_VOLUME=<other-volume-or-host-path> in .env.
-  filerepo-plugin:
+  pgdata: null
+  unm-ca-pki: null
+  unm-api-tls: null
+  unm-ca-cfg: null
+  unm-mcp-tls: null
+  filerepo: null
+  filerepo-plugin: null

@@ -6,12 +6,12 @@ set -e
 # --- Configuration -----------------------------------------------------------
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API_PORT=3000
-WEB_PORT=5173
+WEB_PORT=8080
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/unm-dev.XXXXXX")"
 DEV_PIDS=()
 
 # Plugin service discovery — NO hard-coded plugin list in this script. The set
-# of plugins and their host ports are read from docker-compose.yml at start
+# of plugins and their host ports are read from docker-compose.dev.yml at start
 # time, so a third-party plugin added to the compose file is picked up here
 # (waited for + exported to the dev API) with zero changes to setup.sh.
 declare -A PLUGIN_PORTS=()   # service name -> published TCP port
@@ -35,9 +35,9 @@ discover_plugin_services() {
       }
     });
   ')"; then
-    fail "Could not parse docker-compose.yml (needs Docker Compose v2 with 'config --format json')."
+    fail "Could not parse docker-compose.dev.yml (needs Docker Compose v2 with 'config --format json')."
   fi
-  [ -n "$lines" ] || fail "No *-plugin services with a published TCP port found in docker-compose.yml."
+  [ -n "$lines" ] || fail "No *-plugin services with a published TCP port found in docker-compose.dev.yml."
   while read -r svc port; do
     PLUGIN_PORTS["$svc"]="$port"
     PLUGIN_SERVICES+=("$svc")
@@ -84,6 +84,9 @@ fi
 
 # Run a docker compose command (v2 plugin or legacy binary) with the chosen prefix.
 docker_compose() {
+  # All dev-mode compose commands target the DEV compose file (build: blocks +
+  # hot-reload sources); the standard docker-compose.yml is for end users.
+  set -- -f docker-compose.dev.yml "$@"
   if [ -n "$DOCKER_SUDO" ]; then S="$DOCKER_SUDO"; else S=""; fi
   if command -v docker-compose &> /dev/null; then
     $S docker-compose "$@"
@@ -184,7 +187,7 @@ kill_dev_processes() {
     done
 
     # Strategy 2: free the dev ports (kills whatever is actually serving).
-    # Plugin ports are discovered from docker-compose.yml at start of run;
+    # Plugin ports are discovered from docker-compose.dev.yml at start of run;
     # on a first-ever cleanup they may be empty — API/webapp still covered.
     for p in $(all_dev_ports); do
       fuser -k "${p}/tcp" >/dev/null 2>&1 || true
@@ -228,7 +231,7 @@ trap cleanup EXIT INT TERM
 
 # --- Pre-flight: kill lingering processes from previous runs -----------------
 # An aborted/crashed setup.sh can leave orphaned dev servers holding ports
-# 3000/5173. Every subsequent run then fails with EADDRINUSE while the OLD
+# 3000/8080. Every subsequent run then fails with EADDRINUSE while the OLD
 # code keeps serving — so always start from a clean slate.
 kill_lingering() {
   # Stale compose containers (e.g. an old api container publishing :3000)
@@ -286,7 +289,7 @@ ok "Plugins + MCP server built (in parallel)."
 
 # 7. Start the plugin containers (--build: always reflect current source;
 #    reusing stale images silently serves old code — a past source of bugs).
-#    The service list is DISCOVERED from docker-compose.yml above — adding a
+#    The service list is DISCOVERED from docker-compose.dev.yml above — adding a
 #    third-party plugin there is all that's needed to have it built + waited on.
 echo "🌐 Starting plugin containers..."
 docker_compose up -d --build mcp "${PLUGIN_SERVICES[@]}"

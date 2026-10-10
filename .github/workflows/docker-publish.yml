@@ -75,7 +75,7 @@ jobs:
           node -e '
             const { execSync } = require("node:child_process");
             const path = require("node:path");
-            const cfg = JSON.parse(execSync("docker compose config --format json", { encoding: "utf8" }));
+            const cfg = JSON.parse(execSync("docker compose -f docker-compose.dev.yml config --format json", { encoding: "utf8" }));
             const out = Object.entries(cfg.services ?? {})
               .filter(([, s]) => s.build)
               .map(([name, s]) => {
@@ -303,7 +303,7 @@ jobs:
             echo
             node -e '
               const { execSync } = require("node:child_process");
-              const cfg = JSON.parse(execSync("docker compose config --format json", { encoding: "utf8" }));
+              const cfg = JSON.parse(execSync("docker compose -f docker-compose.dev.yml config --format json", { encoding: "utf8" }));
               for (const [name] of Object.entries(cfg.services ?? {}).filter(([, s]) => s.build)) {
                 console.log(`- \`${process.argv[1]}/${name}:${process.argv[2]}\``);
               }
@@ -369,7 +369,7 @@ jobs:
             echo
             node -e '
               const { execSync } = require("node:child_process");
-              const cfg = JSON.parse(execSync("docker compose config --format json", { encoding: "utf8" }));
+              const cfg = JSON.parse(execSync("docker compose -f docker-compose.dev.yml config --format json", { encoding: "utf8" }));
               for (const [name] of Object.entries(cfg.services ?? {}).filter(([, s]) => s.build)) {
                 console.log(`- \`${process.argv[1]}/${name}:${process.argv[2]}\``);
               }

@@ -101,21 +101,24 @@ Prerequisites: Docker (with compose). That's it — every component ships as a p
 ```bash
 git clone https://github.com/MichaelKirgus/UnifiedNetworkManager.git
 cd UnifiedNetworkManager
-docker compose -f docker-compose.registry.yml up -d
+docker compose up -d
 ```
 
-`docker-compose.registry.yml` is the end-user variant of `docker-compose.yml`: same services, ports, env vars and volumes — every locally-built service is pulled from GHCR instead. Two overrides (`.env` or environment):
+The default `docker-compose.yml` is the end-user deployment: same services, env vars and volumes as the dev file — every locally-built service is pulled from GHCR instead. Overrides (`.env` or environment):
 
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `UNM_IMAGE_TAG` | `dev` | Image tag to pull — use a release tag like `v0.1.0` for stable deployments, or `nightly` for the latest pre-release build |
 | `UNM_REGISTRY` | `ghcr.io/michaelkirgus/unifiednetworkmanager` | Registry prefix (self-mirroring) |
+| `UNM_WEB_PORT` | `8080` | Host port the webapp is published on |
 
-Tear down with `docker compose -f docker-compose.registry.yml down` (add `-v` to also remove the Postgres volume).
+The **MCP server is not exposed to the host by default** — it carries an API token with full agent capabilities, so publishing it on all interfaces is a deliberate choice. If you need remote MCP access, add your own mapping (e.g. `UNM_MCP_PORT=8081`) behind auth or a reverse proxy.
+
+Tear down with `docker compose down` (add `-v` to also remove the Postgres volume).
 
 ### For developers: hot-reload dev setup
 
-If you're working on UNM itself, use `setup.sh` instead — it needs Node.js ≥ 20 and builds everything from source. The script detects whether you can reach the Docker daemon without sudo and only escalates when truly needed.
+If you're working on UNM itself, use `setup.sh` instead — it needs Node.js ≥ 20 and builds everything from source (it works against `docker-compose.dev.yml`, which carries the `build:` blocks). The script detects whether you can reach the Docker daemon without sudo and only escalates when truly needed.
 
 ```bash
 ./setup.sh
@@ -129,7 +132,7 @@ On first boot the API seeds an **admin** user (password `admin`) and prints its 
 
 ### Pre-built images (GHCR)
 
-Every component is published to the [GitHub Container Registry](https://ghcr.io) after the plugin contract suite passes. Image names follow `ghcr.io/michaelkirgus/unifiednetworkmanager/<service>`, where `<service>` is the compose service name (`api`, `webapp`, `mcp`, `unm-ca`, and every `*-plugin`):
+Every component is published to the [GitHub Container Registry](https://ghcr.io) after the plugin contract suite passes. The standard `docker-compose.yml` (end-user deployment, no build step) is **generated** from `docker-compose.dev.yml` by `scripts/generate-registry-compose.cjs` — change the dev file and regenerate; never edit the generated one by hand. Image names follow `ghcr.io/michaelkirgus/unifiednetworkmanager/<service>`, where `<service>` is the compose service name (`api`, `webapp`, `mcp`, `unm-ca`, and every `*-plugin`):
 
 ```bash
 docker pull ghcr.io/michaelkirgus/unifiednetworkmanager/api:dev

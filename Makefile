@@ -96,18 +96,18 @@ plugin-tests:
 up:
 	@echo "Starting infrastructure..."
 	@if command -v docker-compose &> /dev/null; then \
-		docker-compose up -d postgres mcp $(addsuffix -plugin,$(PLUGINS)); \
+		docker-compose -f docker-compose.dev.yml up -d postgres mcp $(addsuffix -plugin,$(PLUGINS)); \
 	else \
-		docker compose up -d postgres mcp $(addsuffix -plugin,$(PLUGINS)); \
+		docker compose -f docker-compose.dev.yml up -d postgres mcp $(addsuffix -plugin,$(PLUGINS)); \
 	fi
 	@echo "Infrastructure is up."
 
 down:
 	@echo "Stopping infrastructure..."
 	@if docker compose version &> /dev/null; then \
-		docker compose down; \
+		docker compose -f docker-compose.dev.yml down; \
 	elif command -v docker-compose &> /dev/null; then \
-		docker-compose down; \
+		docker-compose -f docker-compose.dev.yml down; \
 	else \
 		echo "Error: No docker-compose or docker compose found"; \
 		exit 1; \
@@ -122,8 +122,8 @@ stop-api:
 
 stop-web:
 	@echo "Stopping Webapp server..."
-	-fuser -k 5173/tcp
-	@echo "Webapp port 5173 cleared."
+	-fuser -k 8080/tcp
+	@echo "Webapp port 8080 cleared."
 
 # Run API in dev mode (with hot reload)
 api-dev:
@@ -139,9 +139,9 @@ web-dev:
 clean:
 	@echo "Cleaning up..."
 	@if docker compose version &> /dev/null; then \
-		docker compose down -v; \
+		docker compose -f docker-compose.dev.yml down -v; \
 	elif command -v docker-compose &> /dev/null; then \
-		docker-compose down -v; \
+		docker-compose -f docker-compose.dev.yml down -v; \
 	else \
 		echo "Error: No docker-compose or docker compose found"; \
 		exit 1; \

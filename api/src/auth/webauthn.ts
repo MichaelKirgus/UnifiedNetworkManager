@@ -17,7 +17,7 @@ import {
  *   WEBAUTHN_RP_ID    — relying party id (default "localhost"; set to your
  *                        domain in production, e.g. "unm.example.com")
  *   WEBAUTHN_ORIGIN   — webapp origin(s), comma-separated list allowed by the
- *                        browser (default "http://localhost:5173"). Production
+ *                        browser (default "http://localhost:8080"). Production
  *                        MUST use https origins.
  */
 
@@ -33,7 +33,7 @@ let cachedConfig: WebauthnConfig | null = null;
 export function getWebauthnConfig(): WebauthnConfig {
   if (!cachedConfig) {
     const rpId = process.env.WEBAUTHN_RP_ID?.trim() || 'localhost';
-    const origins = (process.env.WEBAUTHN_ORIGIN ?? 'http://localhost:5173')
+    const origins = (process.env.WEBAUTHN_ORIGIN ?? 'http://localhost:8080')
       .split(',')
       .map((o) => o.trim())
       .filter(Boolean);

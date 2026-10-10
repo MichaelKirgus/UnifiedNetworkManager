@@ -18,7 +18,7 @@ let cachedConfig: { rpId: string; origins: string[] } | null = null;
 function getConfig(): { rpId: string; origins: string[] } {
   if (!cachedConfig) {
     const rpId = process.env.WEBAUTHN_RP_ID?.trim() || 'localhost';
-    const origins = (process.env.WEBAUTHN_ORIGIN ?? 'http://localhost:5173')
+    const origins = (process.env.WEBAUTHN_ORIGIN ?? 'http://localhost:8080')
       .split(',')
       .map((o) => o.trim())
       .filter(Boolean);
