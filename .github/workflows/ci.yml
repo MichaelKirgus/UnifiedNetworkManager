@@ -48,15 +48,33 @@ jobs:
       # BEFORE `cd api && npm install` — mirroring api/Dockerfile exactly.
       - name: "Build @unm/plugin-sdk (api's file: dependency)"
         run: |
+          set -e
           cd packages/plugin-sdk
-          npm install --legacy-peer-deps --no-audit --no-fund
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            if npm install --legacy-peer-deps --no-audit --no-fund; then break; fi
+            echo "::warning::npm install failed (attempt $attempt/3) — retrying in 5s." >&2
+            sleep 5
+            attempt=$((attempt + 1))
+          done
+          [ "$attempt" -le 3 ] || { echo "::error::npm install failed after 3 attempts." >&2; exit 1; }
           npm run build
 
       # npm install — NOT npm ci: the api depends on a sibling package via a file:
       # link, and CI runners ship npm 10 (Node 20) which rejects the committed
       # lockfile shape for such workspaces. See plugin-tests.yml for the full note.
       - name: Install api dependencies
-        run: cd api && npm install --legacy-peer-deps --no-audit --no-fund
+        run: |
+          set -e
+          cd api
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            if npm install --legacy-peer-deps --no-audit --no-fund; then break; fi
+            echo "::warning::npm install failed (attempt $attempt/3) — retrying in 5s." >&2
+            sleep 5
+            attempt=$((attempt + 1))
+          done
+          [ "$attempt" -le 3 ] || { echo "::error::npm install failed after 3 attempts." >&2; exit 1; }
 
       # Typecheck + emit dist/ (the same artifact the container runs). Fails on any
       # type error, so this is also the API's type gate.
@@ -121,7 +139,17 @@ jobs:
 
       # The webapp has no file: dependencies, so a plain per-workspace install works.
       - name: Install webapp dependencies
-        run: cd webapp && npm install --legacy-peer-deps --no-audit --no-fund
+        run: |
+          set -e
+          cd webapp
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            if npm install --legacy-peer-deps --no-audit --no-fund; then break; fi
+            echo "::warning::npm install failed (attempt $attempt/3) — retrying in 5s." >&2
+            sleep 5
+            attempt=$((attempt + 1))
+          done
+          [ "$attempt" -le 3 ] || { echo "::error::npm install failed after 3 attempts." >&2; exit 1; }
 
       # Pure-utility unit tests (address validation, CSV import parsing). No DOM needed.
       - name: Unit tests (vitest)

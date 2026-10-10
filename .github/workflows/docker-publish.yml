@@ -137,7 +137,20 @@ jobs:
       # Root deps (js-yaml for the spec validator) — cheap, and lets us fail on
       # a broken OpenAPI spec BEFORE spending time on installs/builds/tests.
       - name: Install root dependencies
-        run: npm ci --no-audit --no-fund
+        run: |
+          set -e
+          npm_install_retry() {
+            attempt=1
+            while [ "$attempt" -le 3 ]; do
+              if npm install --legacy-peer-deps --no-audit --no-fund; then return 0; fi
+              echo "::warning::npm install failed (attempt $attempt/3) — retrying in 5s." >&2
+              sleep 5
+              attempt=$((attempt + 1))
+            done
+            echo "::error::npm install failed after 3 attempts." >&2
+            return 1
+          }
+          npm_install_retry
 
       # The API is driven by openapi/unified-network-manager.openapi.yaml — a
       # malformed or structurally-broken spec must never reach the build.
@@ -159,6 +172,27 @@ jobs:
       - name: Install dependencies
         run: |
           set -e
+          # Each workspace install is retried up to 3 times with a short backoff.
+          # Under ~29 concurrent installs on one runner, transient registry/network
+          # hiccups (npm ETIMEDOUT reads) and esbuild's postinstall hitting ETXTBSY
+          # ("text file busy") when it execs the binary it just extracted are common;
+          # both almost always clear on retry. A genuinely broken install still fails
+          # (after 3 attempts) and is caught by the per-PID wait below, so this only
+          # absorbs transient flakes.
+          install_with_retry() {
+            dir="$1"
+            attempt=1
+            while [ "$attempt" -le 3 ]; do
+              if (cd "$dir" && npm install --legacy-peer-deps --no-audit --no-fund); then
+                return 0
+              fi
+              echo "::warning::install $dir failed (attempt $attempt/3) — retrying in 5s." >&2
+              sleep 5
+              attempt=$((attempt + 1))
+            done
+            echo "::error::install $dir failed after 3 attempts." >&2
+            return 1
+          }
           pids=()
           for d in packages/plugin-sdk packages/snmp-client packages/lancom-shared packages/plugin-test-kit api webapp mcp; do
             (cd "$d" && npm install --legacy-peer-deps --no-audit --no-fund) &

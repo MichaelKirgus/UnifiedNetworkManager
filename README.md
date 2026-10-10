@@ -18,7 +18,7 @@ UNM ships a growing set of vendor adapter plugins covering routers, switches, Wi
 - [Repository layout](#repository-layout)
 - [Getting started](#getting-started)
   - [First login](#first-login)
-  - [Manual / containerized run](#manual--containerized-run)
+  - [For developers: hot-reload dev setup](#for-developers-hot-reload-dev-setup)
   - [Pre-built images (GHCR)](#pre-built-images-ghcr)
 - [Security model](#security-model)
 - [Device addressing (multi-IP)](#device-addressing-multi-ip)
@@ -96,7 +96,26 @@ flowchart LR
 
 ## Getting started
 
-Prerequisites: Docker (with compose), Node.js ≥ 20. The script detects whether you can reach the Docker daemon without sudo and only escalates when truly needed.
+Prerequisites: Docker (with compose). That's it — every component ships as a pre-built image on the [GitHub Container Registry](https://ghcr.io), so running UNM needs no Node.js and no local build.
+
+```bash
+git clone https://github.com/MichaelKirgus/UnifiedNetworkManager.git
+cd UnifiedNetworkManager
+docker compose -f docker-compose.registry.yml up -d
+```
+
+`docker-compose.registry.yml` is the end-user variant of `docker-compose.yml`: same services, ports, env vars and volumes — every locally-built service is pulled from GHCR instead. Two overrides (`.env` or environment):
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `UNM_IMAGE_TAG` | `dev` | Image tag to pull — use a release tag like `v0.1.0` for stable deployments, or `nightly` for the latest pre-release build |
+| `UNM_REGISTRY` | `ghcr.io/michaelkirgus/unifiednetworkmanager` | Registry prefix (self-mirroring) |
+
+Tear down with `docker compose -f docker-compose.registry.yml down` (add `-v` to also remove the Postgres volume).
+
+### For developers: hot-reload dev setup
+
+If you're working on UNM itself, use `setup.sh` instead — it needs Node.js ≥ 20 and builds everything from source. The script detects whether you can reach the Docker daemon without sudo and only escalates when truly needed.
 
 ```bash
 ./setup.sh
@@ -104,30 +123,13 @@ Prerequisites: Docker (with compose), Node.js ≥ 20. The script detects whether
 
 This installs all dependencies (`make setup`), starts Postgres, syncs the schema (`drizzle-kit push`), builds the shared packages + plugins in parallel (`make build`), starts every plugin container with `--build`, then runs the API and webapp as hot-reloading dev servers. It blocks until you press Enter; teardown (dev servers + containers) happens automatically on exit/Ctrl+C.
 
-| URL | Service |
-|-----|---------|
-| http://localhost:5173 | Web app |
-| http://localhost:3000/v1 | API (health at `/healthz`) |
-| http://localhost:3901/mcp | MCP server (`/debug/mcp` gated by `MCP_DEBUG_KEY`, default `dev-mcp-debug-key`) |
-
-### First login
+Other targets: `make up|down|restart`, `make stop-api|stop-web`, `make clean` (removes containers **and** volumes).
 
 On first boot the API seeds an **admin** user (password `admin`) and prints its generated TOTP secret + `otpauth://` URI to the console — scan it with an authenticator app, then complete 2FA at login. Accounts created without an enrolled TOTP can pass 2FA with any 6-digit code in dev mode but will **not** receive the `amr: totp` claim required by 2FA-gated endpoints (config jobs, plan execution).
 
-### Manual / containerized run
-
-```bash
-make setup                                  # install all deps
-docker compose up -d --build postgres api \
-  opnsense-plugin icmp-plugin generic-snmp-plugin lancom-lx-plugin lancom-sx-plugin \
-  lancom-lcos-plugin mikrotik-swos-plugin fbox-plugin basic-auth-plugin secrets-provider-plugin webapp mcp
-```
-
-Dev mode with hot reload (API + webapp on the host, plugins in Docker): `make api-dev` / `make web-dev`. Other targets: `make up|down|restart`, `make stop-api|stop-web`, `make clean` (removes containers **and** volumes).
-
 ### Pre-built images (GHCR)
 
-Every component is published to the [GitHub Container Registry](https://ghcr.io) after the plugin contract suite passes — no local build needed. Image names follow `ghcr.io/michaelkirgus/unifiednetworkmanager/<service>`, where `<service>` is the compose service name (`api`, `webapp`, `mcp`, `unm-ca`, and every `*-plugin`):
+Every component is published to the [GitHub Container Registry](https://ghcr.io) after the plugin contract suite passes. Image names follow `ghcr.io/michaelkirgus/unifiednetworkmanager/<service>`, where `<service>` is the compose service name (`api`, `webapp`, `mcp`, `unm-ca`, and every `*-plugin`):
 
 ```bash
 docker pull ghcr.io/michaelkirgus/unifiednetworkmanager/api:dev
