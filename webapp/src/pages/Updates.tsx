@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowUpCircle, CheckCircle2, ExternalLink, Layers, Loader2, RefreshCw, Rocket, ShieldCheck } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle2, ExternalLink, Layers, Loader2, Lock, RefreshCw, Rocket, ShieldCheck, Unlock, Zap } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
@@ -180,13 +180,17 @@ function branchOf(n: UpdateNode): string | null {
 /** The "no reboot needed" subset of a device's package rows — everything whose
  * `rebootRequired` is not set (kernel/firmware/initramfs packages are excluded).
  * Becomes ONE plan step with an explicit `packages: string[]` list, so the host
- * upgrades exactly those in a single lock acquisition. Empty when there is no
- * safe subset (e.g. only kernel updates pending) or the plugin has no apply path. */
+ * upgrades exactly those in a single lock acquisition. HELD and KEPT-BACK rows
+ * are excluded too: an explicit list containing a held package makes apt hard-fail
+ * the whole run (a full upgrade skips them on purpose). They stay visible with
+ * their badge — unhold first, or use "Force all". Empty when there is no safe
+ * subset (e.g. only kernel updates pending) or the plugin has no apply path. */
 function noRebootStepsForDevice(node: UpdateNode): Array<{ pluginId: string; actionId: string; deviceId: string; input: Record<string, unknown> }> {
   const pkgs = (node.groups ?? [])
     .filter((g) => g.kind === 'os-package' && g.actionId === 'packages.update')
     .flatMap((g) => g.rows)
     .filter((r) => r.rebootRequired !== true)
+    .filter((r) => r.extra?.['held'] !== true && r.extra?.['keptBack'] !== true)
     .map((r) => r.name);
   if (pkgs.length === 0 || !node.deviceId || !node.pluginId) return [];
   return [{ pluginId: node.pluginId, actionId: 'packages.update', deviceId: node.deviceId, input: { packages: pkgs } }];
@@ -220,9 +224,14 @@ function mergedStepsForRows(rows: UpdateRow[]): Array<{ pluginId: string; action
       continue;
     }
     // Explicit package-list mode — the only merge that is safe for os-packages.
+    // Held / kept-back rows are EXCLUDED: an explicit list containing a held
+    // package makes apt hard-fail the whole run (a full upgrade skips them on
+    // purpose). They stay visible with their badge; unhold first or force all.
     if (first.kind === 'os-package' && first.applyActionId === 'packages.update') {
-      const pkgs = [...new Set(list.map((r) => r.name))];
-      steps.push({ pluginId: first.pluginId, actionId: 'packages.update', deviceId: first.deviceId, input: { packages: pkgs } });
+      const pkgs = [...new Set(
+        list.filter((r) => r.extra?.['held'] !== true && r.extra?.['keptBack'] !== true).map((r) => r.name),
+      )];
+      if (pkgs.length > 0) steps.push({ pluginId: first.pluginId, actionId: 'packages.update', deviceId: first.deviceId, input: { packages: pkgs } });
       continue;
     }
     const merged = mergeInputsSafe(list);
@@ -331,6 +340,27 @@ export default function Updates() {
     if (!pluginId) return false;
     const ids = catalogsQuery.data?.get(pluginId);
     return !!ids && ids.includes('packages.dist-upgrade');
+  }
+
+  /** True when the plugin offers hold/unhold for OS packages (generic-ssh
+   * `packages.hold` / `packages.unhold`). Gates the per-row lock buttons. */
+  function hasPackageHold(pluginId?: string): boolean {
+    if (!pluginId) return false;
+    const ids = catalogsQuery.data?.get(pluginId);
+    return !!ids && ids.includes('packages.hold');
+  }
+
+  /** True when the plugin's package update action supports `force` (generic-ssh
+   * `packages.update` with --allow-change-held-packages). Gates "Force all". */
+  function hasForcePackages(pluginId?: string): boolean {
+    if (!pluginId) return false;
+    const ids = catalogsQuery.data?.get(pluginId);
+    return !!ids && ids.includes('packages.update');
+  }
+
+  /** Total os-package rows of a device (any apply path). */
+  function osPackageCount(node: UpdateNode): number {
+    return (node.groups ?? []).filter((g) => g.kind === 'os-package').reduce((n, g) => n + g.rows.length, 0);
   }
 
   // --- Device → updates hierarchy ---------------------------------------------
@@ -502,6 +532,29 @@ export default function Updates() {
     ]);
   }
 
+  /** Parent-row action (secondary): force ALL packages including held/kept-back.
+   * The hold flags stay set afterwards — this upgrades the version once. */
+  function applyForceAll(node: UpdateNode) {
+    if (!node.deviceId || !node.pluginId) return;
+    void firePlanSteps(`Force all packages on ${node.deviceName ?? 'device'}`, [
+      { pluginId: node.pluginId, actionId: 'packages.update', deviceId: node.deviceId, input: { force: true } },
+    ]);
+  }
+
+  /** Child-row action: hold one package against updates (apt-mark hold). */
+  function applyHold(row: UpdateRow) {
+    void firePlanSteps(`Hold ${row.name}`, [
+      { pluginId: row.pluginId, actionId: 'packages.hold', deviceId: row.deviceId, input: { package: row.name } },
+    ]);
+  }
+
+  /** Child-row action: release one package from a hold (apt-mark unhold). */
+  function applyUnhold(row: UpdateRow) {
+    void firePlanSteps(`Release ${row.name} from hold`, [
+      { pluginId: row.pluginId, actionId: 'packages.unhold', deviceId: row.deviceId, input: { package: row.name } },
+    ]);
+  }
+
   /** Child-row action: just this one update, with its own prefilled input. */
   function applySingle(row: UpdateRow) {
     if (!row.applyActionId) return;
@@ -532,8 +585,12 @@ export default function Updates() {
     const actionable = selectedChildren.filter((r) => r.applyActionId);
     if (actionable.length === 0) return;
     const steps = mergedStepsForRows(actionable);
+    if (steps.length === 0) {
+      setNotice({ kind: 'info', text: 'All selected packages are held or kept back — release them first (unhold button on the row), or use "Force all" on the device.' });
+      return;
+    }
     const ok = window.confirm(
-      `Start update plans for ${actionable.length} specific update(s)? They are grouped into ${steps.length} plan step${steps.length === 1 ? '' : 's'} where safe and may require 2FA.`
+      `Start update plans for ${actionable.length} specific update(s)? They are grouped into ${steps.length} plan step${steps.length === 1 ? '' : 's'} where safe (held/kept-back packages excluded) and may require 2FA.`
     );
     if (!ok) return;
     void firePlanSteps('Update selected updates', steps);
@@ -646,13 +703,17 @@ export default function Updates() {
           if (!actionable && !hasDistUpgrade(n.pluginId)) {
             return <span className="text-faint text-xs" title="No safe apply path — update manually on the device">manual</span>;
           }
+          const pkgCount = osPackageCount(n);
           return (
             <div className="flex items-center gap-0.5">
               {actionable && (
-                <ActionIconButton label={`Update all on ${n.deviceName ?? 'device'} — one plan step per kind-group (firmware, packages, apps/images)`} onClick={() => applyDevice(n)} icon={<ArrowUpCircle size={14} />} />
+                <ActionIconButton label={`Update all on ${n.deviceName ?? 'device'} — one plan step per kind-group (firmware, packages, apps/images); held/kept-back packages are skipped by the manager`} onClick={() => applyDevice(n)} icon={<ArrowUpCircle size={14} />} />
               )}
               {noRebootCount > 0 && (
-                <ActionIconButton label={`Update ${noRebootCount} package(s) that do not need a reboot`} onClick={() => applyNoReboot(n)} icon={<ShieldCheck size={14} />} />
+                <ActionIconButton label={`Update ${noRebootCount} package(s) that do not need a reboot (held/kept-back excluded)`} onClick={() => applyNoReboot(n)} icon={<ShieldCheck size={14} />} />
+              )}
+              {pkgCount > 0 && hasForcePackages(n.pluginId) && (
+                <ActionIconButton label={`Force-update ALL ${pkgCount} package(s) including held/kept-back — may restart services; hold flags stay set`} onClick={() => applyForceAll(n)} icon={<Zap size={14} />} />
               )}
               {hasDistUpgrade(n.pluginId) && (
                 <ActionIconButton label="Distro upgrade (dist-upgrade) — runs detached, may take hours; re-check via the Plans page" onClick={() => applyDistUpgrade(n)} icon={<Layers size={14} />} />
@@ -753,10 +814,21 @@ export default function Updates() {
         return row.rebootRequired ? <span className="text-warning-fg text-xs">yes</span> : <span className="text-faint">—</span>;
       case '__action': {
         if (!canApply || readOnly) return <span className="text-faint text-xs">read-only</span>;
-        return row.applyActionId ? (
-          <ActionIconButton label={`Update ${row.name}`} onClick={() => applySingle(row)} icon={<ArrowUpCircle size={14} />} />
-        ) : (
-          <span className="text-faint text-xs" title="No safe apply path — update manually on the device">manual</span>
+        const held = row.extra?.['held'] === true;
+        const canHold = row.kind === 'os-package' && hasPackageHold(row.pluginId);
+        return (
+          <div className="flex items-center gap-0.5">
+            {row.applyActionId ? (
+              <ActionIconButton label={`Update ${row.name}`} onClick={() => applySingle(row)} icon={<ArrowUpCircle size={14} />} />
+            ) : (
+              <span className="text-faint text-xs" title="No safe apply path — update manually on the device">manual</span>
+            )}
+            {canHold && held ? (
+              <ActionIconButton label={`Release ${row.name} from hold — bulk updates will install it again`} onClick={() => applyUnhold(row)} icon={<Unlock size={14} />} />
+            ) : canHold ? (
+              <ActionIconButton label={`Hold ${row.name} against updates — bulk upgrades skip it on purpose`} onClick={() => applyHold(row)} icon={<Lock size={14} />} />
+            ) : null}
+          </div>
         );
       }
       default: return null;
@@ -844,7 +916,9 @@ export default function Updates() {
             <button
               type="button"
               onClick={() => applySelectedChildren()}
-              className="rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-secondary hover:bg-background"
+              disabled={selectedStepCount === 0}
+              title={selectedStepCount === 0 ? 'All selected packages are held or kept back — unhold them first, or use "Force all" on the device' : undefined}
+              className="rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-secondary hover:bg-background disabled:opacity-50"
             >
               Update selected ({selectedStepCount})
             </button>
