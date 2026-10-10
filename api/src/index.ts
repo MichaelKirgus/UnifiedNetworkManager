@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import * as OpenApiValidator from 'express-openapi-validator';
 import { loadOpenApiSpec, resolveOpenApiPath } from './openapi';
+import { getEffectiveSettingValue } from './systemSettings';
 import { initDb, backfillSecrets, backfillAdminPermissions, backfillDeviceSites, backfillAdminRole, backfillInteractiveLoginPermission, backfillDeviceAllPermission } from './db';
 import authRouter from './routes/auth';
 import devicesRouter from './routes/devices';
@@ -59,12 +60,29 @@ const PORT = Number(process.env.PORT ?? 3000);
 const API_PREFIX = '/v1';
 
 // General limiter applied to every /v1 route to guard database-backed
-// handlers against abuse/brute force.
+// handlers against abuse/brute force. The per-window budget is a global setting
+// (apiRateLimitPerMinute) so busy multi-user deployments — where the webapp's
+// 30 s page polls share one IP bucket behind NAT — can raise or lower it without
+// a code change. Read live through the short-TTL settings cache; on any hiccup
+// the default budget applies (the limiter must never break request flow). The
+// auth endpoints keep their own tight, FIXED limiter below — brute-force
+// protection is not tunable from the UI.
 const generalLimiter = rateLimit({
   windowMs: 60_000,
-  limit: 300,
+  limit: async () => {
+    try {
+      const v = await getEffectiveSettingValue('apiRateLimitPerMinute');
+      if (typeof v === 'number' && Number.isFinite(v)) return Math.max(1, Math.trunc(v));
+    } catch { /* fall through to the default budget */ }
+    return 300;
+  },
   standardHeaders: true,
   legacyHeaders: false,
+  // JSON body so the webapp's error handling shows a useful message instead of
+  // a bare "API error 429" (the default is a plain-text string).
+  message: {
+    error: 'Too many requests — the API rate limit was exceeded. Wait a minute and try again; an admin can raise the budget under Settings → Security ("API rate limit per client").',
+  },
 });
 
 // Tighter limiter for the authentication endpoints, matching the OpenAPI

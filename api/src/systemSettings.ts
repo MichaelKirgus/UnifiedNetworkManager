@@ -336,6 +336,19 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'How long BEFORE a session expires the web UI starts warning the user (amber banner with an "Extend" button). Set to 0 to disable the warning — the session then ends silently at its expiry. The countdown chip in the top bar is always shown.',
   },
   {
+    key: 'apiRateLimitPerMinute',
+    label: 'API rate limit (per client)',
+    type: 'integer',
+    category: 'Security',
+    unit: 'req/min',
+    min: 1,
+    max: 10_000,
+    default: 300,
+    envVar: 'UNM_API_RATE_LIMIT_PER_MINUTE',
+    help:
+      'How many /v1 API requests one client (IP address) may make per rolling minute before the API answers 429 Too Many Requests. The webapp polls most pages every ~30 s, so several users behind one NAT share this budget — raise it if legitimate use trips the limit; lower it to be stricter against abuse. Login attempts have their own fixed, tighter limiter and are NOT affected by this setting. Takes effect immediately (5 s cache); no restart.',
+  },
+  {
     key: 'consoleTicketTtlMs',
     label: 'Console ticket lifetime',
     type: 'integer',
