@@ -115,25 +115,35 @@ const KIND_LABELS: Record<string, string> = {
   app: 'apps',
 };
 
-/** Merges the per-row apply inputs of one kind-group into a single bulk input.
- * Array-valued fields are concatenated (TrueNAS `containers.upgrade` takes
- * `names: string[]`, `images.update` takes `refs: string[]`). Scalar fields
- * keep their value when every row agrees (`system.firmware.update` carries
- * `{ version }`) and are DROPPED when rows disagree — e.g. the per-package
- * `package` name of a generic-ssh host, where an empty input means "upgrade
- * ALL" in the action's own semantics. */
-function mergeGroupInputs(rows: UpdateRow[]): Record<string, unknown> {
+/** Merges per-row apply inputs into a single bulk input and reports whether the
+ * merge is unambiguous. Array-valued fields are concatenated (TrueNAS
+ * `containers.upgrade` takes `names: string[]`, `images.update` takes
+ * `refs: string[]`). Scalar fields keep their value when every row agrees
+ * (`system.firmware.update` carries `{ version }`); a conflicting scalar is
+ * dropped and the merge marked DIRTY — dropping it would let the action's own
+ * default apply (e.g. generic-ssh `packages.update` with no input means "upgrade
+ * ALL"), so callers must fall back to per-row steps for dirty merges. */
+function mergeInputsSafe(rows: UpdateRow[]): { input: Record<string, unknown>; clean: boolean } {
   const out: Record<string, unknown> = {};
+  let clean = true;
   for (const r of rows) {
     const inp = r.applyInput;
     if (!inp || typeof inp !== 'object') continue;
     for (const [k, v] of Object.entries(inp)) {
       if (Array.isArray(v)) out[k] = [...(Array.isArray(out[k]) ? (out[k] as unknown[]) : []), ...v];
       else if (!(k in out)) out[k] = v;
-      else if (!Object.is(out[k], v)) delete out[k]; // conflicting scalars → action default applies
+      else if (!Object.is(out[k], v)) { delete out[k]; clean = false; } // conflicting scalars → dirty merge
     }
   }
-  return out;
+  return { input: out, clean };
+}
+
+/** Merges the per-row apply inputs of one kind-group into a single bulk input.
+ * Conflicting scalars are dropped — for device-level "update all" that is the
+ * intended semantics (e.g. the per-package `package` name of a generic-ssh host,
+ * where an empty input means "upgrade ALL" in the action's own terms). */
+function mergeGroupInputs(rows: UpdateRow[]): Record<string, unknown> {
+  return mergeInputsSafe(rows).input;
 }
 
 /** The bulk plan steps for one device: ONE step per kind-group — with identical
@@ -180,6 +190,49 @@ function noRebootStepsForDevice(node: UpdateNode): Array<{ pluginId: string; act
     .map((r) => r.name);
   if (pkgs.length === 0 || !node.deviceId || !node.pluginId) return [];
   return [{ pluginId: node.pluginId, actionId: 'packages.update', deviceId: node.deviceId, input: { packages: pkgs } }];
+}
+
+/** Plan steps for individually-selected child updates — merged where SAFE.
+ * Rows are grouped by (device, plugin, apply action). Per group:
+ *  - os-package rows applying via `packages.update` collapse into ONE step with
+ *    an explicit `{ packages: [...] }` list (the action's documented list mode)
+ *    — never the empty input that would mean "upgrade ALL";
+ *  - other groups merge their per-row inputs when unambiguous (arrays
+ *    concatenate, scalars must agree — e.g. TrueNAS `containers.upgrade` rows
+ *    `{ names: [app] }` collapse to one step with all selected app names);
+ *  - a DIRTY merge (conflicting non-array scalar dropped) falls back to one
+ *    step per row with its exact prefilled input, so scope never widens. */
+function mergedStepsForRows(rows: UpdateRow[]): Array<{ pluginId: string; actionId: string; deviceId: string; input: Record<string, unknown> }> {
+  const groups = new Map<string, UpdateRow[]>();
+  for (const r of rows) {
+    if (!r.applyActionId) continue; // no safe apply path → manual on the device
+    const gk = `${r.deviceId}|${r.pluginId}|${r.applyActionId}`;
+    let arr = groups.get(gk);
+    if (!arr) { arr = []; groups.set(gk, arr); }
+    arr.push(r);
+  }
+
+  const steps: Array<{ pluginId: string; actionId: string; deviceId: string; input: Record<string, unknown> }> = [];
+  for (const list of groups.values()) {
+    const first = list[0];
+    if (list.length === 1) {
+      steps.push({ pluginId: first.pluginId, actionId: first.applyActionId!, deviceId: first.deviceId, input: first.applyInput ?? {} });
+      continue;
+    }
+    // Explicit package-list mode — the only merge that is safe for os-packages.
+    if (first.kind === 'os-package' && first.applyActionId === 'packages.update') {
+      const pkgs = [...new Set(list.map((r) => r.name))];
+      steps.push({ pluginId: first.pluginId, actionId: 'packages.update', deviceId: first.deviceId, input: { packages: pkgs } });
+      continue;
+    }
+    const merged = mergeInputsSafe(list);
+    if (merged.clean) {
+      steps.push({ pluginId: first.pluginId, actionId: first.applyActionId!, deviceId: first.deviceId, input: merged.input });
+    } else {
+      for (const r of list) steps.push({ pluginId: r.pluginId, actionId: r.applyActionId!, deviceId: r.deviceId, input: r.applyInput ?? {} });
+    }
+  }
+  return steps;
 }
 
 /** Groups flat update rows into device parent nodes (collapsed by default),
@@ -297,6 +350,13 @@ export default function Updates() {
     }
     return out;
   }, [childrenByParentKey, selectedChildKeys]);
+
+  /** How many plan steps the selection would collapse into — shown in the
+   * selection bar so the merge effect is visible before confirming. */
+  const selectedStepCount = useMemo(
+    () => mergedStepsForRows(selectedChildren.filter((r) => r.applyActionId)).length,
+    [selectedChildren]
+  );
 
   function toggleChild(key: string) {
     setSelectedChildKeys((prev) => {
@@ -463,22 +523,20 @@ export default function Updates() {
   }
 
   /** Bulk action for individually-selected child updates (apps/packages/images).
-   * Each selected row becomes its OWN plan step with its exact prefilled input —
-   * deliberately NOT merged, because merging would drop conflicting per-row scalars
-   * (e.g. the os-package `package` name) and silently widen to "upgrade ALL". */
+   * Rows are merged into fewer plan steps where safe (see `mergedStepsForRows`):
+   * e.g. N TrueNAS app rows → ONE `containers.upgrade` step with all names, and
+   * os-package rows → one explicit `{ packages: [...] }` list — never the empty
+   * input that would mean "upgrade ALL". Groups whose inputs conflict keep one
+   * step per row with its exact prefilled input. */
   function applySelectedChildren() {
     const actionable = selectedChildren.filter((r) => r.applyActionId);
     if (actionable.length === 0) return;
+    const steps = mergedStepsForRows(actionable);
     const ok = window.confirm(
-      `Start update plans for ${actionable.length} specific update(s)? Each becomes a plan step and may require 2FA.`
+      `Start update plans for ${actionable.length} specific update(s)? They are grouped into ${steps.length} plan step${steps.length === 1 ? '' : 's'} where safe and may require 2FA.`
     );
     if (!ok) return;
-    void firePlanSteps('Update selected updates', actionable.map((r) => ({
-      pluginId: r.pluginId,
-      actionId: r.applyActionId!,
-      deviceId: r.deviceId,
-      input: r.applyInput ?? {},
-    })));
+    void firePlanSteps('Update selected updates', steps);
   }
 
   // --- "Check now" — force a fresh poll of the devices that report updates ------
@@ -777,13 +835,18 @@ export default function Updates() {
             ticked in expanded rows (separate from the device-level checkboxes). */}
         {selectedChildren.length > 0 && canApply && !readOnly && (
           <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-info/60 px-3 py-1.5 text-sm">
-            <span className="font-medium text-secondary">{selectedChildren.length} update{selectedChildren.length === 1 ? '' : 's'} selected</span>
+            <span className="font-medium text-secondary">
+              {selectedChildren.length} update{selectedChildren.length === 1 ? '' : 's'} selected
+              {selectedStepCount > 0 && (
+                <span className="text-muted-foreground"> · grouped into {selectedStepCount} plan step{selectedStepCount === 1 ? '' : 's'}</span>
+              )}
+            </span>
             <button
               type="button"
               onClick={() => applySelectedChildren()}
               className="rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-secondary hover:bg-background"
             >
-              Update selected ({selectedChildren.length})
+              Update selected ({selectedStepCount})
             </button>
             <button
               type="button"
