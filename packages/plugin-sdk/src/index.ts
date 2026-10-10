@@ -79,7 +79,7 @@ export { queryNtp } from './ntp';
 export type { NtpQueryResult } from './ntp';
 // Update gathering (capability 'updates'): row contract + version comparison +
 // SSH package-manager adapters. See updates.ts.
-export { compareVersions, isUpdateAvailable, firmwareRow, extractMajorMinor, latestCatalogLine, catalogFirmwareRow, PACKAGE_MANAGER_ADAPTERS, detectPackageManager, readOsReleaseIds, listUpgradablePackages, runPackageUpgrade, runPackageUpgradeList, packageRequiresReboot, buildDetachedUpgradeScript, buildUpgradeStatusScript, parseDetachedUpgradeStatus, UPGRADE_DONE_MARKER, DETACHED_ALREADY_RUNNING_EXIT } from './updates';
+export { compareVersions, isUpdateAvailable, firmwareRow, extractMajorMinor, latestCatalogLine, catalogFirmwareRow, PACKAGE_MANAGER_ADAPTERS, detectPackageManager, readOsReleaseIds, listUpgradablePackages, runPackageUpgrade, runPackageUpgradeList, holdPackages, unholdPackages, listHeldPackages, runForceFullUpgrade, packageRequiresReboot, buildDetachedUpgradeScript, buildUpgradeStatusScript, parseDetachedUpgradeStatus, UPGRADE_DONE_MARKER, DETACHED_ALREADY_RUNNING_EXIT } from './updates';
 export type { UpdateKind, UpdateRow, UpdateExecBackend, UpgradablePackage, PmAdapter, SshUpdatesOptions, PackageUpgradeResult, DetachedUpgradeStatus } from './updates';
 // Security checks (capability 'securityChecks'): row contract for the cross-device
 // Security page. See security.ts.
