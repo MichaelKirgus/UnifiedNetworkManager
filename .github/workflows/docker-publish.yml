@@ -290,7 +290,7 @@ jobs:
           echo "tags=${out}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push ${{ matrix.service }}
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b7be995525d1152c80650db49fa4d46cf046f510c3 # v7.4.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
