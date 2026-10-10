@@ -90,7 +90,9 @@
   --accent-hover: 129 140 248;     /* indigo-400           */
   --accent-solid: 99 102 241;      /* indigo-500 (selected)*/
 
-  /* Text on solid primary surfaces (code blocks, etc.). */
+  /* Code block surface — payload JSON, log excerpts. Light = slate-900 (the
+   * classic dark-on-light code panel). Dark themes override both tokens below. */
+  --code-bg: 15 23 42;             /* slate-900            */
   --code-fg: 241 245 249;          /* slate-100            */
 
   /* Modal/backdrop overlay. */
@@ -182,7 +184,10 @@
   --success-solid-hover: 24 120 50;
 
   --focus-ring: 139 139 139;        /* #8b8b8b                       */
-  --accent-hover: 122 162 247;      /* indigo-400                    */}
+  --accent-hover: 122 162 247;      /* indigo-400                    */
+
+  --code-bg: 30 30 30;              /* #1e1e1e VS Code editor bg     */
+  --code-fg: 212 212 212;           /* #d4d4d4 default text          */}
 
 /* Slate — the original dark palette (slate-950 canvas). */
 .theme-slate {
@@ -238,7 +243,9 @@
   --accent-cyan: 8 51 68;         /* cyan-950               */
   --accent-cyan-fg: 103 232 249;  /* cyan-300               */
   --accent-cyan-border: 21 94 117;/* cyan-800               */
-}
+
+  --code-bg: 2 6 23;               /* slate-950 (page canvas)    */
+  --code-fg: 226 232 240;          /* slate-200                  */}
 
 body {
   background-color: rgb(var(--background));

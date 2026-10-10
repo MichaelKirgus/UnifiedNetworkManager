@@ -96,7 +96,8 @@ export default {
         'focus-ring': 'rgb(var(--focus-ring) / <alpha-value>)',
         'accent-hover': 'rgb(var(--accent-hover) / <alpha-value>)',
         'accent-solid': 'rgb(var(--accent-solid) / <alpha-value>)',
-        // Text on solid primary surfaces (code blocks).
+        // Code block surface + text (payload JSON, log excerpts).
+        'code-bg': 'rgb(var(--code-bg) / <alpha-value>)',
         'code-fg': 'rgb(var(--code-fg) / <alpha-value>)',
         // Modal/backdrop overlay.
         overlay: 'rgb(var(--overlay) / <alpha-value>)',

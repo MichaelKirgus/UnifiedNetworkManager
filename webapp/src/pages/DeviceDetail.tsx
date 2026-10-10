@@ -791,7 +791,7 @@ export default function DeviceDetail() {
                             {entry.context && Object.keys(entry.context).length > 0 && (
                               <details className="text-xs">
                                 <summary className="cursor-pointer font-medium text-info-fg hover:underline">Details</summary>
-                                <pre className="mt-1 max-h-48 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
+                                <pre className="mt-1 max-h-48 overflow-auto rounded bg-code-bg p-2 font-mono text-[11px] leading-relaxed text-code-fg">
                                   {JSON.stringify(entry.context, null, 2)}
                                 </pre>
                               </details>

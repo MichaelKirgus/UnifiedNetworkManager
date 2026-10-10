@@ -6,6 +6,7 @@ import { CalendarClock, Play, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableBulkAction, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
+import { StepRatioBar, StepSegments, stepBarTone } from '../components/PlanStepProgress';
 import { SchemaForm, validateSchema, defaultValues } from '../components/SchemaForm';
 import { ReauthDialog } from '../components/ReauthDialog';
 import { ScheduleDialog } from '../components/ScheduleDialog';
@@ -181,10 +182,15 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
       header: 'Steps',
       key: 'stepCount',
       sortable: false,
+      width: 120,
       render: (row) => (
-        <span className="tabular-nums text-secondary">
-          {row.stepsDone ?? 0}/{row.stepCount ?? 0}
-        </span>
+        <div className="flex flex-col gap-1">
+          <span className="tabular-nums text-xs text-secondary">
+            {row.stepsDone ?? 0}/{row.stepCount ?? 0} done
+          </span>
+          {/* Done/total bar — list rows only carry the aggregate, not per-step states. */}
+          <StepRatioBar total={row.stepCount ?? 0} done={row.stepsDone ?? 0} tone={stepBarTone(row.status)} />
+        </div>
       ),
     },
     { header: 'Status', key: 'status', render: (row) => <StatusBadge status={row.status} /> },
@@ -407,13 +413,28 @@ function PlanPayloadRow({ plan, ctx }: { plan: Plan; ctx: ExpandChildContext }) 
   // expandable rows) and the checkbox column (only when selectable).
   const colSpan = ctx.columns.length + (ctx.selectable ? 1 : 0) + 1;
 
+  // Per-step progress — one segment per step, colored by its status. Shown at
+  // the top of the expanded row so the plan's state is visible before scrolling
+  // through payloads.
+  const steps = detailQuery.data?.steps ?? [];
+  const doneSteps = steps.filter((s) => s.status === 'succeeded').length;
+
   return (
     <tr className="bg-background/70">
       <td colSpan={colSpan} className="px-4 py-2 text-secondary">
         <div className="space-y-3 py-1">
+          {steps.length > 0 && (
+            <div>
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-faint">Step progress</p>
+              <div className="flex items-center gap-3">
+                <StepSegments steps={steps} className="max-w-md" />
+                <span className="text-xs tabular-nums text-faint">{doneSteps}/{steps.length}</span>
+              </div>
+            </div>
+          )}
           <div>
             <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-faint">Intent inputs</p>
-            <pre className="max-h-48 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
+            <pre className="max-h-48 overflow-auto rounded bg-code-bg p-2 font-mono text-[11px] leading-relaxed text-code-fg">
               {Object.keys(plan.intentInputs ?? {}).length > 0
                 ? JSON.stringify(plan.intentInputs, null, 2)
                 : '{}'}
@@ -433,7 +454,7 @@ function PlanPayloadRow({ plan, ctx }: { plan: Plan; ctx: ExpandChildContext }) 
                     <span className="ml-2 text-faint">{deviceName(s.deviceId)} ({pluginName(plan.pluginId)})</span>
                     <StatusBadge status={s.status} />
                   </summary>
-                  <pre className="mt-1.5 max-h-40 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
+                  <pre className="mt-1.5 max-h-40 overflow-auto rounded bg-code-bg p-2 font-mono text-[11px] leading-relaxed text-code-fg">
                     {JSON.stringify(s.input ?? {}, null, 2)}
                   </pre>
                 </details>
