@@ -133,7 +133,13 @@ Every component is published to the [GitHub Container Registry](https://ghcr.io)
 docker pull ghcr.io/michaelkirgus/unifiednetworkmanager/api:dev
 ```
 
-Tag scheme: **branch pushes** are tagged with the branch name (`main` → `dev`), and **release tags** (`v0.1.0`) additionally move `latest`. So `latest` always points at the newest release, never at dev-branch builds — pin `:latest` for stable deployments or a version tag to be explicit.
+Tag scheme: **branch pushes** are tagged with the branch name (`main` → `dev`), and **release tags** (`v0.1.0`) additionally move `latest`. So `latest` always points at the newest stable release, never at dev-branch builds — pin `:latest` for stable deployments or a version tag to be explicit.
+
+Two automated lanes sit on top of that (see `.github/workflows/docker-publish.yml`):
+
+- **Stable releases** — pushing a strict semver tag publishes all images tagged with it *and* creates the matching GitHub Release (after the plugin contract suite passes):
+  `git tag v0.2.0 && git push origin v0.2.0`
+- **Nightly pre-releases** — a daily scheduled build of `main` (or manual dispatch) publishes images tagged `nightly-<YYYYMMDD>` plus rolling `nightly`, and creates a dated GitHub **pre-release**. Pre-releases never move `latest`.
 
 ## Security model
 

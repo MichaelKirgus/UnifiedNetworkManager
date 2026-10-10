@@ -1,9 +1,12 @@
 # Build + publish all component images to GitHub Container Registry (GHCR).
 #
 # Tag scheme:
-#   - push to a branch  → image tag = branch name ("main" maps to "dev")
-#   - push to a v* tag  → image tag = the release version (e.g. v0.1.0) AND
-#                         "latest" is moved to that release (never to dev).
+#   - push to a branch        → image tag = branch name ("main" maps to "dev")
+#   - push to a v* tag        → image tag = the release version (e.g. v0.1.0) AND
+#                               "latest" is moved to that release (never to dev);
+#                               strict semver tags (vX.Y.Z) additionally get a GitHub Release
+#   - schedule / dispatch     → nightly lane: images tagged nightly-<YYYYMMDD> + rolling
+#     (nightly=true)          "nightly", plus a dated GitHub pre-release. Never touches latest.
 #
 # Images are only built/published AFTER the plugin contract suite passes.
 # The component list is derived from docker-compose.yml at runtime, so adding a
@@ -15,7 +18,15 @@ on:
   push:
     branches: ['*']
     tags: ['v*']
+  # Nightly lane: daily build of main → dated pre-release (see meta.tags + nightly-release).
+  schedule:
+    - cron: '30 2 * * *'   # 02:30 UTC
   workflow_dispatch:
+    inputs:
+      nightly:
+        description: 'Publish as a dated nightly pre-release instead of the branch tag'
+        type: boolean
+        default: false
 
 concurrency:
   group: docker-publish-${{ github.ref }}
@@ -35,6 +46,9 @@ jobs:
       # Single primary tag (no ",latest") — baked into every image as the
       # UNM_BUILD_TAG env so the webapp can show which branch/release it runs.
       tag: ${{ steps.tags.outputs.tag }}
+      # Lane flags — gate the two announcement jobs (stable-release / nightly-release).
+      isRelease: ${{ steps.tags.outputs.isRelease }}
+      isNightly: ${{ steps.tags.outputs.isNightly }}
       # Lowercased ghcr.io/<owner>/<repo> prefix for the image names. Computed
       # in bash (tr) instead of an expression filter pipe — GitHub's workflow
       # validator rejects `|` inside expressions with "Unexpected symbol: '|'",
@@ -74,13 +88,26 @@ jobs:
             require("fs").writeFileSync(process.env.GITHUB_OUTPUT, `components<<EOF\n${JSON.stringify(out)}\nEOF`);
           '
 
-      # Tag scheme: v* release tag → version + latest; main → dev; else branch name.
+      # Tag scheme: v* release tag → version + latest; schedule/dispatch(nightly)
+      # → dated nightly + rolling "nightly"; main → dev; else branch name.
       - name: Resolve image tags
         id: tags
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_NIGHTLY: ${{ github.event.inputs.nightly || 'false' }}
         run: |
+          IS_RELEASE=false   # strict semver v* tag → a GitHub Release is created (stable-release job)
+          IS_NIGHTLY=false   # schedule / manual nightly dispatch → pre-release (nightly-release job)
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"          # e.g. v0.1.0
             EXTRA=",latest"                        # releases — and only releases — own "latest"
+            # Only strict semver tags become GitHub Releases; other v* tags still get images.
+            [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && IS_RELEASE=true
+          elif [ "$EVENT_NAME" = "schedule" ] || [ "$DISPATCH_NIGHTLY" = "true" ]; then
+            # Nightly lane: dated immutable tag + rolling "nightly". Never touches "latest".
+            TAG="nightly-$(date -u +%Y%m%d)"
+            EXTRA=",nightly"
+            IS_NIGHTLY=true
           elif [ "$GITHUB_REF_NAME" = "main" ]; then
             TAG="dev"                              # default branch maps to dev
             EXTRA=""
@@ -92,6 +119,8 @@ jobs:
           # Single primary tag for the UNM_BUILD_TAG build arg (releases bake
           # their version, branches bake their name — never "latest").
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "isRelease=${IS_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "isNightly=${IS_NIGHTLY}" >> "$GITHUB_OUTPUT"
           # GHCR package names must be lowercase; GITHUB_REPOSITORY is always set.
           echo "imagePrefix=ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
@@ -217,3 +246,113 @@ jobs:
             UNM_BUILD_TAG=${{ needs.meta.outputs.tag }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  # ── Announce stable releases — AFTER every image is pushed. ────────────────
+  # Runs only for strict semver tag pushes (vX.Y.Z). The images already exist at
+  # this point, so the release page never links to a missing tag. Re-running the
+  # workflow updates the existing release in place.
+  stable-release:
+    needs: [meta, tests, publish]
+    if: needs.meta.outputs.isRelease == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compose release notes (image list)
+        run: |
+          PREFIX="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          TAG="${GITHUB_REF#refs/tags/}"
+          {
+            echo "All components are published to the GitHub Container Registry tagged \`$TAG\` (and \`latest\`:):"
+            echo
+            node -e '
+              const { execSync } = require("node:child_process");
+              const cfg = JSON.parse(execSync("docker compose config --format json", { encoding: "utf8" }));
+              for (const [name] of Object.entries(cfg.services ?? {}).filter(([, s]) => s.build)) {
+                console.log(`- \`${process.argv[1]}/${name}:${process.argv[2]}\``);
+              }
+            ' "$PREFIX" "$TAG"
+            echo
+            echo "Pull example:"
+            echo
+            echo "\`\`\`bash"
+            echo "docker pull ${PREFIX}/api:${TAG}"
+            echo "\`\`\`"
+            echo
+            echo "See the README (\"Pre-built images (GHCR)\") for the full tag scheme and compose setup."
+          } > /tmp/release-notes.md
+
+      - name: Create GitHub Release ${{ github.ref_name }}
+        uses: softprops/action-gh-release@f3cad8bcbf209fe591aa1823e372c5d96b7fc800 # v2.3.1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          body_path: /tmp/release-notes.md
+
+  # ── Announce nightly pre-releases — AFTER every image is pushed. ───────────
+  # Runs on the daily schedule (or manual dispatch with nightly=true). Creates a
+  # real git tag at the built commit so the pre-release points at checkable code,
+  # then publishes a dated GitHub PRE-RELEASE — it never moves "latest" and never
+  # appears in stable release lists. One entry per day; re-runs are idempotent.
+  nightly-release:
+    needs: [meta, tests, publish]
+    if: needs.meta.outputs.isNightly == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Create + push git tag ${{ needs.meta.outputs.tag }}
+        id: tag
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}   # nightly-<YYYYMMDD> — same date as the images (from meta)
+        run: |
+          if git ls-remote --tags origin "$TAG" | grep -q "refs/tags/$TAG$"; then
+            echo "Tag $TAG already exists — skipping."
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+          # Pretty date derived from the TAG string itself (no second clock read,
+          # so a run crossing midnight can never mismatch the image tags).
+          echo "prettyDate=$(echo "${TAG#nightly-}" | sed 's/\(....\)\(..\)\(..\)/\1-\2-\3/')" >> "$GITHUB_OUTPUT"
+
+      - name: Compose pre-release notes (image list)
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          PREFIX="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          {
+            echo "Automatic nightly build of \`main\` — **pre-release, not for production**."
+            echo
+            echo "All components are published to the GitHub Container Registry tagged \`$TAG\` (and rolling \`nightly\`:):"
+            echo
+            node -e '
+              const { execSync } = require("node:child_process");
+              const cfg = JSON.parse(execSync("docker compose config --format json", { encoding: "utf8" }));
+              for (const [name] of Object.entries(cfg.services ?? {}).filter(([, s]) => s.build)) {
+                console.log(`- \`${process.argv[1]}/${name}:${process.argv[2]}\``);
+              }
+            ' "$PREFIX" "$TAG"
+            echo
+            echo "Pull example:"
+            echo
+            echo "\`\`\`bash"
+            echo "docker pull ${PREFIX}/api:${TAG}"
+            echo "\`\`\`"
+          } > /tmp/nightly-notes.md
+
+      - name: Create GitHub pre-release ${{ needs.meta.outputs.tag }}
+        uses: softprops/action-gh-release@f3cad8bcbf209fe591aa1823e372c5d96b7fc800 # v2.3.1
+        with:
+          tag_name: ${{ needs.meta.outputs.tag }}
+          name: Nightly ${{ steps.tag.outputs.prettyDate }}
+          draft: false
+          prerelease: true
+          body_path: /tmp/nightly-notes.md
