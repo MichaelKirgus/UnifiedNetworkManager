@@ -399,49 +399,49 @@ function PlanPayloadRow({ plan, ctx }: { plan: Plan; ctx: ExpandChildContext }) 
   const pluginName = (id: string) => pluginsQuery.data?.find((p) => p.id === id)?.name ?? id;
   const deviceName = (id: string) => devicesQuery.data?.find((d) => d.id === id)?.name ?? id;
 
-  // Anchor the payload in the Intent column when visible, else the first
-  // visible column — hiding a column must never hide the payload.
-  const anchorIdx = Math.max(0, ctx.columns.findIndex((c) => c.key === 'intentActionId'));
+  // One full-width cell spanning every column — the payload (intent inputs +
+  // per-step payloads) is wide JSON that must not be squeezed into a single
+  // narrow table column. colSpan covers all visible data columns PLUS the two
+  // leading cells DataTable always renders on expandable+selectable tables:
+  // the chevron column (+1, always present here since renderChild only runs for
+  // expandable rows) and the checkbox column (only when selectable).
+  const colSpan = ctx.columns.length + (ctx.selectable ? 1 : 0) + 1;
 
   return (
     <tr className="bg-background/70">
-      {ctx.columns.map((col, i) => (
-        <td key={col.key} className="overflow-hidden px-4 py-2 text-secondary">
-          {i === anchorIdx ? (
-            <div className="space-y-3 py-1">
-              <div>
-                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-faint">Intent inputs</p>
-                <pre className="max-h-48 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
-                  {Object.keys(plan.intentInputs ?? {}).length > 0
-                    ? JSON.stringify(plan.intentInputs, null, 2)
-                    : '{}'}
-                </pre>
-              </div>
-              <div>
-                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-faint">Step payloads</p>
-                {detailQuery.isLoading && <p className="text-xs text-faint">Loading steps…</p>}
-                {!detailQuery.isLoading && (detailQuery.data?.steps ?? []).length === 0 && (
-                  <p className="text-xs text-faint">No steps.</p>
-                )}
-                <div className="space-y-2">
-                  {(detailQuery.data?.steps ?? []).map((s) => (
-                    <details key={s.id} className="rounded border border-border bg-card px-2.5 py-1.5">
-                      <summary className="cursor-pointer text-xs font-medium text-secondary hover:text-foreground">
-                        #{s.stepIndex} · {s.actionId}
-                        <span className="ml-2 text-faint">{deviceName(s.deviceId)} ({pluginName(plan.pluginId)})</span>
-                        <StatusBadge status={s.status} />
-                      </summary>
-                      <pre className="mt-1.5 max-h-40 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
-                        {JSON.stringify(s.input ?? {}, null, 2)}
-                      </pre>
-                    </details>
-                  ))}
-                </div>
-              </div>
+      <td colSpan={colSpan} className="px-4 py-2 text-secondary">
+        <div className="space-y-3 py-1">
+          <div>
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-faint">Intent inputs</p>
+            <pre className="max-h-48 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
+              {Object.keys(plan.intentInputs ?? {}).length > 0
+                ? JSON.stringify(plan.intentInputs, null, 2)
+                : '{}'}
+            </pre>
+          </div>
+          <div>
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-faint">Step payloads</p>
+            {detailQuery.isLoading && <p className="text-xs text-faint">Loading steps…</p>}
+            {!detailQuery.isLoading && (detailQuery.data?.steps ?? []).length === 0 && (
+              <p className="text-xs text-faint">No steps.</p>
+            )}
+            <div className="space-y-2">
+              {(detailQuery.data?.steps ?? []).map((s) => (
+                <details key={s.id} className="rounded border border-border bg-card px-2.5 py-1.5">
+                  <summary className="cursor-pointer text-xs font-medium text-secondary hover:text-foreground">
+                    #{s.stepIndex} · {s.actionId}
+                    <span className="ml-2 text-faint">{deviceName(s.deviceId)} ({pluginName(plan.pluginId)})</span>
+                    <StatusBadge status={s.status} />
+                  </summary>
+                  <pre className="mt-1.5 max-h-40 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
+                    {JSON.stringify(s.input ?? {}, null, 2)}
+                  </pre>
+                </details>
+              ))}
             </div>
-          ) : null}
-        </td>
-      ))}
+          </div>
+        </div>
+      </td>
     </tr>
   );
 }
