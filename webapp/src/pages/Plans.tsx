@@ -39,8 +39,11 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
   const plansQuery = useQuery({ queryKey: ['plans'], queryFn: api.plans, refetchInterval: 10_000 });
   // Plugin names for the table — only fetched when allowed (API gates on plugins:read).
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, enabled: can('plugins:read') });
+  // Device names for the affected-devices column — same gate (devices:read).
+  const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices, enabled: can('devices:read') });
 
   const pluginName = (id: string) => pluginsQuery.data?.find((p) => p.id === id)?.name ?? id;
+  const deviceName = (id: string) => devicesQuery.data?.find((d) => d.id === id)?.name ?? id;
   const canApply = can('configs:apply');
 
   // Retry duplicates the plan and executes the copy — 2FA-gated server-side,
@@ -176,6 +179,26 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
           {row.intentActionId}
         </Link>
       ),
+    },
+    {
+      // Which device(s) this plan touches — distinct across its steps (a
+      // fan-out intent like network.create has one step per device).
+      header: 'Devices',
+      key: 'deviceIds',
+      sortable: false,
+      width: 200,
+      exportValue: (row) => (row.deviceIds ?? []).map((id) => deviceName(id)).join(', '),
+      searchText: (row) => (row.deviceIds ?? []).map((id) => deviceName(id)).join(' '),
+      render: (row) => {
+        const ids = row.deviceIds ?? [];
+        if (ids.length === 0) return <span className="text-faint">—</span>;
+        const names = ids.map(deviceName);
+        return (
+          <span className="block max-w-[220px] truncate text-secondary" title={names.join(', ')}>
+            {names.slice(0, 2).join(', ')}{ids.length > 2 ? ` +${ids.length - 2} more` : ''}
+          </span>
+        );
+      },
     },
     { header: 'Plugin', key: 'pluginId', render: (row) => <span className="text-secondary">{pluginName(row.pluginId)}</span> },
     {

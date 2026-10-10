@@ -832,7 +832,7 @@ router.get('/plans/activity', requireAuth, requirePermission('plans:read'), asyn
   for (const row of planRows) {
     const steps = await loadSteps(row.id);
     const done = steps.filter((s) => s.status === 'succeeded').length;
-    out.push({ ...serializePlanRow(row, usernames), provisionedSecrets: secretsMeta.get(row.id) ?? [], stepCount: steps.length, stepsDone: done });
+    out.push({ ...serializePlanRow(row, usernames), provisionedSecrets: secretsMeta.get(row.id) ?? [], stepCount: steps.length, stepsDone: done, deviceIds: [...new Set(steps.map((s) => s.deviceId))] });
   }
   res.status(200).json(out);
 });
@@ -858,7 +858,7 @@ router.get('/plans', requireAuth, requirePermission('plans:read'), async (_req, 
   for (const row of planRows) {
     const steps = await loadSteps(row.id);
     const done = steps.filter((s) => s.status === 'succeeded').length;
-    out.push({ ...serializePlanRow(row, usernames), provisionedSecrets: secretsMeta.get(row.id) ?? [], stepCount: steps.length, stepsDone: done });
+    out.push({ ...serializePlanRow(row, usernames), provisionedSecrets: secretsMeta.get(row.id) ?? [], stepCount: steps.length, stepsDone: done, deviceIds: [...new Set(steps.map((s) => s.deviceId))] });
   }
   res.status(200).json(out);
 });

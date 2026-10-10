@@ -2907,6 +2907,8 @@ export interface Plan {
   /** Present on list responses. */
   stepCount?: number;
   stepsDone?: number;
+  /** Distinct device ids across the plan's steps (list responses). */
+  deviceIds?: string[];
 }
 
 /** GET /plans/:id response — plan + ordered steps. */
