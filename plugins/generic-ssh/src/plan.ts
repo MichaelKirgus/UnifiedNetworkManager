@@ -9,7 +9,7 @@
  * Single-device actions fan out (one step per device) for batch rollouts.
  */
 
-import { finalizePlan, PlanningError, isCanonicalIntent } from '@unm/plugin-sdk';
+import { appendSettleAndRefresh, finalizePlan, PlanningError, isCanonicalIntent } from '@unm/plugin-sdk';
 import type { CatalogEntry, Plan, PlanDevice as SdkPlanDevice, PlanRequest as SdkPlanRequest, PlanStep, ProvisionRequest, InputSchema, RiskLevel } from '@unm/plugin-sdk';
 import { getAction, listActions, listCatalog } from './actions/registry';
 
@@ -133,6 +133,33 @@ function isDirtyStep(actionId: string): boolean {
   return !!a && a.riskLevel !== 'read';
 }
 
+// --- Settle + inventory-refresh tail ---------------------------------------------
+// Applying one of these actions invalidates the updates inventory the API caches
+// (device_updates). The plugin therefore appends reserved SYSTEM steps — executed
+// by the UNM plan executor itself, never dispatched here: a visible settle wait,
+// then a forced inventory re-poll so applied updates disappear from the Updates
+// page instead of dangling. The PLUGIN owns both decisions (which intents need it
+// and how long to wait); the API is a dumb runner.
+const UPDATE_SETTLE_MS: Record<string, number> = {
+  // A package install finishes inside the step; a short settle lets apt state +
+  // any lock holders clear before the re-poll reads `apt list --upgradable`.
+  'packages.update': 30_000,
+  // Runs DETACHED (nohup) — may still be going when the step returns. The
+  // refresh is best-effort: if the upgrade holds apt, the poll just sees the
+  // in-flight state; if it finished, we get fresh data.
+  'packages.dist-upgrade': 60_000,
+  // apt-mark / version-lock changes are instant — only the held flags need a re-read.
+  'packages.hold': 5_000,
+  'packages.unhold': 5_000,
+};
+
+/** Appends the settle+refresh tail for update intents; passes other plans through. */
+function withSettleTail(plan: Plan, intentId: string): Plan {
+  const waitMs = UPDATE_SETTLE_MS[intentId];
+  if (waitMs === undefined) return plan;
+  return appendSettleAndRefresh(plan, Object.keys(UPDATE_SETTLE_MS), waitMs);
+}
+
 /** Builds the final plan for one intent + device set. */
 export function buildPlan(req: PlanRequest): Plan {
   const intentId = req.intent?.actionId;
@@ -145,13 +172,16 @@ export function buildPlan(req: PlanRequest): Plan {
       throw new PlanningError(`Intent ${intentId} requires exactly ${intent.deviceCount} devices, got ${req.devices.length}`);
     }
     const rawSteps = intent.buildSteps(req.intent.inputs ?? {}, req.devices as PlanDevice[]);
-    return finalizePlan(
+    return withSettleTail(
+      finalizePlan(
+        intentId,
+        req.devices.map((d) => ({ deviceId: d.deviceId })),
+        intent.provision(req.intent.inputs ?? {}),
+        rawSteps,
+        isDirtyStep,
+        { rollbackStep: () => ({ actionId: 'snapshot.create', input: {} }) },
+      ),
       intentId,
-      req.devices.map((d) => ({ deviceId: d.deviceId })),
-      intent.provision(req.intent.inputs ?? {}),
-      rawSteps,
-      isDirtyStep,
-      { rollbackStep: () => ({ actionId: 'snapshot.create', input: {} }) },
     );
   }
 
@@ -168,13 +198,16 @@ export function buildPlan(req: PlanRequest): Plan {
     actionId: intentId,
     input: { ...(req.intent.inputs ?? {}), ...((req.deviceInputs ?? {})[d.deviceId] ?? {}) },
   }));
-  return finalizePlan(
+  return withSettleTail(
+    finalizePlan(
+      intentId,
+      req.devices.map((d) => ({ deviceId: d.deviceId })),
+      [],
+      rawSteps,
+      isDirtyStep,
+      // Only prepend a rollback snapshot when the action actually writes.
+      { rollbackStep: () => ({ actionId: 'snapshot.create', input: {} }) },
+    ),
     intentId,
-    req.devices.map((d) => ({ deviceId: d.deviceId })),
-    [],
-    rawSteps,
-    isDirtyStep,
-    // Only prepend a rollback snapshot when the action actually writes.
-    { rollbackStep: () => ({ actionId: 'snapshot.create', input: {} }) },
   );
 }

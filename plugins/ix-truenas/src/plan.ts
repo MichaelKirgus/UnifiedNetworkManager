@@ -6,7 +6,7 @@
  * one appliance, created + executed immediately by the webapp.
  */
 
-import { finalizePlan, PlanningError, Plan, PlanRequest } from '@unm/plugin-sdk';
+import { appendSettleAndRefresh, finalizePlan, PlanningError, Plan, PlanRequest } from '@unm/plugin-sdk';
 import { registry as actionRegistry } from './actions';
 
 // Re-exported so index.ts keeps a single import source for the plan contract.
@@ -39,7 +39,32 @@ export async function buildPlan(req: PlanRequest): Promise<Plan> {
   // configuration backup (config.backup.download — read-only on the device)
   // prepended per dirty device. A failed backup never blocks the plan; the
   // step result carries the base64 file for later config.restore.
-  return finalizePlan(actionId, devices, [], rawSteps, isDirtyStep, {
-    rollbackStep: () => ({ actionId: 'config.backup.download', input: {} }),
-  });
+  return withSettleTail(
+    finalizePlan(actionId, devices, [], rawSteps, isDirtyStep, {
+      rollbackStep: () => ({ actionId: 'config.backup.download', input: {} }),
+    }),
+    actionId,
+  );
+}
+
+// --- Settle + inventory-refresh tail ---------------------------------------------
+// Applying an update invalidates the updates inventory the API caches. The plugin
+// appends reserved SYSTEM steps — executed by the UNM plan executor itself, never
+// dispatched here: a visible settle wait, then a forced inventory re-poll so
+// applied updates disappear from the Updates page instead of dangling. The PLUGIN
+// owns both decisions (which intents need it and how long to wait).
+const UPDATE_SETTLE_MS: Record<string, number> = {
+  // App upgrades redeploy containers server-side; image pulls refresh the store.
+  'containers.upgrade': 60_000,
+  'images.update': 30_000,
+  // A firmware update installs a new boot environment and REBOOTS — give it
+  // time to come back before the re-poll (best-effort: unreachable is fine).
+  'system.firmware.update': 600_000,
+};
+
+/** Appends the settle+refresh tail for update intents; passes other plans through. */
+function withSettleTail(plan: Plan, intentId: string): Plan {
+  const waitMs = UPDATE_SETTLE_MS[intentId];
+  if (waitMs === undefined) return plan;
+  return appendSettleAndRefresh(plan, Object.keys(UPDATE_SETTLE_MS), waitMs);
 }

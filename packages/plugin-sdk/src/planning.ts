@@ -92,3 +92,57 @@ export function finalizePlan(
     steps,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Reserved system steps — executed by the UNM plan executor ITSELF, never
+// dispatched to a plugin's /config endpoint. A plugin appends them to its plan
+// (via appendSettleAndRefresh) whenever an applied action invalidates data the
+// API caches (e.g. the updates inventory after an OS package or image update).
+// The PLUGIN decides whether they are needed and how long to wait — the API is
+// a dumb runner, which keeps this reusable across every plugin + intent.
+// ---------------------------------------------------------------------------
+
+/** Reserved action id: sleep `input.ms` before dependent steps run (visible in
+ * the plan as its own step). Executor-side; never dispatched to a plugin. */
+export const SYSTEM_STEP_WAIT = 'unm.wait';
+/** Reserved action id: force an immediate inventory re-poll of the step's device
+ * after the update has settled. Executor-side; never dispatched to a plugin. */
+export const SYSTEM_STEP_INVENTORY_REFRESH = 'unm.inventory.refresh';
+
+/** True for reserved system-step action ids (executor runs them locally). */
+export function isSystemStepAction(actionId: string): boolean {
+  return actionId === SYSTEM_STEP_WAIT || actionId === SYSTEM_STEP_INVENTORY_REFRESH;
+}
+
+/**
+ * Appends a transparent "settle + refresh" tail to a finalized plan, per device
+ * that received at least one step in `invalidateActions`:
+ *   … update steps → unm.wait { ms } (best-effort) → unm.inventory.refresh {} (best-effort)
+ * The wait gives the device time to finish applying (a package install settles
+ * fast; an OS upgrade needs minutes — the plugin picks the value). Both steps
+ * are bestEffort: a rebooted/updated appliance may be unreachable for the
+ * refresh, and that must NOT fail an otherwise successful plan. Returns the
+ * same Plan object with the tail appended (indices continue after `plan.steps`).
+ */
+export function appendSettleAndRefresh(
+  plan: Plan,
+  invalidateActions: string[],
+  waitMs: number,
+): Plan {
+  const invalidating = new Set(invalidateActions);
+  if (invalidating.size === 0) return plan;
+
+  // Devices that actually received an invalidating step — in first-seen order.
+  const devices: string[] = [];
+  for (const s of plan.steps) {
+    if (invalidating.has(s.actionId) && !devices.includes(s.deviceId)) devices.push(s.deviceId);
+  }
+
+  let nextIndex = plan.steps.length;
+  for (const deviceId of devices) {
+    const waitIdx = nextIndex++;
+    plan.steps.push({ stepIndex: waitIdx, deviceId, actionId: SYSTEM_STEP_WAIT, input: { ms: Math.max(0, Math.round(waitMs)) }, bestEffort: true });
+    plan.steps.push({ stepIndex: nextIndex++, deviceId, actionId: SYSTEM_STEP_INVENTORY_REFRESH, input: {}, dependsOn: [waitIdx], bestEffort: true });
+  }
+  return plan;
+}

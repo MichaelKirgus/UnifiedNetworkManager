@@ -1,4 +1,4 @@
-import { finalizePlan, PlanningError } from '@unm/plugin-sdk';
+import { appendSettleAndRefresh, finalizePlan, PlanningError } from '@unm/plugin-sdk';
 import type { Plan, PlanDevice as SdkPlanDevice, PlanRequest as SdkPlanRequest, PlanStep, ProvisionRequest, InputSchema, RiskLevel } from '@unm/plugin-sdk';
 import * as dnsClient from './client/dns';
 import * as dhcpClient from './client/dhcp';
@@ -358,7 +358,7 @@ export async function buildPlan(req: PlanRequest): Promise<Plan> {
 
     const provisionRequests = intent.provision(inputs ?? {});
     const rawSteps = intent.buildSteps(inputs ?? {}, devices);
-    return finalizePlan(actionId, devices, provisionRequests, rawSteps, isDirtyStep, { rollbackStep: () => ({ actionId: 'snapshot.create', input: {} }) });
+    return withSettleTail(finalizePlan(actionId, devices, provisionRequests, rawSteps, isDirtyStep, { rollbackStep: () => ({ actionId: 'snapshot.create', input: {} }) }), actionId);
   }
 
   // --- Single-device action (fan-out across the batch) -----------------------------
@@ -390,11 +390,31 @@ export async function buildPlan(req: PlanRequest): Promise<Plan> {
     rawSteps.push({ deviceId: device.deviceId, actionId: effectiveId, input: { ...(inputs ?? {}), ...(req.deviceInputs?.[device.deviceId] ?? {}) } });
   }
 
-  return finalizePlan(actionId, devices, [], rawSteps, isDirtyStep, { rollbackStep: () => ({ actionId: 'snapshot.create', input: {} }) });
+  return withSettleTail(finalizePlan(actionId, devices, [], rawSteps, isDirtyStep, { rollbackStep: () => ({ actionId: 'snapshot.create', input: {} }) }), actionId);
 }
 
 /** True when a step's action mutates the appliance (write/dangerous). */
 function isDirtyStep(stepActionId: string): boolean {
   const a = getAction(stepActionId);
   return !!a && a.riskLevel !== 'read';
+}
+
+// --- Settle + inventory-refresh tail ---------------------------------------------
+// Applying an update invalidates the updates inventory the API caches. The plugin
+// appends reserved SYSTEM steps — executed by the UNM plan executor itself, never
+// dispatched here: a visible settle wait, then a forced inventory re-poll so
+// applied updates disappear from the Updates page instead of dangling. The PLUGIN
+// owns both decisions (which intents need it and how long to wait).
+const UPDATE_SETTLE_MS: Record<string, number> = {
+  // firmware.update runs the minor-update job; firmware.upgrade downloads +
+  // installs a full release and REBOOTS — give it time before the re-poll.
+  'firmware.update': 300_000,
+  'firmware.upgrade': 300_000,
+};
+
+/** Appends the settle+refresh tail for update intents; passes other plans through. */
+function withSettleTail(plan: Plan, intentId: string): Plan {
+  const waitMs = UPDATE_SETTLE_MS[intentId];
+  if (waitMs === undefined) return plan;
+  return appendSettleAndRefresh(plan, Object.keys(UPDATE_SETTLE_MS), waitMs);
 }
