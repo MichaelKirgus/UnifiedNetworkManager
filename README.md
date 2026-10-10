@@ -9,7 +9,7 @@
 
 Open-source network management and monitoring platform for mixed-vendor environments. A central control plane that manages devices through **pluggable vendor adapters** — each plugin is a small microservice speaking one common contract, so adding a new device family never means touching the core.
 
-Currently supported vendors: **OPNsense** (routing/firewall), **LANCOM LCOS-LX** (Wi-Fi 6/7 access points), **LANCOM LCOS** (routers), **LANCOM SX-Series** (managed switches, both 4.x and legacy GS-2310 firmware lines), **MikroTik SwOS / SwOS Lite** (switches), **AVM FRITZ!Box-class routers** (FBox plugin — web-UI session monitoring + inventory), plus generic **SNMP** and **ICMP ping** plugins for anything else.
+UNM ships a growing set of vendor adapter plugins covering routers, switches, Wi-Fi access points, NAS/mail platforms and consumer boxes — plus generic SNMP / ICMP / HTTP(S) / NTP / SSH adapters for anything else. The full list of supported vendors and devices lives in [docs/PLUGINS.md](docs/PLUGINS.md).
 
 ## Contents
 
@@ -52,11 +52,10 @@ flowchart LR
     end
     subgraph Docker
         A[API :3000/v1<br/>Express + Drizzle + Postgres 16]
-        P1[OPNsense plugin]
-        P2[ICMP / SNMP plugins]
-        P3[LANCOM LX / LCOS / SX plugins]
-        P4[SwOS plugin]
-        P5[FBox plugin<br/>AVM routers]
+        P1[Generic SNMP plugin]
+        P2[ICMP plugin]
+        P3["Generic HTTP(S) / NTP plugins"]
+        P4[Generic SSH plugin]
         BA[basic-auth plugin<br/>identity provider]
         SP[secrets-provider plugin<br/>crypto holder]
         M[MCP server :3901]
@@ -86,19 +85,13 @@ flowchart LR
 | `webapp/` | React 18 + Vite + Tailwind SPA (login, devices, plans, networks, hosts, routes, tunnels, Wi-Fi, logs, plugins, secrets, sites, users, roles, tokens) |
 | `packages/plugin-sdk/` | Shared TypeScript SDK for plugins (`@unm/plugin-sdk`): HTTP server scaffolding (incl. auto-mounted self-metrics `/metrics`), settings reading, API client, structured logger |
 | `packages/snmp-client/` | Shared net-snmp CLI wrapper used by the SNMP + LANCOM plugins |
-| `plugins/opnsense/` | OPNsense plugin — monitoring, inventory, config actions, multi-device plan intents (WireGuard/IPsec/OpenVPN/routes), tunnel + route enrichment |
-| `plugins/icmp/` | ICMP ping plugin — reachability/latency/jitter/loss + IP/MAC inventory; no credentials needed |
-| `plugins/generic-snmp/` | Generic SNMP Plugin — SNMPv1/v2c/v3 monitoring (system group, interface throughput) + inventory via net-snmp CLI |
-| `plugins/lancom-lx/` | LANCOM LCOS-LX access points — radios, SSIDs, stations, RF environment, WDS/CAPWAP; Wi-Fi client propagation |
-| `plugins/lancom-lcos/` | LANCOM LCOS routers — system/LAN/WAN metrics, VPN + firewall counters; config over SNMP SET (`lcsSetup`) with web-UI backup via a second credential slot |
-| `plugins/lancom-sx/` | LANCOM SX-Series switches (4.x unified MIB **and** legacy GS-2310 3.x tree, auto-detected) — ports, PoE, LAG/LACP; config over SNMP SET |
-| `plugins/mikrotik-swos/` | MikroTik SwOS Plugin — SwOS / SwOS Lite switches via the `.b-file` HTTP API (Digest auth): system, ports, PoE, SFP, VLANs; plan/config actions |
-| `plugins/fbox/` | FBox Plugin — AVM FRITZ!Box-class routers over the box's own web-UI session API: system/WAN/LAN/WiFi metrics + LAN-device/WLAN-client/SSID inventory propagation |
-| `plugins/basic-auth/` | Identity provider plugin — local users + TOTP verification on behalf of the API |
-| `plugins/secrets-provider/` | Secrets provider plugin — encryption at rest (owns `MASTER_KEY`) + key/cert generation |
+| `plugins/` | One microservice per vendor adapter — 20 plugins in total. The full list with supported vendors & devices lives in [docs/PLUGINS.md](docs/PLUGINS.md); `_template/` is the scaffold for new plugins |
+| `plugins/basic-auth/` | Identity provider plugin — local users + TOTP verification on behalf of the API (swappable via `AUTH_PLUGIN_ID`) |
+| `plugins/secrets-provider/` | Secrets provider plugin — encryption at rest (owns `MASTER_KEY`) + key/cert generation (swappable via `SECRETS_PLUGIN_ID`) |
 | `mcp/` | MCP server exposing the OpenAPI operations as tools (+ read-only SQL & plugin probes on a gated debug endpoint) |
 | `openapi/` | The OpenAPI contract — single source of truth for the public API surface |
 | `scripts/` | Mock OPNsense appliance + TLS material, plan e2e test suite |
+| `docs/PLUGINS.md` | **Plugin catalog** — every shipped plugin with its supported vendors & devices |
 | `docs/PLUGIN-DEVELOPMENT.md` | **The plugin developer guide** — contract, SDK usage, settings loop, logging, discovery, deployment |
 
 ## Getting started
