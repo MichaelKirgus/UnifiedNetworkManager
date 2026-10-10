@@ -34,12 +34,13 @@ services:
     depends_on:
       - postgres
     restart: unless-stopped
-    # The base image's built-in healthcheck runs `step ca health` WITHOUT the
-    # required --ca-url flag → it always fails, so the container shows
-    # "(unhealthy)" even though enrollment works fine. Override with a working
-    # invocation (the CA cert has no IP SANs — use its DNS name).
+    # step-ca's `ca health` needs BOTH flags or it errors out and the container
+    # shows "(unhealthy)" even though enrollment works fine: --ca-url (the CA has
+    # no IP SANs, so address it by DNS name) AND --root pointing at a root PEM.
+    # The entrypoint mirrors /pki/root_ca.crt → /data/ca/ on every boot, so the
+    # public root is always present on the shared cfg volume for this check.
     healthcheck:
-      test: ["CMD-SHELL", "step ca health --ca-url https://unm-ca:9000 | grep '^ok' >/dev/null"]
+      test: ["CMD-SHELL", "step ca health --ca-url https://unm-ca:9000 --root /data/ca/root_ca.crt | grep '^ok' >/dev/null"]
       interval: 30s
       timeout: 10s
       retries: 3
