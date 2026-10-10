@@ -283,6 +283,42 @@ export default function Updates() {
   // --- Device → updates hierarchy ---------------------------------------------
   const { devices, childrenByParentKey } = useMemo(() => buildDeviceTree(rows), [rows]);
 
+  // Child-row (individual update) selection — separate from the device-level
+  // checkboxes DataTable manages. Lets a user tick several specific apps/packages
+  // under one or more devices and update them together instead of clicking each.
+  const [selectedChildKeys, setSelectedChildKeys] = useState<Set<string>>(new Set());
+
+  /** The concrete update rows behind the selected child keys (stale keys drop out). */
+  const selectedChildren: UpdateRow[] = useMemo(() => {
+    if (selectedChildKeys.size === 0) return [];
+    const out: UpdateRow[] = [];
+    for (const kids of childrenByParentKey.values()) {
+      for (const k of kids) if (k.row && selectedChildKeys.has(k.key)) out.push(k.row);
+    }
+    return out;
+  }, [childrenByParentKey, selectedChildKeys]);
+
+  function toggleChild(key: string) {
+    setSelectedChildKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
+  // Prune child selections whose rows vanished (device deleted / update applied).
+  useEffect(() => {
+    if (selectedChildKeys.size === 0) return;
+    const valid = new Set<string>();
+    for (const kids of childrenByParentKey.values()) for (const k of kids) valid.add(k.key);
+    setSelectedChildKeys((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const key of prev) if (valid.has(key)) next.add(key); else changed = true;
+      return changed ? next : prev;
+    });
+  }, [childrenByParentKey, selectedChildKeys]);
+
   /** The row that summarizes a node's versions/notes: the device's firmware row
    * (falling back to the first row carrying notes) for parent rows, the source
    * row itself for child rows. */
@@ -426,6 +462,25 @@ export default function Updates() {
     void firePlanSteps('Update selected devices (no reboot needed)', steps);
   }
 
+  /** Bulk action for individually-selected child updates (apps/packages/images).
+   * Each selected row becomes its OWN plan step with its exact prefilled input —
+   * deliberately NOT merged, because merging would drop conflicting per-row scalars
+   * (e.g. the os-package `package` name) and silently widen to "upgrade ALL". */
+  function applySelectedChildren() {
+    const actionable = selectedChildren.filter((r) => r.applyActionId);
+    if (actionable.length === 0) return;
+    const ok = window.confirm(
+      `Start update plans for ${actionable.length} specific update(s)? Each becomes a plan step and may require 2FA.`
+    );
+    if (!ok) return;
+    void firePlanSteps('Update selected updates', actionable.map((r) => ({
+      pluginId: r.pluginId,
+      actionId: r.applyActionId!,
+      deviceId: r.deviceId,
+      input: r.applyInput ?? {},
+    })));
+  }
+
   // --- "Check now" — force a fresh poll of the devices that report updates ------
   const [checking, setChecking] = useState(false);
   async function checkNow() {
@@ -566,10 +621,20 @@ export default function Updates() {
         <td className="px-1 py-2 align-middle">
           <span className="inline-block h-6 w-6" />
         </td>
-        {/* Empty selection cell — the table is selectable, so parent rows carry a
-         * checkbox column between chevron and data. Children are NOT selectable,
-         * but without this cell every child's content shifts one column left. */}
-        {ctx.selectable && <td className="px-3 py-2" />}
+        {/* Selection cell — children ARE individually selectable (bulk-update a
+         * few specific apps/packages), so render a real checkbox here; the cell is
+         * only present when the table itself is selectable. */}
+        {ctx.selectable && (
+          <td className="px-3 py-2">
+            <input
+              type="checkbox"
+              aria-label={`Select ${child.row?.name ?? 'update'}`}
+              checked={selectedChildKeys.has(child.key)}
+              onChange={() => toggleChild(child.key)}
+              className="h-3.5 w-3.5 rounded border-border text-foreground focus:ring-focus-ring"
+            />
+          </td>
+        )}
         {ctx.columns.map((col) => (
           <td key={col.key} className="overflow-hidden px-4 py-2 text-secondary">
             {childCell(col.key, child)}
@@ -705,6 +770,28 @@ export default function Updates() {
             {Object.entries(byKind).map(([k, n]) => (
               <span key={k} className="inline-flex items-center gap-1"><KindBadge kind={k} /> {n}</span>
             ))}
+          </div>
+        )}
+
+        {/* Child-update selection bar — appears when specific apps/packages are
+            ticked in expanded rows (separate from the device-level checkboxes). */}
+        {selectedChildren.length > 0 && canApply && !readOnly && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-info/60 px-3 py-1.5 text-sm">
+            <span className="font-medium text-secondary">{selectedChildren.length} update{selectedChildren.length === 1 ? '' : 's'} selected</span>
+            <button
+              type="button"
+              onClick={() => applySelectedChildren()}
+              className="rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-secondary hover:bg-background"
+            >
+              Update selected ({selectedChildren.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedChildKeys(new Set())}
+              className="ml-auto text-xs font-medium text-muted-foreground underline-offset-2 hover:text-secondary hover:underline"
+            >
+              Clear selection
+            </button>
           </div>
         )}
 
