@@ -177,8 +177,6 @@ export default function Devices() {
     mutationFn: (id: string) => api.deleteDevice(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['devices'] });
-      // The device's config-job history is deleted server-side too.
-      queryClient.invalidateQueries({ queryKey: ['configJobs'] });
     },
     onError: (err: Error) => setFormError(err.message),
   });
@@ -223,8 +221,6 @@ export default function Devices() {
     },
     onSuccess: ({ total, blockedByPlans, otherErrors }) => {
       queryClient.invalidateQueries({ queryKey: ['devices'] });
-      // Deleted devices' config-job history is removed server-side too.
-      queryClient.invalidateQueries({ queryKey: ['configJobs'] });
       if (blockedByPlans.length > 0 || otherErrors.length > 0) {
         const parts = [
           `Deleted ${total - blockedByPlans.length - otherErrors.length} of ${total} device(s).`,

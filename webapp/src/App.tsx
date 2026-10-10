@@ -7,7 +7,6 @@ import Devices from './pages/Devices';
 import DeviceDetail from './pages/DeviceDetail';
 import DeviceConfig from './pages/DeviceConfig';
 import Secrets from './pages/Secrets';
-import ConfigJobs from './pages/ConfigJobs';
 import Plans from './pages/Plans';
 import PlanDetail from './pages/PlanDetail';
 import Plugins from './pages/Plugins';
@@ -119,7 +118,6 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   { path: '/sites', permission: 'sites:read' },
   // Global readers OR personal-area users (own secrets) may open the page.
   { path: '/secrets', permission: ['secrets:read', 'secrets:self-write'] },
-  { path: '/config-jobs', permission: 'config-jobs:read' },
   { path: '/plans', permission: 'plans:read' },
   { path: '/plugins', permission: 'plugins:read' },
   { path: '/users', permission: 'users:read' },
@@ -188,7 +186,6 @@ export default function App() {
       <Route path="/devices/:deviceId" element={<Page permission="devices:read"><DeviceDetail /></Page>} />
       {/* Per-device Config page — dynamic plugin state + actions via plans. */}
       <Route path="/devices/:deviceId/config" element={<Page permission="devices:read"><DeviceConfig /></Page>} />
-      <Route path="/config-jobs" element={<Page permission="config-jobs:read"><ConfigJobs /></Page>} />
       <Route path="/plans" element={<Page permission="plans:read"><Plans /></Page>} />
       <Route path="/plans/:id" element={<Page permission="plans:read"><PlanDetail /></Page>} />
       <Route path="/plugins" element={<Page permission="plugins:read"><Plugins /></Page>} />

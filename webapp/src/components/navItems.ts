@@ -7,7 +7,6 @@ import {
   Radio,
   KeyRound,
   Laptop,
-  ListChecks,
   MapPin,
   Network,
   Puzzle,
@@ -122,8 +121,6 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/sites', label: 'Sites', icon: MapPin, requiresPermission: 'sites:read' },
   // Global readers OR personal-area users (own secrets) may open the page.
   { to: '/secrets', label: 'Secrets', icon: KeyRound, requiresPermission: ['secrets:read', 'secrets:self-write'] },
-  // Config jobs still queued/running surface as a badge (actionable).
-  { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks, requiresPermission: 'config-jobs:read', countKey: 'configJobs' },
   // Multi-device execution plans (create/execute additionally require configs:apply + 2FA).
   { to: '/plans', label: 'Plans', icon: RouteIcon, requiresPermission: 'plans:read', countKey: 'plans' },
   { to: '/plugins', label: 'Plugins', icon: Puzzle },
@@ -150,7 +147,6 @@ export const MY_ACCOUNT_ITEM: NavItem = { to: '/my-account', label: 'My Account'
 // Solid status hues — centralized in index.css (--status-*).
 export const BADGE_COLORS: Record<NavCountKey, string> = {
   notifications: 'bg-status-critical',
-  configJobs: 'bg-status-warn',
   plans: 'bg-status-info',
   certificates: 'bg-status-critical',
   updates: 'bg-status-ok',

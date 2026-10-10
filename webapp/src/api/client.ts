@@ -1535,7 +1535,7 @@ export interface NotificationPrefs {
 }
 
 /** Which nav items can carry a badge count (mirrors the API's /counts keys). */
-export type NavCountKey = 'notifications' | 'configJobs' | 'plans' | 'certificates' | 'updates' | 'securityChecks';
+export type NavCountKey = 'notifications' | 'plans' | 'certificates' | 'updates' | 'securityChecks';
 
 /** Per-user navigation preferences (order + hidden pages), additive over defaults. */
 export interface NavPreferences {
@@ -2559,18 +2559,6 @@ export interface PluginSettingsError {
   fieldErrors?: Record<string, string>;
 }
 
-export interface ConfigJob {
-  id: string;
-  deviceId: string;
-  /** The assignment that executes this job. */
-  pluginId?: string;
-  action: string;
-  status: string;
-  result?: Record<string, unknown>;
-  createdAt: string;
-  finishedAt?: string;
-}
-
 // --- Execution plans ---------------------------------------------------------
 
 /** One property of an action's input schema (JSON-Schema subset from the plugin). */
@@ -3148,11 +3136,6 @@ export const api = {
       `/devices/${deviceId}/telemetry?limit=${limit}`
     ),
   plugins: () => apiFetch<Plugin[]>('/plugins'),
-  // CREATE (POST), not a list read — named verb-first like every other mutation.
-  createConfigJob: (deviceId: string, body: unknown) =>
-    apiFetch<ConfigJob>(`/devices/${deviceId}/config-jobs`, { method: 'POST', body: JSON.stringify(body) }),
-  allConfigJobs: () => apiFetch<ConfigJob[]>('/config-jobs'),
-  getConfigJob: (jobId: string) => apiFetch<ConfigJob>(`/config-jobs/${jobId}`),
   secrets: () => apiFetch<Secret[]>('/secrets'),
   secretProviders: () => apiFetch<SecretProvider[]>('/secrets/providers'),
   createSecret: (body: {
