@@ -27,9 +27,11 @@ export default {
           // project (→ one App row) + one standalone redis (→ its own row). So the
           // plugin must emit exactly 2 container rows, both RUNNING. Images: all 4
           // fixture images survive buildImageRows (dangling ones named by short id).
+          // The running gauge counts REAL containers (0.7.1), not App rows — all
+          // three fixtures are State=running → 3.
           const containers = j.metrics?.containers;
           rec.check('X', 'containers[] ingested from mock (2 App rows)', Array.isArray(containers) && containers.length === 2, JSON.stringify(containers?.length));
-          rec.check('X', 'docker.containers.running === 2', j.metrics?.['docker.containers.running'] === 2, JSON.stringify(j.metrics?.['docker.containers.running']));
+          rec.check('X', 'docker.containers.running === 3', j.metrics?.['docker.containers.running'] === 3, JSON.stringify(j.metrics?.['docker.containers.running']));
           rec.check('X', 'images[] ingested from mock (4 rows)', Array.isArray(j.metrics?.images) && j.metrics.images.length === 4, JSON.stringify(j.metrics?.images?.length));
         },
       },

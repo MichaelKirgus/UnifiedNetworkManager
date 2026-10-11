@@ -2268,13 +2268,17 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     if (!collectApps && (label === 'app.query' || label === 'docker.network.query' || label === 'app.image.query')) continue;
     if (!collectVms && label === 'vm.query') continue;
     if (!collectGpus && label === 'device.get_gpus') continue;
-    if (!collectInventory && ['interface.query', 'system.dmidecode_info', 'staticroute.query', 'pool.dataset.query', 'disk.query', 'system.datastore', 'boot.get_disks'].includes(label)) continue;
+    // device.get_gpus is gated on collectInventory too (AND collectGpus) — skip it
+    // here for the same reason as the other inventory RPCs.
+    if (!collectInventory && ['interface.query', 'system.dmidecode_info', 'staticroute.query', 'pool.dataset.query', 'disk.query', 'system.datastore', 'boot.get_disks', 'device.get_gpus'].includes(label)) continue;
     if (storageDebugLogged.has(`${host}|${label}`)) continue;
     storageDebugLogged.add(`${host}|${label}`);
     if (r.status === 'rejected') {
       console.warn(`[storage-debug] ${label} failed: ${errMsg(r.reason)}`);
     } else if (!Array.isArray(r.value) && label !== 'system.datastore') {
-      console.warn(`[storage-debug] ${label} returned non-array: ${JSON.stringify(r.value).slice(0, 200)}`);
+      // r.value is undefined when the call was skipped (option off / metrics-only
+      // poll) — JSON.stringify(undefined) is `undefined`, and .slice on it throws.
+      console.warn(`[storage-debug] ${label} returned non-array: ${(JSON.stringify(r.value) ?? 'undefined').slice(0, 200)}`);
     } else {
       const n = Array.isArray(r.value) ? r.value.length : Object.keys((r.value ?? {}) as object).length;
       console.log(`[storage-debug] ${label} ok (${n} entries)`);
