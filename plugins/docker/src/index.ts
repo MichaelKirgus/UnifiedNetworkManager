@@ -25,6 +25,7 @@ import {
   StateSection,
   clampInt,
   isTransientTransportError,
+  collectGpuRows,
   createNotifier,
   createPluginLogger,
   createPluginServer,
@@ -33,6 +34,7 @@ import {
   probeHandler,
   readSettings,
   resolvePluginIdentity,
+  resolveSshCredentials,
   stateHandler,
   textMetric,
   validateInput,
@@ -42,7 +44,7 @@ import path from 'node:path';
 
 import { DockerClientOptions, DockerTlsMaterial, engineVersion, listContainers, listImages } from './client';
 import { buildContainerRows, buildImageRows, ComposeProjectSummary, ContainerRow as UnmContainerRow, DockerContainerRaw, DockerImageRaw, ImageRow, summarizeComposeProjects } from './inventory';
-import { registry as actionRegistry, DockerActionContext } from './actions';
+import { registry as actionRegistry, sshPool, DockerActionContext } from './actions';
 import { buildPlan, PlanningError } from './plan';
 import { collectProbeStats, collectProbeStates, ProbeContainerStat, ProbeContainerState } from './probe';
 import { mirrorDockerContainers, ContainerCondition } from './notifications';
@@ -95,7 +97,14 @@ const identity = resolvePluginIdentity({
   // renders a per-project status line ("name running (27/29)"). Pure in-memory
   // grouping over the container list already fetched every poll — no extra
   // Engine API calls, so it is as cheap as the v0.7.1 container gauges.
-  version: '0.8.0',
+  // 0.9.0 — GPU inventory + live metrics: emits the generic `gpus[]` metric at
+  // the inventory cadence via a shared SDK probe script (PCI enumeration catches
+  // NVIDIA/AMD/Intel incl. enabled iGPUs; nvidia-smi / rocm-smi add util, VRAM,
+  // temp, power and core clocks) run over an OPTIONAL bound ssh slot — the Engine
+  // API exposes no host-GPU endpoint. Gated by the new `collectGpus` option,
+  // DEFAULT OFF: most Docker hosts are GPU-less servers/VMs, so off = zero SSH
+  // traffic and the key is omitted entirely (no wipe).
+  version: '0.9.0',
   vendors: ['generic'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'probe'],
 });
@@ -142,6 +151,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       "Push non-running containers (exited / dead / paused / created) into UNM's notification center. Entries clear automatically when the container recovers or disappears. The transient 'restarting' state is never mirrored.",
+  },
+  {
+    key: 'collectGpus',
+    label: 'Collect GPU data (requires SSH slot)',
+    type: 'boolean' as const,
+    default: false,
+    description:
+      "Enumerate the host's GPUs (NVIDIA / AMD / Intel, incl. enabled iGPUs) and read live counters via nvidia-smi / rocm-smi during inventory polls — over an OPTIONAL bound ssh slot, since the Engine API has no host-GPU endpoint. OFF by default: most Docker hosts are GPU-less servers/VMs; off = zero SSH traffic.",
   },
 ];
 
@@ -414,6 +431,31 @@ app.post('/monitoring', async (req, res) => {
       // omitted on metrics-only polls (absent = keep stored rows).
       metrics['containers'] = result.rows;
     }
+    // GPUs — the Engine API has NO host-GPU endpoint, so this runs over an
+    // OPTIONAL bound ssh slot using the shared SDK probe script (PCI + vendor
+    // tools in one round-trip). Gated by `collectGpus` (DEFAULT OFF) and on
+    // inventory-due polls only. null = exec failed → omit the key (no wipe);
+    // an empty array is authoritative (host genuinely has no GPUs).
+    if (full && settings.collectGpus === true) {
+      const gpuCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
+      if (gpuCreds) {
+        try {
+          const sshHost = managementAddress.trim().replace(/^https?:\/\//i, '').split('/')[0].split(':')[0];
+          const c = await sshPool.get(sshHost, 22, gpuCreds);
+          // Hard cap well under the API's 30 s /monitoring budget — a slow host
+          // simply yields no GPU rows this cycle (the pooled session stays open).
+          const gpus = await Promise.race([
+            collectGpuRows({ exec: (cmd, t) => c.exec(cmd, gpuCreds, t) }),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 8_000).unref()),
+          ]);
+          // null = probe failed/timed out → omit (no wipe); an EMPTY array is
+          // authoritative — the host genuinely has no GPUs and stale rows clear.
+          if (gpus !== null) metrics['gpus'] = gpus;
+        } catch {
+          /* best-effort — a failed GPU probe must never sink the poll */
+        }
+      }
+    }
     if (result.engineVersionText) metrics['docker.version'] = result.engineVersionText;
     // The generic images[] key — ingested into the cross-device `docker_images`
     // table (Containers page → collapsible images panel). Emitted even when
@@ -430,12 +472,18 @@ app.post('/monitoring', async (req, res) => {
       mirrorDockerContainers(notifier, managementAddress || 'local', deviceId, result.conditions);
     }
 
+    // The gpus table descriptor is only advertised when rows exist — the
+    // static catalog covers everything else.
+    const descriptors = Array.isArray(metrics['gpus']) && (metrics['gpus'] as unknown[]).length > 0
+      ? [...METRIC_DESCRIPTORS, { key: 'gpus', label: 'GPUs', type: 'string' as const, visualization: 'table' as const, columns: ['name', 'vendor', 'slot', 'driver', 'driverVersion', 'vramBytes', 'utilPercent', 'tempCelsius'], group: 'GPU' }]
+      : METRIC_DESCRIPTORS;
+
     res.status(200).json({
       deviceId,
       collectedAt: new Date().toISOString(),
       health: result.health,
       metrics,
-      metricDescriptors: METRIC_DESCRIPTORS,
+      metricDescriptors: descriptors,
       // Echo back the effective settings we received — proof that the
       // API→plugin settings injection loop works end to end.
       activeSettings: {

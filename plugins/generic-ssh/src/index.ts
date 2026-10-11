@@ -89,7 +89,12 @@ const identity = resolvePluginIdentity({
   // images.prune {all?} (remove unused images — dangling by default, ALL unused
   // with all=true). Generic contract: any plugin advertising these ids gets the
   // same UI buttons.
-  version: '0.3.0',
+  // 0.4.0 — GPU inventory + live metrics: emits the generic `gpus[]` metric at
+  // the inventory cadence (PCI enumeration over sysfs catches NVIDIA/AMD/Intel
+  // incl. enabled iGPUs; nvidia-smi / rocm-smi add util, VRAM, temp, power and
+  // core clocks when present). Gated by the new `collectGpus` option so stacks
+  // of GPU-less servers/VMs skip the probe entirely.
+  version: '0.4.0',
   vendors: ['linux'],
   // monitoring + inventory: two-tier cadence collection over SSH (live metrics
   // every poll; interfaces/ARP/routes/filesystems/disks at the 15-min interval).
@@ -153,6 +158,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       'Run per-appliance security checks during inventory polls (file integrity of important config files, unsuccessful logins, active rate limiting / brute-force protection, account hygiene). Findings appear on the cross-device Security page.',
+  },
+  {
+    key: 'collectGpus',
+    label: 'Collect GPU data',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      "Enumerate GPUs (NVIDIA / AMD / Intel, incl. enabled iGPUs) and read live counters via nvidia-smi / rocm-smi during inventory polls. Disable on stacks of GPU-less servers or VMs to skip the probe entirely.",
   },
   {
     key: 'securityWatchedFiles',
@@ -386,7 +399,11 @@ app.post('/monitoring', async (req, res) => {
       return;
     }
 
-    const result = await collectMonitoring(host, backend, { collectInventory: collectInventoryFlag });
+    const result = await collectMonitoring(host, backend, {
+      collectInventory: collectInventoryFlag,
+      // GPU probe rides the inventory window (one combined SSH round-trip).
+      collectGpus: settings.collectGpus !== false,
+    });
 
     // Security checks ride the INVENTORY window (like updates): file-integrity
     // baselines + failed-login/rate-limit/account scans are comparatively heavy,

@@ -84,6 +84,10 @@ export type { UpdateKind, UpdateRow, UpdateExecBackend, UpgradablePackage, PmAda
 // Security checks (capability 'securityChecks'): row contract for the cross-device
 // Security page. See security.ts.
 export type { SecurityCheckKind, SecurityCheckRow } from './security';
+// GPU detection + live metrics (generic `gpus[]` metric): PCI enumeration over
+// sysfs + nvidia-smi / rocm-smi parsers — vendor-neutral (NVIDIA/AMD/Intel). See gpu.ts.
+export { collectGpuRows, buildGpuProbeScript, parsePciGpuSection, parseNvidiaSmiSection, normalizeNvidiaSlot, detectGpuVendor, gpuNameFromPci } from './gpu';
+export type { GpuRow, GpuExecBackend, PciGpuEntry } from './gpu';
 // Generic plugin state store — persistent opaque JSON blobs in the UNM database
 // across polls/restarts (baselines, counters, TOFU fingerprints). See stateStore.ts.
 export { createPluginStateStore } from './stateStore';

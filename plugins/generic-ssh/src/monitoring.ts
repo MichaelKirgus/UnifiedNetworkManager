@@ -14,8 +14,8 @@
  * stored rows, while a present-but-empty array is authoritative.
  */
 
-import { INVENTORY_INTERVAL_MS, buildDeviceTimeInfo, ianaZoneToOffsetMinutes, listUpgradablePackages } from '@unm/plugin-sdk';
-import type { MetricDescriptor, UpdateRow } from '@unm/plugin-sdk';
+import { collectGpuRows, INVENTORY_INTERVAL_MS, buildDeviceTimeInfo, ianaZoneToOffsetMinutes, listUpgradablePackages } from '@unm/plugin-sdk';
+import type { GpuRow, MetricDescriptor, UpdateRow } from '@unm/plugin-sdk';
 import type { CommandRunner } from './client/privilege';
 import { collectDockerInventory } from './containers';
 import type {
@@ -691,7 +691,7 @@ export interface MonitoringResult {
 export async function collectMonitoring(
   hostKey: string,
   backend: CommandRunner,
-  opts: { collectInventory: boolean }
+  opts: { collectInventory: boolean; collectGpus?: boolean }
 ): Promise<MonitoringResult> {
   const live = await collectLive(backend);
   const metrics: Record<string, unknown> = { ...live.metrics };
@@ -737,6 +737,15 @@ export async function collectMonitoring(
       const cont = await collectDockerInventory(backend);
       if (cont.containers !== null) metrics['containers'] = cont.containers;
       if (cont.images !== null) metrics['images'] = cont.images;
+      // GPUs (DeviceDetail GPU cards): fresh on every inventory poll, gated by
+      // the `collectGpus` option so GPU-less stacks skip the probe entirely.
+      // null = exec failed → omit the key (no wipe). A present-but-empty array
+      // is authoritative (the host genuinely has no display controllers) and
+      // wipes stale rows at ingest. One combined SSH round-trip (PCI + vendor tools).
+      if (opts.collectGpus !== false) {
+        const gpus = await collectGpuRows(backend).catch(() => null);
+        if (gpus !== null) metrics['gpus'] = gpus;
+      }
       metrics['arp'] = inventory.arp;
       if (inventory.ndp.length > 0) metrics['ndp'] = inventory.ndp;
       metrics['routes'] = inventory.routes;
@@ -840,6 +849,12 @@ export function descriptorsFromMetrics(metrics: Record<string, unknown>): Metric
     if (Array.isArray(v) && v.length > 0) {
       push({ key, label, type: 'string', visualization: 'table', group: 'Inventory', columns, intervalMs: INVENTORY_INTERVAL_MS });
     }
+  }
+
+  // GPUs get their own group so the DeviceDetail page renders a dedicated
+  // "GPU" section (name/vendor/driver + live counters when vendor tools exist).
+  if (Array.isArray(metrics['gpus']) && metrics['gpus'].length > 0) {
+    push({ key: 'gpus', label: 'GPUs', type: 'string', visualization: 'table', group: 'GPU', columns: ['name', 'vendor', 'slot', 'driver', 'driverVersion', 'vramBytes', 'utilPercent', 'tempCelsius'], intervalMs: INVENTORY_INTERVAL_MS });
   }
 
   // Fallback: any other numeric metric becomes a text card so nothing is lost.

@@ -1578,6 +1578,60 @@ export const dockerImages = pgTable(
   }
 );
 
+// One row per GPU as reported by a plugin's `gpus` metric. Powers the
+// per-device GPU cards on DeviceDetail (rendered via the generic table
+// MetricView — no dedicated page yet). Same upsert-per-poll + delete-on-absent
+// lifecycle as containers/vms: a removed card must vanish, not linger until the
+// 24h sweep. `slot` is part of the PK — one row per (device, plugin, PCI slot);
+// a device without GPU data contributes no rows.
+export const gpus = pgTable(
+  'gpus',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Human-readable card name (e.g. "NVIDIA GeForce RTX 3080", "AMD Radeon RX 6800",
+    // "Intel UHD Graphics 770"). Falls back to the PCI slot when unknown.
+    name: text('name').notNull(),
+    // NVIDIA | AMD | INTEL | UNKNOWN — vendor family (case-insensitive at emit).
+    vendor: text('vendor').notNull().default('UNKNOWN'),
+    // PCI address, e.g. "0000:41:00.0" — the stable identity of a card.
+    slot: text('slot').notNull(),
+    // Kernel driver bound to the device (nvidia, amdgpu, i915, xe, ...).
+    driver: text('driver'),
+    // Driver version string when the vendor tool reports one (e.g. nvidia-smi's
+    // "Driver Version: 550.90.07"); null for sysfs-only detection.
+    driverVersion: text('driverVersion'),
+    // Total VRAM in bytes (null = unknown / no dedicated memory).
+    vramBytes: doublePrecision('vramBytes'),
+    // Live utilization % (GPU core) — null when the vendor tool is unavailable
+    // or the card has no such counter.
+    utilPercent: integer('utilPercent'),
+    // VRAM utilization % (NVIDIA only; AMD/Intel expose no equivalent).
+    memUtilPercent: integer('memUtilPercent'),
+    // Temperature in °C.
+    tempCelsius: integer('tempCelsius'),
+    // Power draw in watts.
+    powerWatts: doublePrecision('powerWatts'),
+    // Current core clock in MHz (null = not reported / iGPU).
+    coreClockMhz: integer('coreClockMhz'),
+    // Max supported core clock in MHz.
+    maxCoreClockMhz: integer('maxCoreClockMhz'),
+    // Plugin-specific details (JSON object) stored verbatim — e.g. TrueNAS's
+    // available_to_host / uses_system_critical_devices, per-container device requests.
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkGpus: primaryKey({
+        name: 'gpus_pkey',
+        columns: [table.deviceId, table.pluginId, table.slot],
+      }),
+      idxGpusDevice: index('idx_gpus_device').on(table.deviceId),
+    };
+  }
+);
+
 // One row per virtual machine as reported by a plugin's `vms` metric. Powers
 // the cross-device VMs page (TrueNAS SCALE VMs today; any plugin may emit the
 // generic key — e.g. a future Proxmox plugin). Same upsert-per-poll +

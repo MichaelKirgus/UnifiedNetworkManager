@@ -27,8 +27,9 @@ export interface DockerActionContext {
 }
 
 // One shared SSH pool for the whole plugin process — deploy-compose reuses a
-// live session per host instead of re-authenticating on every step.
-const sshPool = createSshPool();
+// live session per host instead of re-authenticating on every step. Exported so
+// /monitoring's GPU probe (collectGpus option) reuses the SAME pooled sessions.
+export const sshPool = createSshPool();
 process.on('SIGTERM', () => sshPool.closeAll());
 process.on('SIGINT', () => sshPool.closeAll());
 

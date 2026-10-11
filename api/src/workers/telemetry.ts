@@ -52,7 +52,7 @@ const INVENTORY_METRIC_KEYS = [
   'networks', 'arp', 'ndp', 'hosts', 'dhcpLeases', 'wlanClients', 'macTable', 'dockerHosts', 'vmHosts',
   'tunnels', 'routes', 'firewallRules', 'certificates', 'services',
   'wifiNetworks', 'wifiAirtime', 'wifiRadios', 'wifiNeighbors',
-  'ports', 'filesystems', 'disks', 'containers', 'images', 'vms', 'updates',
+  'ports', 'filesystems', 'disks', 'containers', 'images', 'vms', 'gpus', 'updates',
   'mailDomains', 'mailMailboxes', 'mailAliases',
 ] as const;
 
@@ -2085,6 +2085,97 @@ async function ingestInventory(
       }
     }
 
+    // --- GPUs (DeviceDetail GPU cards) --------------------------------------
+    // Generic key — any plugin may emit it:
+    //   gpus[] { name, vendor?, slot, driver?, driverVersion?, vramBytes?,
+    //            utilPercent?, memUtilPercent?, tempCelsius?, powerWatts?,
+    //            coreClockMhz?, maxCoreClockMhz?, extra? }
+    // Same CONFIG-object lifecycle as containers/vms: upsert-per-poll +
+    // delete-on-absent (a removed card must vanish), present-but-empty =
+    // authoritative wipe. `slot` (PCI address) is the stable identity and part
+    // of the PK; live counters are refreshed in place on every inventory poll.
+    const rawGpus = Array.isArray(metrics['gpus']) ? (metrics['gpus'] as unknown[]) : null;
+    if (rawGpus !== null) {
+      const gpuNumOrNull = (v: unknown): number | null =>
+        typeof v === 'number' && Number.isFinite(v) ? v : null;
+      const gpuIntOrNull = (v: unknown): number | null =>
+        typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : null;
+      const values: {
+        deviceId: string; pluginId: string; name: string; vendor: string; slot: string;
+        driver: string | null; driverVersion: string | null; vramBytes: number | null;
+        utilPercent: number | null; memUtilPercent: number | null; tempCelsius: number | null;
+        powerWatts: number | null; coreClockMhz: number | null; maxCoreClockMhz: number | null;
+        extra: string; collectedAt: string;
+      }[] = [];
+      for (const raw of rawGpus) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        // slot is the stable identity + part of the conflict key — a row without
+        // one cannot be upserted or matched, so skip it (defensive: a plugin bug
+        // must not wipe this device's GPU rows).
+        const slot = typeof r['slot'] === 'string' ? (r['slot'] as string).trim() : '';
+        if (!slot) continue;
+        values.push({
+          deviceId,
+          pluginId,
+          name: typeof r['name'] === 'string' && (r['name'] as string).trim() !== '' ? (r['name'] as string).trim() : slot,
+          vendor: typeof r['vendor'] === 'string' && (r['vendor'] as string).trim() !== '' ? (r['vendor'] as string).trim().toUpperCase() : 'UNKNOWN',
+          slot,
+          driver: typeof r['driver'] === 'string' && (r['driver'] as string).trim() !== '' ? (r['driver'] as string).trim() : null,
+          driverVersion: typeof r['driverVersion'] === 'string' && (r['driverVersion'] as string).trim() !== '' ? (r['driverVersion'] as string).trim() : null,
+          vramBytes: gpuNumOrNull(r['vramBytes']),
+          utilPercent: gpuIntOrNull(r['utilPercent']),
+          memUtilPercent: gpuIntOrNull(r['memUtilPercent']),
+          tempCelsius: gpuIntOrNull(r['tempCelsius']),
+          powerWatts: gpuNumOrNull(r['powerWatts']),
+          coreClockMhz: gpuIntOrNull(r['coreClockMhz']),
+          maxCoreClockMhz: gpuIntOrNull(r['maxCoreClockMhz']),
+          extra: extraOf(r),
+          collectedAt,
+        });
+      }
+      const gpuByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        gpuByKey.set(`${v.deviceId}|${v.pluginId}|${v.slot}`, v);
+      }
+      if (gpuByKey.size > 0) {
+        await db.insert(schema.gpus).values(Array.from(gpuByKey.values())).onConflictDoUpdate({
+          target: [schema.gpus.deviceId, schema.gpus.pluginId, schema.gpus.slot],
+          set: {
+            name: sql`excluded.name`,
+            vendor: sql`excluded.vendor`,
+            driver: sql`excluded.driver`,
+            "driverVersion": sql`excluded."driverVersion"`,
+            "vramBytes": sql`excluded."vramBytes"`,
+            "utilPercent": sql`excluded."utilPercent"`,
+            "memUtilPercent": sql`excluded."memUtilPercent"`,
+            "tempCelsius": sql`excluded."tempCelsius"`,
+            "powerWatts": sql`excluded."powerWatts"`,
+            "coreClockMhz": sql`excluded."coreClockMhz"`,
+            "maxCoreClockMhz": sql`excluded."maxCoreClockMhz"`,
+            extra: sql`excluded.extra`,
+            collectedAt: sql`excluded."collectedAt"`,
+          },
+        });
+      }
+      const seenGpuSlots = new Set(values.map((v) => v.slot));
+      if (seenGpuSlots.size > 0) {
+        await db.delete(schema.gpus)
+          .where(and(
+            eq(schema.gpus.deviceId, deviceId),
+            eq(schema.gpus.pluginId, pluginId),
+            notInArray(schema.gpus.slot, Array.from(seenGpuSlots))
+          ));
+      } else if (rawGpus.length === 0) {
+        // Present-but-EMPTY is the authoritative wipe — same contract as containers.
+        await db.delete(schema.gpus)
+          .where(and(
+            eq(schema.gpus.deviceId, deviceId),
+            eq(schema.gpus.pluginId, pluginId)
+          ));
+      }
+    }
+
     // --- Device updates (Updates page) --------------------------------------
     // Generic key — any plugin advertising capability 'updates' may emit it:
     //   updates[] { name, kind, currentVersion?, latestVersion?, available,
@@ -2303,6 +2394,7 @@ async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
   await db.delete(schema.containers).where(lt(schema.containers.collectedAt, cutoff));
   await db.delete(schema.dockerImages).where(lt(schema.dockerImages.collectedAt, cutoff));
   await db.delete(schema.vms).where(lt(schema.vms.collectedAt, cutoff));
+  await db.delete(schema.gpus).where(lt(schema.gpus.collectedAt, cutoff));
   await db.delete(schema.deviceUpdates).where(lt(schema.deviceUpdates.collectedAt, cutoff));
   await db.delete(schema.deviceSecurityChecks).where(lt(schema.deviceSecurityChecks.collectedAt, cutoff));
   await db.delete(schema.mailDomains).where(lt(schema.mailDomains.collectedAt, cutoff));

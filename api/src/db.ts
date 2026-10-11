@@ -1045,6 +1045,34 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_vms_device ON vms ("deviceId")`);
 
+  // GPUs inventory table (DeviceDetail GPU cards) — one row per card, upserted
+  // per poll from the plugin's `gpus` metric. Same lifecycle as containers/vms
+  // (upsert + delete-on-absent + 24h sweep). PK includes the PCI slot so a
+  // multi-GPU host keeps one row per card; live counters (util/temp/power/
+  // clocks) are refreshed in place on every inventory poll.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS gpus (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      vendor TEXT NOT NULL DEFAULT 'UNKNOWN',
+      slot TEXT NOT NULL,
+      driver TEXT,
+      "driverVersion" TEXT,
+      "vramBytes" DOUBLE PRECISION,
+      "utilPercent" INTEGER,
+      "memUtilPercent" INTEGER,
+      "tempCelsius" INTEGER,
+      "powerWatts" DOUBLE PRECISION,
+      "coreClockMhz" INTEGER,
+      "maxCoreClockMhz" INTEGER,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", slot)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_gpus_device ON gpus ("deviceId")`);
+
   // Device updates inventory table (Updates page) — one row per available update,
   // upserted per poll from the plugin's `updates` metric (capability 'updates').
   // Same lifecycle as containers (upsert + delete-on-absent + 24h sweep). Only

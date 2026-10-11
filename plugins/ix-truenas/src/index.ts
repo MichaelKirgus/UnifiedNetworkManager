@@ -42,7 +42,9 @@ import {
   parseProbeTarget,
   CertificateRow,
   buildDeviceTimeInfo,
+  collectGpuRows,
   isUpdateAvailable,
+  type GpuRow,
   type SshCredentials,
   type SshTerminalSession,
   type UpdateRow,
@@ -306,7 +308,12 @@ const identity = resolvePluginIdentity({
   // 0.26.0 — /monitoring now reports `healthReasons` (SDK contract) for every
   // non-ok health: worst active alerts, OFFLINE/DEGRADED pools, partial core-
   // call failures. The UNM webapp shows them in the device status badge tooltip.
-  version: '0.26.0',
+  // 0.27.0 — GPU inventory + live metrics: emits the generic `gpus[]` metric at
+  // the inventory cadence from the appliance's own PCI-based `device.get_gpus`
+  // (NVIDIA/AMD/Intel, incl. enabled iGPUs), enriched with live counters via
+  // nvidia-smi / rocm-smi over the bound SSH slot when present. Gated by the new
+  // `collectGpus` option so GPU-less appliances skip both the RPC and the probe.
+  version: '0.27.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -404,6 +411,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       'Collect virtual machines (vm.query) for the VMs page — including their NIC MAC addresses (inserted into the Hosts page with source "VM") and live guest IPs via `virsh domifaddr` over SSH when an ssh slot is bound. Disable on hosts whose VMs are monitored by another plugin: no vm.query RPC traffic is sent to the appliance and previously collected rows are cleared.',
+  },
+  {
+    key: 'collectGpus',
+    label: 'Collect GPU data',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      "Enumerate GPUs (NVIDIA / AMD / Intel, incl. enabled iGPUs) via the appliance's own PCI inventory and read live counters over SSH when a slot is bound. Disable on GPU-less appliances to skip the probe entirely.",
   },
   {
     key: 'uploadViaSftp',
@@ -2074,6 +2089,9 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // VM collection toggle — off = skip vm.query + the SSH virsh enrichment and
   // emit empty vms[]/vmHosts[] to clear stale rows (same contract as apps).
   const collectVms = settings.collectVms !== false;
+  // GPU collection toggle — off = no device.get_gpus RPC, no SSH vendor-tool
+  // probe, key omitted entirely (no wipe) so GPU-less stacks stay clean.
+  const collectGpus = settings.collectGpus !== false;
   // Window-based scheduling: the API sends collectInventory=false on metrics-only
   // polls. The health trio (system.info / pool.query / alert.list) ALWAYS runs so
   // device status stays live; the slow inventory RPCs + their metric keys are
@@ -2109,7 +2127,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // before error handling. The last three are best-effort extras (networks
   // inventory + static routes + board serial/model) — their failure does NOT
   // count toward health.
-  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes, vmsRes, updateAvailRes, updateConfigRes, bootStateRes, bootEnvsRes] = await Promise.allSettled([
+  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes, vmsRes, updateAvailRes, updateConfigRes, bootStateRes, bootEnvsRes, gpusRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('alert.list', [], creds),
@@ -2174,6 +2192,12 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     //     legacy `bootenv.*` namespace — queryBootEnvs falls back automatically.
     collectInventory ? client.call<Record<string, unknown>>('boot.get_state', [], creds) : Promise.resolve(undefined),
     collectInventory ? (async () => { const ctx: TruenasActionContext = { client, creds }; return queryBootEnvs(ctx); })() : Promise.resolve(undefined),
+    // GPU inventory (best-effort — never count toward health). The appliance's
+    // OWN PCI-based enumeration: one row per display controller with vendor +
+    // slot + host-availability flags. Skipped entirely when the `collectGpus`
+    // option is off — no RPC traffic at all. Missing method on older releases →
+    // key omitted (no wipe).
+    collectInventory && collectGpus ? client.call<Record<string, unknown>[]>('device.get_gpus', [], creds) : Promise.resolve(undefined),
   ]);
 
   // Shares-page live sessions (best-effort — never count toward health). The
@@ -2238,10 +2262,12 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     ['docker.network.query', dockerNetsRes],
     ['app.image.query', appImagesRes],
     ['vm.query', vmsRes],
+    ['device.get_gpus', gpusRes],
   ] as const) {
     // Not called when collection is disabled — don't log their "outcome".
     if (!collectApps && (label === 'app.query' || label === 'docker.network.query' || label === 'app.image.query')) continue;
     if (!collectVms && label === 'vm.query') continue;
+    if (!collectGpus && label === 'device.get_gpus') continue;
     if (!collectInventory && ['interface.query', 'system.dmidecode_info', 'staticroute.query', 'pool.dataset.query', 'disk.query', 'system.datastore', 'boot.get_disks'].includes(label)) continue;
     if (storageDebugLogged.has(`${host}|${label}`)) continue;
     storageDebugLogged.add(`${host}|${label}`);
@@ -2823,6 +2849,92 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     metrics['vmHosts'] = vmHosts;
   }
 
+  // --- device.get_gpus: GPU inventory (+ live counters over SSH) -------------
+  // Best-effort extra — never counts toward health. The appliance's own PCI
+  // enumeration is the authoritative INVENTORY (works without any vendor tool);
+  // when an ssh slot is bound we additionally run the shared SDK probe script
+  // (nvidia-smi / rocm-smi + sysfs) and merge its live counters onto the same
+  // rows by normalized PCI slot. Emitted even when EMPTY so a removed GPU
+  // vanishes on the next poll (present-but-empty is authoritative; an absent
+  // key would not wipe). Skipped entirely while collectGpus is off — no RPC or
+  // SSH traffic at all.
+  if (!collectGpus) {
+    /* option off — omit the key entirely (no wipe, zero GPU traffic) */
+  } else if (collectInventory && gpusRes.status === 'fulfilled' && Array.isArray(gpusRes.value)) {
+    const rawGpus = gpusRes.value as Record<string, unknown>[];
+    // TrueNAS reports addr.pci_slot as "domain:bus:device" (function omitted,
+    // e.g. "0000:00:02"); the SDK probe uses sysfs slots ("0000:41:00.0").
+    // Normalize to the full sysfs form for the PK + merge key while keeping
+    // the appliance's own value in extra.pci_slot_raw. Idempotent on input
+    // that is already normalized (the SSH-merge lookup re-normalizes rows).
+    const normSlot = (s?: string | null): string => {
+      if (!s) return '';
+      const t = s.trim().toLowerCase();
+      // Sysfs form is "domain:bus:device.fn" (TWO colons, one dot — see the
+      // SDK's parsePciGpuSection slot regex). TrueNAS omits the function.
+      let m = t.match(/^([0-9a-f]{4}):([0-9a-f]{2}):([0-9a-f]{2})(?:\.([0-7]))?$/); // domain:bus:device[.fn]
+      if (m) return `${m[1]}:${m[2]}:${m[3]}${m[4] ? `.${m[4]}` : '.0'}`;
+      m = t.match(/^([0-9a-f]{2}):([0-9a-f]{2})(?:\.([0-7]))?$/); // bus:device[.fn] (no domain)
+      if (m) return `0000:${m[1]}:${m[2]}${m[3] ? `.${m[3]}` : '.0'}`;
+      return t;
+    };
+    const rows: GpuRow[] = rawGpus.map((g) => {
+      const addr = (g['addr'] ?? {}) as Record<string, unknown>;
+      const rawSlot = pickString(addr, ['pci_slot']) ?? '';
+      // Store the normalized sysfs form — stable PK at ingest + merge key for
+      // the SSH live counters; keep the appliance's own value in extra.
+      const slot = normSlot(rawSlot) || rawSlot;
+      return {
+        name: pickString(g, ['description']) || `GPU ${slot}`,
+        vendor: pickString(g, ['vendor']) ?? undefined,
+        slot,
+        extra: {
+          pci_slot_raw: rawSlot || null,
+          available_to_host: g['available_to_host'] === true,
+          uses_system_critical_devices: g['uses_system_critical_devices'] === true,
+          ...(typeof g['critical_reason'] === 'string' ? { critical_reason: g['critical_reason'] } : {}),
+        },
+      };
+    });
+    // Live counters over the bound SSH slot (best-effort — a missing slot or a
+    // failed exec simply leaves the sysfs/RPC fields as-is). One combined
+    // round-trip via the shared SDK probe script.
+    const gpuSshCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
+    if (gpuSshCreds) {
+      try {
+        const c = await sshPool.get(host, hostSshPort(host), gpuSshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host, hostSshPort(host)) });
+        const liveRows = await collectGpuRows({ exec: (cmd, t) => c.exec(cmd, gpuSshCreds, t) });
+        if (liveRows !== null) {
+          for (const lr of liveRows) {
+            const target = rows.find((r) => normSlot(r.slot) === lr.slot);
+            if (!target) continue; // RPC row is authoritative for identity
+            // The appliance's description beats the SDK's "VENDOR GPU (slot)"
+            // FALLBACK name — only a real marketing name (nvidia-smi / rocm-smi
+            // / curated PCI table) may replace it. Vendor/driver fill in when
+            // the RPC row lacks them (TrueNAS reports neither for some cards).
+            if (!target.vendor && lr.vendor && lr.vendor !== 'UNKNOWN') target.vendor = lr.vendor;
+            if (!target.driver && lr.driver) target.driver = lr.driver;
+            if (lr.driverVersion) target.driverVersion = lr.driverVersion;
+            if (typeof lr.vramBytes === 'number') target.vramBytes = lr.vramBytes;
+            if (typeof lr.utilPercent === 'number') target.utilPercent = lr.utilPercent;
+            if (typeof lr.memUtilPercent === 'number') target.memUtilPercent = lr.memUtilPercent;
+            if (typeof lr.tempCelsius === 'number') target.tempCelsius = lr.tempCelsius;
+            if (typeof lr.powerWatts === 'number') target.powerWatts = lr.powerWatts;
+            if (typeof lr.coreClockMhz === 'number') target.coreClockMhz = lr.coreClockMhz;
+            if (typeof lr.maxCoreClockMhz === 'number') target.maxCoreClockMhz = lr.maxCoreClockMhz;
+            // A REAL marketing name from nvidia-smi / rocm-smi beats the PCI
+            // description — but never the SDK's "VENDOR GPU (slot)" fallback,
+            // which is strictly less informative than the appliance's own text.
+            if (lr.name && !/^[A-Z]+ GPU \(/.test(lr.name)) target.name = lr.name;
+          }
+        }
+      } catch {
+        /* best-effort — a failed GPU probe must never sink the poll */
+      }
+    }
+    metrics['gpus'] = rows;
+  }
+
   // --- system.dmidecode_info: board serial + real hardware model fallback ---
   // system.info's `model` is the CPU; the baseboard product name is the actual
   // appliance model. Serial: DMI values are often placeholders — skip those.
@@ -3000,6 +3112,16 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
       visualization: 'table',
       columns: ['name', 'sizeBytes', 'createdAt', 'updateAvailable'],
       group: 'Storage',
+    });
+  }
+  if (Array.isArray(metrics['gpus']) && (metrics['gpus'] as unknown[]).length > 0) {
+    out.push({
+      key: 'gpus',
+      label: 'GPUs',
+      type: 'string',
+      visualization: 'table',
+      columns: ['name', 'vendor', 'slot', 'driver', 'driverVersion', 'vramBytes', 'utilPercent', 'tempCelsius'],
+      group: 'GPU',
     });
   }
   if ('system.error' in metrics) out.push(textMetric('system.error', 'Error', { group: 'System' }));
