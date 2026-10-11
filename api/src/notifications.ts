@@ -440,6 +440,23 @@ export async function pruneOldNotifications(cutoffIso: string): Promise<number> 
   );
   return result.rowCount ?? 0;
 }
+
+/**
+ * Close stale one-shot recovery notes ("<name> is back online"). Unlike the
+ * condition rows they follow, these carry NO dedupe key — so the auto-resolve
+ * sweep never touches them and a flapping device accumulated thousands of open
+ * copies (each flap emitted a fresh note). They are informational only: once
+ * older than `olderThanIso` they have served their purpose and are closed.
+ */
+export async function closeStaleRecoveryNotes(olderThanIso: string): Promise<number> {
+  const result = await pool.query(
+    `UPDATE notifications SET status = 'closed', "resolvedAt" = $2
+     WHERE source = 'device' AND title LIKE '% is back online'
+       AND status IN ('open', 'acknowledged') AND "createdAt" < $1`,
+    [olderThanIso, new Date().toISOString()]
+  );
+  return result.rowCount ?? 0;
+}
 /**
  * Auto-resolve sweep for certificate notifications. Two dedupe-key families:
  *   - `cert-expiry:<deviceId>:<name>` — stays live only while the endpoint STILL

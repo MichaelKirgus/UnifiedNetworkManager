@@ -2456,6 +2456,18 @@ const lastKnownStatus = new Map<string, string>();
 /** In-memory mirror of devices.healthReasons (JSON or null) — lets us skip the
  * DB write when neither status nor reasons changed. */
 const lastHealthReasonsJson = new Map<string, string | null>();
+
+// --- Status-transition hysteresis -------------------------------------------
+// A single bad poll must not flip a device's status (and thereby emit a
+// notification): e.g. one lost ping out of four is 'warning' for 30 s and back
+// to ok — without grace that churns "degraded" + "back online" rows every few
+// minutes on flaky links. A NEWLY DERIVED status only commits once it has been
+// observed continuously for STATUS_TRANSITION_GRACE_MS; the DB keeps showing
+// the previous (stable) state until then. Recovery to 'online' gets the same
+// grace, so a brief blip never produces a "back online" note at all.
+const STATUS_TRANSITION_GRACE_MS = 60_000;
+/** deviceId → epoch ms when the current derived status first differed from the committed one (null = matches). */
+const pendingStatusSince = new Map<string, number | null>();
 /** Plugin display names for status-reason tooltips (refreshed with the roster). */
 const pluginNames = new Map<string, string>();
 /** Assignment count per device — status is only derived once all are known. */
@@ -2512,6 +2524,7 @@ async function refreshRoster(settings: SystemSettings): Promise<void> {
     assignmentsPerDevice.clear();
     pluginNames.clear();
     lastHealthReasonsJson.clear();
+    pendingStatusSince.clear();
     recordTelemetryCycle(0, 0, Date.now() - startedAt);
     return;
   }
@@ -2597,6 +2610,9 @@ async function refreshRoster(settings: SystemSettings): Promise<void> {
   for (const deviceId of Array.from(lastHealthReasonsJson.keys())) {
     if (!liveDeviceIds.has(deviceId)) lastHealthReasonsJson.delete(deviceId);
   }
+  for (const deviceId of Array.from(pendingStatusSince.keys())) {
+    if (!liveDeviceIds.has(deviceId)) pendingStatusSince.delete(deviceId);
+  }
 
   // Per-device assignment counts + status mirror for transition detection.
   assignmentsPerDevice.clear();
@@ -2679,20 +2695,40 @@ async function updateDeviceStatus(
   const expected = assignmentsPerDevice.get(deviceId) ?? 1;
   if (byAssignment.size < expected) return; // wait for the full picture
 
-  const status = deriveDeviceStatus(Array.from(byAssignment.values()));
+  const derived = deriveDeviceStatus(Array.from(byAssignment.values()));
+  const committed = lastKnownStatus.get(deviceId) ?? 'unknown';
+
+  // Hysteresis (see STATUS_TRANSITION_GRACE_MS): a transition only commits once
+  // it has been SUSTAINED for the grace window. Until then the device keeps its
+  // previous stable status AND reasons — no partial updates, no notification
+  // churn from single bad polls (one lost ping out of four must not flip a
+  // healthy device to degraded and back within a minute).
+  let status = committed;
+  if (derived !== committed) {
+    const since = pendingStatusSince.get(deviceId);
+    if (since === undefined || since === null) {
+      pendingStatusSince.set(deviceId, Date.now()); // first observation — start the window
+      return; // keep showing the previous stable state for now
+    }
+    if (Date.now() - since < STATUS_TRANSITION_GRACE_MS) return; // still inside the window
+    status = derived; // sustained long enough — commit it
+  } else {
+    pendingStatusSince.set(deviceId, null); // back to committed state — re-arm for next time
+  }
+
   // Human-readable reasons for the current outcome set (NULL when healthy).
   const healthReasons = deriveDeviceHealthReasons(byAssignment, pluginNames);
   const reasonsJson = healthReasons.length > 0 ? JSON.stringify(healthReasons) : null;
 
-  const prev = lastKnownStatus.get(deviceId) ?? 'unknown';
-  if (status === prev && (lastHealthReasonsJson.get(deviceId) ?? null) === reasonsJson) return;
+  if (status === committed && (lastHealthReasonsJson.get(deviceId) ?? null) === reasonsJson) return;
 
   // Mirror the STATUS transition into the notification center. Degrading states
   // carry a stable dedupe key so they upsert while ongoing and are auto-resolved
   // by the notifications worker when the device recovers; recovery emits one-shot.
-  if (status !== prev) {
+  if (status !== committed) {
     lastKnownStatus.set(deviceId, status);
-    void emitDeviceStatusNotification(deviceId, prev, status);
+    pendingStatusSince.set(deviceId, null); // re-arm for the next transition
+    void emitDeviceStatusNotification(deviceId, committed, status);
   }
   // Persist status + reasons whenever EITHER changed — a device that was already
   // non-ok before an API restart has no transition to trigger the write, so its

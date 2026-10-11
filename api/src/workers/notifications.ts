@@ -1,7 +1,7 @@
 import { initWorker, trackBeat } from './stats';
 import { LEADER_KEYS } from './leader';
 import { getEffectiveSettingValue } from '../systemSettings';
-import { autoResolveStaleCertificateNotifications, autoResolveStaleDeviceNotifications, pruneOldNotifications } from '../notifications';
+import { autoResolveStaleCertificateNotifications, autoResolveStaleDeviceNotifications, closeStaleRecoveryNotes, pruneOldNotifications } from '../notifications';
 
 /**
  * Notifications worker (leader-gated).
@@ -11,7 +11,9 @@ import { autoResolveStaleCertificateNotifications, autoResolveStaleDeviceNotific
  * run exactly once across replicas:
  *   1. AUTO-RESOLVE: mirrored device-state notifications clear themselves when
  *      the device recovers (status no longer matches the dedupe key's state).
- *   2. RETENTION: terminal rows (resolved/closed) older than NOTIFICATION_RETENTION_DAYS
+ *   2. STALE NOTES: one-shot "<name> is back online" rows (no dedupe key) are
+ *      closed after a day — flapping devices used to accumulate thousands.
+ *   3. RETENTION: terminal rows (resolved/closed) older than NOTIFICATION_RETENTION_DAYS
  *      are pruned so the table stays small even with a chatty fleet.
  *
  * Cadence is deliberately coarse (60s): resolution latency of one minute is
@@ -47,7 +49,17 @@ export function startNotificationsWorker(): () => void {
         console.log(`[notifications] auto-resolved ${resolvedCerts} stale certificate notification(s)`);
       }
 
-      // 3. Retention sweep for terminal rows.
+      // 3. Close stale one-shot recovery notes ("<name> is back online") — they
+      // carry no dedupe key, so a flapping device used to accumulate thousands
+      // of open copies; anything older than a day has served its purpose.
+      const noteCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const closedNotes = await closeStaleRecoveryNotes(noteCutoff);
+      if (closedNotes > 0) {
+        // eslint-disable-next-line no-console
+        console.log(`[notifications] closed ${closedNotes} stale recovery note(s)`);
+      }
+
+      // 4. Retention sweep for terminal rows.
       const retentionDays = Number(await getEffectiveSettingValue('notificationRetentionDays')) || 30;
       const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
       const pruned = await pruneOldNotifications(cutoff);

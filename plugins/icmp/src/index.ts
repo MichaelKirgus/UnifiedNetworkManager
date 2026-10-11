@@ -8,6 +8,7 @@ import {
   hostFromAddress,
   readSettings,
   resolvePluginIdentity,
+  type HealthReason,
 } from '@unm/plugin-sdk';
 import { ICMP_DEVICE_SUPPORT } from './deviceSupport';
 import path from 'node:path';
@@ -25,10 +26,15 @@ export const PLUGIN_NAME = 'ICMP Plugin';
  * the instance id is appended: "ICMP Plugin (site-a)". Unset = single-instance behavior.
  * (Convention implemented in @unm/plugin-sdk's resolvePluginIdentity.)
  */
+// 0.2.0 — Partial packet loss no longer flips health to 'warning' on a single
+// lost echo (that churned device status + notifications every few minutes on
+// flaky links): warning now requires loss ≥ the configurable `lossWarnPercent`
+// threshold (default 50). Also reports `healthReasons` for non-ok health so
+// the UNM webapp can show WHY in the status badge tooltip.
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
-  version: '0.1.0',
+  version: '0.2.0',
   vendors: ['generic'],
   capabilities: ['monitoring', 'inventory'],
 });
@@ -143,6 +149,16 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     description: 'How long to wait for each reply before counting it lost.',
   },
   {
+    key: 'lossWarnPercent',
+    label: 'Warning threshold (packet loss %)',
+    type: 'integer',
+    default: 50,
+    min: 1,
+    max: 99,
+    description:
+      'Partial loss below this percentage is treated as normal background noise and does NOT degrade the device health. Raise it on flaky links to stop status/notification churn; lower it for stricter monitoring.',
+  },
+  {
     key: 'logToApi',
     label: 'Send logs to UNM',
     type: 'boolean' as const,
@@ -176,12 +192,17 @@ const app = server.app;
 // flows through the settings loop, so it works globally and per-device.
 const logger = createPluginLogger(identity);
 
-/** Maps a ping result to the plugin health vocabulary. */
-function healthFromPing(ping: PingResult): Health {
-  if (ping.error) return 'critical'; // binary itself failed — not just unreachable
-  if (!ping.reachable) return 'critical'; // 100% loss
-  if (ping.lossPercent > 0) return 'warning'; // partial loss
-  return 'ok';
+/** Maps a ping result to the plugin health vocabulary + tooltip reasons. */
+function healthFromPing(ping: PingResult, warnThresholdPct: number): { health: Health; reasons: HealthReason[] } {
+  if (ping.error) return { health: 'critical', reasons: [{ severity: 'critical', message: `Ping failed — ${String(ping.error).slice(0, 160)}` }] };
+  if (!ping.reachable) return { health: 'critical', reasons: [{ severity: 'critical', message: 'No ICMP replies (100% packet loss)' }] };
+  // Partial loss below the threshold is background noise — a single lost echo
+  // out of four must not flip the device to degraded (it churned status +
+  // notifications every few minutes on flaky links).
+  if (ping.lossPercent >= warnThresholdPct) {
+    return { health: 'warning', reasons: [{ severity: 'warning', message: `High packet loss — ${ping.lossPercent}% of echo requests lost` }] };
+  }
+  return { health: 'ok', reasons: [] };
 }
 
 app.post('/monitoring', async (req, res) => {
@@ -223,7 +244,8 @@ app.post('/monitoring', async (req, res) => {
       collectInventory(target),
     ]);
 
-    const health = healthFromPing(ping);
+    const warnThresholdPct = clampInt(settings.lossWarnPercent, 1, 99, 50);
+    const { health, reasons } = healthFromPing(ping, warnThresholdPct);
     const metrics: Record<string, unknown> = {
       'ping.latency': ping.avgMs, // null when no replies — UI renders "—"
       'ping.lossPercent': ping.lossPercent,
@@ -238,6 +260,8 @@ app.post('/monitoring', async (req, res) => {
       deviceId,
       collectedAt: new Date().toISOString(),
       health,
+      // Human-readable reasons for a non-ok health (status-badge tooltip).
+      ...(health !== 'ok' && reasons.length > 0 ? { healthReasons: reasons } : {}),
       metrics,
       metricDescriptors: METRIC_DESCRIPTORS,
       // Echo back the effective settings — proof of the API→plugin loop.
@@ -245,6 +269,7 @@ app.post('/monitoring', async (req, res) => {
         pingHost: pingHostOverride || null,
         pingCount: count,
         timeoutMs,
+        lossWarnPercent: warnThresholdPct,
       },
     });
   } catch (err) {
@@ -253,6 +278,7 @@ app.post('/monitoring', async (req, res) => {
       deviceId,
       collectedAt: new Date().toISOString(),
       health: 'critical',
+      healthReasons: [{ severity: 'critical' as const, message: `Ping run failed — ${(err as Error).message.slice(0, 160)}` }],
       metrics: {},
       metricDescriptors: METRIC_DESCRIPTORS,
       error: (err as Error).message,
