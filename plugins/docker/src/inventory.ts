@@ -261,6 +261,45 @@ function dedupeVolumes(vols: ContainerVolume[]): ContainerVolume[] {
   return out.sort((a, b) => a.source.localeCompare(b.source));
 }
 
+// --- Compose project summary (device-page gauges, every poll) ------------------
+
+/** Per-project detail for the compose summary. */
+export interface ComposeProjectEntry {
+  name: string;
+  state: 'RUNNING' | 'STOPPED'; // RUNNING = at least one member container is running
+  containers: number;
+  runningContainers: number;
+}
+
+export interface ComposeProjectSummary {
+  /** Distinct compose projects (label com.docker.compose.project). */
+  total: number;
+  /** Projects with at least one container currently running. */
+  running: number;
+  entries: ComposeProjectEntry[];
+}
+
+/** Groups the raw container list by its `com.docker.compose.project` label and
+ * summarizes each project's state — pure in-memory work over data /monitoring
+ * already fetches every poll (no extra Engine API calls). Standalone containers
+ * (no project label) are NOT projects and are excluded. */
+export function summarizeComposeProjects(raw: DockerContainerRaw[]): ComposeProjectSummary {
+  const groups = new Map<string, { total: number; running: number }>();
+  for (const c of raw) {
+    if (!c || typeof c !== 'object') continue;
+    const project = typeof c.Labels?.[COMPOSE_PROJECT_LABEL] === 'string' && c.Labels[COMPOSE_PROJECT_LABEL] ? c.Labels[COMPOSE_PROJECT_LABEL] : null;
+    if (!project) continue;
+    const g = groups.get(project) ?? { total: 0, running: 0 };
+    g.total++;
+    if (typeof c.State === 'string' && c.State.toLowerCase() === 'running') g.running++;
+    groups.set(project, g);
+  }
+  const entries: ComposeProjectEntry[] = [...groups.entries()]
+    .map(([name, g]): ComposeProjectEntry => ({ name, state: g.running > 0 ? 'RUNNING' : 'STOPPED', containers: g.total, runningContainers: g.running }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return { total: entries.length, running: entries.filter((e) => e.state === 'RUNNING').length, entries };
+}
+
 // --- Image inventory (/images/json → UNM `images[]` metric) -------------------
 
 export interface DockerImageRaw {

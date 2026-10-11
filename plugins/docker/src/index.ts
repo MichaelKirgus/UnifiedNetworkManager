@@ -41,7 +41,7 @@ import { DOCKER_DEVICE_SUPPORT } from './deviceSupport';
 import path from 'node:path';
 
 import { DockerClientOptions, DockerTlsMaterial, engineVersion, listContainers, listImages } from './client';
-import { buildContainerRows, buildImageRows, ContainerRow as UnmContainerRow, DockerContainerRaw, DockerImageRaw, ImageRow } from './inventory';
+import { buildContainerRows, buildImageRows, ComposeProjectSummary, ContainerRow as UnmContainerRow, DockerContainerRaw, DockerImageRaw, ImageRow, summarizeComposeProjects } from './inventory';
 import { registry as actionRegistry, DockerActionContext } from './actions';
 import { buildPlan, PlanningError } from './plan';
 import { collectProbeStats, collectProbeStates, ProbeContainerStat, ProbeContainerState } from './probe';
@@ -90,7 +90,12 @@ const identity = resolvePluginIdentity({
   // APP ROWS (compose projects) and were absent on metrics-only polls — a host
   // with one big stack showed "1 running" at best, "0" most of the time. Row +
   // image building stays deferred to inventory-due polls only.
-  version: '0.7.1',
+  // 0.8.0 — compose project gauges: docker.compose.projects / .running count
+  // distinct com.docker.compose.project labels and docker.compose.projects.list
+  // renders a per-project status line ("name running (27/29)"). Pure in-memory
+  // grouping over the container list already fetched every poll — no extra
+  // Engine API calls, so it is as cheap as the v0.7.1 container gauges.
+  version: '0.8.0',
   vendors: ['generic'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'probe'],
 });
@@ -144,6 +149,9 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 const METRIC_DESCRIPTORS: MetricDescriptor[] = [
   gaugeMetric('docker.containers.running', 'Containers running', { group: 'Docker', min: 0, summary: true }),
   gaugeMetric('docker.containers.stopped', 'Containers stopped', { group: 'Docker', min: 0 }),
+  gaugeMetric('docker.compose.projects', 'Compose projects', { group: 'Docker', min: 0 }),
+  gaugeMetric('docker.compose.projects.running', 'Projects running', { group: 'Docker', min: 0 }),
+  textMetric('docker.compose.projects.list', 'Compose project status', { group: 'Docker' }),
   textMetric('docker.version', 'Engine version', { group: 'Docker' }),
 ];
 
@@ -250,6 +258,7 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
   images: ImageRow[] | null;
   running: number;
   stopped: number;
+  compose: ComposeProjectSummary;
   engineVersionText: string | null;
   /** Non-running containers for notification mirroring. `null` when this poll
    * did NOT take an authoritative container snapshot (a failed /containers/json
@@ -258,7 +267,7 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
 }> {
   const version = await engineVersion(opts);
   if (!version.ok) {
-    return { health: 'critical', error: `Docker Engine unreachable via ${version.transportUsed ?? opts.transport}: ${version.error || `HTTP ${version.status}`}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText: null, conditions: null };
+    return { health: 'critical', error: `Docker Engine unreachable via ${version.transportUsed ?? opts.transport}: ${version.error || `HTTP ${version.status}`}`, rows: [], images: null, running: 0, stopped: 0, compose: { total: 0, running: 0, entries: [] }, engineVersionText: null, conditions: null };
   }
 
   // Version + container list in parallel (both cheap). On a full poll the image
@@ -277,9 +286,9 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
     // (rows are not emitted → no wipe of stored rows).
     const engineVersionText = version.data?.Version ? `Docker ${version.data.Version}` : null;
     if (!full) {
-      return { health: 'ok', rows: [], images: null, running: 0, stopped: 0, engineVersionText, conditions: null };
+      return { health: 'ok', rows: [], images: null, running: 0, stopped: 0, compose: { total: 0, running: 0, entries: [] }, engineVersionText, conditions: null };
     }
-    return { health: 'critical', error: `/containers/json failed (HTTP ${list.status}): ${JSON.stringify(list.data ?? '').slice(0, 200)}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText, conditions: null };
+    return { health: 'critical', error: `/containers/json failed (HTTP ${list.status}): ${JSON.stringify(list.data ?? '').slice(0, 200)}`, rows: [], images: null, running: 0, stopped: 0, compose: { total: 0, running: 0, entries: [] }, engineVersionText, conditions: null };
   }
 
   const raw = Array.isArray(list.data) ? (list.data as DockerContainerRaw[]) : [];
@@ -306,6 +315,10 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
     conditions.push({ name, state, exitCode: typeof c.ExitCode === 'number' ? c.ExitCode : null });
   }
 
+  // Compose project summary for the device-page gauges — every poll, pure
+  // in-memory grouping over the raw list (no extra Engine API calls).
+  const compose = summarizeComposeProjects(raw);
+
   // UNM rows (App → Container tree) only on inventory-due polls — they are the
   // slow part and feed the cross-device `containers` table.
   const rows = full ? buildContainerRows(raw) : [];
@@ -321,6 +334,7 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
     images,
     running,
     stopped,
+    compose,
     engineVersionText: version.data?.Version ? `Docker ${version.data.Version}` : null,
     conditions,
   };
@@ -385,6 +399,14 @@ app.post('/monitoring', async (req, res) => {
     // made them read 0/0 for ~15 min at a time.
     metrics['docker.containers.running'] = result.running;
     metrics['docker.containers.stopped'] = result.stopped;
+    // Compose project gauges — same every-poll contract as the container
+    // counts above. The list line is "name running (27/29)" per project, so a
+    // partially-down stack stays visible at a glance.
+    metrics['docker.compose.projects'] = result.compose.total;
+    metrics['docker.compose.projects.running'] = result.compose.running;
+    metrics['docker.compose.projects.list'] = result.compose.entries.length > 0
+      ? result.compose.entries.map((e) => `${e.name} ${e.state.toLowerCase()} (${e.runningContainers}/${e.containers})`).join(', ')
+      : '';
     if (full) {
       // The generic containers[] key — ingested by the API's telemetry worker
       // into the cross-device `containers` table. Emitted even when empty so a
