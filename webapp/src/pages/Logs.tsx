@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
+import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
 import { api, LogEntry } from '../api/client';
 import { useTimeFormat } from '../utils/time';
 
@@ -22,22 +23,6 @@ function LevelBadge({ level }: { level: LogEntry['level'] }) {
   );
 }
 
-/** Time-range presets for the filter bar (v1: presets only, no custom pickers). */
-const TIME_RANGES = [
-  { value: 'all', label: 'All time' },
-  { value: '1h', label: 'Last hour' },
-  { value: '24h', label: 'Last 24 hours' },
-  { value: '7d', label: 'Last 7 days' },
-] as const;
-
-type TimeRange = (typeof TIME_RANGES)[number]['value'];
-
-const RANGE_MS: Record<Exclude<TimeRange, 'all'>, number> = {
-  '1h': 60 * 60 * 1000,
-  '24h': 24 * 60 * 60 * 1000,
-  '7d': 7 * 24 * 60 * 60 * 1000,
-};
-
 /**
  * Global plugin log view. Rows are pushed by plugins via the API's internal
  * POST /plugin/logs endpoint (see docs/PLUGIN-DEVELOPMENT.md §8 Logging) and
@@ -50,7 +35,7 @@ export default function Logs() {
   const [pluginId, setPluginId] = useState('');
   const [deviceId, setDeviceId] = useState('');
   const [search, setSearch] = useState('');
-  const [range, setRange] = useState<TimeRange>('24h');
+  const [range, setRange] = useState<TimeRangeValue>('24h');
 
   // Options for the filter selects.
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
@@ -61,13 +46,15 @@ export default function Logs() {
   const logsQuery = useQuery({
     queryKey: ['logs', level, pluginId, deviceId, search, range],
     queryFn: () => {
-      const from = range === 'all' ? undefined : new Date(Date.now() - RANGE_MS[range]).toISOString();
+      // Relative presets slide with the current time; custom ranges are absolute.
+      const { from, to } = resolveTimeRangeIso(range);
       return api.logs({
         level: (level || undefined) as LogEntry['level'] | undefined,
         pluginId: pluginId || undefined,
         deviceId: deviceId || undefined,
         search: search.trim() || undefined,
         from,
+        to,
       });
     },
     refetchInterval: 30_000,
@@ -189,16 +176,7 @@ export default function Logs() {
             ))}
           </select>
         </div>
-        <div>
-          <label className="mb-1 block text-xs font-medium text-secondary">Time range</label>
-          <select className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm" value={range} onChange={(e) => setRange(e.target.value as TimeRange)}>
-            {TIME_RANGES.map((r) => (
-              <option key={r.value} value={r.value}>
-                {r.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        <TimeRangeFilter label="Time range" value={range} onChange={setRange} />
         <div>
           <label className="mb-1 block text-xs font-medium text-secondary">Search</label>
           <input

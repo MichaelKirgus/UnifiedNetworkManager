@@ -5,6 +5,8 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Copy, FolderOpen, Power, Plus, RefreshCw, Settings, Settings2, Star, Terminal as TerminalIcon, Trash2 } from 'lucide-react';
 import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
+import { DataTable, DataTableColumn } from '../components/DataTable';
+import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
 import { ConsoleDialog } from '../components/ConsoleDialog';
 import { FileBrowserDialog } from '../components/FileBrowserDialog';
 import { StatusBadge } from '../components/StatusBadge';
@@ -20,6 +22,22 @@ import { useTimeFormat } from '../utils/time';
 /** Resolves the current value for a metric descriptor from a metrics map. */
 function resolveValue(descriptor: MetricDescriptor, metrics: Record<string, unknown>): unknown {
   return metrics[descriptor.key];
+}
+
+/** Small colored pill for the log level (same palette as the global Logs page). */
+const LOG_LEVEL_STYLES: Record<LogEntry['level'], string> = {
+  debug: 'bg-muted text-muted-foreground',
+  info: 'bg-info text-info-fg',
+  warn: 'bg-warning text-warning-fg',
+  error: 'bg-danger text-danger-fg',
+};
+
+function LogLevelBadge({ level }: { level: LogEntry['level'] }) {
+  return (
+    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${LOG_LEVEL_STYLES[level] ?? 'bg-muted text-secondary'}`}>
+      {level}
+    </span>
+  );
 }
 
 export default function DeviceDetail() {
@@ -127,14 +145,90 @@ export default function DeviceDetail() {
 
   // Per-device plugin log entries (gated by logs:read — logs can carry critical
   // details). Newest first; the API caps at 500 rows, which is plenty for a
-  // single device's recent activity.
+  // single device's recent activity. Time range defaults to the last 24 hours.
   const [logLevelFilter, setLogLevelFilter] = useState('');
+  const [logRange, setLogRange] = useState<TimeRangeValue>('24h');
   const logsQuery = useQuery({
-    queryKey: ['deviceLogs', deviceId, logLevelFilter],
-    queryFn: () => api.logs({ deviceId: deviceId as string, level: (logLevelFilter || undefined) as LogEntry['level'] | undefined }),
+    queryKey: ['deviceLogs', deviceId, logLevelFilter, logRange],
+    queryFn: () => {
+      // Relative presets slide with the current time; custom ranges are absolute.
+      const { from, to } = resolveTimeRangeIso(logRange);
+      return api.logs({
+        deviceId: deviceId as string,
+        level: (logLevelFilter || undefined) as LogEntry['level'] | undefined,
+        from,
+        to,
+      });
+    },
     enabled: Boolean(deviceId) && can('logs:read'),
     refetchInterval: 15_000,
   });
+
+  // Rows whose structured context is currently expanded (by row id).
+  const [logExpanded, setLogExpanded] = useState<Set<string>>(new Set());
+  function toggleLogContext(id: string) {
+    setLogExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  // Columns for the per-device logs table — same shape as the global Logs page,
+  // minus the Device column (this is already one device's view).
+  const logColumns: DataTableColumn<LogEntry>[] = [
+    {
+      header: 'Time',
+      key: 'emittedAt',
+      width: 180,
+      sortAccessor: (row) => new Date(row.emittedAt).getTime(),
+      render: (row) => <span className="font-mono text-xs">{formatDateTime(row.emittedAt)}</span>,
+    },
+    {
+      header: 'Level',
+      key: 'level',
+      width: 90,
+      render: (row) => <LogLevelBadge level={row.level} />,
+    },
+    {
+      header: 'Plugin',
+      key: 'pluginName',
+      width: 200,
+      exportValue: (row) => row.pluginName ?? row.pluginId,
+      render: (row) => (
+        <span className="text-sm text-secondary" title={row.pluginId}>
+          {row.pluginName ?? '—'}
+        </span>
+      ),
+    },
+    {
+      header: 'Message',
+      key: 'message',
+      width: 520,
+      render: (row) => (
+        <div className="flex flex-col gap-1">
+          <span className="break-words text-sm text-foreground">{row.message}</span>
+          {row.context && Object.keys(row.context).length > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => toggleLogContext(row.id)}
+                className="self-start text-xs font-medium text-info-fg hover:underline"
+              >
+                {logExpanded.has(row.id) ? 'Hide details' : `Details (${Object.keys(row.context).length})`}
+              </button>
+              {logExpanded.has(row.id) && (
+                <pre className="max-h-48 overflow-auto rounded bg-code-bg p-2 font-mono text-[11px] leading-relaxed text-code-fg">
+                  {JSON.stringify(row.context, null, 2)}
+                </pre>
+              )}
+            </>
+          )}
+        </div>
+      ),
+    },
+  ];
 
   const device = (devicesQuery.data ?? []).find((d) => d.id === deviceId);
   const assignments = useMemo(
@@ -728,82 +822,39 @@ export default function DeviceDetail() {
       {/* --- Plugin logs (gated by logs:read) ------------------------------ */}
       {can('logs:read') && (
         <section className="mb-8">
-          <div className="mb-3 flex items-center justify-between gap-2">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Logs</h2>
-            <select
-              className="rounded-md border border-border px-2 py-1 text-xs"
-              value={logLevelFilter}
-              onChange={(e) => setLogLevelFilter(e.target.value)}
-            >
-              <option value="">All levels</option>
-              <option value="debug">Debug</option>
-              <option value="info">Info</option>
-              <option value="warn">Warn</option>
-              <option value="error">Error</option>
-            </select>
+            <div className="flex flex-wrap items-center gap-2">
+              <TimeRangeFilter value={logRange} onChange={setLogRange} />
+              <select
+                className="rounded-md border border-border px-2 py-1.5 text-xs"
+                value={logLevelFilter}
+                onChange={(e) => setLogLevelFilter(e.target.value)}
+              >
+                <option value="">All levels</option>
+                <option value="debug">Debug</option>
+                <option value="info">Info</option>
+                <option value="warn">Warn</option>
+                <option value="error">Error</option>
+              </select>
+            </div>
           </div>
 
           {logsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading logs...</p>}
           {logsQuery.isError && (
             <p className="text-sm text-danger-fg">Failed to load logs: {(logsQuery.error as Error).message}</p>
           )}
-          {logsQuery.data &&
-            (logsQuery.data.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                No log entries for this device yet — plugins ship failures and state changes here.
-              </p>
-            ) : (
-              <div className="overflow-x-auto rounded-md border border-border bg-card shadow-sm">
-                <table className="w-full text-left text-sm">
-                  <thead className="border-b border-border bg-background text-xs uppercase tracking-wide text-muted-foreground">
-                    <tr>
-                      <th className="px-3 py-2">Time</th>
-                      <th className="px-3 py-2">Level</th>
-                      <th className="px-3 py-2">Plugin</th>
-                      <th className="px-3 py-2">Message</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {logsQuery.data.map((entry) => (
-                      <tr key={entry.id} className="border-b border-border last:border-0">
-                        <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-muted-foreground">
-                          {formatDateTime(entry.emittedAt)}
-                        </td>
-                        <td className="px-3 py-2">
-                          <span
-                            className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${
-                              entry.level === 'error'
-                                ? 'bg-danger text-danger-fg'
-                                : entry.level === 'warn'
-                                  ? 'bg-warning text-warning-fg'
-                                  : entry.level === 'debug'
-                                    ? 'bg-muted text-muted-foreground'
-                                    : 'bg-info text-info-fg'
-                            }`}
-                          >
-                            {entry.level}
-                          </span>
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-2 text-xs text-secondary">{entry.pluginName ?? entry.pluginId}</td>
-                        <td className="px-3 py-2">
-                          <div className="flex flex-col gap-1">
-                            <span className="break-words text-foreground">{entry.message}</span>
-                            {entry.context && Object.keys(entry.context).length > 0 && (
-                              <details className="text-xs">
-                                <summary className="cursor-pointer font-medium text-info-fg hover:underline">Details</summary>
-                                <pre className="mt-1 max-h-48 overflow-auto rounded bg-code-bg p-2 font-mono text-[11px] leading-relaxed text-code-fg">
-                                  {JSON.stringify(entry.context, null, 2)}
-                                </pre>
-                              </details>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ))}
+          {logsQuery.data && (
+            <DataTable<LogEntry>
+              columns={logColumns}
+              rows={logsQuery.data}
+              rowKey={(row) => row.id}
+              storageKey="device-detail-logs"
+              autoRefresh={{ intervalMs: 15_000, queries: [logsQuery] }}
+              searchPlaceholder="Search logs…"
+              emptyMessage="No log entries for this device in the selected range — plugins ship failures and state changes here."
+            />
+          )}
         </section>
       )}
 

@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
+import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
 import { api, FirewallEventRow } from '../api/client';
 import { useTimeFormat } from '../utils/time';
 
@@ -36,21 +37,6 @@ function addrPort(addr?: string, port?: number | null): string {
   return typeof port === 'number' && port > 0 ? `${a}:${port}` : a;
 }
 
-/** Time-range presets for the filter bar. */
-const TIME_RANGES = [
-  { value: '1h', label: 'Last hour' },
-  { value: '24h', label: 'Last 24 hours' },
-  { value: '7d', label: 'Last 7 days' },
-] as const;
-
-type TimeRange = (typeof TIME_RANGES)[number]['value'];
-
-const RANGE_MS: Record<TimeRange, number> = {
-  '1h': 60 * 60 * 1000,
-  '24h': 24 * 60 * 60 * 1000,
-  '7d': 7 * 24 * 60 * 60 * 1000,
-};
-
 /** Action filter chips — the summary counts double as the chip labels. */
 const ACTION_FILTERS = [
   { value: '', label: 'All', key: null },
@@ -71,7 +57,7 @@ export default function FirewallEvents() {
   const [action, setAction] = useState('');
   const [deviceId, setDeviceId] = useState('');
   const [search, setSearch] = useState('');
-  const [range, setRange] = useState<TimeRange>('1h');
+  const [range, setRange] = useState<TimeRangeValue>('1h');
 
   // Options for the device filter select.
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
@@ -81,9 +67,11 @@ export default function FirewallEvents() {
   const eventsQuery = useQuery({
     queryKey: ['firewallEvents', action, deviceId, search, range],
     queryFn: () => {
-      const from = new Date(Date.now() - RANGE_MS[range]).toISOString();
+      // Relative presets slide with the current time; custom ranges are absolute.
+      const { from, to } = resolveTimeRangeIso(range);
       return api.firewallEvents({
         from,
+        to,
         deviceId: deviceId || undefined,
         action: (action || undefined) as 'pass' | 'block' | 'rdr' | 'nat' | 'binat' | 'other' | undefined,
         search: search.trim() || undefined,
@@ -201,16 +189,7 @@ export default function FirewallEvents() {
             ))}
           </select>
         </div>
-        <div className="sm:col-span-2">
-          <label className="mb-1 block text-xs font-medium text-secondary">Time range</label>
-          <select className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm" value={range} onChange={(e) => setRange(e.target.value as TimeRange)}>
-            {TIME_RANGES.map((r) => (
-              <option key={r.value} value={r.value}>
-                {r.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        <TimeRangeFilter label="Time range" value={range} onChange={setRange} />
         <div className="sm:col-span-2">
           <label className="mb-1 block text-xs font-medium text-secondary">Search</label>
           <input
