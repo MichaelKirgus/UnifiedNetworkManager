@@ -40,4 +40,10 @@ export interface InventorySnapshot {
    * null = collection failed this cycle → /monitoring must NOT emit the key, so a
    * transient failure never wipes previously stored rows. */
   services: ServiceRow[] | null;
+  /** True when the SSH ZFS enrichment SUCCEEDED for this snapshot (a bound ssh
+   * slot answered with a real pool listing). Drives notification mirroring of
+   * pool states — false means "no fresh authoritative ZFS data", so live pool
+   * alerts are kept rather than wrongly cleared by an API-only poll or a
+   * transient SSH failure. */
+  zfsSshCollected?: boolean;
 }

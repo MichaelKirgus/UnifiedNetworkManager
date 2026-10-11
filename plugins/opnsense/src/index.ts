@@ -6,6 +6,7 @@ import {
   PluginOptionDescriptor,
   INVENTORY_INTERVAL_MS,
   createPluginLogger,
+  createNotifier,
   createPluginServer,
   pickNumber,
   pickString,
@@ -75,6 +76,7 @@ import { buildPlan, PlanningError, PlanRequest, listCatalog } from './plan';
 import { PREFLIGHT_RESOLVERS } from './actions/preflight';
 import { InventorySnapshot } from './inventoryTypes';
 import { buildOpnsenseState } from './state';
+import { mirrorOpnsenseConditions, type ZfsPoolCondition, type SecurityFinding } from './notifications';
 
 // Base UUID + shared state store live in ./stateStore so the monitoring path,
 // the security actions AND the firewall-event cursor all bind to the SAME
@@ -94,11 +96,14 @@ export const PLUGIN_NAME = 'OPNsense Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
-  // 0.3.0 — Updates page support (capability 'updates'): /monitoring emits a
-  // firmware `updates[]` row comparing the live version against the static
-  // release catalog (available-without-apply — OPNsense OS updates go through
-  // the web UI, there is no safe programmatic update API).
-  version: '0.3.0',
+  // 0.4.0 — Notification-center mirroring (SDK createNotifier): /monitoring now
+  // mirrors appliance-level conditions into the UNM notification center with
+  // stable dedupe keys + resolve-on-disappearance, like ix-truenas's alert.list:
+  //   - ZFS pool states DEGRADED/FAULTED/OFFLINE (ssh-slot-gated), and
+  //   - security-check findings at warning/critical (file-integrity change,
+  //     brute-force login burst, unexpected uid-0 account).
+  // Gated by the `notifyAlerts` option. Device-state mirroring stays API-side.
+  version: '0.4.0',
   vendors: ['opnsense'],
   // 'planning' advertises the /plan endpoint (multi-device intents) so the API
   // can offer bulk rollout + tunnel provisioning flows in the webapp.
@@ -611,6 +616,11 @@ async function collectInventory(
     if (level === 'warn') logger.warn(message);
     else logger.info(message);
   }, { port: sshPort });
+  // A non-null result means the SSH ZFS enrichment SUCCEEDED (a bound slot
+  // answered with a real pool listing) — mark it so /monitoring can mirror pool
+  // states authoritatively. null = no slot / failure → keep previous data AND
+  // leave live pool alerts untouched (see notifications.ts anti-flap contract).
+  snap.zfsSshCollected = sshZfs !== null;
   if (sshZfs && sshZfs.filesystems.length > 0) {
     // Keep non-ZFS API rows; SSH rows win on name collisions (the zroot pool).
     const apiNonZfs = snap.filesystems.filter((f) => f['type'] !== 'zfs-pool');
@@ -939,6 +949,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
       'Ship structured log entries (poll failures, config/plan errors) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
   },
   {
+    key: 'notifyAlerts',
+    label: 'Mirror alerts to notification center',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Push appliance-level conditions into the UNM notification center: ZFS pool states (DEGRADED/FAULTED/OFFLINE — requires a bound SSH slot) and security-check findings at warning/critical. Conditions that clear are auto-resolved.',
+  },
+  {
     key: 'securityChecksEnabled',
     label: 'Security checks',
     type: 'boolean' as const,
@@ -1050,6 +1068,11 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 // Emission is gated per call by the `logToApi` option via setEnabled() — it
 // flows through the settings loop, so it works globally and per-device.
 const logger = createPluginLogger(identity);
+
+// Notification-center pushes for appliance-level conditions (ZFS pool states +
+// security findings). Gated per call by the `notifyAlerts` option, same pattern
+// as logging — see ./notifications.ts for the diff/resolve semantics.
+const notifier = createNotifier(identity);
 
 
 
@@ -1219,10 +1242,15 @@ async function collectMetrics(
   collectInventory?: boolean,
   ports?: OpnsensePorts,
   sshPort = 22
-): Promise<{ metrics: Record<string, unknown>; interfaces: string[] }> {
+): Promise<{ metrics: Record<string, unknown>; interfaces: string[]; zfsFresh: boolean }> {
   const metrics: Record<string, unknown> = {};
   const interfaces: string[] = [];
   const interfaceMacs: { name: string; mac: string }[] = [];
+  // True only when the SSH ZFS enrichment SUCCEEDED this cycle (a bound ssh slot
+  // answered with a real pool listing). Drives notification mirroring: a false
+  // value means "no fresh authoritative ZFS data" so live pool alerts are kept,
+  // never wrongly cleared by a transient SSH failure or an API-only poll.
+  let zfsFresh = false;
 
   // Device clock (Time page) — the appliance's CURRENT local wall time from
   // /api/diagnostics/system/system_time plus its IANA zone from
@@ -1358,6 +1386,10 @@ async function collectMetrics(
     }
   } else {
     inventory = await getInventory(host, apiKey, apiSecret, transport, credentials, ports, sshPort);
+    // Fresh authoritative ZFS data only when the SSH enrichment succeeded for this
+    // snapshot (served from cache like the rest of the inventory — pool states are
+    // slow-changing). Drives notification mirroring in /monitoring.
+    zfsFresh = inventory.zfsSshCollected === true;
     if (inventory.hostname) metrics['hostname'] = inventory.hostname;
     if (inventory.version) metrics['version'] = inventory.version;
     if (inventory.arp.length > 0) metrics['arp'] = inventory.arp;
@@ -1518,7 +1550,7 @@ async function collectMetrics(
     }
   }
 
-  return { metrics, interfaces };
+  return { metrics, interfaces, zfsFresh };
 }
 
 // --- Firewall events push pipeline (fire-and-forget batches) ------------------
@@ -1775,6 +1807,7 @@ app.post('/monitoring', async (req, res) => {
   // plugin reads its options from here — it never stores them itself.
   const settings = readSettings(req, PLUGIN_OPTIONS);
   logger.setEnabled(settings.logToApi === true);
+  notifier.setEnabled(settings.notifyAlerts !== false);
   const transport: OpnsenseTransport =
     typeof settings.transport === 'string' && ['auto', 'http', 'https'].includes(settings.transport)
       ? (settings.transport as OpnsenseTransport)
@@ -1795,7 +1828,7 @@ app.post('/monitoring', async (req, res) => {
     // inventory BEFORE any credentials are transmitted (throws on mismatch).
     await assertPinned(req, managementAddress, transport, ports);
 
-    const { metrics, interfaces } = await collectMetrics(managementAddress, apiKey, apiSecret, transport, deviceId, credentials, collectInventory, ports, sshPort);
+    const { metrics, interfaces, zfsFresh } = await collectMetrics(managementAddress, apiKey, apiSecret, transport, deviceId, credentials, collectInventory, ports, sshPort);
 
     // Firewall events: fetch new log rows since the last digest cursor and push
     // them to the API's internal endpoint. Fire-and-forget — NOT awaited, so it
@@ -1847,8 +1880,10 @@ app.post('/monitoring', async (req, res) => {
 
     // Security checks ride the INVENTORY window: file-integrity baselines +
     // failed-login/rate-limit/account scans over the optional `ssh` slot.
-    // Failure → omit the key entirely (absent = no wipe, per the ingestion
-    // contract). No ssh slot bound → skipped silently (API-only mode).
+    // null = did not run this cycle (disabled / no ssh slot / SSH failure) → omit
+    // the key entirely so stored rows survive AND live security alerts are kept;
+    // [] = ran and clean → authoritative wipe + resolve lingering notifications.
+    let securityFindings: SecurityFinding[] | null = null;
     if (collectInventory) {
       try {
         const secSettings: SecuritySettings = {
@@ -1861,10 +1896,43 @@ app.post('/monitoring', async (req, res) => {
           authFailureWarnThreshold: Number(settings.securityAuthFailureWarnThreshold ?? 10),
           authFailureCriticalThreshold: Number(settings.securityAuthFailureCriticalThreshold ?? 50),
         };
-        metrics['securityChecks'] = await collectSecurityChecks(managementAddress, credentials, sshPort, deviceId, secSettings);
+        const secRows = await collectSecurityChecks(managementAddress, credentials, sshPort, deviceId, secSettings);
+        if (secRows !== null) {
+          metrics['securityChecks'] = secRows;
+          // Only warning/critical are actionable — 'info' rows (e.g. rate limiting
+          // active) stay on the Security page but never hit the notification center.
+          securityFindings = [];
+          for (const r of secRows) {
+            if (r.status !== 'warning' && r.status !== 'critical') continue;
+            securityFindings.push({ kind: String(r.kind), name: String(r.name), status: r.status, detail: typeof r.detail === 'string' ? r.detail : undefined });
+          }
+        }
       } catch {
         /* best-effort — a failed check must never sink the poll */
       }
+    }
+
+    // Notification-center mirroring (gated by `notifyAlerts`): appliance-level
+    // conditions that are NOT derivable from the scalar health value. Both sources
+    // pass `null` when there is no fresh authoritative data this cycle, which
+    // leaves their known-sets untouched — a transient SSH failure or an API-only
+    // poll can never wrongly clear a live alert (see ./notifications.ts).
+    if (notifier.enabled) {
+      const fsRows = Array.isArray(metrics['filesystems']) ? (metrics['filesystems'] as Record<string, unknown>[]) : [];
+      const zfsPools: ZfsPoolCondition[] | null = zfsFresh
+        ? fsRows
+            .filter((f) => String(f['type']) === 'zfs-pool')
+            .map((f) => ({ name: String(f['name'] ?? ''), status: String(f['status'] ?? 'online').toLowerCase() }))
+            .filter((p) => p.name !== '' && p.status !== 'online' && p.status !== 'healthy')
+        : null;
+      mirrorOpnsenseConditions(
+        notifier,
+        managementAddress,
+        deviceId ?? null,
+        typeof metrics['hostname'] === 'string' ? metrics['hostname'] : undefined,
+        zfsPools,
+        securityFindings,
+      );
     }
 
     // Health: prefer the appliance's own status code (0=critical, 1=warning,
@@ -1894,6 +1962,8 @@ app.post('/monitoring', async (req, res) => {
         pollIntervalSec: settings.pollIntervalSec,
         enableInventoryCache: settings.enableInventoryCache,
         transport,
+        logToApi: settings.logToApi === true,
+        notifyAlerts: settings.notifyAlerts !== false,
         model: selectedModel,
         firmwareVersion: selectedFirmware,
       },
