@@ -83,7 +83,14 @@ const identity = resolvePluginIdentity({
   // automatically when the container recovers or disappears, gated by the new
   // `notifyAlerts` option. The self-healing 'restarting' state is NOT mirrored
   // so deploys don't flap the center; metrics-only polls pass null (anti-flap).
-  version: '0.7.0',
+  // 0.7.1 — docker.containers.running/stopped now count REAL containers and are
+  // emitted on EVERY poll: a cheap /containers/json?all=true runs each cycle
+  // (the probe already does this every few seconds), so the device page's gauge
+  // cards no longer read 0/0 between inventory polls. Previously they counted
+  // APP ROWS (compose projects) and were absent on metrics-only polls — a host
+  // with one big stack showed "1 running" at best, "0" most of the time. Row +
+  // image building stays deferred to inventory-due polls only.
+  version: '0.7.1',
   vendors: ['generic'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'probe'],
 });
@@ -224,11 +231,16 @@ function clientOptsFrom(
   };
 }
 
-/** One full collection: version + container list + image inventory → UNM rows. */
+/** One full collection: version + container list (+ image inventory on full polls) → UNM rows. */
 /**
- * Window-based scheduling: `full=false` on metrics-only polls — only the cheap
- * engine liveness/version call runs; container + image listing (the slow part)
-  * is skipped and their metric keys are omitted until the next inventory-due poll.
+ * Window-based scheduling: `full=false` on metrics-only polls — the cheap
+ * engine liveness/version call AND one /containers/json?all=true run (so the
+ * running/stopped gauges stay fresh every cycle and the notification mirror has
+ * an authoritative snapshot); row building + image listing (the slow part) are
+ * skipped until the next inventory-due poll. The container list is deliberately
+ * NOT deferred: it is one cheap call the probe already makes every few seconds,
+ * while deferring it made the device page's gauge cards read 0/0 for ~15 min at
+ * a time and (previously) miscounted APP ROWS instead of containers.
  */
 async function collect(opts: DockerClientOptions, full = true): Promise<{
   health: Health;
@@ -240,8 +252,8 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
   stopped: number;
   engineVersionText: string | null;
   /** Non-running containers for notification mirroring. `null` when this poll
-   * did NOT take an authoritative container snapshot (metrics-only poll or a
-   * failed /containers/json read) — the mirror must leave its known-set alone. */
+   * did NOT take an authoritative container snapshot (a failed /containers/json
+   * read) — the mirror must leave its known-set alone. */
   conditions: ContainerCondition[] | null;
 }> {
   const version = await engineVersion(opts);
@@ -249,26 +261,35 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
     return { health: 'critical', error: `Docker Engine unreachable via ${version.transportUsed ?? opts.transport}: ${version.error || `HTTP ${version.status}`}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText: null, conditions: null };
   }
 
-  if (!full) {
-    // Liveness-only poll — the daemon answered /_ping + version; that IS the
-    // health signal. No container/image traffic to the engine. `conditions` is
-    // null (not []): a metrics-only poll must neither add nor clear bell entries.
-    return { health: 'ok', rows: [], images: null, running: 0, stopped: 0, engineVersionText: version.data?.Version ? `Docker ${version.data.Version}` : null, conditions: null };
-  }
+  // Version + container list in parallel (both cheap). On a full poll the image
+  // inventory joins them — it is a best-effort extra whose failure must not fail
+  // the poll or wipe previously seen rows.
+  const [list, imagesRes] = await Promise.all([
+    listContainers(opts),
+    full ? listImages(opts) : Promise.resolve(null),
+  ]);
 
-  // Containers are the core of this plugin; the image inventory is a best-
-  // effort extra (a failure must not fail the poll or wipe previously seen rows).
-  const [list, imagesRes] = await Promise.all([listContainers(opts), listImages(opts)]);
   if (!list.ok) {
-    return { health: 'critical', error: `/containers/json failed (HTTP ${list.status}): ${JSON.stringify(list.data ?? '').slice(0, 200)}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText: version.data?.Version ?? null, conditions: null };
+    // A failed container read is authoritative for NOTHING: gauges are emitted
+    // as 0/0 (the daemon answered /_ping, so the host is up — we just couldn't
+    // list containers this cycle) and `conditions` stays null so the mirror's
+    // known-set is untouched. On a full poll it additionally fails the inventory
+    // (rows are not emitted → no wipe of stored rows).
+    const engineVersionText = version.data?.Version ? `Docker ${version.data.Version}` : null;
+    if (!full) {
+      return { health: 'ok', rows: [], images: null, running: 0, stopped: 0, engineVersionText, conditions: null };
+    }
+    return { health: 'critical', error: `/containers/json failed (HTTP ${list.status}): ${JSON.stringify(list.data ?? '').slice(0, 200)}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText, conditions: null };
   }
 
   const raw = Array.isArray(list.data) ? (list.data as DockerContainerRaw[]) : [];
-  const rows = buildContainerRows(raw);
+
+  // REAL container counts for the gauge cards — every poll, not app rows.
   let running = 0;
   let stopped = 0;
-  for (const r of rows) {
-    if (r.state === 'RUNNING') running++;
+  for (const c of raw) {
+    const state = typeof c?.State === 'string' ? c.State.toLowerCase() : '';
+    if (state === 'running') running++;
     else stopped++;
   }
 
@@ -285,8 +306,12 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
     conditions.push({ name, state, exitCode: typeof c.ExitCode === 'number' ? c.ExitCode : null });
   }
 
+  // UNM rows (App → Container tree) only on inventory-due polls — they are the
+  // slow part and feed the cross-device `containers` table.
+  const rows = full ? buildContainerRows(raw) : [];
+
   let images: ImageRow[] | null = null;
-  if (imagesRes.ok && Array.isArray(imagesRes.data)) {
+  if (full && imagesRes?.ok && Array.isArray(imagesRes.data)) {
     images = buildImageRows(imagesRes.data as DockerImageRaw[]);
   }
 
@@ -355,13 +380,17 @@ app.post('/monitoring', async (req, res) => {
     }
 
     const metrics: Record<string, unknown> = {};
+    // Real container counts on EVERY poll — the device page renders its gauge
+    // cards from the latest telemetry row, so deferring these to inventory polls
+    // made them read 0/0 for ~15 min at a time.
+    metrics['docker.containers.running'] = result.running;
+    metrics['docker.containers.stopped'] = result.stopped;
     if (full) {
       // The generic containers[] key — ingested by the API's telemetry worker
       // into the cross-device `containers` table. Emitted even when empty so a
-      // host that loses all containers clears its rows (authoritative wipe).
+      // host that loses all containers clears its rows (authoritative wipe);
+      // omitted on metrics-only polls (absent = keep stored rows).
       metrics['containers'] = result.rows;
-      metrics['docker.containers.running'] = result.running;
-      metrics['docker.containers.stopped'] = result.stopped;
     }
     if (result.engineVersionText) metrics['docker.version'] = result.engineVersionText;
     // The generic images[] key — ingested into the cross-device `docker_images`
