@@ -893,7 +893,8 @@ export interface UpdateRow {
   siteName?: string | null;
   /** Display name of the reporting plugin instance (e.g. "Generic SSH Plugin (Linux)"). */
   pluginName?: string | null;
-  kind: 'firmware' | 'os-package' | 'docker-image' | 'app';
+  /** 'stack' = the synthetic "UNM itself" row appended by the API when a newer UNM release is available. */
+  kind: 'firmware' | 'os-package' | 'docker-image' | 'app' | 'stack';
   /** Stable identity within (device, kind): "os" for firmware, a package name, an app/image name. */
   name: string;
   currentVersion?: string | null;
@@ -922,6 +923,8 @@ export interface StackUpdateInfo {
   latestApiVersion?: string | null;
   available: boolean;
   notesUrl?: string | null;
+  /** The release page itself (GitHub html_url) — where an admin actually updates. */
+  releaseUrl?: string | null;
 }
 
 export interface UpdatesResponse {

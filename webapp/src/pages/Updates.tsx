@@ -19,6 +19,7 @@ const KIND_STYLES: Record<string, string> = {
   'os-package': 'bg-accent-sky text-accent-sky-fg',
   'docker-image': 'bg-accent-teal text-accent-teal-fg',
   app: 'bg-accent-violet text-accent-violet-fg',
+  stack: 'bg-accent-purple text-accent-purple-fg',
 };
 
 function KindBadge({ kind }: { kind: string }) {
@@ -105,10 +106,11 @@ interface UpdateNode {
   groups?: KindGroup[];
 }
 
-/** Display order of kind groups on a device row (firmware first, packages last). */
-const KIND_ORDER: Record<string, number> = { firmware: 0, app: 1, 'docker-image': 2, 'os-package': 3 };
+/** Display order of kind groups on a device row (UNM itself first, packages last). */
+const KIND_ORDER: Record<string, number> = { stack: -1, firmware: 0, app: 1, 'docker-image': 2, 'os-package': 3 };
 
 const KIND_LABELS: Record<string, string> = {
+  stack: 'UNM itself',
   firmware: 'firmware',
   'os-package': 'packages',
   'docker-image': 'images',
@@ -599,7 +601,8 @@ export default function Updates() {
   // --- "Check now" — force a fresh poll of the devices that report updates ------
   const [checking, setChecking] = useState(false);
   async function checkNow() {
-    const deviceIds = Array.from(new Set(rows.map((r) => r.deviceId)));
+    // 'unm-stack' is the synthetic UNM-itself row — it has no device to poll.
+    const deviceIds = Array.from(new Set(rows.map((r) => r.deviceId))).filter((id) => id !== 'unm-stack');
     if (deviceIds.length === 0) return;
     setChecking(true);
     try {
@@ -873,11 +876,14 @@ export default function Updates() {
                 <span className="text-xs text-faint" title="Set the updateFeedUrl system setting to enable release checks">feed not configured</span>
               )}
             </div>
-            {stack.notesUrl && stack.available && (
-              <a href={stack.notesUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs text-info underline">
-                Release notes →
-              </a>
-            )}
+            {(() => {
+              const releaseHref = stack.releaseUrl ?? stack.notesUrl ?? undefined;
+              return releaseHref && stack.available ? (
+                <a href={releaseHref} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs text-info underline">
+                  Release page →
+                </a>
+              ) : null;
+            })()}
             <p className="mt-2 text-xs text-secondary">
               {stack.plugins.length} plugin{stack.plugins.length === 1 ? '' : 's'}: {stack.plugins.map((p) => `${p.name} ${p.version}`).join(' · ')}
             </p>

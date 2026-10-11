@@ -5063,8 +5063,8 @@ paths:
           required: false
           schema:
             type: string
-            enum: [firmware, os-package, docker-image, app]
-          description: Filter by update kind
+            enum: [firmware, os-package, docker-image, app, stack]
+          description: "Filter by update kind ('stack' = the synthetic UNM-itself row)"
       responses:
         '200':
           description: Update rows + stack self-update info (device + plugin identity included)
@@ -9358,8 +9358,11 @@ components:
         pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
         kind:
           type: string
-          enum: [firmware, os-package, docker-image, app]
-          description: "Update kind (plugins may emit custom kinds)"
+          enum: [firmware, os-package, docker-image, app, stack]
+          description: >-
+            Update kind (plugins may emit custom kinds). 'stack' marks the
+            synthetic "UNM itself" row appended by the API when a newer UNM
+            release is available (deviceId 'unm-stack', no apply path).
         name: { type: string, description: "Stable identity within (device, kind): 'os' for firmware, a package name, an app or image name" }
         currentVersion: { type: [string, 'null'] }
         latestVersion: { type: [string, 'null'] }
@@ -9418,6 +9421,11 @@ components:
         latestApiVersion: { type: [string, 'null'], description: "Latest version from the configured release feed (null = no feed / fetch failed)" }
         available: { type: boolean, description: "True when the feed reports a newer version than the running one" }
         notesUrl: { type: [string, 'null'], description: "Release notes URL from the manifest, if present" }
+        releaseUrl:
+          type: [string, 'null']
+          description: >-
+            The release page itself (e.g. GitHub html_url) — where an admin
+            actually updates. Null when the feed carries no such link.
 
     UpdatesResponse:
       type: object

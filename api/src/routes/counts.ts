@@ -5,6 +5,7 @@ import * as schema from '../db/schema';
 import { requireAuth } from '../auth/middleware';
 import { allowedDeviceIds } from '../deviceAccess';
 import { countOpenForUser } from '../notifications';
+import { getStackUpdateInfo } from '../stackUpdates';
 
 const router = Router();
 
@@ -100,17 +101,23 @@ const COUNTS: CountSpec[] = [
   },
   {
     // Available updates across the caller's devices. Only rows with available=
-    // true are ever persisted in device_updates, so a plain count is the badge.
+    // true are ever persisted in device_updates, so a plain count is the badge —
+    // PLUS one when UNM itself has an update available (the synthetic "UNM
+    // itself" row on the Updates page). The feed check is short-cached, so this
+    // stays cheap.
     key: 'updates',
     permission: 'updates:read',
     compute: async (req) => {
       const allowed = await allowedDeviceIds(req);
       if (allowed !== null && allowed.size === 0) return 0;
-      const [row] = await db
-        .select({ n: sql<number>`count(*)::int` })
-        .from(schema.deviceUpdates)
-        .where(allowed !== null ? inArray(schema.deviceUpdates.deviceId, [...allowed]) : undefined);
-      return row?.n ?? 0;
+      const [countRows, stack] = await Promise.all([
+        db
+          .select({ n: sql<number>`count(*)::int` })
+          .from(schema.deviceUpdates)
+          .where(allowed !== null ? inArray(schema.deviceUpdates.deviceId, [...allowed]) : undefined),
+        getStackUpdateInfo(),
+      ]);
+      return (countRows[0]?.n ?? 0) + (stack.available ? 1 : 0);
     },
   },
   {

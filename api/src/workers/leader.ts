@@ -46,6 +46,7 @@ export const LEADER_KEYS = {
   geoip: 9012,
   firewallEventRetention: 9013,
   hostStateRetention: 9014,
+  stackUpdates: 9015,
 } as const;
 
 /**

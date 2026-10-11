@@ -39,19 +39,23 @@ router.get('/updates', requireAuth, requirePermission('updates:read'), async (re
   try {
     const { deviceId, siteId, kind } = req.query as Record<string, string | undefined>;
 
-    if (kind && !['firmware', 'os-package', 'docker-image', 'app'].includes(kind)) {
-      res.status(400).json({ error: '"kind" must be one of: firmware, os-package, docker-image, app' });
+    if (kind && !['firmware', 'os-package', 'docker-image', 'app', 'stack'].includes(kind)) {
+      res.status(400).json({ error: '"kind" must be one of: firmware, os-package, docker-image, app, stack' });
       return;
     }
+
+    // "UNM itself" card — computed once and reused by every response path (the
+    // feed check is short-cached, so this stays cheap even on early returns).
+    const stack = await getStackUpdateInfo();
 
     // Device-level access control — scoped callers only see rows of their devices.
     const allowed = await allowedDeviceIds(req);
     if (allowed !== null && allowed.size === 0) {
-      res.status(200).json({ rows: [], stack: await getStackUpdateInfo() });
+      res.status(200).json({ rows: [], stack });
       return;
     }
     if (deviceId && allowed !== null && !allowed.has(deviceId)) {
-      res.status(200).json({ rows: [], stack: await getStackUpdateInfo() });
+      res.status(200).json({ rows: [], stack });
       return;
     }
 
@@ -60,7 +64,7 @@ router.get('/updates', requireAuth, requirePermission('updates:read'), async (re
     if (deviceId && siteId) {
       const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
       if (!device || device.siteId !== siteId) {
-        res.status(200).json({ rows: [], stack: await getStackUpdateInfo() });
+        res.status(200).json({ rows: [], stack });
         return;
       }
       where = kindClause ? and(eq(schema.deviceUpdates.deviceId, deviceId), kindClause) : eq(schema.deviceUpdates.deviceId, deviceId);
@@ -70,7 +74,7 @@ router.get('/updates', requireAuth, requirePermission('updates:read'), async (re
       let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
       if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
       if (deviceIds.length === 0) {
-        res.status(200).json({ rows: [], stack: await getStackUpdateInfo() });
+        res.status(200).json({ rows: [], stack });
         return;
       }
       const deviceClause = inArray(schema.deviceUpdates.deviceId, deviceIds);
@@ -91,21 +95,48 @@ router.get('/updates', requireAuth, requirePermission('updates:read'), async (re
       loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId)))),
     ]);
 
-    res.status(200).json({
-      rows: rows.map((r) => {
-        const device = deviceViews.get(r.deviceId);
-        return {
-          ...r,
-          applyInput: safeParseJson<Record<string, unknown>>(r.applyInput),
-          extra: safeParseJson<Record<string, unknown>>(r.extra),
-          deviceName: device?.name ?? null,
-          managementAddress: device?.managementAddress ?? null,
-          siteName: device?.siteName ?? null,
-          pluginName: pluginNames.get(r.pluginId) ?? null,
-        };
-      }),
-      stack: await getStackUpdateInfo(),
+    const mappedRows = rows.map((r) => {
+      const device = deviceViews.get(r.deviceId);
+      return {
+        ...r,
+        applyInput: safeParseJson<Record<string, unknown>>(r.applyInput),
+        extra: safeParseJson<Record<string, unknown>>(r.extra),
+        deviceName: device?.name ?? null,
+        managementAddress: device?.managementAddress ?? null,
+        siteName: device?.siteName ?? null,
+        pluginName: pluginNames.get(r.pluginId) ?? null,
+      };
     });
+
+    // Append a synthetic "UNM itself" row when a newer version is available so it
+    // renders in the SAME table (its own device-like node) with a manual apply
+    // path — consistent with how every other update appears. Only shown for the
+    // unfiltered view: it belongs to no device/site and has kind 'stack'.
+    if (stack.available && stack.latestApiVersion && !deviceId && !siteId && (!kind || kind === 'stack')) {
+      mappedRows.push({
+        deviceId: 'unm-stack',
+        pluginId: '',
+        kind: 'stack',
+        name: 'UnifiedNetworkManager',
+        currentVersion: stack.apiVersion,
+        latestVersion: stack.latestApiVersion,
+        rebootRequired: null,
+        sizeBytes: null,
+        releaseNotesUrl: stack.releaseUrl ?? stack.notesUrl ?? null,
+        releaseNotes: null,
+        branch: null,
+        applyActionId: null,
+        applyInput: {},
+        extra: { synthetic: true },
+        collectedAt: new Date().toISOString(),
+        deviceName: 'UnifiedNetworkManager (this instance)',
+        managementAddress: null,
+        siteName: null,
+        pluginName: null,
+      });
+    }
+
+    res.status(200).json({ rows: mappedRows, stack });
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

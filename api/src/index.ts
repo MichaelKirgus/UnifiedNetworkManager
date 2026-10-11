@@ -45,6 +45,7 @@ import { startPlanSchedulerWorker } from './workers/planScheduler';
 import { startLogRetentionWorker } from './workers/logRetention';
 import { startPluginMetricsWorker } from './workers/pluginMetrics';
 import { startNtpReferencesWorker } from './workers/ntpReferences';
+import { startUpdateCheckWorker } from './workers/updateCheck';
 import { startGeoIpWorker } from './workers/geoip';
 import { startFlowsWorker } from './workers/flows';
 import { startInactiveUsersWorker } from './workers/inactiveUsers';
@@ -296,6 +297,8 @@ async function main(): Promise<void> {
     void runAsLeader(LEADER_KEYS.pluginMetrics, 'pluginMetrics', () => startPluginMetricsWorker()).then((stop) => workerStops.push(stop));
     // Public NTP reference polling (Time page "Time base" card — fleet time-base check).
     void runAsLeader(LEADER_KEYS.ntpReferences, 'ntpReferences', () => startNtpReferencesWorker()).then((stop) => workerStops.push(stop));
+    // Stack self-update check: proactively notifies the admin when a newer UNM release is available.
+    void runAsLeader(LEADER_KEYS.stackUpdates, 'stackUpdates', () => startUpdateCheckWorker()).then((stop) => workerStops.push(stop));
     // Notification maintenance: auto-resolve recovered device states + retention.
     void runAsLeader(LEADER_KEYS.notifications, 'notifications', () => startNotificationsWorker()).then((stop) => workerStops.push(stop));
     // Inactivity auto-disable (credential policy inactiveDisableAfterDays).

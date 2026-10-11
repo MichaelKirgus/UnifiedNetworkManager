@@ -428,18 +428,45 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'How often the API polls configured plugin endpoints for discovery (the mDNS/DNS-SD fallback). A new or restarted plugin appears within one interval.',
   },
 
-  // Stack self-update feed (Updates page "UNM itself" card). Empty = disabled —
-  // the card then shows current versions without a latest-version comparison.
+  // Stack self-update feed (Updates page "UNM itself" card + row). Defaults to
+  // the official public GitHub releases endpoint so a fresh install checks for
+  // UNM updates out of the box; set empty to disable, or point at your own
+  // manifest. Accepts a bare manifest ({latestVersion, notesUrl}), a GitHub
+  // /releases array, or a single GitHub release object (/releases/latest).
   {
     key: 'updateFeedUrl',
     label: 'Update feed URL',
     type: 'string',
     category: 'Updates',
-    default: '',
+    default: 'https://api.github.com/repos/MichaelKirgus/UnifiedNetworkManager/releases/latest',
     envVar: 'UNM_UPDATE_FEED_URL',
     maxLength: 2048,
     help:
-      'Optional HTTPS URL of a JSON release manifest for UNM itself (e.g. a GitHub releases asset). Expected shape: {"latestVersion":"1.2.3","notesUrl":"https://…"}. When set, the Updates page compares it against the running API version and shows an "update available" state; when empty, only current versions are shown.',
+      'HTTPS URL of a JSON release manifest for UNM itself. Defaults to the official public GitHub releases endpoint (…/releases/latest) so new installs check for updates automatically. Accepts a bare manifest {"latestVersion":"1.2.3","notesUrl":"https://…"}, a GitHub /releases array, or a single GitHub release object. Set empty to disable — then only current versions are shown and no update notification is raised.',
+  },
+  {
+    key: 'updateFeedCheckIntervalMs',
+    label: 'Update check interval',
+    type: 'integer',
+    category: 'Updates',
+    unit: 'ms',
+    min: 60_000,
+    max: 86_400_000,
+    default: 900_000,
+    envVar: 'UNM_UPDATE_FEED_CHECK_INTERVAL_MS',
+    help:
+      'How often the API actively re-checks the update feed and raises/clears the "UnifiedNetworkManager update available" notification. The Updates page itself refreshes on its own 30 s cadence; this only controls how promptly the admin is NOTIFIED (bell + badge) when a new release appears. Takes effect on the next beat; no restart.',
+  },
+  {
+    key: 'updateFeedWebFetchProviderId',
+    label: 'Update feed web-fetch instance',
+    type: 'string',
+    category: 'Updates',
+    default: '',
+    envVar: 'UNM_UPDATE_FEED_WEBFETCH_PROVIDER_ID',
+    maxLength: 128,
+    help:
+      'The web-fetch plugin instance (capability `webFetch`) that downloads the update feed — the API itself never opens outbound internet connections. Empty = auto-resolve: the built-in Web Fetch plugin if online, otherwise any registered online web-fetch provider. Set a specific plugin id to pin the check to one instance (e.g. an egress proxy in another network segment).',
   },
 
   // Central file repository — which file-repo plugin stores NEW uploads by default.
