@@ -295,9 +295,14 @@ const identity = resolvePluginIdentity({
   // swaps a vdev's backing disk (pool.replace job — waits for it to settle);
   // storage.disk-offline / storage.disk-online take one vdev offline and back
   // (pool.offline / pool.online) with topology re-read verification. All writes
-  // are transport-tolerant; the section is omitted on non-iX hardware where
-  // enclosure2.query returns [].
-  version: '0.24.0',
+  // are transport-tolerant.
+  // 0.25.0 — Virtual drive-bay fallback for hosts WITHOUT native enclosure
+  // management: when enclosure2.query returns [] the 'Drive Bays' section is now
+  // built from disk.query instead of being omitted — one bay per physical disk
+  // (external JBODs included), grouped into bands by pool, LED from the live
+  // vdev status, replace/offline/online actions for pooled disks. Native
+  // enclosure data always takes priority when present.
+  version: '0.25.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -3136,16 +3141,19 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   await assertPinned(req, host, transport, ports);
 
   const client = getClient(host, transport, timeoutMs, ports);
-  const [sysInfoRes, poolsRes, ifacesRes, updateConfigRes, enclosuresRes] = await Promise.allSettled([
+  const [sysInfoRes, poolsRes, ifacesRes, updateConfigRes, enclosuresRes, disksRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('interface.query', [], creds),
     // The configured update branch/profile — shown on the System item and
     // switchable via the update.profile.set action (best-effort like the rest).
     client.call<Record<string, unknown>>('update.config', [], creds),
-    // Drive bays for the enclosure tray — [] on non-iX hardware (the section is
-    // then omitted); filterable_api_method takes [filters, options].
+    // Drive bays for the enclosure tray — [] on non-iX hardware (the virtual
+    // disk.query fallback then takes over); filterable_api_method takes [filters, options].
     client.call<Record<string, unknown>[]>('enclosure2.query', [[], {}], creds),
+    // Every physical disk (incl. external JBODs) — the virtual drive-bay view
+    // when no native enclosure management exists.
+    client.call<Record<string, unknown>[]>('disk.query', [], creds),
   ]);
 
   return buildTruenasState({
@@ -3154,6 +3162,7 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
     ifaces: ifacesRes.status === 'fulfilled' && Array.isArray(ifacesRes.value) ? ifacesRes.value : [],
     updateConfig: updateConfigRes.status === 'fulfilled' ? updateConfigRes.value : undefined,
     enclosures: enclosuresRes.status === 'fulfilled' && Array.isArray(enclosuresRes.value) ? enclosuresRes.value : [],
+    disks: disksRes.status === 'fulfilled' && Array.isArray(disksRes.value) ? disksRes.value : [],
   });
 }, 'ix-truenas-plugin'));
 

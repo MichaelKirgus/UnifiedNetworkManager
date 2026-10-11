@@ -4,8 +4,10 @@
  *   - Pools      — one item per ZFS pool with status, size/used/free and scrub
  *                  state (read-only in v1; pool management is a later release).
  *   - Drive Bays — one item per enclosure slot from enclosure2.query (iX
- *                  hardware only) rendered as a disk-tray face, with identify /
- *                  replace / offline actions for installed disks.
+ *                  hardware) rendered as a disk-tray face, with identify /
+ *                  replace / offline actions; on hosts WITHOUT native enclosure
+ *                  management the section falls back to a virtual view of every
+ *                  disk.query row grouped by pool (external JBODs included).
  *   - Interfaces — one item per network interface with link state, MAC, IP
  *                  aliases and VLAN tag.
  *   - System     — hostname/version/model/uptime summary + configuration
@@ -51,11 +53,14 @@ function poolStatus(status: string): string {
   return 'unknown';
 }
 
-/** Maps a pool topology tree to bare disk name → pool name. Walks every vdev
- *  category (data/log/cache/spares) recursively; leaf DISK entries carry `disk`
- *  (bare name) and/or `path` (/dev/...). */
-function poolMembershipByDev(pools: Record<string, unknown>[]): Map<string, string> {
-  const byDev = new Map<string, string>();
+/** Pool membership + live vdev status for one bare disk name. */
+interface DiskPoolEntry { pool: string; status: string | null }
+
+/** Maps a pool topology tree to bare disk name → {pool, vdevStatus}. Walks every
+ *  vdev category (data/log/cache/spares) recursively; leaf DISK entries carry
+ *  `disk` (bare name), `path` (/dev/...) and the live vdev `status`. */
+function diskPoolInfo(pools: Record<string, unknown>[]): Map<string, DiskPoolEntry> {
+  const byDev = new Map<string, DiskPoolEntry>();
   const walk = (vdevs: unknown, poolName: string): void => {
     if (!Array.isArray(vdevs)) return;
     for (const v of vdevs) {
@@ -66,7 +71,7 @@ function poolMembershipByDev(pools: Record<string, unknown>[]): Map<string, stri
         const disk = pickString(vd, ['disk']);
         const path = pickString(vd, ['path']);
         const bare = disk ?? (path ? path.replace(/^\/dev\//, '') : null);
-        if (bare && !byDev.has(bare)) byDev.set(bare, poolName);
+        if (bare && !byDev.has(bare)) byDev.set(bare, { pool: poolName, status: pickString(vd, ['status']) ?? null });
       }
       walk(vd['children'], poolName);
     }
@@ -90,9 +95,9 @@ function bayStatus(status: string | null | undefined): string {
 }
 
 /** One state item per drive bay across all enclosures. `enclosures` is the raw
- *  `enclosure2.query` result — empty on non-iX hardware (the section is then
- *  omitted entirely). */
-function enclosureItems(enclosures: Record<string, unknown>[], poolByDev: Map<string, string>): StateItem[] {
+ *  `enclosure2.query` result — empty on non-iX hardware (the virtual fallback
+ *  then takes over; see buildTruenasState). */
+function enclosureItems(enclosures: Record<string, unknown>[], byDev: Map<string, DiskPoolEntry>): StateItem[] {
   const items: StateItem[] = [];
   for (const enc of enclosures) {
     const encId = pickString(enc, ['id']);
@@ -110,7 +115,7 @@ function enclosureItems(enclosures: Record<string, unknown>[], poolByDev: Map<st
       const serial = pickString(e, ['serial']);
       const sizeBytes = pickNumber(e, ['size']);
       const supportsIdentify = e['supports_identify_light'] === true;
-      const pool = dev ? (poolByDev.get(dev) ?? null) : null;
+      const pool = dev ? (byDev.get(dev)?.pool ?? null) : null;
 
       const fields: Record<string, string | number | null | unknown[]> = {};
       if (model && !/to be filled/i.test(model)) fields.Model = model;
@@ -160,6 +165,100 @@ function enclosureLayout(enclosures: Record<string, unknown>[]): { groups: { id:
     const label = pickString(enc, ['label']) || pickString(enc, ['name']);
     return { id: `enc-${encId}`, label: label ?? null, portKeys };
   });
+  return { groups };
+}
+
+/** Natural order for bare disk names (da2 before da10). */
+function diskNameOrder(a: string, b: string): number {
+  const ma = /^([a-z]+)(\d+)$/i.exec(a);
+  const mb = /^([a-z]+)(\d+)$/i.exec(b);
+  if (ma && mb) {
+    if (ma[1].toLowerCase() !== mb[1].toLowerCase()) return ma[1].localeCompare(mb[1]);
+    return Number(ma[2]) - Number(mb[2]);
+  }
+  return a.localeCompare(b);
+}
+
+/** Media type from a raw disk.query row — modern `type` ('HDD'|'SSD'), legacy
+ *  integer `rotationrate` (0/null = SSD) or boolean `rotation_rate`. */
+function diskMediaType(d: Record<string, unknown>): string | null {
+  const t = pickString(d, ['type']);
+  if (t === 'HDD' || t === 'SSD') return t.toLowerCase();
+  const rr = d['rotationrate'];
+  if (typeof rr === 'number') return rr > 0 ? 'hdd' : 'ssd';
+  if (rr === null) return 'ssd';
+  if (typeof d['rotation_rate'] === 'boolean') return d['rotation_rate'] ? 'hdd' : 'ssd';
+  return null;
+}
+
+/** Live vdev status → bay LED badge for the virtual tray. */
+function vdevBayStatus(status: string | null): string {
+  const s = (status ?? '').toUpperCase();
+  if (s === 'ONLINE') return 'ok';
+  if (s === 'DEGRADED' || s === 'MAINTENANCE') return 'degraded';
+  if (s === 'FAULTED' || s === 'UNAVAIL') return 'critical';
+  if (s === 'OFFLINE') return 'offline';
+  return 'unknown';
+}
+
+/** Virtual drive-bay view for hosts WITHOUT native enclosure management: one bay
+ *  per disk.query row (external JBOD disks included), LED from the pool's vdev
+ *  status, replace/offline/online actions for pooled disks. No identify action —
+ *  there is no LED hardware to light. */
+function virtualBayItems(disks: Record<string, unknown>[], byDev: Map<string, DiskPoolEntry>): StateItem[] {
+  const items: StateItem[] = [];
+  for (const d of disks) {
+    const name = pickString(d, ['name', 'identifier']);
+    if (!name) continue;
+    const model = pickString(d, ['model', 'description']);
+    const serial = pickString(d, ['serial', 'serial_number']);
+    const sizeBytes = pickNumber(d, ['size', 'capacity_bytes']);
+    const media = diskMediaType(d);
+    const info = byDev.get(name);
+
+    const fields: Record<string, string | number | null | unknown[]> = {};
+    if (model && !/to be filled/i.test(model)) fields.Model = model;
+    if (serial) fields.Serial = serial;
+    const size = formatBytes(sizeBytes);
+    if (size) fields.Size = size;
+    if (media) fields.Media = media.toUpperCase();
+    if (info?.pool) fields.Pool = info.pool;
+
+    const actions: StateItem['actions'] = [];
+    if (info?.pool) {
+      // Disk-level operations target the vdev by device name — same contract as
+      // the native tray, so the plan workflow is identical either way.
+      actions.push({ actionId: 'storage.disk-replace', prefill: { pool: info.pool, label: name } });
+      actions.push({ actionId: 'storage.disk-offline', prefill: { pool: info.pool, label: name } });
+      actions.push({ actionId: 'storage.disk-online', prefill: { pool: info.pool, label: name } });
+    }
+
+    items.push({
+      key: `vdisk:${name}`,
+      title: name,
+      subtitle: model && !/to be filled/i.test(model) ? model : (media ? media.toUpperCase() : null),
+      status: info ? vdevBayStatus(info.status) : 'unknown',
+      fields,
+      ...(actions.length > 0 ? { actions } : {}),
+    });
+  }
+  return items.sort((a, b) => diskNameOrder(a.key.replace(/^vdisk:/, ''), b.key.replace(/^vdisk:/, '')));
+}
+
+/** One layout band per pool for the virtual tray; disks outside any pool fall
+ *  into the tray's automatic "Unassigned" band. */
+function virtualBayLayout(items: StateItem[], byDev: Map<string, DiskPoolEntry>): { groups: { id: string; label?: string | null; portKeys: string[] }[] } {
+  const byPool = new Map<string, string[]>();
+  for (const it of items) {
+    const name = it.key.replace(/^vdisk:/, '');
+    const pool = byDev.get(name)?.pool;
+    if (!pool) continue; // orphan → the tray's automatic "Unassigned" band
+    const keys = byPool.get(pool);
+    if (keys) keys.push(it.key); else byPool.set(pool, [it.key]);
+  }
+  const groups = Array.from(byPool.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([pool, portKeys]) => ({ id: `vpool-${pool}`, label: pool, portKeys }));
   return { groups };
 }
 
@@ -256,10 +355,13 @@ export function buildTruenasState(args: {
   ifaces?: Record<string, unknown>[];
   /** `update.config` result — the configured update branch/profile (best-effort). */
   updateConfig?: Record<string, unknown>;
-  /** `enclosure2.query` result — empty on non-iX hardware → section omitted. */
+  /** `enclosure2.query` result — empty on non-iX hardware → virtual fallback. */
   enclosures?: Record<string, unknown>[];
+  /** `disk.query` result — the virtual drive-bay view when no native enclosure
+   *  data exists (bare-metal builds, external JBODs). */
+  disks?: Record<string, unknown>[];
 }): DeviceStateResponse {
-  const { sysInfo, pools = [], ifaces = [], updateConfig, enclosures = [] } = args;
+  const { sysInfo, pools = [], ifaces = [], updateConfig, enclosures = [], disks = [] } = args;
 
   // --- System ------------------------------------------------------------------
   const hostname = pickString(sysInfo ?? {}, ['hostname']);
@@ -302,17 +404,29 @@ export function buildTruenasState(args: {
         }
       : null;
 
-  // Drive bays render as a disk-tray face — one band per physical enclosure.
-  // enclosure2.query returns [] on non-iX hardware → the section is omitted.
-  const bayItems = enclosureItems(enclosures, poolMembershipByDev(pools));
+  // Drive bays render as a disk-tray face. Native enclosure data (iX hardware)
+  // ALWAYS wins; when enclosure2.query returns [] the section falls back to a
+  // virtual view of every disk.query row — one band per pool, unpooled disks in
+  // the tray's automatic "Unassigned" band.
+  const byDev = diskPoolInfo(pools);
+  let bayItems = enclosureItems(enclosures, byDev);
+  let encLayout: { groups: { id: string; label?: string | null; portKeys: string[] }[] };
+  let encDescription = 'Installed disks per enclosure. Click bays to select them for identify / replace / offline actions.';
+  if (bayItems.length === 0 && disks.length > 0) {
+    bayItems = virtualBayItems(disks, byDev);
+    encLayout = virtualBayLayout(bayItems, byDev);
+    encDescription = 'No native enclosure management detected — all physical disks grouped by pool. Click bays to select them for replace / offline actions.';
+  } else {
+    encLayout = enclosureLayout(enclosures);
+  }
   const enclosuresSection: StateSection | null =
     bayItems.length > 0
       ? {
           id: 'enclosures',
           label: 'Drive Bays',
-          description: 'Installed disks per enclosure. Click bays to select them for identify / replace / offline actions.',
+          description: encDescription,
           kind: 'enclosure',
-          layout: enclosureLayout(enclosures),
+          layout: encLayout,
           items: bayItems,
         }
       : null;

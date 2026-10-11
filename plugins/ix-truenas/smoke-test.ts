@@ -52,6 +52,9 @@ const capturedPoolDiskOps: CapturedPoolDiskOp[] = [];
 /** Vdevs currently OFFLINE in the mock (flipped by pool.offline / pool.online) —
  *  lets disk-op verification re-read the effect via pool.query topology. */
 const offlineVdevs = new Set<string>();
+/** Toggle for the enclosure2.query mock — false simulates non-iX hardware so
+ *  the virtual disk.query drive-bay fallback can be asserted. */
+let mockEnclosuresEnabled = true;
 
 /** Minimal multipart/form-data parser (boundary-delimited parts → fields + files). */
 function parseMultipart(body: Buffer, contentType: string): { fields: Record<string, string>; files: { name: string; filename?: string; data: Buffer }[] } {
@@ -241,6 +244,7 @@ wss.on('connection', (ws: WebSocket) => {
         ]);
       case 'enclosure2.query':
         if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        if (!mockEnclosuresEnabled) return reply([]); // non-iX hardware
         // One iX controller enclosure with 4 bays: da0 (OK, identify-capable),
         // da3 (CRIT — the failing mirror member), an EMPTY bay (no dev) and da5
         // (OK but on a slot WITHOUT identify support → no LED action). da0/da3
@@ -648,6 +652,26 @@ async function main(): Promise<void> {
   check('empty bay renders disabled with no disk actions', !!bayEmpty && bayEmpty.status === 'disabled' && (bayEmpty.actions ?? []).every((a) => a.actionId !== 'storage.disk-replace'), bayEmpty);
   const bay4 = encSection?.items?.find((i) => i.key === 'enc-aaaa1111:4');
   check('bay 4 (no identify support, no pool) has NO actions', !!bay4 && (bay4.actions ?? []).length === 0, bay4);
+
+  // Virtual drive-bay fallback — non-iX hardware (enclosure2.query → []):
+  // the section is built from disk.query instead of being omitted.
+  mockEnclosuresEnabled = false;
+  const vStateRes = await post('/state', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds });
+  const vStateJson = (await vStateRes.json()) as typeof stateJson;
+  mockEnclosuresEnabled = true; // restore for any later /state calls
+  console.log('\n== /state virtual drive-bay fallback ==');
+  check('fallback: HTTP 200', vStateRes.status === 200);
+  const vEncSection = (vStateJson.sections ?? []).find((s) => s.id === 'enclosures');
+  check('fallback: drive-bays section present from disk.query', !!vEncSection && vEncSection.kind === 'enclosure', (vStateJson.sections ?? []).map((s) => s.id));
+  const vItems = vEncSection?.items ?? [];
+  check('fallback: one bay per physical disk (da0, da1, da3)', vItems.length === 3 && ['vdisk:da0', 'vdisk:da1', 'vdisk:da3'].every((k) => vItems.some((i) => i.key === k)), vItems.map((i) => i.key));
+  const vGroups = (vEncSection?.layout?.groups ?? []).map((g) => ({ label: g.label, keys: [...g.portKeys].sort() }));
+  check('fallback: bays grouped into pool bands', JSON.stringify(vGroups) === JSON.stringify([{ label: 'cache', keys: ['vdisk:da1'] }, { label: 'tank', keys: ['vdisk:da0', 'vdisk:da3'] }]), vGroups);
+  const vDa0 = vItems.find((i) => i.key === 'vdisk:da0');
+  check('fallback: da0 ok, pool tank, disk actions but NO identify (no LED hardware)', !!vDa0 && vDa0.status === 'ok' && vDa0.fields?.Pool === 'tank' && ['storage.disk-replace', 'storage.disk-offline', 'storage.disk-online'].every((id) => vDa0.actions!.some((a) => a.actionId === id)) && !vDa0.actions!.some((a) => a.actionId === 'enclosure.identify'), vDa0);
+  const vDa1 = vItems.find((i) => i.key === 'vdisk:da1');
+  check('fallback: da1 (cache pool, SSD) ok with media field', !!vDa1 && vDa1.status === 'ok' && vDa1.fields?.Pool === 'cache' && String(vDa1.fields?.Media).toLowerCase() === 'ssd', vDa1);
+
   const sysSection = (stateJson.sections ?? []).find((s) => s.id === 'system');
   check('system item advertises backup + restore + branch actions + power', !!sysSection?.items?.[0]?.actions && ['config.backup.download', 'config.restore', 'update.profile.read', 'update.profile.set', 'system.firmware.update-file', 'system.reboot', 'system.shutdown'].every((id) => sysSection.items![0].actions!.some((a) => a.actionId === id)), sysSection?.items?.[0]?.actions);
   check('system item shows the configured update branch', (sysSection?.items?.[0]?.fields as Record<string, unknown>)?.Branch === 'GENERAL', sysSection?.items?.[0]?.fields);
