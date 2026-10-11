@@ -4882,6 +4882,258 @@ const storageDeleteAction: ActionDescriptor<TruenasActionContext> = {
 };
 
 // ---------------------------------------------------------------------------
+// Enclosure / drive-bay actions (Config page "Drive Bays" tray) — target the
+// documented TrueNAS JSON-RPC methods for physical disk management:
+//   enclosure2.set_slot_status   (bay LED identify; ENCLOSURE_WRITE)
+//   pool.replace                 (swap a vdev's backing disk; POOL_WRITE, @job)
+//   pool.offline / pool.online   (take a vdev offline / bring it back; POOL_WRITE)
+// All resolve the appliance's integer pool id from a pool NAME first (the RPCs
+// are id-keyed), and every write is transport-tolerant with state re-reads.
+// ---------------------------------------------------------------------------
+
+/** Resolves an appliance pool's integer id from its name (pool.query). */
+async function resolvePoolId(ctx: TruenasActionContext, poolName: string): Promise<number | null> {
+  const rows = await callWithRetry<Record<string, unknown>[]>(ctx, 'pool.query', [[['name', '=', poolName]]]);
+  for (const r of rows ?? []) {
+    if (!r || typeof r !== 'object') continue;
+    if (pickString(r, ['name']) === poolName) {
+      const id = pickNumber(r, ['id']);
+      return typeof id === 'number' ? id : null;
+    }
+  }
+  return null;
+}
+
+/** Walks a pool's topology and returns the status of the vdev whose `disk` or
+ *  `guid` matches `label` — used to verify offline/online effects. Null when the
+ *  pool is gone or no matching vdev exists (state unreadable → don't guess). */
+async function vdevStatusByLabel(ctx: TruenasActionContext, poolName: string, label: string): Promise<string | null> {
+  let rows: Record<string, unknown>[];
+  try {
+    rows = await ctx.client.call<Record<string, unknown>[]>('pool.query', [[['name', '=', poolName]]], ctx.creds);
+  } catch {
+    return null;
+  }
+  const pool = (rows ?? [])[0];
+  if (!pool) return null; // pool gone — can't confirm either way
+  const topo = pool['topology'];
+  let found: string | null = null;
+  const walk = (vdevs: unknown): void => {
+    if (!Array.isArray(vdevs)) return;
+    for (const v of vdevs) {
+      if (!v || typeof v !== 'object') continue;
+      const vd = v as Record<string, unknown>;
+      const disk = pickString(vd, ['disk']);
+      const guid = pickString(vd, ['guid']);
+      if ((disk && disk === label) || (guid && guid === label)) {
+        found = normState(pickString(vd, ['status']));
+        return; // first match wins — a disk appears once in the topology
+      }
+      walk(vd['children']);
+    }
+  };
+  if (topo && typeof topo === 'object') for (const cat of Object.values(topo as Record<string, unknown>)) walk(cat);
+  return found;
+}
+
+/** Lights (or clears) the physical bay LED — `enclosure2.set_slot_status`. The
+ *  operation is idempotent (setting a slot to its current state is a no-op), so
+ *  a lost transport response is safely re-dispatched. */
+const enclosureIdentifyAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'enclosure.identify',
+  label: 'Identify drive (LED)',
+  description:
+    "Lights the physical bay LED of one installed disk (`enclosure2.set_slot_status`, ENCLOSURE_WRITE) so you can find it in a rack. status='ON' lights it, 'OFF' clears it. Only bays whose hardware supports identification offer this action.",
+  module: 'Storage',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 30_000,
+  inputSchema: {
+    enclosureId: { type: 'string', required: true, minLength: 1, description: 'Enclosure id (from the Drive Bays tray)' },
+    slot: { type: 'number', required: true, min: 1, description: 'Drive bay number within the enclosure' },
+    status: { type: 'string', required: false, enum: ['ON', 'OFF'], default: 'ON', description: "'ON' lights the bay LED; 'OFF' clears it" },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const enclosureId = str(input, 'enclosureId');
+    if (!enclosureId || typeof input['slot'] !== 'number') return { success: false, details: { error: 'enclosureId and a numeric slot are required' } };
+    const slotRaw = input['slot']; // narrowed to number by the guard above
+    if (!Number.isFinite(slotRaw)) return { success: false, details: { error: 'enclosureId and a numeric slot are required' } };
+    const slot = Math.floor(slotRaw); // plain const — narrowing survives into closures
+    const status = str(input, 'status') === 'OFF' ? 'OFF' : 'ON';
+    try {
+      // Idempotent — re-dispatching the same set_slot_status on a transport drop is harmless.
+      const dr = await dispatchWrite(ctx, 'enclosure2.set_slot_status', [{ enclosure_id: enclosureId, slot, status }], { idempotentRetry: true });
+      return { success: true, applied: true, details: { enclosureId, slot, status, ...(dr.note ? { transportNote: dr.note } : {}) } };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/does not support identification/i.test(msg)) return { success: false, details: { error: `Bay ${slot} does not support LED identification on this hardware.` } };
+      return { success: false, details: { error: msg } };
+    }
+  },
+};
+
+/** Swaps the backing disk of a vdev — `pool.replace` (POOL_WRITE, @job). The job
+ *  formats + hot-swaps the new disk and copies settings; RESILVERING then runs in
+ *  the background independently. We wait for the swap JOB to settle (bounded) so
+ *  "success" means the disk was actually swapped in, not merely accepted. */
+const storageDiskReplaceAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'storage.disk-replace',
+  label: 'Replace pool disk',
+  description:
+    "Replaces one disk of a ZFS pool with a spare (`pool.replace`, POOL_WRITE job). The appliance formats the new disk, hot-swaps it into the vdev and copies settings; resilvering continues in the background afterwards. DANGEROUS — pick the correct spare.",
+  module: 'Storage',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    pool: { type: 'string', required: true, minLength: 1, description: 'Pool name containing the disk to replace' },
+    label: { type: 'string', required: true, minLength: 1, description: 'Disk to replace — its device name (e.g. da0) or ZFS guid' },
+    newDisk: { type: 'string', required: true, minLength: 1, description: 'Replacement disk — its device name or identifier (from disk.get_unused)' },
+    force: { type: 'boolean', required: false, default: false, description: 'Force even if the new disk appears in use / not clean' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const poolName = str(input, 'pool');
+    const label = str(input, 'label');
+    const newDisk = str(input, 'newDisk');
+    if (!poolName || !label || !newDisk) return { success: false, details: { error: 'pool, label and newDisk are all required' } };
+    if (isBootPoolName(poolName)) return { success: false, details: { error: `Refusing to replace a disk in the OS boot pool — it holds TrueNAS itself.` } };
+    const force = input['force'] === true;
+
+    const poolId = await resolvePoolId(ctx, poolName);
+    if (poolId === null) return { success: false, details: { error: `Pool "${poolName}" not found on this appliance.`, pool: poolName } };
+
+    try {
+      // Transport-tolerant — a lost response is confirmed by re-reading the vdev's status.
+      const dr = await dispatchWrite(ctx, 'pool.replace', [poolId, { label, disk: newDisk, force }], {
+        timeoutMs: 60_000,
+        verify: async () => {
+          // Applied when the NEW disk now occupies this vdev (its status is no longer
+          // UNAVAIL/FAULTED and the topology references it). Best-effort signal.
+          const st = await vdevStatusByLabel(ctx, poolName, label);
+          if (st === null) return null;
+          return st !== 'UNAVAIL' && st !== 'OFFLINE';
+        },
+      });
+
+      // pool.replace is @job — the RPC resolves to a job id while the swap runs.
+      const r = dr.value as unknown;
+      let jobId: number | null = typeof r === 'number' ? r : (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number' ? ((r as Record<string, unknown>)['id'] as number) : null);
+
+      if (jobId !== null) {
+        const wait = await waitForJob(ctx, jobId, 240_000);
+        if (wait.state === 'RUNNING') return { success: true, applied: true, details: { pool: poolName, label, newDisk, jobId, note: 'Replace job still in progress on the appliance — resilvering will continue after it settles.' } };
+        if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') return { success: false, details: { pool: poolName, label, newDisk, jobId, error: wait.error ?? `Replace job ended in state ${wait.state}` } };
+      }
+
+      // Post-apply verification — the vdev should now be ONLINE/DEGRADED (resilvering), not UNAVAIL.
+      let verified = !dr.unconfirmed;
+      const st = await vdevStatusByLabel(ctx, poolName, label);
+      if (st !== null) verified = st === 'ONLINE' || st === 'DEGRADED';
+
+      return { success: true, applied: true, verified, details: { pool: poolName, label, newDisk, force, ...(jobId !== null ? { jobId } : {}), ...(dr.note ? { transportNote: dr.note } : {}) } };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/not found|Label .* not found/i.test(msg)) return { success: false, details: { error: `Disk "${label}" was not found in pool "${poolName}".`, pool: poolName } };
+      if (/is in use by zpool|not clean|Force must be specified/i.test(msg)) return { success: false, details: { error: msg, hint: 'The replacement disk is busy or has partitions — set force=true to override.' } };
+      return { success: false, details: { error: msg, pool: poolName } };
+    }
+  },
+};
+
+/** Takes one vdev's backing disk OFFLINE — `pool.offline` (POOL_WRITE). DANGEROUS:
+ *  in a mirror/raidz this degrades redundancy; on a single-disk/stripe pool it
+ *  fails the whole pool. Verified by re-reading the vdev status to OFFLINE. */
+const storageDiskOfflineAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'storage.disk-offline',
+  label: 'Take disk offline',
+  description:
+    "Takes one disk of a ZFS pool OFFLINE (`pool.offline`, POOL_WRITE). DANGEROUS — in a mirror/raidz this degrades redundancy, and on a single-disk or stripe pool it fails the entire pool. Use to pull a failing drive out for replacement; bring it back with 'Bring disk online'.",
+  module: 'Storage',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    pool: { type: 'string', required: true, minLength: 1, description: 'Pool name containing the disk' },
+    label: { type: 'string', required: true, minLength: 1, description: 'Disk to take offline — its device name (e.g. da0) or ZFS guid' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const poolName = str(input, 'pool');
+    const label = str(input, 'label');
+    if (!poolName || !label) return { success: false, details: { error: 'pool and label are required' } };
+    if (isBootPoolName(poolName)) return { success: false, details: { error: `Refusing to take a disk offline in the OS boot pool — it holds TrueNAS itself.` } };
+
+    const poolId = await resolvePoolId(ctx, poolName);
+    if (poolId === null) return { success: false, details: { error: `Pool "${poolName}" not found on this appliance.`, pool: poolName } };
+
+    // Pre-check — a label that is not in the pool topology must fail cleanly
+    // (the appliance would reject it too, but our own message names the disk).
+    const preStatus = await vdevStatusByLabel(ctx, poolName, label);
+    if (preStatus === null) return { success: false, details: { error: `Disk "${label}" was not found in pool "${poolName}".`, pool: poolName } };
+    if (preStatus === 'OFFLINE') return { success: true, applied: false, details: { pool: poolName, label, note: 'Disk is already offline.' } };
+
+    try {
+      // Transport-tolerant — a lost response is confirmed by re-reading the vdev status.
+      const dr = await dispatchWrite(ctx, 'pool.offline', [poolId, { label }], { verify: () => vdevStatusByLabel(ctx, poolName, label).then((s) => (s === null ? null : s === 'OFFLINE')) });
+      if (dr.unconfirmed) return { success: false, details: { error: 'Offline could not be confirmed (transport drop, state unreadable) — check the appliance.', pool: poolName, label } };
+
+      // Post-apply verification.
+      const st = await vdevStatusByLabel(ctx, poolName, label);
+      return { success: true, applied: true, verified: st === 'OFFLINE', details: { pool: poolName, label, status: st ?? 'unknown', ...(dr.note ? { transportNote: dr.note } : {}) } };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/already offline/i.test(msg)) return { success: true, applied: false, details: { pool: poolName, label, note: 'Disk is already offline.' } };
+      if (/not found|Label .* not found/i.test(msg)) return { success: false, details: { error: `Disk "${label}" was not found in pool "${poolName}".`, pool: poolName } };
+      return { success: false, details: { error: msg, pool: poolName } };
+    }
+  },
+};
+
+/** Brings one vdev's backing disk back ONLINE — `pool.online` (POOL_WRITE). The
+ *  inverse of take-disk-offline; verified by re-reading the vdev status to ONLINE. */
+const storageDiskOnlineAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'storage.disk-online',
+  label: 'Bring disk online',
+  description:
+    "Brings one previously-offlined disk of a ZFS pool back ONLINE (`pool.online`, POOL_WRITE). The inverse of 'Take disk offline' — the vdev re-joins the pool and any needed resilvering starts automatically.",
+  module: 'Storage',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    pool: { type: 'string', required: true, minLength: 1, description: 'Pool name containing the disk' },
+    label: { type: 'string', required: true, minLength: 1, description: 'Disk to bring online — its device name (e.g. da0) or ZFS guid' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const poolName = str(input, 'pool');
+    const label = str(input, 'label');
+    if (!poolName || !label) return { success: false, details: { error: 'pool and label are required' } };
+
+    const poolId = await resolvePoolId(ctx, poolName);
+    if (poolId === null) return { success: false, details: { error: `Pool "${poolName}" not found on this appliance.`, pool: poolName } };
+
+    // Pre-check — a label that is not in the pool topology must fail cleanly.
+    const preStatus = await vdevStatusByLabel(ctx, poolName, label);
+    if (preStatus === null) return { success: false, details: { error: `Disk "${label}" was not found in pool "${poolName}".`, pool: poolName } };
+    if (preStatus === 'ONLINE') return { success: true, applied: false, details: { pool: poolName, label, note: 'Disk is already online.' } };
+
+    try {
+      // Transport-tolerant — a lost response is confirmed by re-reading the vdev status.
+      const dr = await dispatchWrite(ctx, 'pool.online', [poolId, { label }], { verify: () => vdevStatusByLabel(ctx, poolName, label).then((s) => (s === null ? null : s === 'ONLINE')) });
+      if (dr.unconfirmed) return { success: false, details: { error: 'Online could not be confirmed (transport drop, state unreadable) — check the appliance.', pool: poolName, label } };
+
+      // Post-apply verification.
+      const st = await vdevStatusByLabel(ctx, poolName, label);
+      return { success: true, applied: true, verified: st === 'ONLINE', details: { pool: poolName, label, status: st ?? 'unknown', ...(dr.note ? { transportNote: dr.note } : {}) } };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/already online/i.test(msg)) return { success: true, applied: false, details: { pool: poolName, label, note: 'Disk is already online.' } };
+      if (/not found|Label .* not found/i.test(msg)) return { success: false, details: { error: `Disk "${label}" was not found in pool "${poolName}".`, pool: poolName } };
+      return { success: false, details: { error: msg, pool: poolName } };
+    }
+  },
+};
+
+// ---------------------------------------------------------------------------
 // File-share CRUD actions (Shares page) — a GENERIC contract any storage plugin
 // can implement. One action per protocol × operation, so the webapp's Shares page
 // offers create/edit/delete for SMB/CIFS, NFS, iSCSI and NVMe-oF shares and fans
@@ -6762,6 +7014,10 @@ export const registry = createRegistry<TruenasActionContext>([
   storageMountAction,
   storageUnmountAction,
   storageDeleteAction,
+  enclosureIdentifyAction,
+  storageDiskReplaceAction,
+  storageDiskOfflineAction,
+  storageDiskOnlineAction,
   smbShareCreateAction,
   smbShareUpdateAction,
   smbShareDeleteAction,

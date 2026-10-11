@@ -44,6 +44,15 @@ let manualResumeCalled = false;/** Captured /_upload requests — asserted after
 interface CapturedUpload { auth: string; method?: string; params?: unknown[]; fileName?: string; data: Buffer }
 const capturedUploads: CapturedUpload[] = [];
 
+/** Captured enclosure2.set_slot_status payloads — asserted after identify runs. */
+const capturedSlotStatus: Record<string, unknown>[] = [];
+/** Captured pool.offline / pool.online calls — asserted after the disk ops run. */
+interface CapturedPoolDiskOp { method: string; params?: unknown[] }
+const capturedPoolDiskOps: CapturedPoolDiskOp[] = [];
+/** Vdevs currently OFFLINE in the mock (flipped by pool.offline / pool.online) —
+ *  lets disk-op verification re-read the effect via pool.query topology. */
+const offlineVdevs = new Set<string>();
+
 /** Minimal multipart/form-data parser (boundary-delimited parts → fields + files). */
 function parseMultipart(body: Buffer, contentType: string): { fields: Record<string, string>; files: { name: string; filename?: string; data: Buffer }[] } {
   const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType ?? '');
@@ -147,20 +156,22 @@ wss.on('connection', (ws: WebSocket) => {
       case 'pool.query':
         if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
         // Topology is a DICT of vdev categories (real TrueNAS shape); leaf disks
-        // carry `disk` (bare name) + `path` (/dev/...). da0 → tank mirror,
-        // da1 → cache stripe.
+        // carry `disk` (bare name) + `path` (/dev/...) + live `status`. da0 → tank
+        // mirror, da1 → cache stripe. Vdev statuses flip with pool.offline /
+        // pool.online so disk-op verification can re-read the effect.
+        const vdevStatus = (disk: string): string => (offlineVdevs.has(disk) ? 'OFFLINE' : 'ONLINE');
         return reply([
           {
-            name: 'tank', status: 'ONLINE', size: 8_796_093_022_208, allocated: 4_398_046_511_104, free: 4_398_046_511_104,
+            id: 1, name: 'tank', status: 'ONLINE', size: 8_796_093_022_208, allocated: 4_398_046_511_104, free: 4_398_046_511_104,
             scan: { function: 'SCRUB', state: 'SCANNING', percentage: 42 },
             topology: { data: [{ type: 'MIRROR', children: [
-              { type: 'DISK', path: '/dev/da0', disk: 'da0' },
-              { type: 'DISK', path: '/dev/da3', disk: 'da3' },
+              { type: 'DISK', path: '/dev/da0', disk: 'da0', status: vdevStatus('da0') },
+              { type: 'DISK', path: '/dev/da3', disk: 'da3', status: vdevStatus('da3') },
             ] }], log: [], cache: [], spares: [] },
           },
           {
-            name: 'cache', status: 'DEGRADED', size: 1_099_511_627_776, allocated: 549_755_813_888, free: 549_755_813_888,
-            topology: { data: [{ type: 'DISK', path: '/dev/da1', disk: 'da1' }], log: [], cache: [], spares: [] },
+            id: 2, name: 'cache', status: 'DEGRADED', size: 1_099_511_627_776, allocated: 549_755_813_888, free: 549_755_813_888,
+            topology: { data: [{ type: 'DISK', path: '/dev/da1', disk: 'da1', status: vdevStatus('da1') }], log: [], cache: [], spares: [] },
           },
         ]);
       case 'interface.query':
@@ -228,6 +239,42 @@ wss.on('connection', (ws: WebSocket) => {
           // Second tank mirror member (CRITICAL smart alert target).
           { name: 'da3', model: 'WDC WD40EFRX-68N', serial: 'WD-ABC456', size: 4_000_787_035_008, type: 'HDD', rotationrate: 7200 },
         ]);
+      case 'enclosure2.query':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        // One iX controller enclosure with 4 bays: da0 (OK, identify-capable),
+        // da3 (CRIT — the failing mirror member), an EMPTY bay (no dev) and da5
+        // (OK but on a slot WITHOUT identify support → no LED action). da0/da3
+        // are tank members per pool.query; da5 is not in any pool.
+        return reply([
+          {
+            name: 'iX 4024Sp c205', model: 'M40', controller: true, dmi: 'TRUENAS-M40-HA', status: ['OK'],
+            id: 'enc-aaaa1111', vendor: 'iX', product: '4024Sp', revision: 'c205', label: null,
+            bsg: '/dev/bsg/0:0:23:0', sg: '/dev/sg25', pci: '0:0:23:0', rackmount: true, top_loaded: false,
+            front_slots: 4, rear_slots: 0, internal_slots: 0,
+            elements: {
+              'Array Device Slot': {
+                1: { descriptor: 'slot00', status: 'OK', dev: 'da0', supports_identify_light: true, name: 'da0', size: 4_000_787_035_008, model: 'WDC WD40EFRX-68N', serial: 'WD-ABC123' },
+                2: { descriptor: 'slot01', status: 'CRIT', dev: 'da3', supports_identify_light: true, name: 'da3', size: 4_000_787_035_008, model: 'WDC WD40EFRX-68N', serial: 'WD-ABC456' },
+                3: { descriptor: 'slot02', status: 'INVOP', supports_identify_light: true, name: '' },
+                4: { descriptor: 'slot03', status: 'OK', dev: 'da5', supports_identify_light: false, name: 'da5', size: 1_000_204_886_016, model: 'Samsung SSD 970 EVO', serial: 'SAMSUNG-DA5' },
+              },
+            },
+          },
+        ]);
+      case 'enclosure2.set_slot_status':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        capturedSlotStatus.push(msg.params?.[0]);
+        return reply(null);
+      case 'pool.offline':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        capturedPoolDiskOps.push({ method: 'offline', params: msg.params });
+        offlineVdevs.add(String((msg.params?.[1] as Record<string, unknown>)?.['label'] ?? ''));
+        return reply(true);
+      case 'pool.online':
+        if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
+        capturedPoolDiskOps.push({ method: 'online', params: msg.params });
+        offlineVdevs.delete(String((msg.params?.[1] as Record<string, unknown>)?.['label'] ?? ''));
+        return reply(true);
       case 'boot.get_disks':
         if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
         // Boot media is a separate device (USB stick) not in disk.query.
@@ -475,8 +522,8 @@ async function main(): Promise<void> {
   const caps = (disc.capabilities ?? []) as string[];
   check('capabilities include configuration+planning+deviceState', ['configuration', 'planning', 'deviceState'].every((c) => caps.includes(c)), caps);
   const actions = (disc.actions ?? []) as { id: string; riskLevel: string }[];
-  check('action catalog has all expected actions', ['containers.stop','containers.start','containers.restart','containers.upgrade','containers.delete','images.delete','images.update','compose.config.read','containers.update','alerts.dismiss','alerts.undismiss','system.firmware.update','system.firmware.update-file','config.backup.download','config.restore','config.reset','update.profile.read','update.profile.set','shares.smb.create','shares.smb.update','shares.smb.delete','shares.nfs.create','shares.nfs.update','shares.nfs.delete','shares.iscsi.create','shares.iscsi.delete','shares.nvmeof.create','shares.nvmeof.delete'].every((id) => actions.some((a) => a.id === id)), `count=${actions.length}`);
-  check('dangerous destructive/power actions marked', actions.filter((a) => a.riskLevel === 'dangerous').map((a) => a.id).sort().join(',') === ['containers.delete','images.delete','system.reboot','system.shutdown','system.firmware.update','system.firmware.update-file','vms.delete','storage.delete','shares.smb.delete','shares.nfs.delete','shares.iscsi.delete','shares.nvmeof.delete','config.restore','config.reset'].sort().join(','));
+  check('action catalog has all expected actions', ['containers.stop','containers.start','containers.restart','containers.upgrade','containers.delete','images.delete','images.update','compose.config.read','containers.update','alerts.dismiss','alerts.undismiss','system.firmware.update','system.firmware.update-file','config.backup.download','config.restore','config.reset','update.profile.read','update.profile.set','shares.smb.create','shares.smb.update','shares.smb.delete','shares.nfs.create','shares.nfs.update','shares.nfs.delete','shares.iscsi.create','shares.iscsi.delete','shares.nvmeof.create','shares.nvmeof.delete','enclosure.identify','storage.disk-replace','storage.disk-offline','storage.disk-online'].every((id) => actions.some((a) => a.id === id)), `count=${actions.length}`);
+  check('dangerous destructive/power actions marked', actions.filter((a) => a.riskLevel === 'dangerous').map((a) => a.id).sort().join(',') === ['bootenv.activate','bootenv.destroy','containers.delete','images.delete','images.prune','system.reboot','system.shutdown','system.firmware.update','system.firmware.update-file','vms.delete','storage.delete','shares.smb.delete','shares.nfs.delete','shares.iscsi.delete','shares.nvmeof.delete','config.restore','config.reset','storage.disk-replace','storage.disk-offline'].sort().join(','));
   check('config.backup.download is a READ action (non-destructive)', actions.find((a) => a.id === 'config.backup.download')?.riskLevel === 'read', actions.find((a) => a.id === 'config.backup.download'));
   check('update.profile.read is read / update.profile.set is write', actions.find((a) => a.id === 'update.profile.read')?.riskLevel === 'read' && actions.find((a) => a.id === 'update.profile.set')?.riskLevel === 'write');
   check('updates capability advertised', caps.includes('updates'), caps);
@@ -511,7 +558,7 @@ async function main(): Promise<void> {
   const appUpd = updateRows.find((r) => r.kind === 'app');
   check('app row: only the upgradable app is listed', !!appUpd && appUpd.name === 'zabbix' && appUpd.currentVersion === '7.0.1' && appUpd.applyActionId === 'containers.upgrade' && JSON.stringify(appUpd.applyInput) === JSON.stringify({ names: ['zabbix'] }), appUpd);
   const imgUpd = updateRows.find((r) => r.kind === 'docker-image');
-  check('image row: only the stale image is listed', !!imgUpd && imgUpd.name === 'zabbix/zabbix-agent2:alpine-7.0' && imgUpd.applyActionId === 'images.update' && JSON.stringify(imgUpd.applyInput) === JSON.stringify({ images: ['zabbix/zabbix-agent2:alpine-7.0'] }), imgUpd);
+  check('image row: only the stale image is listed', !!imgUpd && imgUpd.name === 'zabbix/zabbix-agent2:alpine-7.0' && imgUpd.applyActionId === 'images.update' && JSON.stringify(imgUpd.applyInput) === JSON.stringify({ refs: ['zabbix/zabbix-agent2:alpine-7.0'], restart: false }), imgUpd);
 
   // --- Storage inventory (Storage page): filesystems[] + disks[] --------------
   const fsRows = (m['filesystems'] ?? []) as Record<string, unknown>[];
@@ -582,6 +629,25 @@ async function main(): Promise<void> {
     ifLayoutKeys.length === (ifSection?.items?.length ?? 0) && new Set(ifLayoutKeys).size === ifLayoutKeys.length,
     ifLayoutKeys
   );
+  // Enclosure tray: kind + one band per enclosure; bays carry pool membership
+  // from the topology and per-bay actions (identify only where supported).
+  const encSection = (stateJson.sections ?? []).find((s) => s.id === 'enclosures');
+  check('has a drive-bays section', !!encSection, sectionIds);
+  check('drive bays section is an enclosure face', encSection?.kind === 'enclosure', encSection?.kind);
+  const bayKeys = (encSection?.layout?.groups ?? []).flatMap((g) => g.portKeys);
+  check(
+    'enclosure layout covers all bays exactly once',
+    bayKeys.length === (encSection?.items?.length ?? 0) && new Set(bayKeys).size === bayKeys.length,
+    bayKeys
+  );
+  const bay1 = encSection?.items?.find((i) => i.key === 'enc-aaaa1111:1');
+  check('bay 1 (da0) ok with pool + identify/replace/offline actions', !!bay1 && bay1.status === 'ok' && bay1.fields?.Pool === 'tank' && ['enclosure.identify', 'storage.disk-replace', 'storage.disk-offline', 'storage.disk-online'].every((id) => bay1.actions!.some((a) => a.actionId === id)), bay1);
+  const bay2 = encSection?.items?.find((i) => i.key === 'enc-aaaa1111:2');
+  check('bay 2 (da3, CRIT element) flagged critical', !!bay2 && bay2.status === 'critical' && bay2.fields?.Pool === 'tank', bay2);
+  const bayEmpty = encSection?.items?.find((i) => i.key === 'enc-aaaa1111:3');
+  check('empty bay renders disabled with no disk actions', !!bayEmpty && bayEmpty.status === 'disabled' && (bayEmpty.actions ?? []).every((a) => a.actionId !== 'storage.disk-replace'), bayEmpty);
+  const bay4 = encSection?.items?.find((i) => i.key === 'enc-aaaa1111:4');
+  check('bay 4 (no identify support, no pool) has NO actions', !!bay4 && (bay4.actions ?? []).length === 0, bay4);
   const sysSection = (stateJson.sections ?? []).find((s) => s.id === 'system');
   check('system item advertises backup + restore + branch actions + power', !!sysSection?.items?.[0]?.actions && ['config.backup.download', 'config.restore', 'update.profile.read', 'update.profile.set', 'system.firmware.update-file', 'system.reboot', 'system.shutdown'].every((id) => sysSection.items![0].actions!.some((a) => a.actionId === id)), sysSection?.items?.[0]?.actions);
   check('system item shows the configured update branch', (sysSection?.items?.[0]?.fields as Record<string, unknown>)?.Branch === 'GENERAL', sysSection?.items?.[0]?.fields);
@@ -610,10 +676,10 @@ async function main(): Promise<void> {
   check('already-on-target is a verified no-op (SCALE prefix normalized)', cfgFwNoop.status === 200 && cfgFwNoopJson.success === true && (cfgFwNoopJson.result?.details as Record<string, unknown>)?.applied !== true && /nothing to do/i.test(String((cfgFwNoopJson.result?.details as Record<string, unknown>)?.note)), cfgFwNoopJson);
 
   // --- /config (images.update → pull job + verification) ---------------------------------
-  const cfgImg = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'images.update', input: { images: ['zabbix/zabbix-agent2:alpine-7.0'] } });
+  const cfgImg = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'images.update', input: { refs: ['zabbix/zabbix-agent2:alpine-7.0'], restart: false } });
   const cfgImgJson = (await cfgImg.json()) as { success?: boolean; result?: Record<string, unknown> };
   console.log('\n== /config images.update ==');
-  check('success true with pulled=1', cfgImg.status === 200 && cfgImgJson.success === true && ((cfgImgJson.result?.details as Record<string, unknown>)?.pulled === 1), cfgImgJson);
+  check('success true with updated=1 (pull job + verification)', cfgImg.status === 200 && cfgImgJson.success === true && JSON.stringify((cfgImgJson.result?.details as Record<string, unknown>)?.updated) === JSON.stringify(['zabbix/zabbix-agent2:alpine-7.0']), cfgImgJson);
 
   // --- /config (config.backup.download → job + token + HTTP file fetch → UNM file repo) --
   const cfgBackup = await post('/config', { deviceId: 'dev-tnas', deviceName: 'KIRGUSBANDE', managementAddress: ADDR, credentials: creds, actionId: 'config.backup.download', input: {} });
@@ -658,6 +724,35 @@ async function main(): Promise<void> {
   const cfgResetJson = (await cfgReset.json()) as { success?: boolean; result?: Record<string, unknown> };
   console.log('\n== /config config.reset ==');
   check('success true with job id', cfgReset.status === 200 && cfgResetJson.success === true && ((cfgResetJson.result?.details as Record<string, unknown>)?.jobId) === 92, cfgResetJson);
+
+  // --- /config (enclosure.identify → set_slot_status ON) --------------------------------
+  const cfgIdentify = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'enclosure.identify', input: { enclosureId: 'enc-aaaa1111', slot: 2, status: 'ON' } });
+  const cfgIdentifyJson = (await cfgIdentify.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config enclosure.identify ==');
+  check('success true with bay LED ON', cfgIdentify.status === 200 && cfgIdentifyJson.success === true && ((cfgIdentifyJson.result?.details as Record<string, unknown>)?.status) === 'ON', cfgIdentifyJson);
+  const slotCall = capturedSlotStatus[capturedSlotStatus.length - 1];
+  check('set_slot_status received {enclosure_id, slot, status}', !!slotCall && slotCall['enclosure_id'] === 'enc-aaaa1111' && slotCall['slot'] === 2 && slotCall['status'] === 'ON', slotCall);
+
+  // --- /config (storage.disk-offline → pool.offline + verified OFFLINE) ------------------
+  const cfgOffline = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'storage.disk-offline', input: { pool: 'tank', label: 'da0' } });
+  const cfgOfflineJson = (await cfgOffline.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config storage.disk-offline ==');
+  check('success true + verified OFFLINE via topology re-read', cfgOffline.status === 200 && cfgOfflineJson.success === true && (cfgOfflineJson.result as { verified?: boolean; details?: Record<string, unknown> })?.verified === true && ((cfgOfflineJson.result as { details?: Record<string, unknown> })?.details?.status) === 'OFFLINE', cfgOfflineJson);
+  const offCall = capturedPoolDiskOps.find((c) => c.method === 'offline');
+  check('pool.offline called with pool id + label', !!offCall && JSON.stringify(offCall.params ?? []) === '[1,{"label":"da0"}]', offCall?.params);
+
+  // --- /config (storage.disk-online → pool.online + verified ONLINE) ---------------------
+  const cfgOnline = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'storage.disk-online', input: { pool: 'tank', label: 'da0' } });
+  const cfgOnlineJson = (await cfgOnline.json()) as { success?: boolean; result?: Record<string, unknown> };
+  console.log('\n== /config storage.disk-online ==');
+  check('success true + verified ONLINE via topology re-read', cfgOnline.status === 200 && cfgOnlineJson.success === true && (cfgOnlineJson.result as { verified?: boolean; details?: Record<string, unknown> })?.verified === true && ((cfgOnlineJson.result as { details?: Record<string, unknown> })?.details?.status) === 'ONLINE', cfgOnlineJson);
+  const onCall = capturedPoolDiskOps.find((c) => c.method === 'online');
+  check('pool.online called with pool id + label', !!onCall && JSON.stringify(onCall.params ?? []) === '[1,{"label":"da0"}]', onCall?.params);
+
+  // --- /config (storage.disk-offline unknown disk → clean failure) -----------------------
+  const cfgOfflineBad = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'storage.disk-offline', input: { pool: 'tank', label: 'da9' } });
+  const cfgOfflineBadJson = (await cfgOfflineBad.json()) as { success?: boolean; result?: Record<string, unknown> };
+  check('offlining a disk not in the pool fails cleanly', cfgOfflineBad.status === 200 && cfgOfflineBadJson.success === false && /not found/i.test(String((cfgOfflineBadJson.result as { details?: Record<string, unknown> })?.details?.error)), cfgOfflineBadJson);
 
   // --- /config (update.profile.read → profile + choices) -------------------------------
   const cfgProfileRead = await post('/config', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds, actionId: 'update.profile.read', input: {} });

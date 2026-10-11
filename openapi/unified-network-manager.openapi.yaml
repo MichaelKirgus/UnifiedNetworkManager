@@ -9820,9 +9820,9 @@ components:
         description: { type: string, nullable: true }
         kind:
           type: string
-          enum: [table, switch]
+          enum: [table, switch, enclosure]
           default: table
-          description: "Rendering hint — 'switch' renders a virtual switch face with per-port selection for bulk actions"
+          description: "Rendering hint — 'switch' renders a virtual switch face with per-port selection for bulk actions; 'enclosure' renders a disk-tray face (one LED bay per item, grouped into bands by layout)"
         layout:
           $ref: '#/components/schemas/SwitchLayout'
         items:

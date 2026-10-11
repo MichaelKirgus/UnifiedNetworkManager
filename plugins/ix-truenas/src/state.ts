@@ -3,6 +3,9 @@
  * from live TrueNAS API calls. Sections:
  *   - Pools      — one item per ZFS pool with status, size/used/free and scrub
  *                  state (read-only in v1; pool management is a later release).
+ *   - Drive Bays — one item per enclosure slot from enclosure2.query (iX
+ *                  hardware only) rendered as a disk-tray face, with identify /
+ *                  replace / offline actions for installed disks.
  *   - Interfaces — one item per network interface with link state, MAC, IP
  *                  aliases and VLAN tag.
  *   - System     — hostname/version/model/uptime summary + configuration
@@ -46,6 +49,118 @@ function poolStatus(status: string): string {
   if (s === 'FAULTED' || s === 'OFFLINE' || s === 'UNAVAIL') return 'critical';
   if (s === 'MAINTENANCE') return 'degraded';
   return 'unknown';
+}
+
+/** Maps a pool topology tree to bare disk name → pool name. Walks every vdev
+ *  category (data/log/cache/spares) recursively; leaf DISK entries carry `disk`
+ *  (bare name) and/or `path` (/dev/...). */
+function poolMembershipByDev(pools: Record<string, unknown>[]): Map<string, string> {
+  const byDev = new Map<string, string>();
+  const walk = (vdevs: unknown, poolName: string): void => {
+    if (!Array.isArray(vdevs)) return;
+    for (const v of vdevs) {
+      if (!v || typeof v !== 'object') continue;
+      const vd = v as Record<string, unknown>;
+      const type = pickString(vd, ['type'])?.toUpperCase();
+      if (type === 'DISK' || Array.isArray(vd['children'])) {
+        const disk = pickString(vd, ['disk']);
+        const path = pickString(vd, ['path']);
+        const bare = disk ?? (path ? path.replace(/^\/dev\//, '') : null);
+        if (bare && !byDev.has(bare)) byDev.set(bare, poolName);
+      }
+      walk(vd['children'], poolName);
+    }
+  };
+  for (const p of pools) {
+    const name = pickString(p, ['name']);
+    const topo = p['topology'];
+    if (!name || !topo || typeof topo !== 'object') continue;
+    for (const cat of Object.values(topo as Record<string, unknown>)) walk(cat, name);
+  }
+  return byDev;
+}
+
+/** Normalizes an enclosure element status to a badge value. */
+function bayStatus(status: string | null | undefined): string {
+  const s = (status ?? '').toUpperCase();
+  if (s === 'OK' || s === 'INFO') return 'ok';
+  if (s === 'CRIT' || s === 'UNRECOV') return 'critical';
+  if (s === 'NON-CRIT' || s === 'INVOP') return 'degraded';
+  return 'unknown';
+}
+
+/** One state item per drive bay across all enclosures. `enclosures` is the raw
+ *  `enclosure2.query` result — empty on non-iX hardware (the section is then
+ *  omitted entirely). */
+function enclosureItems(enclosures: Record<string, unknown>[], poolByDev: Map<string, string>): StateItem[] {
+  const items: StateItem[] = [];
+  for (const enc of enclosures) {
+    const encId = pickString(enc, ['id']);
+    if (!encId) continue;
+    const elements = enc['elements'];
+    const slots = elements && typeof elements === 'object' ? ((elements as Record<string, unknown>)['Array Device Slot'] ?? {}) : {};
+    for (const [slotRaw, el] of Object.entries(slots as Record<string, unknown>)) {
+      if (!el || typeof el !== 'object') continue;
+      const e = el as Record<string, unknown>;
+      const slot = Number(slotRaw);
+      if (!Number.isFinite(slot) || slot <= 0) continue;
+
+      const dev = pickString(e, ['dev']);
+      const model = pickString(e, ['model']);
+      const serial = pickString(e, ['serial']);
+      const sizeBytes = pickNumber(e, ['size']);
+      const supportsIdentify = e['supports_identify_light'] === true;
+      const pool = dev ? (poolByDev.get(dev) ?? null) : null;
+
+      const fields: Record<string, string | number | null | unknown[]> = {};
+      if (model && !/to be filled/i.test(model)) fields.Model = model;
+      if (serial) fields.Serial = serial;
+      const size = formatBytes(sizeBytes);
+      if (size) fields.Size = size;
+      if (pool) fields.Pool = pool;
+
+      const actions: StateItem['actions'] = [];
+      if (supportsIdentify) {
+        // Lights the bay LED — the physical "which drive is this" helper.
+        actions.push({ actionId: 'enclosure.identify', prefill: { enclosureId: encId, slot, status: 'ON' } });
+      }
+      if (dev && pool) {
+        // Disk-level operations target the vdev by device name (the appliance
+        // resolves it against the pool topology).
+        actions.push({ actionId: 'storage.disk-replace', prefill: { pool, label: dev } });
+        actions.push({ actionId: 'storage.disk-offline', prefill: { pool, label: dev } });
+        actions.push({ actionId: 'storage.disk-online', prefill: { pool, label: dev } });
+      }
+
+      items.push({
+        key: `${encId}:${slot}`,
+        title: `Slot ${slot}`,
+        subtitle: dev ? dev : 'empty bay',
+        status: dev ? bayStatus(pickString(e, ['status'])) : 'disabled',
+        fields,
+        ...(actions.length > 0 ? { actions } : {}),
+      });
+    }
+  }
+  return items;
+}
+
+/** One layout band per physical enclosure (controller first — the query is
+ *  already sorted that way); bays within a band in ascending slot order. */
+function enclosureLayout(enclosures: Record<string, unknown>[]): { groups: { id: string; label?: string | null; portKeys: string[] }[] } {
+  const groups = enclosures.map((enc) => {
+    const encId = pickString(enc, ['id']) ?? 'unknown';
+    const elements = enc['elements'];
+    const slots = elements && typeof elements === 'object' ? ((elements as Record<string, unknown>)['Array Device Slot'] ?? {}) : {};
+    const portKeys = Object.keys(slots)
+      .map(Number)
+      .filter((n) => Number.isFinite(n) && n > 0)
+      .sort((a, b) => a - b)
+      .map((n) => `${encId}:${n}`);
+    const label = pickString(enc, ['label']) || pickString(enc, ['name']);
+    return { id: `enc-${encId}`, label: label ?? null, portKeys };
+  });
+  return { groups };
 }
 
 /** One state item per ZFS pool. */
@@ -141,8 +256,10 @@ export function buildTruenasState(args: {
   ifaces?: Record<string, unknown>[];
   /** `update.config` result — the configured update branch/profile (best-effort). */
   updateConfig?: Record<string, unknown>;
+  /** `enclosure2.query` result — empty on non-iX hardware → section omitted. */
+  enclosures?: Record<string, unknown>[];
 }): DeviceStateResponse {
-  const { sysInfo, pools = [], ifaces = [], updateConfig } = args;
+  const { sysInfo, pools = [], ifaces = [], updateConfig, enclosures = [] } = args;
 
   // --- System ------------------------------------------------------------------
   const hostname = pickString(sysInfo ?? {}, ['hostname']);
@@ -185,12 +302,28 @@ export function buildTruenasState(args: {
         }
       : null;
 
+  // Drive bays render as a disk-tray face — one band per physical enclosure.
+  // enclosure2.query returns [] on non-iX hardware → the section is omitted.
+  const bayItems = enclosureItems(enclosures, poolMembershipByDev(pools));
+  const enclosuresSection: StateSection | null =
+    bayItems.length > 0
+      ? {
+          id: 'enclosures',
+          label: 'Drive Bays',
+          description: 'Installed disks per enclosure. Click bays to select them for identify / replace / offline actions.',
+          kind: 'enclosure',
+          layout: enclosureLayout(enclosures),
+          items: bayItems,
+        }
+      : null;
+
   return {
     collectedAt: new Date().toISOString(),
     sections: [
       ...(pools.length > 0
         ? [{ id: 'pools', label: 'ZFS Pools', description: 'Storage pools with capacity and scrub state.', items: poolItems(pools) }]
         : []),
+      ...(enclosuresSection ? [enclosuresSection] : []),
       ...(interfacesSection ? [interfacesSection] : []),
       {
         id: 'system',

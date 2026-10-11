@@ -286,7 +286,18 @@ const identity = resolvePluginIdentity({
   // app.query's container_details) via app.image.delete force=false, so docker's
   // own in-use protection still applies on the appliance. The Updates page's
   // docker-image rows now apply through refs[] too.
-  version: '0.23.0',
+  // 0.24.0 — Enclosure / drive-bay management on the Config page: /state gains a
+  // 'Drive Bays' section (kind:'enclosure') built from enclosure2.query — one LED
+  // bay per slot, grouped into bands per physical enclosure (controller first),
+  // with pool membership resolved from pool.query topology. NEW actions:
+  // enclosure.identify {enclosureId, slot, status} lights/clears the bay LED via
+  // enclosure2.set_slot_status; storage.disk-replace {pool, label, newDisk, force?}
+  // swaps a vdev's backing disk (pool.replace job — waits for it to settle);
+  // storage.disk-offline / storage.disk-online take one vdev offline and back
+  // (pool.offline / pool.online) with topology re-read verification. All writes
+  // are transport-tolerant; the section is omitted on non-iX hardware where
+  // enclosure2.query returns [].
+  version: '0.24.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -3125,13 +3136,16 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   await assertPinned(req, host, transport, ports);
 
   const client = getClient(host, transport, timeoutMs, ports);
-  const [sysInfoRes, poolsRes, ifacesRes, updateConfigRes] = await Promise.allSettled([
+  const [sysInfoRes, poolsRes, ifacesRes, updateConfigRes, enclosuresRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('interface.query', [], creds),
     // The configured update branch/profile — shown on the System item and
     // switchable via the update.profile.set action (best-effort like the rest).
     client.call<Record<string, unknown>>('update.config', [], creds),
+    // Drive bays for the enclosure tray — [] on non-iX hardware (the section is
+    // then omitted); filterable_api_method takes [filters, options].
+    client.call<Record<string, unknown>[]>('enclosure2.query', [[], {}], creds),
   ]);
 
   return buildTruenasState({
@@ -3139,6 +3153,7 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
     pools: poolsRes.status === 'fulfilled' && Array.isArray(poolsRes.value) ? poolsRes.value : [],
     ifaces: ifacesRes.status === 'fulfilled' && Array.isArray(ifacesRes.value) ? ifacesRes.value : [],
     updateConfig: updateConfigRes.status === 'fulfilled' ? updateConfigRes.value : undefined,
+    enclosures: enclosuresRes.status === 'fulfilled' && Array.isArray(enclosuresRes.value) ? enclosuresRes.value : [],
   });
 }, 'ix-truenas-plugin'));
 

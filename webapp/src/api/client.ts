@@ -2739,9 +2739,9 @@ export interface StateSection {
   id: string;
   label: string;
   description?: string | null;
-  /** Rendering hint: 'table' (default) renders the item table; 'switch' renders a virtual switch face with per-port selection for bulk actions. */
-  kind?: 'table' | 'switch';
-  /** Switch-face layout (only meaningful when kind === 'switch'). */
+  /** Rendering hint: 'table' (default) renders the item table; 'switch' renders a virtual switch face with per-port selection for bulk actions; 'enclosure' renders a disk-tray face — one LED bay per item, grouped into bands by `layout` (one band per physical enclosure). */
+  kind?: 'table' | 'switch' | 'enclosure';
+  /** Switch-face / enclosure-tray layout (only meaningful when kind === 'switch' or 'enclosure'). For enclosures each group is one physical chassis; its label renders as the tray header. */
   layout?: SwitchLayout | null;
   items?: StateItem[];
   /** Section-level actions with no item context (e.g. reboot system). */

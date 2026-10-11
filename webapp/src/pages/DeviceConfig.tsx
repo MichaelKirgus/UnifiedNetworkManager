@@ -8,6 +8,7 @@ import { StatusBadge } from '../components/StatusBadge';
 import { ActionDialog } from '../components/ActionDialog';
 import { BulkActionDialog } from '../components/BulkActionDialog';
 import { VirtualSwitch } from '../components/VirtualSwitch';
+import { EnclosureTray } from '../components/EnclosureTray';
 import { api, CatalogEntry, DeviceStateResponse, StateItem, StateSection } from '../api/client';
 import { can } from '../auth/permissions';
 
@@ -174,7 +175,8 @@ export default function DeviceConfig() {
 }
 
 /** One section card: header + optional section-level actions + item table — or,
- *  for `kind: 'switch'` sections, a virtual switch face with bulk selection. */
+ *  for `kind: 'switch'` / `kind: 'enclosure'` sections, a device face (virtual
+ *  switch / disk tray) with per-item selection for bulk actions. */
 function StateSectionCard({
   section,
   catalogById,
@@ -214,6 +216,8 @@ function StateSectionCard({
 
       {section.kind === 'switch' ? (
         <SwitchSection section={section} catalogById={catalogById} canApply={canApply} onBulk={onBulk} />
+      ) : section.kind === 'enclosure' ? (
+        <EnclosureSection section={section} catalogById={catalogById} canApply={canApply} onBulk={onBulk} />
       ) : (
         <TableSection items={items} catalogById={catalogById} canApply={canApply} onAction={onAction} />
       )}
@@ -339,6 +343,93 @@ function SwitchSection({
           <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-accent-indigo-fg">
             <CheckSquare className="h-3.5 w-3.5" />
             {validSelected.size} port{validSelected.size === 1 ? '' : 's'} selected
+          </span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {bulkActions.map((entry) => (
+              <ActionButton key={entry.id} entry={entry} onClick={() => onBulk(entry, selectedItems)} />
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => setSelectedKeys(new Set())}
+            className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-card/70 hover:text-foreground"
+          >
+            <X className="h-3 w-3" /> Clear selection
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+/** A `kind: 'enclosure'` section — disk-tray face + bulk action bar. Drive bays
+ *  are selected by clicking (checkbox overlay); the bar offers every catalog
+ *  action that at least one selected bay supports, applied to all of them at once. */
+function EnclosureSection({
+  section,
+  catalogById,
+  canApply,
+  onBulk,
+}: {
+  section: StateSection;
+  catalogById: Map<string, CatalogEntry>;
+  canApply: boolean;
+  onBulk: (entry: CatalogEntry, items: StateItem[]) => void;
+}) {
+  const items = section.items ?? [];
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+
+  // Selection survives state refreshes — drop keys that no longer exist.
+  const validSelected = useMemo(
+    () => new Set([...selectedKeys].filter((k) => items.some((i) => i.key === k))),
+    [selectedKeys, items]
+  );
+
+  function toggleKey(key: string) {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  // Actions offered in the bulk bar: catalog entries referenced by at least one
+  // selected item's action list. Order follows first appearance across items.
+  const bulkActions = useMemo(() => {
+    if (!canApply || validSelected.size === 0) return [];
+    const seen = new Map<string, CatalogEntry>();
+    for (const item of items) {
+      if (!validSelected.has(item.key)) continue;
+      for (const ref of item.actions ?? []) {
+        const entry = catalogById.get(ref.actionId);
+        if (entry && !seen.has(entry.id)) seen.set(entry.id, entry);
+      }
+    }
+    return Array.from(seen.values());
+  }, [canApply, validSelected, items, catalogById]);
+
+  const selectedItems = useMemo(
+    () => items.filter((i) => validSelected.has(i.key)),
+    [items, validSelected]
+  );
+
+  // Read-only trays (no item carries a known executable action) render without
+  // selection affordances — clicking would offer nothing to do.
+  const selectable = canApply && items.some((i) => (i.actions ?? []).some((a) => catalogById.has(a.actionId)));
+
+  if (items.length === 0) {
+    return <div className="px-4 py-3 text-xs text-faint">No drive bays reported.</div>;
+  }
+
+  return (
+    <>
+      <EnclosureTray items={items} layout={section.layout} selectedKeys={validSelected} onToggleKey={toggleKey} selectable={selectable} />
+      {canApply && validSelected.size > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-border bg-accent-indigo/60 px-4 py-2.5">
+          <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-accent-indigo-fg">
+            <CheckSquare className="h-3.5 w-3.5" />
+            {validSelected.size} disk{validSelected.size === 1 ? '' : 's'} selected
           </span>
           <div className="flex flex-wrap items-center gap-1.5">
             {bulkActions.map((entry) => (
