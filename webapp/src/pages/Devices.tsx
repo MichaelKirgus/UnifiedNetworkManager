@@ -5,7 +5,7 @@ import { ChevronDown, Copy, Eye, Pencil, Plus, Power, RefreshCw, Save, Settings2
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ChipInput } from '../components/ChipInput';
-import { StatusBadge } from '../components/StatusBadge';
+import { StatusBadge, statusReasonsTitle } from '../components/StatusBadge';
 import { MetricCell } from '../components/MetricCell';
 import { DeviceIcon } from '../components/DeviceIcon';
 import { DeviceActionsCell } from '../components/DeviceActionsCell';
@@ -555,7 +555,8 @@ export default function Devices() {
       key: 'status',
       render: (row) => (
         <span className="inline-flex items-center gap-1.5">
-          <StatusBadge status={row.status} />
+          {/* Tooltip lists which plugin is non-ok and why (worst-wins rollup). */}
+          <StatusBadge status={row.status} title={statusReasonsTitle(row.status, row.healthReasons)} />
           {row.enabled === false && (
             <span
               title="Telemetry polling disabled — historical data and last metrics are preserved"

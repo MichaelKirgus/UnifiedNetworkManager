@@ -87,11 +87,35 @@ function clampInt(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(v)));
 }
 
+/** One plugin-reported reason for a non-ok health (SDK `HealthReason`). */
+interface PluginHealthReason {
+  severity: 'warning' | 'critical';
+  message: string;
+}
+
 interface MonitoringResponse {
   /** Plugin monitoring health — the SDK's canonical vocabulary (ok/warning/critical/unknown). */
   health?: Health;
+  /** Optional human-readable reasons for a non-ok health (newer plugins only). */
+  healthReasons?: unknown;
   metrics?: Record<string, unknown>;
   metricDescriptors?: unknown[];
+}
+
+/** Normalizes the plugin's `healthReasons` field — tolerant of anything. */
+function parseHealthReasons(raw: unknown): PluginHealthReason[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PluginHealthReason[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== 'object') continue;
+    const o = r as Record<string, unknown>;
+    const severity = o['severity'] === 'critical' ? 'critical' : o['severity'] === 'warning' ? 'warning' : null;
+    const message = typeof o['message'] === 'string' ? o['message'].trim() : '';
+    if (!severity || !message) continue;
+    out.push({ severity, message: message.slice(0, 300) });
+    if (out.length >= 10) break; // tooltip budget — keep it short by contract
+  }
+  return out;
 }
 
 // DeviceAddressView comes from types/deviceAddressView (shared).
@@ -122,6 +146,9 @@ interface AssignmentTarget {
  * inventory arrays — used to decide if the inventory deadline may advance.
  * `error` carries the transport/credential error message for diagnostics
  * (forced refresh reports it back to the caller; the scheduler ignores it).
+ * `healthReasons` are plugin-reported human-readable reasons for a non-ok
+ * health — persisted on the telemetry snapshot and rolled up into the
+ * device's status tooltip.
  */
 interface PollOutcome {
   /** The plugin's reported monitoring health (SDK Health vocabulary). */
@@ -130,6 +157,8 @@ interface PollOutcome {
   inventoryEmitted: boolean;
   /** Transport-level failure reason (set when `reachable` is false). */
   error?: string;
+  /** Plugin-reported reasons for a non-ok health (empty when healthy/absent). */
+  healthReasons: PluginHealthReason[];
 }
 
 interface PollOptions {
@@ -184,6 +213,9 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
     );
 
     const health = response.data?.health ?? 'unknown';
+    // Reasons only make sense for a non-ok poll — drop them when healthy so
+    // the column stays NULL in the common case.
+    const healthReasons = parseHealthReasons(response.data?.healthReasons);
     const metrics = response.data?.metrics ?? {};
     const metricDescriptors = response.data?.metricDescriptors;
     const collectedAt = new Date().toISOString();
@@ -194,6 +226,7 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
       pluginId: target.pluginId,
       collectedAt,
       health,
+      healthReasons: health !== 'ok' && healthReasons.length > 0 ? JSON.stringify(healthReasons) : null,
       metrics: JSON.stringify(metrics),
       metricDescriptors: metricDescriptors ? JSON.stringify(metricDescriptors) : null,
     });
@@ -212,14 +245,14 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
       ingestInventory(target.deviceId, target.pluginId, metrics, collectedAt);
     }
 
-    return { health, reachable: true, inventoryEmitted: hasInventoryKeys(metrics) };
+    return { health, reachable: true, inventoryEmitted: hasInventoryKeys(metrics), healthReasons };
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error(
       `[telemetry] failed to poll device ${target.deviceId} via plugin ${target.pluginId}:`,
       (err as Error).message
     );
-    return { health: 'unknown', reachable: false, inventoryEmitted: false, error: (err as Error).message };
+    return { health: 'unknown', reachable: false, inventoryEmitted: false, error: (err as Error).message, healthReasons: [] };
   }
 }
 
@@ -2292,6 +2325,59 @@ function deriveDeviceStatus(outcomes: PollOutcome[]): string {
   return 'degraded';
 }
 
+/** One line of the device's status tooltip — which plugin, why. */
+interface DeviceHealthReason {
+  pluginId: string;
+  /** Plugin display name (resolved at derivation time; null when unknown). */
+  pluginName: string | null;
+  severity: 'warning' | 'critical';
+  message: string;
+}
+
+/**
+ * Rolls the per-assignment outcomes up into human-readable status reasons —
+ * one entry per non-ok assignment, worst first (unreachable → critical →
+ * warning). Plugins that report `healthReasons` contribute their own lines;
+ * everyone else gets a generic fallback so the tooltip is never empty for a
+ * degraded/critical/offline device. Online/unknown devices get no reasons.
+ * The map keys are `${deviceId}|${pluginId}` — the plugin id comes from there.
+ */
+function deriveDeviceHealthReasons(
+  byAssignment: Map<string, PollOutcome>,
+  pluginNameByPluginId: Map<string, string>
+): DeviceHealthReason[] {
+  const outcomes = Array.from(byAssignment.values());
+  const status = deriveDeviceStatus(outcomes);
+  if (status === 'online' || status === 'unknown') return [];
+
+  const rank = (o: PollOutcome): number =>
+    !o.reachable ? 0 : o.health === 'critical' ? 1 : o.health === 'warning' ? 2 : 3;
+
+  const reasons: DeviceHealthReason[] = [];
+  for (const [key, o] of [...byAssignment.entries()].sort((a, b) => rank(a[1]) - rank(b[1]))) {
+    if (o.reachable && o.health === 'ok') continue;
+    const pluginId = key.split('|')[1] ?? '';
+    const pluginName = pluginNameByPluginId.get(pluginId) ?? null;
+    if (!o.reachable) {
+      reasons.push({
+        pluginId,
+        pluginName,
+        severity: 'critical',
+        message: `Monitoring unreachable${o.error ? ` — ${o.error.slice(0, 200)}` : ''}`,
+      });
+    } else if (o.healthReasons.length > 0) {
+      for (const r of o.healthReasons) {
+        reasons.push({ pluginId, pluginName, severity: r.severity, message: r.message });
+      }
+    } else {
+      const generic =
+        o.health === 'critical' ? 'Reports a critical problem' : 'Reports degraded health';
+      reasons.push({ pluginId, pluginName, severity: o.health === 'critical' ? 'critical' : 'warning', message: generic });
+    }
+  }
+  return reasons.slice(0, 12); // tooltip budget — keep it scannable
+}
+
 /**
  * Mirror a device status transition into the notification center.
  *   - degrading (offline/critical/degraded): one live row per condition via a
@@ -2367,6 +2453,11 @@ const inFlightKeys = new Set<string>();
 const lastOutcomesByDevice = new Map<string, Map<string, PollOutcome>>();
 /** In-memory mirror of devices.status (avoids a DB read per poll). */
 const lastKnownStatus = new Map<string, string>();
+/** In-memory mirror of devices.healthReasons (JSON or null) — lets us skip the
+ * DB write when neither status nor reasons changed. */
+const lastHealthReasonsJson = new Map<string, string | null>();
+/** Plugin display names for status-reason tooltips (refreshed with the roster). */
+const pluginNames = new Map<string, string>();
 /** Assignment count per device — status is only derived once all are known. */
 const assignmentsPerDevice = new Map<string, number>();
 let lastRosterRefreshAt = 0;
@@ -2419,6 +2510,8 @@ async function refreshRoster(settings: SystemSettings): Promise<void> {
     targetStates.clear();
     lastOutcomesByDevice.clear();
     assignmentsPerDevice.clear();
+    pluginNames.clear();
+    lastHealthReasonsJson.clear();
     recordTelemetryCycle(0, 0, Date.now() - startedAt);
     return;
   }
@@ -2426,6 +2519,10 @@ async function refreshRoster(settings: SystemSettings): Promise<void> {
   // Load every assignment with its plugin endpoint in one pass.
   const assignments = await db.query.devicePlugins.findMany({});
   const pluginsById = new Map((await db.query.plugins.findMany()).map((p) => [p.id, p] as const));
+
+  // Plugin display names — used to attribute status-reason tooltip lines.
+  pluginNames.clear();
+  for (const p of pluginsById.values()) pluginNames.set(p.id, p.name);
 
   // Secondary IPs per device (primary is always managementAddress). Batched.
   const deviceIds = devices.map((d) => d.id);
@@ -2497,6 +2594,9 @@ async function refreshRoster(settings: SystemSettings): Promise<void> {
   for (const deviceId of Array.from(lastOutcomesByDevice.keys())) {
     if (!liveDeviceIds.has(deviceId)) lastOutcomesByDevice.delete(deviceId);
   }
+  for (const deviceId of Array.from(lastHealthReasonsJson.keys())) {
+    if (!liveDeviceIds.has(deviceId)) lastHealthReasonsJson.delete(deviceId);
+  }
 
   // Per-device assignment counts + status mirror for transition detection.
   assignmentsPerDevice.clear();
@@ -2506,7 +2606,13 @@ async function refreshRoster(settings: SystemSettings): Promise<void> {
       (assignmentsPerDevice.get(state.target.deviceId) ?? 0) + 1
     );
   }
-  for (const d of devices) lastKnownStatus.set(d.id, d.status);
+  // Seed both mirrors from the DB — a device already non-ok before an API
+  // restart must get its reasons persisted on the first poll without a status
+  // transition to trigger it.
+  for (const d of devices) {
+    lastKnownStatus.set(d.id, d.status);
+    lastHealthReasonsJson.set(d.id, d.healthReasons ?? null);
+  }
 
   recordTelemetryCycle(devices.length, targetStates.size, Date.now() - startedAt);
 }
@@ -2574,14 +2680,28 @@ async function updateDeviceStatus(
   if (byAssignment.size < expected) return; // wait for the full picture
 
   const status = deriveDeviceStatus(Array.from(byAssignment.values()));
+  // Human-readable reasons for the current outcome set (NULL when healthy).
+  const healthReasons = deriveDeviceHealthReasons(byAssignment, pluginNames);
+  const reasonsJson = healthReasons.length > 0 ? JSON.stringify(healthReasons) : null;
+
   const prev = lastKnownStatus.get(deviceId) ?? 'unknown';
-  if (status === prev) return;
-  lastKnownStatus.set(deviceId, status);
-  // Mirror the transition into the notification center. Degrading states carry
-  // a stable dedupe key so they upsert while ongoing and are auto-resolved by
-  // the notifications worker when the device recovers; recovery emits one-shot.
-  void emitDeviceStatusNotification(deviceId, prev, status);
-  await db.update(schema.devices).set({ status }).where(eq(schema.devices.id, deviceId));
+  if (status === prev && (lastHealthReasonsJson.get(deviceId) ?? null) === reasonsJson) return;
+
+  // Mirror the STATUS transition into the notification center. Degrading states
+  // carry a stable dedupe key so they upsert while ongoing and are auto-resolved
+  // by the notifications worker when the device recovers; recovery emits one-shot.
+  if (status !== prev) {
+    lastKnownStatus.set(deviceId, status);
+    void emitDeviceStatusNotification(deviceId, prev, status);
+  }
+  // Persist status + reasons whenever EITHER changed — a device that was already
+  // non-ok before an API restart has no transition to trigger the write, so its
+  // tooltip would stay empty until this catches up.
+  lastHealthReasonsJson.set(deviceId, reasonsJson);
+  await db.update(schema.devices).set({
+    status,
+    healthReasons: reasonsJson,
+  }).where(eq(schema.devices.id, deviceId));
 }
 
 /** One dispatcher tick: roster/sweeps on their cadences + dispatch due targets. */

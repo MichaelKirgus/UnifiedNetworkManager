@@ -9,7 +9,7 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
 import { ConsoleDialog } from '../components/ConsoleDialog';
 import { FileBrowserDialog } from '../components/FileBrowserDialog';
-import { StatusBadge } from '../components/StatusBadge';
+import { StatusBadge, statusReasonsTitle } from '../components/StatusBadge';
 import { MetricView } from '../components/MetricView';
 import { OptionForm } from '../components/OptionForm';
 import { DeviceIcon } from '../components/DeviceIcon';
@@ -421,7 +421,9 @@ export default function DeviceDetail() {
       title={device?.name ?? deviceId}
       actions={
         <>
-          {monitoringQuery.data && <StatusBadge status={monitoringQuery.data.health} />}
+          {monitoringQuery.data && (
+            <StatusBadge status={monitoringQuery.data.health} title={statusReasonsTitle(monitoringQuery.data.health, monitoringQuery.data.healthReasons)} />
+          )}
           {device?.enabled === false && (
             <span
               title="Telemetry polling disabled — historical data and last metrics are preserved"
@@ -784,7 +786,8 @@ export default function DeviceDetail() {
               <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
                 {assignment?.pluginName ?? snapshot.pluginId}
               </h2>
-              <StatusBadge status={snapshot.health} />
+              {/* Tooltip: this plugin's own reported reasons for a non-ok health. */}
+              <StatusBadge status={snapshot.health} title={statusReasonsTitle(snapshot.health, snapshot.healthReasons)} />
             </div>
 
             {descriptors.length === 0 ? (

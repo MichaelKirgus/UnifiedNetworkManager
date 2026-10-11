@@ -187,9 +187,10 @@ wss.on('connection', (ws: WebSocket) => {
         // Active SMART alerts (25.10+ has no public SMART API — health comes
         // from these): da1 failed a selftest, da3 uncorrected errors (both
         // WARNING ⇒ device health stays 'warning'). A dismissed CRITICAL alert
-        // must NOT affect anything.
+        // must NOT affect anything. a1 uses the TrueNAS ≥ 25 TEMPLATE text
+        // (%(key)s placeholders) — it must be formatted with args everywhere.
         return reply([
-          { id: 'a1', klass: 'SMARTFailedSelfTestAlert', severity: 'WARNING', dismissed: false, args: { name: 'da1', serial: 'SAMSUNG-XYZ' }, text: 'da1 (SAMSUNG-XYZ) failed a SMART selftest.' },
+          { id: 'a1', klass: 'SMARTFailedSelfTestAlert', severity: 'WARNING', dismissed: false, args: { name: 'da1', serial: 'SAMSUNG-XYZ' }, text: '%(name)s (%(serial)s) failed a SMART selftest.' },
           { id: 'a2', klass: 'SMARTUncorrectedErrorsAlert', severity: 'WARNING', dismissed: false, args: { name: '/dev/da3', serial: 'WD-ABC456' }, text: '12 uncorrectable errors reported for /dev/da3 (WD-ABC456).' },
           { id: 'a3', klass: 'SMARTSpareBlockCountAlert', severity: 'CRITICAL', dismissed: true, args: { name: 'da0', serial: 'WD-ABC123' }, text: 'dismissed — must not affect health' },
         ]);
@@ -534,10 +535,18 @@ async function main(): Promise<void> {
 
   // --- /monitoring ---------------------------------------------------------------------
   const mon = (await post('/monitoring', { deviceId: 'dev-tnas', managementAddress: ADDR, credentials: creds })) as Response;
-  const monJson = (await mon.json()) as { health?: string; metrics?: Record<string, unknown> };
+  const monJson = (await mon.json()) as { health?: string; metrics?: Record<string, unknown>; healthReasons?: { severity: string; message: string }[] };
   console.log('\n== /monitoring ==');
   // The mock includes a DEGRADED pool ('cache') → health must be warning, not ok.
   check('health warning (degraded pool present)', monJson.health === 'warning', { health: monJson.health, err: monJson.metrics?.['system.error'] });
+  // Status transparency: non-ok health carries human-readable reasons — the two
+  // active SMART alerts + the DEGRADED pool. Dismissed CRITICAL must not appear.
+  const reasons = monJson.healthReasons ?? [];
+  check('healthReasons present for warning health', Array.isArray(monJson.healthReasons) && reasons.length === 3, { count: reasons.length, reasons });
+  check('healthReasons include degraded pool line', reasons.some((r) => r.severity === 'warning' && r.message === 'Pool cache is DEGRADED'), reasons);
+  check('healthReasons include active alert lines (dismissed excluded)', reasons.some((r) => r.message.includes('SMARTFailedSelfTestAlert')) && reasons.some((r) => r.message.includes('SMARTUncorrectedErrorsAlert')) && !reasons.some((r) => r.message.includes('SpareBlockCount')), reasons);
+  // TrueNAS ≥ 25 template text must be formatted with args — no raw %(key)s.
+  check('healthReasons alert text is template-formatted', reasons.some((r) => r.message === 'SMARTFailedSelfTestAlert: da1 (SAMSUNG-XYZ) failed a SMART selftest.') && !reasons.some((r) => r.message.includes('%(')), reasons);
   const m = monJson.metrics ?? {};
   check('hostname + version collected', m['system.hostname'] === 'mock-truenas' && m['system.version'] === 'SCALE 25.04.2');
   check('CPU load computed from loadavg/cores', typeof m['system.cpuLoad'] === 'number', m['system.cpuLoad']);

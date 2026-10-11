@@ -2,6 +2,7 @@ import path from 'path';
 import { Request, Response } from 'express';
 import {
   Health,
+  type HealthReason,
   MetricDescriptor,
   PluginOptionDescriptor,
   INVENTORY_INTERVAL_MS,
@@ -302,7 +303,10 @@ const identity = resolvePluginIdentity({
   // (external JBODs included), grouped into bands by pool, LED from the live
   // vdev status, replace/offline/online actions for pooled disks. Native
   // enclosure data always takes priority when present.
-  version: '0.25.0',
+  // 0.26.0 — /monitoring now reports `healthReasons` (SDK contract) for every
+  // non-ok health: worst active alerts, OFFLINE/DEGRADED pools, partial core-
+  // call failures. The UNM webapp shows them in the device status badge tooltip.
+  version: '0.26.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -884,6 +888,28 @@ function parseAlertSeverity(a: Record<string, unknown>): string {
   return sev ? sev.toUpperCase() : 'INFO';
 }
 
+/**
+ * Formats an alert's text with its args. TrueNAS ≥ 25 ships `text` as a Python
+ * template ("Replication "%(name)s" failed: %(message)s.") — the appliance web
+ * UI substitutes `args` client-side; we do the same so UNM surfaces (status
+ * tooltip, notification center) never show raw placeholders.
+ */
+function formatAlertText(a: Record<string, unknown>): string {
+  const text = pickString(a, ['text']) ?? '';
+  if (!text.includes('%(')) return text;
+  const args = a['args'];
+  if (!args || typeof args !== 'object') return text;
+  try {
+    // Unknown keys keep their original placeholder — never fabricate values.
+    return text.replace(/%\((\w+)\)s/g, (m, key: string) => {
+      const v = (args as Record<string, unknown>)[key];
+      return v === undefined ? m : String(v);
+    });
+  } catch {
+    return text;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Storage inventory (cross-device Storage page): `filesystems[]` + `disks[]`
 // metrics. Pools come from pool.query (already polled); datasets + zvols from
@@ -1187,7 +1213,8 @@ function smartAlertsOf(rawAlerts: Record<string, unknown>[]): Map<string, { leve
     const args = (a['args'] ?? {}) as Record<string, unknown>;
     const name = bareDiskName(pickString(args, ['name']) ?? '');
     if (!name) continue;
-    map.set(name, { level: parseAlertSeverity(a), text: pickString(a, ['text']) ?? '' });
+    // formatAlertText substitutes the %(key)s template args (TrueNAS ≥ 25).
+    map.set(name, { level: parseAlertSeverity(a), text: formatAlertText(a) });
   }
   return map;
 }
@@ -2071,6 +2098,10 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   const metrics: Record<string, unknown> = {};
   let failures = 0;
   let firstError = '';
+  // Human-readable reasons for a non-ok health — sent as `healthReasons` so the
+  // UNM webapp can show them in the device status badge tooltip. One line per
+  // finding, worst first (the API re-sorts by severity anyway).
+  const healthReasons: HealthReason[] = [];
 
   // Core calls in parallel (the API's monitoring budget is ~30 s; the slowest
   // call dominates). allSettled (NOT all): a failed login (unreachable host /
@@ -2449,6 +2480,14 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
         if (sev === 'CRITICAL') metrics['health.alertCritical'] = true;
         else if (sev === 'WARNING' && !metrics['health.alertWarning']) metrics['health.alertWarning'] = true;
       }
+      // Worst active alerts become status-reason lines (tooltip budget: 3).
+      const sevRank = (s: string) => (s === 'CRITICAL' ? 0 : s === 'WARNING' ? 1 : 2);
+      for (const a of [...active].sort((x, y) => sevRank(parseAlertSeverity(x)) - sevRank(parseAlertSeverity(y))).slice(0, 3)) {
+        const sev = parseAlertSeverity(a);
+        if (sev !== 'CRITICAL' && sev !== 'WARNING') continue;
+        const klass = pickString(a, ['klass']) ?? 'Unknown';
+        healthReasons.push({ severity: sev === 'CRITICAL' ? 'critical' : 'warning', message: `${klass}: ${formatAlertText(a)}`.slice(0, 160) });
+      }
     }
     alertsOk = true;
 
@@ -2467,7 +2506,9 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
         const subject = key.slice(`alert:${klass}:`.length);
 
         const sev = parseAlertSeverity(a);
-        const text = pickString(a, ['text']) ?? klass;
+        // formatAlertText substitutes the %(key)s template args (TrueNAS ≥ 25) —
+        // raw placeholders must never reach the notification center.
+        const text = formatAlertText(a) || klass;
         const hostname = pickString(metrics, ['system.hostname']) ?? host;
         notifier.notify({
           severity: sev === 'CRITICAL' ? 'critical' : sev === 'WARNING' ? 'warning' : 'info',
@@ -2801,13 +2842,22 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   if (failures === 3) {
     health = 'critical';
     metrics['system.error'] = firstError || 'All TrueNAS API calls failed';
+    healthReasons.push({ severity: 'critical', message: `All TrueNAS API calls failed${firstError ? ` — ${firstError}` : ''}`.slice(0, 160) });
   } else {
-    const poolRows = metrics['pools'] as { status?: string }[] | undefined;
-    const offlinePool = poolRows?.some((r) => r.status === 'OFFLINE');
-    const degradedPool = poolRows?.some((r) => r.status === 'DEGRADED' || r.status === 'FAULTED');
-    if (offlinePool || metrics['health.alertCritical']) health = 'critical';
-    else if (degradedPool || metrics['health.alertWarning'] || failures > 0) health = 'warning';
-    else health = sysInfoOk && poolsOk ? 'ok' : 'warning';
+    const poolRows = metrics['pools'] as { name?: string; status?: string }[] | undefined;
+    const offlinePools = (poolRows ?? []).filter((r) => r.status === 'OFFLINE');
+    const degradedPools = (poolRows ?? []).filter((r) => r.status === 'DEGRADED' || r.status === 'FAULTED');
+    for (const p of offlinePools.slice(0, 2)) healthReasons.push({ severity: 'critical', message: `Pool ${p.name} is OFFLINE` });
+    for (const p of degradedPools.slice(0, 2)) healthReasons.push({ severity: 'warning', message: `Pool ${p.name} is ${p.status}` });
+    if (offlinePools.length > 0 || metrics['health.alertCritical']) health = 'critical';
+    else if (degradedPools.length > 0 || metrics['health.alertWarning'] || failures > 0) {
+      health = 'warning';
+      // Partial core-call failure — say which call, not just "degraded".
+      if (failures > 0 && firstError) healthReasons.push({ severity: 'warning', message: `Monitoring partial — ${firstError}`.slice(0, 160) });
+    } else {
+      health = sysInfoOk && poolsOk ? 'ok' : 'warning';
+      if (health === 'warning') healthReasons.push({ severity: 'warning', message: 'Core monitoring calls did not all succeed' });
+    }
   }
 
   // Internal flags are not user-facing metrics.
@@ -2822,6 +2872,9 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     deviceId: deviceId ?? null,
     collectedAt: new Date().toISOString(),
     health,
+    // Human-readable reasons for a non-ok health (status-badge tooltip in the
+    // webapp) — omitted when healthy so old APIs see an unchanged response.
+    ...(health !== 'ok' && healthReasons.length > 0 ? { healthReasons: healthReasons.slice(0, 8) } : {}),
     metrics,
     metricDescriptors: descriptorsFromMetrics(metrics),
     // Echo of the effective settings — proof the API→plugin injection loop works.

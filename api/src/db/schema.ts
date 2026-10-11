@@ -108,6 +108,11 @@ export const devices = pgTable('devices', {
   // Reference to the site this device lives at (NULL = unassigned).
   siteId: text('siteId'),
   status: text('status').notNull().default('unknown'),
+  // Human-readable reasons for a non-ok status (JSON array of
+  // {pluginId, pluginName, severity, message}), derived worst-wins from the
+  // last poll outcomes — persisted so the webapp can show them in a badge
+  // tooltip without re-deriving. NULL when online/unknown or no reasons yet.
+  healthReasons: text('healthReasons'),
   // User-selected hardware model, chosen from a plugin's advertised catalog
   // (/discover `deviceModels`). NULL when no catalog applies or the user skipped it.
   // Forwarded to every /monitoring call so vendor plugins can adapt their data gathering.
@@ -397,6 +402,9 @@ export const telemetry = pgTable('telemetry', {
   pluginId: text('pluginId'),
   collectedAt: text('collectedAt').notNull(),
   health: text('health').notNull().default('unknown'),
+  // Optional plugin-reported reasons for a non-ok health (JSON array of
+  // {severity, message}) — surfaced in the webapp's status-badge tooltip.
+  healthReasons: text('healthReasons'),
   metrics: text('metrics').notNull().default('{}'),
   metricDescriptors: text('metricDescriptors'),
 }, (table) => {

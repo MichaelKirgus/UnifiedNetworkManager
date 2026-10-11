@@ -7172,6 +7172,21 @@ components:
           additionalProperties: { type: [string, 'null'] }
           description: "Replace bound slot secrets (validated per slot type); provided = full replacement of the slot map"
 
+    # One line of a device's status tooltip — which plugin is non-ok and why.
+    # Derived worst-wins from the last poll outcomes; plugins that report
+    # `healthReasons` on /monitoring contribute their own lines, everyone else
+    # gets a generic fallback ("Monitoring unreachable …", "Reports degraded health").
+    DeviceHealthReason:
+      type: object
+      required: [pluginId, severity, message]
+      properties:
+        pluginId: { type: string }
+        pluginName: { type: [string, 'null'], description: "Plugin display name (null when the plugin row is gone)" }
+        severity:
+          type: string
+          enum: [warning, critical]
+        message: { type: string, description: "Short human-readable reason, e.g. 'Pool tank is DEGRADED'" }
+
     Device:
       type: object
       required: [id, name, vendor, deviceTypes, tags, managementAddress, status]
@@ -7194,7 +7209,12 @@ components:
         siteName: { type: [string, 'null'], description: "Display name of the assigned site" }
         status:
           type: string
-          enum: [online, degraded, offline, unknown]
+          enum: [online, degraded, offline, critical, unknown]
+        healthReasons:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeviceHealthReason'
+          description: "Human-readable reasons for a non-ok status (worst-wins rollup of the last poll outcomes); empty when online"
         model: { type: [string, 'null'], description: "Hardware model selected from a plugin's advertised catalog (null = unset)" }
         firmwareVersion: { type: [string, 'null'], description: "Firmware version for the selected model (null = unset)" }
         layerOverride: { type: [string, 'null'], description: "Manual topology-layer override (a network_layers id); null = auto-classify from plugin suggestion / heuristic" }
@@ -9730,6 +9750,11 @@ components:
         health:
           type: string
           enum: [ok, warning, degraded, critical, unknown]
+        healthReasons:
+          type: array
+          items:
+            $ref: '#/components/schemas/HealthReason'
+          description: "Plugin-reported reasons for a non-ok health (empty when healthy or the plugin doesn't report them)"
         metrics:
           type: object
           additionalProperties: true
@@ -9747,10 +9772,26 @@ components:
         health:
           type: string
           enum: [ok, warning, degraded, critical, unknown]
+        healthReasons:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeviceHealthReason'
+          description: "Worst-wins rollup of the last poll outcomes (same as devices.healthReasons)"
         snapshots:
           type: array
           items:
             $ref: '#/components/schemas/PluginTelemetrySnapshot'
+
+    # One plugin-reported reason for a non-ok monitoring health. Optional on
+    # POST /monitoring — the API persists it and surfaces it in tooltips.
+    HealthReason:
+      type: object
+      required: [severity, message]
+      properties:
+        severity:
+          type: string
+          enum: [warning, critical]
+        message: { type: string, description: "Short human-readable reason (one line, ideally ≤ 120 chars)" }
 
     # --- Device state (per-device Config page) ------------------------------
     # The dynamic device-state document a plugin serves from GET /state. The

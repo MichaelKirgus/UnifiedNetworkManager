@@ -2280,6 +2280,8 @@ export interface Device {
   /** Display name of the assigned site (null = unassigned). */
   siteName?: string | null;
   status: string;
+  /** Human-readable reasons for a non-ok status — rendered as a badge tooltip. */
+  healthReasons?: DeviceHealthReason[];
   /** All addresses, primary first (list endpoints include this). */
   ips?: DeviceAddress[];
   /** Assigned plugins (list endpoints include this). */
@@ -2409,11 +2411,28 @@ export interface CapabilityEvaluation {
   reasons: string[];
 }
 
+/** One human-readable reason for a non-ok monitoring health (plugin-reported). */
+export interface HealthReason {
+  severity: 'warning' | 'critical';
+  message: string;
+}
+
+/** One line of a device's status tooltip — which plugin is non-ok and why. */
+export interface DeviceHealthReason {
+  pluginId: string;
+  /** Plugin display name (null when the plugin row is gone). */
+  pluginName?: string | null;
+  severity: 'warning' | 'critical';
+  message: string;
+}
+
 /** One plugin's monitoring snapshot for a device. */
 export interface PluginTelemetrySnapshot {
   pluginId: string;
   collectedAt?: string | null;
   health: string;
+  /** Plugin-reported reasons for a non-ok health (empty when healthy). */
+  healthReasons?: HealthReason[];
   metrics: Record<string, unknown>;
   metricDescriptors?: MetricDescriptor[];
 }
@@ -2423,6 +2442,8 @@ export interface DeviceMonitoring {
   deviceId: string;
   /** Overall device health = worst-wins across all assignments. */
   health: string;
+  /** Worst-wins rollup of the last poll outcomes (same as devices.healthReasons). */
+  healthReasons?: DeviceHealthReason[];
   snapshots: PluginTelemetrySnapshot[];
 }
 

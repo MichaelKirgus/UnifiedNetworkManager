@@ -19,6 +19,20 @@
 /** Plugin health vocabulary (the API derives device status worst-wins from it). */
 export type Health = 'ok' | 'warning' | 'critical' | 'unknown';
 
+/**
+ * One human-readable reason why a monitoring poll reported non-ok health.
+ * Optional on the /monitoring response — plugins that don't report reasons
+ * still work (the API falls back to generic wording). The webapp shows these
+ * in a tooltip when hovering the device status badge, so keep them SHORT:
+ * one line each, no newlines, ideally ≤ 120 chars.
+ */
+export interface HealthReason {
+  /** 'warning' or 'critical' — must match (or be less severe than) `health`. */
+  severity: 'warning' | 'critical';
+  /** Short human-readable reason, e.g. "Pool tank is DEGRADED". */
+  message: string;
+}
+
 /** Capability strings a plugin may advertise in /discover. */
 export const CAPABILITIES = [
   'monitoring',
@@ -526,9 +540,16 @@ export interface MonitoringRequestBody {
   collectInventory?: boolean;
 }
 
-/** Response of POST /monitoring — the API reads exactly these three fields. */
+/** Response of POST /monitoring — the API reads exactly these four fields. */
 export interface MonitoringResponseBody {
   health?: Health;
+  /**
+   * Optional human-readable reasons for a non-ok `health` (see HealthReason).
+   * Omit or leave empty when healthy — the API persists them on the telemetry
+   * snapshot and surfaces them in the webapp's status-badge tooltip. Old APIs
+   * ignore this field, so it is safe to send unconditionally.
+   */
+  healthReasons?: HealthReason[];
   metrics?: Record<string, unknown>;
   metricDescriptors?: MetricDescriptor[];
 }

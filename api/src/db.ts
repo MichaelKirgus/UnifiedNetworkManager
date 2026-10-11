@@ -38,6 +38,11 @@ export async function initDb(): Promise<void> {
     `ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS "metricDescriptors" TEXT`
   );
 
+  // Defensive migrations for status transparency: plugin-reported health
+  // reasons per snapshot + the derived worst-wins reasons on the device row.
+  await pool.query(`ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS "healthReasons" TEXT`);
+  await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS "healthReasons" TEXT`);
+
   // Defensive migrations for plugin options: descriptor cache column + the
   // settings table. Same rationale as above — host-dev hot reload may run
   // before drizzle-kit push has created them.

@@ -39,10 +39,26 @@ const STATUS_STYLES: Record<string, string> = {
   unknown: 'bg-muted text-secondary border-border',
 };
 
-export function StatusBadge({ status }: { status: string }) {
+/**
+ * Builds the hover tooltip for a non-ok status badge from its reasons — one
+ * line per finding, worst first (the API already sorts them). Returns null for
+ * healthy/unknown statuses or when no reasons are available.
+ */
+export function statusReasonsTitle(
+  status: string,
+  reasons?: { pluginName?: string | null; severity: 'warning' | 'critical'; message: string }[]
+): string | null {
+  if (!reasons || reasons.length === 0) return null;
+  const lines = reasons.map((r) => `${r.pluginName ? `[${r.pluginName}] ` : ''}${r.message}`);
+  // Prefix with the status so the tooltip reads as a full sentence.
+  return [status, ...lines].join('\n');
+}
+
+export function StatusBadge({ status, title }: { status: string; title?: string | null }) {
   const style = STATUS_STYLES[status] ?? STATUS_STYLES.unknown;
   return (
     <span
+      title={title || undefined}
       className={clsx(
         'inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium capitalize',
         style

@@ -48,6 +48,43 @@ const router = Router();
 
 // readStringArray / parseStringArrayField come from utils/stringArrays (shared).
 
+/** One line of a device's status tooltip (see devices.healthReasons). */
+export interface DeviceHealthReason {
+  pluginId: string;
+  pluginName: string | null;
+  severity: 'warning' | 'critical';
+  message: string;
+}
+
+/** Tolerant parser for the persisted healthReasons JSON column. */
+function parseHealthReasonsField(raw: unknown): DeviceHealthReason[] {
+  if (typeof raw !== 'string' || raw.length === 0) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: DeviceHealthReason[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const o = item as Record<string, unknown>;
+      const pluginIdRaw = o['pluginId'];
+      const pluginNameRaw = o['pluginName'];
+      const severityRaw = o['severity'];
+      const messageRaw = o['message'];
+      const message = typeof messageRaw === 'string' ? messageRaw.trim() : '';
+      if (!message) continue;
+      out.push({
+        pluginId: typeof pluginIdRaw === 'string' ? pluginIdRaw : '',
+        pluginName: typeof pluginNameRaw === 'string' ? pluginNameRaw : null,
+        severity: severityRaw === 'critical' ? 'critical' : 'warning',
+        message,
+      });
+    }
+    return out;
+  } catch {
+    return []; // corrupt JSON must never break the device list
+  }
+}
+
 function serializeDevice(row: Device, siteName?: string | null) {
   const deviceTypes = readStringArray(row.deviceTypes);
   return {
@@ -64,6 +101,9 @@ function serializeDevice(row: Device, siteName?: string | null) {
     siteId: row.siteId ?? undefined,
     siteName: siteName ?? null,
     status: row.status,
+    // Human-readable reasons for a non-ok status (worst-wins rollup of the
+    // last poll outcomes) — rendered as a tooltip on the webapp's badge.
+    healthReasons: parseHealthReasonsField(row.healthReasons),
     model: row.model ?? null,
     firmwareVersion: row.firmwareVersion ?? null,
     // Manual topology-layer override (null = auto-classify).
@@ -1021,6 +1061,8 @@ router.get('/devices/:id/monitoring', requireAuth, requirePermission('devices:re
         pluginId: a.pluginId,
         collectedAt: telemetry.collectedAt,
         health: telemetry.health,
+        // Plugin-reported reasons for this snapshot's non-ok health (null when healthy).
+        healthReasons: parseHealthReasonsField(telemetry.healthReasons),
         metrics: typeof telemetry.metrics === 'string' ? JSON.parse(telemetry.metrics) : telemetry.metrics,
         metricDescriptors: descriptors,
       };
@@ -1034,7 +1076,7 @@ router.get('/devices/:id/monitoring', requireAuth, requirePermission('devices:re
     'unknown'
   );
 
-  res.status(200).json({ deviceId, health, snapshots });
+  res.status(200).json({ deviceId, health, healthReasons: parseHealthReasonsField(device.healthReasons), snapshots });
 });
 
 // GET /devices/:id/state - LIVE device state from one assigned plugin's
