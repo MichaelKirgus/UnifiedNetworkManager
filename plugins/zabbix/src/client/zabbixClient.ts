@@ -290,18 +290,32 @@ export class ZabbixClient {
   }
 
   /** problem.get — active problems (newest first, capped). */
-  async getProblems(limit = 50): Promise<Array<{ object: string; name: string; severity: number }>> {
-    const rows = await this.call<Record<string, unknown>[]>('problem.get', {
-      output: ['objectid', 'object', 'name'],
-      selectEvents: [],
-      sortfield: 'clock',
+  async getProblems(limit = 50): Promise<Array<{ objectid: string; object: string; name: string; severity: number; eventid: string | null }>> {
+    const params = (withEventId: boolean) => ({
+      output: withEventId ? ['objectid', 'object', 'name', 'eventid'] : ['objectid', 'object', 'name'],
+      // problem.get only allows sorting by eventid — "clock" is rejected.
+      sortfield: 'eventid',
       sortorder: 'DESC',
       limit,
     });
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.call<Record<string, unknown>[]>('problem.get', params(true));
+    } catch (err) {
+      // `eventid` is not a valid output field on older frontends — the API rejects
+      // the whole call. Retry once without it; eventid then stays null and the
+      // notification dedupe key falls back to object+name.
+      if (!(err instanceof ZabbixApiError) || !/output|invalid/i.test(err.message)) throw err;
+      rows = await this.call<Record<string, unknown>[]>('problem.get', params(false));
+    }
     return (rows ?? []).map((r) => ({
+      objectid: String(r['objectid'] ?? ''),
       object: String(r['object'] ?? ''),
       name: String(r['name'] ?? ''),
       severity: Number(r['severity'] ?? 0),
+      // eventid = the opening event of this problem — stable while the problem
+      // persists, so it makes a good dedupe key (null on very old servers).
+      eventid: r['eventid'] != null ? String(r['eventid']) : null,
     }));
   }
 

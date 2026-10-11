@@ -27,6 +27,7 @@ import {
   MetricDescriptor,
   PluginOptionDescriptor,
   clampInt,
+  createNotifier,
   isTransientTransportError,
   createPluginLogger,
   createPluginServer,
@@ -36,6 +37,7 @@ import {
   validateInput,
 } from '@unm/plugin-sdk';
 import { ZABBIX_DEVICE_SUPPORT } from './deviceSupport';
+import { mirrorZabbixProblems, type ZabbixProblem } from './notifications';
 import path from 'node:path';
 import { ZabbixActionContext } from './actions';
 import { registry as actionRegistry } from './actions';
@@ -54,7 +56,15 @@ import {
 const identity = resolvePluginIdentity({
   uuid: '00000000-0000-4000-8000-000000000010', // zabbix plugin — stable primary key in the API
   name: 'Zabbix Plugin',
-  version: '0.1.0',
+  // 0.2.0 — Notification-center mirroring (SDK createNotifier): /monitoring now
+  // mirrors active problems into UNM's notification center with stable per-event
+  // dedupe keys and resolve-on-clear, gated by the new `notifyAlerts` option;
+  // `minSeverity` controls which Zabbix severities are mirrored (default 2 =
+  // Warning — lower it for deployments that leave triggers "Not classified").
+  // Also: basePath "/" now means "frontend served at the web root" (previously
+  // an empty value silently fell back to /zabbix), and problem.get was fixed to
+  // use its only legal sortfield (eventid) without the invalid selectEvents param.
+  version: '0.2.0',
   vendors: ['zabbix'],
   capabilities: ['monitoring', 'inventorySync'],
 });
@@ -79,7 +89,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     label: 'Frontend base path',
     type: 'string' as const,
     default: '/zabbix',
-    description: 'URL path of the Zabbix frontend (e.g. /zabbix). The JSON-RPC endpoint is <base>/api_jsonrpc.php.',
+    description: 'URL path of the Zabbix frontend (e.g. /zabbix). The JSON-RPC endpoint is <base>/api_jsonrpc.php. Use "/" when the frontend is served at the web root.',
   },
   { key: 'timeoutMs', label: 'Request timeout (ms)', type: 'integer' as const, default: 15000, min: 2000, max: 60000, description: 'Per-request timeout for Zabbix API calls.' },
 
@@ -160,6 +170,18 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 
   // --- Logging -------------------------------------------------------------------
   { key: 'logToApi', label: 'Send logs to UNM', type: 'boolean' as const, default: true, description: 'Ship structured log entries (poll/action failures) to the UNM API for the device Logs view.' },
+
+  // --- Notifications ---------------------------------------------------------------
+  { key: 'notifyAlerts', label: 'Mirror problems to notification center', type: 'boolean' as const, default: true, description: 'Push active Zabbix problems into UNM\'s notification center. Problems clear automatically when they disappear.' },
+  {
+    key: 'minSeverity',
+    label: 'Minimum severity to mirror',
+    type: 'integer' as const,
+    default: 2,
+    min: 0,
+    max: 5,
+    description: 'Lowest Zabbix severity mirrored into the notification center (0 Not classified, 1 Information, 2 Warning, 3 Average, 4 High, 5 Disaster). Lower it to 0 when your triggers are left at "Not classified".',
+  },
 ];
 
 // --- Metric descriptors -----------------------------------------------------------
@@ -213,6 +235,11 @@ const app = server.app;
 // --- Structured logging ---------------------------------------------------------------
 const logger = createPluginLogger(identity);
 
+// Notification-center mirroring (SDK createNotifier): fire-and-forget push of
+// active problems into UNM's notification center. Gated per call by the
+// `notifyAlerts` option, same pattern as logToApi.
+const notifier = createNotifier(identity);
+
 // --- Helpers --------------------------------------------------------------------------
 
 /** Extracts the management address (host[:port]) from a request body. */
@@ -223,13 +250,17 @@ function hostOf(managementAddress: unknown): string {
 /** Resolves effective transport + ports + base path from injected settings. */
 function endpointsOf(settings: Record<string, unknown>): { transport: ZabbixTransport; ports: ZabbixPorts; basePath: string } {
   const t = typeof settings['transport'] === 'string' ? (settings['transport'] as ZabbixTransport) : 'auto';
+  // "/" is the explicit marker for "frontend served at the web root" — an empty
+  // value falls back to the /zabbix default (the API injects defaults, so an
+  // unset option can never arrive empty).
+  const rawBase = typeof settings['basePath'] === 'string' ? (settings['basePath'] as string).trim() : '';
   return {
     transport: t,
     ports: {
       httpsPort: clampInt(settings['httpsPort'], 1, 65535, 443),
       httpPort: clampInt(settings['httpPort'], 1, 65535, 80),
     },
-    basePath: typeof settings['basePath'] === 'string' && settings['basePath'].trim() ? (settings['basePath'] as string).trim() : '/zabbix',
+    basePath: rawBase === '' ? '/zabbix' : rawBase,
   };
 }
 
@@ -284,6 +315,7 @@ app.post('/monitoring', async (req, res) => {
 async function handleMonitoring(req: Request, res: Response, body: Record<string, unknown>, deviceId: string | undefined, host: string): Promise<void> {
   const settings = readSettings(req, PLUGIN_OPTIONS);
   logger.setEnabled(settings.logToApi === true);
+  notifier.setEnabled(settings.notifyAlerts !== false);
   const timeoutMs = clampInt(settings['timeoutMs'], 2000, 60000, 15000);
 
   if (!host) {
@@ -329,16 +361,52 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
     if (!isAuthError(hostsRes.reason)) health = 'warning';
   }
 
+  // Fresh problem snapshot for notification mirroring — null when the read did
+  // not succeed this cycle (anti-flap contract: a failed read must neither add
+  // nor clear bell entries). Truncation is detected via countOutput so a cap
+  // can never be mistaken for "problems disappeared".
+  let problemsFresh: ZabbixProblem[] | null = null;
+  let problemsTruncated = false;
   if (problemsRes.status === 'fulfilled') {
-    metrics['zabbix.problems'] = problemsRes.value.map((p) => ({ object: p.object, name: p.name, severity: String(p.severity) }));
+    const rows = problemsRes.value;
+    metrics['zabbix.problems'] = rows.map((p) => ({ object: p.object, name: p.name, severity: String(p.severity) }));
+    problemsFresh = rows;
+    try {
+      // Best-effort completeness check — a failed count must not sink the poll.
+      const total = await client.countProblems();
+      problemsTruncated = total > rows.length;
+    } catch { /* keep truncated=false; worst case: one over-resolve on a flaky count */ }
   } else {
     firstError = firstError || `problem list failed: ${errMsg(problemsRes.reason)}`;
     if (!isAuthError(problemsRes.reason)) health = 'warning';
   }
 
+  // Notification-center mirroring (gated by `notifyAlerts`): active problems at
+  // or above the configured minimum severity, with stable per-event dedupe keys
+  // and resolve-on-clear. A failed problem read passes null → the known-set is
+  // left untouched.
+  if (notifier.enabled) {
+    mirrorZabbixProblems(notifier, host, deviceId ?? null, problemsFresh, problemsTruncated, clampInt(settings['minSeverity'], 0, 5, 2));
+  }
+
   if (firstError && !('system.error' in metrics)) metrics['system.error'] = firstError;
 
-  res.status(200).json({ deviceId: deviceId ?? null, collectedAt: new Date().toISOString(), health, metrics, metricDescriptors: METRIC_DESCRIPTORS });
+  res.status(200).json({
+    deviceId: deviceId ?? null,
+    collectedAt: new Date().toISOString(),
+    health,
+    metrics,
+    metricDescriptors: METRIC_DESCRIPTORS,
+    // Echo back the effective settings we received — proof that the
+    // API→plugin settings injection loop works end to end.
+    activeSettings: {
+      transport: endpointsOf(settings).transport,
+      basePath: endpointsOf(settings).basePath,
+      logToApi: settings.logToApi === true,
+      notifyAlerts: settings.notifyAlerts !== false,
+      minSeverity: clampInt(settings['minSeverity'], 0, 5, 2),
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
