@@ -25,6 +25,7 @@ import {
   StateSection,
   clampInt,
   isTransientTransportError,
+  createNotifier,
   createPluginLogger,
   createPluginServer,
   errorDescriptor,
@@ -44,6 +45,7 @@ import { buildContainerRows, buildImageRows, ContainerRow as UnmContainerRow, Do
 import { registry as actionRegistry, DockerActionContext } from './actions';
 import { buildPlan, PlanningError } from './plan';
 import { collectProbeStats, collectProbeStates, ProbeContainerStat, ProbeContainerState } from './probe';
+import { mirrorDockerContainers, ContainerCondition } from './notifications';
 
 // --- Identity -----------------------------------------------------------------
 export const PLUGIN_UUID = '00000000-0000-4000-8000-00000000000b';
@@ -76,7 +78,12 @@ const identity = resolvePluginIdentity({
   // optionally restart every running container using one of those refs) and
   // images.prune {all?} (POST /images/prune). Same generic contract as the
   // Generic SSH plugin — the webapp's image buttons are catalog-gated.
-  version: '0.6.0',
+  // 0.7.0 — notification-center mirroring: non-running containers (exited /
+  // dead / paused / created) push a stable per-container bell entry that clears
+  // automatically when the container recovers or disappears, gated by the new
+  // `notifyAlerts` option. The self-healing 'restarting' state is NOT mirrored
+  // so deploys don't flap the center; metrics-only polls pass null (anti-flap).
+  version: '0.7.0',
   vendors: ['generic'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'probe'],
 });
@@ -115,6 +122,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       'Ship structured log entries (poll failures) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
+  },
+  {
+    key: 'notifyAlerts',
+    label: 'Mirror stopped containers to notification center',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      "Push non-running containers (exited / dead / paused / created) into UNM's notification center. Entries clear automatically when the container recovers or disappears. The transient 'restarting' state is never mirrored.",
   },
 ];
 
@@ -163,6 +178,10 @@ const app = server.app;
 
 // --- Structured logging ---------------------------------------------------------------
 const logger = createPluginLogger(identity);
+
+// Notification-center mirroring (SDK fire-and-forget notifier) — enabled/disabled
+// per poll from the `notifyAlerts` option, same pattern as logToApi.
+const notifier = createNotifier(identity);
 
 // --- /monitoring helpers ----------------------------------------------------------------
 
@@ -220,23 +239,28 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
   running: number;
   stopped: number;
   engineVersionText: string | null;
+  /** Non-running containers for notification mirroring. `null` when this poll
+   * did NOT take an authoritative container snapshot (metrics-only poll or a
+   * failed /containers/json read) — the mirror must leave its known-set alone. */
+  conditions: ContainerCondition[] | null;
 }> {
   const version = await engineVersion(opts);
   if (!version.ok) {
-    return { health: 'critical', error: `Docker Engine unreachable via ${version.transportUsed ?? opts.transport}: ${version.error || `HTTP ${version.status}`}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText: null };
+    return { health: 'critical', error: `Docker Engine unreachable via ${version.transportUsed ?? opts.transport}: ${version.error || `HTTP ${version.status}`}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText: null, conditions: null };
   }
 
   if (!full) {
     // Liveness-only poll — the daemon answered /_ping + version; that IS the
-    // health signal. No container/image traffic to the engine.
-    return { health: 'ok', rows: [], images: null, running: 0, stopped: 0, engineVersionText: version.data?.Version ? `Docker ${version.data.Version}` : null };
+    // health signal. No container/image traffic to the engine. `conditions` is
+    // null (not []): a metrics-only poll must neither add nor clear bell entries.
+    return { health: 'ok', rows: [], images: null, running: 0, stopped: 0, engineVersionText: version.data?.Version ? `Docker ${version.data.Version}` : null, conditions: null };
   }
 
   // Containers are the core of this plugin; the image inventory is a best-
   // effort extra (a failure must not fail the poll or wipe previously seen rows).
   const [list, imagesRes] = await Promise.all([listContainers(opts), listImages(opts)]);
   if (!list.ok) {
-    return { health: 'critical', error: `/containers/json failed (HTTP ${list.status}): ${JSON.stringify(list.data ?? '').slice(0, 200)}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText: version.data?.Version ?? null };
+    return { health: 'critical', error: `/containers/json failed (HTTP ${list.status}): ${JSON.stringify(list.data ?? '').slice(0, 200)}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText: version.data?.Version ?? null, conditions: null };
   }
 
   const raw = Array.isArray(list.data) ? (list.data as DockerContainerRaw[]) : [];
@@ -246,6 +270,19 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
   for (const r of rows) {
     if (r.state === 'RUNNING') running++;
     else stopped++;
+  }
+
+  // Non-running containers worth a bell entry — straight from the raw list so we
+  // keep the exit code (the UNM row shape doesn't carry it). 'running' and the
+  // self-healing 'restarting' transition are excluded by the mirror itself.
+  const conditions: ContainerCondition[] = [];
+  for (const c of raw) {
+    if (!c || typeof c !== 'object') continue;
+    const state = typeof c.State === 'string' ? c.State.toLowerCase() : '';
+    if (!state || state === 'running' || state === 'restarting') continue;
+    const name = Array.isArray(c.Names) && c.Names.length > 0 ? String(c.Names[0]).replace(/^\/+/, '') : '';
+    if (!name) continue;
+    conditions.push({ name, state, exitCode: typeof c.ExitCode === 'number' ? c.ExitCode : null });
   }
 
   let images: ImageRow[] | null = null;
@@ -260,6 +297,7 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
     running,
     stopped,
     engineVersionText: version.data?.Version ? `Docker ${version.data.Version}` : null,
+    conditions,
   };
 }
 
@@ -277,6 +315,7 @@ app.post('/monitoring', async (req, res) => {
   // Effective settings: declared defaults ⊕ user overrides from the header.
   const settings = readSettings(req, PLUGIN_OPTIONS);
   logger.setEnabled(settings.logToApi === true);
+  notifier.setEnabled(settings.notifyAlerts !== false);
   const transport = String(settings.transport ?? 'auto');
   const port = clampInt(Number(settings.port ?? 2375), 1, 65535, 2375);
   const localSocketPath = String(settings.localSocketPath || '/var/run/docker.sock');
@@ -331,12 +370,30 @@ app.post('/monitoring', async (req, res) => {
     // when the /images/json call itself failed (no wipe on transport errors).
     if (result.images !== null) metrics['images'] = result.images;
 
+    // Notification-center mirroring (gated by `notifyAlerts`): non-running
+    // containers get a stable per-container bell entry that clears when the
+    // container recovers or disappears. `result.conditions` is null on every
+    // non-authoritative path (metrics-only poll, failed read) → the mirror's
+    // known-set is left untouched (anti-flap contract).
+    if (notifier.enabled && result.conditions !== null) {
+      mirrorDockerContainers(notifier, managementAddress || 'local', deviceId, result.conditions);
+    }
+
     res.status(200).json({
       deviceId,
       collectedAt: new Date().toISOString(),
       health: result.health,
       metrics,
       metricDescriptors: METRIC_DESCRIPTORS,
+      // Echo back the effective settings we received — proof that the
+      // API→plugin settings injection loop works end to end.
+      activeSettings: {
+        transport,
+        port,
+        localSocketPath,
+        logToApi: settings.logToApi === true,
+        notifyAlerts: settings.notifyAlerts !== false,
+      },
     });
   } catch (err) {
     logger.error(`Monitoring poll for ${managementAddress} failed: ${(err as Error).message}`, { deviceId, context: { host: managementAddress } });

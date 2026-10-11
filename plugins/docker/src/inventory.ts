@@ -40,6 +40,8 @@ export interface DockerContainerRaw {
   Image?: string;
   State?: string; // running | exited | created | restarting | paused | dead | removing
   Status?: string;
+  /** Exit code for exited containers (0 = clean). Absent while running. */
+  ExitCode?: number;
   Ports?: DockerPort[];
   Labels?: Record<string, string>;
   NetworkSettings?: DockerNetworkSettings;
