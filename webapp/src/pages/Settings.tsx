@@ -79,6 +79,25 @@ function SettingEditor({
     return <span className="text-xs text-faint">Read-only — requires system:write to change this setting.</span>;
   }
 
+  // Boolean settings get a native checkbox that applies immediately on toggle —
+  // no draft/Save round-trip (same behaviour as the date/time card on My Account).
+  if (setting.type === 'boolean') {
+    const on = setting.value === true;
+    return (
+      <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-secondary">
+        <input
+          type="checkbox"
+          checked={on}
+          disabled={saving}
+          onChange={(e) => onSave(e.target.checked)}
+          className="h-4 w-4 accent-[var(--color-primary)]"
+        />
+        {on ? 'Enabled' : 'Disabled'}
+        {saving && <span className="text-xs text-faint">Saving…</span>}
+      </label>
+    );
+  }
+
   const isInt = setting.type === 'integer';
   const opts = enumOptions(setting.pattern); // enum-style string settings render as a dropdown
   const parsed = Number(draft);
