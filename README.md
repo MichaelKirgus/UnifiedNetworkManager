@@ -31,6 +31,7 @@ Open-source network management and monitoring platform for mixed-vendor environm
   - [Plugin log pipeline](#plugin-log-pipeline)
   - [Multi-instance plugins (remote sites)](#multi-instance-plugins-remote-sites)
 - [Plans & configuration jobs](#plans--configuration-jobs)
+- [Backup & replication](#backup--replication)
 - [MCP server (AI agent access)](#mcp-server-ai-agent-access)
 - [Development workflow](#development-workflow)
   - [Key environment variables (API)](#key-environment-variables-api)
@@ -249,6 +250,19 @@ With neither set, behavior is exactly as before — single-instance deployments 
 - **Config jobs** — single-device action submissions (`POST /devices/:deviceId/config-jobs` with an explicit `pluginId`), executed by the config-job worker against that plugin assignment. Require `configs:apply` + 2FA.
 - **Plans** — multi-step workflows with per-step dependencies, reordering (cycle-checked while draft/ready), and `${steps[N].result.details.<key>}` token substitution from earlier step results. The executor runs one plan at a time, persists the *resolved* input of each step before dispatch, honors `bestEffort` flags, and marks orphaned executing plans failed on startup. Plan creation can **provision secrets** (e.g. WireGuard key pairs) through the secrets provider with rollback on failure; provisioned material is referenced by id in steps and never stored in plaintext anywhere.
 - E2E test suite: `scripts/e2e-plans.ts` against the mock OPNsense appliance (`docker compose --profile test up -d mock-appliance`; the service is hidden behind the `test` profile so productive `up`s never start it).
+
+## Backup & replication
+
+The **Backups** page (gated on the `instance:backup` permission) manages UNM's own database — not device configs:
+
+- **Backups** are section-based gzip-compressed JSON archives (`.unmbak.gz`). Sections: `identity` (users/roles/policies), `settings`, `devices` (+plugins/secrets), `documented` (planned networks/hosts), `plans`, and `liveInventory` (regenerable telemetry — only in the *All* preset). Presets bundle sections; any combination works. Deliberately excluded from every backup: API tokens, passkeys, live telemetry/logs/events and the plugin registry cache.
+- **Destinations** are per-backup: the local volume (`unm-backups` → `/data/backups`, override with `UNM_BACKUP_VOLUME`) or a registered file-repo instance (bytes content-addressed there; the backup is bound to exactly one instance — no fallback to a sibling).
+- **Restore** is a safe merge: rows are upserted by primary key, and rows absent from the archive are never deleted. The webapp walks upload/stored → manifest preview → per-section report.
+- **Replication** syncs portable config (everything except `liveInventory`) one-way to/from a peer instance using a peer API token that carries `instance:backup` there. Targets support manual *Sync now* and an optional interval (leader-gated scheduler). A default exclusion list strips stack-dependent settings (`instanceName`, update feed, provider bindings, …) before sending/applying — editable per target.
+
+**Cross-instance secret portability:** device secrets are encrypted with a key derived from `MASTER_KEY` + `CRYPTO_SALT`. For replicated/restored secrets to decrypt on the peer, both instances MUST run with identical values for both variables (set them in each stack's `.env`).
+
+**Dev → prod recipe:** 1) create an API token on **prod** with only `instance:backup` (Tokens page); 2) on **dev**, Backups → Replication → *Add target* (push, that URL + token, optional interval); 3) *Sync now*, then watch the scheduler. Verify `instanceName`/update-feed settings were NOT overwritten on prod.
 
 ## MCP server (AI agent access)
 

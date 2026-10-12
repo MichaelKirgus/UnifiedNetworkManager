@@ -84,6 +84,10 @@ services:
       # api container mounts it — plugins reach files through the API's
       # /plugin/files/* routes and never see any filesystem.
       - FILE_REPO_PATH=${FILE_REPO_PATH:-/data/file-repo}
+      # Local destination for stored UNM backups (the Backups page; archives are
+      # gzip-compressed JSON documents, <id>.unmbak.gz). Override with a host
+      # path or another volume via UNM_BACKUP_VOLUME in .env.
+      - BACKUP_PATH=${BACKUP_PATH:-/data/backups}
       # Secrets provider selection (the API is a pure secrets broker).
       # SECRETS_PLUGIN_ID names the active secrets provider plugin; if unset or
       # offline the API falls back to the built-in secrets-provider plugin.
@@ -105,6 +109,10 @@ services:
       - MCP_DEBUG_KEY=${MCP_DEBUG_KEY:-dev-mcp-debug-key}
       - UNM_MCP_URL=http://mcp:3901
     volumes:
+      # Stored UNM backups (Backups page) — local-destination archives live here.
+      # Named volume by default; set UNM_BACKUP_VOLUME to a host path or another
+      # named volume in .env to persist/backup them off-stack.
+      - ${UNM_BACKUP_VOLUME:-unm-backups}:/data/backups
       # Legacy api-local file-repo volume (fallback + pre-plugin rows). The
       # active byte store is the file-repo plugin's own volume below.
       - filerepo:/data/file-repo
@@ -1105,6 +1113,9 @@ volumes:
   # persisted across container rebuilds. Same content rules as unm-api-tls —
   # only UNM-owned material, no CA signing keys.
   unm-mcp-tls:
+  # Stored UNM backups (Backups page) — local-destination archives. Mounted on
+  # the api service ONLY; override with UNM_BACKUP_VOLUME in .env.
+  unm-backups:
   # Legacy api-local file-repo volume (fallback + pre-plugin rows). Mounted on
   # the api service ONLY — plugins access files through the API, never directly.
   filerepo:

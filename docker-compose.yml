@@ -69,12 +69,14 @@ services:
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - FILE_REPO_PLUGIN_ID=${FILE_REPO_PLUGIN_ID:-00000000-0000-4000-8000-000000000011}
       - FILE_REPO_PATH=${FILE_REPO_PATH:-/data/file-repo}
+      - BACKUP_PATH=${BACKUP_PATH:-/data/backups}
       - SECRETS_PLUGIN_ID=${SECRETS_PLUGIN_ID:-00000000-0000-4000-8000-000000000002}
       - PLUGIN_POLL_ENDPOINTS=${PLUGIN_POLL_ENDPOINTS:-}
       - UNM_TLS=${UNM_TLS:-}
       - MCP_DEBUG_KEY=${MCP_DEBUG_KEY:-dev-mcp-debug-key}
       - UNM_MCP_URL=http://mcp:3901
     volumes:
+      - ${UNM_BACKUP_VOLUME:-unm-backups}:/data/backups
       - filerepo:/data/file-repo
       - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca
       - ${UNM_API_TLS_VOLUME:-unm-api-tls}:/data/tls
@@ -645,5 +647,6 @@ volumes:
   unm-api-tls: null
   unm-ca-cfg: null
   unm-mcp-tls: null
+  unm-backups: null
   filerepo: null
   filerepo-plugin: null
