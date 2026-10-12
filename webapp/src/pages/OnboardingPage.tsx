@@ -1,11 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import QRCode from 'react-qr-code';
-import { ArrowRight, CheckCircle2, KeyRound, Loader2, Server, ShieldCheck, Sparkles, Wand2 } from 'lucide-react';
+import { ArchiveRestore, ArrowRight, CalendarClock, CheckCircle2, KeyRound, Loader2, Server, ShieldCheck, Sparkles, Upload, Wand2 } from 'lucide-react';
 import { WizardLayout } from '../components/Wizard';
 import { PasskeyManager } from '../components/PasskeyManager';
-import { api, TotpEnrollment } from '../api/client';
+import { TimePreferencesCard } from '../components/TimePreferencesCard';
+import { useTimeFormat } from '../utils/time';
+import { api, BackupEntry, BackupManifest, SectionMergeReport, TotpEnrollment } from '../api/client';
 import { can } from '../auth/permissions';
 
 /**
@@ -23,7 +25,9 @@ import { can } from '../auth/permissions';
 
 const STEPS = [
   { label: 'Security' },
-  { label: 'Instance name' },
+  { label: 'Instance & display' },
+  { label: 'Restore data' },
+  { label: 'Auto backup' },
   { label: 'First device' },
   { label: 'Done' },
 ];
@@ -52,6 +56,22 @@ export default function OnboardingPage() {
   useEffect(() => {
     if (meQuery.data && !nameTouched) setInstanceName(meQuery.data.instanceName ?? 'UnifiedNetworkManager');
   }, [meQuery.data, nameTouched]);
+
+  // Step 3 — optional restore from a previous backup (file upload or stored row).
+  const [restoreSource, setRestoreSource] = useState<'none' | 'upload' | 'stored'>('none');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [stagedUpload, setStagedUpload] = useState<{ pendingId: string; manifest: BackupManifest } | null>(null);
+  const [restoreBackupId, setRestoreBackupId] = useState('');
+  const [selectedSections, setSelectedSections] = useState<Set<string>>(new Set());
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoreReport, setRestoreReport] = useState<SectionMergeReport[] | null>(null);
+
+  // Step 4 — optional scheduled auto-backup.
+  const [autoEnabled, setAutoEnabled] = useState(false);
+  const [autoInterval, setAutoInterval] = useState(1440);
+  const [autoPreset, setAutoPreset] = useState('config');
+  const [autoDestination, setAutoDestination] = useState<'local' | 'repo'>('local');
+  const [autoProviderId, setAutoProviderId] = useState('');
 
   // Non-admins should not be here — bounce to the app.
   useEffect(() => {
@@ -101,6 +121,60 @@ export default function OnboardingPage() {
     },
   });
 
+  // Step 3 — restore data (optional).
+  const backupsQuery = useQuery({ queryKey: ['backups'], queryFn: api.listBackups });
+  const providersQuery = useQuery({ queryKey: ['fileRepoProviders'], queryFn: api.repoFileProviders });
+
+  const stageUpload = useMutation({
+    mutationFn: (file: File) => api.uploadBackupForRestore(file),
+    onSuccess: (res) => {
+      setStagedUpload(res);
+      setSelectedSections(new Set(Object.keys(res.manifest.sections ?? {})));
+      setRestoreError(null);
+    },
+    onError: (err) => setRestoreError((err as Error).message),
+  });
+
+  const applyRestore = useMutation({
+    mutationFn: () =>
+      api.applyBackupRestore(
+        restoreSource === 'upload'
+          ? { pendingId: stagedUpload!.pendingId, sections: [...selectedSections] }
+          : { backupId: restoreBackupId, sections: [...selectedSections] },
+      ),
+    onSuccess: (res) => {
+      setRestoreReport(res.report);
+      setStagedUpload(null); // server deleted the pending file on apply
+      setRestoreError(null);
+    },
+    onError: (err) => setRestoreError((err as Error).message),
+  });
+
+  // An un-applied staged upload is discarded when leaving the wizard.
+  useEffect(() => {
+    const pendingId = stagedUpload?.pendingId;
+    return () => {
+      if (pendingId) void api.discardPendingRestore(pendingId).catch(() => {});
+    };
+  }, [stagedUpload]);
+
+  // Step 4 — auto-backup settings (one key per updateSetting call, chained).
+  const saveAutoBackup = useMutation({
+    mutationFn: async () => {
+      await api.updateSetting('autoBackupEnabled', autoEnabled);
+      if (autoEnabled) {
+        await api.updateSetting('autoBackupIntervalMinutes', autoInterval);
+        await api.updateSetting('autoBackupPreset', autoPreset);
+        await api.updateSetting('autoBackupDestination', autoDestination);
+        await api.updateSetting('autoBackupProviderId', autoDestination === 'repo' ? autoProviderId : '');
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+      setStep(4);
+    },
+  });
+
   const completeOnboarding = useMutation({
     mutationFn: () => api.onboardingComplete(),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['me'] }),
@@ -112,10 +186,24 @@ export default function OnboardingPage() {
     if (!twoFactorDone && meQuery.data && (meQuery.data.totpEnabled || (meQuery.data.passkeyCount ?? 0) > 0)) setTwoFactorDone(true);
   }, [meQuery.data, twoFactorDone]);
 
+  const { formatDateTime } = useTimeFormat();
+
+  /** Parse a stored backup's sections (JSON string or array, depending on the row). */
+  function sectionsOf(b: BackupEntry): string[] {
+    if (Array.isArray(b.sections)) return b.sections;
+    try {
+      const v = JSON.parse(b.sections);
+      return Array.isArray(v) ? v.filter((s) => typeof s === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
   const me = meQuery.data;
   if (!me) return null; // guard + data not ready yet
 
   const canWriteSettings = can('system:write');
+  const hasBackupPermission = can('instance:backup');
 
   function handlePasswordSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -309,6 +397,7 @@ export default function OnboardingPage() {
 
       {/* ---------------------------------------------------------- Step 2 */}
       {step === 1 && (
+        <div className="space-y-5">
         <div className="rounded-md border border-border bg-card p-4 shadow-sm">
           <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
             <Sparkles className="h-4 w-4 text-primary" /> Name this instance
@@ -361,10 +450,320 @@ export default function OnboardingPage() {
             </div>
           )}
         </div>
+
+        {/* Date & time display — the same self-service card as on My Account. */}
+        <TimePreferencesCard />
+        </div>
       )}
 
       {/* ---------------------------------------------------------- Step 3 */}
       {step === 2 && (
+        <div className="rounded-md border border-border bg-card p-4 shadow-sm">
+          <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+            <ArchiveRestore className="h-4 w-4 text-primary" /> Restore from a previous backup
+          </h2>
+          <p className="mt-1 text-sm text-secondary">
+            This instance is new — if you have an archive from another UNM (or an earlier install), restore it now. You can
+            also do this any time later from the Backups page.
+          </p>
+
+          {restoreReport ? (
+            <div className="mt-4 space-y-3">
+              <div className="flex items-center gap-2 rounded-md border border-success-border bg-success/10 px-3 py-2 text-sm text-success">
+                <CheckCircle2 className="h-4 w-4" /> Restore complete — the selected sections were merged into this instance.
+              </div>
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-border text-xs uppercase tracking-wide text-faint">
+                    <th className="py-1.5 pr-3">Section</th>
+                    <th className="py-1.5 pr-3">Tables</th>
+                    <th className="py-1.5 pr-3">Created</th>
+                    <th className="py-1.5">Updated</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {restoreReport.map((r) => (
+                    <tr key={r.section} className="border-b border-border/50">
+                      <td className="py-1.5 pr-3 font-medium text-secondary">{r.section}</td>
+                      <td className="py-1.5 pr-3 tabular-nums text-faint">{r.tables.length}</td>
+                      <td className="py-1.5 pr-3 tabular-nums text-success">{r.tables.reduce((s, t) => s + t.created, 0)}</td>
+                      <td className="py-1.5 tabular-nums text-secondary">{r.tables.reduce((s, t) => s + t.updated, 0)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {restoreReport.some((r) => r.warnings.length > 0) && (
+                <ul className="list-inside list-disc text-xs text-warning">
+                  {restoreReport.flatMap((r) => r.warnings).map((w, i) => (<li key={i}>{w}</li>))}
+                </ul>
+              )}
+              <button
+                type="button"
+                onClick={() => setStep(3)}
+                className="flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
+              >
+                Continue <ArrowRight className="h-4 w-4" />
+              </button>
+            </div>
+          ) : (
+            <div className="mt-4 space-y-4">
+              {/* Source picker */}
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {([
+                  { value: 'none', label: 'Start fresh', hint: 'No restore — continue with an empty instance' },
+                  { value: 'upload', label: 'Upload a file', hint: 'A .unmbak.gz archive from another UNM' },
+                  { value: 'stored', label: 'Stored backup', hint: 'An archive already on this instance (volume or file repo)' },
+                ] as const).map((opt) => (
+                  <label
+                    key={opt.value}
+                    className={`flex cursor-pointer flex-col gap-0.5 rounded-md border px-3 py-2 text-sm transition-colors ${
+                      restoreSource === opt.value ? 'border-primary bg-muted' : 'border-border hover:bg-muted/50'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2 font-medium text-secondary">
+                      <input
+                        type="radio"
+                        name="restore-source"
+                        checked={restoreSource === opt.value}
+                        onChange={() => {
+                          setRestoreSource(opt.value);
+                          setSelectedSections(new Set());
+                          setRestoreError(null);
+                        }}
+                        className="accent-[var(--color-primary)]"
+                      />
+                      {opt.label}
+                    </span>
+                    <span className="pl-5 text-xs text-faint">{opt.hint}</span>
+                  </label>
+                ))}
+              </div>
+
+              {/* Upload path */}
+              {restoreSource === 'upload' && (
+                <div className="space-y-3">
+                  {!stagedUpload ? (
+                    <button
+                      type="button"
+                      disabled={stageUpload.isPending || !hasBackupPermission}
+                      onClick={() => fileInputRef.current?.click()}
+                      className="flex items-center gap-2 rounded-md border border-dashed border-border bg-muted/40 px-3 py-2 text-sm font-medium text-secondary hover:bg-muted disabled:opacity-50"
+                    >
+                      <Upload className="h-4 w-4" />
+                      {stageUpload.isPending ? 'Reading archive…' : 'Choose a .unmbak.gz file'}
+                    </button>
+                  ) : (
+                    <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
+                      <p className="text-sm font-medium text-secondary">
+                        {stagedUpload.manifest.instanceName ?? 'Unknown instance'} · exported{' '}
+                        {formatDateTime(stagedUpload.manifest.exportedAt)}
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {Object.entries(stagedUpload.manifest.sections ?? {}).map(([key, info]) => (
+                          <label key={key} className="flex cursor-pointer items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-xs font-medium text-secondary">
+                            <input
+                              type="checkbox"
+                              checked={selectedSections.has(key)}
+                              onChange={(e) => {
+                                const next = new Set(selectedSections);
+                                if (e.target.checked) next.add(key); else next.delete(key);
+                                setSelectedSections(next);
+                              }}
+                              className="accent-[var(--color-primary)]"
+                            />
+                            {key} <span className="text-faint">({info.rowCount})</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".unmbak.gz,.gz,application/gzip"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) stageUpload.mutate(f);
+                      e.target.value = '';
+                    }}
+                  />
+                </div>
+              )}
+
+              {/* Stored-backup path */}
+              {restoreSource === 'stored' && (
+                <div className="space-y-2">
+                  {(backupsQuery.data?.backups ?? []).length === 0 ? (
+                    <p className="rounded-md border border-border bg-muted px-3 py-2 text-sm text-faint">
+                      No stored backups on this instance yet — pick “Upload a file” instead.
+                    </p>
+                  ) : (
+                    (backupsQuery.data?.backups ?? []).slice(0, 10).map((b) => {
+                      const secs = sectionsOf(b);
+                      return (
+                        <label
+                          key={b.id}
+                          className={`flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 rounded-md border px-3 py-2 text-sm transition-colors ${
+                            restoreBackupId === b.id ? 'border-primary bg-muted' : 'border-border hover:bg-muted/50'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="restore-stored"
+                            checked={restoreBackupId === b.id}
+                            onChange={() => {
+                              setRestoreBackupId(b.id);
+                              setSelectedSections(new Set(secs));
+                              setRestoreError(null);
+                            }}
+                            className="accent-[var(--color-primary)]"
+                          />
+                          <span className="font-medium text-secondary">{b.name}</span>
+                          <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-faint">{b.scope}</span>
+                          <span className="text-xs tabular-nums text-faint">{(Number(b.sizeBytes) / 1024).toFixed(0)} KiB</span>
+                          <span className="text-xs text-faint">{formatDateTime(b.createdAt)}</span>
+                          {b.source === 'repo' && b.providerName ? (
+                            <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-faint">{b.providerName}</span>
+                          ) : null}
+                        </label>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+
+              {restoreError && (
+                <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{restoreError}</div>
+              )}
+
+              <div className="flex items-center gap-4">
+                <button
+                  type="button"
+                  disabled={
+                    applyRestore.isPending || !hasBackupPermission || restoreSource === 'none' || selectedSections.size === 0
+                  }
+                  onClick={() => applyRestore.mutate()}
+                  className="flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
+                >
+                  {applyRestore.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  Apply restore
+                </button>
+                <button type="button" onClick={() => setStep(3)} className="text-sm text-secondary underline-offset-2 hover:underline">
+                  Skip →
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ---------------------------------------------------------- Step 4 */}
+      {step === 3 && (
+        <div className="rounded-md border border-border bg-card p-4 shadow-sm">
+          <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
+            <CalendarClock className="h-4 w-4 text-primary" /> Scheduled auto-backups
+          </h2>
+          <p className="mt-1 text-sm text-secondary">
+            Optionally let UNM create a backup automatically on an interval — stored on the local volume or in a file-repo
+            instance. You can change this any time from Settings.
+          </p>
+
+          <label className="mt-4 flex cursor-pointer items-center gap-2 text-sm font-medium text-secondary">
+            <input
+              type="checkbox"
+              checked={autoEnabled}
+              onChange={(e) => setAutoEnabled(e.target.checked)}
+              className="accent-[var(--color-primary)]"
+            />
+            Enable scheduled backups
+          </label>
+
+          {autoEnabled && (
+            <div className="mt-4 grid grid-cols-1 gap-6 sm:grid-cols-3">
+              {/* Interval */}
+              <div className="space-y-2">
+                <span className="block text-sm font-semibold text-secondary">Interval</span>
+                <select
+                  value={autoInterval}
+                  onChange={(e) => setAutoInterval(Number(e.target.value))}
+                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
+                >
+                  <option value={60}>Every hour</option>
+                  <option value={360}>Every 6 hours</option>
+                  <option value={720}>Every 12 hours</option>
+                  <option value={1440}>Daily</option>
+                  <option value={4320}>Weekly</option>
+                </select>
+              </div>
+
+              {/* Preset */}
+              <div className="space-y-1.5">
+                <span className="block text-sm font-semibold text-secondary">What to back up</span>
+                {([
+                  { value: 'config', label: 'Config', hint: 'Identity, settings & devices' },
+                  { value: 'planned', label: 'Planned', hint: 'Documented networks/hosts + plans' },
+                  { value: 'all', label: 'All', hint: 'Everything incl. live inventory' },
+                ] as const).map((opt) => (
+                  <label key={opt.value} className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 text-sm transition-colors ${autoPreset === opt.value ? 'border-primary bg-muted' : 'border-border hover:bg-muted/50'}`}>
+                    <input type="radio" name="auto-preset" checked={autoPreset === opt.value} onChange={() => setAutoPreset(opt.value)} className="accent-[var(--color-primary)]" />
+                    <span className="font-medium text-secondary">{opt.label}</span>
+                    <span className="text-xs text-faint">{opt.hint}</span>
+                  </label>
+                ))}
+              </div>
+
+              {/* Destination */}
+              <div className="space-y-2">
+                <span className="block text-sm font-semibold text-secondary">Destination</span>
+                {([
+                  { value: 'local', label: 'Local volume (unm-backups)' },
+                  { value: 'repo', label: 'File-repo instance' },
+                ] as const).map((opt) => (
+                  <label key={opt.value} className={`flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 text-sm transition-colors ${autoDestination === opt.value ? 'border-primary bg-muted' : 'border-border hover:bg-muted/50'}`}>
+                    <input type="radio" name="auto-destination" checked={autoDestination === opt.value} onChange={() => setAutoDestination(opt.value)} className="accent-[var(--color-primary)]" />
+                    <span className="font-medium text-secondary">{opt.label}</span>
+                  </label>
+                ))}
+                {autoDestination === 'repo' && (
+                  (providersQuery.data?.providers ?? []).filter((p) => p.online).length > 0 ? (
+                    <select
+                      value={autoProviderId}
+                      onChange={(e) => setAutoProviderId(e.target.value)}
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
+                    >
+                      <option value="">Choose an instance…</option>
+                      {(providersQuery.data?.providers ?? []).filter((p) => p.online).map((p) => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <p className="text-xs text-faint">No online file-repo instance is registered — pick the local volume or register one first.</p>
+                  )
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="mt-5 flex items-center gap-4">
+            <button
+              type="button"
+              disabled={saveAutoBackup.isPending || (autoEnabled && autoDestination === 'repo' && !autoProviderId)}
+              onClick={() => saveAutoBackup.mutate()}
+              className="flex items-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
+            >
+              {saveAutoBackup.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              Save &amp; continue
+            </button>
+            <button type="button" onClick={() => setStep(4)} className="text-sm text-secondary underline-offset-2 hover:underline">
+              Skip →
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------------------------------------------------- Step 5 */}
+      {step === 4 && (
         <div className="rounded-md border border-border bg-card p-4 shadow-sm">
           <h2 className="flex items-center gap-2 text-base font-semibold text-foreground">
             <Server className="h-4 w-4 text-primary" /> Register your first device
@@ -382,15 +781,15 @@ export default function OnboardingPage() {
             >
               <Server className="h-4 w-4" /> Register a device now
             </button>
-            <button type="button" onClick={() => setStep(3)} className="text-sm text-secondary underline-offset-2 hover:underline">
+            <button type="button" onClick={() => setStep(5)} className="text-sm text-secondary underline-offset-2 hover:underline">
               Set up later →
             </button>
           </div>
         </div>
       )}
 
-      {/* ---------------------------------------------------------- Step 4 */}
-      {step === 3 && (
+      {/* ---------------------------------------------------------- Step 6 */}
+      {step === 5 && (
         <div className="space-y-5">
           <div className="rounded-md border border-success-border bg-success/10 p-4 text-sm text-success">
             <CheckCircle2 className="mb-1 h-5 w-5" /> You&apos;re all set. Your account is secured and your instance is ready to manage devices.
