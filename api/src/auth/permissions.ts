@@ -133,6 +133,12 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // permissions — this is UNM's OWN PKI, not appliance cert inventory.
   'ca:read': 'View the certificate authority status and issued certificates',
   'ca:manage': 'Manage the certificate authority (revoke certificates)',
+  // Backup / restore / replication of UNM's OWN database (Backups page): create
+  // section-based backups, download/restore them, and manage replication targets
+  // between instances. Carriers may also act as a replication PEER — inbound
+  // sync pushes from another instance are accepted when the presented token
+  // carries this permission.
+  'instance:backup': "Back up, restore and replicate UNM's own configuration",
 };
 
 /** All known permission ids (stable order — object key insertion order). */

@@ -21,6 +21,7 @@ tags:
   - name: Sites
   - name: Layers
   - name: Files
+  - name: Backups
   - name: Inventory
   - name: Flows
   - name: Updates
@@ -3474,6 +3475,241 @@ paths:
           description: Authentication required (requires files:read)
         '404':
           description: File not found
+
+  /backups/meta:
+    get:
+      tags: [Backups]
+      summary: Backup sections, presets and exclusion info
+      description: >-
+        Requires permission `instance:backup`. Returns the selectable backup
+        sections with their discovered tables (new schema tables are picked up
+        automatically — backups are exclusion-based), the preset bundles
+        (`config`, `planned`, `all`) and the list of tables that never enter a
+        backup. Feeds the Backups page's section picker.
+      responses:
+        '200':
+          description: Section/preset/exclusion metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupMetaResponse'
+        '401':
+          description: Authentication required (requires instance:backup)
+
+  /backups:
+    get:
+      tags: [Backups]
+      summary: List stored backups
+      description: >-
+        Requires permission `instance:backup`. Stored backup metadata, newest
+        first. Repo-backed rows carry the bound file-repo instance's display
+        name (`providerName`); a deregistered/offline instance degrades to
+        "unknown provider <id>" so the row stays identifiable and deletable.
+        Local rows whose bytes were deleted out-of-band get `fileMissing: true`.
+      responses:
+        '200':
+          description: Stored backups (newest first)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  backups:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BackupEntry'
+        '401':
+          description: Authentication required (requires instance:backup)
+    post:
+      tags: [Backups]
+      summary: Create a backup
+      description: >-
+        Requires permission `instance:backup`. Builds the selected sections
+        (or a preset bundle) into a gzip-compressed JSON archive and stores it
+        on the local backup volume (`destination: "local"`) or content-addressed
+        in a bound file-repo plugin instance (`destination: "repo"` +
+        `providerId`). The provider's computed SHA-256/size are recorded for
+        repo-backed backups. 409 when the target file-repo instance is not
+        registered or online.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BackupCreateRequest'
+      responses:
+        '201':
+          description: Backup created and stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  backup:
+                    $ref: '#/components/schemas/BackupEntry'
+        '400':
+          description: Unknown preset/section or missing providerId for repo destination
+        '401':
+          description: Authentication required (requires instance:backup)
+        '409':
+          description: Target file-repo instance not registered or online
+
+  /backups/{id}:
+    delete:
+      tags: [Backups]
+      summary: Delete a stored backup
+      description: >-
+        Requires permission `instance:backup`. Removes the metadata row and the
+        bytes — local unlink, or blob deletion on the BOUND file-repo instance
+        only (never a sibling). 409 when the bound instance is gone/offline.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+        '401':
+          description: Authentication required (requires instance:backup)
+        '404':
+          description: Backup not found
+        '409':
+          description: Bound file-repo instance not registered or online
+
+  /backups/{id}/download:
+    get:
+      tags: [Backups]
+      summary: Download a stored backup (raw bytes, attachment)
+      description: >-
+        Requires permission `instance:backup`. Streams the gzip-compressed
+        archive with `Content-Disposition: attachment` from whichever destination
+        holds it. 410 when the metadata exists but the bytes are gone.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The archive's raw bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          description: Authentication required (requires instance:backup)
+        '404':
+          description: Backup not found
+        '409':
+          description: Bound file-repo instance not registered or online
+        '410':
+          description: Metadata exists but the bytes are missing
+
+  /backups/restore/upload:
+    post:
+      tags: [Backups]
+      summary: Stage an uploaded backup for restore (preview)
+      description: >-
+        Requires permission `instance:backup`. The body is the RAW archive
+        (`application/octet-stream`); an optional display name travels in the
+        `x-backup-name` header. The archive is parsed and validated (format,
+        schema version, manifest) but NOT applied — it is staged under a pending
+        id so the client can show a preview first. 400 on corrupt/foreign or
+        newer-version archives.
+      parameters:
+        - name: x-backup-name
+          in: header
+          required: false
+          description: Optional display name for the uploaded archive
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: Archive staged — manifest returned for preview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreUploadResponse'
+        '400':
+          description: Corrupt, foreign or newer-version archive (or JSON body)
+        '401':
+          description: Authentication required (requires instance:backup)
+
+  /backups/restore/apply:
+    post:
+      tags: [Backups]
+      summary: Apply a backup with safe merge semantics
+      description: >-
+        Requires permission `instance:backup`. Merges the staged upload
+        (`pendingId`) or a stored backup (`backupId`) into this instance —
+        upsert by primary key per table, rows absent from the archive are never
+        deleted. Each section applies in its own transaction; settings merge
+        through the normal setting-update path (validation + onChange hooks).
+        Returns a per-section report with created/updated/skipped counts and
+        warnings.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreApplyRequest'
+      responses:
+        '200':
+          description: Merge report per applied section
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  report:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SectionMergeReport'
+        '400':
+          description: Unknown sections or invalid archive
+        '401':
+          description: Authentication required (requires instance:backup)
+        '404':
+          description: Stored backup not found
+        '409':
+          description: A section failed to apply (rolled back) or bound file-repo instance unreachable
+        '410':
+          description: Staged upload gone or bytes missing
+
+  /backups/restore/pending/{pendingId}:
+    delete:
+      tags: [Backups]
+      summary: Discard a staged restore upload without applying
+      parameters:
+        - in: path
+          name: pendingId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Staged file discarded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+        '401':
+          description: Authentication required (requires instance:backup)
 
   /layers:
     get:
@@ -10996,6 +11232,109 @@ components:
         serial: { type: string, description: "Hex serial number of the leaf to revoke" }
         reason: { type: integer, nullable: true, description: "Optional CRL revocation reason code (0–10)" }
 
+    BackupMetaResponse:
+      type: object
+      properties:
+        sections:
+          type: array
+          items:
+            type: object
+            required: [key, tables]
+            properties:
+              key: { type: string }
+              tables:
+                type: array
+                items: { type: string }
+        presets:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+        excludedTables:
+          type: array
+          items: { type: string }
+    BackupCreateRequest:
+      type: object
+      required: [destination]
+      properties:
+        name: { type: string, description: Display name (default derived from scope + date) }
+        preset: { type: string, enum: [config, planned, all], description: Preset bundle; ignored when sections is given }
+        sections:
+          type: array
+          items: { type: string, enum: [identity, settings, devices, documented, plans, liveInventory] }
+        destination: { type: string, enum: [local, repo] }
+        providerId: { type: string, description: File-repo plugin instance id (required for destination=repo) }
+    BackupEntry:
+      type: object
+      required: [id, name, scope, sections, sizeBytes, sha256, source, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        scope: { type: string, description: Preset name when the section set matches one, else "custom" }
+        sections:
+          type: array
+          items: { type: string }
+        sizeBytes: { type: integer, format: int64 }
+        sha256: { type: string }
+        source: { type: string, enum: [local, repo] }
+        providerId: { type: string, nullable: true, description: Bound file-repo instance (repo backups) }
+        providerName: { type: string, nullable: true, description: Display name of the bound instance; "unknown provider <id>" when deregistered }
+        fileMissing: { type: boolean, description: Local bytes deleted out-of-band (metadata row remains) }
+        createdAt: { type: string, format: date-time }
+    BackupManifest:
+      type: object
+      required: [format, schemaVersion, exportedAt, scope, sections]
+      properties:
+        format: { type: string, enum: [unm-backup] }
+        schemaVersion: { type: integer }
+        exportedAt: { type: string, format: date-time }
+        instanceName: { type: string }
+        buildTag: { type: string }
+        scope: { type: string }
+        sections:
+          type: object
+          additionalProperties:
+            type: object
+            required: [rowCount]
+            properties:
+              rowCount: { type: integer }
+              tables:
+                type: object
+                additionalProperties: { type: integer }
+    RestoreUploadResponse:
+      type: object
+      required: [pendingId, manifest]
+      properties:
+        pendingId: { type: string }
+        manifest:
+          $ref: '#/components/schemas/BackupManifest'
+    RestoreApplyRequest:
+      type: object
+      properties:
+        pendingId: { type: string, description: Staged upload id from POST /backups/restore/upload }
+        backupId: { type: string, description: Stored backup id (alternative to pendingId) }
+        sections:
+          type: array
+          items: { type: string }
+          description: "Subset of the archive's sections (default: all present)"
+    SectionMergeReport:
+      type: object
+      required: [section, tables]
+      properties:
+        section: { type: string }
+        tables:
+          type: array
+          items:
+            type: object
+            required: [table, created, updated]
+            properties:
+              table: { type: string }
+              created: { type: integer }
+              updated: { type: integer }
+              skipped: { type: integer, description: Rows skipped (e.g. unknown setting keys) }
+        warnings:
+          type: array
+          items: { type: string }
     CaRevokeResponse:
       type: object
       required: [serial]

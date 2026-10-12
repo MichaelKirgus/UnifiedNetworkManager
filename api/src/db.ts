@@ -1603,6 +1603,43 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_repo_file_uses_file ON repo_file_uses ("fileId")`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_repo_file_uses_device ON repo_file_uses ("deviceId")`);
 
+  // Stored UNM backups (see src/backup.ts + routes/backups.ts). Metadata only —
+  // the archive bytes live on the api-local volume (source='local') or in a
+  // file-repo plugin named by providerId (content-addressed by sha256).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS backups (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      scope TEXT NOT NULL DEFAULT 'all',
+      sections TEXT NOT NULL DEFAULT '[]',
+      "sizeBytes" BIGINT NOT NULL DEFAULT 0,
+      sha256 TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'local',
+      "providerId" TEXT,
+      "createdAt" TEXT NOT NULL
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_backups_source ON backups (source, "providerId")`);
+
+  // Replication targets — one-way sync peers of this instance (see
+  // routes/backups.ts /replication/* + workers/replication.ts).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS replication_targets (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      "baseUrl" TEXT NOT NULL,
+      token TEXT NOT NULL,
+      direction TEXT NOT NULL DEFAULT 'push',
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      "intervalMinutes" INTEGER,
+      "excludeKeys" TEXT NOT NULL DEFAULT '[]',
+      "lastSyncAt" TEXT,
+      "lastSyncStatus" TEXT,
+      "lastError" TEXT,
+      "lastReport" TEXT NOT NULL DEFAULT '{}',
+      "createdAt" TEXT NOT NULL
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_replication_targets_enabled ON replication_targets (enabled)`);
+
   const existingAdmin = await db.query.users.findFirst({
     where: (users, { eq }) => eq(users.username, 'admin'),
   });

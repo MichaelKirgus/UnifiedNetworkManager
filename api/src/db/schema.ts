@@ -2248,6 +2248,88 @@ export const repoFileUses = pgTable(
   }
 );
 
+// Stored UNM backups (see src/backup.ts + routes/backups.ts). A backup is a
+// section-based JSON archive (gzipped, `.unmbak.gz`) of this instance's own
+// database — NOT device config files. The BYTES live either on the api-local
+// volume (`source='local'`, `providerId` NULL → `${BACKUP_PATH}/<id>.unmbak.gz`)
+// or in a file-repo plugin (`source='repo'`, content-addressed by sha256).
+// Multi-instance note: several file-repo INSTANCES can be registered at once
+// (plugin id `<base-uuid>:<instanceId>`); `providerId` binds the backup to
+// EXACTLY ONE of them and is resolved strictly — never with fallback to a
+// sibling instance.
+export const backups = pgTable(
+  'backups',
+  {
+    id: text('id').primaryKey(),
+    // Human label (e.g. "prod before cutover"). Defaults to the scope + date.
+    name: text('name').notNull(),
+    // Preset that produced this backup ('config' | 'planned' | 'all') — display
+    // only; `sections` is authoritative for what the archive actually holds.
+    scope: text('scope').notNull().default('all'),
+    // JSON string array of section keys present in the archive (see backup.ts
+    // BACKUP_SECTIONS). Drives restore preview + per-section apply selection.
+    sections: text('sections').notNull().default('[]'),
+    sizeBytes: bigint('sizeBytes', { mode: 'number' }).notNull().default(0),
+    // SHA-256 hex of the archive bytes — integrity check on download AND the
+    // content-addressed blob key inside a file-repo provider.
+    sha256: text('sha256').notNull(),
+    // Where the bytes live: 'local' = api volume (BACKUP_PATH), 'repo' = plugin.
+    source: text('source').notNull().default('local'),
+    // File-repo PLUGIN id holding the bytes (capability `fileRepo`). NULL for
+    // local-volume backups. Full instance id when multiple instances exist.
+    providerId: text('providerId'),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => {
+    return {
+      idxBackupsSource: index('idx_backups_source').on(table.source, table.providerId),
+    };
+  }
+);
+
+// Replication targets — one-way sync peers of this UNM instance (see
+// routes/backups.ts /replication/* + workers/replication.ts). A target is
+// another UNM API reachable over HTTP; the peer authenticates with a long-lived
+// bearer token that carries `instance:backup`. Direction 'push' = THIS instance
+// exports and sends to the peer's POST /replication/inbound; 'pull' = this
+// instance fetches the peer's GET /replication/export and applies it locally.
+export const replicationTargets = pgTable(
+  'replication_targets',
+  {
+    id: text('id').primaryKey(),
+    // Human label (e.g. "prod").
+    name: text('name').notNull(),
+    // Peer API base URL, e.g. https://unm.example.com/v1 — must already include
+    // the /v1 prefix; the sync job appends /replication/inbound or
+    // /replication/export to it.
+    baseUrl: text('baseUrl').notNull(),
+    // Bearer token presented to the peer (plaintext — DB access already implies
+    // admin trust; revisit with envelope encryption later).
+    token: text('token').notNull(),
+    direction: text('direction').notNull().default('push'),
+    enabled: boolean('enabled').notNull().default(true),
+    // Scheduled sync cadence in minutes. NULL = manual-only (Sync now button).
+    intervalMinutes: integer('intervalMinutes'),
+    // JSON string array of system_settings keys to EXCLUDE from the settings
+    // section during sync — stack-dependent values that must stay per-instance
+    // (instanceName, updateFeedUrl, …). Defaults are applied at creation time.
+    excludeKeys: text('excludeKeys').notNull().default('[]'),
+    lastSyncAt: text('lastSyncAt'),
+    // 'ok' | 'error' — plus the human-readable failure in `lastError`.
+    lastSyncStatus: text('lastSyncStatus'),
+    lastError: text('lastError'),
+    // JSON report of the last sync (per-section created/updated counts, or the
+    // peer's error envelope) — rendered on the Backups page.
+    lastReport: text('lastReport').notNull().default('{}'),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => {
+    return {
+      idxReplicationTargetsEnabled: index('idx_replication_targets_enabled').on(table.enabled),
+    };
+  }
+);
+
 // Add index for config_jobs
 // Note: Drizzle's index definition inside the table definition is 
 // usually the best way to handle this. I'll add it to configJobs.

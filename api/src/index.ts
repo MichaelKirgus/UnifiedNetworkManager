@@ -34,6 +34,7 @@ import settingsRouter from './routes/settings';
 import caRouter from './routes/ca';
 import countsRouter from './routes/counts';
 import { filesRouter, internalFileRepoRouter } from './routes/files';
+import { backupsRouter } from './routes/backups';
 import { startNotificationsWorker } from './workers/notifications';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startTelemetryRetentionWorker } from './workers/telemetryRetention';
@@ -218,6 +219,9 @@ async function main(): Promise<void> {
   // The plans router defines its own /plans/... paths (like the devices router),
   // so it is mounted without an extra prefix.
   api.use(plansRouter);
+
+  // Backup / restore of UNM's own database (/backups/*, instance:backup).
+  api.use(backupsRouter);
 
   // OpenAPI validation error handler.
   api.use(
