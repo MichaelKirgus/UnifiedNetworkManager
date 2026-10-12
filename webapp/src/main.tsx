@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import App from './App';
 import { ExecutionModeProvider } from './executionMode';
+import { NavLockProvider } from './components/NavLock';
 import { TimeProvider } from './utils/time';
 import './index.css';
 
@@ -22,11 +23,15 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
       {/* Central date/time display preferences — every timestamp in the app
           renders through useTimeFormat() (see utils/time.tsx). */}
       <TimeProvider>
-        <BrowserRouter>
-          <ExecutionModeProvider>
-            <App />
-          </ExecutionModeProvider>
-        </BrowserRouter>
+        {/* Pauses sidebar navigation while a focused surface (wizard / action
+            dialog) is active — see components/NavLock.tsx. */}
+        <NavLockProvider>
+          <BrowserRouter>
+            <ExecutionModeProvider>
+              <App />
+            </ExecutionModeProvider>
+          </BrowserRouter>
+        </NavLockProvider>
       </TimeProvider>
     </QueryClientProvider>
   </React.StrictMode>

@@ -1,9 +1,10 @@
-import { ReactNode, useMemo, useState } from 'react';
+import { ReactNode, useEffect, useMemo, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowLeft, CheckSquare, RefreshCw, Settings2, X } from 'lucide-react';
 import clsx from 'clsx';
 import { Layout } from '../components/Layout';
+import { useNavLock } from '../components/NavLock';
 import { StatusBadge } from '../components/StatusBadge';
 import { ActionDialog } from '../components/ActionDialog';
 import { BulkActionDialog } from '../components/BulkActionDialog';
@@ -78,6 +79,14 @@ export default function DeviceConfig() {
   const [dialog, setDialog] = useState<DialogTarget | null>(null);
   // Bulk target: one action + the selected ports of a switch section.
   const [bulkDialog, setBulkDialog] = useState<{ pluginId: string; entry: CatalogEntry; items: StateItem[] } | null>(null);
+
+  // While an action dialog is open, pause sidebar navigation (the overlay already
+  // swallows clicks — the lock makes the paused state explicit in the shell).
+  const { lock, unlock } = useNavLock();
+  useEffect(() => {
+    if (dialog || bulkDialog) lock('Close this dialog first');
+    else unlock();
+  }, [dialog, bulkDialog, lock, unlock]);
 
   if (!device) {
     return (

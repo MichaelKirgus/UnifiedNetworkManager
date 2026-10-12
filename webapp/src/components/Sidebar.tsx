@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import clsx from 'clsx';
 import { useQuery } from '@tanstack/react-query';
-import { LogOut, Network, PanelLeftClose, PanelLeftOpen, SlidersHorizontal } from 'lucide-react';
+import { LogOut, Lock, Network, PanelLeftClose, PanelLeftOpen, SlidersHorizontal } from 'lucide-react';
 import { clearPermissions, clearUsername } from '../auth/permissions';
 import { api } from '../api/client';
 import { MY_ACCOUNT_ITEM, orderedNavItems, BADGE_COLORS, type NavItem } from './navItems';
 import { NavCustomizer } from './NavCustomizer';
+import { useNavLock } from './NavLock';
 
 const COLLAPSED_KEY = 'unm:sidebar-collapsed';
 
@@ -34,9 +35,25 @@ function useWebappBuildTag(): string | null {
   return tag;
 }
 
-/** One sidebar row (icon + label) with an optional count badge. */
-function NavRow({ item, collapsed, count }: { item: NavItem; collapsed: boolean; count?: number }) {
+/** One sidebar row (icon + label) with an optional count badge. While the nav
+ *  lock is active (wizard / action dialog in progress) rows render dimmed and
+ *  non-navigating, with a tooltip explaining why. */
+function NavRow({ item, collapsed, count, locked }: { item: NavItem; collapsed: boolean; count?: number; locked: boolean }) {
   const Icon = item.icon;
+  if (locked) {
+    return (
+      <span
+        title={collapsed ? `${item.label} — navigation paused` : undefined}
+        className={clsx(
+          'relative flex cursor-not-allowed items-center gap-3 rounded-md px-2.5 py-2 text-sm font-medium opacity-40',
+          collapsed && 'justify-center px-0'
+        )}
+      >
+        <Icon className="h-5 w-5 shrink-0" />
+        {!collapsed && <span className="truncate">{item.label}</span>}
+      </span>
+    );
+  }
   return (
     <NavLink
       to={item.to}
@@ -72,6 +89,7 @@ function NavRow({ item, collapsed, count }: { item: NavItem; collapsed: boolean;
  * the reorder/hide panel. Actionable items show a count badge from /counts.
  */
 export function Sidebar() {
+  const { locked, reason } = useNavLock();
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem(COLLAPSED_KEY) === '1';
@@ -143,14 +161,22 @@ export function Sidebar() {
         )}
       </div>
 
-      {/* Navigation */}
+      {/* Navigation — dimmed + non-navigating while a focused surface (wizard /
+          action dialog) holds the nav lock; the hint below explains why. */}
       <nav className={clsx('flex flex-1 flex-col gap-1 overflow-y-auto p-2', collapsed && 'items-center')}>
         {visibleItems.map((item) => (
-          <NavRow key={item.to} item={item} collapsed={collapsed} count={item.countKey ? counts[item.countKey] : undefined} />
+          <NavRow key={item.to} item={item} collapsed={collapsed} count={item.countKey ? counts[item.countKey] : undefined} locked={locked} />
         ))}
         {/* My Account is pinned last and never hidden/reordered. */}
-        <NavRow item={MY_ACCOUNT_ITEM} collapsed={collapsed} />
+        <NavRow item={MY_ACCOUNT_ITEM} collapsed={collapsed} locked={locked} />
       </nav>
+
+      {locked && (
+        <div className="mx-2 mb-1 flex items-center gap-2 rounded-md border border-border bg-muted px-2 py-1.5 text-[11px] font-medium leading-tight text-secondary">
+          <Lock className="h-3.5 w-3.5 shrink-0" />
+          {!collapsed && <span className="min-w-0 truncate" title={reason ?? undefined}>Navigation paused</span>}
+        </div>
+      )}
 
       {customizing && (
         <div className="border-t border-border">
