@@ -2156,6 +2156,95 @@ export interface RepoFileUse {
   usedByName?: string | null;
 }
 
+// --- Backup / restore / replication types -----------------------------------
+/** GET /backups/meta — section keys, presets and excluded-table info. */
+export interface BackupMeta {
+  sections: Array<{ key: string; tables: string[] }>;
+  presets: Record<string, string[]>;
+  excludedTables: string[];
+}
+
+/** The manifest inside a .unmbak.gz archive (also returned by restore upload). */
+export interface BackupManifest {
+  format: 'unm-backup';
+  schemaVersion: number;
+  exportedAt: string;
+  instanceName?: string;
+  buildTag?: string;
+  scope: string;
+  sections: Record<string, { rowCount: number; tables: Record<string, number> }>;
+}
+
+/** A stored backup row (GET /backups). `sections` is a JSON-encoded string. */
+export interface BackupEntry {
+  id: string;
+  name: string;
+  scope: string;
+  sections: string | string[];
+  sizeBytes: number;
+  sha256: string;
+  source: 'local' | 'repo';
+  providerId: string | null;
+  createdAt: string;
+  /** Destination display name (repo rows) — "unknown provider <id>" when gone. */
+  providerName?: string | null;
+  /** Local bytes deleted out-of-band — metadata row remains. */
+  fileMissing?: boolean;
+}
+
+/** Per-table merge counts inside a SectionMergeReport. */
+export interface TableMergeResult {
+  table: string;
+  created: number;
+  updated: number;
+  skipped?: number;
+}
+
+/** Per-section result of a restore/replication apply (POST /backups/restore/apply). */
+export interface SectionMergeReport {
+  section: string;
+  tables: TableMergeResult[];
+  warnings: string[];
+}
+
+/** A replication target row — the peer token is never returned. */
+export interface ReplicationTarget {
+  id: string;
+  name: string;
+  baseUrl: string;
+  direction: 'push' | 'pull';
+  enabled: boolean;
+  intervalMinutes: number | null;
+  excludeKeys: string[];
+  lastSyncAt: string | null;
+  lastSyncStatus: 'ok' | 'error' | null;
+  lastError: string | null;
+  lastReport: Record<string, unknown>;
+  createdAt: string;
+}
+
+/** Create/update body for a replication target (PATCH requires name+baseUrl+token). */
+export interface ReplicationTargetInput {
+  name: string;
+  baseUrl: string;
+  token: string;
+  direction?: 'push' | 'pull';
+  enabled?: boolean;
+  intervalMinutes?: number | null;
+  excludeKeys?: string[];
+}
+
+/** Outcome of one replication sync (manual or scheduled). */
+export interface SyncReport {
+  status: 'ok' | 'error';
+  at: string;
+  direction: 'push' | 'pull';
+  sections?: string[];
+  tables?: TableMergeResult[];
+  warnings?: string[];
+  error?: string;
+}
+
 /** Device-level access scope rules — a user may see any device matching ANY rule. Empty = unrestricted. */
 export interface DeviceScope {
   /** Visible devices assigned to any of these site ids. */
@@ -3479,6 +3568,63 @@ export const api = {
   deleteRepoFile: (id: string) => apiFetch<void>(`/files/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   /** The usage audit trail of one repo file (newest first). */
   repoFileUses: (id: string) => apiFetch<{ fileId: string; uses: RepoFileUse[] }>(`/files/${encodeURIComponent(id)}/uses`),
+  // --- Backup / restore / replication ---------------------------------------
+  /** Section keys, presets and excluded-table info for the backup UI. */
+  backupMeta: () => apiFetch<BackupMeta>('/backups/meta'),
+  /** Lists stored backups, newest first (enriched with destination state). */
+  listBackups: () => apiFetch<{ backups: BackupEntry[] }>('/backups'),
+  /** Creates a backup into the local volume or a file-repo instance. */
+  createBackup: (body: { name?: string; preset?: string; sections?: string[]; destination: 'local' | 'repo'; providerId?: string }) =>
+    apiFetch<{ backup: BackupEntry }>('/backups', { method: 'POST', body: JSON.stringify(body) }),
+  /** Deletes a stored backup (metadata + bytes on its bound destination). */
+  deleteBackup: (id: string) => apiFetch<void>(`/backups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** Downloads a stored backup as raw gzip bytes. */
+  downloadBackup: async (id: string): Promise<Blob> => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/backups/${encodeURIComponent(id)}/download`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      let message = `API error ${res.status}`;
+      try { const b = await res.json(); if (b?.error) message = b.error; } catch { /* keep generic */ }
+      throw new ApiError(message, res.status);
+    }
+    return res.blob();
+  },
+  /** Stages an uploaded archive for restore — RAW octet-stream + x-backup-name header. Returns the manifest preview. */
+  uploadBackupForRestore: async (file: File): Promise<{ pendingId: string; manifest: BackupManifest }> => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/backups/restore/upload`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'x-backup-name': file.name,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: file,
+    });
+    if (!res.ok) {
+      let message = `API error ${res.status}`;
+      try { const b = await res.json(); if (b?.error) message = b.error; } catch { /* keep generic */ }
+      throw new ApiError(message, res.status);
+    }
+    return res.json() as Promise<{ pendingId: string; manifest: BackupManifest }>;
+  },
+  /** Merge-applies a staged upload or stored backup (safe upsert-by-PK). */
+  applyBackupRestore: (body: { pendingId?: string; backupId?: string; sections?: string[] }) =>
+    apiFetch<{ report: SectionMergeReport[] }>('/backups/restore/apply', { method: 'POST', body: JSON.stringify(body) }),
+  /** Discards a staged restore upload without applying. */
+  discardPendingRestore: (pendingId: string) => apiFetch<void>(`/backups/restore/pending/${encodeURIComponent(pendingId)}`, { method: 'DELETE' }),
+  // Replication targets + sync
+  listReplicationTargets: () => apiFetch<{ targets: ReplicationTarget[] }>('/replication/targets'),
+  createReplicationTarget: (body: ReplicationTargetInput) =>
+    apiFetch<{ target: ReplicationTarget }>('/replication/targets', { method: 'POST', body: JSON.stringify(body) }),
+  updateReplicationTarget: (id: string, body: ReplicationTargetInput) =>
+    apiFetch<{ target: ReplicationTarget }>(`/replication/targets/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteReplicationTarget: (id: string) => apiFetch<void>(`/replication/targets/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** Manual "Sync now" — returns the report even when the sync itself failed. */
+  replicationSyncNow: (targetId: string) =>
+    apiFetch<{ report: SyncReport }>('/replication/sync', { method: 'POST', body: JSON.stringify({ targetId }) }),
   /** Cross-device update center — available updates + stack self-update info. */
   updates: (params?: { deviceId?: string; siteId?: string; kind?: 'firmware' | 'os-package' | 'docker-image' | 'app' }) => {
     const qs = new URLSearchParams();

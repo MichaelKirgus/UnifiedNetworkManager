@@ -38,6 +38,8 @@ import ContainerLogsPage from './pages/ContainerLogsPage';
 import ConsolePage from './pages/ConsolePage';
 import FileBrowserPage from './pages/FileBrowserPage';
 import Files from './pages/Files';
+import Backups from './pages/Backups';
+import BackupRestorePage from './pages/BackupRestorePage';
 import Vms from './pages/Vms';
 import CreateVmPage from './pages/CreateVmPage';
 import Updates from './pages/Updates';
@@ -103,6 +105,10 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   // Central file repository — device-independent store of ISOs/firmware/config
   // backups/scripts (volume mounted on the API only; metadata in Postgres).
   { path: '/files', permission: 'files:read' },
+  // Backup / restore / replication of UNM's own database.
+  { path: '/backups', permission: 'instance:backup' },
+  // Full-page restore wizard — same perm as the Backups page it lives on.
+  { path: '/backups/restore', permission: 'instance:backup' },
   // Cross-device update center (firmware/packages/images) + stack self-update card.
   { path: '/updates', permission: 'updates:read' },
   // Cross-device security findings — unsuccessful logins, file integrity, rate limiting.
@@ -237,6 +243,9 @@ export default function App() {
       <Route path="/vms/create-vm" element={<Page permission="vms:read"><CreateVmPage /></Page>} />
       {/* Central file repository — device-independent store of ISOs/firmware/config backups/scripts. */}
       <Route path="/files" element={<Page permission="files:read"><Files /></Page>} />
+      {/* Backup / restore / replication of UNM's own database. */}
+      <Route path="/backups" element={<Page permission="instance:backup"><Backups /></Page>} />
+      <Route path="/backups/restore" element={<Page permission="instance:backup"><BackupRestorePage /></Page>} />
       {/* Cross-device update center — available updates + stack self-update card. */}
       <Route path="/updates" element={<Page permission="updates:read"><Updates /></Page>} />
       {/* Cross-device security findings — unsuccessful logins, file integrity, rate limiting. */}

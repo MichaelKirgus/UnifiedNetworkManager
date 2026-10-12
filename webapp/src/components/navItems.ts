@@ -27,6 +27,7 @@ import {
   Radar,
   FileKey2,
   Globe,
+  DatabaseBackup,
   NotebookPen,
   Settings2,
   UserRound,
@@ -104,6 +105,9 @@ export const NAV_ITEMS: NavItem[] = [
   // backups/scripts. Files live on a volume only the API mounts; metadata + usage
   // audit trail in Postgres (plugins reach it through /plugin/files/*).
   { to: '/files', label: 'Files', icon: FolderOpen, requiresPermission: 'files:read' },
+  // Backup / restore / replication of UNM's own database (section-based archives,
+  // safe-merge restore, one-way peer sync). Gated on instance:backup.
+  { to: '/backups', label: 'Backups', icon: DatabaseBackup, requiresPermission: 'instance:backup' },
   // Cross-device update center — firmware/packages/images available across devices,
   // plus the "UNM itself" self-update card. Badge = count of available updates.
   { to: '/updates', label: 'Updates', icon: ArrowUpCircle, requiresPermission: 'updates:read', countKey: 'updates' },
