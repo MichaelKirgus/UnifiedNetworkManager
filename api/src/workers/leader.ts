@@ -47,6 +47,7 @@ export const LEADER_KEYS = {
   firewallEventRetention: 9013,
   hostStateRetention: 9014,
   stackUpdates: 9015,
+  replication: 9016,
 } as const;
 
 /**

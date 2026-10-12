@@ -22,6 +22,7 @@ tags:
   - name: Layers
   - name: Files
   - name: Backups
+  - name: Replication
   - name: Inventory
   - name: Flows
   - name: Updates
@@ -3708,6 +3709,243 @@ paths:
                 type: object
                 properties:
                   deleted: { type: boolean }
+        '401':
+          description: Authentication required (requires instance:backup)
+
+  /replication/inbound:
+    post:
+      tags: [Replication]
+      summary: Receive a pushed backup from a peer instance
+      description: >-
+        Requires permission `instance:backup`. Peer-facing endpoint for push-mode
+        replication. The body is the portable archive `{ manifest, data }` (same
+        shape as GET /replication/export). Applies the same safe merge as restore;
+        only portable sections are accepted — liveInventory & co. are rejected with 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [manifest, data]
+              properties:
+                manifest: { $ref: '#/components/schemas/BackupManifest' }
+                data:
+                  type: object
+                  additionalProperties:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items: { type: object }
+      responses:
+        '200':
+          description: Merge report per applied section
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  report:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SectionMergeReport'
+                  receivedAt: { type: string, format: date-time }
+        '400':
+          description: Malformed body or non-portable sections present
+        '401':
+          description: Authentication required (requires instance:backup)
+
+  /replication/export:
+    get:
+      tags: [Replication]
+      summary: Portable export for pull-mode peers
+      description: >-
+        Requires permission `instance:backup`. Returns the portable sections of
+        this instance as `{ manifest, data }` (liveInventory is never included).
+        Peers in pull mode fetch this and merge it locally.
+      parameters:
+        - name: sections
+          in: query
+          required: false
+          description: "Comma-separated subset of portable section keys (default: all)"
+          schema: { type: string }
+      responses:
+        '200':
+          description: Portable archive as JSON
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [manifest, data]
+                properties:
+                  manifest: { $ref: '#/components/schemas/BackupManifest' }
+                  data:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      additionalProperties:
+                        type: array
+                        items: { type: object }
+        '401':
+          description: Authentication required (requires instance:backup)
+
+  /replication/targets:
+    get:
+      tags: [Replication]
+      summary: List replication targets
+      description: >-
+        Requires permission `instance:backup`. Lists configured peer targets.
+        Peer tokens are never returned in responses.
+      responses:
+        '200':
+          description: Configured targets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  targets:
+                    type: array
+                    items: { $ref: '#/components/schemas/ReplicationTarget' }
+        '401':
+          description: Authentication required (requires instance:backup)
+    post:
+      tags: [Replication]
+      summary: Create a replication target
+      description: >-
+        Requires permission `instance:backup`. Registers a peer to push this
+        instance's portable config to, or pull it from. When `excludeKeys` is
+        omitted, the default exclusion list (identity-bound settings such as
+        instanceName and provider ids) applies.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReplicationTargetCreateRequest' }
+      responses:
+        '201':
+          description: Target created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  target: { $ref: '#/components/schemas/ReplicationTarget' }
+        '400':
+          description: Invalid name, base URL, token or interval
+        '401':
+          description: Authentication required (requires instance:backup)
+
+  /replication/targets/{id}:
+    patch:
+      tags: [Replication]
+      summary: Update a replication target
+      description: >-
+        Requires permission `instance:backup`. Same body shape as create; name,
+        baseUrl and token are required.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReplicationTargetCreateRequest' }
+      responses:
+        '200':
+          description: Updated target
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  target: { $ref: '#/components/schemas/ReplicationTarget' }
+        '400':
+          description: Missing name, baseUrl or token / invalid values
+        '401':
+          description: Authentication required (requires instance:backup)
+        '404':
+          description: Target not found
+    delete:
+      tags: [Replication]
+      summary: Delete a replication target
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+        '401':
+          description: Authentication required (requires instance:backup)
+        '404':
+          description: Target not found
+
+  /replication/sync:
+    post:
+      tags: [Replication]
+      summary: Run a replication sync now (manual trigger)
+      description: >-
+        Requires permission `instance:backup`. Runs the same sync job as the
+        scheduler for one target. Returns 200 with the report even when the sync
+        itself failed — inspect `report.status` / `report.error`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetId]
+              properties:
+                targetId: { type: string }
+      responses:
+        '200':
+          description: Sync report (status ok or error)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  report: { $ref: '#/components/schemas/SyncReport' }
+        '400':
+          description: Missing targetId
+        '401':
+          description: Authentication required (requires instance:backup)
+        '404':
+          description: Target not found
+
+  /replication/due:
+    get:
+      tags: [Replication]
+      summary: Targets currently due for a scheduled sync
+      description: >-
+        Requires permission `instance:backup`. Debug/ops helper — lists enabled
+        targets whose interval has elapsed (or that never synced).
+      responses:
+        '200':
+          description: Due targets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  targets:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name]
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
         '401':
           description: Authentication required (requires instance:backup)
 
@@ -11335,6 +11573,62 @@ components:
         warnings:
           type: array
           items: { type: string }
+    ReplicationTargetCreateRequest:
+      type: object
+      required: [name, baseUrl, token]
+      properties:
+        name: { type: string, description: Display name for the peer target }
+        baseUrl: { type: string, description: "Peer API base URL (http/https; a trailing /v1 is tolerated)" }
+        token: { type: string, description: Peer API token carrying instance:backup on that instance }
+        direction: { type: string, enum: [push, pull], default: push, description: push = send this instance's config to the peer; pull = fetch and merge the peer's config here }
+        enabled: { type: boolean, default: true }
+        intervalMinutes: { type: integer, minimum: 1, maximum: 1440, nullable: true, description: Scheduled sync cadence (null = manual only) }
+        excludeKeys:
+          type: array
+          items: { type: string }
+          description: "Setting keys stripped before sending/applying (default: identity-bound settings)"
+    ReplicationTarget:
+      type: object
+      required: [id, name, baseUrl, direction, enabled]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        baseUrl: { type: string }
+        direction: { type: string, enum: [push, pull] }
+        enabled: { type: boolean }
+        intervalMinutes: { type: integer, nullable: true }
+        excludeKeys:
+          type: array
+          items: { type: string }
+        lastSyncAt: { type: string, format: date-time, nullable: true }
+        lastSyncStatus: { type: string, enum: [ok, error], nullable: true }
+        lastError: { type: string, nullable: true }
+        lastReport: { type: object, description: Last SyncReport as an object (empty until first sync) }
+        createdAt: { type: string, format: date-time }
+    SyncReport:
+      type: object
+      required: [status, at, direction]
+      properties:
+        status: { type: string, enum: [ok, error] }
+        at: { type: string, format: date-time }
+        direction: { type: string, enum: [push, pull] }
+        sections:
+          type: array
+          items: { type: string }
+        tables:
+          type: array
+          description: Per-table merge counts (SectionMergeReport.tables entries)
+          items:
+            type: object
+            properties:
+              table: { type: string }
+              created: { type: integer }
+              updated: { type: integer }
+              skipped: { type: integer }
+        warnings:
+          type: array
+          items: { type: string }
+        error: { type: string, description: Present when status is error }
     CaRevokeResponse:
       type: object
       required: [serial]

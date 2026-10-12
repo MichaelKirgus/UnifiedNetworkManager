@@ -50,6 +50,7 @@ import { startUpdateCheckWorker } from './workers/updateCheck';
 import { startGeoIpWorker } from './workers/geoip';
 import { startFlowsWorker } from './workers/flows';
 import { startInactiveUsersWorker } from './workers/inactiveUsers';
+import { startReplicationSchedulerWorker } from './workers/replication';
 import { LEADER_KEYS, runAsLeader } from './workers/leader';
 import { initWorker } from './workers/stats';
 import { attachConsoleProxy } from './consoleProxy';
@@ -303,6 +304,8 @@ async function main(): Promise<void> {
     void runAsLeader(LEADER_KEYS.ntpReferences, 'ntpReferences', () => startNtpReferencesWorker()).then((stop) => workerStops.push(stop));
     // Stack self-update check: proactively notifies the admin when a newer UNM release is available.
     void runAsLeader(LEADER_KEYS.stackUpdates, 'stackUpdates', () => startUpdateCheckWorker()).then((stop) => workerStops.push(stop));
+    // Replication scheduler: runs due replication target syncs (leader-gated).
+    void runAsLeader(LEADER_KEYS.replication, 'replication', () => startReplicationSchedulerWorker()).then((stop) => workerStops.push(stop));
     // Notification maintenance: auto-resolve recovered device states + retention.
     void runAsLeader(LEADER_KEYS.notifications, 'notifications', () => startNotificationsWorker()).then((stop) => workerStops.push(stop));
     // Inactivity auto-disable (credential policy inactiveDisableAfterDays).

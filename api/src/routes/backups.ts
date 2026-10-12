@@ -32,6 +32,35 @@ import {
   storePendingUpload,
   storeRepoBackup,
 } from '../backup';
+import {
+  buildPortableExport,
+  deleteTarget,
+  findDueTargets,
+  listTargets,
+  runTargetSync,
+  upsertTarget,
+} from '../replication';
+
+/**
+ * Backup / restore routes (Backups page).
+ *
+ * All endpoints require the `instance:backup` permission. Uploads are RAW
+ * octet-stream bodies with an `x-backup-name` header — no multipart parser
+ * needed (same house pattern as files.ts); archives are gzip-compressed JSON
+ * documents, typically a few MB even for full-scope backups.
+ *
+ * Stored backup bytes live either on the local volume (`BACKUP_DIR`, docker
+ * volume `unm-backups`) or content-addressed in a BOUND file-repo plugin
+ * instance — see backup.ts for the strict-instance-binding rules.
+ */
+
+export const backupsRouter = Router();
+
+function readBackupNameHeader(req: Request): string {
+  const raw = req.headers['x-backup-name'];
+  const name = Array.isArray(raw) ? (raw[0] ?? '') : (raw ?? '');
+  return String(name).trim().slice(0, 256);
+}
 
 function isJsonBody(req: Request): boolean {
   const ct = String(req.headers['content-type'] ?? '');
@@ -298,6 +327,137 @@ backupsRouter.delete('/backups/restore/pending/:pendingId', requireAuth, require
   try {
     await deletePendingUpload(String(req.params.pendingId ?? ''));
     res.status(200).json({ deleted: true });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Replication — peer-facing endpoints + target management
+// ---------------------------------------------------------------------------
+
+// POST /replication/inbound — receive a push from a peer instance. Body: { manifest, data }.
+// Applies the SAME safe merge as restore; only portable sections are accepted (400 otherwise).
+backupsRouter.post('/replication/inbound', requireAuth, requirePermission('instance:backup'), async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { manifest?: unknown; data?: Record<string, Record<string, unknown[]>> };
+  if (!body.manifest || typeof body.manifest !== 'object' || !body.data || typeof body.data !== 'object') {
+    res.status(400).json({ error: 'Body must be a backup archive { manifest, data } (see GET /replication/export)' });
+    return;
+  }
+  try {
+    const sections = Object.keys(body.data);
+    assertPortableSections(sections); // liveInventory & co. are rejected with 400
+    const reports = await applyArchive({ manifest: body.manifest as BackupArchive['manifest'], data: body.data });
+    res.status(200).json({ report: reports, receivedAt: new Date().toISOString() });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// GET /replication/export?sections=a,b — portable export for pull-mode peers.
+backupsRouter.get('/replication/export', requireAuth, requirePermission('instance:backup'), async (req: Request, res: Response) => {
+  try {
+    const raw = typeof req.query.sections === 'string' ? req.query.sections : '';
+    const sections = raw.split(',').map((s) => s.trim()).filter(Boolean);
+    const archive = await buildPortableExport(sections.length > 0 ? sections : undefined);
+    res.status(200).json({ manifest: archive.manifest, data: archive.data });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// GET /replication/targets — list replication targets (tokens are never returned).
+backupsRouter.get('/replication/targets', requireAuth, requirePermission('instance:backup'), async (_req: Request, res: Response) => {
+  try {
+    const targets = await listTargets();
+    res.status(200).json({ targets });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// POST /replication/targets — create a target. Body: { name, baseUrl, token, direction?, enabled?, intervalMinutes?, excludeKeys? }.
+backupsRouter.post('/replication/targets', requireAuth, requirePermission('instance:backup'), async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const target = await upsertTarget({
+      name: String(body.name ?? ''),
+      baseUrl: String(body.baseUrl ?? ''),
+      token: String(body.token ?? ''),
+      direction: body.direction === 'pull' ? 'pull' : 'push',
+      enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+      intervalMinutes: body.intervalMinutes == null ? null : Number(body.intervalMinutes),
+      excludeKeys: Array.isArray(body.excludeKeys) ? (body.excludeKeys as unknown[]).filter((k): k is string => typeof k === 'string') : undefined,
+    });
+    res.status(201).json({ target });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// PATCH /replication/targets/:id — update a target. Same body shape as create.
+backupsRouter.patch('/replication/targets/:id', requireAuth, requirePermission('instance:backup'), async (req: Request, res: Response) => {
+  try {
+    const id = String(req.params.id ?? '');
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (!body.name || !body.baseUrl || !body.token) {
+      res.status(400).json({ error: 'name, baseUrl and token are required' });
+      return;
+    }
+    const target = await upsertTarget(
+      {
+        name: String(body.name),
+        baseUrl: String(body.baseUrl),
+        token: String(body.token),
+        direction: body.direction === 'pull' ? 'pull' : 'push',
+        enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+        intervalMinutes: body.intervalMinutes == null ? null : Number(body.intervalMinutes),
+        excludeKeys: Array.isArray(body.excludeKeys) ? (body.excludeKeys as unknown[]).filter((k): k is string => typeof k === 'string') : undefined,
+      },
+      id,
+    );
+    res.status(200).json({ target });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// DELETE /replication/targets/:id — remove a target.
+backupsRouter.delete('/replication/targets/:id', requireAuth, requirePermission('instance:backup'), async (req: Request, res: Response) => {
+  try {
+    const deleted = await deleteTarget(String(req.params.id ?? ''));
+    if (!deleted) {
+      res.status(404).json({ error: 'Target not found' });
+      return;
+    }
+    res.status(200).json({ deleted: true });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// POST /replication/sync { targetId } — manual "Sync now"; runs the same job as the scheduler.
+backupsRouter.post('/replication/sync', requireAuth, requirePermission('instance:backup'), async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const targetId = typeof body.targetId === 'string' ? body.targetId : '';
+  if (!targetId) {
+    res.status(400).json({ error: '"targetId" is required' });
+    return;
+  }
+  try {
+    const report = await runTargetSync(targetId);
+    // The job persists the outcome; surface it even on sync errors (200 + status field).
+    res.status(200).json({ report });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// GET /replication/due — targets currently due for a scheduled sync (debug/ops helper).
+backupsRouter.get('/replication/due', requireAuth, requirePermission('instance:backup'), async (_req: Request, res: Response) => {
+  try {
+    const due = await findDueTargets();
+    res.status(200).json({ targets: due.map((t) => ({ id: t.id, name: t.name })) });
   } catch (err) {
     return sendError(res, err);
   }
