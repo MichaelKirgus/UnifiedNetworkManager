@@ -94,6 +94,59 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'Display name for this UNM instance. Shown in the webapp window title (browser tab) and on the login page — useful when several instances are open side by side.',
   },
 
+  // Scheduled auto-backup (leader-gated worker; see api/src/workers/autoBackup.ts).
+  {
+    key: 'autoBackupEnabled',
+    label: 'Auto-backup enabled',
+    type: 'boolean',
+    category: 'General',
+    default: false,
+    help:
+      'When on, the instance creates a backup automatically at the configured interval (leader-gated worker). The archive is named auto-backup-<preset>-<date> and appears in the Backups list like any manual one. Off by default — enable it from Settings or the first-run wizard.',
+  },
+  {
+    key: 'autoBackupIntervalMinutes',
+    label: 'Auto-backup interval',
+    type: 'integer',
+    category: 'General',
+    unit: 'min',
+    min: 15,
+    max: 7 * 24 * 60,
+    default: 24 * 60,
+    help:
+      'How often the auto-backup worker creates a new archive (minimum 15 minutes, maximum one week). A backup is due when no auto-backup-<preset>-* row exists from within this window — so it self-heals after downtime or manual deletes.',
+  },
+  {
+    key: 'autoBackupPreset',
+    label: 'Auto-backup preset',
+    type: 'string',
+    category: 'General',
+    default: 'config',
+    pattern: '^(config|planned|all)$',
+    help:
+      'Which sections the scheduled backup archives. config = identity+settings+devices, planned = documented networks/hosts + plans, all = everything including live inventory.',
+  },
+  {
+    key: 'autoBackupDestination',
+    label: 'Auto-backup destination',
+    type: 'string',
+    category: 'General',
+    default: 'local',
+    pattern: '^(local|repo)$',
+    help:
+      'Where scheduled backups are stored: the local docker volume (unm-backups) or a file-repo plugin instance (see autoBackupProviderId).',
+  },
+  {
+    key: 'autoBackupProviderId',
+    label: 'Auto-backup file-repo instance',
+    type: 'string',
+    category: 'General',
+    default: '',
+    maxLength: 128,
+    help:
+      'Full plugin id of the file-repo instance that receives scheduled backups — only used when autoBackupDestination is "repo". Empty = local volume.',
+  },
+
   // Telemetry / worker cadence (previously the only tunable knobs, on the Workers page).
   {
     key: 'telemetryPollIntervalMs',

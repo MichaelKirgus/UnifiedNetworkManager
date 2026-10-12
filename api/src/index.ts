@@ -51,6 +51,7 @@ import { startGeoIpWorker } from './workers/geoip';
 import { startFlowsWorker } from './workers/flows';
 import { startInactiveUsersWorker } from './workers/inactiveUsers';
 import { startReplicationSchedulerWorker } from './workers/replication';
+import { startAutoBackupWorker } from './workers/autoBackup';
 import { LEADER_KEYS, runAsLeader } from './workers/leader';
 import { initWorker } from './workers/stats';
 import { attachConsoleProxy } from './consoleProxy';
@@ -220,7 +221,6 @@ async function main(): Promise<void> {
   // The plans router defines its own /plans/... paths (like the devices router),
   // so it is mounted without an extra prefix.
   api.use(plansRouter);
-
   // Backup / restore of UNM's own database (/backups/*, instance:backup).
   api.use(backupsRouter);
 
@@ -306,6 +306,8 @@ async function main(): Promise<void> {
     void runAsLeader(LEADER_KEYS.stackUpdates, 'stackUpdates', () => startUpdateCheckWorker()).then((stop) => workerStops.push(stop));
     // Replication scheduler: runs due replication target syncs (leader-gated).
     void runAsLeader(LEADER_KEYS.replication, 'replication', () => startReplicationSchedulerWorker()).then((stop) => workerStops.push(stop));
+    // Auto-backup scheduler: creates scheduled backups per the autoBackup* settings.
+    void runAsLeader(LEADER_KEYS.autoBackup, 'autoBackup', () => startAutoBackupWorker()).then((stop) => workerStops.push(stop));
     // Notification maintenance: auto-resolve recovered device states + retention.
     void runAsLeader(LEADER_KEYS.notifications, 'notifications', () => startNotificationsWorker()).then((stop) => workerStops.push(stop));
     // Inactivity auto-disable (credential policy inactiveDisableAfterDays).

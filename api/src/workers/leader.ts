@@ -48,6 +48,7 @@ export const LEADER_KEYS = {
   hostStateRetention: 9014,
   stackUpdates: 9015,
   replication: 9016,
+  autoBackup: 9017,
 } as const;
 
 /**
