@@ -857,7 +857,7 @@ router.post('/devices/:id/ips', requireAuth, requirePermission('devices:write'),
 
 // DELETE /devices/:id/ips/:ipId - remove a secondary IP.
 router.delete('/devices/:id/ips/:ipId', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const deviceId = String(req.params.deviceId ?? '');
+  const deviceId = String(req.params.id ?? '');
   const ipId = String(req.params.ipId ?? '');
   try {
     await removeDeviceIp(deviceId, ipId);
@@ -913,7 +913,7 @@ router.post('/devices/:id/plugins', requireAuth, requirePermission('devices:writ
 //   { "extraCredentials": {...} }→ replace bound slot secrets (validated per slot type)
 //   any combination             → applied in one call
 router.patch('/devices/:id/plugins/:pluginId', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const deviceId = String(req.params.deviceId ?? '');
+  const deviceId = String(req.params.id ?? '');
   const pluginId = String(req.params.pluginId ?? '');
   const body = (req.body ?? {}) as Record<string, unknown>;
   try {
@@ -940,7 +940,7 @@ router.patch('/devices/:id/plugins/:pluginId', requireAuth, requirePermission('d
 
 // DELETE /devices/:id/plugins/:pluginId - remove an assignment.
 router.delete('/devices/:id/plugins/:pluginId', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const deviceId = String(req.params.deviceId ?? '');
+  const deviceId = String(req.params.id ?? '');
   const pluginId = String(req.params.pluginId ?? '');
   try {
     await removeAssignment(deviceId, pluginId);
@@ -975,7 +975,7 @@ router.put('/devices/:id/plugins/order', requireAuth, requirePermission('devices
 
 // GET /devices/:id/plugins/:pluginId/options - descriptors + this device's overrides.
 router.get('/devices/:id/plugins/:pluginId/options', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
-  const deviceId = String(req.params.deviceId ?? '');
+  const deviceId = String(req.params.id ?? '');
   const pluginId = String(req.params.pluginId ?? '');
   try {
     const view = await getDevicePluginOptions(deviceId, pluginId);
@@ -989,7 +989,7 @@ router.get('/devices/:id/plugins/:pluginId/options', requireAuth, requirePermiss
 
 // PUT /devices/:id/plugins/:pluginId/settings - persist this device's overrides.
 router.put('/devices/:id/plugins/:pluginId/settings', requireAuth, requirePermission('plugins:manage'), requireDeviceAccess, async (req, res) => {
-  const deviceId = String(req.params.deviceId ?? '');
+  const deviceId = String(req.params.id ?? '');
   const pluginId = String(req.params.pluginId ?? '');
   const settings = (req.body ?? {}).settings as Record<string, unknown> | undefined;
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
@@ -1013,7 +1013,7 @@ router.put('/devices/:id/plugins/:pluginId/settings', requireAuth, requirePermis
 
 // DELETE /devices/:id/plugins/:pluginId/settings - reset this device's overrides.
 router.delete('/devices/:id/plugins/:pluginId/settings', requireAuth, requirePermission('plugins:manage'), requireDeviceAccess, async (req, res) => {
-  const deviceId = String(req.params.deviceId ?? '');
+  const deviceId = String(req.params.id ?? '');
   const pluginId = String(req.params.pluginId ?? '');
   try {
     await resetDevicePluginSettings(deviceId, pluginId);
