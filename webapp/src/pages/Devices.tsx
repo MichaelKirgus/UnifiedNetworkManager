@@ -12,6 +12,7 @@ import { DeviceActionsCell } from '../components/DeviceActionsCell';
 import { PluginAssignmentBuilder } from '../components/PluginAssignmentBuilder';
 import { api, Device, DeviceCreateRequest, DeviceModelEntry, DevicePluginAssignmentInput, DevicePluginAssignment, DeviceRefreshResult, Plugin } from '../api/client';
 import { OptionForm } from '../components/OptionForm';
+import { useNavLock } from '../components/NavLock';
 import { can } from '../auth/permissions';
 import { isValidAddress, addressError } from '../utils/address';
 
@@ -128,6 +129,17 @@ export default function Devices() {
     setShowForm(true);
     setSearchParams({}, { replace: true });
   }, [searchParams, canWriteDevices, editingId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // While the create/edit form is open, hold the nav lock (the same mechanism
+  // wizards use) so a stray sidebar click can't change the route and unmount
+  // the page — which would silently abandon in-progress edits. The form closes
+  // via resetForm() on Save/Cancel, releasing the lock.
+  const { lock, unlock } = useNavLock();
+  useEffect(() => {
+    if (!showForm) return;
+    lock('Finish editing this device first');
+    return () => unlock();
+  }, [showForm, lock, unlock]);
 
   // Model catalog for the selected vendor, merged across ALL plugins currently
   // assigned in the form (a device can have several — e.g. LANCOM + SNMP).
