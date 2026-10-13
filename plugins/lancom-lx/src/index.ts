@@ -60,6 +60,8 @@ export const PLUGIN_NAME = 'LANCOM LX-Series Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'LANCOM LX-series wireless monitoring (SNMP) — radios, SSIDs, per-client stations and LAN ports; read-only by design.',
   // 0.1.0 — initial release: LCOS-LX-MIB monitoring (system, radios, SSIDs,
   // per-client stations, LAN ports) + inventory propagation for the Networks/
   // Hosts pages. Read-only by design — the vendor MIB exposes no writable

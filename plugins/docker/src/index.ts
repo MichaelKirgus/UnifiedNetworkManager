@@ -61,6 +61,8 @@ export const PLUGIN_NAME = 'Docker Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'Monitors any Docker host through the Engine API — containers, images and compose projects on the Containers page (TCP/TLS/socket transports).',
   // 0.4.0 — containers.deploy-compose deploys a NEW compose stack on the host
   // (docker compose up -d via an optional ssh slot; the Engine API has no
   // classic compose endpoint), powering the Containers page's Create-app dialog.

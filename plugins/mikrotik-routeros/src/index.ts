@@ -59,6 +59,8 @@ export const PLUGIN_NAME = 'MikroTik RouterOS Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'MikroTik RouterOS management via the REST API — system resources, interfaces, IP/ARP/DHCP/routes/wireless plus config actions.',
   // 0.1.0 — initial release: RouterOS monitoring via the REST API (/rest) —
   // system resources (CPU/memory/uptime), interfaces + throughput rates, IP
   // addresses, ARP, DHCP leases, routes, wireless clients — with network/host/

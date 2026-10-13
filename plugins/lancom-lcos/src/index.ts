@@ -68,6 +68,8 @@ export const PLUGIN_NAME = 'LANCOM LCOS Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'LANCOM LCOS router monitoring (SNMP) — system, throughput, VPN and temperature plus inventory propagation and config backup.',
   // 0.1.0 — initial release: unified LCOS-MIB monitoring (system, LAN/WAN throughput,
   // VPN, temperature) + inventory propagation for the Networks/Hosts pages, plus
   // config/planning over SNMP SET and web-UI config backup via a credential slot.

@@ -48,6 +48,8 @@ export const PLUGIN_NAME = 'File Repository (Local Storage)';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    "Stores the bytes of UNM's central file repository (ISOs, firmware images, config backups) on a local filesystem volume.",
   version: '0.1.0',
   vendors: ['unm'],
   capabilities: ['fileRepo'],

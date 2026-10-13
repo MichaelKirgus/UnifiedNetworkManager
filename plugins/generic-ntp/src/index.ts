@@ -50,6 +50,8 @@ export const PLUGIN_NAME = 'Generic (S)NTP Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'NTP time-source monitoring for any host — reachability and served-time metrics feeding the cross-device Time page.',
   version: '0.1.0',
   vendors: ['generic'],
   // monitoring: live NTP reachability + served-time metrics every poll.

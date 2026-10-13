@@ -121,6 +121,9 @@ export function buildDiscoverPayload(identity: PluginIdentity, extras?: Discover
   return {
     uuid: identity.effectiveUuid,
     name: identity.displayName,
+    // Short catalog description (see PluginIdentity.description) — the webapp's
+    // plugin picker renders it under the display name. Absent when undeclared.
+    ...(identity.description ? { description: identity.description } : {}),
     version: identity.version,
     vendors: identity.vendors,
     capabilities: identity.capabilities,

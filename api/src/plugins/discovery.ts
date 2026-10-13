@@ -24,6 +24,8 @@ import { getEffectiveSettingValue } from '../systemSettings';
 export interface PluginIdentity {
   uuid: string;
   name: string;
+  /** Short human-readable description for the webapp's plugin catalog picker (absent when undeclared). */
+  description?: string;
   version: string;
   vendors: string[];
   capabilities: string[];
@@ -334,6 +336,7 @@ function parseTxt(txt: Record<string, string> | undefined): Partial<PluginIdenti
 interface RawDiscover {
   uuid?: unknown;
   name?: unknown;
+  description?: unknown;
   version?: unknown;
   vendors?: unknown;
   capabilities?: unknown;
@@ -361,6 +364,10 @@ export function normalizeDiscoverPayload(raw: RawDiscover, sourceEndpoint: strin
   return {
     uuid: raw.uuid,
     name: typeof raw.name === 'string' ? raw.name : raw.uuid,
+    // Catalog description — trimmed, dropped when empty (absent ≠ wipe).
+    ...(typeof raw.description === 'string' && raw.description.trim() !== ''
+      ? { description: raw.description.trim() }
+      : {}),
     version: typeof raw.version === 'string' ? raw.version : 'unknown',
     vendors: Array.isArray(raw.vendors) ? (raw.vendors as string[]) : [],
     capabilities: Array.isArray(raw.capabilities) ? (raw.capabilities as string[]) : [],
@@ -472,12 +479,16 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
   // without UNM_BUILD_TAG (local/dev) advertises nothing; neither may wipe a
   // previously-stored tag.
   const hasBuildTag = typeof identity.buildTag === 'string' && identity.buildTag.length > 0;
+  // Catalog description: same guard — only overwrite when this discovery source
+  // actually carries one, so an undeclared value never wipes a stored one.
+  const hasDescription = typeof identity.description === 'string' && identity.description.length > 0;
 
   if (existing) {
     await db
       .update(schema.plugins)
       .set({
         name: identity.name,
+        ...(hasDescription ? { description: identity.description } : {}),
         version: identity.version,
         vendors: JSON.stringify(identity.vendors),
         capabilities: JSON.stringify(identity.capabilities),
@@ -500,6 +511,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
     await db.insert(schema.plugins).values({
       id: identity.uuid,
       name: identity.name,
+      description: hasDescription ? (identity.description as string) : null,
       version: identity.version,
       vendors: JSON.stringify(identity.vendors),
       capabilities: JSON.stringify(identity.capabilities),

@@ -2547,6 +2547,8 @@ export interface StackInfo {
 export interface Plugin {
   id: string;
   name: string;
+  /** Short human-readable description of what the plugin manages (advertised in /discover); null when undeclared. Rendered by the plugin catalog picker under the display name. */
+  description?: string | null;
   version: string;
   /** Build tag baked into the plugin image at CI build time (branch/release); null = local/dev or not advertised. */
   buildTag?: string | null;

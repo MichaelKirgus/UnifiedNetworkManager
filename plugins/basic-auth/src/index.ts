@@ -28,6 +28,8 @@ export const PLUGIN_NAME = 'Basic Auth (Local Users + TOTP)';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'Local user authentication for UNM itself — username/password + TOTP two-factor login for the web app.',
   version: '0.1.0',
   vendors: ['unm'],
   capabilities: ['identityProvider'],

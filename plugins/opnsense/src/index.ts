@@ -96,6 +96,8 @@ export const PLUGIN_NAME = 'OPNsense Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'OPNsense firewall management — system/network metrics, ZFS pools, security checks and config actions over REST + SSH.',
   // 0.4.0 — Notification-center mirroring (SDK createNotifier): /monitoring now
   // mirrors appliance-level conditions into the UNM notification center with
   // stable dedupe keys + resolve-on-disappearance, like ix-truenas's alert.list:

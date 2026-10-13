@@ -253,6 +253,10 @@ export const deviceSessionCredentials = pgTable(
 export const plugins = pgTable('plugins', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
+  // Short human-readable description of what the plugin manages, advertised in
+  // /discover. Drives the webapp's plugin catalog picker (card subtitle). NULL
+  // = not declared — the card simply shows no description line.
+  description: text('description'),
   version: text('version').notNull(),
   vendors: text('vendors').notNull().default('[]'),
   capabilities: text('capabilities').notNull().default('[]'),

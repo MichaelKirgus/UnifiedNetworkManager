@@ -25,6 +25,11 @@ export interface PluginIdentity {
   effectiveUuid: string;
   /** Advertised display name. */
   displayName: string;
+  /** Short human-readable description of what this plugin manages (one or two
+   * sentences). Surfaced in the webapp's plugin catalog picker so users can
+   * find the right plugin without knowing its exact name. Optional — plugins
+   * that don't declare one simply show no description line. */
+  description?: string;
   version: string;
   vendors: string[];
   capabilities: PluginCapability[];
@@ -42,6 +47,8 @@ export const DEFAULT_PLUGIN_PORT = 4080;
 export interface PluginIdentityInput {
   uuid: string;
   name: string;
+  /** Short human-readable description for the webapp's plugin catalog picker. */
+  description?: string;
   version: string;
   vendors: string[];
   capabilities: PluginCapability[];
@@ -59,6 +66,7 @@ export function resolvePluginIdentity(input: PluginIdentityInput): PluginIdentit
     uuid: input.uuid,
     effectiveUuid,
     displayName,
+    ...(input.description?.trim() ? { description: input.description.trim() } : {}),
     version: input.version,
     vendors: input.vendors,
     capabilities: input.capabilities,

@@ -34,6 +34,8 @@ export const PLUGIN_NAME = 'ICMP Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'Ping-based reachability + latency monitoring for any IP address — no credentials, no agent required.',
   version: '0.2.0',
   vendors: ['generic'],
   capabilities: ['monitoring', 'inventory'],

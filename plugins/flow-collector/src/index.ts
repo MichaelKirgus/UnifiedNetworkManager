@@ -57,6 +57,8 @@ export const PLUGIN_NAME = 'Flow Collector (sFlow/NetFlow)';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'Push-based sFlow/NetFlow ingest service — devices send flow samples to this collector; it is not assigned to devices.',
   version: '0.1.0',
   vendors: ['generic'],
   // No device-facing capabilities — this is a push-based ingest service. The

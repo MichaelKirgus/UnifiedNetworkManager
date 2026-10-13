@@ -26,6 +26,8 @@ export const PLUGIN_NAME = 'Secrets Provider (Device Credentials)';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'Credential vault for UNM — decrypts bound device credentials (API keys, passwords, SSH key pairs) on demand.',
   version: '0.1.0',
   vendors: ['unm'],
   capabilities: ['secretsProvider'],

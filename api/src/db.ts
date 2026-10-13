@@ -213,6 +213,9 @@ export async function initDb(): Promise<void> {
   // Device support metadata — license/help/docs + supported-device matrix with
   // capability/intent gating conditions (see schema.plugins.deviceSupport).
   await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "deviceSupport" TEXT`);
+  // Short catalog description for the webapp's plugin picker (see
+  // schema.plugins.description) — advertised in /discover, NULL when undeclared.
+  await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "description" TEXT`);
   // mTLS state (Stage 1): discovery persists whether a plugin is serving TLS
   // with a CA-signed leaf; the API's pluginHttp factory picks https+client-cert.
   await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "tlsLive" BOOLEAN`);

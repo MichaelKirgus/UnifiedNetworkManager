@@ -54,6 +54,9 @@ function serializePlugin(row: any) {
   return {
     id: row.id,
     name: row.name,
+    // Short catalog description (see schema.plugins.description) — rendered by
+    // the webapp's plugin picker under the display name; null when undeclared.
+    description: typeof row.description === 'string' && row.description.length > 0 ? row.description : null,
     version: row.version,
     // Build tag baked into the image at CI build time (branch/release); null =
     // local/dev build or not advertised. Shown on the Plugins page next to version.

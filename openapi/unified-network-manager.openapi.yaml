@@ -11116,6 +11116,7 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
+        description: { type: [string, 'null'], description: "Short human-readable description of what the plugin manages (advertised in /discover); rendered by the webapp's plugin catalog picker. Null when undeclared" }
         version: { type: string }
         vendors:
           type: array
@@ -11124,7 +11125,7 @@ components:
           type: array
           items:
             type: string
-            enum: [monitoring, configuration, inventory, identityProvider, secretsProvider, deviceState, ssh, filesystem, probe, sshConsole, updates, quickActions, logIngestion, inventorySync]
+            enum: [monitoring, inventory, configuration, planning, deviceState, ssh, filesystem, probe, sshConsole, updates, securityChecks, secretsProvider, fileRepo, identityProvider, logIngestion, quickActions, inventorySync, webFetch]
         endpoint: { type: string, format: uri }
         authType:
           type: string
@@ -11245,7 +11246,7 @@ components:
           type: array
           items:
             type: string
-            enum: [monitoring, configuration, inventory, identityProvider, secretsProvider, deviceState, ssh, filesystem, probe, sshConsole, updates, quickActions, logIngestion, inventorySync]
+            enum: [monitoring, inventory, configuration, planning, deviceState, ssh, filesystem, probe, sshConsole, updates, securityChecks, secretsProvider, fileRepo, identityProvider, logIngestion, quickActions, inventorySync, webFetch]
         endpoint: { type: string, format: uri }
         authType:
           type: string

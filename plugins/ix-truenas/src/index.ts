@@ -96,6 +96,8 @@ export const PLUGIN_NAME = 'TrueNAS Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'TrueNAS SCALE management — apps/containers, VMs, ZFS pools, storage and firmware updates over the TrueNAS API + SSH.',
   // 0.5.0 — live PROBE endpoint (POST /probe, capability 'probe'): short-cycle
   // per-container CPU/RAM/I-O for the Containers page's on-demand polling
   // (1–5 s), served from ONE `docker stats --no-stream` over the shared SSH

@@ -4,7 +4,8 @@ import clsx from 'clsx';
 import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { allowedSecretTypes, api, CredentialSlotDescriptor, DevicePluginAssignmentInput, Plugin, Secret } from '../api/client';
+import { allowedSecretTypes, api, CredentialSlotDescriptor, DevicePluginAssignmentInput, Plugin, Secret, pluginIconUrl } from '../api/client';
+import { isDeviceAssignablePlugin, PluginCatalogPicker } from './PluginCatalogPicker';
 
 interface RowState {
   /** Stable key for drag & drop (unique per row, independent of the plugin pick). */
@@ -20,12 +21,45 @@ const emptyRow = (): RowState => ({ id: crypto.randomUUID(), pluginId: '', secre
 /** One draggable assignment row: grip handle + position badge (1 = primary) +
  * plugin/credential pickers. The whole card is the sortable element; only the
  * grip carries the drag listeners so the selects stay fully clickable. */
+/** Compact card for a picked plugin — icon + name + version + description.
+ * Clicking it re-opens the catalog so the user can switch plugins. */
+function SelectedPluginCard({ plugin, onReopen }: { plugin: Plugin; onReopen: () => void }) {
+  const [iconFailed, setIconFailed] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onReopen}
+      title="Click to change the selected plugin"
+      className="flex w-full items-start gap-2 rounded-md border border-info bg-info/40 px-2.5 py-2 text-left hover:bg-info/60"
+    >
+      {plugin.iconUrl && !iconFailed ? (
+        <img
+          src={pluginIconUrl(plugin.id)}
+          alt=""
+          onError={() => setIconFailed(true)}
+          className="mt-0.5 h-[18px] w-[18px] shrink-0 rounded object-contain"
+        />
+      ) : null}
+      <span className="min-w-0 flex-1">
+        <span className="flex items-baseline gap-1.5">
+          <span className="truncate text-sm font-medium text-secondary">{plugin.name}</span>
+          <span className="shrink-0 font-mono text-[10px] text-faint">v{plugin.version}</span>
+        </span>
+        {plugin.description ? (
+          <span className="mt-0.5 line-clamp-1 block text-xs leading-snug text-muted-foreground">{plugin.description}</span>
+        ) : null}
+      </span>
+    </button>
+  );
+}
+
 function SortablePluginRow({
   row,
   position,
   isPrimary,
   removable,
   availablePlugins,
+  takenPluginIds,
   pluginMeta,
   secretsOfType,
   secretsOfSlot,
@@ -39,6 +73,8 @@ function SortablePluginRow({
   isPrimary: boolean;
   removable: boolean;
   availablePlugins: Plugin[];
+  /** Plugin ids used by the OTHER rows — shown but disabled in this row's catalog. */
+  takenPluginIds: string[];
   pluginMeta: Record<string, { requiredTypes: string[]; slots: CredentialSlotDescriptor[] }>;
   secretsOfType: (types: string[]) => Secret[];
   secretsOfSlot: (slot: CredentialSlotDescriptor) => Secret[];
@@ -47,7 +83,12 @@ function SortablePluginRow({
   onRemove: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: row.id });
+  // Catalog gallery open state — starts OPEN when the row has no plugin yet
+  // (fresh rows are all about picking one), and collapses to a compact card
+  // once a pick is made. Re-opening happens by clicking the selected card.
+  const [pickerOpen, setPickerOpen] = useState(row.pluginId === '');
   const meta = row.pluginId ? pluginMeta[row.pluginId] : undefined;
+  const pickedPlugin = row.pluginId ? availablePlugins.find((p) => p.id === row.pluginId) ?? null : null;
   // Multi-type primary support: a plugin may accept several secret types for
   // its main credential (e.g. usernamePassword OR sshKeyPair). Empty list =
   // undeclared → the picker offers every secret type.
@@ -90,25 +131,28 @@ function SortablePluginRow({
         </span>
 
         {/* Plugin + primary credentials share one aligned row; the remove
-            control sits right-aligned on the same line. */}
+            control sits right-aligned on the same line. The plugin cell is a
+            catalog picker (TrueNAS Apps-catalog style) instead of a dropdown —
+            with 40+ vendor plugins browsing by vendor/description beats hunting
+            for an exact name in a list. */}
         <div className="grid min-w-0 flex-1 grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_auto]">
           <div>
             <label className="mb-1 block text-xs font-medium text-secondary">Plugin</label>
-            <select
-              required
-              className="w-full rounded-md border border-border bg-card px-2 py-1.5 text-sm"
-              value={row.pluginId}
-              onChange={(e) => onUpdate({ pluginId: e.target.value, secretId: '', slotSecrets: {} })}
-            >
-              <option value="" disabled>
-                Select a plugin
-              </option>
-              {availablePlugins.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} ({p.version})
-                </option>
-              ))}
-            </select>
+            {pickedPlugin && !pickerOpen ? (
+              <SelectedPluginCard plugin={pickedPlugin} onReopen={() => setPickerOpen(true)} />
+            ) : (
+              <PluginCatalogPicker
+                plugins={availablePlugins}
+                selectedId={row.pluginId || null}
+                takenIds={takenPluginIds}
+                onPick={(id) => {
+                  // Switching plugins invalidates the bound credentials (they are
+                  // type-specific to the previous plugin).
+                  onUpdate({ pluginId: id, secretId: '', slotSecrets: {} });
+                  setPickerOpen(false);
+                }}
+              />
+            )}
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium text-secondary">
@@ -215,10 +259,12 @@ export const PluginAssignmentBuilder = forwardRef<PluginAssignmentBuilderHandle,
    * "Add plugin" modal; leave it off for create/edit forms where row 1 = primary. */
   appendMode?: boolean;
 }>(({ plugins, secrets, initial = [], excludedPluginIds = [], onSubmit, submitLabel = 'Save', busy = false, onRowsChange, onDirtyChange, showSubmitButton = true, appendMode = false }, ref) => {
-  // Secret-provider plugins serve the Secrets page, not devices — they must
-  // never appear in this picker (they have no device-facing capabilities).
+  // Only device-assignable plugins are offered — pure service plugins (secret
+  // providers, file repos, web fetchers, identity providers) serve UNM itself,
+  // not devices, and must never appear in this picker. The capability check is
+  // the single source of truth (see PluginCatalogPicker).
   const availablePlugins = useMemo(
-    () => plugins.filter((p) => !excludedPluginIds.includes(p.id) && !(p.capabilities ?? []).includes('secretsProvider')),
+    () => plugins.filter((p) => !excludedPluginIds.includes(p.id) && isDeviceAssignablePlugin(p)),
     [plugins, excludedPluginIds]
   );
   const [rows, setRows] = useState<RowState[]>(() =>
@@ -313,6 +359,12 @@ export const PluginAssignmentBuilder = forwardRef<PluginAssignmentBuilderHandle,
     [rows]
   );
 
+  /** Per-row "taken" list — every OTHER row's pick, so a plugin already bound
+   * elsewhere is visible (context) but not re-selectable in this row. */
+  function takenIdsFor(row: RowState): string[] {
+    return rows.filter((r) => r.id !== row.id && r.pluginId).map((r) => r.pluginId);
+  }
+
   // Report the selected plugin ids to the parent (initial rows included) so it
   // can derive vendor-specific fields — e.g. model catalogs — from exactly the
   // plugins assigned here. The callback is kept in a ref: only `rows` should
@@ -376,6 +428,7 @@ export const PluginAssignmentBuilder = forwardRef<PluginAssignmentBuilderHandle,
                 isPrimary={index === 0 && !appendMode}
                 removable={rows.length > 1}
                 availablePlugins={availablePlugins}
+                takenPluginIds={takenIdsFor(row)}
                 pluginMeta={pluginMeta}
                 secretsOfType={secretsOfType}
                 secretsOfSlot={secretsOfSlot}

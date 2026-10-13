@@ -58,6 +58,8 @@ export const PLUGIN_NAME = 'Web Fetch (Internet Egress)';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'Internet egress service — downloads files/web content (optionally through a proxy) so UNM and plugins never handle outbound TLS themselves.',
   version: '0.1.0',
   vendors: ['unm'],
   // No device-facing capabilities — this is a pull-based egress service. The

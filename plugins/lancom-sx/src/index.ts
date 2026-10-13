@@ -72,6 +72,8 @@ export const PLUGIN_NAME = 'LANCOM SX-Series Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'LANCOM SX-series switch monitoring (SNMP) — system/PSU/fans, ports + throughput, PoE and LAG/LACP plus config actions over SNMP SET.',
   // 0.1.0 — initial release: LCOS-SX switch monitoring (system/PSU/fans/temp,
   // ports + throughput, PoE, LAG/LACP) for BOTH firmware lines (unified 4.x tree
   // and legacy GS-2310 3.x tree, auto-detected), network/host inventory
