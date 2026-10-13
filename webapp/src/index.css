@@ -251,3 +251,40 @@ body {
   background-color: rgb(var(--background));
   color: rgb(var(--foreground));
 }
+
+/* ---------------------------------------------------------------------------
+ * xyflow (React Flow) theming — Topology page.
+ *
+ * The canvas wrapper and node cards use app tokens (bg-card/border-border), so
+ * the built-in widgets must too. xyflow's own defaults are one fixed light set
+ * plus one fixed dark palette (.react-flow.dark via its colorMode prop) — that
+ * produced white Controls/MiniMap boxes with invisible icons on a dark canvas,
+ * and can't distinguish our Black vs Slate themes or track live theme switches.
+ * Instead we re-point xyflow's --xy-* hooks at the design tokens below; the
+ * selectors key off the <html> classes that useTheme.ts toggles (single source
+ * of truth), so every widget follows the active theme instantly.
+ * ------------------------------------------------------------------------- */
+
+.react-flow {
+  /* Canvas surface = card, dots = faint hints (matches the page chrome). */
+  --xy-background-color: rgb(var(--card));
+  --xy-background-pattern-dots-color-default: rgb(var(--faint) / 0.5);
+
+  /* Zoom controls — panel + buttons from the app palette. */
+  --xy-controls-button-background-color: rgb(var(--muted));
+  --xy-controls-button-background-color-hover: rgb(var(--border));
+  --xy-controls-button-color: rgb(var(--secondary));
+  --xy-controls-button-color-hover: rgb(var(--foreground));
+  --xy-controls-button-border-color: rgb(var(--border));
+
+  /* MiniMap — canvas + viewport mask from the app palette. Node colors come
+   * from the MiniMap nodeColor prop (the fixed --topo-* graph hues). */
+  --xy-minimap-background-color: rgb(var(--card));
+  --xy-minimap-mask-background-color: rgb(var(--overlay) / 0.35);
+}
+
+.dark .react-flow {
+  /* Dark themes need a lighter mask so the viewport rectangle stays visible
+   * over the dark minimap canvas (the light default is near-invisible). */
+  --xy-minimap-mask-background-color: rgb(255 255 255 / 0.18);
+}

@@ -624,6 +624,10 @@ export default function Topology() {
               edges={rfEdges}
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
+              // Controls/MiniMap/background dots are themed via the --xy-*
+              // overrides in index.css (keyed off the html theme classes) —
+              // not xyflow's colorMode, which is one fixed dark palette and
+              // wouldn't track live theme switches or Black-vs-Slate.
               fitView
               minZoom={0.15}
               maxZoom={2}
