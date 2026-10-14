@@ -21,8 +21,10 @@ const HUB_R = 34; // hub anchor radius (px) — matches HubNode's 68px circle
 const AP_R = 26;
 const HOST_MIN_R = 10;
 const HOST_MAX_R = 26;
-const GRID_X = 520; // horizontal spacing between hub anchors
-const GRID_Y = 460;
+// Cell spacing must exceed a busy hub's host-cloud diameter (~50 hosts spiral
+// out to ~200 px + collision spread) or neighboring clouds overlap.
+const GRID_X = 640; // horizontal spacing between hub anchors
+const GRID_Y = 580;
 
 interface SimNode extends SimulationNodeDatum {
   id: string;
@@ -103,11 +105,12 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
   }
 
   // --- Deterministic anchors --------------------------------------------------
-  // Hubs are grouped into CLUSTERS of related segments — two hubs that share
-  // member hosts sit next to each other, so the net reads as organic islands
-  // (VLAN 30 beside VLAN 210 only if a host actually spans both) instead of a
-  // server-order grid. Greedy: seed with the busiest hub, absorb every hub
-  // sharing ≥1 host with the cluster; repeat over the remainder.
+  // Hubs sit on a grid in VLAN order (numeric ascending; no-VLAN segments by
+  // label after them). Content-based clustering was tried and failed: real
+  // inventories have multi-homed hosts everywhere, so "shares ≥1 host" chains
+  // almost every segment into ONE giant cluster whose ring crams all hubs —
+  // and their host clouds — into a single blob. VLAN order is predictable and
+  // matches intuition: VLAN 30 beside VLAN 29/31, not beside VLAN 210.
   const hostsBySeg = new Map<string, Set<string>>();
   for (const e of visMembership) {
     let s = hostsBySeg.get(e.target);
@@ -118,46 +121,18 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
     s.add(e.source);
   }
   const hubSize = (id: string) => hostsBySeg.get(id)?.size ?? 0;
-  const remaining = [...hubs].sort((a, b) => hubSize(b.id) - hubSize(a.id) || a.id.localeCompare(b.id));
-  const clusters: string[][] = [];
-  while (remaining.length > 0) {
-    const cluster = [remaining.shift()!.id];
-    // Absorb every remaining hub that shares ≥1 host with ANY cluster member
-    // (transitive closure — a chain of overlapping segments is one island).
-    let grew = true;
-    while (grew) {
-      grew = false;
-      for (let i = remaining.length - 1; i >= 0; i--) {
-        const other = remaining[i].id;
-        if ([...hostsBySeg.get(other) ?? []].some((h) => cluster.some((c) => hostsBySeg.get(c)?.has(h)))) {
-          cluster.push(other);
-          remaining.splice(i, 1);
-          grew = true;
-        }
-      }
-    }
-    clusters.push(cluster);
-  }
-  // Cluster cells on a grid — big islands first.
-  clusters.sort((a, b) => b.length - a.length || hubSize(b[0]) - hubSize(a[0]));
-  const cols = Math.max(1, Math.ceil(Math.sqrt(clusters.length)));
-  const rows = Math.max(1, Math.ceil(clusters.length / cols));
+  const ordered = [...hubs].sort((a, b) => {
+    const av = a.vlanId ?? Number.MAX_SAFE_INTEGER;
+    const bv = b.vlanId ?? Number.MAX_SAFE_INTEGER;
+    return av - bv || a.label.localeCompare(b.label);
+  });
+  const cols = Math.max(1, Math.ceil(Math.sqrt(ordered.length)));
+  const rows = Math.max(1, Math.ceil(ordered.length / cols));
   const anchor = new Map<string, { x: number; y: number }>();
-  clusters.forEach((c, i) => {
+  ordered.forEach((h, i) => {
     const col = i % cols;
     const row = Math.floor(i / cols);
-    const cx = (col - (cols - 1) / 2) * GRID_X;
-    const cy = (row - (rows - 1) / 2) * GRID_Y;
-    if (c.length === 1) {
-      anchor.set(c[0], { x: cx, y: cy });
-      return;
-    }
-    // Ring around the cell center — related hubs literally touch.
-    const ringR = Math.min(230, 96 + c.length * 48);
-    c.forEach((id, j) => {
-      const ang = (j / c.length) * Math.PI * 2 - Math.PI / 2;
-      anchor.set(id, { x: cx + Math.cos(ang) * ringR, y: cy + Math.sin(ang) * ringR });
-    });
+    anchor.set(h.id, { x: (col - (cols - 1) / 2) * GRID_X, y: (row - (rows - 1) / 2) * GRID_Y });
   });
 
   // AP anchors — a ring slot around their hub (first visible segment they're a
@@ -241,7 +216,7 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
   // and stays anchored to the grid between refetches.
   const sim = forceSimulation<SimNode>(simNodes)
     .force('link', forceLink<SimNode, SimLink>(simLinks).id((d) => d.id).distance((l) => l.dist).strength((l) => l.str))
-    .force('charge', forceManyBody().strength(-45))
+    .force('charge', forceManyBody().strength(-70))
     .force('collide', forceCollide<SimNode>().radius((d) => d.r + 6))
     .stop();
   for (let i = 0; i < 300; i++) sim.tick();
