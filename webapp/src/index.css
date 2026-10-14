@@ -113,6 +113,8 @@
   --topo-node: 51 65 85;           /* slate-700            */
   --topo-cable: 148 163 184;       /* slate-400 (inferred) */
   --topo-tunnel: 100 116 139;      /* slate-500            */
+  --topo-wireless: 203 213 225;    /* slate-300 (WLAN link)*/
+  --topo-traffic: 56 189 248;      /* sky-400 (flow accent)*/
 }
 
 /* Dark styles — `.dark` enables dark mode; the paired style class selects the
