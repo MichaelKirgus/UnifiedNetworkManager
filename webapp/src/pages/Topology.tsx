@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -16,7 +16,7 @@ import { can } from '../auth/permissions';
 import { api, NetworkLayer, TopologyEdge as TopoEdge, TopologyNode as TopoNode } from '../api/client';
 import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
 import { joinHostTraffic, joinPairTraffic, joinSegmentTraffic, maxOf, nodeEmphasis } from '../components/topology/traffic';
-import { layoutHostsNet, MAX_HOSTS } from '../components/topology/hostsLayout';
+import { layoutHostsNet, MAX_HOSTS, type NetSimNode } from '../components/topology/hostsLayout';
 import { ApNode, HubNode, NetHostNode, SwitchNode } from '../components/topology/HubNode';
 import { DeviceNode, setLayerRegistry } from '../components/topology/DeviceNode';
 import { SegmentNode } from '../components/topology/SegmentNode';
@@ -520,6 +520,45 @@ export default function Topology() {
   // queryFn, same pattern as the Flows page).
   const [showTraffic, setShowTraffic] = useState(false);
   const [range, setRange] = useState<TimeRangeValue>('24h');
+  // Hosts-net live simulation — the layout returns it stopped; node drags
+  // reheat it so every other element reacts with real forces (weighted by
+  // degree + traffic: busy hubs barely flinch, light hosts shove around).
+  // Ref (not state): the sim's tick listener writes positions into RF nodes,
+  // and drag handlers read it — no re-render needed for either.
+  const netSimRef = useRef<{ sim?: import('d3-force').Simulation<NetSimNode, never>; byId?: Map<string, NetSimNode> }>({});
+  const dragRef = useRef<NetSimNode | null>(null);
+  // Live positions while the hosts-net sim is running (after a drag). RF's
+  // plain `nodes` prop is controlled — without this mirror, reheated ticks
+  // would move the SIM but not the rendered nodes.
+  const [liveNodes, setLiveNodes] = useState<FlowNode[] | null>(null);
+  // Screen→flow conversion for the drag handlers — read React Flow's live
+  // viewport transform straight from its `.react-flow__viewport` element
+  // (translate + scale), relative to the flow container. No context/provider
+  // needed, and it stays correct through pan/zoom.
+  const flowWrapRef = useRef<HTMLDivElement | null>(null);
+  const toFlowPos = (clientX: number, clientY: number) => {
+    const wrap = flowWrapRef.current;
+    if (!wrap) return { x: clientX, y: clientY };
+    const rect = wrap.getBoundingClientRect();
+    const vp = wrap.querySelector('.react-flow__viewport') as HTMLElement | null;
+    let tx = 0;
+    let ty = 0;
+    let scale = 1;
+    if (vp) {
+      const t = getComputedStyle(vp).transform;
+      if (t && t !== 'none') {
+        try {
+          const m = new DOMMatrix(t);
+          tx = m.e;
+          ty = m.f;
+          scale = m.a || 1;
+        } catch {
+          /* identity */
+        }
+      }
+    }
+    return { x: (clientX - rect.left - tx) / scale, y: (clientY - rect.top - ty) / scale };
+  };
 
   // Site filter options — only fetched when allowed (API gates on sites:read).
   const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: () => api.sites(), enabled: can('sites:read') });
@@ -694,6 +733,7 @@ export default function Topology() {
     // traffic-sized dots orbiting their hub(s), WLAN clients dashed to their AP.
     if (view === 'hosts') {
       const res = layoutHostsNet({ nodes: data.nodes, edges: data.edges, hostBytes: traffic?.hostBytes, segmentFilter: segmentKey });
+      netSimRef.current = { sim: res.sim, byId: res.byId };
       return { rfNodes: res.rfNodes, rfEdges: res.rfEdges, hostsNetInfo: res };
     }
 
@@ -823,6 +863,45 @@ export default function Topology() {
   }, [topoQuery.data, view, segmentKey, showHosts, showTunnels, layersQuery.data, traffic]);
 
   const { rfNodes, rfEdges } = graph;
+
+  // Hosts-net: mirror sim ticks into RF node positions while the net is live.
+  useEffect(() => {
+    if (view !== 'hosts') {
+      setLiveNodes(null);
+      return;
+    }
+    const { sim, byId } = netSimRef.current;
+    if (!sim || !byId) return;
+    // Throttled to one update per animation frame (the sim runs ~60 ticks/s;
+    // React can't keep up with all of them). The dragged node is skipped here:
+    // the wrapper's pointermove handler updates it synchronously with the
+    // cursor (no lag).
+    let raf = 0;
+    const mirror = () => {
+      raf = 0;
+      setLiveNodes((prev) => {
+        const base = prev ?? graph.rfNodes;
+        return base.map((fn) => {
+          if (byId.has(fn.id) && fn.id !== dragRef.current?.id) {
+            const s = byId.get(fn.id)!;
+            return { ...fn, position: { x: (s.x ?? 0) - (s.hw ?? 0), y: (s.y ?? 0) - (s.hh ?? 0) } };
+          }
+          return fn;
+        });
+      });
+    };
+    const onTick = () => {
+      if (!raf) raf = requestAnimationFrame(mirror);
+    };
+    sim.on('tick.net', onTick);
+    return () => {
+      // d3-dispatch removes a listener by passing null.
+      sim.on('tick.net', null);
+      if (raf) cancelAnimationFrame(raf);
+      setLiveNodes(null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, topoQuery.data, segmentKey]);
 
   const segments = useMemo(
     () => (topoQuery.data?.nodes ?? []).filter((n): n is TopoNode & { kind: 'segment' } => n.kind === 'segment'),
@@ -1002,7 +1081,7 @@ export default function Topology() {
         )}
 
         {/* Graph */}
-        <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-card">
+        <div ref={flowWrapRef} className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-card">
           {topoQuery.isLoading ? (
             <div className="flex h-full items-center justify-center text-sm text-faint">Computing topology…</div>
           ) : rfNodes.length === 0 || (view !== 'hosts' && !rfNodes.some((n) => n.type === 'device')) ? (
@@ -1021,11 +1100,68 @@ export default function Topology() {
               )}
             </div>
           ) : (
+            // Hosts net view — interactive forces: dragging a node pins it in
+            // the d3 sim (fx/fy) and reheats, so every other element reacts
+            // with real tension; on release the node settles under its own
+            // forces. Handled here (not via RF's onNodeDrag*) because our
+            // `nodes` prop is controlled — RF's internal drag position would
+            // not reach it, making the dragged node lag behind the cursor.
+            // screenToFlowPosition resolves against ReactFlow's transform, so
+            // pan/zoom are accounted for.
+            <div
+              className="h-full w-full"
+              style={view === 'hosts' ? { touchAction: 'none' } : undefined}
+              onPointerDown={(e) => {
+                if (view !== 'hosts') return;
+                const sim = netSimRef.current.sim;
+                const byId = netSimRef.current.byId;
+                if (!sim || !byId) return;
+                const el = (e.target as HTMLElement).closest('[data-id]') as HTMLElement | null;
+                const id = el?.dataset.id;
+                if (!id) return; // background / minimap — let RF pan
+                const s = byId.get(id);
+                if (!s) return; // not part of the sim (shouldn't happen here)
+                e.preventDefault();
+                dragRef.current = s;
+                const p = toFlowPos(e.clientX, e.clientY);
+                s.fx = p.x + (s.hw ?? 0);
+                s.fy = p.y + (s.hh ?? 0);
+                s.vx = 0;
+                s.vy = 0;
+                sim.alphaTarget(0.3).restart();
+              }}
+              onPointerMove={(e) => {
+                const s = dragRef.current;
+                if (!s || view !== 'hosts') return;
+                const p = toFlowPos(e.clientX, e.clientY);
+                // Synchronous with the cursor — no frame lag.
+                setLiveNodes((prev) => {
+                  const base = prev ?? graph.rfNodes;
+                  return base.map((fn) => (fn.id === s.id ? { ...fn, position: { x: p.x, y: p.y } } : fn));
+                });
+                s.fx = p.x + (s.hw ?? 0);
+                s.fy = p.y + (s.hh ?? 0);
+              }}
+              onPointerUp={() => {
+                const s = dragRef.current;
+                if (!s || view !== 'hosts' || !netSimRef.current.sim) return;
+                dragRef.current = null;
+                delete s.fx;
+                delete s.fy;
+                // Small reheat — the node settles under its own forces (grid
+                // pull, links, collisions) instead of snapping back.
+                netSimRef.current.sim.alphaTarget(0).alpha(0.25);
+              }}
+            >
             <ReactFlow
-              nodes={rfNodes}
+              // Hosts view: live sim positions once a drag has reheated the net.
+              nodes={view === 'hosts' ? (liveNodes ?? rfNodes) : rfNodes}
               edges={rfEdges}
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
+              // RF's own dragging is off in hosts view — the wrapper above
+              // drives the sim instead (see comment on the div).
+              nodesDraggable={view !== 'hosts'}
               // Controls/MiniMap/background dots are themed via the --xy-*
               // overrides in index.css (keyed off the html theme classes) —
               // not xyflow's colorMode, which is one fixed dark palette and
@@ -1066,6 +1202,7 @@ export default function Topology() {
                 }}
               />
             </ReactFlow>
+            </div>
           )}
         </div>
       </div>

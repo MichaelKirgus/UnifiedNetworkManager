@@ -1,4 +1,4 @@
-import { forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY, type SimulationNodeDatum } from 'd3-force';
+import { forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY, type Simulation, type SimulationNodeDatum } from 'd3-force';
 import type { Edge as FlowEdge, Node as FlowNode } from '@xyflow/react';
 import type { TopologyEdge as TopoEdge, TopologyNode as TopoNode } from '../../api/client';
 
@@ -30,10 +30,18 @@ const HOST_MAX_R = 26;
 const GRID_X = 640; // horizontal spacing between hub anchors
 const GRID_Y = 580;
 
+/** A node in the hosts-net d3 simulation. `hw/hh` = half card size (center ↔
+ * flow-position conversion for drag sync), `w` = weight — heavier nodes resist
+ * forces more (see the tick.damp listener). */
 interface SimNode extends SimulationNodeDatum {
   id: string;
   r: number;
+  hw?: number;
+  hh?: number;
+  w?: number;
 }
+/** Exported for the Topology page's drag handlers. */
+export type NetSimNode = SimNode;
 interface SimLink {
   source: string | SimNode;
   target: string | SimNode;
@@ -57,6 +65,10 @@ export interface HostsNetResult {
   shownHosts: number;
   /** True when the cap ranking used traffic bytes (else server order). */
   rankedByTraffic: boolean;
+  /** The live d3 simulation — stopped after the initial sync ticks. The hosts
+   * view reheats it on node drag so neighbors react with real forces. */
+  sim?: Simulation<SimNode, SimLink>;
+  byId?: Map<string, SimNode>;
 }
 
 export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
@@ -205,6 +217,8 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
   // ticks start from a spread-out (not exploded) state. Radius by traffic when
   // available (busy hosts get room), uniform otherwise.
   const hostRadius = new Map<string, number>();
+  /** Sqrt-normalized traffic per host (0..1) — feeds the node weight. */
+  const hostT = new Map<string, number>();
   let maxBytes = 0;
   for (const h of allHosts) {
     const b = input.hostBytes?.get(h.id) ?? 0;
@@ -238,6 +252,7 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
     const p = anchor.get(refId)!;
     const b = input.hostBytes?.get(h.id) ?? 0;
     const t = maxBytes > 0 && b > 0 ? Math.sqrt(b / maxBytes) : 0;
+    hostT.set(h.id, t);
     hostRadius.set(h.id, HOST_MIN_R + (HOST_MAX_R - HOST_MIN_R) * t);
     simNodes.push({ id: h.id, r: hostRadius.get(h.id)!, x: p.x + Math.cos(a) * r, y: p.y + Math.sin(a) * r });
   }
@@ -256,6 +271,21 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
     ...visWireless.map((e): SimLink => ({ source: e.source, target: e.target, dist: AP_R + 56, str: 0.12 })),
   ];
 
+  // Node weight — heavier nodes resist forces more (tick.damp below). Degree
+  // counts every tether (host spoke, switch link, WLAN); trafficT is the host's
+  // sqrt-normalized bytes (0 for hubs/switches). A 50-host hub barely flinches
+  // when you drag a neighbor; a single light host shoves around.
+  const degree = new Map<string, number>();
+  for (const l of simLinks) {
+    const a = typeof l.source === 'string' ? l.source : l.source.id;
+    const b = typeof l.target === 'string' ? l.target : l.target.id;
+    degree.set(a, (degree.get(a) ?? 0) + 1);
+    degree.set(b, (degree.get(b) ?? 0) + 1);
+  }
+  for (const s of simNodes) {
+    s.w = (degree.get(s.id) ?? 0) * 0.25 + (hostT.get(s.id) ?? 0) * 2;
+  }
+
   // Hubs are SOFT-anchored to their grid slot (forceX/Y at low strength) —
   // hosts and satellites move freely, so the net converges fast while the VLAN
   // order stays readable between refetches.
@@ -266,6 +296,16 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
     .force('charge', forceManyBody().strength(-70))
     .force('collide', forceCollide<SimNode>().radius((d) => d.r + 6))
     .stop();
+  // Weighted damping on EVERY tick — the initial sync ticks AND interactive
+  // reheats after a drag (namespaced so the page can add its own listener).
+  sim.on('tick.damp', () => {
+    for (const s of simNodes) {
+      if (!s.w || !s.vx && !s.vy) continue;
+      const k = 1 / (1 + s.w);
+      s.vx! *= k;
+      s.vy! *= k;
+    }
+  });
   for (let i = 0; i < 300; i++) sim.tick();
 
   // --- Emit React Flow nodes/edges ---------------------------------------------
@@ -284,6 +324,13 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
     const c = cardHalf(id);
     return { x: (n.x ?? 0) - c.hw, y: (n.y ?? 0) - c.hh };
   };
+  // Remember the card offsets on the sim nodes — the page's drag handlers need
+  // them to convert between flow positions (card corner) and sim centers.
+  for (const s of simNodes) {
+    const c = cardHalf(s.id);
+    s.hw = c.hw;
+    s.hh = c.hh;
+  }
 
   const rfNodes: FlowNode[] = [];
   for (const h of hubs) {
@@ -348,5 +395,5 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
     })),
   ];
 
-  return { rfNodes, rfEdges, totalHosts: allHosts.length, shownHosts: shownHostIds.size, rankedByTraffic };
+  return { rfNodes, rfEdges, totalHosts: allHosts.length, shownHosts: shownHostIds.size, rankedByTraffic, sim, byId: simById };
 }
