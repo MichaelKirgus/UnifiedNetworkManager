@@ -213,13 +213,15 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
     shownHostIds.add(h.id);
   }
 
+  // Straight lines — radial spokes read cleaner than beziers in a net view
+  // (endpoints come from the nodes' wall handles; see SideHandles).
   const rfEdges: FlowEdge[] = [
     // Faint membership spokes — structure, not the story.
     ...visMembership.map((e) => ({
       id: e.id,
       source: e.source,
       target: e.target,
-      type: 'default' as const,
+      type: 'straight' as const,
       style: { stroke: 'rgb(var(--topo-cable))', strokeWidth: 1, strokeOpacity: 0.3 },
     })),
     // WLAN associations — the distinct dashed link (AP → client).
@@ -227,7 +229,7 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
       id: e.id,
       source: e.source,
       target: e.target,
-      type: 'default' as const,
+      type: 'straight' as const,
       style: { stroke: 'rgb(var(--topo-wireless))', strokeWidth: 1.25, strokeDasharray: '2 4' },
     })),
   ];

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { TopologyNode as TopoNode } from '../../api/client';
 import { formatBytes } from '../formatMetric';
+import { SideHandles } from './DeviceNode';
 
 /**
  * Node renderers for the TOPOLOGY "Hosts" net view (force-directed):
@@ -24,6 +25,9 @@ export function HubNode({ data }: { data: (TopoNode & { kind: 'segment' }) & { m
   const label = data.vlanId !== null ? `VLAN ${data.vlanId}` : data.label;
   return (
     <div className="flex flex-col items-center gap-0.5">
+      {/* xyflow v12 computes edge endpoints from handle ELEMENTS — without any,
+          getHandleBounds returns null and no edge path is drawn at all. */}
+      <SideHandles />
       <div
         className="flex h-[68px] w-[68px] items-center justify-center rounded-full border-2 bg-card shadow-sm"
         style={{ borderColor: `hsl(${hue}, 65%, 55%)` }}
@@ -41,6 +45,7 @@ export function HubNode({ data }: { data: (TopoNode & { kind: 'segment' }) & { m
 export function ApNode({ data }: { data: TopoNode & { kind: 'device' } }) {
   return (
     <div className="flex flex-col items-center gap-0.5">
+      <SideHandles />
       <div className="flex h-[42px] w-16 flex-col items-center justify-center rounded-md border border-border bg-card px-1 shadow-sm" title={data.name}>
         <span className="text-[8px] font-bold uppercase tracking-wide text-faint">AP</span>
         <span className="max-w-full truncate text-[9px] font-semibold text-secondary">{data.name}</span>
@@ -55,6 +60,8 @@ export function NetHostNode({ data }: { data: (TopoNode & { kind: 'host' }) & { 
   const r = data.r ?? 10;
   return (
     <div className="relative flex items-center gap-1.5" onClick={() => setOpen((o) => !o)}>
+      {/* Anchor handles — required for xyflow to draw the spoke/WLAN edges. */}
+      <SideHandles />
       {/* Traffic-sized dot — radius comes from the layout's traffic ranking. */}
       <span
         className="block cursor-pointer rounded-full bg-topo-host shadow-sm ring-1 ring-border transition-transform hover:scale-110"
