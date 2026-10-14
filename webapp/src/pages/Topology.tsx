@@ -16,13 +16,25 @@ import { can } from '../auth/permissions';
 import { api, NetworkLayer, TopologyEdge as TopoEdge, TopologyNode as TopoNode } from '../api/client';
 import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
 import { joinHostTraffic, joinPairTraffic, joinSegmentTraffic, maxOf, nodeEmphasis } from '../components/topology/traffic';
+import { layoutHostsNet, MAX_HOSTS } from '../components/topology/hostsLayout';
+import { ApNode, HubNode, NetHostNode } from '../components/topology/HubNode';
 import { DeviceNode, setLayerRegistry } from '../components/topology/DeviceNode';
 import { SegmentNode } from '../components/topology/SegmentNode';
 import { HostNode } from '../components/topology/HostNode';
 import { RemoteNode } from '../components/topology/RemoteNode';
 import { TrunkEdge } from '../components/topology/TrunkEdge';
 
-const nodeTypes = { device: DeviceNode, segment: SegmentNode, host: HostNode, remote: RemoteNode, band: BandNode };
+const nodeTypes = {
+  device: DeviceNode,
+  segment: SegmentNode,
+  host: HostNode,
+  remote: RemoteNode,
+  band: BandNode,
+  // Hosts net view (force-directed) — hub/AP/host-dot renderers.
+  hub: HubNode,
+  ap: ApNode,
+  nethost: NetHostNode,
+};
 
 /** True when the straight segment between two card centers crosses any OTHER
  * card's box (with a small margin). Same-row edges whose direct line passes
@@ -275,7 +287,7 @@ function withBendOffsets(
 // reads the kind + VLAN list from `data` and picks its rendering.
 const edgeTypes = { trunk: TrunkEdge };
 
-type ViewMode = 'physical' | 'logical';
+type ViewMode = 'physical' | 'logical' | 'hosts';
 
 /** MiniMap base hues as RGB triplets — mirrors the --topo-* palette in
  * index.css (fixed dark-slate values, identical across all themes), so JS can
@@ -518,17 +530,20 @@ export default function Topology() {
   useEffect(() => {
     setLayerRegistry(layersQuery.data ?? []);
   }, [layersQuery.data]);
-  // includeHosts is only consumed in the logical view; requesting it always
-  // keeps a single cache entry per (site, hosts) pair. Tag/layer filters are
-  // server-side — they change which devices exist in the graph at all.
+  // includeHosts is consumed by the logical view (checkbox) and ALWAYS by the
+  // hosts net view — requesting it keeps one cache entry per (site, hosts)
+  // pair. Tag/layer filters are server-side: they change which devices exist
+  // in the graph at all. hostLimit caps per-segment placement for the net view.
+  const wantHosts = showHosts || view === 'hosts';
   const topoQuery = useQuery({
-    queryKey: ['topology', siteId || null, showHosts, tagFilter, layerFilter || null],
+    queryKey: ['topology', siteId || null, wantHosts, tagFilter, layerFilter || null],
     queryFn: () =>
       api.topology({
         siteId: siteId || undefined,
-        includeHosts: showHosts,
+        includeHosts: wantHosts,
         tags: tagFilter.length > 0 ? tagFilter : undefined,
         layer: layerFilter || undefined,
+        hostLimit: view === 'hosts' ? MAX_HOSTS : undefined,
       }),
     refetchInterval: 30_000, // matches the telemetry poll cadence
   });
@@ -587,9 +602,16 @@ export default function Topology() {
     };
   }, [trafficEnabled, topoQuery.data, devicesTrafficQuery.data, inventoryQuery.data, pairsQuery.data]);
 
-  const { rfNodes, rfEdges } = useMemo(() => {
+  interface GraphResult {
+    rfNodes: FlowNode[];
+    rfEdges: FlowEdge[];
+    /** Hosts-net cap info (only set in the hosts view) — drives the header note. */
+    hostsNetInfo?: { totalHosts: number; shownHosts: number; rankedByTraffic: boolean };
+  }
+
+  const graph = useMemo<GraphResult>(() => {
     const data = topoQuery.data;
-    if (!data) return { rfNodes: [] as FlowNode[], rfEdges: [] as FlowEdge[] };
+    if (!data) return { rfNodes: [], rfEdges: [] };
 
     // Display names per node id — wireless edge chips show "AP · WLAN-1 ↔ host".
     const nameById = new Map<string, string>();
@@ -665,6 +687,13 @@ export default function Topology() {
         withBendOffsets(assignParallel(edges.filter((e) => posMap.has(e.source) && posMap.has(e.target)), posMap, dims, boxes), posMap, dims)
       );
       return { rfNodes, rfEdges };
+    }
+
+    // Hosts net view — force-directed: segment hubs pinned on a grid, hosts as
+    // traffic-sized dots orbiting their hub(s), WLAN clients dashed to their AP.
+    if (view === 'hosts') {
+      const res = layoutHostsNet({ nodes: data.nodes, edges: data.edges, hostBytes: traffic?.hostBytes, segmentFilter: segmentKey });
+      return { rfNodes: res.rfNodes, rfEdges: res.rfEdges, hostsNetInfo: res };
     }
 
     // Logical view.
@@ -792,6 +821,8 @@ export default function Topology() {
     };
   }, [topoQuery.data, view, segmentKey, showHosts, showTunnels, layersQuery.data, traffic]);
 
+  const { rfNodes, rfEdges } = graph;
+
   const segments = useMemo(
     () => (topoQuery.data?.nodes ?? []).filter((n): n is TopoNode & { kind: 'segment' } => n.kind === 'segment'),
     [topoQuery.data]
@@ -809,9 +840,9 @@ export default function Topology() {
         {/* Header controls */}
         <div className="flex flex-wrap items-center gap-2">
 
-          {/* Physical | Logical toggle */}
+          {/* Physical | Logical | Hosts toggle */}
           <div className="inline-flex rounded-md border border-border bg-card p-0.5">
-            {(['physical', 'logical'] as ViewMode[]).map((v) => (
+            {(['physical', 'logical', 'hosts'] as ViewMode[]).map((v) => (
               <button
                 key={v}
                 onClick={() => setView(v)}
@@ -876,26 +907,36 @@ export default function Topology() {
             </>
           )}
 
-          {/* Segment focus (logical view only) */}
+          {/* Segment focus — logical view (block filter) and hosts net view
+              (focus one hub). */}
+          {(view === 'logical' || view === 'hosts') && (
+            <select
+              value={segmentKey}
+              onChange={(e) => setSegmentKey(e.target.value)}
+              className="max-w-56 rounded-md border border-border bg-card px-2 py-1 text-xs text-secondary"
+            >
+              <option value="all">All segments</option>
+              {segments.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.vlanId !== null ? `VLAN ${s.vlanId}` : s.label}
+                </option>
+              ))}
+            </select>
+          )}
+
+          {/* Hosts net view — cap note (top-N by traffic when the overlay has bytes). */}
+          {view === 'hosts' && graph.hostsNetInfo && (
+            <span className="text-[10px] text-muted-foreground" title={graph.hostsNetInfo.rankedByTraffic ? 'Capped to the busiest hosts in the selected window' : `Capped at ${MAX_HOSTS} hosts`}>
+              {graph.hostsNetInfo.shownHosts} of {graph.hostsNetInfo.totalHosts} hosts{graph.hostsNetInfo.rankedByTraffic ? ' (top by traffic)' : ''}
+            </span>
+          )}
+
+          {/* Show hosts — logical view only (the hosts net view is all hosts). */}
           {view === 'logical' && (
-            <>
-              <select
-                value={segmentKey}
-                onChange={(e) => setSegmentKey(e.target.value)}
-                className="max-w-56 rounded-md border border-border bg-card px-2 py-1 text-xs text-secondary"
-              >
-                <option value="all">All segments</option>
-                {segments.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.vlanId !== null ? `VLAN ${s.vlanId}` : s.label}
-                  </option>
-                ))}
-              </select>
-              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-secondary">
-                <input type="checkbox" checked={showHosts} onChange={(e) => setShowHosts(e.target.checked)} />
-                Show hosts
-              </label>
-            </>
+            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-secondary">
+              <input type="checkbox" checked={showHosts} onChange={(e) => setShowHosts(e.target.checked)} />
+              Show hosts
+            </label>
           )}
 
           {/* Legend */}
@@ -913,6 +954,18 @@ export default function Topology() {
                 </span>
                 <span className="flex items-center gap-1">
                   <span className="inline-block h-0.5 w-4 border-t-2 border-dashed border-topo-tunnel" /> tunnel
+                </span>
+              </>
+            ) : view === 'hosts' ? (
+              <>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block h-3 w-3 rounded-full border-2 border-topo-segment bg-card" /> segment hub
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block h-2.5 w-2.5 rounded-full bg-topo-host" title="Dot size ≈ traffic in window">host (size ≈ traffic)</span>
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block h-0.5 w-4 border-t border-dotted border-topo-wireless" /> WLAN link
                 </span>
               </>
             ) : (
@@ -945,7 +998,7 @@ export default function Topology() {
         <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-card">
           {topoQuery.isLoading ? (
             <div className="flex h-full items-center justify-center text-sm text-faint">Computing topology…</div>
-          ) : rfNodes.length === 0 || !rfNodes.some((n) => n.type === 'device') ? (
+          ) : rfNodes.length === 0 || (view !== 'hosts' && !rfNodes.some((n) => n.type === 'device')) ? (
             <div className="flex h-full flex-col items-center justify-center gap-1 text-sm text-faint">
               {tagFilter.length > 0 || layerFilter ? (
                 <>
@@ -954,6 +1007,8 @@ export default function Topology() {
                     Clear tag/layer filters
                   </button>
                 </>
+              ) : view === 'hosts' ? (
+                'No hosts in the inventory yet.'
               ) : (
                 'No devices to display.'
               )}
@@ -988,10 +1043,18 @@ export default function Topology() {
                 // traffic accent when the overlay is on (busy nodes glow sky).
                 nodeColor={(n) => {
                   if (n.type === 'band') return ((n.data as { color?: string }).color ?? 'rgb(var(--topo-unassigned))');
-                  const base = n.type === 'segment' ? TOPO_RGB.segment : n.type === 'host' ? TOPO_RGB.host : n.type === 'remote' ? TOPO_RGB.remote : TOPO_RGB.node;
+                  // Hosts-net types map onto their kind hues (hub=segment, ap=device).
+                  const base =
+                    n.type === 'segment' || n.type === 'hub'
+                      ? TOPO_RGB.segment
+                      : n.type === 'host' || n.type === 'nethost'
+                        ? TOPO_RGB.host
+                        : n.type === 'remote'
+                          ? TOPO_RGB.remote
+                          : TOPO_RGB.node;
                   const d = n.data as { trafficBytes?: number };
                   if (!traffic || typeof d.trafficBytes !== 'number') return `rgb(${base.join(' ')})`;
-                  const max = n.type === 'segment' ? traffic.maxSegment : n.type === 'host' ? traffic.maxHost : traffic.maxDevice;
+                  const max = base === TOPO_RGB.segment ? traffic.maxSegment : base === TOPO_RGB.host ? traffic.maxHost : traffic.maxDevice;
                   return mixTowardTraffic(base, nodeEmphasis(d.trafficBytes, max));
                 }}
               />
