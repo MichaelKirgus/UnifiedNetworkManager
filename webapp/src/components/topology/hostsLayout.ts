@@ -1,15 +1,15 @@
-import { forceCollide, forceLink, forceManyBody, forceSimulation, type SimulationNodeDatum } from 'd3-force';
+import { forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY, type SimulationNodeDatum } from 'd3-force';
 import type { Edge as FlowEdge, Node as FlowNode } from '@xyflow/react';
 import type { TopologyEdge as TopoEdge, TopologyNode as TopoNode } from '../../api/client';
 
 /**
  * Force-directed layout for the TOPOLOGY "Hosts" view — every known host as a
  * dot in a net around its segment hub(s), with WLAN clients visibly attached
- * to their AP and switches/APs (the devices that bridge the VLANs) fanned out
- * beside their busiest segment. Deterministic: hubs/satellites are pinned to
- * computed anchors and all initial positions are index-derived (no
- * Math.random), so refetches at the same data produce the same picture
- * instead of reshuffling.
+ * to their AP and switches/APs (the devices that bridge the VLANs) settling
+ * into the middle of their VLAN group. Hubs START on a deterministic
+ * VLAN-order grid but are only SOFT-anchored there — device→segment links
+ * pull co-bridged segments together, so the final picture is organic while
+ * staying predictable (all initial positions index-derived, no Math.random).
  *
  * Node set is capped (MAX_HOSTS) — ranked by traffic when the overlay has
  * bytes, otherwise in server order (newest-first per segment). The caller
@@ -124,12 +124,15 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
   }
 
   // --- Deterministic anchors --------------------------------------------------
-  // Hubs sit on a grid in VLAN order (numeric ascending; no-VLAN segments by
-  // label after them). Content-based clustering was tried and failed: real
-  // inventories have multi-homed hosts everywhere, so "shares ≥1 host" chains
-  // almost every segment into ONE giant cluster whose ring crams all hubs —
-  // and their host clouds — into a single blob. VLAN order is predictable and
-  // matches intuition: VLAN 30 beside VLAN 29/31, not beside VLAN 210.
+  // Hubs START on a grid in VLAN order (numeric ascending; no-VLAN segments by
+  // label after them) — but are only soft-anchored there (forceX/Y below), not
+  // pinned. Content-based clustering was tried and failed: real inventories
+  // have multi-homed hosts everywhere, so "shares ≥1 host" chains almost every
+  // segment into ONE giant cluster whose ring crams all hubs — and their host
+  // clouds — into a single blob. A hard grid scales poorly to hundreds of
+  // VLANs (switch lines span the whole canvas). The hybrid keeps VLAN order as
+  // a positional prior while device→segment links pull co-bridged segments
+  // together: VLAN 30 still starts beside 29/31, and switches sit locally.
   const hostsBySeg = new Map<string, Set<string>>();
   for (const e of visMembership) {
     let s = hostsBySeg.get(e.target);
@@ -155,53 +158,47 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
   });
 
   // --- Switches / APs as satellites ------------------------------------------
-  // Each bridging device is drawn ONCE — a compact card fanned beside its
-  // busiest segment (most visible member hosts) — with faint lines to every
-  // VISIBLE hub it belongs to, so "which switch carries which VLANs" stays
-  // readable without a hairball.
+  // Each bridging device is drawn ONCE — a compact card with faint lines to
+  // every VISIBLE hub it belongs to. The simulation settles each switch into
+  // the middle of its VLAN group (device→segment links below), so "which
+  // switch carries which VLANs" reads locally instead of as canvas-spanning
+  // lines across a hard grid.
   const visDevSegs = new Map<string, string[]>();
   for (const [id, list] of devSegs) {
     if (!devices.has(id)) continue;
     const vis = list.filter((s) => hubIds.has(s));
     if (vis.length > 0) visDevSegs.set(id, vis);
   }
-  // Primary hub per device — most visible member hosts (ties → first).
-  const satPrimary = new Map<string, string>();
-  for (const [id, list] of visDevSegs) {
-    let best: { seg: string; n: number } | null = null;
-    for (const s of list) {
-      const n = hubSize(s);
-      if (!best || n > best.n) best = { seg: s, n };
-    }
-    satPrimary.set(id, best?.seg ?? hubs[0]!.id);
-  }
   // APs without any membership (pure WLAN-only access points) still get a
-  // satellite slot at the first hub — their dashed client links need an anchor.
-  for (const id of apIds) if (!satPrimary.has(id)) satPrimary.set(id, hubs[0]!.id);
-  const satelliteIds = [...satPrimary.keys()];
-  const satsByHub = new Map<string, string[]>();
-  for (const [id, segId] of satPrimary) {
-    let list = satsByHub.get(segId);
-    if (!list) {
-      list = [];
-      satsByHub.set(segId, list);
+  // satellite slot — their dashed client links need something to attach to.
+  const satelliteIds = [...visDevSegs.keys()];
+  for (const id of apIds) if (!satelliteIds.includes(id)) satelliteIds.push(id);
+  // Satellite initial positions — the centroid of their segment anchors; the
+  // simulation refines it into the middle of the group. Membership-less APs
+  // start beside the first hub.
+  for (const id of satelliteIds) {
+    const list = visDevSegs.get(id);
+    if (!list || list.length === 0) {
+      const a = anchor.get(hubs[0]!.id)!;
+      anchor.set(id, { x: a.x + 140, y: a.y - 180 });
+      continue;
     }
-    list.push(id);
-  }
-  // Satellite anchors — a deterministic fan ABOVE their primary hub (APs and
-  // switches share the same ring so they never overlap).
-  for (const [segId, list] of satsByHub) {
-    const a = anchor.get(segId)!;
-    list.forEach((id, j) => {
-      const ang = (j - (list.length - 1) / 2) * 0.9 - Math.PI / 2; // fan above the hub
-      anchor.set(id, { x: a.x + Math.cos(ang) * 230, y: a.y + Math.sin(ang) * 230 });
-    });
+    let cx = 0;
+    let cy = 0;
+    for (const s of list) {
+      const a = anchor.get(s)!;
+      cx += a.x;
+      cy += a.y;
+    }
+    anchor.set(id, { x: cx / list.length, y: cy / list.length });
   }
 
   // --- Simulation nodes --------------------------------------------------------
+  // Hubs and satellites are FREE (no fx/fy) — the grid only seeds their start
+  // position; the soft forceX/Y below keeps them near it.
   const simNodes: SimNode[] = [
-    ...hubs.map((h): SimNode => ({ id: h.id, r: hubSize(h.id) > 0 ? HUB_R : MINI_HUB_R, x: anchor.get(h.id)!.x, y: anchor.get(h.id)!.y, fx: anchor.get(h.id)!.x, fy: anchor.get(h.id)!.y })),
-    ...satelliteIds.map((id): SimNode => ({ id, r: apIds.has(id) ? AP_R : SWITCH_R, x: anchor.get(id)!.x, y: anchor.get(id)!.y, fx: anchor.get(id)!.x, fy: anchor.get(id)!.y })),
+    ...hubs.map((h): SimNode => ({ id: h.id, r: hubSize(h.id) > 0 ? HUB_R : MINI_HUB_R, x: anchor.get(h.id)!.x, y: anchor.get(h.id)!.y })),
+    ...satelliteIds.map((id): SimNode => ({ id, r: apIds.has(id) ? AP_R : SWITCH_R, x: anchor.get(id)!.x, y: anchor.get(id)!.y })),
   ];
 
   // Host initial positions — golden-angle spiral around their hub so the first
@@ -248,16 +245,24 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
   const simLinks: SimLink[] = [
     // Primary spokes only — the simulation tethers each host to ONE hub.
     ...[...primaryHub.entries()].filter(([, seg]) => seg !== null).map(([hostId, seg]): SimLink => ({ source: hostId, target: seg!, dist: HUB_R + 78, str: 0.1 })),
-    // Satellites tether to their primary hub only (pinned anyway — keeps the
-    // fan stable between refetches).
-    ...satelliteIds.map((id): SimLink => ({ source: id, target: satPrimary.get(id)!, dist: HUB_R + 90, str: 0.1 })),
+    // Device→segment membership — the organizing force: each switch settles
+    // into the middle of its VLAN group and drags co-bridged hubs slightly
+    // together (they are soft-anchored to the grid, not pinned).
+    ...satelliteIds.flatMap((id) => {
+      const list = visDevSegs.get(id);
+      if (!list) return [];
+      return list.map((segId): SimLink => ({ source: id, target: segId, dist: HUB_R + 80, str: 0.15 }));
+    }),
     ...visWireless.map((e): SimLink => ({ source: e.source, target: e.target, dist: AP_R + 56, str: 0.12 })),
   ];
 
-  // Hubs/APs are pinned (fx/fy) — only hosts move, so the net converges fast
-  // and stays anchored to the grid between refetches.
+  // Hubs are SOFT-anchored to their grid slot (forceX/Y at low strength) —
+  // hosts and satellites move freely, so the net converges fast while the VLAN
+  // order stays readable between refetches.
   const sim = forceSimulation<SimNode>(simNodes)
     .force('link', forceLink<SimNode, SimLink>(simLinks).id((d) => d.id).distance((l) => l.dist).strength((l) => l.str))
+    .force('gridX', forceX<SimNode>((d) => anchor.get(d.id)?.x ?? 0).strength((d) => (d.id.startsWith('segment:') ? 0.12 : 0)))
+    .force('gridY', forceY<SimNode>((d) => anchor.get(d.id)?.y ?? 0).strength((d) => (d.id.startsWith('segment:') ? 0.12 : 0)))
     .force('charge', forceManyBody().strength(-70))
     .force('collide', forceCollide<SimNode>().radius((d) => d.r + 6))
     .stop();
