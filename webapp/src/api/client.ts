@@ -1217,7 +1217,10 @@ export type TopologyEdge =
       vlans: number[];
     }
   | { id: string; source: string; target: string; kind: 'tunnel'; type: string; status: string | null }
-  | { id: string; source: string; target: string; kind: 'membership'; vlanId: number | null };
+  | { id: string; source: string; target: string; kind: 'membership'; vlanId: number | null }
+  /** WLAN client association — source is the AP that reported the host in its
+   * station table, `via` names the radio interface (e.g. "WLAN-1"). */
+  | { id: string; source: string; target: string; kind: 'wireless'; via: string };
 
 /** Response of GET /topology — the physical + logical network graph. */
 export interface TopologyResponse {
@@ -1386,6 +1389,25 @@ export interface FlowPairsResponse {
   toMs: number;
   table: 'flow_agg_5m' | 'flow_agg_1h';
   pairs: FlowPair[];
+}
+
+/** One known internal device with its total estimated bytes over the window
+ * (GET /flows/devices) — feeds node sizing on the topology page. */
+export interface FlowDeviceRow {
+  deviceId: string;
+  deviceName: string | null;
+  /** Traffic sourced from this device. */
+  srcEstBytes: number;
+  /** Traffic destined to this device. */
+  dstEstBytes: number;
+  estBytes: number;
+}
+
+export interface FlowDevicesResponse {
+  fromMs: number;
+  toMs: number;
+  table: 'flow_agg_5m' | 'flow_agg_1h';
+  devices: FlowDeviceRow[];
 }
 
 /** One gap-filled point of the flow timeseries (GET /flows/timeseries). */
@@ -3647,10 +3669,13 @@ export const api = {
     return apiFetch<SecurityChecksResponse>(`/security-checks${suffix}`);
   },
   /** Physical + logical topology graph for the Topology page. */
-  topology: (params?: { siteId?: string; includeHosts?: boolean }) => {
+  topology: (params?: { siteId?: string; includeHosts?: boolean; tags?: string[]; layer?: string; hostLimit?: number }) => {
     const qs = new URLSearchParams();
     if (params?.siteId) qs.set('siteId', params.siteId);
     if (params?.includeHosts) qs.set('includeHosts', 'true');
+    if (params?.tags && params.tags.length > 0) qs.set('tags', params.tags.join(','));
+    if (params?.layer) qs.set('layer', params.layer);
+    if (params?.hostLimit) qs.set('hostLimit', String(params.hostLimit));
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<TopologyResponse>(`/topology${suffix}`);
   },
@@ -3681,6 +3706,15 @@ export const api = {
     if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<FlowPairsResponse>(`/flows/pairs${suffix}`);
+  },
+  /** Per-device TOTAL traffic over the window — topology node sizing. */
+  flowsDevices: (params?: { from?: string; to?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<FlowDevicesResponse>(`/flows/devices${suffix}`);
   },
   flowsTimeseries: (params?: { from?: string; to?: string; bucket?: '5m' | '1h'; deviceId?: string; class?: 'internet' | 'internal'; siteId?: string }) => {
     const qs = new URLSearchParams();

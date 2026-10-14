@@ -4274,6 +4274,47 @@ paths:
         '401':
           description: Authentication required
 
+  /flows/devices:
+    get:
+      tags: [Flows]
+      summary: Per-device total traffic over the window
+      description: >-
+        Estimated bytes per known internal device where it is source OR
+        destination (internal-classified endpoints only). Feeds node sizing on
+        the topology page — /flows/pairs alone would undercount a device's
+        internet egress.
+      parameters:
+        - in: query
+          name: from
+          required: false
+          schema: { type: string }
+        - in: query
+          name: to
+          required: false
+          schema: { type: string }
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: "Filter to devices where either endpoint belongs to a device at this site (400 for an unknown id)"
+      responses:
+        '200':
+          description: Per-device totals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fromMs: { type: integer }
+                  toMs: { type: integer }
+                  table: { type: string, enum: [flow_agg_5m, flow_agg_1h] }
+                  devices:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FlowDeviceRow'
+        '401':
+          description: Authentication required
+
   /flows/timeseries:
     get:
       tags: [Flows]
@@ -5293,6 +5334,21 @@ paths:
           required: false
           schema: { type: boolean }
           description: "Add end-host nodes (ARP/MAC-table entries) to the logical segments; capped per segment"
+        - in: query
+          name: tags
+          required: false
+          schema: { type: string }
+          description: "Comma-separated device tags, AND semantics — only devices carrying ALL listed tags are included (case-insensitive); segments/cables recompute over the filtered subset"
+        - in: query
+          name: layer
+          required: false
+          schema: { type: string }
+          description: "Only keep devices whose RESOLVED network-layer band matches this id (override > plugin suggestion > heuristic), plus everything attached to them; unknown ids yield an empty graph"
+        - in: query
+          name: hostLimit
+          required: false
+          schema: { type: integer, default: 50, minimum: 1, maximum: 1000 }
+          description: "Max end-hosts rendered per segment (default 50 — ARP tables can hold hundreds of entries)"
       responses:
         '200':
           description: Topology graph (nodes + edges)
@@ -8300,6 +8356,22 @@ components:
         dstEstBytes: { type: integer, format: int64 }
         estBytes: { type: integer, format: int64 }
 
+    FlowDeviceRow:
+      type: object
+      description: >-
+        One known internal device with its total estimated bytes over the window
+        (srcEstBytes = traffic it sourced, dstEstBytes = traffic destined to it;
+        estBytes is their sum). Endpoints classified 'internet' are excluded —
+        this counts internal-to-anywhere and anywhere-to-internal traffic where
+        the endpoint device was resolved.
+      required: [deviceId, srcEstBytes, dstEstBytes, estBytes]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'] }
+        srcEstBytes: { type: integer, format: int64 }
+        dstEstBytes: { type: integer, format: int64 }
+        estBytes: { type: integer, format: int64 }
+
     FlowInventoryIp:
       type: object
       description: >-
@@ -9156,7 +9228,9 @@ components:
       description: >-
         One edge of the topology graph. `kind` discriminates: cable = inferred
         physical link (`via` records the evidence), tunnel = overlay link,
-        membership = device/host belongs to a logical segment.
+        membership = device/host belongs to a logical segment, wireless = WLAN
+        client association (source is the AP that reported the host in its
+        station table; `via` names the radio interface).
       required: [id, source, target, kind]
       properties:
         id: { type: string }
@@ -9164,11 +9238,10 @@ components:
         target: { type: string, description: "Target node id" }
         kind:
           type: string
-          enum: [cable, tunnel, membership]
+          enum: [cable, tunnel, membership, wireless]
         via:
           type: [string, 'null']
-          enum: [mac-table, lacp, null]
-          description: "Evidence the cable was inferred from (kind=cable)"
+          description: "kind=cable: evidence the cable was inferred from (mac-table | lacp). kind=wireless: radio interface on the AP (e.g. WLAN-1)"
         portA: { type: [string, 'null'], description: "Port on the source device (kind=cable)" }
         portB: { type: [string, 'null'], description: "Interface on the target device (kind=cable; null when unknown)" }
         vlans:

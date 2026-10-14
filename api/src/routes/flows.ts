@@ -403,6 +403,76 @@ router.get('/flows/pairs', requireAuth, requirePermission('flows:read'), async (
 });
 
 /**
+ * GET /v1/flows/devices?from&to&siteId — per-device TOTAL traffic over the
+ * window (bytes where the device is source OR destination, internal-classified
+ * endpoints only). Feeds node sizing on the topology page: /flows/pairs alone
+ * would undercount a device's internet egress (dstDeviceId NULL there).
+ */
+router.get('/flows/devices', requireAuth, requirePermission('flows:read'), async (req: Request, res: Response) => {
+  const q = req.query as Record<string, unknown>;
+  const { fromMs, toMs } = resolveWindow(q);
+
+  try {
+    const use5m = toMs - fromMs <= 31 * 86_400_000;
+    const table = use5m ? 'flow_agg_5m' : 'flow_agg_1h';
+
+    // Site filter: a device is interesting when EITHER endpoint belongs to the site.
+    const params: unknown[] = [new Date(fromMs).toISOString(), new Date(toMs).toISOString()];
+    const site = await resolveSiteFilter(params, q, true);
+    if (site.kind === 'unknown') return res.status(400).json({ error: `Unknown site id: ${String(q.siteId)}` });
+
+    let res2 = { rows: [] as any[] };
+    if (!(site.kind === 'ok' && site.empty)) {
+      const siteClause = site.kind === 'ok' ? site.clause : '';
+      // Two GROUP BYs in one pass via UNION ALL would double-count the join;
+      // instead aggregate per endpoint role and merge on the device id.
+      res2 = await pool.query(
+        `WITH src AS (
+           SELECT "srcDeviceId" AS device_id, SUM("estBytes")::bigint AS bytes
+           FROM ${table}
+           WHERE bucket >= $1 AND bucket < $2
+             AND "srcClass" = 'internal' AND "srcDeviceId" IS NOT NULL${siteClause}
+           GROUP BY "srcDeviceId"
+         ), dst AS (
+           SELECT "dstDeviceId" AS device_id, SUM("estBytes")::bigint AS bytes
+           FROM ${table}
+           WHERE bucket >= $1 AND bucket < $2
+             AND "dstClass" = 'internal' AND "dstDeviceId" IS NOT NULL${siteClause}
+           GROUP BY "dstDeviceId"
+         )
+         SELECT COALESCE(s.device_id, d.device_id) AS device_id,
+                COALESCE(s.bytes, 0)::bigint AS src_bytes,
+                COALESCE(d.bytes, 0)::bigint AS dst_bytes
+         FROM src s FULL OUTER JOIN dst d ON s.device_id = d.device_id`,
+        params
+      );
+    }
+
+    const deviceIds = res2.rows.map((r) => String(r.device_id));
+    const names = await loadDeviceNames(deviceIds);
+
+    res.status(200).json({
+      fromMs,
+      toMs,
+      table,
+      devices: res2.rows.map((r) => {
+        const id = String(r.device_id);
+        return {
+          deviceId: id,
+          deviceName: names.get(id) ?? null,
+          srcEstBytes: Number(r.src_bytes),
+          dstEstBytes: Number(r.dst_bytes),
+          estBytes: Number(r.src_bytes) + Number(r.dst_bytes),
+        };
+      }),
+    });
+  } catch (error) {
+    console.error('Error querying per-device flow totals:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
  * GET /v1/flows/timeseries?from&to&bucket=5m|1h&deviceId=&class=internet|internal —
  * bucketed estimated-bytes series for charts. `class` filters on the DESTINATION
  * classification (e.g. "internet" = total egress to the internet over time).
