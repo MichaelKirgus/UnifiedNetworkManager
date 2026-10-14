@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { TopologyNode as TopoNode } from '../../api/client';
 import { formatBytes } from '../formatMetric';
-import { SideHandles } from './DeviceNode';
+import { CenterHandles, SideHandles } from './DeviceNode';
 
 /**
  * Node renderers for the TOPOLOGY "Hosts" net view (force-directed):
@@ -33,13 +33,15 @@ export function HubNode({ data }: { data: HubData }) {
   return (
     <div className="flex flex-col items-center gap-0.5">
       {/* xyflow v12 computes edge endpoints from handle ELEMENTS — without any,
-          getHandleBounds returns null and no edge path is drawn at all. */}
-      <SideHandles />
+          getHandleBounds returns null and no edge path is drawn at all.
+          CenterHandles INSIDE the circle: spokes/switch lines end on the ring,
+          not on the card center (which sits below, over the label). */}
       <div
-        className={mini ? 'flex h-10 w-10 items-center justify-center rounded-full border border-dashed bg-card/60' : 'flex h-[68px] w-[68px] items-center justify-center rounded-full border-2 bg-card shadow-sm'}
+        className={mini ? 'relative flex h-10 w-10 items-center justify-center rounded-full border border-dashed bg-card/60' : 'relative flex h-[68px] w-[68px] items-center justify-center rounded-full border-2 bg-card shadow-sm'}
         style={{ borderColor: `hsl(${hue}, 65%, ${mini ? 45 : 55}%)` }}
         title={mini ? `${label} — no visible hosts (bridged by the attached devices)` : `${label} — ${data.memberCount ?? 0} hosts`}
       >
+        <CenterHandles />
         {!mini && <span className="text-[10px] font-bold leading-tight text-secondary">{data.memberCount ?? 0}</span>}
       </div>
       <span
@@ -88,14 +90,17 @@ export function NetHostNode({ data }: { data: (TopoNode & { kind: 'host' }) & { 
   const r = data.r ?? 10;
   return (
     <div className="relative flex items-center gap-1.5" onClick={() => setOpen((o) => !o)}>
-      {/* Anchor handles — required for xyflow to draw the spoke/WLAN edges. */}
-      <SideHandles />
-      {/* Traffic-sized dot — radius comes from the layout's traffic ranking. */}
+      {/* Traffic-sized dot — radius comes from the layout's traffic ranking.
+          CenterHandles live INSIDE it: the node card is dot+label, so
+          SideHandles would put edge endpoints at the row center and lines
+          visibly miss the white dot. */}
       <span
-        className="block cursor-pointer rounded-full bg-topo-host shadow-sm ring-1 ring-border transition-transform hover:scale-110"
+        className="relative block cursor-pointer rounded-full bg-topo-host shadow-sm ring-1 ring-border transition-transform hover:scale-110"
         style={{ width: r * 2, height: r * 2 }}
         title={label}
-      />
+      >
+        <CenterHandles />
+      </span>
       <span className="max-w-36 truncate text-[9px] leading-none text-secondary">{label}</span>
 
       {open && (

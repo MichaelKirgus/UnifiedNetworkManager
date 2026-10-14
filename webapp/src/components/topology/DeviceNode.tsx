@@ -79,6 +79,22 @@ export function SideHandles() {
   return <>{handles}</>;
 }
 
+/** All eight wall handles stacked at ONE point — the center of their parent.
+ * For nodes whose visual anchor is a sub-element (a host dot inside a
+ * dot+label row, a hub circle above its label), SideHandles would put edge
+ * endpoints at the CARD center and lines visibly miss the shape. Render this
+ * INSIDE the anchored element instead: every edge then ends exactly on it. */
+export function CenterHandles() {
+  const handles: React.ReactElement[] = [];
+  for (const { id } of WALLS) {
+    handles.push(
+      <Handle key={`${id}s`} id={`${id}s`} type="source" position={Position.Top} className="!absolute !left-1/2 !top-1/2 !h-1 !w-1 -translate-x-1/2 -translate-y-1/2 opacity-0" />,
+      <Handle key={`${id}t`} id={`${id}t`} type="target" position={Position.Top} className="!absolute !left-1/2 !top-1/2 !h-1 !w-1 -translate-x-1/2 -translate-y-1/2 opacity-0" />
+    );
+  }
+  return <>{handles}</>;
+}
+
 export function DeviceNode({ data }: { data: (TopoNode & { kind: 'device' }) & { trafficBytes?: number } }) {
   const layer = layerInfo(data.layer);
   return (
