@@ -5,9 +5,11 @@ import type { TopologyEdge as TopoEdge, TopologyNode as TopoNode } from '../../a
 /**
  * Force-directed layout for the TOPOLOGY "Hosts" view — every known host as a
  * dot in a net around its segment hub(s), with WLAN clients visibly attached
- * to their AP. Deterministic: hubs/APs are pinned to computed anchors and all
- * initial positions are index-derived (no Math.random), so refetches at the
- * same data produce the same picture instead of reshuffling.
+ * to their AP and switches/APs (the devices that bridge the VLANs) fanned out
+ * beside their busiest segment. Deterministic: hubs/satellites are pinned to
+ * computed anchors and all initial positions are index-derived (no
+ * Math.random), so refetches at the same data produce the same picture
+ * instead of reshuffling.
  *
  * Node set is capped (MAX_HOSTS) — ranked by traffic when the overlay has
  * bytes, otherwise in server order (newest-first per segment). The caller
@@ -18,7 +20,9 @@ import type { TopologyEdge as TopoEdge, TopologyNode as TopoNode } from '../../a
 export const MAX_HOSTS = 200;
 
 const HUB_R = 34; // hub anchor radius (px) — matches HubNode's 68px circle
+const MINI_HUB_R = 20; // empty-segment mini-hub (40px dashed ring)
 const AP_R = 26;
+const SWITCH_R = 24;
 const HOST_MIN_R = 10;
 const HOST_MAX_R = 26;
 // Cell spacing must exceed a busy hub's host-cloud diameter (~50 hosts spiral
@@ -77,9 +81,25 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
   const membershipEdges = input.edges.filter((e) => e.kind === 'membership' && keptHostIds.has(e.source));
   const wirelessEdges = input.edges.filter((e) => e.kind === 'wireless' && keptHostIds.has(e.target));
 
-  // Hubs: segments with ≥1 kept member host (or the focused one). Empty hubs
-  // are dropped — an isolated dot adds no information.
+  // Device→segment membership (switches/routers bridging VLANs). Read from the
+  // RAW input — `membershipEdges` above is filtered to HOST sources only.
+  const devSegs = new Map<string, string[]>();
+  for (const e of input.edges) {
+    if (e.kind !== 'membership' || !e.source.startsWith('device:')) continue;
+    let list = devSegs.get(e.source);
+    if (!list) {
+      list = [];
+      devSegs.set(e.source, list);
+    }
+    list.push(e.target);
+  }
+
+  // Hubs: every segment in the grid — including EMPTY ones (no visible host),
+  // rendered as a compact dashed mini-hub. A segment qualifies when it has a
+  // visible member host OR at least one bridging device, so "this VLAN exists
+  // but no visible hosts" stays readable instead of vanishing from the grid.
   let keptSegs = new Set(membershipEdges.map((e) => e.target));
+  for (const list of devSegs.values()) for (const s of list) keptSegs.add(s);
   if (input.segmentFilter) {
     keptSegs = input.segmentFilter === 'all' ? keptSegs : new Set([input.segmentFilter].filter((s) => segments.some((x) => x.id === s)));
   }
@@ -98,7 +118,6 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
 
   // APs: devices that own a kept wireless edge.
   const apIds = new Set(visWireless.map((e) => e.source));
-  const aps = [...apIds].map((id) => devices.get(id)!);
 
   if (hubs.length === 0 || hostsInView.size + apIds.size === 0) {
     return { rfNodes: [], rfEdges: [], totalHosts: allHosts.length, shownHosts: 0, rankedByTraffic };
@@ -135,34 +154,54 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
     anchor.set(h.id, { x: (col - (cols - 1) / 2) * GRID_X, y: (row - (rows - 1) / 2) * GRID_Y });
   });
 
-  // AP anchors — a ring slot around their hub (first visible segment they're a
-  // member of; else the first hub). Deterministic angle per index.
-  const apHub = new Map<string, string>();
-  for (const apId of apIds) {
-    const seg = visMembership.find((m) => m.source === apId)?.target ?? hubs[0].id;
-    apHub.set(apId, seg);
+  // --- Switches / APs as satellites ------------------------------------------
+  // Each bridging device is drawn ONCE — a compact card fanned beside its
+  // busiest segment (most visible member hosts) — with faint lines to every
+  // VISIBLE hub it belongs to, so "which switch carries which VLANs" stays
+  // readable without a hairball.
+  const visDevSegs = new Map<string, string[]>();
+  for (const [id, list] of devSegs) {
+    if (!devices.has(id)) continue;
+    const vis = list.filter((s) => hubIds.has(s));
+    if (vis.length > 0) visDevSegs.set(id, vis);
   }
-  const apsByHub = new Map<string, string[]>();
-  for (const apId of apIds) {
-    let list = apsByHub.get(apHub.get(apId)!);
+  // Primary hub per device — most visible member hosts (ties → first).
+  const satPrimary = new Map<string, string>();
+  for (const [id, list] of visDevSegs) {
+    let best: { seg: string; n: number } | null = null;
+    for (const s of list) {
+      const n = hubSize(s);
+      if (!best || n > best.n) best = { seg: s, n };
+    }
+    satPrimary.set(id, best?.seg ?? hubs[0]!.id);
+  }
+  // APs without any membership (pure WLAN-only access points) still get a
+  // satellite slot at the first hub — their dashed client links need an anchor.
+  for (const id of apIds) if (!satPrimary.has(id)) satPrimary.set(id, hubs[0]!.id);
+  const satelliteIds = [...satPrimary.keys()];
+  const satsByHub = new Map<string, string[]>();
+  for (const [id, segId] of satPrimary) {
+    let list = satsByHub.get(segId);
     if (!list) {
       list = [];
-      apsByHub.set(apHub.get(apId)!, list);
+      satsByHub.set(segId, list);
     }
-    list.push(apId);
+    list.push(id);
   }
-  for (const [segId, list] of apsByHub) {
+  // Satellite anchors — a deterministic fan ABOVE their primary hub (APs and
+  // switches share the same ring so they never overlap).
+  for (const [segId, list] of satsByHub) {
     const a = anchor.get(segId)!;
-    list.forEach((apId, j) => {
+    list.forEach((id, j) => {
       const ang = (j - (list.length - 1) / 2) * 0.9 - Math.PI / 2; // fan above the hub
-      anchor.set(apId, { x: a.x + Math.cos(ang) * 230, y: a.y + Math.sin(ang) * 230 });
+      anchor.set(id, { x: a.x + Math.cos(ang) * 230, y: a.y + Math.sin(ang) * 230 });
     });
   }
 
   // --- Simulation nodes --------------------------------------------------------
   const simNodes: SimNode[] = [
-    ...hubs.map((h): SimNode => ({ id: h.id, r: HUB_R, x: anchor.get(h.id)!.x, y: anchor.get(h.id)!.y, fx: anchor.get(h.id)!.x, fy: anchor.get(h.id)!.y })),
-    ...aps.map((d): SimNode => ({ id: d.id, r: AP_R, x: anchor.get(d.id)!.x, y: anchor.get(d.id)!.y, fx: anchor.get(d.id)!.x, fy: anchor.get(d.id)!.y })),
+    ...hubs.map((h): SimNode => ({ id: h.id, r: hubSize(h.id) > 0 ? HUB_R : MINI_HUB_R, x: anchor.get(h.id)!.x, y: anchor.get(h.id)!.y, fx: anchor.get(h.id)!.x, fy: anchor.get(h.id)!.y })),
+    ...satelliteIds.map((id): SimNode => ({ id, r: apIds.has(id) ? AP_R : SWITCH_R, x: anchor.get(id)!.x, y: anchor.get(id)!.y, fx: anchor.get(id)!.x, fy: anchor.get(id)!.y })),
   ];
 
   // Host initial positions — golden-angle spiral around their hub so the first
@@ -209,6 +248,9 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
   const simLinks: SimLink[] = [
     // Primary spokes only — the simulation tethers each host to ONE hub.
     ...[...primaryHub.entries()].filter(([, seg]) => seg !== null).map(([hostId, seg]): SimLink => ({ source: hostId, target: seg!, dist: HUB_R + 78, str: 0.1 })),
+    // Satellites tether to their primary hub only (pinned anyway — keeps the
+    // fan stable between refetches).
+    ...satelliteIds.map((id): SimLink => ({ source: id, target: satPrimary.get(id)!, dist: HUB_R + 90, str: 0.1 })),
     ...visWireless.map((e): SimLink => ({ source: e.source, target: e.target, dist: AP_R + 56, str: 0.12 })),
   ];
 
@@ -226,8 +268,9 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
   // Card sizes per type — the simulation centers on these radii, so subtract
   // half the CARD size to center the rendered node (not just its collision dot).
   const cardHalf = (id: string): { hw: number; hh: number } => {
-    if (id.startsWith('segment:')) return { hw: HUB_R, hh: HUB_R }; // 68px circle
-    if (devices.has(id)) return { hw: 32, hh: 26 }; // AP card w-16
+    if (id.startsWith('segment:')) return hubSize(id) > 0 ? { hw: HUB_R, hh: HUB_R } : { hw: MINI_HUB_R, hh: MINI_HUB_R }; // 68px / 40px circle
+    if (apIds.has(id)) return { hw: 32, hh: 26 }; // AP card w-16
+    if (devices.has(id)) return { hw: 26, hh: 20 }; // switch card w-[52px]
     const r = hostRadius.get(id) ?? HOST_MIN_R;
     return { hw: r + 4, hh: r + 4 }; // dot + label padding
   };
@@ -239,11 +282,18 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
 
   const rfNodes: FlowNode[] = [];
   for (const h of hubs) {
-    const count = visMembership.filter((m) => m.target === h.id).length;
-    rfNodes.push({ id: h.id, type: 'hub', position: pos(h.id), data: { ...h, memberCount: count } });
+    const count = hubSize(h.id);
+    // Empty segments render as compact dashed mini-hubs — present in the VLAN
+    // grid, but not taking a full hub's space.
+    rfNodes.push({ id: h.id, type: 'hub', position: pos(h.id), data: { ...h, memberCount: count, variant: count > 0 ? 'hub' : 'mini-hub' } });
   }
-  for (const d of aps) {
-    rfNodes.push({ id: d.id, type: 'ap', position: pos(d.id), data: d });
+  for (const id of satelliteIds) {
+    const d = devices.get(id)!;
+    if (apIds.has(id)) {
+      rfNodes.push({ id, type: 'ap', position: pos(id), data: d });
+    } else {
+      rfNodes.push({ id, type: 'switch', position: pos(id), data: { ...d, segCount: visDevSegs.get(id)!.length } });
+    }
   }
   const shownHostIds = new Set<string>();
   for (const h of hosts) {
@@ -272,6 +322,17 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
       type: 'straight' as const,
       style: { stroke: 'rgb(var(--topo-cable))', strokeWidth: 1, strokeOpacity: 0.3 },
     })),
+    // Device→segment membership — which switch bridges which VLANs (fainter
+    // than host spokes; a multi-VLAN switch shows one line per segment).
+    ...satelliteIds.flatMap((id) =>
+      visDevSegs.get(id)!.map((segId) => ({
+        id: `dev-${id}::${segId}`,
+        source: id,
+        target: segId,
+        type: 'straight' as const,
+        style: { stroke: 'rgb(var(--topo-cable))', strokeWidth: 1, strokeOpacity: 0.2 },
+      }))
+    ),
     // WLAN associations — the distinct dashed link (AP → client).
     ...visWireless.map((e) => ({
       id: e.id,

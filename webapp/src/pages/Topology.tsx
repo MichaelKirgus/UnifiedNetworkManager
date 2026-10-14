@@ -17,7 +17,7 @@ import { api, NetworkLayer, TopologyEdge as TopoEdge, TopologyNode as TopoNode }
 import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
 import { joinHostTraffic, joinPairTraffic, joinSegmentTraffic, maxOf, nodeEmphasis } from '../components/topology/traffic';
 import { layoutHostsNet, MAX_HOSTS } from '../components/topology/hostsLayout';
-import { ApNode, HubNode, NetHostNode } from '../components/topology/HubNode';
+import { ApNode, HubNode, NetHostNode, SwitchNode } from '../components/topology/HubNode';
 import { DeviceNode, setLayerRegistry } from '../components/topology/DeviceNode';
 import { SegmentNode } from '../components/topology/SegmentNode';
 import { HostNode } from '../components/topology/HostNode';
@@ -30,9 +30,10 @@ const nodeTypes = {
   host: HostNode,
   remote: RemoteNode,
   band: BandNode,
-  // Hosts net view (force-directed) — hub/AP/host-dot renderers.
+  // Hosts net view (force-directed) — hub/AP/switch/host-dot renderers.
   hub: HubNode,
   ap: ApNode,
+  switch: SwitchNode,
   nethost: NetHostNode,
 };
 
@@ -961,6 +962,12 @@ export default function Topology() {
                 <span className="flex items-center gap-1">
                   <span className="inline-block h-3 w-3 rounded-full border-2 border-topo-segment bg-card" /> segment hub
                 </span>
+                <span className="flex items-center gap-1" title="VLAN with no visible hosts — bridged by the attached devices">
+                  <span className="inline-block h-2.5 w-2.5 rounded-full border border-dashed border-topo-segment bg-card/60" /> empty segment
+                </span>
+                <span className="flex items-center gap-1" title="Switch/router bridging the attached VLANs">
+                  <span className="inline-block h-2 w-3 rounded-sm border border-border bg-card" /> switch
+                </span>
                 <span className="flex items-center gap-1">
                   <span className="inline-block h-2.5 w-2.5 rounded-full bg-topo-host" title="Dot size ≈ traffic in window">host (size ≈ traffic)</span>
                 </span>
@@ -1051,7 +1058,7 @@ export default function Topology() {
                         ? TOPO_RGB.host
                         : n.type === 'remote'
                           ? TOPO_RGB.remote
-                          : TOPO_RGB.node;
+                          : TOPO_RGB.node; // ap + switch = device hue
                   const d = n.data as { trafficBytes?: number };
                   if (!traffic || typeof d.trafficBytes !== 'number') return `rgb(${base.join(' ')})`;
                   const max = base === TOPO_RGB.segment ? traffic.maxSegment : base === TOPO_RGB.host ? traffic.maxHost : traffic.maxDevice;

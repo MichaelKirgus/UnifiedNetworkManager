@@ -20,24 +20,52 @@ function hubHue(key: string): number {
   return h;
 }
 
-export function HubNode({ data }: { data: (TopoNode & { kind: 'segment' }) & { memberCount?: number } }) {
+/** Hub data — the segment union member plus layout extras. Empty segments
+ * render as a compact dashed mini-hub so they stay in the VLAN grid without
+ * taking full space (`variant` from the layout). */
+type SegmentNodeData = Extract<TopoNode, { kind: 'segment' }>;
+type HubData = SegmentNodeData & { memberCount?: number; variant?: 'hub' | 'mini-hub' };
+
+export function HubNode({ data }: { data: HubData }) {
   const hue = hubHue(data.id);
   const label = data.vlanId !== null ? `VLAN ${data.vlanId}` : data.label;
+  const mini = data.variant === 'mini-hub';
   return (
     <div className="flex flex-col items-center gap-0.5">
       {/* xyflow v12 computes edge endpoints from handle ELEMENTS — without any,
           getHandleBounds returns null and no edge path is drawn at all. */}
       <SideHandles />
       <div
-        className="flex h-[68px] w-[68px] items-center justify-center rounded-full border-2 bg-card shadow-sm"
-        style={{ borderColor: `hsl(${hue}, 65%, 55%)` }}
-        title={`${label} — ${data.memberCount ?? 0} hosts`}
+        className={mini ? 'flex h-10 w-10 items-center justify-center rounded-full border border-dashed bg-card/60' : 'flex h-[68px] w-[68px] items-center justify-center rounded-full border-2 bg-card shadow-sm'}
+        style={{ borderColor: `hsl(${hue}, 65%, ${mini ? 45 : 55}%)` }}
+        title={mini ? `${label} — no visible hosts (bridged by the attached devices)` : `${label} — ${data.memberCount ?? 0} hosts`}
       >
-        <span className="text-[10px] font-bold leading-tight text-secondary">{data.memberCount ?? 0}</span>
+        {!mini && <span className="text-[10px] font-bold leading-tight text-secondary">{data.memberCount ?? 0}</span>}
       </div>
-      <span className="max-w-28 truncate rounded bg-card/90 px-1 text-[9px] font-semibold" style={{ color: `hsl(${hue}, 65%, 45%)` }} title={label}>
+      <span
+        className={mini ? 'max-w-24 truncate rounded bg-card/60 px-1 text-[8px]' : 'max-w-28 truncate rounded bg-card/90 px-1 text-[9px] font-semibold'}
+        style={{ color: `hsl(${hue}, 65%, ${mini ? 55 : 45}%)` }}
+        title={label}
+      >
         {label}
       </span>
+    </div>
+  );
+}
+
+/** Switch/router satellite — a compact card fanned beside its busiest segment,
+ * with faint lines to every VLAN it bridges (see hostsLayout). */
+export function SwitchNode({ data }: { data: TopoNode & { kind: 'device' } & { segCount?: number } }) {
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <SideHandles />
+      <div
+        className="flex h-[34px] w-[52px] flex-col items-center justify-center rounded-md border border-border bg-card px-1 shadow-sm"
+        title={`${data.name} — bridges ${data.segCount ?? 0} segment(s)`}
+      >
+        <span className="text-[7px] font-bold uppercase tracking-wide text-faint">SW</span>
+        <span className="max-w-full truncate text-[8px] font-semibold text-secondary">{data.name}</span>
+      </div>
     </div>
   );
 }
