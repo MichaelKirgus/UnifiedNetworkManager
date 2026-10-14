@@ -103,13 +103,61 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
   }
 
   // --- Deterministic anchors --------------------------------------------------
+  // Hubs are grouped into CLUSTERS of related segments — two hubs that share
+  // member hosts sit next to each other, so the net reads as organic islands
+  // (VLAN 30 beside VLAN 210 only if a host actually spans both) instead of a
+  // server-order grid. Greedy: seed with the busiest hub, absorb every hub
+  // sharing ≥1 host with the cluster; repeat over the remainder.
+  const hostsBySeg = new Map<string, Set<string>>();
+  for (const e of visMembership) {
+    let s = hostsBySeg.get(e.target);
+    if (!s) {
+      s = new Set();
+      hostsBySeg.set(e.target, s);
+    }
+    s.add(e.source);
+  }
+  const hubSize = (id: string) => hostsBySeg.get(id)?.size ?? 0;
+  const remaining = [...hubs].sort((a, b) => hubSize(b.id) - hubSize(a.id) || a.id.localeCompare(b.id));
+  const clusters: string[][] = [];
+  while (remaining.length > 0) {
+    const cluster = [remaining.shift()!.id];
+    // Absorb every remaining hub that shares ≥1 host with ANY cluster member
+    // (transitive closure — a chain of overlapping segments is one island).
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (let i = remaining.length - 1; i >= 0; i--) {
+        const other = remaining[i].id;
+        if ([...hostsBySeg.get(other) ?? []].some((h) => cluster.some((c) => hostsBySeg.get(c)?.has(h)))) {
+          cluster.push(other);
+          remaining.splice(i, 1);
+          grew = true;
+        }
+      }
+    }
+    clusters.push(cluster);
+  }
+  // Cluster cells on a grid — big islands first.
+  clusters.sort((a, b) => b.length - a.length || hubSize(b[0]) - hubSize(a[0]));
+  const cols = Math.max(1, Math.ceil(Math.sqrt(clusters.length)));
+  const rows = Math.max(1, Math.ceil(clusters.length / cols));
   const anchor = new Map<string, { x: number; y: number }>();
-  const cols = Math.max(1, Math.ceil(Math.sqrt(hubs.length)));
-  const rows = Math.max(1, Math.ceil(hubs.length / cols));
-  hubs.forEach((h, i) => {
+  clusters.forEach((c, i) => {
     const col = i % cols;
     const row = Math.floor(i / cols);
-    anchor.set(h.id, { x: (col - (cols - 1) / 2) * GRID_X, y: (row - (rows - 1) / 2) * GRID_Y });
+    const cx = (col - (cols - 1) / 2) * GRID_X;
+    const cy = (row - (rows - 1) / 2) * GRID_Y;
+    if (c.length === 1) {
+      anchor.set(c[0], { x: cx, y: cy });
+      return;
+    }
+    // Ring around the cell center — related hubs literally touch.
+    const ringR = Math.min(230, 96 + c.length * 48);
+    c.forEach((id, j) => {
+      const ang = (j / c.length) * Math.PI * 2 - Math.PI / 2;
+      anchor.set(id, { x: cx + Math.cos(ang) * ringR, y: cy + Math.sin(ang) * ringR });
+    });
   });
 
   // AP anchors — a ring slot around their hub (first visible segment they're a
@@ -151,11 +199,27 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
     const b = input.hostBytes?.get(h.id) ?? 0;
     if (b > maxBytes) maxBytes = b;
   }
+  // PRIMARY hub per host — the visible segment with the MOST members (ties →
+  // first). One spoke per host: multi-segment hosts no longer drag lines
+  // across the whole canvas, which is what made the net read as a hairball.
+  // WLAN-only clients have NO membership → null (they anchor at their AP and
+  // get no fake cross-canvas spoke).
+  const primaryHub = new Map<string, string | null>();
+  for (const h of hosts) {
+    let best: { seg: string; n: number } | null = null;
+    for (const m of visMembership) {
+      if (m.source !== h.id) continue;
+      const n = hubSize(m.target);
+      if (!best || n > best.n) best = { seg: m.target, n };
+    }
+    primaryHub.set(h.id, best?.seg ?? null);
+  }
+
   const perHubIndex = new Map<string, number>();
   for (const h of hosts) {
-    // Primary hub = first visible membership; WLAN-only clients anchor at their AP.
-    let refId = visMembership.find((m) => m.source === h.id)?.target ?? visWireless.find((w) => w.target === h.id)?.source ?? hubs[0].id;
-    if (!anchor.has(refId)) refId = hubs[0].id;
+    // WLAN-only clients anchor at their AP; everyone else at their primary hub.
+    let refId = primaryHub.get(h.id) ?? visWireless.find((w) => w.target === h.id)?.source ?? hubs[0]!.id;
+    if (!anchor.has(refId)) refId = hubs[0]!.id;
     const i = perHubIndex.get(refId) ?? 0;
     perHubIndex.set(refId, i + 1);
     const a = i * 2.39996323; // golden angle (rad)
@@ -168,7 +232,8 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
   }
 
   const simLinks: SimLink[] = [
-    ...visMembership.map((e): SimLink => ({ source: e.source, target: e.target, dist: HUB_R + 70, str: 0.04 })),
+    // Primary spokes only — the simulation tethers each host to ONE hub.
+    ...[...primaryHub.entries()].filter(([, seg]) => seg !== null).map(([hostId, seg]): SimLink => ({ source: hostId, target: seg!, dist: HUB_R + 78, str: 0.1 })),
     ...visWireless.map((e): SimLink => ({ source: e.source, target: e.target, dist: AP_R + 56, str: 0.12 })),
   ];
 
@@ -176,10 +241,10 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
   // and stays anchored to the grid between refetches.
   const sim = forceSimulation<SimNode>(simNodes)
     .force('link', forceLink<SimNode, SimLink>(simLinks).id((d) => d.id).distance((l) => l.dist).strength((l) => l.str))
-    .force('charge', forceManyBody().strength(-60))
-    .force('collide', forceCollide<SimNode>().radius((d) => d.r + 4))
+    .force('charge', forceManyBody().strength(-45))
+    .force('collide', forceCollide<SimNode>().radius((d) => d.r + 6))
     .stop();
-  for (let i = 0; i < 250; i++) sim.tick();
+  for (let i = 0; i < 300; i++) sim.tick();
 
   // --- Emit React Flow nodes/edges ---------------------------------------------
   const simById = new Map(simNodes.map((s) => [s.id, s]));
@@ -215,10 +280,18 @@ export function layoutHostsNet(input: HostsNetInput): HostsNetResult {
 
   // Straight lines — radial spokes read cleaner than beziers in a net view
   // (endpoints come from the nodes' wall handles; see SideHandles).
+  // Drawn spokes = primary membership only (one line per host). The full
+  // multi-segment list stays in the node popover data.
+  const drawnSpokes = new Map<string, { source: string; target: string }>();
+  for (const [hostId, seg] of primaryHub) {
+    if (!seg || !hostsInView.has(hostId)) continue;
+    drawnSpokes.set(hostId, { source: hostId, target: seg });
+  }
+
   const rfEdges: FlowEdge[] = [
     // Faint membership spokes — structure, not the story.
-    ...visMembership.map((e) => ({
-      id: e.id,
+    ...[...drawnSpokes.entries()].map(([hostId, e]) => ({
+      id: `spoke-${hostId}`,
       source: e.source,
       target: e.target,
       type: 'straight' as const,
