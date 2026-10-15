@@ -2,11 +2,19 @@
  * WebAuthn option conversion helpers.
  *
  * The API returns SimpleWebAuthn JSON options where the binary members are
- * base64url strings (`challenge`, `user.id`). The browser's WebAuthn API
- * requires those as ArrayBufferView — passing the raw JSON throws a
- * TypeError ("'challenge' member … could not be converted to any of:
- * ArrayBufferView, ArrayBuffer") before any prompt appears.
+ * base64url strings (`challenge`, `user.id`) and the credential descriptors
+ * (`allowCredentials[]` / `excludeCredentials[]`) are `{ id: string }` objects
+ * (SimpleWebAuthn v10+ shape). The browser's WebAuthn API requires all of
+ * those as ArrayBufferView — passing the raw JSON throws a TypeError before
+ * any prompt appears.
  */
+
+/** Extracts the base64url id from a descriptor that may be a plain string or an `{ id }` object. */
+function descriptorId(c: unknown): string | undefined {
+  if (typeof c === 'string') return c;
+  const id = (c as { id?: unknown })?.id;
+  return typeof id === 'string' ? id : undefined;
+}
 
 /** base64url (no padding) → Uint8Array. Returns undefined for empty input. */
 export function b64uToBytes(b64u?: string): Uint8Array | undefined {
@@ -30,6 +38,9 @@ export function toCreationOptions(options: unknown): PublicKeyCredentialCreation
       name: o.user?.name ?? '',
       displayName: o.user?.displayName ?? o.user?.name ?? '',
     },
+    excludeCredentials: Array.isArray(o.excludeCredentials)
+      ? o.excludeCredentials.map((c: unknown) => ({ type: 'public-key' as const, id: b64uToBytes(descriptorId(c))! }))
+      : [],
   } as unknown as PublicKeyCredentialCreationOptions;
 }
 
@@ -40,7 +51,7 @@ export function toRequestOptions(options: unknown): PublicKeyCredentialRequestOp
     ...o,
     challenge: b64uToBytes(o.challenge)!,
     allowCredentials: Array.isArray(o.allowCredentials)
-      ? o.allowCredentials.map((id: string) => ({ type: 'public-key' as const, id: b64uToBytes(id)! }))
+      ? o.allowCredentials.map((c: unknown) => ({ type: 'public-key' as const, id: b64uToBytes(descriptorId(c))! }))
       : [],
   } as unknown as PublicKeyCredentialRequestOptions;
 }
