@@ -79,3 +79,22 @@ export interface CveProvider {
   id: string;
   fetchAdvisories(pkgs: PackageQuery[]): Promise<AdvisoryRow[]>;
 }
+
+/**
+ * Dedupes advisory rows by their (ecosystem, packageName, id) PK, keeping the
+ * FIRST occurrence of each key. Required before bulk upserting: one advisory is
+ * returned once per queried version of its package (openssl@3.0.x AND
+ * openssl@3.2.x both yield the same CVE rows), and a single
+ * `INSERT ... ON CONFLICT` statement may not contain two rows with the same
+ * conflict target — Postgres rejects it with "ON CONFLICT DO UPDATE command
+ * cannot affect row a second time". The duplicates are identical advisory
+ * objects, so keep-first is lossless.
+ */
+export function dedupeAdvisoriesByPk(rows: AdvisoryRow[]): AdvisoryRow[] {
+  const byPk = new Map<string, AdvisoryRow>();
+  for (const r of rows) {
+    const key = `${r.ecosystem}\u0000${r.packageName}\u0000${r.id}`;
+    if (!byPk.has(key)) byPk.set(key, r);
+  }
+  return [...byPk.values()];
+}

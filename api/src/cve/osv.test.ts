@@ -1,11 +1,17 @@
 /**
- * Unit tests for the CVE provider's pure helpers — CVSS v3 vector scoring
- * (cvss.ts) and ecosystem mapping (ecosystems.ts). The network path itself is
- * covered by live E2E.
+ * Unit tests for the CVE worker's pure helpers — CVSS v3 vector scoring
+ * (cvss.ts), ecosystem mapping (ecosystems.ts) and advisory PK dedupe
+ * (types.ts). The network path itself is covered by live E2E.
  */
 
 import { parseCvssVector } from './cvss';
 import { mapToOsvEcosystem } from './ecosystems';
+import { dedupeAdvisoriesByPk } from './types';
+import type { AdvisoryRow } from './types';
+
+function advisory(overrides: Partial<AdvisoryRow> & Pick<AdvisoryRow, 'ecosystem' | 'packageName' | 'id'>): AdvisoryRow {
+  return { severityScore: null, severityRank: 'unknown', affectedRanges: [], ...overrides };
+}
 
 describe('parseCvssVector', () => {
   it('scores a known critical vector (AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H = 9.8)', () => {
@@ -53,7 +59,9 @@ describe('mapToOsvEcosystem', () => {
   it('maps plugin ecosystem tags onto OSV.dev ecosystem names', () => {
     expect(mapToOsvEcosystem('debian')).toBe('Debian');
     expect(mapToOsvEcosystem('ubuntu')).toBe('Debian'); // Ubuntu advisories live in the Debian source
-    expect(mapToOsvEcosystem('alpine')).toBe('Alpine Linux');
+    expect(mapToOsvEcosystem('alpine')).toBe('Alpine'); // no release → bare name (versionless lookups only)
+    expect(mapToOsvEcosystem('alpine:v3.19')).toBe('Alpine:v3.19'); // OSV keys Alpine per release
+    expect(mapToOsvEcosystem('alpine:3.18')).toBe('Alpine:v3.18');
     expect(mapToOsvEcosystem('npm')).toBe('npm');
     expect(mapToOsvEcosystem('pypi')).toBe('PyPI');
   });
@@ -63,5 +71,33 @@ describe('mapToOsvEcosystem', () => {
     expect(mapToOsvEcosystem('')).toBeNull();
     expect(mapToOsvEcosystem(null)).toBeNull();
     expect(mapToOsvEcosystem('routeros')).toBeNull(); // no OSV source yet
+  });
+});
+
+describe('dedupeAdvisoriesByPk', () => {
+  it('drops duplicate (ecosystem, packageName, id) rows — one per queried version of a package', () => {
+    const base = advisory({ ecosystem: 'Debian', packageName: 'openssl', id: 'DEBIAN-CVE-2024-0727' });
+    // Same advisory returned by the openssl@3.0.x AND openssl@3.2.x queries —
+    // a single ON CONFLICT statement containing both is rejected by Postgres.
+    const rows = [base, { ...base }, base];
+    expect(dedupeAdvisoriesByPk(rows)).toHaveLength(1);
+  });
+
+  it('keeps the FIRST occurrence and preserves order of distinct keys', () => {
+    const a1 = advisory({ ecosystem: 'Debian', packageName: 'openssl', id: 'CVE-2024-0727', severityScore: 9.8, severityRank: 'critical' });
+    const a2 = advisory({ ecosystem: 'Debian', packageName: 'curl', id: 'CVE-2023-38545', severityScore: 6.1, severityRank: 'medium' });
+    const a1dup = { ...a1, summary: 'should be ignored — keep-first' };
+    expect(dedupeAdvisoriesByPk([a1, a2, a1dup])).toEqual([a1, a2]);
+  });
+
+  it('treats different ecosystems or ids as distinct rows', () => {
+    const d = advisory({ ecosystem: 'Debian', packageName: 'openssl', id: 'CVE-2024-0727' });
+    const n = advisory({ ecosystem: 'npm', packageName: 'openssl', id: 'CVE-2024-0727' });
+    const d2 = advisory({ ecosystem: 'Debian', packageName: 'openssl', id: 'CVE-2023-5678' });
+    expect(dedupeAdvisoriesByPk([d, n, d2])).toHaveLength(3);
+  });
+
+  it('handles an empty input', () => {
+    expect(dedupeAdvisoriesByPk([])).toEqual([]);
   });
 });

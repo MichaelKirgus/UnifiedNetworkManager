@@ -27,6 +27,7 @@ import { emitNotification, resolveNotificationsByDedupeKeys } from '../notificat
 import { LEADER_KEYS } from '../workers/leader';
 import { initWorker, trackBeat } from '../workers/stats';
 import type { AdvisoryRow, PackageQuery } from './types';
+import { dedupeAdvisoriesByPk } from './types';
 import { matchesVersion } from './match';
 import { osvProvider } from './osv';
 
@@ -88,8 +89,11 @@ async function collectFleetPackages(): Promise<PackageQuery[]> {
 
 /** Bulk-upserts advisory rows (batches stay under the bind-parameter budget). */
 async function upsertAdvisories(rows: AdvisoryRow[], nowIso: string): Promise<void> {
-  for (let start = 0; start < rows.length; start += BULK_ROWS_PER_STATEMENT) {
-    const batch = rows.slice(start, start + BULK_ROWS_PER_STATEMENT);
+  // Dedupe by PK before batching — see dedupeAdvisoriesByPk for why a single
+  // ON CONFLICT statement must not contain duplicate conflict targets.
+  const deduped = dedupeAdvisoriesByPk(rows);
+  for (let start = 0; start < deduped.length; start += BULK_ROWS_PER_STATEMENT) {
+    const batch = deduped.slice(start, start + BULK_ROWS_PER_STATEMENT);
     const params: unknown[] = [];
     let p = 1;
     const valuesSql = batch.map((r) => {
@@ -113,57 +117,63 @@ async function upsertAdvisories(rows: AdvisoryRow[], nowIso: string): Promise<vo
   }
 }
 
-/** Drops advisories for (ecosystem, package) pairs no longer installed in the fleet. */
-async function pruneStaleAdvisories(pkgs: PackageQuery[]): Promise<void> {
-  if (pkgs.length === 0) return; // empty fleet — keep the knowledge base intact
-  const distinct = new Map<string, { ecosystem: string; name: string }>();
-  for (const p of pkgs) distinct.set(`${p.ecosystem}|${p.name.toLowerCase()}`, { ecosystem: p.ecosystem, name: p.name });
-  const set = Array.from(distinct.values());
-  for (let start = 0; start < set.length; start += BULK_ROWS_PER_STATEMENT) {
-    const batch = set.slice(start, start + BULK_ROWS_PER_STATEMENT);
-    const params: unknown[] = [];
-    let p = 1;
-    const valuesSql = batch.map((r) => {
-      params.push(r.ecosystem, r.name);
-      return `($${p++},$${p++})`;
-    }).join(', ');
-    await pool.query(
-      `DELETE FROM cve_advisories a WHERE NOT EXISTS (
-         SELECT 1 FROM (VALUES ${valuesSql}) AS v(ecosystem, pkg)
-          WHERE v.ecosystem = a.ecosystem AND lower(v.pkg) = lower(a."packageName")
-       )`,
-      params
-    );
-  }
-}
-
 /**
- * Removes empty-range advisory rows for the queried packages. Versioned OSV
- * queries only return advisories that AFFECT the given version — every such row
- * carries at least one affected range, so an empty `affectedRanges` marks a
- * junk row (e.g. from a pre-versioning fetch). Self-healing: if a legitimate
- * advisory ever lacked ranges it is re-fetched on the next cycle anyway.
+ * Prunes advisories for (ecosystem, package) pairs no longer installed in the
+ * fleet, then removes empty-range rows for the remaining fleet packages. Both
+ * DELETEs must see the FULL fleet-pair set in one predicate — so the pairs are
+ * loaded into a session-scoped temp table on a dedicated connection and each
+ * DELETE runs once against it (batching only the INSERT). The earlier per-batch
+ * `NOT EXISTS (VALUES <slice>)` form was wrong: with disjoint slices, an
+ * advisory survived only if its package appeared in EVERY slice — i.e. prune
+ * deleted every row on any fleet larger than one batch. Returns { pruned, cleaned }.
  */
-async function cleanupEmptyRangeAdvisories(pkgs: PackageQuery[]): Promise<void> {
-  const distinct = new Map<string, { ecosystem: string; name: string }>();
-  for (const p of pkgs) distinct.set(`${p.ecosystem}|${p.name.toLowerCase()}`, { ecosystem: p.ecosystem, name: p.name });
-  const set = Array.from(distinct.values());
-  if (set.length === 0) return;
-  for (let start = 0; start < set.length; start += BULK_ROWS_PER_STATEMENT) {
-    const batch = set.slice(start, start + BULK_ROWS_PER_STATEMENT);
-    const params: unknown[] = [];
-    let p = 1;
-    const valuesSql = batch.map((r) => {
-      params.push(r.ecosystem, r.name);
-      return `($${p++},$${p++})`;
-    }).join(', ');
-    await pool.query(
-      `DELETE FROM cve_advisories a WHERE a."affectedRanges" = '[]'::jsonb AND EXISTS (
-         SELECT 1 FROM (VALUES ${valuesSql}) AS v(ecosystem, pkg)
+async function pruneAndCleanAdvisories(pkgs: PackageQuery[]): Promise<{ pruned: number; cleaned: number }> {
+  if (pkgs.length === 0) return { pruned: 0, cleaned: 0 }; // empty fleet — keep the knowledge base intact
+
+  const client = await pool.connect();
+  try {
+    const distinct = new Map<string, { ecosystem: string; name: string }>();
+    for (const p of pkgs) distinct.set(`${p.ecosystem}|${p.name.toLowerCase()}`, { ecosystem: p.ecosystem, name: p.name });
+    const set = Array.from(distinct.values());
+
+    // Drop-first guards against a stale table left on this pooled connection by
+    // an earlier interrupted cycle (temp tables survive until the session ends).
+    await client.query(`DROP TABLE IF EXISTS cve_fleet_pairs`).catch(() => undefined);
+    await client.query(`CREATE TEMP TABLE cve_fleet_pairs (ecosystem text NOT NULL, pkg text NOT NULL)`);
+    for (let start = 0; start < set.length; start += BULK_ROWS_PER_STATEMENT) {
+      const batch = set.slice(start, start + BULK_ROWS_PER_STATEMENT);
+      const params: unknown[] = [];
+      let p = 1;
+      const valuesSql = batch.map((r) => {
+        params.push(r.ecosystem, r.name.toLowerCase());
+        return `($${p++},$${p++})`;
+      }).join(', ');
+      await client.query(`INSERT INTO cve_fleet_pairs VALUES ${valuesSql}`, params);
+    }
+
+    const pruneRes = await client.query(
+      `DELETE FROM cve_advisories a WHERE NOT EXISTS (
+         SELECT 1 FROM cve_fleet_pairs v
           WHERE v.ecosystem = a.ecosystem AND lower(v.pkg) = lower(a."packageName")
-       )`,
-      params
+       )`
     );
+
+    // Versioned OSV queries only return advisories that AFFECT the given version —
+    // every such row carries at least one affected range, so an empty
+    // `affectedRanges` marks a junk row (e.g. from a pre-versioning fetch).
+    // Self-healing: if a legitimate advisory ever lacked ranges it is re-fetched
+    // on the next cycle anyway.
+    const cleanRes = await client.query(
+      `DELETE FROM cve_advisories a WHERE a."affectedRanges" = '[]'::jsonb AND EXISTS (
+         SELECT 1 FROM cve_fleet_pairs v
+          WHERE v.ecosystem = a.ecosystem AND lower(v.pkg) = lower(a."packageName")
+       )`
+    );
+
+    return { pruned: pruneRes.rowCount ?? 0, cleaned: cleanRes.rowCount ?? 0 };
+  } finally {
+    await client.query(`DROP TABLE IF EXISTS cve_fleet_pairs`).catch(() => undefined);
+    client.release();
   }
 }
 
@@ -188,15 +198,18 @@ export async function cveFetchCycle(): Promise<void> {
   try {
     const rows = await osvProvider.fetchAdvisories(pkgs);
     if (rows.length > 0) await upsertAdvisories(rows, nowIso);
-    await pruneStaleAdvisories(pkgs);
-    // Versioned queries only return advisories that affect the version — any
-    // stored row without ranges is junk (e.g. from a pre-versioning fetch).
-    await cleanupEmptyRangeAdvisories(pkgs);
+    // Prune + empty-range cleanup in one connection — both DELETEs must see the
+    // full fleet-pair set (see pruneAndCleanAdvisories for why per-batch slices
+    // were wrong).
+    const { pruned, cleaned } = await pruneAndCleanAdvisories(pkgs);
 
     await writeStatusKey('cveLastSuccessAt', new Date().toISOString());
     await writeStatusKey('cveLastError', '');
     // eslint-disable-next-line no-console
-    console.log(`[cve] advisory fetch done — ${rows.length} advisory row(s) for ${pkgs.length} package(s)`);
+    console.log(
+      `[cve] advisory fetch done — ${rows.length} fetched (${rows.filter((r) => r.affectedRanges.length > 0).length} with ranges), ` +
+        `${pruned} pruned, ${cleaned} empty-range row(s) cleaned, for ${pkgs.length} package(s)`
+    );
 
     // Healthy — clear any live cve condition.
     await resolveNotificationsByDedupeKeys(['cve-fetch-failed']);
@@ -317,10 +330,11 @@ export async function recomputeDeviceCves(): Promise<void> {
     client.release();
   }
 
-  if (matches.length > 0 || pkgRes.rows.length === 0) {
-    // eslint-disable-next-line no-console
-    console.log(`[cve] recomputed device_cves — ${matches.length} match(es) across ${pkgRes.rows.length} package row(s)`);
-  }
+  // Always log when a recompute actually ran (the caller only invokes it on
+  // input change or after a fetch) — a zero-match result is meaningful too:
+  // it means the advisory table no longer covers any installed version.
+  // eslint-disable-next-line no-console
+  console.log(`[cve] recomputed device_cves — ${matches.length} match(es) across ${pkgRes.rows.length} package row(s)`);
 }
 
 // ── Worker loop ──────────────────────────────────────────────────────────────
