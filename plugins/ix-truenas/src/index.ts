@@ -54,6 +54,7 @@ import {
 import { IX_TRUENAS_DEVICE_SUPPORT } from './deviceSupport';
 import { TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } from './client/truenasClient';
 import {
+  collectProbeStartedAt,
   collectProbeStates,
   collectProbeStats,
   collectProbeVmStates,
@@ -315,7 +316,17 @@ const identity = resolvePluginIdentity({
   // (NVIDIA/AMD/Intel, incl. enabled iGPUs), enriched with live counters via
   // nvidia-smi / rocm-smi over the bound SSH slot when present. Gated by the new
   // `collectGpus` option so GPU-less appliances skip both the RPC and the probe.
-  version: '0.27.0',
+  // 0.28.0 — Live container start times on the Containers page: probe requests
+  // that carry a `names` selection (the webapp's fast transition probe) now also
+  // return each selected container's REAL docker StartedAt via ONE batched
+  // `docker inspect --format '{{.Name}}|{{.State.StartedAt}}' name…` — so the
+  // Uptime column flips within seconds of a start/stop/restart instead of
+  // waiting for the next inventory poll + SSH enrichment cycle (up to ~40 min).
+  // The default page-wide probe stays a single `docker ps -a` with zero
+  // per-container work. Container lifecycle intents (containers.restart / .start
+  // / .stop) now also get the settle+inventory-refresh plan tail, so the DB
+  // catches up right after the action settles.
+  version: '0.28.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -3431,9 +3442,14 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
     }
   }
 
-  const [stats, states, vmStates, vmStats, deviceTime] = await Promise.all([
+  const [stats, states, startedAt, vmStates, vmStats, deviceTime] = await Promise.all([
     wanted.has('containerStats') ? collectProbeStats(host, sshCreds, logFn) : Promise.resolve(null),
     wanted.has('containerStates') ? collectProbeStates(host, sshCreds, logFn, nameSel) : Promise.resolve(null),
+    // Real start times — ONLY for the selected names (the webapp's fast
+    // transition probe). One batched `docker inspect` over a handful of
+    // containers is cheap; doing it for every container on each page-wide poll
+    // would not be. Best-effort: null just means no startedAt in the response.
+    wanted.has('containerStates') && nameSel ? collectProbeStartedAt(host, sshCreds, nameSel, logFn) : Promise.resolve(null),
     wanted.has('vmStates') ? collectProbeVmStates(host, sshCreds, logFn, nameSel, uuidToName) : Promise.resolve(null),
     // vmStats needs NO names selection — the CPU percent is only meaningful
     // for everything at once (one domstats pass covers all domains anyway).
@@ -3460,7 +3476,13 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
     // valid answer (all containers stopped) and must reach the caller.
     if (!states) throw new Error('SSH docker ps probe returned no data');
     const flat: Record<string, ProbeContainerState> = {};
-    for (const [name, s] of states) flat[name] = s;
+    for (const [name, s] of states) {
+      const st: ProbeContainerState = { ...s };
+      // Live start time from the batched inspect (selected probes only).
+      const sa = startedAt?.get(name);
+      if (sa) st.startedAt = sa;
+      flat[name] = st;
+    }
     metrics['containerStates'] = flat;
   }
   if (wanted.has('vmStates')) {

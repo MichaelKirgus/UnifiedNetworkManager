@@ -16,7 +16,7 @@ import { randomBytes } from 'node:crypto';
 import { ActionDescriptor, ActionResult, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, INTENT_L2_TOPOLOGY_READ, INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, L2Topology, pickNumber, pickString, pollUntil, PreflightInterfaceOption, PreflightResult, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
 import { hostSshPort, sshPool } from './ssh';
-import { normalizeVmDevice } from './enrichment';
+import { invalidateDockerEnrichment, normalizeVmDevice, sshHostOf } from './enrichment';
 import { fsSftpPool } from './index';
 
 /** Executor context for one /config step. */
@@ -1522,6 +1522,7 @@ const containersStopAction: ActionDescriptor<TruenasActionContext> = {
     // Verify: app.stop is a server-side job — every driven app must actually
     // reach STOPPED for this step to count as verified.
     const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyAppStates(ctx, toRun, new Set(['STOPPED'])));
+    if (stopped > 0) invalidateDockerEnrichment(sshHostOf(ctx.host ?? '')); // container facts changed — force a fresh docker inspect on the next poll
     return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { stopped, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
@@ -1561,6 +1562,7 @@ const containersStartAction: ActionDescriptor<TruenasActionContext> = {
     }
     // Verify: every driven app must actually reach RUNNING.
     const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyAppStates(ctx, toRun, new Set(['RUNNING'])));
+    if (started > 0) invalidateDockerEnrichment(sshHostOf(ctx.host ?? '')); // container facts changed — force a fresh docker inspect on the next poll
     return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { started, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
@@ -1615,6 +1617,7 @@ const containersRestartAction: ActionDescriptor<TruenasActionContext> = {
     }
     // Verify: a restart is only done when every driven app is RUNNING again.
     const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyAppStates(ctx, names.filter((n) => byName.has(n)), new Set(['RUNNING'])));
+    if (restarted > 0) invalidateDockerEnrichment(sshHostOf(ctx.host ?? '')); // container facts changed — force a fresh docker inspect on the next poll
     return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { restarted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
@@ -1682,6 +1685,7 @@ const containersUpgradeAction: ActionDescriptor<TruenasActionContext> = {
     // settle back into a stable state (RUNNING or STOPPED), not stay DEPLOYING.
     const upgradedNames = names.filter((n) => byName.has(n) && !skipped[n]);
     const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyAppStates(ctx, upgradedNames, new Set(['RUNNING', 'STOPPED'])));
+    if (upgraded > 0) invalidateDockerEnrichment(sshHostOf(ctx.host ?? '')); // redeployed containers have NEW start times — force a fresh docker inspect on the next poll
     return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { upgraded, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };

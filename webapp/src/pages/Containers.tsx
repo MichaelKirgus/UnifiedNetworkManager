@@ -67,15 +67,34 @@ function stateRank(s: string): number {
   return 1; // exited / dead / unknown
 }
 
-/** Normalizes one probe `containerStates` payload into name → lowercase docker
- * state. Fresh plugins report the real state ('exited', …); older ones reported
- * a bare running set ({ status: 'running' }) — normalize both to strings. */
-function normalizeContainerStates(v: unknown): Record<string, string> | null {
+/** One container's LIVE probe state: docker state + (when the probe carried a
+ * `names` selection and the plugin supports it — ix-truenas ≥0.28) the REAL
+ * docker start time from a batched `docker inspect`. */
+interface LiveContainerStateEntry {
+  status: string;
+  startedAt?: string | null;
+}
+
+/** Normalizes one probe `containerStates` payload into name → live state entry.
+ * Fresh plugins report the real state ('exited', …); older ones reported a bare
+ * running set ({ status: 'running' }) — normalize both. `startedAt` is carried
+ * through verbatim when present (ISO-8601 UTC from docker inspect). */
+function normalizeContainerStates(v: unknown): Record<string, LiveContainerStateEntry> | null {
   if (!v || typeof v !== 'object') return null;
-  const out: Record<string, string> = {};
+  const out: Record<string, LiveContainerStateEntry> = {};
   for (const [name, s] of Object.entries(v as Record<string, unknown>)) {
-    const st = typeof s === 'string' ? s : (s && typeof s === 'object' && typeof (s as Record<string, unknown>).status === 'string') ? String((s as Record<string, unknown>).status) : 'running';
-    out[name] = st.toLowerCase();
+    let st: string;
+    let startedAt: string | undefined;
+    if (typeof s === 'string') {
+      st = s; // legacy bare-string shape
+    } else if (s && typeof s === 'object') {
+      const o = s as Record<string, unknown>;
+      st = typeof o.status === 'string' ? String(o.status) : 'running';
+      startedAt = typeof o.startedAt === 'string' && o.startedAt !== '' ? o.startedAt : undefined;
+    } else {
+      st = 'running';
+    }
+    out[name] = { status: st.toLowerCase(), ...(startedAt ? { startedAt } : {}) };
   }
   return out;
 }
@@ -84,7 +103,7 @@ function normalizeContainerStates(v: unknown): Record<string, string> | null {
  * probe `containerStates` data (null = no data at all). The app is 'running'
  * when ANY member runs; otherwise the WORST non-running state wins so a
  * mid-transition app shows 'restarting', not just 'exited'. */
-function liveStateForNames(names: string[], states?: Record<string, string>): string | null {
+function liveStateForNames(names: string[], states?: Record<string, LiveContainerStateEntry>): string | null {
   if (!states || Object.keys(states).length === 0) return null;
   let anyRunning = false;
   let worst: string | null = null;
@@ -92,14 +111,14 @@ function liveStateForNames(names: string[], states?: Record<string, string>): st
     // Exact docker-name match first, then the `<app>-<service>` convention.
     const direct = states[n];
     if (direct !== undefined) {
-      if (direct === 'running') anyRunning = true;
-      else if (!worst || stateRank(direct) > stateRank(worst)) worst = direct;
+      if (direct.status === 'running') anyRunning = true;
+      else if (!worst || stateRank(direct.status) > stateRank(worst)) worst = direct.status;
       continue;
     }
     for (const [k, v] of Object.entries(states)) {
       if (!k.endsWith(`-${n}`)) continue;
-      if (v === 'running') anyRunning = true;
-      else if (!worst || stateRank(v) > stateRank(worst)) worst = v;
+      if (v.status === 'running') anyRunning = true;
+      else if (!worst || stateRank(v.status) > stateRank(worst)) worst = v.status;
     }
   }
   return anyRunning ? 'running' : worst;
@@ -108,10 +127,43 @@ function liveStateForNames(names: string[], states?: Record<string, string>): st
 /** Live docker state of an APP from probe data (null = no fresh data for its
  * device). TrueNAS multi-container apps name docker containers
  * `<app>-<service>`, so candidates are matched exactly or by suffix. */
-function liveStateOf(row: ContainerRow, states?: Record<string, string>): string | null {
+function liveStateOf(row: ContainerRow, states?: Record<string, LiveContainerStateEntry>): string | null {
   const services = servicesOf(row);
   const candidates = Array.from(new Set([row.name, ...(services.length > 0 ? services.map((s) => s.service ?? row.name) : [])]));
   return liveStateForNames(candidates, states);
+}
+
+/** Parses an ISO-8601 start time to epoch ms (null when absent/unparseable). */
+function parseStartedAtMs(v?: string | null): number | null {
+  if (!v) return null;
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? null : t;
+}
+
+/** LIVE start time of an APP from probe data (null = no fresh live stamp).
+ * Single-container apps: the member's real docker StartedAt. Multi-container
+ * apps: the EARLIEST running member's start — a restart redeploys every
+ * container, so the oldest one is when the app came back up. Only RUNNING
+ * members count (docker leaves no start time on stopped containers). */
+function liveStartedAtOf(row: ContainerRow, states?: Record<string, LiveContainerStateEntry>): string | null {
+  if (!states || Object.keys(states).length === 0) return null;
+  const services = servicesOf(row);
+  const candidates = Array.from(new Set([row.name, ...(services.length > 0 ? services.map((s) => s.service ?? row.name) : [])]));
+  let best: { ms: number; iso: string } | null = null;
+  for (const n of candidates) {
+    const direct = states[n];
+    if (direct && direct.status === 'running' && direct.startedAt) {
+      const ms = parseStartedAtMs(direct.startedAt);
+      if (ms !== null && (!best || ms < best.ms)) best = { ms, iso: direct.startedAt };
+      continue;
+    }
+    for (const [k, v] of Object.entries(states)) {
+      if (!k.endsWith(`-${n}`) || v.status !== 'running' || !v.startedAt) continue;
+      const ms = parseStartedAtMs(v.startedAt);
+      if (ms !== null && (!best || ms < best.ms)) best = { ms, iso: v.startedAt };
+    }
+  }
+  return best ? best.iso : null;
 }
 
 /**
@@ -433,17 +485,21 @@ function LogsDialog({ app, onClose }: { app: ContainerRow; onClose: () => void }
 /** Uptime cell — "running since". RUNNING + startedAt → duration; non-RUNNING
  * or no stamp → "—". The value is the real container start when the plugin
  * observed it via SSH (`docker inspect`), otherwise UNM-tracked from state
- * transitions (a lower bound that resets after restarts). */
-function UptimeCell({ row }: { row: ContainerRow }) {
+ * transitions (a lower bound that resets after restarts). `liveStartedAt`
+ * (fresh probe data) overrides the inventory stamp so a restart shows up in
+ * seconds instead of waiting for the next enrichment cycle. */
+function UptimeCell({ row, liveStartedAt }: { row: ContainerRow; liveStartedAt?: string | null }) {
   const { formatDateTime } = useTimeFormat();
-  if (row.state !== 'RUNNING' || !row.startedAt) return <span className="text-faint">—</span>;
-  const since = new Date(row.startedAt).getTime();
+  if (row.state !== 'RUNNING') return <span className="text-faint">—</span>;
+  const stamp = liveStartedAt ?? row.startedAt;
+  if (!stamp) return <span className="text-faint">—</span>;
+  const since = new Date(stamp).getTime();
   if (Number.isNaN(since)) return <span className="text-faint">—</span>;
   const secs = Math.max(0, (Date.now() - since) / 1000);
   return (
     <span
       className="font-mono text-xs text-secondary"
-      title={`Running since ${formatDateTime(row.startedAt)}`}
+      title={`Running since ${formatDateTime(stamp)}`}
     >
       {formatDuration(secs)}
     </span>
@@ -621,8 +677,10 @@ interface BuiltApp {
  * with no per-service detail yet falls back to a synthetic container from the
  * app-level image so nothing is lost. `liveStats` (probe data for this device)
  * overrides the enrichment stats when present — live wins, cached fills gaps.
- * `liveStates` carries the fresh probe docker states for each member's badge. */
-function buildApp(row: ContainerRow, liveStats?: Record<string, LiveContainerStat>, liveStates?: Record<string, string>): BuiltApp {
+ * `liveStates` carries the fresh probe docker states for each member's badge;
+ * `liveStartedAt` the fresh per-member start times (probe inspect data) that
+ * override the enrichment stamps in the uptime cells. */
+function buildApp(row: ContainerRow, liveStats?: Record<string, LiveContainerStat>, liveStates?: Record<string, LiveContainerStateEntry>, liveStartedAt?: Record<string, string>): BuiltApp {
   const base = `${row.deviceId}|${row.pluginId}|${row.name}`;
   const services = servicesOf(row);
   let list: ContainerServiceDetail[];
@@ -668,7 +726,9 @@ function buildApp(row: ContainerRow, liveStats?: Record<string, LiveContainerSta
         liveState: liveStates && svcName ? liveStateForNames([svcName], liveStates) : null,
         mac: s.mac ?? null,
         ip: s.ip ?? null,
-        startedAt: s.startedAt ?? null,
+        // Fresh probe start time wins over the enrichment snapshot (same
+        // exact / `<app>-<svc>` matching as liveStateForNames).
+        startedAt: (liveStartedAt && svcName ? liveStartedAt[svcName] ?? liveStartedAt[`${row.name}-${svcName}`] : undefined) ?? s.startedAt ?? null,
         cpuPct: live?.cpuPct ?? s.cpuPct ?? null,
         memUsedBytes: live?.memUsedBytes ?? s.memUsedBytes ?? null,
         memLimitBytes: live?.memLimitBytes ?? s.memLimitBytes ?? null,
@@ -939,6 +999,9 @@ function nodeCell(key: string, node: TreeNode, depth: number, actions?: ChildAct
       return <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">{parts}</span>;
     }
     case 'startedAt': {
+      // node.startedAt already carries the fresh probe start time when the
+      // fast transition probe covered this member (buildApp overrides it),
+      // else the enrichment/inventory stamp.
       if (node.kind !== 'container' || !node.startedAt) return null;
       const since = new Date(node.startedAt).getTime();
       if (Number.isNaN(since)) return null;
@@ -1327,7 +1390,7 @@ export default function Containers() {
   // per-name updates. Feeds both the settle watch's cheap live check and the
   // live State badges; a failed poll keeps serving the last good snapshot.
   const liveStatesByDevice = useMemo(() => {
-    const m = new Map<string, { at: number; states: Record<string, string> }>();
+    const m = new Map<string, { at: number; states: Record<string, LiveContainerStateEntry> }>();
     probeTargets.forEach((t, i) => {
       const res = probeResults[i];
       if (!res?.data) return;
@@ -1353,9 +1416,23 @@ export default function Containers() {
 
   /** Fresh (≤30 s) live states for one device+plugin — null when the probe has
    * no recent data, so callers fall back to the inventory state. */
-  function freshLiveStates(deviceId: string, pluginId: string): Record<string, string> | null {
+  function freshLiveStates(deviceId: string, pluginId: string): Record<string, LiveContainerStateEntry> | null {
     const e = liveStatesByDevice.get(`${deviceId}|${pluginId}`);
     return e && Date.now() - e.at < 30_000 ? e.states : null;
+  }
+
+  /** Fresh (≤30 s) LIVE start times for one device+plugin — name → ISO stamp.
+   * Only present when the probe carried a `names` selection AND the plugin
+   * supports it (ix-truenas ≥0.28); absent otherwise, so callers fall back to
+   * the inventory/enrichment stamps. */
+  function freshLiveStartedAt(deviceId: string, pluginId: string): Record<string, string> | null {
+    const e = liveStatesByDevice.get(`${deviceId}|${pluginId}`);
+    if (!e || Date.now() - e.at >= 30_000) return null;
+    const out: Record<string, string> = {};
+    for (const [name, s] of Object.entries(e.states)) {
+      if (s.startedAt) out[name] = s.startedAt;
+    }
+    return Object.keys(out).length > 0 ? out : null;
   }
 
   useEffect(() => {
@@ -1364,6 +1441,18 @@ export default function Containers() {
     // completion — start the throttle clock there so this watch only adds
     // follow-ups, never a redundant immediate one.
     let lastHeavyAt = Date.now();
+    // Grace period: keep the fast probe (and its throttled heavy refreshes)
+    // running for at least 90 s after the watch (re)starts even if the DB
+    // already shows RUNNING. Two things must happen before the live start times
+    // may disappear from the Uptime column: (1) the plugin's background SSH
+    // enrichment (`docker inspect` over all containers — seconds on a small box,
+    // longer on a busy one) picks up the NEW StartedAt after the plan's own
+    // refresh tail ingested the still-stale cache, and (2) at least ONE more
+    // heavy refresh (15 s throttle) lands that fresh stamp in the DB. 90 s
+    // covers both with margin; without it the column would briefly show the new
+    // uptime from the probe, then revert to the stale inventory value until the
+    // next ~15 min enrichment cycle — exactly the original bug.
+    const graceUntil = Date.now() + 90_000;
     /** app name → live state on previous tick. Stability gate: TrueNAS
      * app.state lags docker state during transitions, so one sample can still
      * be mid-flight — require the same answer twice before syncing the DB. */
@@ -1372,11 +1461,13 @@ export default function Containers() {
       if (Date.now() > settleWatch.until) { setSettleWatch(null); return; }
       const data = containersRef.current;
 
-      // Authoritative exit: the DB no longer shows any watched app as transitional.
+      // Authoritative exit: the DB no longer shows any watched app as
+      // transitional AND the grace period has elapsed (see above — keeps the
+      // fast probe alive long enough to capture fresh live start times).
       const dbTransitional = new Set(
         (data?.containers ?? []).filter((c) => TRANSITIONAL_STATES.has(c.state)).map((c) => c.name),
       );
-      if (!settleWatch.names.some((n) => dbTransitional.has(n))) { setSettleWatch(null); return; }
+      if (!settleWatch.names.some((n) => dbTransitional.has(n)) && Date.now() > graceUntil) { setSettleWatch(null); return; }
 
       // Cheap live check: docker ps -a via the probe cache (3 s cadence, zero
       // appliance API load — unlike refreshDevices which triggers a full
@@ -1651,8 +1742,8 @@ export default function Containers() {
       // enrichment data — live wins, cached fills gaps.
       const key = `${row.deviceId}|${row.pluginId}`;
       const liveEntry = liveStatesByDevice.get(key);
-      const freshStates = liveEntry && Date.now() - liveEntry.at < 30_000 ? liveEntry.states : undefined;
-      const built = buildApp(row, liveStatsByDevice.get(key), freshStates);
+      const fresh = liveEntry && Date.now() - liveEntry.at < 30_000 ? liveEntry : undefined;
+      const built = buildApp(row, liveStatsByDevice.get(key), fresh?.states, freshLiveStartedAt(row.deviceId, row.pluginId) ?? undefined);
       roots.push(built.app);
       childMap.set(built.app.key, built.containers.map((c) => c.node));
       for (const c of built.containers) if (c.volumes.length > 0) childMap.set(c.node.key, c.volumes);
@@ -1700,9 +1791,27 @@ export default function Containers() {
       header: 'Uptime',
       key: 'startedAt',
       width: 120,
-      exportValue: (node) => node.row?.startedAt ?? '',
-      sortAccessor: (node) => (node.row?.startedAt ? new Date(node.row.startedAt).getTime() : null),
-      render: (node) => (node.row ? <UptimeCell row={node.row} /> : null),
+      // Effective stamp = fresh live probe start time (real docker StartedAt
+      // from the fast transition probe) when available, else the inventory /
+      // enrichment value — so a restart shows up in seconds.
+      exportValue: (node) => {
+        const r = node.row;
+        if (!r) return '';
+        return freshLiveStartedAt(r.deviceId, r.pluginId) ? liveStartedAtOf(r, freshLiveStates(r.deviceId, r.pluginId) ?? undefined) ?? r.startedAt ?? '' : r.startedAt ?? '';
+      },
+      sortAccessor: (node) => {
+        const r = node.row;
+        if (!r) return null;
+        const eff = freshLiveStartedAt(r.deviceId, r.pluginId) ? liveStartedAtOf(r, freshLiveStates(r.deviceId, r.pluginId) ?? undefined) ?? r.startedAt : r.startedAt;
+        return eff ? new Date(eff).getTime() : null;
+      },
+      render: (node) => {
+        const r = node.row;
+        if (!r) return null;
+        const live = freshLiveStartedAt(r.deviceId, r.pluginId);
+        const ls = live ? liveStartedAtOf(r, freshLiveStates(r.deviceId, r.pluginId) ?? undefined) : null;
+        return <UptimeCell row={r} liveStartedAt={ls} />;
+      },
     },
     {
       header: 'Image',
