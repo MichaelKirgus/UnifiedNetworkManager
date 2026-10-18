@@ -67,6 +67,7 @@ import {
   FirewallEventRow,
 } from './client/firewallEvents';
 import { fetchStateIdentities, countOpenStates, diffStates, buildHostStateRows } from './client/hostStates';
+import { decideUpdateSearch, DEFAULT_UPDATE_CHECK_INTERVAL_SEC, type UpdateSearchEntry } from './updateSearch';
 import { collectServices } from './services';
 import { collectZfsViaSsh } from './zfsSsh';
 import { collectSecurityChecks, DEFAULT_WATCHED_FILES, type SecuritySettings } from './security';
@@ -98,6 +99,19 @@ const identity = resolvePluginIdentity({
   name: PLUGIN_NAME,
   description:
     'OPNsense firewall management — system/network metrics, ZFS pools, security checks and config actions over REST + SSH.',
+  // 0.5.0 — Automatic update search (option `updateCheckIntervalSec`, default
+  // 6 h, 0 disables): OPNsense only advertises available updates after an
+  // update SEARCH has run on-device (POST /api/core/firmware/status — a
+  // synchronous ~30–90 s probe against pkg.opnsense.org), while monitoring
+  // reads the appliance's CACHED check result. Devices that never ran a search
+  // therefore showed no updates forever. The plugin now triggers a fresh probe
+  // in the background at its own cadence (fire-and-forget — it must never block
+  // or fail a poll, since the API times out /monitoring POSTs at 30 s); once it
+  // finishes, the next fast GET surfaces the result. A forced refresh ("Check
+  // now" on the Updates page) passes forceUpdateCheck and bypasses both cadence
+  // and a zero interval — but a forced check younger than 5 min is skipped: the
+  // cache was just refreshed by that probe, and re-probing would serialize every
+  // REST call behind configd's lock for another 30–90 s.
   // 0.4.0 — Notification-center mirroring (SDK createNotifier): /monitoring now
   // mirrors appliance-level conditions into the UNM notification center with
   // stable dedupe keys + resolve-on-disappearance, like ix-truenas's alert.list:
@@ -105,7 +119,7 @@ const identity = resolvePluginIdentity({
   //   - security-check findings at warning/critical (file-integrity change,
   //     brute-force login burst, unexpected uid-0 account).
   // Gated by the `notifyAlerts` option. Device-state mirroring stays API-side.
-  version: '0.4.0',
+  version: '0.5.0',
   vendors: ['opnsense'],
   // 'planning' advertises the /plan endpoint (multi-device intents) so the API
   // can offer bulk rollout + tunnel provisioning flows in the webapp.
@@ -936,6 +950,16 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
       'How often the plugin walks the appliance\'s FULL live state table to track per-host open states + created/destroyed churn (Hosts/Networks "States" columns). Each walk is one big query_states call — a full table scan on the appliance (~30 s / ~115 MB on a 240k-state box), so keep this slow. 0 disables per-host state tracking.',
   },
   {
+    key: 'updateCheckIntervalSec',
+    label: 'Update search interval (seconds)',
+    type: 'integer' as const,
+    default: DEFAULT_UPDATE_CHECK_INTERVAL_SEC,
+    min: 0,
+    max: 86400,
+    description:
+      'How often the plugin triggers a fresh update SEARCH on the appliance (POST /api/core/firmware/status — a synchronous probe against pkg.opnsense.org that takes ~30–90 s). OPNsense only advertises available updates after such a search has run; without it, devices that never checked show no updates at all. The probe runs in the background and never blocks or fails a poll — its result surfaces on the next monitoring beat via the cached status read. 0 disables automatic searches (updates then only appear after an explicit "Check now" or the firmware.check plan action).',
+  },
+  {
     key: 'enableInventoryCache',
     label: 'Enable inventory cache',
     type: 'boolean' as const,
@@ -1728,6 +1752,69 @@ async function collectAndPushHostStates(
   entry.prev = next;
 }
 
+// --- Automatic update search (Updates page freshness) -------------------------
+// OPNsense only advertises available updates after an update SEARCH has run on-
+// device — POST /api/core/firmware/status is a SYNCHRONOUS probe against
+// pkg.opnsense.org that takes ~30–90 s. The monitoring path reads the
+// appliance's CACHED check result (fast GET), so a device that never ran a
+// search shows no updates forever. This trigger runs the probe in the
+// BACKGROUND at its own cadence (option `updateCheckIntervalSec`, 0 disables):
+// it must NEVER block or fail a poll — the API times out /monitoring POSTs at
+// 30 s, well below one probe. Once the probe finishes, the appliance's cache is
+// fresh and the very next fast GET (≤ one beat later) surfaces the result with
+// the existing wipe/throw semantics of getFirmwareUpdateRows() untouched.
+
+const updateSearches = new Map<string, UpdateSearchEntry>(); // key = management address
+
+/**
+ * Triggers a fresh update search on one appliance when its cadence has elapsed
+ * (or this is an explicit forced check). Runs fire-and-forget from /monitoring;
+ * all failures are contained here — a failed probe only logs and retries on the
+ * next beat, it never degrades device health or fails the poll. A forced check
+ * younger than 5 min is skipped: the appliance's cache was just refreshed by
+ * that probe, and re-probing would serialize every REST call behind configd's
+ * lock for another 30–90 s (rapid "Check now" clicks / overlapping refreshes).
+ */
+async function maybeRunUpdateSearch(
+  host: string,
+  apiKey: string,
+  apiSecret: string,
+  transport?: OpnsenseTransport,
+  ports?: OpnsensePorts,
+  intervalSec?: number,
+  force = false
+): Promise<void> {
+  const everyMs = Math.max(0, Number(intervalSec ?? DEFAULT_UPDATE_CHECK_INTERVAL_SEC)) * 1000;
+  let entry = updateSearches.get(host);
+  if (!entry) {
+    entry = { lastRunAt: 0, inFlight: false };
+    updateSearches.set(host, entry);
+  }
+  const decision = decideUpdateSearch(entry, Date.now(), everyMs, force);
+  if (decision !== 'run') return;
+
+  // Claim the slot BEFORE the slow probe — overlapping polls / rapid "Check now"
+  // clicks simply skip while it is in flight. lastRunAt advances on SUCCESS only:
+  // a failed probe retries on the next beat instead of waiting out the interval.
+  entry.inFlight = true;
+  try {
+    const client = createClient(host, { apiKey, apiSecret }, transport, ports);
+    const res = await firmware.checkForUpdates(client);
+    if (!res.ok || !res.data) throw new Error(`update search failed (HTTP ${res.status})`);
+    const st = firmware.parseFirmwareStatus(res.data);
+    entry.lastRunAt = Date.now();
+    // eslint-disable-next-line no-console
+    console.log(
+      `[opnsense] update search done for ${host} — ${st.packages.length + st.majorSets.length} pending item(s), reboot required: ${st.needsReboot}`
+    );
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(`[opnsense] update search failed for ${host}: ${(err as Error)?.message ?? err}`);
+  } finally {
+    entry.inFlight = false;
+  }
+}
+
 // --- Updates page: live firmware status --------------------------------------
 // Reads the appliance's CACHED update check (fast GET — no synchronous probe)
 // and turns it into UpdateRows:
@@ -1844,6 +1931,15 @@ app.post('/monitoring', async (req, res) => {
     // a 30 s+ walk must never block or fail this poll.
     const stateWalkIntervalSec = typeof settings.stateWalkIntervalSec === 'number' ? settings.stateWalkIntervalSec : undefined;
     void collectAndPushHostStates(managementAddress, deviceId, apiKey, apiSecret, transport, ports, stateWalkIntervalSec).catch(() => { /* best-effort */ });
+
+    // Automatic update search (option updateCheckIntervalSec): a fresh probe at
+    // its own slow cadence so the appliance's CACHED check result — which the
+    // updates row below reads on every beat — stays current. An explicit forced
+    // refresh ("Check now" on the Updates page) bypasses both cadence and a zero
+    // interval. Fire-and-forget like the state walk: a 30–90 s probe must never
+    // block or fail this poll (the API times out /monitoring at 30 s).
+    const updateCheckIntervalSec = typeof settings.updateCheckIntervalSec === 'number' ? settings.updateCheckIntervalSec : undefined;
+    void maybeRunUpdateSearch(managementAddress, apiKey, apiSecret, transport, ports, updateCheckIntervalSec, body.forceUpdateCheck === true).catch(() => { /* best-effort */ });
 
     // Echo of the user-selected model/firmware (mirrors the LANCOM plugin) —
     // informational only; shown as text cards in the device detail view.

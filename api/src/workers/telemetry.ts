@@ -169,6 +169,13 @@ interface PollOptions {
    * and always answer with a full snapshot — harmless.
    */
   collectInventory: boolean;
+  /**
+   * Ask the plugin to trigger an immediate device-side update search (OPNsense:
+   * POST /api/core/firmware/status, ~30–90 s). Set by forced refreshes ("Check
+   * now" on the Updates page) so a stale appliance cache can't keep hiding
+   * updates. Old plugin images ignore the field — harmless.
+   */
+  forceUpdateCheck?: boolean;
 }
 
 async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Promise<PollOutcome> {
@@ -201,6 +208,7 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
         // Window-based scheduling hint (see header comment): true only on
         // inventory-due polls so plugins can skip slow collection in between.
         collectInventory: opts.collectInventory,
+        ...(opts.forceUpdateCheck ? { forceUpdateCheck: true } : {}),
         ...(decrypted?.type === 'apiKey'
           ? { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }
           : {})
@@ -235,6 +243,16 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
     // table — runs on EVERY poll (not inventory-gated) so drift stays fresh.
     // Best-effort; a parse failure must never break the telemetry cycle.
     ingestDeviceTime(target.deviceId, target.pluginId, metrics, collectedAt);
+
+    // Device updates (Updates page) — also per-poll: plugins that emit `updates`
+    // do so on every beat (OPNsense reads its cached check result each poll),
+    // and a forced refresh ("Check now") must surface fresh rows IMMEDIATELY
+    // instead of waiting up to the next 15-min inventory window. Absent key =
+    // no-op, present-but-empty = authoritative wipe — same contract as before.
+    ingestUpdates(target.deviceId, target.pluginId, metrics, collectedAt).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[telemetry] updates ingestion failed:', err);
+    });
 
     // Normalize the inventory parts of this snapshot into the cross-device
     // tables (Networks + Hosts pages) — ONLY on inventory-due polls. Metrics-
@@ -366,6 +384,117 @@ async function ingestDeviceTime(
  * independently of the API. Never throws: an inventory parse failure must not
  * break the telemetry cycle.
  */
+/**
+ * Ingests the `updates` metric into device_updates (Updates page). Runs on
+ * EVERY poll — not inventory-gated — because plugins that emit it do so on
+ * every beat and a forced refresh must surface fresh rows immediately.
+ *
+ * Generic key — any plugin advertising capability 'updates' may emit it:
+ *   updates[] { name, kind, currentVersion?, latestVersion?, available,
+ *               rebootRequired?, sizeBytes?, applyActionId?, applyInput?, extra? }
+ * Same CONFIG-object lifecycle as containers: upsert-per-poll + delete-on-
+ * absent (an applied update must vanish on the next poll), present-but-nothing
+ * available = authoritative wipe. Only rows with available=true persist — a
+ * plugin that reports "checked, nothing new" emits an empty array and its
+ * stale rows are wiped.
+ */
+async function ingestUpdates(
+  deviceId: string,
+  pluginId: string,
+  metrics: Record<string, unknown>,
+  collectedAt: string
+): Promise<void> {
+  const rawUpdates = Array.isArray(metrics['updates']) ? (metrics['updates'] as unknown[]) : null;
+  if (rawUpdates === null) return; // absent key — keep previous rows
+
+  // Local helpers (same semantics as ingestInventory's closures).
+  const numOrNull = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isFinite(v) ? v : null;
+  const extraOf = (r: Record<string, unknown>): string => {
+    const e = r['extra'];
+    if (!e || typeof e !== 'object' || Array.isArray(e)) return '{}';
+    try {
+      return JSON.stringify(e);
+    } catch {
+      return '{}';
+    }
+  };
+
+  const values: {
+    deviceId: string; pluginId: string; kind: string; name: string;
+    currentVersion: string | null; latestVersion: string | null;
+    rebootRequired: boolean | null; sizeBytes: number | null;
+    releaseNotesUrl: string | null; releaseNotes: string | null;
+    branch: string | null;
+    applyActionId: string | null; applyInput: string; extra: string; collectedAt: string;
+  }[] = [];
+  for (const raw of rawUpdates) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    // Only genuinely-available updates persist.
+    if (r['available'] !== true) continue;
+    const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+    if (!name) continue; // name is part of the conflict key
+    const kind = typeof r['kind'] === 'string' && (r['kind'] as string).trim() !== '' ? (r['kind'] as string).trim() : 'firmware';
+    values.push({
+      deviceId,
+      pluginId,
+      kind,
+      name,
+      currentVersion: typeof r['currentVersion'] === 'string' && (r['currentVersion'] as string) !== '' ? (r['currentVersion'] as string) : null,
+      latestVersion: typeof r['latestVersion'] === 'string' && (r['latestVersion'] as string) !== '' ? (r['latestVersion'] as string) : null,
+      rebootRequired: typeof r['rebootRequired'] === 'boolean' ? (r['rebootRequired'] as boolean) : null,
+      sizeBytes: numOrNull(r['sizeBytes']),
+      releaseNotesUrl: typeof r['releaseNotesUrl'] === 'string' && (r['releaseNotesUrl'] as string).trim() !== '' ? (r['releaseNotesUrl'] as string).trim() : null,
+      // Cap notes text at 16 KB — a runaway feed must not bloat the table.
+      releaseNotes: typeof r['releaseNotes'] === 'string' && (r['releaseNotes'] as string).trim() !== '' ? (r['releaseNotes'] as string).slice(0, 16_384) : null,
+      branch: typeof r['branch'] === 'string' && (r['branch'] as string).trim() !== '' ? (r['branch'] as string).trim().slice(0, 128) : null,
+      applyActionId: typeof r['applyActionId'] === 'string' && (r['applyActionId'] as string).trim() !== '' ? (r['applyActionId'] as string) : null,
+      applyInput: (() => {
+        const ai = r['applyInput'];
+        if (!ai || typeof ai !== 'object' || Array.isArray(ai)) return '{}';
+        try { return JSON.stringify(ai); } catch { return '{}'; }
+      })(),
+      extra: extraOf(r),
+      collectedAt,
+    });
+  }
+  if (values.length > 0) {
+    const byKey = new Map<string, typeof values[number]>();
+    for (const v of values) byKey.set(`${v.kind}|${v.name}`, v);
+    await db.insert(schema.deviceUpdates).values(Array.from(byKey.values())).onConflictDoUpdate({
+      target: [schema.deviceUpdates.deviceId, schema.deviceUpdates.pluginId, schema.deviceUpdates.kind, schema.deviceUpdates.name],
+      set: {
+        currentVersion: sql`excluded."currentVersion"`,
+        latestVersion: sql`excluded."latestVersion"`,
+        rebootRequired: sql`excluded."rebootRequired"`,
+        sizeBytes: sql`excluded."sizeBytes"`,
+        releaseNotesUrl: sql`excluded."releaseNotesUrl"`,
+        releaseNotes: sql`excluded."releaseNotes"`,
+        branch: sql`excluded."branch"`,
+        applyActionId: sql`excluded."applyActionId"`,
+        applyInput: sql`excluded."applyInput"`,
+        extra: sql`excluded.extra`,
+        collectedAt: sql`excluded."collectedAt"`,
+      },
+    });
+    const seenKeys = new Set(values.map((v) => `${v.kind}|${v.name}`));
+    await db.delete(schema.deviceUpdates)
+      .where(and(
+        eq(schema.deviceUpdates.deviceId, deviceId),
+        eq(schema.deviceUpdates.pluginId, pluginId),
+        notInArray(sql`"kind" || '|' || name`, Array.from(seenKeys))
+      ));
+  } else {
+    // Present-but-nothing-available is the authoritative wipe — same contract as containers.
+    await db.delete(schema.deviceUpdates)
+      .where(and(
+        eq(schema.deviceUpdates.deviceId, deviceId),
+        eq(schema.deviceUpdates.pluginId, pluginId)
+      ));
+  }
+}
+
 async function ingestInventory(
   deviceId: string,
   pluginId: string,
@@ -2176,91 +2305,6 @@ async function ingestInventory(
       }
     }
 
-    // --- Device updates (Updates page) --------------------------------------
-    // Generic key — any plugin advertising capability 'updates' may emit it:
-    //   updates[] { name, kind, currentVersion?, latestVersion?, available,
-    //               rebootRequired?, sizeBytes?, applyActionId?, applyInput?, extra? }
-    // Same CONFIG-object lifecycle as containers: upsert-per-poll + delete-on-
-    // absent (an applied update must vanish on the next poll), present-but-nothing
-    // available = authoritative wipe. Only rows with available=true persist — a
-    // plugin that reports "checked, nothing new" emits an empty array and its
-    // stale rows are wiped.
-    const rawUpdates = Array.isArray(metrics['updates']) ? (metrics['updates'] as unknown[]) : null;
-    if (rawUpdates !== null) {
-      const values: {
-        deviceId: string; pluginId: string; kind: string; name: string;
-        currentVersion: string | null; latestVersion: string | null;
-        rebootRequired: boolean | null; sizeBytes: number | null;
-        releaseNotesUrl: string | null; releaseNotes: string | null;
-        branch: string | null;
-        applyActionId: string | null; applyInput: string; extra: string; collectedAt: string;
-      }[] = [];
-      for (const raw of rawUpdates) {
-        if (!raw || typeof raw !== 'object') continue;
-        const r = raw as Record<string, unknown>;
-        // Only genuinely-available updates persist.
-        if (r['available'] !== true) continue;
-        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
-        if (!name) continue; // name is part of the conflict key
-        const kind = typeof r['kind'] === 'string' && (r['kind'] as string).trim() !== '' ? (r['kind'] as string).trim() : 'firmware';
-        values.push({
-          deviceId,
-          pluginId,
-          kind,
-          name,
-          currentVersion: typeof r['currentVersion'] === 'string' && (r['currentVersion'] as string) !== '' ? (r['currentVersion'] as string) : null,
-          latestVersion: typeof r['latestVersion'] === 'string' && (r['latestVersion'] as string) !== '' ? (r['latestVersion'] as string) : null,
-          rebootRequired: typeof r['rebootRequired'] === 'boolean' ? (r['rebootRequired'] as boolean) : null,
-          sizeBytes: numOrNull(r['sizeBytes']),
-          releaseNotesUrl: typeof r['releaseNotesUrl'] === 'string' && (r['releaseNotesUrl'] as string).trim() !== '' ? (r['releaseNotesUrl'] as string).trim() : null,
-          // Cap notes text at 16 KB — a runaway feed must not bloat the table.
-          releaseNotes: typeof r['releaseNotes'] === 'string' && (r['releaseNotes'] as string).trim() !== '' ? (r['releaseNotes'] as string).slice(0, 16_384) : null,
-          branch: typeof r['branch'] === 'string' && (r['branch'] as string).trim() !== '' ? (r['branch'] as string).trim().slice(0, 128) : null,
-          applyActionId: typeof r['applyActionId'] === 'string' && (r['applyActionId'] as string).trim() !== '' ? (r['applyActionId'] as string).trim() : null,
-          applyInput: (() => {
-            const ai = r['applyInput'];
-            if (!ai || typeof ai !== 'object' || Array.isArray(ai)) return '{}';
-            try { return JSON.stringify(ai); } catch { return '{}'; }
-          })(),
-          extra: extraOf(r),
-          collectedAt,
-        });
-      }
-      if (values.length > 0) {
-        const byKey = new Map<string, typeof values[number]>();
-        for (const v of values) byKey.set(`${v.kind}|${v.name}`, v);
-        await db.insert(schema.deviceUpdates).values(Array.from(byKey.values())).onConflictDoUpdate({
-          target: [schema.deviceUpdates.deviceId, schema.deviceUpdates.pluginId, schema.deviceUpdates.kind, schema.deviceUpdates.name],
-          set: {
-            currentVersion: sql`excluded."currentVersion"`,
-            latestVersion: sql`excluded."latestVersion"`,
-            rebootRequired: sql`excluded."rebootRequired"`,
-            sizeBytes: sql`excluded."sizeBytes"`,
-            releaseNotesUrl: sql`excluded."releaseNotesUrl"`,
-            releaseNotes: sql`excluded."releaseNotes"`,
-            branch: sql`excluded."branch"`,
-            applyActionId: sql`excluded."applyActionId"`,
-            applyInput: sql`excluded."applyInput"`,
-            extra: sql`excluded.extra`,
-            collectedAt: sql`excluded."collectedAt"`,
-          },
-        });
-        const seenKeys = new Set(values.map((v) => `${v.kind}|${v.name}`));
-        await db.delete(schema.deviceUpdates)
-          .where(and(
-            eq(schema.deviceUpdates.deviceId, deviceId),
-            eq(schema.deviceUpdates.pluginId, pluginId),
-            notInArray(sql`"kind" || '|' || name`, Array.from(seenKeys))
-          ));
-      } else {
-        // Present-but-nothing-available is the authoritative wipe — same contract as containers.
-        await db.delete(schema.deviceUpdates)
-          .where(and(
-            eq(schema.deviceUpdates.deviceId, deviceId),
-            eq(schema.deviceUpdates.pluginId, pluginId)
-          ));
-      }
-    }
 
     // --- Security checks (Security page) --------------------------------------
     // Generic key — any plugin advertising capability 'securityChecks' may emit it:
@@ -3032,8 +3076,11 @@ export async function forceRefreshDevices(
       continue;
     }
 
+    // forceUpdateCheck: an explicit "Check now" must not be held back by the
+    // plugin's automatic-search cadence (or a zero interval) — it asks for FRESH
+    // data right now. The probe itself runs in the background inside the plugin.
     const outcomes = await Promise.all(
-      targets.map((target) => pollAssignment(target, { collectInventory: true }))
+      targets.map((target) => pollAssignment(target, { collectInventory: true, forceUpdateCheck: true }))
     );
     results.push({
       deviceId: id,
