@@ -254,6 +254,15 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
       console.error('[telemetry] updates ingestion failed:', err);
     });
 
+    // Installed packages (CVE tracking) — also per-poll: a package upgrade must
+    // refresh the row's version + collectedAt so the cve worker's input-change
+    // gate re-matches within one beat. Absent key = no-op, present-but-empty =
+    // authoritative wipe — same contract as containers/updates.
+    ingestInstalledPackages(target.deviceId, target.pluginId, metrics, collectedAt).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[telemetry] installed-packages ingestion failed:', err);
+    });
+
     // Normalize the inventory parts of this snapshot into the cross-device
     // tables (Networks + Hosts pages) — ONLY on inventory-due polls. Metrics-
     // only polls carry no inventory keys, so ingesting them would be a no-op;
@@ -491,6 +500,88 @@ async function ingestUpdates(
       .where(and(
         eq(schema.deviceUpdates.deviceId, deviceId),
         eq(schema.deviceUpdates.pluginId, pluginId)
+      ));
+  }
+}
+
+/**
+ * Ingests the `installedPackages` metric into device_packages (CVE tracking).
+ * Runs on EVERY poll — not inventory-gated — so a package upgrade refreshes the
+ * row's version + collectedAt immediately and the cve worker re-matches within
+ * one beat.
+ *
+ * Generic key — any plugin may emit it:
+ *   installedPackages[] { name, version?, ecosystem?, extra? }
+ * `ecosystem` is a free-form tag ('debian', 'alpine', 'npm', …) the cve worker
+ * maps onto its provider's source names; missing = 'unknown' (skipped by the
+ * fetch, but still stored so the UI can show untracked packages). Same
+ * CONFIG-object lifecycle as containers: upsert-per-poll + delete-on-absent,
+ * present-but-empty = authoritative wipe. Never throws.
+ */
+async function ingestInstalledPackages(
+  deviceId: string,
+  pluginId: string,
+  metrics: Record<string, unknown>,
+  collectedAt: string
+): Promise<void> {
+  const rawPkgs = Array.isArray(metrics['installedPackages']) ? (metrics['installedPackages'] as unknown[]) : null;
+  if (rawPkgs === null) return; // absent key — keep previous rows
+
+  const extraOf = (r: Record<string, unknown>): string => {
+    const e = r['extra'];
+    if (!e || typeof e !== 'object' || Array.isArray(e)) return '{}';
+    try {
+      return JSON.stringify(e);
+    } catch {
+      return '{}';
+    }
+  };
+
+  const values: {
+    deviceId: string; pluginId: string; name: string; version: string | null;
+    ecosystem: string; extra: string; collectedAt: string;
+  }[] = [];
+  for (const raw of rawPkgs) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+    if (!name) continue; // name is part of the conflict key
+    values.push({
+      deviceId,
+      pluginId,
+      name,
+      version: typeof r['version'] === 'string' && (r['version'] as string).trim() !== '' ? (r['version'] as string).trim() : null,
+      ecosystem: typeof r['ecosystem'] === 'string' && (r['ecosystem'] as string).trim() !== '' ? (r['ecosystem'] as string).trim().toLowerCase() : 'unknown',
+      extra: extraOf(r),
+      collectedAt,
+    });
+  }
+
+  if (values.length > 0) {
+    const byKey = new Map<string, typeof values[number]>();
+    for (const v of values) byKey.set(v.name, v); // one row per package name (PK is case-sensitive; the cve worker matches case-insensitively)
+    await db.insert(schema.devicePackages).values(Array.from(byKey.values())).onConflictDoUpdate({
+      target: [schema.devicePackages.deviceId, schema.devicePackages.pluginId, schema.devicePackages.name],
+      set: {
+        version: sql`excluded.version`,
+        ecosystem: sql`excluded.ecosystem`,
+        extra: sql`excluded.extra`,
+        collectedAt: sql`excluded."collectedAt"`,
+      },
+    });
+    const seenNames = new Set(values.map((v) => v.name));
+    await db.delete(schema.devicePackages)
+      .where(and(
+        eq(schema.devicePackages.deviceId, deviceId),
+        eq(schema.devicePackages.pluginId, pluginId),
+        notInArray(schema.devicePackages.name, Array.from(seenNames))
+      ));
+  } else {
+    // Present-but-EMPTY is the authoritative wipe — same contract as containers.
+    await db.delete(schema.devicePackages)
+      .where(and(
+        eq(schema.devicePackages.deviceId, deviceId),
+        eq(schema.devicePackages.pluginId, pluginId)
       ));
   }
 }
@@ -2436,6 +2527,11 @@ async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
   // drops its (stale) session rows after the sweep window.
   await db.delete(schema.shareSessions).where(lt(schema.shareSessions.collectedAt, cutoff));
   await db.delete(schema.containers).where(lt(schema.containers.collectedAt, cutoff));
+  // Installed-package inventory (CVE tracking) ages out the same way as containers.
+  await db.delete(schema.devicePackages).where(lt(schema.devicePackages.collectedAt, cutoff));
+  // Derived CVE matches: swept too so an offline device drops out of the Security
+  // page between worker beats (the worker also recomputes them wholesale each cycle).
+  await db.delete(schema.deviceCves).where(lt(schema.deviceCves.collectedAt, cutoff));
   await db.delete(schema.dockerImages).where(lt(schema.dockerImages.collectedAt, cutoff));
   await db.delete(schema.vms).where(lt(schema.vms.collectedAt, cutoff));
   await db.delete(schema.gpus).where(lt(schema.gpus.collectedAt, cutoff));

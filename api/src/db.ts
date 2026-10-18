@@ -1122,6 +1122,67 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_device_security_checks_device ON device_security_checks ("deviceId")`);
 
+  // Installed-package inventory (CVE tracking) — one row per package, upserted
+  // per poll from the plugin's `installedPackages` metric. Same lifecycle as
+  // containers (upsert + delete-on-absent + 24h sweep). See schema.devicePackages.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_packages (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      version TEXT,
+      ecosystem TEXT NOT NULL DEFAULT 'unknown',
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_packages_device ON device_packages ("deviceId")`);
+
+  // CVE advisory knowledge base (Security page) — one row per (ecosystem,
+  // package, advisory). Worker-managed only: fetched from an OSINT provider and
+  // pruned for packages no longer in the fleet. NOT swept (global knowledge,
+  // not per-device inventory). See schema.cveAdvisories.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cve_advisories (
+      ecosystem TEXT NOT NULL,
+      "packageName" TEXT NOT NULL,
+      id TEXT NOT NULL,
+      "severityScore" DOUBLE PRECISION,
+      "severityRank" TEXT NOT NULL DEFAULT 'unknown',
+      "affectedRanges" JSONB NOT NULL DEFAULT '[]'::jsonb,
+      summary TEXT,
+      url TEXT,
+      "publishedAt" TEXT,
+      provider TEXT NOT NULL DEFAULT 'osv',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY (ecosystem, "packageName", id)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_cve_advisories_pkg ON cve_advisories (ecosystem, "packageName")`);
+
+  // Per-device CVE matches (Security page) — the join of device_packages with
+  // cve_advisories, recomputed wholesale by the CVE worker each cycle. Swept
+  // like other inventory so offline devices drop out of the views. See schema.deviceCves.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_cves (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      ecosystem TEXT NOT NULL,
+      "packageName" TEXT NOT NULL,
+      "cveId" TEXT NOT NULL,
+      "installedVersion" TEXT,
+      "severityScore" DOUBLE PRECISION,
+      "severityRank" TEXT NOT NULL DEFAULT 'unknown',
+      summary TEXT,
+      url TEXT,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", ecosystem, "packageName", "cveId")
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_cves_device ON device_cves ("deviceId")`);
+
   // Generic per-plugin persistent state (see schema.pluginState). Plugins store
   // opaque JSON blobs here across polls/restarts via the internal /plugin/state/*
   // routes — e.g. file-integrity baselines keyed by host+path. The API never

@@ -1,4 +1,4 @@
-import { pgTable, text, boolean, integer, bigint, doublePrecision, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
+import { pgTable, text, boolean, integer, bigint, doublePrecision, jsonb, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const users = pgTable('users', {
@@ -2337,3 +2337,122 @@ export const replicationTargets = pgTable(
 // Add index for config_jobs
 // Note: Drizzle's index definition inside the table definition is 
 // usually the best way to handle this. I'll add it to configJobs.
+
+// ── CVE vulnerability tracking (Security page) ───────────────────────────────
+// One row per installed package as reported by a plugin's `installedPackages`
+// metric — the fleet-wide inventory the CVE worker matches advisories against.
+// Same upsert-per-poll + delete-on-absent lifecycle as containers: an uninstalled
+// package must vanish on the next poll, not linger until the 24h sweep. PK is
+// (device, plugin, name) so two plugins watching one device keep separate rows;
+// a device without package data contributes no rows. Swept like other inventory.
+export const devicePackages = pgTable(
+  'device_packages',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Package name as reported (e.g. "openssl", "nginx", "node").
+    name: text('name').notNull(),
+    // Installed version string, verbatim ("1.1.1n-0ubuntu3.9", "2.4.5-r0", …).
+    // NULL = unversioned (e.g. a binary with no readable version) — the CVE
+    // worker treats it as "any version" for matching purposes.
+    version: text('version'),
+    // Ecosystem tag used to pick the advisory source + version comparator:
+    // 'debian' | 'alpine' | 'npm' | … (plugins emit what their OS/package
+    // manager is; the worker maps it onto provider ecosystems).
+    ecosystem: text('ecosystem').notNull().default('unknown'),
+    // Plugin-specific details (JSON object) stored verbatim.
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDevicePackages: primaryKey({
+        name: 'device_packages_pkey',
+        columns: [table.deviceId, table.pluginId, table.name],
+      }),
+      idxDevicePackagesDevice: index('idx_device_packages_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per known advisory for a (ecosystem, package) pair — the fleet-wide
+// vulnerability knowledge base. Worker-managed ONLY (never written by plugins):
+// fetched from an OSINT provider (OSV.dev today; commercial providers later via
+// the CveProvider interface), upserted on every fetch cycle and pruned for
+// packages no longer installed anywhere in the fleet. NOT swept — advisories
+// are global knowledge, not per-device inventory. `affectedRanges` is a JSONB
+// array of { type: 'lt'|'gt', version } bounds (OSV "events" normalized): a
+// package version matches when it falls inside any [introduced, fixed) range.
+export const cveAdvisories = pgTable(
+  'cve_advisories',
+  {
+    // Provider ecosystem tag ('DEBIAN', 'ALPINE_LINUX', 'npm', …). Part of the
+    // PK — the same package name can carry different advisories per ecosystem.
+    ecosystem: text('ecosystem').notNull(),
+    packageName: text('packageName').notNull(),
+    // Advisory id (e.g. "CVE-2024-1234", "GHSA-xxxx"). One row per advisory —
+    // a package with several CVEs gets one row each, all sharing the ranges.
+    id: text('id').notNull(),
+    // CVSS base score 0–10 (null = unscored / provider gave none).
+    severityScore: doublePrecision('severityScore'),
+    // Derived bucket for cheap filtering/sorting: 'critical' | 'high' |
+    // 'medium' | 'low' | 'unknown' — computed from the score at ingest.
+    severityRank: text('severityRank').notNull().default('unknown'),
+    // Affected version ranges (JSONB): [{ type: 'lt'|'gt', version }] — OSV
+    // "events" normalized to bounds. Matching is done in TS (cve/match.ts),
+    // not SQL, so the shape stays provider-flexible.
+    affectedRanges: jsonb('affectedRanges').notNull().default([] as unknown[]),
+    // Human summary of the vulnerability (first paragraph / description).
+    summary: text('summary'),
+    // Canonical advisory URL (NVD/GHSA/OSV page) for the UI's "details" link.
+    url: text('url'),
+    publishedAt: text('publishedAt'),
+    // Provider id that last wrote this row ('osv' today).
+    provider: text('provider').notNull().default('osv'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkCveAdvisories: primaryKey({
+        name: 'cve_advisories_pkey',
+        columns: [table.ecosystem, table.packageName, table.id],
+      }),
+      idxCveAdvisoriesPkg: index('idx_cve_advisories_pkg').on(table.ecosystem, table.packageName),
+    };
+  }
+);
+
+// One row per (device × vulnerable package) match — the join of device_packages
+// with cve_advisories computed by the CVE worker on every fetch cycle. This is
+// what the Security page renders: which devices are exposed to which CVEs, at
+// what severity. Recomputed WHOLESALE each beat (delete-all + re-insert per
+// device set) — the table is a pure derived view and must never drift from its
+// inputs. Swept like other inventory so offline devices drop out of the views.
+export const deviceCves = pgTable(
+  'device_cves',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    ecosystem: text('ecosystem').notNull(),
+    packageName: text('packageName').notNull(),
+    cveId: text('cveId').notNull(),
+    // The installed version that matched (denormalized for display).
+    installedVersion: text('installedVersion'),
+    severityScore: doublePrecision('severityScore'),
+    severityRank: text('severityRank').notNull().default('unknown'),
+    summary: text('summary'),
+    url: text('url'),
+    // Provider-specific details (JSON object) stored verbatim.
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDeviceCves: primaryKey({
+        name: 'device_cves_pkey',
+        columns: [table.deviceId, table.pluginId, table.ecosystem, table.packageName, table.cveId],
+      }),
+      idxDeviceCvesDevice: index('idx_device_cves_device').on(table.deviceId),
+    };
+  }
+);

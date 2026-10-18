@@ -129,6 +129,10 @@ export interface WebFetchRequest {
   maxBytes?: number;
   extract?: 'auto' | 'tar.gz' | 'zip';
   headers?: Record<string, string>;
+  /** Origin HTTP method (default GET). POST + `body` for APIs that need a request body. */
+  method?: 'GET' | 'POST';
+  /** JSON-serializable body sent with a POST request (the plugin serializes it as application/json). */
+  body?: unknown;
 }
 
 export interface WebFetchResult {

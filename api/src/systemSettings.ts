@@ -798,6 +798,33 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     help:
       'Internal pointer to the currently active GeoIP file in the central repository — written by the geoip worker after each successful refresh. Do not edit manually; clear it to force a re-download on the next cycle.',
   },
+
+  // CVE vulnerability tracking (Security page) — the cve worker queries an OSINT
+  // provider (OSV.dev today, commercial providers later via the CveProvider
+  // interface) for every distinct package installed in the fleet and matches
+  // the advisories against each device's versions. Egress goes through the same
+  // web-fetch plugin as GeoIP (webFetchProxyUrl/TimeoutMs/MaxBytes apply).
+  {
+    key: 'cveEnabled',
+    label: 'CVE vulnerability tracking',
+    type: 'boolean',
+    category: 'CVE Tracking',
+    default: true,
+    help:
+      'Master switch for the CVE worker. When enabled it periodically fetches advisories (OSV.dev) for every package installed on your devices and matches them against the installed versions — results appear on the Security page. Disable to stop fetching; existing findings stay in place.',
+  },
+  {
+    key: 'cveFetchIntervalHours',
+    label: 'Advisory refresh interval',
+    type: 'integer',
+    category: 'CVE Tracking',
+    unit: 'h',
+    min: 1,
+    max: 8_760,
+    default: 24,
+    help:
+      'How often the worker re-queries the advisory provider (default 24 h — OSV.dev publishes new advisories continuously). The manual "Refresh now" button on the Security page bypasses the interval. Device-side matching is recomputed on every beat regardless, so a package upgrade clears its findings without waiting for the next fetch.',
+  },
 ];
 
 const BY_KEY: Record<string, SettingDescriptor> = Object.fromEntries(

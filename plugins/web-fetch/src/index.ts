@@ -17,7 +17,11 @@
  * with CONNECT tunneling for HTTPS targets.
  *
  * Contract (POST /fetch):
- *   body  { url, proxyUrl?, timeoutMs?, maxBytes?, extract?: 'auto'|'tar.gz'|'zip', headers? }
+ *   body  { url, proxyUrl?, timeoutMs?, maxBytes?, extract?: 'auto'|'tar.gz'|'zip', headers?,
+ *           method?: 'GET'|'POST', body? }
+ *         `method` defaults to GET. With method POST + a JSON-serializable `body`,
+ *         the request is sent as application/json (axios serializes it) — needed
+ *         for APIs that only accept POST, e.g. OSV.dev's batch vulnerability query.
  *   resp  raw octet-stream of the downloaded (and optionally extracted) bytes;
  *         metadata rides in response headers:
  *           x-webfetch-status          — origin HTTP status code
@@ -59,8 +63,8 @@ const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
   description:
-    'Internet egress service — downloads files/web content (optionally through a proxy) so UNM and plugins never handle outbound TLS themselves.',
-  version: '0.1.0',
+    'Internet egress service — downloads files/web content (optionally through a proxy, GET or POST+JSON body) so UNM and plugins never handle outbound TLS themselves.',
+  version: '0.2.0',
   vendors: ['unm'],
   // No device-facing capabilities — this is a pull-based egress service. The
   // API's plugin-metrics worker still polls GET /metrics (SDK auto-mounted)
@@ -87,6 +91,10 @@ interface FetchRequest {
   maxBytes?: number;
   extract?: 'auto' | 'tar.gz' | 'zip';
   headers?: Record<string, string>;
+  /** HTTP method for the origin request. Defaults to GET (the historical behavior). */
+  method?: 'GET' | 'POST';
+  /** JSON-serializable body sent with a POST request (axios serializes it as application/json). */
+  body?: unknown;
 }
 
 const stats = {
@@ -271,11 +279,18 @@ server.app.post('/fetch', requirePluginKey, async (req, res) => {
     const timeoutMs = Math.min(Math.max(5_000, Number(body.timeoutMs) || DEFAULT_TIMEOUT_MS), 3_600_000);
     const maxBytes = Math.min(Number(body.maxBytes) > 0 ? Number(body.maxBytes) : MAX_BYTES_CEILING, MAX_BYTES_CEILING);
     const extract: 'auto' | 'tar.gz' | 'zip' = body.extract === 'tar.gz' || body.extract === 'zip' ? body.extract : 'auto';
+    // POST support (OSV.dev's batch query and similar APIs): the caller passes a
+    // JSON-serializable `body`; axios serializes it as application/json. GET is
+    // the default — every pre-existing caller keeps working unchanged.
+    const method: 'GET' | 'POST' = body.method === 'POST' ? 'POST' : 'GET';
 
     // ── Download (streamed; byte-counted so chunked responses are bounded too) ──
     let response;
     try {
-      response = await axios.get<fs.ReadStream>(body.url, {
+      response = await axios.request<fs.ReadStream>({
+        url: body.url,
+        method,
+        data: method === 'POST' ? body.body : undefined,
         responseType: 'stream',
         timeout: timeoutMs,
         proxy: proxy ?? false,

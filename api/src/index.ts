@@ -26,6 +26,7 @@ import documentedHostsRouter from './routes/documentedHosts';
 import documentedNetworksRouter from './routes/documentedNetworks';
 import updatesRouter from './routes/updates';
 import securityChecksRouter from './routes/securityChecks';
+import cveRouter from './routes/cve';
 import topologyRouter from './routes/topology';
 import logsRouter from './routes/logs';
 import notificationsRouter from './routes/notifications';
@@ -48,6 +49,7 @@ import { startPluginMetricsWorker } from './workers/pluginMetrics';
 import { startNtpReferencesWorker } from './workers/ntpReferences';
 import { startUpdateCheckWorker } from './workers/updateCheck';
 import { startGeoIpWorker } from './workers/geoip';
+import { startCveWorker } from './cve/worker';
 import { startFlowsWorker } from './workers/flows';
 import { startInactiveUsersWorker } from './workers/inactiveUsers';
 import { startReplicationSchedulerWorker } from './workers/replication';
@@ -202,6 +204,9 @@ async function main(): Promise<void> {
   api.use(updatesRouter);
   // Cross-device security findings (Security page) — actionable checks only.
   api.use(securityChecksRouter);
+  // CVE vulnerability tracking (Security page): per-device matches, summary
+  // counts + manual advisory refresh. All gated on security:read.
+  api.use(cveRouter);
   // Physical + logical topology graph for the Topology page (self-defining path).
   api.use(topologyRouter);
   // Plugin log entries (global view + per-device section in DeviceDetail).
@@ -318,6 +323,9 @@ async function main(): Promise<void> {
 
     // GeoIP database refresh (leader-gated; cadence from geoipFetchIntervalHours).
     void runAsLeader(LEADER_KEYS.geoip, 'geoip', () => startGeoIpWorker()).then((stop) => workerStops.push(stop));
+
+    // CVE advisory fetch + device matching (Security page; cadence from cveFetchIntervalHours).
+    void runAsLeader(LEADER_KEYS.cve, 'cve', () => startCveWorker()).then((stop) => workerStops.push(stop));
 
     // CA config rendering: the API owns ca.json (rendered from global settings)
     // on the shared volume; the CA service SIGHUPs itself when it changes.

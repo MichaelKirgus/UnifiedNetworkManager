@@ -5658,6 +5658,101 @@ paths:
         '401':
           description: Authentication required
 
+  /cve/vulnerabilities:
+    get:
+      tags: [Security]
+      summary: Per-device CVE matches (installed packages × known advisories)
+      description: >-
+        Rows from the `device_cves` table — one row per (device × vulnerable
+        package) match, recomputed wholesale by the cve worker on every beat.
+        The worker fetches advisories for every distinct package installed in
+        the fleet (OSV.dev today; commercial providers later via the CveProvider
+        interface) and matches them against each device's installed versions
+        with per-ecosystem comparators. Device-level access control applies —
+        scoped callers get an empty list for out-of-scope devices, never a leak.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: severityRank
+          required: false
+          schema:
+            type: string
+            enum: [critical, high, medium, low, unknown]
+          description: Filter by CVSS-derived severity bucket
+        - in: query
+          name: ecosystem
+          required: false
+          schema: { type: string }
+          description: Filter by package ecosystem tag (e.g. debian, alpine, npm)
+        - in: query
+          name: q
+          required: false
+          schema: { type: string }
+          description: Case-insensitive substring match on package name or CVE id
+      responses:
+        '200':
+          description: CVE match rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CveVulnerabilitiesResponse'
+        '400':
+          description: Invalid severityRank filter value
+        '401':
+          description: Authentication required
+
+  /cve/summary:
+    get:
+      tags: [Security]
+      summary: CVE page header — counts by severity + last advisory fetch outcome
+      description: >-
+        Aggregate view for the Security page header: match counts per severity
+        bucket, the number of affected devices, and the cve worker's status rows
+        (lastAttemptAt / lastSuccessAt / lastError). Device-level access control
+        applies — scoped callers only count their own devices.
+      responses:
+        '200':
+          description: Summary counts + worker fetch state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CveSummaryResponse'
+        '401':
+          description: Authentication required
+
+  /cve/refresh:
+    post:
+      tags: [Security]
+      summary: Run one CVE advisory fetch cycle now (bypasses the interval)
+      description: >-
+        Triggers a single advisory fetch for every distinct package installed in
+        the fleet (OSV.dev), upserts cve_advisories and prunes advisories for
+        packages no longer present. Match recomputation happens on the worker's
+        next beat automatically. Returns 502 when the fetch failed and no data
+        has ever been fetched successfully; 409 when CVE tracking is disabled.
+      responses:
+        '200':
+          description: Worker status rows after the cycle
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CveWorkerStatus'
+        '401':
+          description: Authentication required
+        '409':
+          description: CVE tracking is disabled (cveEnabled)
+        '502':
+          description: The fetch failed and no advisory data has ever been fetched
+
   /certificates:
     get:
       tags: [Inventory]
@@ -10048,6 +10143,60 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SecurityCheckRow'
+
+    CveVulnerabilitiesResponse:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/CveMatchRow'
+
+    CveMatchRow:
+      type: object
+      description: One (device × vulnerable package) match from the device_cves table.
+      required: [deviceId, pluginId, ecosystem, packageName, cveId, severityRank, collectedAt]
+      properties:
+        deviceId: { type: string }
+        pluginId: { type: string }
+        ecosystem: { type: string, description: "Package ecosystem tag (debian, alpine, npm, …)" }
+        packageName: { type: string }
+        cveId: { type: string, description: "Advisory id — a CVE alias when the source provides one" }
+        installedVersion: { type: [string, 'null'], description: "The installed version that matched (null = unversioned package)" }
+        severityScore: { type: [number, 'null'], description: "CVSS v3 base score 0–10 (null = unscored advisory)" }
+        severityRank:
+          type: string
+          enum: [critical, high, medium, low, unknown]
+        summary: { type: [string, 'null'] }
+        url: { type: [string, 'null'], description: "Canonical advisory URL (OSV page)" }
+        extra: { type: object, additionalProperties: true }
+        collectedAt: { type: string, format: date-time }
+        deviceName: { type: [string, 'null'] }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginName: { type: [string, 'null'] }
+
+    CveSummaryResponse:
+      allOf:
+        - $ref: '#/components/schemas/CveWorkerStatus'
+        - type: object
+          required: [bySeverity, affectedDevices, totalMatches]
+          properties:
+            bySeverity:
+              type: object
+              description: "Match counts per severity bucket (all five keys always present)"
+              additionalProperties: { type: integer }
+            affectedDevices: { type: integer, description: "Distinct devices with at least one match" }
+            totalMatches: { type: integer }
+
+    CveWorkerStatus:
+      type: object
+      required: [lastAttemptAt, lastSuccessAt, lastError]
+      properties:
+        lastAttemptAt: { type: [string, 'null'], format: date-time }
+        lastSuccessAt: { type: [string, 'null'], format: date-time }
+        lastError: { type: string, description: "Empty when the last cycle succeeded" }
 
     ContainersOverview:
       type: object

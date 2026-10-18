@@ -18,7 +18,7 @@ const router = Router();
  */
 interface CountSpec {
   /** Response key + the permission required to see it. */
-  key: 'notifications' | 'plans' | 'certificates' | 'updates' | 'securityChecks';
+  key: 'notifications' | 'plans' | 'certificates' | 'updates' | 'securityChecks' | 'cveVulnerabilities';
   permission: string;
   compute: (req: Request, userId: string) => Promise<number>;
 }
@@ -134,6 +134,27 @@ const COUNTS: CountSpec[] = [
         .select({ n: sql<number>`count(*)::int` })
         .from(schema.deviceSecurityChecks)
         .where(allowed !== null ? inArray(schema.deviceSecurityChecks.deviceId, [...allowed]) : undefined);
+      return row?.n ?? 0;
+    },
+  },
+  {
+    // CRITICAL CVE matches across the caller's devices (device_cves is a pure
+    // derived view recomputed by the cve worker). Only critical rows light up
+    // the badge — lower severities stay visible on the Security page itself.
+    key: 'cveVulnerabilities',
+    permission: 'security:read',
+    compute: async (req) => {
+      const allowed = await allowedDeviceIds(req);
+      if (allowed !== null && allowed.size === 0) return 0;
+      const [row] = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(schema.deviceCves)
+        .where(
+          and(
+            eq(schema.deviceCves.severityRank, 'critical'),
+            allowed !== null ? inArray(schema.deviceCves.deviceId, [...allowed]) : undefined
+          )
+        );
       return row?.n ?? 0;
     },
   },

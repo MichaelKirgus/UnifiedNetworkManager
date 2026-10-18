@@ -49,6 +49,7 @@ export const LEADER_KEYS = {
   stackUpdates: 9015,
   replication: 9016,
   autoBackup: 9017,
+  cve: 9018,
 } as const;
 
 /**
