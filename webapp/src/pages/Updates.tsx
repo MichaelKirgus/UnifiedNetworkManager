@@ -7,7 +7,7 @@ import { DataTable, DataTableColumn, type ExpandChildContext } from '../componen
 import { DeviceChip } from '../components/DeviceChip';
 import { ReauthDialog } from '../components/ReauthDialog';
 import { runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
-import { api, ApiError, UpdateRow } from '../api/client';
+import { api, ApiError, UpdateRow, FixesSummary } from '../api/client';
 import { can } from '../auth/permissions';
 
 // ---------------------------------------------------------------------------
@@ -42,6 +42,68 @@ function ActionIconButton({ label, onClick, icon }: { label: string; onClick: ()
 
 function orDash(v?: string | null): string {
   return v && v.trim() !== '' ? v : '—';
+}
+
+// ---------------------------------------------------------------------------
+// "Fixes CVEs" — severity chips for the CVEs each update resolves (computed by
+// the API from the fleet's advisory data; os-package rows with a known
+// current+latest version only)
+// ---------------------------------------------------------------------------
+
+const RANK_STYLES: Record<string, string> = {
+  critical: 'bg-danger text-danger-fg',
+  high: 'bg-warning text-warning-fg',
+  medium: 'bg-info text-info-fg',
+  low: 'bg-muted text-secondary',
+  unknown: 'bg-muted text-faint',
+};
+
+/** Merges the per-row fixesCves summaries (device row = all of its child rows). */
+function aggregateFixes(rows: UpdateRow[]): FixesSummary | null {
+  const acc = { total: 0, critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const r of rows) {
+    const f = r.fixesCves;
+    if (!f) continue;
+    acc.total += f.total;
+    acc.critical += f.critical;
+    acc.high += f.high;
+    acc.medium += f.medium;
+    acc.low += f.low;
+    acc.unknown += f.unknown;
+    for (const id of f.topIds) if (!seen.has(id)) { seen.add(id); ids.push(id); } // per-row lists are already severity-ordered
+  }
+  if (acc.total === 0) return null;
+  return { ...acc, topIds: ids.slice(0, 8) };
+}
+
+/** The fixes summary of one tree node — its own row for children, the merged
+ * child rows for device parents. */
+function fixesOf(n: UpdateNode): FixesSummary | null {
+  if (!n.isDevice) return n.row?.fixesCves ?? null;
+  return aggregateFixes((n.groups ?? []).flatMap((g) => g.rows));
+}
+
+/** "2 critical · 1 high" chips — the tooltip lists the top CVE ids. */
+function FixesChips({ fixes }: { fixes: FixesSummary | null }) {
+  if (!fixes || fixes.total === 0) return <span className="text-faint">—</span>;
+  const parts = [
+    fixes.critical > 0 ? `${fixes.critical} critical` : '',
+    fixes.high > 0 ? `${fixes.high} high` : '',
+    fixes.medium > 0 ? `${fixes.medium} medium` : '',
+    fixes.low > 0 ? `${fixes.low} low` : '',
+    fixes.unknown > 0 ? `${fixes.unknown} unknown` : '',
+  ].filter(Boolean);
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1" title={`Fixes ${fixes.total} known CVE(s): ${fixes.topIds.join(', ')}`}>
+      {parts.map((p) => (
+        <span key={p} className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${RANK_STYLES[p.split(' ')[1]] ?? 'bg-muted text-secondary'}`}>
+          {p}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -673,6 +735,12 @@ export default function Updates() {
       render: (n) => <span className="font-mono text-xs font-medium text-foreground">{orDash(summaryRowOf(n)?.latestVersion)}</span>,
     },
     {
+      header: 'Fixes CVEs', key: 'fixesCves', width: 190, sortable: false, filterable: true,
+      exportValue: (n) => fixesOf(n)?.topIds.join(', ') ?? '',
+      searchText: (n) => fixesOf(n)?.topIds.join(' ') ?? '',
+      render: (n) => <FixesChips fixes={fixesOf(n)} />,
+    },
+    {
       header: 'Branch', key: 'branch', width: 130, sortable: false, filterable: false,
       exportValue: (n) => branchOf(n) ?? '',
       searchText: (n) => branchOf(n) ?? '',
@@ -803,6 +871,8 @@ export default function Updates() {
         return <span className="font-mono text-xs">{orDash(row.currentVersion)}</span>;
       case 'latestVersion':
         return <span className="font-mono text-xs font-medium text-foreground">{orDash(row.latestVersion)}</span>;
+      case 'fixesCves':
+        return <FixesChips fixes={row.fixesCves ?? null} />;
       case 'branch': {
         const b = row.branch ?? null;
         return b ? (

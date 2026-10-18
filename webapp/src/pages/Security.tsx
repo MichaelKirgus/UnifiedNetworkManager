@@ -1,9 +1,10 @@
-import { useQuery } from '@tanstack/react-query';
-import { ShieldCheck, ShieldAlert, ShieldX, Info } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Bug, Loader2, RefreshCw, ShieldCheck, ShieldAlert, ShieldX, Info } from 'lucide-react';
+import { useState } from 'react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
-import { api, SecurityCheckRow } from '../api/client';
+import { api, SecurityCheckRow, CveVulnerabilityRow } from '../api/client';
 
 /** Check-kind pill — the vocabulary is shared across all plugins (SDK contract). */
 const KIND_STYLES: Record<string, string> = {
@@ -81,6 +82,24 @@ function timeAgo(iso: string): string {
   return `${Math.round(h / 24)}d ago`;
 }
 
+/** Severity-rank pill for CVE rows — same color language as the status badges. */
+const RANK_STYLES: Record<string, string> = {
+  critical: 'bg-danger text-danger-fg',
+  high: 'bg-warning text-warning-fg',
+  medium: 'bg-info text-info-fg',
+  low: 'bg-muted text-secondary',
+  unknown: 'bg-muted text-faint',
+};
+
+function RankBadge({ rank, score }: { rank: string; score?: number | null }) {
+  return (
+    <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium ${RANK_STYLES[rank] ?? 'bg-muted text-secondary'}`} title={typeof score === 'number' ? `CVSS score ${score.toFixed(1)}` : undefined}>
+      {rank}
+      {typeof score === 'number' && <span className="font-mono opacity-80">{score.toFixed(1)}</span>}
+    </span>
+  );
+}
+
 export default function Security() {
   // The API polls plugins every 30s and upserts findings on inventory-due polls —
   // refresh at the same cadence so the view tracks live checks.
@@ -94,6 +113,42 @@ export default function Security() {
   const criticalCount = rows.filter((r) => r.status === 'critical').length;
   const warningCount = rows.filter((r) => r.status === 'warning').length;
   const infoCount = rows.length - criticalCount - warningCount;
+
+  // --- CVE vulnerability tracking (installed packages × known advisories) ------
+  const queryClient = useQueryClient();
+  const cveSummaryQuery = useQuery({
+    queryKey: ['cveSummary'],
+    queryFn: () => api.cveSummary(),
+    refetchInterval: 30_000,
+  });
+  const cveVulnsQuery = useQuery({
+    queryKey: ['cveVulnerabilities'],
+    queryFn: () => api.cveVulnerabilities(),
+    refetchInterval: 30_000,
+  });
+
+  // "Refresh advisories" runs one full fetch cycle server-side (~3.5 min) — fire
+  // and forget; the summary's lastSuccessAt/lastError surface the outcome.
+  const [refreshingCves, setRefreshingCves] = useState(false);
+  async function refreshAdvisories() {
+    if (refreshingCves) return;
+    setRefreshingCves(true);
+    try {
+      await api.refreshCveAdvisories();
+      void queryClient.invalidateQueries({ queryKey: ['cveSummary'] });
+      void queryClient.invalidateQueries({ queryKey: ['cveVulnerabilities'] });
+    } catch (err) {
+      // The cycle itself never throws — a 502 here means the fetch FAILED and
+      // its error is already in lastError. Still surface it as a notice.
+      void queryClient.invalidateQueries({ queryKey: ['cveSummary'] });
+      console.warn('CVE advisory refresh reported an error:', (err as Error).message);
+    } finally {
+      setRefreshingCves(false);
+    }
+  }
+
+  const cveRows = cveVulnsQuery.data?.rows ?? [];
+  const summary = cveSummaryQuery.data;
 
   const columns: DataTableColumn<SecurityCheckRow>[] = [
     {
@@ -165,6 +220,78 @@ export default function Security() {
     },
   ];
 
+  const cveColumns: DataTableColumn<CveVulnerabilityRow>[] = [
+    {
+      header: 'Device',
+      key: 'deviceName',
+      width: 240,
+      exportValue: (row) => `${row.deviceName ?? '?'} (${row.managementAddress ?? '?'})`,
+      render: (row) => (
+        <DeviceChip
+          deviceName={row.deviceName}
+          managementAddress={row.managementAddress}
+          pluginName={row.pluginName}
+          siteName={row.siteName}
+          interfaces={[]}
+        />
+      ),
+    },
+    {
+      header: 'Package',
+      key: 'packageName',
+      width: 240,
+      exportValue: (row) => row.packageName,
+      render: (row) => (
+        <span className="font-mono text-xs">
+          {row.packageName}
+          {row.installedVersion ? (
+            <span className="text-faint"> @ {row.installedVersion}</span>
+          ) : null}
+        </span>
+      ),
+    },
+    {
+      header: 'CVE',
+      key: 'cveId',
+      width: 160,
+      exportValue: (row) => row.cveId,
+      render: (row) =>
+        row.url ? (
+          <a href={row.url} target="_blank" rel="noreferrer" title={`Open ${row.cveId} details`} className="font-mono text-xs text-info hover:underline">
+            {row.cveId}
+          </a>
+        ) : (
+          <span className="font-mono text-xs">{row.cveId}</span>
+        ),
+    },
+    {
+      header: 'Severity',
+      key: 'severityRank',
+      width: 130,
+      sortAccessor: (row) => ({ critical: 0, high: 1, medium: 2, low: 3, unknown: 4 }[row.severityRank] ?? 5),
+      render: (row) => <RankBadge rank={row.severityRank} score={row.severityScore} />,
+    },
+    {
+      header: 'Ecosystem',
+      key: 'ecosystem',
+      width: 120,
+      exportValue: (row) => row.ecosystem,
+      render: (row) => <span className="text-xs text-secondary">{orDash(row.ecosystem)}</span>,
+    },
+    {
+      header: 'Summary',
+      key: 'summary',
+      width: 420,
+      exportValue: (row) => row.summary ?? '',
+      render: (row) =>
+        row.summary && row.summary.trim() !== '' ? (
+          <span className="text-xs text-secondary break-words">{row.summary}</span>
+        ) : (
+          <span className="text-faint">—</span>
+        ),
+    },
+  ];
+
   return (
     <Layout title="Security">
       {/* Summary strip — the badge in the sidebar is this same count. */}
@@ -209,6 +336,75 @@ export default function Security() {
           emptyMessage="No open security findings — devices report unsuccessful logins, changed important files and active rate limiting here. Assign an SSH-capable plugin (Generic SSH, OpenWRT, OPNsense) or a RouterOS plugin to start collecting."
         />
       )}
+
+      {/* CVE vulnerability tracking — installed packages matched against known advisories */}
+      <div className="mt-8">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+            <Bug className="h-4 w-4" /> Vulnerabilities (CVEs)
+          </h2>
+          {summary && summary.totalMatches > 0 && (
+            <button
+              type="button"
+              onClick={() => void refreshAdvisories()}
+              disabled={refreshingCves}
+              title="Fetch the latest advisories from OSV and re-match all installed packages (~3.5 min)"
+              className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted disabled:opacity-60"
+            >
+              {refreshingCves ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Refresh advisories
+            </button>
+          )}
+        </div>
+
+        {/* Summary chips — severity distribution + worker fetch state */}
+        {cveSummaryQuery.isLoading && <p className="text-sm text-muted-foreground">Loading vulnerability data…</p>}
+        {cveSummaryQuery.isError && (
+          <p className="text-sm text-danger-fg">Failed to load vulnerability summary: {(cveSummaryQuery.error as Error).message}</p>
+        )}
+        {summary && (
+          <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
+            {summary.totalMatches === 0 ? (
+              <span className="inline-flex items-center gap-1.5 text-success-fg">
+                <ShieldCheck className="h-4 w-4" /> No known vulnerabilities on tracked packages.
+              </span>
+            ) : (
+              <>
+                {(Object.entries(summary.bySeverity) as Array<[string, number]>).filter(([, n]) => n > 0).map(([rank, n]) => (
+                  <span key={rank} className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium ${RANK_STYLES[rank] ?? 'bg-muted text-secondary'}`}>
+                    {n.toLocaleString()} {rank}
+                  </span>
+                ))}
+                <span className="text-faint">·</span>
+                <span className="text-sm text-secondary">
+                  on <strong className="text-foreground">{summary.affectedDevices}</strong> device{summary.affectedDevices === 1 ? '' : 's'}
+                </span>
+              </>
+            )}
+            {summary.lastError && (
+              <span className="inline-flex items-center gap-1 rounded-md bg-danger/20 px-2 py-1 text-xs font-medium text-danger-fg" title={String(summary.lastError)}>
+                last fetch failed: {String(summary.lastError).slice(0, 80)}{String(summary.lastError).length > 80 ? '…' : ''}
+              </span>
+            )}
+            {!summary.lastError && summary.lastSuccessAt && (
+              <span className="text-xs text-faint" title={new Date(summary.lastSuccessAt).toLocaleString()}>
+                advisories fetched {timeAgo(summary.lastSuccessAt)}
+              </span>
+            )}
+          </div>
+        )}
+
+        {cveVulnsQuery.data && (
+          <DataTable
+            columns={cveColumns}
+            rows={cveRows}
+            rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.packageName}|${row.cveId}`}
+            storageKey="security-cves"
+            autoRefresh={{ intervalMs: 30_000, queries: [cveVulnsQuery] }}
+            searchPlaceholder="Search package or CVE id…"
+            emptyMessage="No known vulnerabilities — packages are matched against OSV advisories once the fleet's installed-package inventory is collected (Generic SSH plugin on Linux hosts) and at least one advisory fetch has succeeded."
+          />
+        )}
+      </div>
     </Layout>
   );
 }

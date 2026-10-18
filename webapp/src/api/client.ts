@@ -884,6 +884,18 @@ export interface MailAliasRow {
   collectedAt: string;
 }
 
+/** Which CVEs an update resolves — computed by the API from the fleet's advisory data. */
+export interface FixesSummary {
+  total: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  unknown: number;
+  /** Highest-severity CVE ids first (capped) — for tooltips/links. */
+  topIds: string[];
+}
+
 /** One available update on one device, as reported by a plugin's `updates` metric. */
 export interface UpdateRow {
   deviceId: string;
@@ -912,7 +924,44 @@ export interface UpdateRow {
   /** Prefilled input for applyActionId. */
   applyInput?: Record<string, unknown>;
   extra?: Record<string, unknown>;
+  /** CVEs this update resolves (os-package rows with a known current+latest version only). */
+  fixesCves?: FixesSummary | null;
   collectedAt: string;
+}
+
+/** One installed package on one device that matches a known CVE advisory. */
+export interface CveVulnerabilityRow {
+  deviceId: string;
+  pluginId: string;
+  ecosystem: string;
+  packageName: string;
+  cveId: string;
+  /** Installed version of the affected package (null = unversioned, conservatively flagged). */
+  installedVersion?: string | null;
+  severityScore?: number | null;
+  severityRank: 'critical' | 'high' | 'medium' | 'low' | 'unknown';
+  summary?: string | null;
+  url?: string | null;
+  extra?: Record<string, unknown>;
+  collectedAt: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+export interface CveVulnerabilitiesResponse {
+  rows: CveVulnerabilityRow[];
+}
+
+/** Fleet-wide CVE tracking status + severity distribution. */
+export interface CveSummaryResponse {
+  bySeverity: { critical: number; high: number; medium: number; low: number; unknown: number };
+  affectedDevices: number;
+  totalMatches: number;
+  lastAttemptAt?: string | null;
+  lastSuccessAt?: string | null;
+  lastError?: string | null;
 }
 
 /** The "UNM itself" card on the Updates page (stack self-update info). */
@@ -3668,6 +3717,22 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<SecurityChecksResponse>(`/security-checks${suffix}`);
   },
+  /** CVE matches on installed packages — one row per (device × package × advisory). */
+  cveVulnerabilities: (params?: { deviceId?: string; siteId?: string; severityRank?: 'critical' | 'high' | 'medium' | 'low' | 'unknown'; ecosystem?: string; q?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.severityRank) qs.set('severityRank', params.severityRank);
+    if (params?.ecosystem) qs.set('ecosystem', params.ecosystem);
+    if (params?.q) qs.set('q', params.q);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<CveVulnerabilitiesResponse>(`/cve/vulnerabilities${suffix}`);
+  },
+  /** Fleet-wide CVE tracking status + severity distribution (Security page header). */
+  cveSummary: () => apiFetch<CveSummaryResponse>('/cve/summary'),
+  /** Run one advisory fetch cycle now — blocks ~3.5 min, so the UI must not await it inline. */
+  refreshCveAdvisories: () => apiFetch<{ lastAttemptAt?: string | null; lastSuccessAt?: string | null; lastError?: string }>(
+    '/cve/refresh', { method: 'POST' }),
   /** Physical + logical topology graph for the Topology page. */
   topology: (params?: { siteId?: string; includeHosts?: boolean; tags?: string[]; layer?: string; hostLimit?: number }) => {
     const qs = new URLSearchParams();

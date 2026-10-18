@@ -10063,6 +10063,29 @@ components:
           type: object
           additionalProperties: true
           description: "Plugin-specific details (JSON) — e.g. the package manager id for os-package rows"
+        fixesCves:
+          type: object
+          nullable: true
+          required: [total, critical, high, medium, low, unknown, topIds]
+          properties:
+            total: { type: integer }
+            critical: { type: integer }
+            high: { type: integer }
+            medium: { type: integer }
+            low: { type: integer }
+            unknown: { type: integer }
+            topIds:
+              type: array
+              items: { type: string }
+          description: >-
+            Which known CVEs this update RESOLVES — computed by the API from the
+            fleet's advisory data (device_cves × cve_advisories): an advisory is
+            counted when the CURRENT version falls inside its affected ranges and
+            the LATEST version does not. Only os-package rows with a known
+            current AND latest version carry this; null everywhere else (no fix
+            can be verified without both versions). Rendered as severity chips on
+            the Updates page ("Fixes CVEs" column); topIds lists the highest-
+            severity CVE ids first, capped at 8.
         collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this update" }
 
     StackUpdateInfo:
