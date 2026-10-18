@@ -70,7 +70,16 @@ let enqueuedTotal = 0;
 let droppedTotal = 0;
 let insertedTotal = 0;
 let lastInsertAt: string | null = null;
-let lastError: string | null = null;
+// Per-loop error tracking — a single shared `lastError` that is never cleared
+// on success would pin ONE old failure (e.g. the hourly rollup's syntax error)
+// onto the Flows page forever, long after every loop had recovered. Each loop
+// records its own last failure with a timestamp; getFlowIngestStats() reports
+// only the MOST RECENT one across loops and clears it when that loop succeeds.
+interface LoopError { message: string; atMs: number }
+let drainLastError: LoopError | null = null;
+let rollup5mLastError: LoopError | null = null;
+let rollup1hLastError: LoopError | null = null;
+let partitionLastError: LoopError | null = null;
 
 /** Enqueue one batch from the internal route. Drops oldest rows on overflow. */
 export function enqueueFlowRows(rows: FlowMicroRow[]): void {
@@ -93,13 +102,19 @@ export function getFlowIngestStats(): {
   lastInsertAt: string | null;
   lastError: string | null;
 } {
+  // Most recent failure across all loops — null when every loop is healthy.
+  let worst: LoopError | null = null;
+  for (const e of [drainLastError, rollup5mLastError, rollup1hLastError, partitionLastError]) {
+    if (!e) continue;
+    if (!worst || e.atMs >= worst.atMs) worst = e;
+  }
   return {
     queueDepth: queue.length,
     enqueuedTotal,
     droppedTotal,
     insertedTotal,
     lastInsertAt,
-    lastError,
+    lastError: worst?.message ?? null,
   };
 }
 
@@ -280,12 +295,15 @@ async function drainQueue(): Promise<void> {
       lastInsertAt = new Date().toISOString();
     } catch (err) {
       // Re-queue the failed chunk at the FRONT so no data is lost; the next
-      // drain retries. lastError surfaces on GET /v1/flow-collectors.
+      // drain retries. The error surfaces on GET /v1/flow-collectors.
       queue.unshift(...chunk);
-      lastError = (err as Error).message;
+      drainLastError = { message: (err as Error).message, atMs: Date.now() };
       break;
     }
   }
+  // A fully drained batch clears the ingest loop's last error — a recovered
+  // queue must not keep showing an old failure on the Flows page.
+  if (queue.length === 0) drainLastError = null;
 }
 
 // ── Loop B: 5-minute rollup with enrichment ──────────────────────────────────
@@ -325,6 +343,7 @@ async function rollupTo5m(): Promise<void> {
 
   if (!rows.rows.length) {
     lastRolled5mBucketMs = nowBucketMs; // empty window — advance the cursor anyway
+    rollup5mLastError = null; // this window is settled — clear any earlier failure
     return;
   }
 
@@ -491,6 +510,7 @@ async function rollupTo5m(): Promise<void> {
   }
 
   lastRolled5mBucketMs = nowBucketMs;
+  rollup5mLastError = null; // window settled — clear any earlier failure
   // eslint-disable-next-line no-console
   console.log(`[flows] rolled ${byKey.size} tuple(s) into flow_agg_5m (up to ${new Date(nowBucketMs).toISOString()})`);
 }
@@ -512,9 +532,9 @@ async function rollupTo1h(): Promise<void> {
      SELECT date_trunc('hour', bucket), "srcIp", "dstIp", proto,
             SUM(bytes)::bigint, SUM(packets)::bigint, SUM("estBytes")::bigint,
             MAX("srcPort"), MAX("dstPort"),
-            -- Exporter identity: the agent of the largest 5-min observation
-            // wins (NULL-safe). MAX (not SUM) across buckets — the exporter set
-            // on a path is stable within an hour, so summing would overcount ×N.
+            -- Exporter identity: the agent of the largest 5-min observation wins
+            -- (NULL-safe). MAX (not SUM) across buckets — the exporter set on a
+            -- path is stable within an hour, so summing would overcount ×N.
             (ARRAY_AGG("agentIp" ORDER BY bytes DESC NULLS LAST))[1], MAX(GREATEST("agentCount", 0))::int,
             MAX("srcDeviceId"), MAX("dstDeviceId"),
             -- 'internal' wins over 'internet'/'unknown' when a tuple's endpoints
@@ -558,6 +578,7 @@ async function rollupTo1h(): Promise<void> {
   );
 
   lastRolled1hBucketMs = nowBucketMs;
+  rollup1hLastError = null; // window settled — clear any earlier failure
   if (res.rowCount) {
     // eslint-disable-next-line no-console
     console.log(`[flows] rolled ${res.rowCount} tuple(s) into flow_agg_1h`);
@@ -635,6 +656,7 @@ async function ensureFlowPartitions(): Promise<void> {
       }
     }
   }
+  partitionLastError = null; // pass completed — clear any earlier failure
 }
 
 // ── Worker lifecycle ─────────────────────────────────────────────────────────
@@ -650,7 +672,7 @@ export function startFlowsWorker(): () => void {
 
   const drainTimer = setInterval(() => {
     void drainQueue().catch((err) => {
-      lastError = (err as Error).message;
+      drainLastError = { message: (err as Error).message, atMs: Date.now() };
       // eslint-disable-next-line no-console
       console.error('[flows] ingest drain failed:', err);
     });
@@ -658,7 +680,7 @@ export function startFlowsWorker(): () => void {
 
   const rollup5mTimer = setInterval(() => {
     void rollupTo5m().catch((err) => {
-      lastError = (err as Error).message;
+      rollup5mLastError = { message: (err as Error).message, atMs: Date.now() };
       // eslint-disable-next-line no-console
       console.error('[flows] 5-min rollup failed:', err);
     });
@@ -666,7 +688,7 @@ export function startFlowsWorker(): () => void {
 
   const rollup1hTimer = setInterval(() => {
     void rollupTo1h().catch((err) => {
-      lastError = (err as Error).message;
+      rollup1hLastError = { message: (err as Error).message, atMs: Date.now() };
       // eslint-disable-next-line no-console
       console.error('[flows] hourly rollup failed:', err);
     });
@@ -674,7 +696,7 @@ export function startFlowsWorker(): () => void {
 
   const partitionTimer = setInterval(() => {
     void ensureFlowPartitions().catch((err) => {
-      lastError = (err as Error).message;
+      partitionLastError = { message: (err as Error).message, atMs: Date.now() };
       // eslint-disable-next-line no-console
       console.error('[flows] partition maintenance failed:', err);
     });
@@ -683,7 +705,7 @@ export function startFlowsWorker(): () => void {
   // First pass: partitions immediately (so the first ingest can land), rollups
   // on their normal cadence.
   void ensureFlowPartitions().catch((err) => {
-    lastError = (err as Error).message;
+    partitionLastError = { message: (err as Error).message, atMs: Date.now() };
     // eslint-disable-next-line no-console
     console.error('[flows] initial partition maintenance failed:', err);
   });
