@@ -355,9 +355,21 @@ export default function Plugins() {
       key: 'declaredMetricCount',
       width: 90,
       sortAccessor: (row) => row.declaredMetricCount ?? null,
+      exportValue: (row) =>
+        row.declaredMetricCount != null ? String(row.declaredMetricCount) : row.capabilities.includes('monitoring') ? 'dynamic' : '',
       render: (row) =>
         row.declaredMetricCount !== null && row.declaredMetricCount !== undefined ? (
           <span className="text-secondary">{row.declaredMetricCount} declared</span>
+        ) : row.capabilities.includes('monitoring') ? (
+          // Dynamic-descriptor plugins (Generic SSH, OpenWRT, FBox, MikroTik …)
+          // build their descriptors per /monitoring poll from what the specific
+          // device returned — no fixed fleet-wide count exists to show.
+          <span
+            className="inline-flex items-center rounded bg-muted px-1.5 py-0.5 text-xs font-medium text-faint"
+            title="Metric descriptors are built dynamically on each monitoring poll from what this specific device reports, so there is no fixed declared count."
+          >
+            dynamic
+          </span>
         ) : (
           <span className="text-faint">—</span>
         ),
