@@ -334,6 +334,7 @@ export default function Plugins() {
 
   const columns: DataTableColumn<Plugin>[] = [
     { header: 'Name', key: 'name' },
+    { header: 'ID', key: 'id', width: 280, render: (row) => <span className="font-mono text-xs">{row.id}</span> },
     { header: 'Version', key: 'version' },
     {
       // Build tag baked into the image at CI build time (branch/release); null = local/dev.
