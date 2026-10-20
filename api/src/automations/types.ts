@@ -100,7 +100,65 @@ export interface DeviceStatusTrigger {
   toStatuses: DeviceStatus[];
 }
 
-export type TriggerBlock = ScheduleTrigger | MetricTrigger | LogTrigger | DeviceStatusTrigger;
+/** Flow direction a flow trigger watches (either endpoint of an observed tuple). */
+export const FLOW_DIRECTIONS = ['any', 'src', 'dst'] as const;
+export type FlowDirection = (typeof FLOW_DIRECTIONS)[number];
+
+/** Endpoint classification filter for flow triggers (flow_agg_* "srcClass"/"dstClass"). */
+export const FLOW_CLASSES = ['internal', 'internet', 'unknown'] as const;
+export type FlowClass = (typeof FLOW_CLASSES)[number];
+
+/**
+ * Fires when network traffic observed by the flow collector crosses a threshold.
+ * Evaluated against the AGGREGATE tables (flow_agg_5m / flow_agg_1h) over a
+ * sliding window ending at each tick: `windowSec` of buckets are summed per
+ * endpoint tuple and compared with `comparator`/`thresholdBytes`. The trigger
+ * fires when ANY in-scope tuple meets the condition; `durationSec` > 0 requires
+ * it to hold for that long (sustained window, same semantics as metric triggers).
+ * Scope matches against whichever endpoint device is known (src preferred); a
+ * tuple with no known device only matches an empty scope.
+ */
+export interface FlowTrigger {
+  id: string;
+  type: 'flow';
+  scope?: DeviceScope;
+  /** Which endpoint to measure ('any' = either side of the tuple). */
+  direction?: FlowDirection;
+  /** Only endpoints classified as this (absent = all classes). */
+  endpointClass?: FlowClass;
+  /** Optional exact-IP filter on the measured endpoint. */
+  ip?: string;
+  /** Sliding window length in seconds (default 300, capped at one hour). */
+  windowSec?: number;
+  comparator: MetricComparator;
+  thresholdBytes: number;
+  /** Seconds the condition must hold before firing (0/absent = immediate). */
+  durationSec?: number;
+}
+
+/**
+ * Fires when NEW lines appear in a container's log output. The worker tails the
+ * app's containers through the plugin's `containers.logs.read` action (the same
+ * read path the Containers page uses) and compares each line against the set of
+ * previously-seen lines for this trigger (content hash, capped ring buffer in
+ * automation_state). A null watermark = first run: only NEW lines after that are
+ * considered, so a freshly created rule doesn't fire on the whole tail history.
+ */
+export interface ContainerLogTrigger {
+  id: string;
+  type: 'containerLog';
+  scope?: DeviceScope;
+  /** Plugin providing `containers.logs.read` (ix-truenas or docker). */
+  pluginId: string;
+  /** App / container name as it appears in the Containers page. */
+  appName: string;
+  /** Trailing lines to tail on each evaluation (20–5000, default 300). */
+  tail?: number;
+  /** JS regex source (search semantics) matched against each new line. */
+  pattern: string;
+}
+
+export type TriggerBlock = ScheduleTrigger | MetricTrigger | LogTrigger | DeviceStatusTrigger | FlowTrigger | ContainerLogTrigger;
 
 // ── Action blocks ────────────────────────────────────────────────────────────
 
@@ -225,6 +283,8 @@ export interface TriggerContext {
   device?: { id: string; name: string; address?: string | null } | null;
   /** Metric key/value snapshot, for metric triggers. */
   metric?: { key: string; value: number | string | boolean | null } | null;
-  /** Log message, for log triggers. */
+  /** Log message, for log triggers (and container-log triggers). */
   logMessage?: string | null;
+  /** Flow tuple + measured bytes, for flow triggers. */
+  flow?: { ip: string; estBytes: number; windowSec: number; direction: string } | null;
 }

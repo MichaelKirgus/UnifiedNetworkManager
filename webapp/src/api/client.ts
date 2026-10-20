@@ -3161,11 +3161,57 @@ export interface AutomationDeviceStatusTrigger {
   toStatuses: DeviceStatusValue[];
 }
 
+/** Flow direction a flow trigger watches (either endpoint of an observed tuple). */
+export const FLOW_DIRECTIONS = ['any', 'src', 'dst'] as const;
+export type FlowDirectionValue = (typeof FLOW_DIRECTIONS)[number];
+
+/** Endpoint classification filter for flow triggers. */
+export const FLOW_CLASSES = ['internal', 'internet', 'unknown'] as const;
+export type FlowClassValue = (typeof FLOW_CLASSES)[number];
+
+/**
+ * Fires when network traffic observed by the flow collector crosses a threshold,
+ * measured over a sliding window of the aggregate tables. durationSec>0 requires
+ * the condition to hold continuously that long before firing.
+ */
+export interface AutomationFlowTrigger {
+  id: string;
+  type: 'flow';
+  scope?: AutomationDeviceScope;
+  direction?: FlowDirectionValue;
+  endpointClass?: FlowClassValue;
+  ip?: string;
+  /** Sliding window length in seconds (default 300). */
+  windowSec?: number;
+  comparator: MetricComparator;
+  thresholdBytes: number;
+  durationSec?: number;
+}
+
+/**
+ * Fires when NEW lines appear in a container's log output — the worker tails the
+ * app through the plugin's containers.logs.read action and dedupes against a
+ * persisted seen-line ring buffer. First run seeds without firing.
+ */
+export interface AutomationContainerLogTrigger {
+  id: string;
+  type: 'containerLog';
+  scope?: AutomationDeviceScope;
+  /** Plugin providing containers.logs.read (ix-truenas or docker). */
+  pluginId: string;
+  /** App / container name as shown on the Containers page. */
+  appName: string;
+  tail?: number;
+  pattern: string;
+}
+
 export type AutomationTriggerBlock =
   | AutomationScheduleTrigger
   | AutomationMetricTrigger
   | AutomationLogTrigger
-  | AutomationDeviceStatusTrigger;
+  | AutomationDeviceStatusTrigger
+  | AutomationFlowTrigger
+  | AutomationContainerLogTrigger;
 
 /** Severity values for automation notification actions (same set as the notification center). */
 export const AUTOMATION_NOTIFICATION_SEVERITIES = ['info', 'warning', 'critical'] as const;
@@ -3248,7 +3294,7 @@ export interface AutomationRun {
   id: string;
   automationId: string;
   firedAt: string;
-  triggerType: 'schedule' | 'metric' | 'log' | 'deviceStatus';
+  triggerType: 'schedule' | 'metric' | 'log' | 'deviceStatus' | 'flow' | 'containerLog';
   context: Record<string, unknown>;
   status: 'succeeded' | 'failed' | 'partial';
   error?: string | null;

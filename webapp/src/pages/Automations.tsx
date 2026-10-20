@@ -22,6 +22,13 @@ function triggerSummary(t: AutomationTriggerBlock): string {
       return `${t.source} log ~ /${t.pattern}/`;
     case 'deviceStatus':
       return `status → ${t.toStatuses.join(', ')}`;
+    case 'flow': {
+      const win = t.windowSec ?? 300;
+      const ip = t.ip ? ` ${t.ip}` : '';
+      return `traffic${ip} ${t.comparator} ${Math.round(t.thresholdBytes / 1_048_576 * 10) / 10} MB/${win >= 3600 ? `${Math.round(win / 3600)}h` : win >= 60 ? `${Math.round(win / 60)}m` : `${win}s`}`;
+    }
+    case 'containerLog':
+      return `logs ${t.appName} ~ /${t.pattern}/`;
   }
 }
 
@@ -44,6 +51,8 @@ const TRIGGER_CHIP: Record<AutomationTriggerBlock['type'], string> = {
   metric: 'bg-status-ok/20 text-status-ok',
   log: 'bg-muted text-secondary',
   deviceStatus: 'bg-status-warning/20 text-status-warning',
+  flow: 'bg-accent-sky/60 text-accent-sky-fg',
+  containerLog: 'bg-accent-teal/60 text-accent-teal-fg',
 };
 
 /** Run-history panel rendered under an expanded rule row. */

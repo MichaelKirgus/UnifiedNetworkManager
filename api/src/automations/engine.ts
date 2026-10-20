@@ -14,11 +14,12 @@ import type {
   ActionBlock,
   AutomationDraft,
   DeviceScope,
+  MetricComparator,
   MetricTrigger,
   ScheduleSpec,
   TriggerBlock,
 } from './types';
-import { DEVICE_STATUSES, LOG_LEVELS, METRIC_COMPARATORS, NOTIFICATION_SEVERITIES, BACKUP_PRESETS } from './types';
+import { DEVICE_STATUSES, FLOW_CLASSES, FLOW_DIRECTIONS, LOG_LEVELS, METRIC_COMPARATORS, NOTIFICATION_SEVERITIES, BACKUP_PRESETS } from './types';
 
 // ── Draft validation ─────────────────────────────────────────────────────────
 
@@ -115,6 +116,27 @@ function validateTrigger(t: TriggerBlock, where: string): string[] {
     case 'deviceStatus': {
       if (!Array.isArray(t.toStatuses) || t.toStatuses.length === 0) e.push(`${where}: toStatuses must be a non-empty array`);
       else if (t.toStatuses.some((s) => !DEVICE_STATUSES.includes(s))) e.push(`${where}: unknown device status in toStatuses`);
+      break;
+    }
+    case 'flow': {
+      if (!METRIC_COMPARATORS.includes(t.comparator)) e.push(`${where}: comparator must be one of ${METRIC_COMPARATORS.join(', ')}`);
+      if (typeof t.thresholdBytes !== 'number' || !Number.isFinite(t.thresholdBytes) || t.thresholdBytes < 0) {
+        e.push(`${where}: thresholdBytes must be a non-negative number`);
+      }
+      if (t.direction !== undefined && !FLOW_DIRECTIONS.includes(t.direction)) e.push(`${where}: direction must be one of ${FLOW_DIRECTIONS.join(', ')}`);
+      if (t.endpointClass !== undefined && !FLOW_CLASSES.includes(t.endpointClass)) e.push(`${where}: endpointClass must be one of ${FLOW_CLASSES.join(', ')}`);
+      if (t.windowSec !== undefined && (!Number.isFinite(t.windowSec) || t.windowSec < 60 || t.windowSec > 3_600_000)) {
+        e.push(`${where}: windowSec must be between 60 and one year`);
+      }
+      if (t.durationSec !== undefined && (!Number.isFinite(t.durationSec) || t.durationSec < 0)) e.push(`${where}: durationSec must be ≥ 0`);
+      break;
+    }
+    case 'containerLog': {
+      if (!t.pluginId || typeof t.pluginId !== 'string') e.push(`${where}: pluginId is required (a plugin with containers.logs.read)`);
+      if (!t.appName || typeof t.appName !== 'string' || !t.appName.trim()) e.push(`${where}: appName is required`);
+      if (!t.pattern || typeof t.pattern !== 'string') e.push(`${where}: pattern is required`);
+      else if (!isValidRegex(t.pattern)) e.push(`${where}: invalid regex "${t.pattern}"`);
+      if (t.tail !== undefined && (!Number.isInteger(t.tail) || t.tail < 20 || t.tail > 5000)) e.push(`${where}: tail must be an integer between 20 and 5000`);
       break;
     }
     default:
@@ -304,7 +326,41 @@ export function evaluateMetricCondition(trigger: MetricTrigger, value: number | 
     default: return false;
   }
 }
+/** Compares a measured byte count against a flow trigger's threshold. */
+export function evaluateFlowCondition(trigger: { comparator: MetricComparator; thresholdBytes: number }, estBytes: number): boolean {
+  if (!Number.isFinite(estBytes) || !Number.isFinite(trigger.thresholdBytes)) return false;
+  switch (trigger.comparator) {
+    case '>': return estBytes > trigger.thresholdBytes;
+    case '>=': return estBytes >= trigger.thresholdBytes;
+    case '<': return estBytes < trigger.thresholdBytes;
+    case '<=': return estBytes <= trigger.thresholdBytes;
+    case '=': return estBytes === trigger.thresholdBytes;
+    case '!=': return estBytes !== trigger.thresholdBytes;
+    default: return false;
+  }
+}
 
+/**
+ * Stable short hash of a container-log line, used for new-line deduplication.
+ * FNV-1a over the first 512 chars (log lines are bounded by the tail read) —
+ * fast, dependency-free and stable across processes/restarts so the persisted
+ * seen-set in automation_state stays comparable.
+ */
+export function hashLogLine(line: string): string {
+  const s = line.length > 512 ? line.slice(0, 512) : line;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+}
+
+/** Splits a container-log tail into trimmed lines (drops empties + [err] tags). */
+export function splitLogLines(raw: string): string[] {
+  if (!raw) return [];
+  return raw.split(/\r?\n/).map((l) => l.replace(/^\[err\]\s?/, '').trim()).filter(Boolean);
+}
 // ── Device scope matching ────────────────────────────────────────────────────
 
 /** Minimal device shape the engine needs (avoids importing the DB schema). */
@@ -350,7 +406,7 @@ export function renderTemplate(template: string, vars: Record<string, string | n
 }
 
 /** Builds the flat token map for a firing from its context. */
-export function templateVarsFor(automationName: string, ctx: { triggerType: TriggerBlock['type']; device?: { name: string; address?: string | null } | null; metricKey?: string | null; metricValue?: number | string | boolean | null; logMessage?: string | null; firedAtIso: string }): Record<string, string> {
+export function templateVarsFor(automationName: string, ctx: { triggerType: TriggerBlock['type']; device?: { name: string; address?: string | null } | null; metricKey?: string | null; metricValue?: number | string | boolean | null; logMessage?: string | null; flowIp?: string | null; flowBytes?: number | null; firedAtIso: string }): Record<string, string> {
   const vars: Record<string, string> = {
     'automation.name': automationName,
     'trigger.type': ctx.triggerType,
@@ -365,6 +421,10 @@ export function templateVarsFor(automationName: string, ctx: { triggerType: Trig
     if (ctx.metricValue !== undefined && ctx.metricValue !== null) vars['metric.value'] = String(ctx.metricValue);
   }
   if (ctx.logMessage) vars['log.message'] = ctx.logMessage;
+  if (ctx.flowIp) {
+    vars['flow.ip'] = ctx.flowIp;
+    if (ctx.flowBytes !== undefined && ctx.flowBytes !== null) vars['flow.bytes'] = String(ctx.flowBytes);
+  }
   return vars;
 }
 

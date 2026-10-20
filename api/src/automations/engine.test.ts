@@ -4,14 +4,17 @@
  */
 
 import {
+  evaluateFlowCondition,
   evaluateMetricCondition,
   evaluateSchedules,
+  hashLogLine,
   isScheduleDue,
   nextScheduleRun,
   parseJsonField,
   previewSchedule,
   renderTemplate,
   scopeMatchesDevice,
+  splitLogLines,
   templateVarsFor,
   validateAutomationDraft,
 } from './engine';
@@ -155,6 +158,88 @@ describe('validateAutomationDraft', () => {
 
     const badCooldown = validateAutomationDraft({ ...validDraft, cooldownSec: -1 });
     expect(badCooldown.some((e) => e.includes('cooldownSec'))).toBe(true);
+  });
+
+  it('validates flow triggers', () => {
+    const good = validateAutomationDraft({
+      ...validDraft,
+      triggers: [{ id: 't1', type: 'flow', comparator: '>=', thresholdBytes: 1048576, windowSec: 300 } as never],
+    });
+    expect(good).toEqual([]);
+
+    const badComparator = validateAutomationDraft({
+      ...validDraft,
+      triggers: [{ id: 't1', type: 'flow', comparator: '~=', thresholdBytes: 10 } as never],
+    });
+    expect(badComparator.some((e) => e.includes('comparator'))).toBe(true);
+
+    const badThreshold = validateAutomationDraft({
+      ...validDraft,
+      triggers: [{ id: 't1', type: 'flow', comparator: '>', thresholdBytes: -5 } as never],
+    });
+    expect(badThreshold.some((e) => e.includes('thresholdBytes'))).toBe(true);
+
+    const badWindow = validateAutomationDraft({
+      ...validDraft,
+      triggers: [{ id: 't1', type: 'flow', comparator: '>', thresholdBytes: 1, windowSec: 5 } as never],
+    });
+    expect(badWindow.some((e) => e.includes('windowSec'))).toBe(true);
+
+    const badDirection = validateAutomationDraft({
+      ...validDraft,
+      triggers: [{ id: 't1', type: 'flow', comparator: '>', thresholdBytes: 1, direction: 'sideways' } as never],
+    });
+    expect(badDirection.some((e) => e.includes('direction'))).toBe(true);
+
+    const badClass = validateAutomationDraft({
+      ...validDraft,
+      triggers: [{ id: 't1', type: 'flow', comparator: '>', thresholdBytes: 1, endpointClass: 'intranet' } as never],
+    });
+    expect(badClass.some((e) => e.includes('endpointClass'))).toBe(true);
+
+    const badDuration = validateAutomationDraft({
+      ...validDraft,
+      triggers: [{ id: 't1', type: 'flow', comparator: '>', thresholdBytes: 1, durationSec: -1 } as never],
+    });
+    expect(badDuration.some((e) => e.includes('durationSec'))).toBe(true);
+  });
+
+  it('validates containerLog triggers', () => {
+    const good = validateAutomationDraft({
+      ...validDraft,
+      triggers: [{ id: 't1', type: 'containerLog', pluginId: 'docker', appName: 'nginx', pattern: 'error|fatal', tail: 300 } as never],
+    });
+    expect(good).toEqual([]);
+
+    const missingPlugin = validateAutomationDraft({
+      ...validDraft,
+      triggers: [{ id: 't1', type: 'containerLog', pluginId: '', appName: 'nginx', pattern: 'x' } as never],
+    });
+    expect(missingPlugin.some((e) => e.includes('pluginId is required'))).toBe(true);
+
+    const missingApp = validateAutomationDraft({
+      ...validDraft,
+      triggers: [{ id: 't1', type: 'containerLog', pluginId: 'docker', appName: '  ', pattern: 'x' } as never],
+    });
+    expect(missingApp.some((e) => e.includes('appName is required'))).toBe(true);
+
+    const badRegex = validateAutomationDraft({
+      ...validDraft,
+      triggers: [{ id: 't1', type: 'containerLog', pluginId: 'docker', appName: 'nginx', pattern: '[' } as never],
+    });
+    expect(badRegex.some((e) => e.includes('invalid regex'))).toBe(true);
+
+    const badTail = validateAutomationDraft({
+      ...validDraft,
+      triggers: [{ id: 't1', type: 'containerLog', pluginId: 'docker', appName: 'nginx', pattern: 'x', tail: 5 } as never],
+    });
+    expect(badTail.some((e) => e.includes('tail'))).toBe(true);
+
+    const badTailHigh = validateAutomationDraft({
+      ...validDraft,
+      triggers: [{ id: 't1', type: 'containerLog', pluginId: 'docker', appName: 'nginx', pattern: 'x', tail: 5001 } as never],
+    });
+    expect(badTailHigh.some((e) => e.includes('tail'))).toBe(true);
   });
 });
 
@@ -363,6 +448,59 @@ describe('renderTemplate / templateVarsFor', () => {
 });
 
 // ── Row parsing ──────────────────────────────────────────────────────────────
+
+describe('evaluateFlowCondition', () => {
+  it('applies every comparator against the threshold', () => {
+    const t = (comparator: string) => ({ comparator, thresholdBytes: 100 }) as Parameters<typeof evaluateFlowCondition>[0];
+    expect(evaluateFlowCondition(t('>'), 101)).toBe(true);
+    expect(evaluateFlowCondition(t('>'), 100)).toBe(false);
+    expect(evaluateFlowCondition(t('>='), 100)).toBe(true);
+    expect(evaluateFlowCondition(t('<'), 99)).toBe(true);
+    expect(evaluateFlowCondition(t('<'), 100)).toBe(false);
+    expect(evaluateFlowCondition(t('<='), 100)).toBe(true);
+    expect(evaluateFlowCondition(t('='), 100)).toBe(true);
+    expect(evaluateFlowCondition(t('='), 101)).toBe(false);
+    expect(evaluateFlowCondition(t('!='), 101)).toBe(true);
+    expect(evaluateFlowCondition(t('!='), 100)).toBe(false);
+  });
+
+  it('rejects non-finite measurements or thresholds', () => {
+    expect(evaluateFlowCondition({ comparator: '>', thresholdBytes: 100 }, NaN)).toBe(false);
+    expect(evaluateFlowCondition({ comparator: '>', thresholdBytes: Infinity }, 5)).toBe(false);
+  });
+});
+
+describe('hashLogLine / splitLogLines', () => {
+  it('is stable and distinguishes different lines', () => {
+    const a = hashLogLine('boom happened');
+    expect(a).toBe(hashLogLine('boom happened'));
+    expect(a).toMatch(/^[0-9a-f]{8}$/);
+    expect(hashLogLine('boom happened')).not.toBe(hashLogLine('boom happend'));
+  });
+
+  it('truncates to the first 512 chars', () => {
+    const head = 'x'.repeat(512);
+    expect(hashLogLine(head + '-tail-a')).toBe(hashLogLine(head + '-tail-b'));
+  });
+
+  it('splits CRLF/LF, strips [err] tags and drops empty lines', () => {
+    const raw = 'line one\r\n[err] stderr line\n   \n[err]another err\nlast';
+    expect(splitLogLines(raw)).toEqual(['line one', 'stderr line', 'another err', 'last']);
+    expect(splitLogLines('')).toEqual([]);
+  });
+});
+
+describe('templateVarsFor — flow tokens', () => {
+  it('emits flow.ip / flow.bytes only when present', () => {
+    const withFlow = templateVarsFor('r', { triggerType: 'flow', device: null, flowIp: '10.0.0.5', flowBytes: 1234, firedAtIso: 'now' });
+    expect(withFlow['flow.ip']).toBe('10.0.0.5');
+    expect(withFlow['flow.bytes']).toBe('1234');
+
+    const without = templateVarsFor('r', { triggerType: 'schedule', device: null, firedAtIso: 'now' });
+    expect(without['flow.ip']).toBeUndefined();
+    expect(without['flow.bytes']).toBeUndefined();
+  });
+});
 
 describe('parseJsonField', () => {
   it('parses valid JSON and falls back on null/garbage', () => {

@@ -19,9 +19,10 @@ import { LEADER_KEYS } from './leader';
 import { initWorker, trackBeat } from './stats';
 import { getEffectiveSettingValue } from '../systemSettings';
 import { emitNotification } from '../notifications';
-import { evaluateMetricCondition, evaluateSchedules, parseJsonField, scopeMatchesDevice } from '../automations/engine';
-import type { Automation, DeviceStatus, LogTrigger, MetricTrigger, TriggerBlock, TriggerContext } from '../automations/types';
+import { evaluateFlowCondition, evaluateMetricCondition, evaluateSchedules, hashLogLine, parseJsonField, scopeMatchesDevice, splitLogLines } from '../automations/engine';
+import type { Automation, ContainerLogTrigger, DeviceStatus, FlowTrigger, LogTrigger, MetricTrigger, TriggerBlock, TriggerContext } from '../automations/types';
 import { executeAction } from '../automations/actions';
+import { dispatchPluginAction } from '../utils/pluginDispatch';
 
 const TICK_INTERVAL_MS = 15_000; // how often the leader scans for due triggers
 /** Run history retention — rows older than this are swept (hourly). */
@@ -242,6 +243,28 @@ async function tick(): Promise<void> {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[automations] log trigger evaluation failed:', err);
+    }
+  }
+
+  // Flow triggers — sliding-window aggregation over the flow_agg_* tables.
+  const flowRules = rules.filter((r) => r.enabled && r.triggers.some((t) => t.type === 'flow'));
+  if (flowRules.length > 0) {
+    try {
+      await evaluateFlowTriggers(flowRules, nowMs);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[automations] flow trigger evaluation failed:', err);
+    }
+  }
+
+  // Container-log triggers — tail the app's containers via the plugin read action.
+  const containerLogRules = rules.filter((r) => r.enabled && r.triggers.some((t) => t.type === 'containerLog'));
+  if (containerLogRules.length > 0) {
+    try {
+      await evaluateContainerLogTriggers(containerLogRules, nowMs);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[automations] container-log trigger evaluation failed:', err);
     }
   }
 
@@ -553,6 +576,262 @@ async function evaluateLogTriggers(rules: Automation[], nowMs: number): Promise<
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error(`[automations] log trigger ${t.id} of rule ${rule.id} failed:`, err);
+      }
+    }
+  }
+}
+
+// ── Generic per-trigger state helpers ───────────────────────────────────────
+
+/** Reads an automation_state value for (rule, trigger, key), or null. */
+async function readState(automationId: string, triggerId: string, key: string): Promise<string | null> {
+  const row = await db.query.automationState.findFirst({
+    where: and(
+      eq(schema.automationState.automationId, automationId),
+      eq(schema.automationState.triggerId, triggerId),
+      eq(schema.automationState.stateKey, key)
+    ),
+  });
+  return row ? row.value : null;
+}
+
+/** Sets (or clears with null) an automation_state value for (rule, trigger, key). */
+async function writeState(automationId: string, triggerId: string, key: string, value: string | null): Promise<void> {
+  const where = and(
+    eq(schema.automationState.automationId, automationId),
+    eq(schema.automationState.triggerId, triggerId),
+    eq(schema.automationState.stateKey, key)
+  );
+  if (value === null) {
+    await db.delete(schema.automationState).where(where);
+    return;
+  }
+  const nowIso = new Date().toISOString();
+  const existing = await db.query.automationState.findFirst({ where });
+  if (existing) {
+    await db.update(schema.automationState).set({ value, updatedAt: nowIso }).where(where);
+  } else {
+    await db.insert(schema.automationState).values({ automationId, triggerId, stateKey: key, value, updatedAt: nowIso });
+  }
+}
+
+// ── Flow triggers (sliding-window aggregation over flow_agg_5m) ──────────────
+
+const FLOW_WINDOW_KEY = 'flowWindowStart';
+/** Max endpoint tuples considered per trigger per tick (bounded work). */
+const FLOW_TUPLE_LIMIT = 200;
+
+interface FlowTuple {
+  ip: string;
+  estBytes: number;
+  deviceId: string | null;
+}
+
+/**
+ * Aggregates estimated bytes over the last `windowSec` seconds per endpoint IP,
+ * for one flow trigger. 'any' direction unions both endpoints of each tuple;
+ * 'src'/'dst' measure only that side. The class filter applies to the MEASURED
+ * endpoint (a src-side row with an internal dst is not filtered out when
+ * endpointClass=internal and direction=src). Returns at most FLOW_TUPLE_LIMIT
+ * tuples, highest traffic first.
+ */
+async function queryFlowWindow(t: FlowTrigger, nowMs: number): Promise<FlowTuple[]> {
+  const windowSec = typeof t.windowSec === 'number' && Number.isFinite(t.windowSec) && t.windowSec >= 60 ? Math.min(t.windowSec, 3_600_000) : 300;
+  const fromIso = new Date(nowMs - windowSec * 1000).toISOString();
+  const toIso = new Date(nowMs).toISOString();
+
+  // direction 'any' → both endpoints as separate subqueries (UNION ALL); else one side.
+  const sides: Array<'src' | 'dst'> = t.direction === 'dst' ? ['dst'] : t.direction === 'src' ? ['src'] : ['src', 'dst'];
+  const parts: string[] = [];
+  for (const s of sides) {
+    const ipCol = s === 'src' ? '"srcIp"' : '"dstIp"';
+    const clsCol = s === 'src' ? '"srcClass"' : '"dstClass"';
+    const devCol = s === 'src' ? '"srcDeviceId"' : '"dstDeviceId"';
+    let conds = `bucket >= $1 AND bucket < $2`; // enum values — safe to inline
+    if (t.endpointClass) conds += ` AND ${clsCol} = '${t.endpointClass}'`;
+    if (t.ip) conds += ` AND ${ipCol} = '${String(t.ip).replace(/'/g, "''")}'`;
+    parts.push(
+      `(SELECT ${ipCol} AS ip, SUM("estBytes")::bigint AS est_bytes, MAX(${devCol}) AS device_id
+          FROM flow_agg_5m WHERE ${conds} GROUP BY ${ipCol})`
+    );
+  }
+  const { rows } = await pool.query<{ ip: string; est_bytes: string | number; device_id: string | null }>(
+    `SELECT w.ip, SUM(w.est_bytes)::bigint AS est_bytes, MAX(w.device_id) AS device_id
+       FROM (${parts.join(' UNION ALL ')}) w
+      GROUP BY w.ip ORDER BY est_bytes DESC LIMIT ${FLOW_TUPLE_LIMIT}`,
+    [fromIso, toIso]
+  );
+  return rows.map((r) => ({ ip: String(r.ip), estBytes: Number(r.est_bytes), deviceId: r.device_id ? String(r.device_id) : null }));
+}
+
+/** Evaluates every flow trigger of the given rules (sliding window per tick). */
+async function evaluateFlowTriggers(rules: Automation[], nowMs: number): Promise<void> {
+  const deviceRows = await db.query.devices.findMany();
+  const devicesById = new Map(deviceRows.map((d) => [d.id, toScopeDevice(d)]));
+
+  for (const rule of rules) {
+    if (!rule.enabled) continue;
+    // Cooldown — same semantics as the other trigger types.
+    if (rule.cooldownSec > 0 && rule.lastFiredAt) {
+      const last = new Date(rule.lastFiredAt).getTime();
+      if (Number.isFinite(last) && nowMs - last < rule.cooldownSec * 1000) continue;
+    }
+
+    for (const t of rule.triggers) {
+      if (t.type !== 'flow') continue;
+      try {
+        const tuples = await queryFlowWindow(t, nowMs);
+        // In-scope tuple: the endpoint's device matches the scope. A tuple with
+        // no known device only matches an EMPTY scope (nothing to match against).
+        let firstMatch: FlowTuple | null = null;
+        for (const tup of tuples) {
+          const dev = tup.deviceId ? devicesById.get(tup.deviceId) : undefined;
+          if (!dev) continue; // unknown endpoint — can't verify scope
+          if (!scopeMatchesDevice(t.scope, dev)) continue;
+          if (!evaluateFlowCondition(t, tup.estBytes)) continue;
+          firstMatch = tup;
+          break; // tuples are ordered by traffic DESC — the biggest breach wins
+        }
+
+        const durationSec = typeof t.durationSec === 'number' && Number.isFinite(t.durationSec) && t.durationSec > 0 ? t.durationSec : 0;
+        if (!firstMatch) {
+          const startMsRaw = await readState(rule.id, t.id, FLOW_WINDOW_KEY);
+          if (startMsRaw !== null) await writeState(rule.id, t.id, FLOW_WINDOW_KEY, null); // clear open window
+          continue;
+        }
+
+        const fire = async () => {
+          const dev = firstMatch!.deviceId ? devicesById.get(firstMatch!.deviceId!) : undefined;
+          await fireRule(
+            rule,
+            t,
+            { kind: 'flow', ip: firstMatch!.ip, estBytes: firstMatch!.estBytes, windowSec: typeof t.windowSec === 'number' ? t.windowSec : 300, direction: t.direction ?? 'any' },
+            { trigger: t, device: dev ? { id: dev.id, name: dev.name, address: dev.managementAddress ?? null } : null, flow: { ip: firstMatch!.ip, estBytes: firstMatch!.estBytes, windowSec: typeof t.windowSec === 'number' ? t.windowSec : 300, direction: t.direction ?? 'any' } }
+          );
+        };
+
+        if (durationSec > 0) {
+          const startMsRaw = await readState(rule.id, t.id, FLOW_WINDOW_KEY);
+          const startMs = startMsRaw !== null ? Number(startMsRaw) : null;
+          if (startMs === null || !Number.isFinite(startMs)) {
+            await writeState(rule.id, t.id, FLOW_WINDOW_KEY, String(nowMs)); // first observation — start window
+            return;
+          }
+          if (nowMs - startMs < durationSec * 1000) return; // still accumulating
+          await fire();
+          await writeState(rule.id, t.id, FLOW_WINDOW_KEY, null); // re-arm
+        } else {
+          await fire();
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[automations] flow trigger ${t.id} of rule ${rule.id} failed:`, err);
+      }
+    }
+  }
+}
+
+// ── Container-log triggers (tail via the plugin's containers.logs.read) ──────
+
+const CONTAINER_LOG_SEEN_KEY = 'seenLines';
+/** Ring-buffer cap for the seen-line hash set (bounded state size). */
+const SEEN_LINES_CAP = 2000;
+
+/** Evaluates every container-log trigger of the given rules. */
+async function evaluateContainerLogTriggers(rules: Automation[], nowMs: number): Promise<void> {
+  const deviceRows = await db.query.devices.findMany();
+  // Plain findMany() does NOT populate relational joins — load assignments explicitly.
+  const assignments = await db.query.devicePlugins.findMany();
+  const pluginIdsByDevice = new Map<string, string[]>();
+  for (const a of assignments) {
+    const list = pluginIdsByDevice.get(a.deviceId) ?? [];
+    list.push(a.pluginId);
+    pluginIdsByDevice.set(a.deviceId, list);
+  }
+
+  for (const rule of rules) {
+    if (!rule.enabled) continue;
+    // Cooldown — same semantics as the other trigger types.
+    if (rule.cooldownSec > 0 && rule.lastFiredAt) {
+      const last = new Date(rule.lastFiredAt).getTime();
+      if (Number.isFinite(last) && nowMs - last < rule.cooldownSec * 1000) continue;
+    }
+
+    for (const t of rule.triggers) {
+      if (t.type !== 'containerLog') continue;
+      try {
+        // Devices that have this plugin assigned AND match the scope.
+        const candidates = deviceRows.filter((d) => (pluginIdsByDevice.get(d.id) ?? []).includes(t.pluginId));
+        const inScope = candidates.filter((d) => scopeMatchesDevice(t.scope, toScopeDevice(d)));
+        if (inScope.length === 0) continue; // nothing to tail
+
+        let pattern: RegExp | null = null;
+        try { pattern = new RegExp(t.pattern); } catch { pattern = null; }
+        if (!pattern) continue; // invalid — validation should have caught it at write time
+
+        const tail = typeof t.tail === 'number' && Number.isInteger(t.tail) ? Math.min(5000, Math.max(20, t.tail)) : 300;
+
+        // Tail each in-scope device (bounded — a scope should rarely span many).
+        const perDeviceLines = new Map<string, string[]>();
+        for (const dev of inScope.slice(0, 10)) {
+          const out = await dispatchPluginAction(dev.id, t.pluginId, 'containers.logs.read', { name: t.appName, tail });
+          if (!out.ok) continue; // unreachable / no SSH slot — skip this device
+          const details = (out.result?.details ?? {}) as Record<string, unknown>;
+          const containers = Array.isArray(details.containers) ? details.containers : [];
+          let lines: string[] = [];
+          for (const c of containers) {
+            const logs = typeof (c as { logs?: unknown }).logs === 'string' ? (c as { logs: string }).logs : '';
+            lines.push(...splitLogLines(logs));
+          }
+          if (lines.length > 0) perDeviceLines.set(dev.id, lines);
+        }
+        if (perDeviceLines.size === 0) continue;
+
+        // New-line dedup against the persisted seen-set. First run seeds it so a
+        // fresh rule doesn't fire on the whole tail history.
+        const rawSeen = await readState(rule.id, t.id, CONTAINER_LOG_SEEN_KEY);
+        let seen: Set<string>;
+        let firstRun = false;
+        if (rawSeen === null) {
+          seen = new Set();
+          firstRun = true;
+        } else {
+          try {
+            const parsed = JSON.parse(rawSeen);
+            seen = new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []);
+          } catch { seen = new Set(); }
+        }
+
+        let matchedLine: string | null = null;
+        let matchDeviceId: string | null = null;
+        let freshCount = 0;
+        for (const [deviceId, lines] of perDeviceLines) {
+          for (const line of lines) {
+            const h = hashLogLine(line);
+            if (seen.has(h)) continue; // already reported — skip
+            seen.add(h);
+            freshCount++;
+            if (!firstRun && pattern.test(line)) { matchedLine = line; matchDeviceId = deviceId; }
+          }
+        }
+
+        // Persist the updated ring buffer (newest last, capped).
+        const nextSeen = [...seen].slice(-SEEN_LINES_CAP);
+        await writeState(rule.id, t.id, CONTAINER_LOG_SEEN_KEY, JSON.stringify(nextSeen));
+
+        if (!firstRun && matchedLine !== null && matchDeviceId) {
+          const devRow = deviceRows.find((d) => d.id === matchDeviceId);
+          const scopeDev = devRow ? toScopeDevice(devRow) : undefined;
+          await fireRule(
+            rule,
+            t,
+            { kind: 'containerLog', pluginId: t.pluginId, appName: t.appName, deviceId: matchDeviceId, line: matchedLine.slice(0, 500), newLines: freshCount },
+            { trigger: t, device: scopeDev ? { id: scopeDev.id, name: scopeDev.name, address: scopeDev.managementAddress ?? null } : null, logMessage: matchedLine }
+          );
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[automations] containerLog trigger ${t.id} of rule ${rule.id} failed:`, err);
       }
     }
   }

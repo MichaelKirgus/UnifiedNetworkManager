@@ -12135,6 +12135,8 @@ components:
         - $ref: '#/components/schemas/AutomationMetricTrigger'
         - $ref: '#/components/schemas/AutomationLogTrigger'
         - $ref: '#/components/schemas/AutomationDeviceStatusTrigger'
+        - $ref: '#/components/schemas/AutomationFlowTrigger'
+        - $ref: '#/components/schemas/AutomationContainerLogTrigger'
 
     AutomationScheduleTrigger:
       type: object
@@ -12182,6 +12184,42 @@ components:
           type: array
           minItems: 1
           items: { type: string, enum: [unknown, online, degraded, critical, offline] }
+
+    AutomationFlowTrigger:
+      type: object
+      required: [id, type, comparator, thresholdBytes]
+      description: >-
+        Fires when traffic observed by the flow collector crosses a threshold.
+        Evaluated over a sliding window (windowSec) of the aggregate tables;
+        durationSec>0 requires the condition to hold continuously that long.
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [flow] }
+        scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+        direction: { type: string, enum: [any, src, dst], default: any, description: "Which endpoint to measure" }
+        endpointClass: { type: string, enum: [internal, internet, unknown], description: "Only endpoints classified as this (absent = all)" }
+        ip: { type: string, description: "Optional exact-IP filter on the measured endpoint" }
+        windowSec: { type: integer, minimum: 60, maximum: 3600000, default: 300, description: "Sliding window length in seconds" }
+        comparator: { type: string, enum: ['>', '>=', '<', '<=', '=', '!='] }
+        thresholdBytes: { type: number, minimum: 0 }
+        durationSec: { type: integer, minimum: 0, description: "Condition must hold this long before firing (0 = immediate)" }
+
+    AutomationContainerLogTrigger:
+      type: object
+      required: [id, type, pluginId, appName, pattern]
+      description: >-
+        Fires when NEW lines appear in a container's log output. The worker tails
+        the app through the plugin's containers.logs.read action and compares each
+        line against previously-seen lines (content-hash ring buffer). First run
+        seeds the seen-set without firing.
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [containerLog] }
+        scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+        pluginId: { type: string, description: "Plugin providing containers.logs.read (ix-truenas or docker)" }
+        appName: { type: string, minLength: 1, description: "App / container name as shown on the Containers page" }
+        tail: { type: integer, minimum: 20, maximum: 5000, default: 300, description: "Trailing lines to read per evaluation" }
+        pattern: { type: string, description: "JS regex source (search semantics) matched against each new line" }
 
     AutomationActionBlock:
       oneOf:
@@ -12303,7 +12341,7 @@ components:
         id: { type: string }
         automationId: { type: string }
         firedAt: { type: string, format: date-time }
-        triggerType: { type: string, enum: [schedule, metric, log, deviceStatus] }
+        triggerType: { type: string, enum: [schedule, metric, log, deviceStatus, flow, containerLog] }
         context: { type: object, additionalProperties: true, description: "Trigger context at firing time" }
         status: { type: string, enum: [succeeded, failed, partial] }
         error: { type: string, nullable: true }

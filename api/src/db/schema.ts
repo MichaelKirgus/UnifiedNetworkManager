@@ -2472,7 +2472,7 @@ export const automations = pgTable(
     name: text('name').notNull(),
     description: text('description'),
     enabled: boolean('enabled').notNull().default(true),
-    // JSON array of trigger blocks (≥1): schedule | metric | log | deviceStatus.
+    // JSON array of trigger blocks (≥1): schedule | metric | log | deviceStatus | flow | containerLog.
     triggers: text('triggers').notNull().default('[]'),
     // JSON array of action blocks (≥1): intent | webhook | notification | internal.
     actions: text('actions').notNull().default('[]'),
@@ -2501,7 +2501,7 @@ export const automationRuns = pgTable(
     automationId: text('automationId').notNull(),
     // ISO timestamp of the firing instant (denormalized for cheap retention sweeps).
     firedAt: text('firedAt').notNull(),
-    // Which trigger block fired ('schedule' | 'metric' | 'log' | 'deviceStatus').
+    // Which trigger block fired (free TEXT — any TriggerBlock type).
     triggerType: text('triggerType').notNull(),
     // Trigger context at firing time (JSON): device/metric/log details for display.
     context: text('context').notNull().default('{}'),

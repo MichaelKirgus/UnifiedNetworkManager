@@ -65,6 +65,8 @@ export async function executeAction(automationId: string, automationName: string
     metricKey: ctx.metric?.key ?? null,
     metricValue: ctx.metric?.value ?? null,
     logMessage: ctx.logMessage ?? null,
+    flowIp: ctx.flow?.ip ?? null,
+    flowBytes: ctx.flow?.estBytes ?? null,
     firedAtIso,
   });
 
