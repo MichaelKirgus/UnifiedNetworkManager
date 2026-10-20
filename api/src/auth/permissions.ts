@@ -83,6 +83,12 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // device-to-device pairs. Read-only; collector configuration is global
   // (env-driven) in v1.
   'flows:read': 'View the Flows page (traffic flows between devices and to the internet)',
+  // Actions & Schedules — ITTT-style automation rules (triggers + actions).
+  // Read gates viewing rules/runs; write gates creating/editing/deleting them
+  // and test-running. Firing itself is worker-driven (no per-firing gate);
+  // intent actions create plans, which the plan engine handles as usual.
+  'automations:read': 'View automation rules (Actions & Schedules) and their run history',
+  'automations:write': 'Create, edit, delete and test-run automation rules',
   'sites:read': 'View sites',
   'plans:read': 'View execution plans and their steps',
   'plugins:read': 'View plugins, their options and self-metrics',

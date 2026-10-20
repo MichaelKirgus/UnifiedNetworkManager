@@ -147,6 +147,18 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'Full plugin id of the file-repo instance that receives scheduled backups — only used when autoBackupDestination is "repo". Empty = local volume.',
   },
 
+  // Actions & Schedules (automation engine; see workers/automations.ts). Master
+  // switch for the whole feature — off = no trigger evaluation at all.
+  {
+    key: 'automationsEnabled',
+    label: 'Actions & Schedules enabled',
+    type: 'boolean',
+    category: 'General',
+    default: true,
+    help:
+      'Master switch for the automation engine (the Actions & Schedules page). When off, no triggers are evaluated and no rules fire — existing rules keep their state and resume when re-enabled.',
+  },
+
   // Telemetry / worker cadence (previously the only tunable knobs, on the Workers page).
   {
     key: 'telemetryPollIntervalMs',

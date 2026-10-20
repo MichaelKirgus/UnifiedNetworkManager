@@ -16,6 +16,8 @@ import {
   statusToSeverity,
 } from '../notifications';
 import { LEADER_KEYS } from './leader';
+import { onDeviceStatusTransition } from './automations';
+import type { DeviceStatus } from '../automations/types';
 import {
   initWorker,
   recordSkippedTelemetryBeat,
@@ -2961,6 +2963,12 @@ async function updateDeviceStatus(
     lastKnownStatus.set(deviceId, status);
     pendingStatusSince.set(deviceId, null); // re-arm for the next transition
     void emitDeviceStatusNotification(deviceId, committed, status);
+    // Actions & Schedules — deviceStatus triggers fire on the SETTLED transition
+    // (post-hysteresis), never disturbing telemetry bookkeeping.
+    void onDeviceStatusTransition(deviceId, committed as DeviceStatus, status as DeviceStatus).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[telemetry] automation device-status hook failed:', err);
+    });
   }
   // Persist status + reasons whenever EITHER changed — a device that was already
   // non-ok before an API restart has no transition to trigger the write, so its

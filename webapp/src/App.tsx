@@ -9,6 +9,7 @@ import DeviceConfig from './pages/DeviceConfig';
 import Secrets from './pages/Secrets';
 import Plans from './pages/Plans';
 import PlanDetail from './pages/PlanDetail';
+import Automations from './pages/Automations';
 import Plugins from './pages/Plugins';
 import Sites from './pages/Sites';
 import Layers from './pages/Layers';
@@ -125,6 +126,8 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   // Global readers OR personal-area users (own secrets) may open the page.
   { path: '/secrets', permission: ['secrets:read', 'secrets:self-write'] },
   { path: '/plans', permission: 'plans:read' },
+  // ITTT-style automation rules (Actions & Schedules page).
+  { path: '/automations', permission: 'automations:read' },
   { path: '/plugins', permission: 'plugins:read' },
   { path: '/users', permission: 'users:read' },
   { path: '/roles', permission: 'users:write' },
@@ -194,6 +197,7 @@ export default function App() {
       <Route path="/devices/:deviceId/config" element={<Page permission="devices:read"><DeviceConfig /></Page>} />
       <Route path="/plans" element={<Page permission="plans:read"><Plans /></Page>} />
       <Route path="/plans/:id" element={<Page permission="plans:read"><PlanDetail /></Page>} />
+      <Route path="/automations" element={<Page permission="automations:read"><Automations /></Page>} />
       <Route path="/plugins" element={<Page permission="plugins:read"><Plugins /></Page>} />
       <Route path="/sites" element={<Page permission="sites:read"><Sites /></Page>} />
       <Route path="/networks" element={<Page permission="networks:read"><Networks /></Page>} />

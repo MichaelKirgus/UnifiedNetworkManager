@@ -2456,3 +2456,86 @@ export const deviceCves = pgTable(
     };
   }
 );
+
+// ── Actions & Schedules (automation engine) ──────────────────────────────────
+// ITTT-style rules: "IF <trigger> THEN <action…>". A rule is a list of trigger
+// blocks AND a list of action blocks; the leader-gated automation worker
+// (workers/automations.ts) evaluates triggers on every tick and runs the
+// actions sequentially when one fires. Trigger/action shapes are validated in
+// automations/types.ts — the DB stores them as opaque JSON TEXT so new block
+// types can be added without a migration. See routes/automations.ts for the API.
+
+export const automations = pgTable(
+  'automations',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    description: text('description'),
+    enabled: boolean('enabled').notNull().default(true),
+    // JSON array of trigger blocks (≥1): schedule | metric | log | deviceStatus.
+    triggers: text('triggers').notNull().default('[]'),
+    // JSON array of action blocks (≥1): intent | webhook | notification | internal.
+    actions: text('actions').notNull().default('[]'),
+    // Minimum seconds between two firings of this rule (event-trigger throttle).
+    cooldownSec: integer('cooldownSec').notNull().default(0),
+    // ISO timestamp of the most recent firing (any trigger) — drives cooldown.
+    lastFiredAt: text('lastFiredAt'),
+    createdBy: text('createdBy'),
+    createdAt: text('createdAt').notNull(),
+    updatedAt: text('updatedAt').notNull(),
+  },
+  (table) => {
+    return {
+      idxAutomationsEnabled: index('idx_automations_enabled').on(table.enabled),
+    };
+  }
+);
+
+// One row per rule firing — the audit trail behind the "Runs" view. `status`
+// is 'succeeded' when every action succeeded, 'failed' when none did and
+// 'partial' for mixed outcomes; `planIds` links intent actions to their plans.
+export const automationRuns = pgTable(
+  'automation_runs',
+  {
+    id: text('id').primaryKey(),
+    automationId: text('automationId').notNull(),
+    // ISO timestamp of the firing instant (denormalized for cheap retention sweeps).
+    firedAt: text('firedAt').notNull(),
+    // Which trigger block fired ('schedule' | 'metric' | 'log' | 'deviceStatus').
+    triggerType: text('triggerType').notNull(),
+    // Trigger context at firing time (JSON): device/metric/log details for display.
+    context: text('context').notNull().default('{}'),
+    status: text('status').notNull().default('succeeded'),
+    error: text('error'),
+    // JSON array of plan ids created by intent actions ([] when none).
+    planIds: text('planIds').notNull().default('[]'),
+  },
+  (table) => {
+    return {
+      idxAutomationRunsAutomationId: index('idx_automation_runs_automation_id').on(table.automationId),
+      idxAutomationRunsFiredAt: index('idx_automation_runs_fired_at').on(table.firedAt),
+    };
+  }
+);
+
+// Per-trigger evaluation state (JSON) — e.g. log-trigger watermarks and the
+// sustained-condition window of metric triggers. Keyed by (rule, trigger block,
+// state key) so each trigger keeps its own bookkeeping independently.
+export const automationState = pgTable(
+  'automation_state',
+  {
+    automationId: text('automationId').notNull(),
+    triggerId: text('triggerId').notNull(),
+    stateKey: text('stateKey').notNull(),
+    value: text('value').notNull().default('{}'),
+    updatedAt: text('updatedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkAutomationState: primaryKey({
+        name: 'automation_state_pkey',
+        columns: [table.automationId, table.triggerId, table.stateKey],
+      }),
+    };
+  }
+);

@@ -6,15 +6,18 @@ export class ApiError extends Error {
   /** Machine-readable error code when the API provides one (e.g. 'no_2fa_enrolled'). */
   code?: string;
   fieldErrors?: Record<string, string>;
+  /** Human-readable validation detail lines — present on e.g. automation draft rejections. */
+  details?: string[];
   /** Session-credential candidates — present on `credential_selection_required` errors. */
   candidates?: SessionCredentialCandidate[];
-  constructor(message: string, status: number, fieldErrors?: Record<string, string>, code?: string, candidates?: SessionCredentialCandidate[]) {
+  constructor(message: string, status: number, fieldErrors?: Record<string, string>, code?: string, candidates?: SessionCredentialCandidate[], details?: string[]) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.fieldErrors = fieldErrors;
     this.code = code;
     if (candidates) this.candidates = candidates;
+    if (details) this.details = details;
   }
 }
 
@@ -3102,6 +3105,156 @@ export interface PlanDetail extends Plan {
   steps: PlanStep[];
 }
 
+// --- Automations (Actions & Schedules) ---------------------------------------
+
+/** Which devices a trigger/action applies to — any-rule-matches, empty = all. */
+export interface AutomationDeviceScope {
+  siteIds?: string[];
+  tags?: string[];
+  deviceIds?: string[];
+}
+
+export type AutomationScheduleSpec =
+  | { kind: 'cron'; expr: string }
+  | { kind: 'interval'; everyMinutes: number }
+  | { kind: 'dailyAt'; time: string }; // "HH:MM" (24h, server local)
+
+export interface AutomationScheduleTrigger { id: string; type: 'schedule'; schedule: AutomationScheduleSpec; }
+
+export const METRIC_COMPARATORS = ['>', '>=', '<', '<=', '=', '!='] as const;
+export type MetricComparator = (typeof METRIC_COMPARATORS)[number];
+
+export interface AutomationMetricTrigger {
+  id: string;
+  type: 'metric';
+  scope?: AutomationDeviceScope;
+  pluginId?: string;
+  metricKey: string;
+  mode: 'compare' | 'regex';
+  comparator?: MetricComparator;
+  value?: number | string;
+  pattern?: string;
+  /** Seconds the condition must hold before firing (0/absent = immediate). */
+  durationSec?: number;
+}
+
+export const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
+export type LogLevel = (typeof LOG_LEVELS)[number];
+
+export interface AutomationLogTrigger {
+  id: string;
+  type: 'log';
+  source: 'plugin' | 'firewall';
+  scope?: AutomationDeviceScope;
+  pluginId?: string;
+  levels?: LogLevel[];
+  pattern: string;
+}
+
+export const DEVICE_STATUSES = ['unknown', 'online', 'degraded', 'critical', 'offline'] as const;
+export type DeviceStatusValue = (typeof DEVICE_STATUSES)[number];
+
+export interface AutomationDeviceStatusTrigger {
+  id: string;
+  type: 'deviceStatus';
+  scope?: AutomationDeviceScope;
+  toStatuses: DeviceStatusValue[];
+}
+
+export type AutomationTriggerBlock =
+  | AutomationScheduleTrigger
+  | AutomationMetricTrigger
+  | AutomationLogTrigger
+  | AutomationDeviceStatusTrigger;
+
+/** Severity values for automation notification actions (same set as the notification center). */
+export const AUTOMATION_NOTIFICATION_SEVERITIES = ['info', 'warning', 'critical'] as const;
+export type AutomationNotificationSeverity = (typeof AUTOMATION_NOTIFICATION_SEVERITIES)[number];
+
+export interface AutomationIntentAction {
+  id: string;
+  type: 'intent';
+  pluginId: string;
+  actionId: string;
+  devices: { scope?: AutomationDeviceScope; deviceIds?: string[] };
+  input?: Record<string, unknown>;
+}
+
+export interface AutomationWebhookAction {
+  id: string;
+  type: 'webhook';
+  url: string;
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH';
+  headers?: Record<string, string>;
+  bodyTemplate?: string;
+}
+
+export interface AutomationNotificationAction {
+  id: string;
+  type: 'notification';
+  severity: AutomationNotificationSeverity;
+  titleTemplate: string;
+  messageTemplate: string;
+}
+
+export const BACKUP_PRESETS = ['config', 'planned', 'all'] as const;
+export type BackupPresetValue = (typeof BACKUP_PRESETS)[number];
+
+export interface AutomationInternalAction {
+  id: string;
+  type: 'internal';
+  kind: 'backup' | 'replicationSync';
+  preset?: BackupPresetValue;
+  sections?: string[];
+  destination?: 'local' | 'repo';
+  targetId?: string;
+}
+
+export type AutomationActionBlock =
+  | AutomationIntentAction
+  | AutomationWebhookAction
+  | AutomationNotificationAction
+  | AutomationInternalAction;
+
+/** Payload for POST /automations and PATCH /automations/:id. */
+export interface AutomationDraft {
+  name: string;
+  description?: string | null;
+  enabled?: boolean;
+  triggers: AutomationTriggerBlock[];
+  actions: AutomationActionBlock[];
+  cooldownSec?: number;
+}
+
+/** A rule as served by GET /automations (with computed next-run previews). */
+export interface Automation {
+  id: string;
+  name: string;
+  description?: string | null;
+  enabled: boolean;
+  triggers: AutomationTriggerBlock[];
+  actions: AutomationActionBlock[];
+  cooldownSec: number;
+  lastFiredAt: string | null;
+  createdBy?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** triggerId → next ISO occurrence (schedule triggers only). */
+  schedulePreviews: Record<string, string | null>;
+}
+
+/** One row of a rule's run history. */
+export interface AutomationRun {
+  id: string;
+  automationId: string;
+  firedAt: string;
+  triggerType: 'schedule' | 'metric' | 'log' | 'deviceStatus';
+  context: Record<string, unknown>;
+  status: 'succeeded' | 'failed' | 'partial';
+  error?: string | null;
+  planIds: string[];
+}
+
 function getToken(): string | null {
   return localStorage.getItem('accessToken');
 }
@@ -3121,12 +3274,14 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
     let fieldErrors: Record<string, string> | undefined;
     let code: string | undefined;
     let candidates: SessionCredentialCandidate[] | undefined;
+    let details: string[] | undefined;
     try {
       const body = await res.json();
       if (body?.error) message = body.error;
       if (body?.fieldErrors && typeof body.fieldErrors === 'object') fieldErrors = body.fieldErrors;
       if (typeof body?.code === 'string') code = body.code;
       if (Array.isArray(body?.candidates)) candidates = body.candidates as SessionCredentialCandidate[];
+      if (Array.isArray(body?.details) && body.details.every((d: unknown) => typeof d === 'string')) details = body.details as string[];
     } catch {
       // ignore body parse errors, fall back to generic message
     }
@@ -3138,7 +3293,7 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
       localStorage.removeItem('accessToken');
       window.location.assign('/login' + (code === 'user_disabled' ? '?reason=disabled' : ''));
     }
-    throw new ApiError(message, res.status, fieldErrors, code, candidates);
+    throw new ApiError(message, res.status, fieldErrors, code, candidates, details);
   }
   if (res.status === 204) {
     return undefined as T;
@@ -4093,4 +4248,27 @@ export const api = {
     apiFetch<{ setting: SettingView }>(`/settings/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ value }) }),
   resetSetting: (key: string) =>
     apiFetch<{ setting: SettingView }>(`/settings/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+  // Actions & Schedules (automation rules).
+  automations: () => apiFetch<{ automations: Automation[] }>('/automations'),
+  createAutomation: (body: AutomationDraft) =>
+    apiFetch<Automation>('/automations', { method: 'POST', body: JSON.stringify(body) }),
+  updateAutomation: (id: string, body: Partial<AutomationDraft>) =>
+    apiFetch<Automation>(`/automations/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteAutomation: (id: string) =>
+    apiFetch<{ deleted: boolean }>(`/automations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** Run the rule's actions once now (verify wiring before relying on it). */
+  testAutomation: (id: string) =>
+    apiFetch<{ run: AutomationRun }>(`/automations/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+  automationRuns: (id: string, limit = 50) =>
+    apiFetch<{ runs: AutomationRun[] }>(`/automations/${encodeURIComponent(id)}/runs?limit=${limit}`),
+  /** Upcoming occurrences of a schedule spec (builder "next runs" hint). */
+  previewSchedule: (kind: 'cron' | 'interval' | 'dailyAt', expr: string, count = 5) => {
+    // The OpenAPI validator rejects unencoded reserved chars — `*` must be %2A.
+    const fullEncode = (s: string) => encodeURIComponent(s).replace(/\*/g, '%2A');
+    return apiFetch<{ runs: string[] }>(`/automations/preview-schedule?kind=${kind}&expr=${fullEncode(expr)}&count=${count}`);
+  },
+  /** Dry-run a log trigger's pattern against recent logs (no firing, no state). */
+  testAutomationPattern: (body: { source: 'plugin' | 'firewall'; pluginId?: string; levels?: LogLevel[]; pattern: string }) =>
+    apiFetch<{ count: number; matches: Array<{ deviceId: string | null; message: string; axisValue: string | number }> }>(
+      '/automations/test-pattern', { method: 'POST', body: JSON.stringify(body) }),
 };

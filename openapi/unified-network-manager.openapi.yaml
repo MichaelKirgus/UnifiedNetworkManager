@@ -29,6 +29,7 @@ tags:
   - name: Security
   - name: Logs
   - name: Notifications
+  - name: Automations
   - name: Users
   - name: Tokens
   - name: System
@@ -7522,6 +7523,221 @@ paths:
         '502':
           description: CA unreachable — revocation NOT applied
 
+  # ── Actions & Schedules (automation engine) ────────────────────────────────
+  /automations:
+    get:
+      tags: [Automations]
+      summary: List automation rules with computed next-run previews
+      responses:
+        '200':
+          description: All rules, newest first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationListResponse' }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:read permission
+    post:
+      tags: [Automations]
+      summary: Create an automation rule (ITTT triggers + actions)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AutomationDraft' }
+      responses:
+        '201':
+          description: The created rule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationResponse' }
+        '400':
+          description: Validation failed (details list the problems)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:write permission
+
+  /automations/preview-schedule:
+    get:
+      tags: [Automations]
+      summary: Upcoming occurrences of a schedule spec (builder "next runs" hint)
+      parameters:
+        - in: query
+          name: kind
+          required: true
+          schema: { type: string, enum: [cron, interval, dailyAt] }
+        - in: query
+          name: expr
+          required: true
+          description: >-
+            cron expression | integer minutes (interval) | "HH:MM" (dailyAt).
+            Must be FULLY percent-encoded — the OpenAPI validator rejects any
+            unencoded reserved character, and `encodeURIComponent` alone leaves
+            `*` literal. Encode with e.g. encodeURIComponent(expr).replace(/\*/g, '%2A').
+          schema: { type: string }
+        - in: query
+          name: count
+          required: false
+          schema: { type: integer, default: 5, minimum: 1, maximum: 20 }
+      responses:
+        '200':
+          description: Upcoming ISO timestamps (newest first)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runs: { type: array, items: { type: string, format: date-time } }
+        '400':
+          description: Invalid schedule spec
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:read permission
+
+  /automations/test-pattern:
+    post:
+      tags: [Automations]
+      summary: Dry-run a log trigger's pattern against recent logs (no firing, no state)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source, pattern]
+              properties:
+                source: { type: string, enum: [plugin, firewall] }
+                pluginId: { type: string }
+                levels: { type: array, items: { type: string, enum: [debug, info, warn, error] } }
+                pattern: { type: string, description: JS regex source (search semantics) }
+      responses:
+        '200':
+          description: Matching rows from the most recent window (capped at 50)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer }
+                  matches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        deviceId: { type: string, nullable: true }
+                        message: { type: string }
+                        axisValue: { description: ISO timestamp (plugin) or epoch ms (firewall), oneOf }
+        '400':
+          description: Invalid source/pattern/regex
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:read permission
+        '500':
+          description: Pattern scan failed
+
+  /automations/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Automations]
+      summary: Update an automation rule (partial — omitted fields keep current values)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AutomationDraft' }
+      responses:
+        '200':
+          description: The updated rule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationResponse' }
+        '400':
+          description: Validation failed (details list the problems)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:write permission
+        '404':
+          description: Rule not found
+    delete:
+      tags: [Automations]
+      summary: Delete an automation rule (run history is kept for audit)
+      responses:
+        '200':
+          description: Deletion confirmed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:write permission
+        '404':
+          description: Rule not found
+
+  /automations/{id}/test:
+    post:
+      tags: [Automations]
+      summary: Run the rule's actions once now (verify wiring before relying on it)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The run row just written
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationRunResponse' }
+        '400':
+          description: Rule has no triggers or actions to test
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:write permission
+        '404':
+          description: Rule not found
+        '500':
+          description: Test run failed
+
+  /automations/{id}/runs:
+    get:
+      tags: [Automations]
+      summary: Run history for one rule (newest first, capped)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+      responses:
+        '200':
+          description: Run rows for the rule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationRunsResponse' }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:read permission
+        '404':
+          description: Rule not found
+
 components:
   securitySchemes:
     bearerAuth:
@@ -11882,3 +12098,227 @@ components:
         serial: { type: string }
         caStatus: { type: integer, description: "HTTP status returned by the CA's /1.0/revoke endpoint" }
         caResponse: { description: "Raw response body from the CA" }
+
+    # ── Actions & Schedules (automation engine) ──────────────────────────────
+    AutomationDeviceScope:
+      type: object
+      description: >-
+        Which devices a trigger/action applies to. "Any rule matches" semantics —
+        empty/absent = every device; otherwise the device qualifies when it
+        matches ANY provided list (site id, tag or explicit id).
+      properties:
+        siteIds: { type: array, items: { type: string } }
+        tags: { type: array, items: { type: string } }
+        deviceIds: { type: array, items: { type: string } }
+
+    AutomationScheduleSpec:
+      oneOf:
+        - type: object
+          required: [kind, expr]
+          properties:
+            kind: { type: string, enum: [cron] }
+            expr: { type: string, description: "5-field cron expression (server local time)" }
+        - type: object
+          required: [kind, everyMinutes]
+          properties:
+            kind: { type: string, enum: [interval] }
+            everyMinutes: { type: integer, minimum: 1 }
+        - type: object
+          required: [kind, time]
+          properties:
+            kind: { type: string, enum: [dailyAt] }
+            time: { type: string, pattern: '^([01]\\d|2[0-3]):[0-5]\\d$', description: '"HH:MM" 24h (server local time)' }
+
+    AutomationTriggerBlock:
+      oneOf:
+        - $ref: '#/components/schemas/AutomationScheduleTrigger'
+        - $ref: '#/components/schemas/AutomationMetricTrigger'
+        - $ref: '#/components/schemas/AutomationLogTrigger'
+        - $ref: '#/components/schemas/AutomationDeviceStatusTrigger'
+
+    AutomationScheduleTrigger:
+      type: object
+      required: [id, type, schedule]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [schedule] }
+        schedule: { $ref: '#/components/schemas/AutomationScheduleSpec' }
+
+    AutomationMetricTrigger:
+      type: object
+      required: [id, type, metricKey, mode]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [metric] }
+        scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+        pluginId: { type: string }
+        metricKey: { type: string, description: "Dot-notation key in the telemetry metrics blob" }
+        mode: { type: string, enum: [compare, regex] }
+        comparator: { type: string, enum: ['>', '>=', '<', '<=', '=', '!='] }
+        value: { oneOf: [{ type: number }, { type: string }] }
+        pattern: { type: string, description: "JS regex source (search semantics), required for mode=regex" }
+        durationSec: { type: integer, minimum: 0, description: "Condition must hold this long before firing (0 = immediate)" }
+
+    AutomationLogTrigger:
+      type: object
+      required: [id, type, source, pattern]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [log] }
+        source: { type: string, enum: [plugin, firewall] }
+        scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+        pluginId: { type: string }
+        levels: { type: array, items: { type: string, enum: [debug, info, warn, error] } }
+        pattern: { type: string, description: "JS regex source (search semantics) matched against the message" }
+
+    AutomationDeviceStatusTrigger:
+      type: object
+      required: [id, type, toStatuses]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [deviceStatus] }
+        scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+        toStatuses:
+          type: array
+          minItems: 1
+          items: { type: string, enum: [unknown, online, degraded, critical, offline] }
+
+    AutomationActionBlock:
+      oneOf:
+        - $ref: '#/components/schemas/AutomationIntentAction'
+        - $ref: '#/components/schemas/AutomationWebhookAction'
+        - $ref: '#/components/schemas/AutomationNotificationAction'
+        - $ref: '#/components/schemas/AutomationInternalAction'
+
+    AutomationIntentAction:
+      type: object
+      required: [id, type, pluginId, actionId]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [intent] }
+        pluginId: { type: string }
+        actionId: { type: string, description: "Catalog entry id (plugins.actionDescriptors)" }
+        devices:
+          type: object
+          properties:
+            scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+            deviceIds: { type: array, items: { type: string }, description: "Explicit ids narrow/override the scope" }
+        input: { type: object, additionalProperties: true, description: "Intent payload (validated against the catalog inputSchema in the UI)" }
+
+    AutomationWebhookAction:
+      type: object
+      required: [id, type, url]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [webhook] }
+        url: { type: string, pattern: '^https?://', description: "http(s) endpoint (10 s timeout)" }
+        method: { type: string, enum: [GET, POST, PUT, PATCH], default: POST }
+        headers: { type: object, additionalProperties: { type: string } }
+        bodyTemplate: { type: string, description: "JSON or raw template with {{…}} tokens" }
+
+    AutomationNotificationAction:
+      type: object
+      required: [id, type, severity, titleTemplate, messageTemplate]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [notification] }
+        severity: { type: string, enum: [info, warning, critical] }
+        titleTemplate: { type: string, maxLength: 300 }
+        messageTemplate: { type: string, maxLength: 2000 }
+
+    AutomationInternalAction:
+      type: object
+      required: [id, type, kind]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [internal] }
+        kind: { type: string, enum: [backup, replicationSync] }
+        preset: { type: string, enum: [config, planned, all], description: "backup only (default config)" }
+        sections: { type: array, items: { type: string }, description: "backup only — explicit section list overrides preset" }
+        destination: { type: string, enum: [local, repo], default: local, description: "backup only (v1 stores local)" }
+        targetId: { type: string, description: "replicationSync only — replication_targets.id" }
+
+    AutomationDraft:
+      type: object
+      required: [name, triggers, actions]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, nullable: true }
+        enabled: { type: boolean, default: true }
+        triggers:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AutomationTriggerBlock' }
+        actions:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AutomationActionBlock' }
+        cooldownSec: { type: integer, minimum: 0, default: 0, description: "Minimum seconds between two firings (event-trigger throttle)" }
+
+    Automation:
+      allOf:
+        - $ref: '#/components/schemas/AutomationDraft'
+        - type: object
+          required: [id, createdAt, updatedAt]
+          properties:
+            id: { type: string }
+            lastFiredAt: { type: string, format: date-time, nullable: true }
+            createdBy: { type: string, nullable: true }
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+
+    AutomationResponse:
+      type: object
+      required: [automation]
+      properties:
+        automation:
+          allOf:
+            - $ref: '#/components/schemas/Automation'
+            - type: object
+              properties:
+                schedulePreviews:
+                  description: "triggerId → next occurrence (ISO) for each schedule trigger"
+                  type: object
+                  additionalProperties: { type: string, format: date-time, nullable: true }
+
+    AutomationListResponse:
+      type: object
+      required: [automations]
+      properties:
+        automations:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Automation'
+              - type: object
+                properties:
+                  schedulePreviews:
+                    type: object
+                    additionalProperties: { type: string, format: date-time, nullable: true }
+
+    AutomationRun:
+      type: object
+      required: [id, automationId, firedAt, triggerType, status]
+      properties:
+        id: { type: string }
+        automationId: { type: string }
+        firedAt: { type: string, format: date-time }
+        triggerType: { type: string, enum: [schedule, metric, log, deviceStatus] }
+        context: { type: object, additionalProperties: true, description: "Trigger context at firing time" }
+        status: { type: string, enum: [succeeded, failed, partial] }
+        error: { type: string, nullable: true }
+        planIds: { type: array, items: { type: string }, description: "Plans created by intent actions" }
+
+    AutomationRunResponse:
+      type: object
+      required: [run]
+      properties:
+        run: { $ref: '#/components/schemas/AutomationRun' }
+
+    AutomationRunsResponse:
+      type: object
+      required: [runs]
+      properties:
+        runs:
+          type: array
+          items: { $ref: '#/components/schemas/AutomationRun' }

@@ -37,6 +37,7 @@ import {
   Cog,
   Mail as MailIcon,
   ArrowUpCircle,
+  Workflow,
 } from 'lucide-react';
 import { can } from '../auth/permissions';
 import type { NavCountKey } from '../api/client';
@@ -127,6 +128,9 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/secrets', label: 'Secrets', icon: KeyRound, requiresPermission: ['secrets:read', 'secrets:self-write'] },
   // Multi-device execution plans (create/execute additionally require configs:apply + 2FA).
   { to: '/plans', label: 'Plans', icon: RouteIcon, requiresPermission: 'plans:read', countKey: 'plans' },
+  // ITTT-style automation rules — schedule/metric/log/device-status triggers
+  // driving intent plans, webhooks, notifications or internal operations.
+  { to: '/automations', label: 'Actions & Schedules', icon: Workflow, requiresPermission: 'automations:read' },
   { to: '/plugins', label: 'Plugins', icon: Puzzle },
   // Only visible to users who may read user accounts/permissions.
   { to: '/users', label: 'Users', icon: UsersIcon, requiresPermission: 'users:read' },

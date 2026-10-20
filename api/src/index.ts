@@ -18,6 +18,7 @@ import rolesRouter from './routes/roles';
 import tokensRouter from './routes/tokens';
 import { internalRouter } from './routes/internal';
 import plansRouter from './routes/plans';
+import automationsRouter from './routes/automations';
 import networksRouter from './routes/networks';
 import flowsRouter from './routes/flows';
 import geoipRouter from './routes/geoip';
@@ -54,6 +55,7 @@ import { startFlowsWorker } from './workers/flows';
 import { startInactiveUsersWorker } from './workers/inactiveUsers';
 import { startReplicationSchedulerWorker } from './workers/replication';
 import { startAutoBackupWorker } from './workers/autoBackup';
+import { startAutomationEvaluatorWorker } from './workers/automations';
 import { LEADER_KEYS, runAsLeader } from './workers/leader';
 import { initWorker } from './workers/stats';
 import { attachConsoleProxy } from './consoleProxy';
@@ -228,6 +230,9 @@ async function main(): Promise<void> {
   api.use(plansRouter);
   // Backup / restore of UNM's own database (/backups/*, instance:backup).
   api.use(backupsRouter);
+  // Actions & Schedules — automation rules CRUD + test-run + run history
+  // (self-defining /automations/... paths; engine in workers/automations.ts).
+  api.use(automationsRouter);
 
   // OpenAPI validation error handler.
   api.use(
@@ -326,6 +331,10 @@ async function main(): Promise<void> {
 
     // CVE advisory fetch + device matching (Security page; cadence from cveFetchIntervalHours).
     void runAsLeader(LEADER_KEYS.cve, 'cve', () => startCveWorker()).then((stop) => workerStops.push(stop));
+
+    // Actions & Schedules: evaluates automation rule triggers and fires their
+    // actions (leader-gated; gated by the automationsEnabled setting).
+    void runAsLeader(LEADER_KEYS.automationEvaluator, 'automationEvaluator', () => startAutomationEvaluatorWorker()).then((stop) => workerStops.push(stop));
 
     // CA config rendering: the API owns ca.json (rendered from global settings)
     // on the shared volume; the CA service SIGHUPs itself when it changes.

@@ -1704,6 +1704,52 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
     )`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_replication_targets_enabled ON replication_targets (enabled)`);
 
+  // Actions & Schedules (automation engine) — see schema.automations /
+  // automationRuns / automationState. Trigger and action blocks are opaque JSON
+  // TEXT validated in automations/types.ts, so new block types need no migration.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS automations (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      triggers TEXT NOT NULL DEFAULT '[]',
+      actions TEXT NOT NULL DEFAULT '[]',
+      "cooldownSec" INTEGER NOT NULL DEFAULT 0,
+      "lastFiredAt" TEXT,
+      "createdBy" TEXT,
+      "createdAt" TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_automations_enabled ON automations (enabled)`);
+
+  // One row per rule firing — the audit trail behind the Runs view. Swept by
+  // the retention worker after automationRunRetentionDays.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS automation_runs (
+      id TEXT PRIMARY KEY,
+      "automationId" TEXT NOT NULL,
+      "firedAt" TEXT NOT NULL,
+      "triggerType" TEXT NOT NULL,
+      context TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'succeeded',
+      error TEXT,
+      "planIds" TEXT NOT NULL DEFAULT '[]'
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_automation_runs_automation_id ON automation_runs ("automationId")`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_automation_runs_fired_at ON automation_runs ("firedAt")`);
+
+  // Per-trigger evaluation state (log watermarks, sustained-condition windows).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS automation_state (
+      "automationId" TEXT NOT NULL,
+      "triggerId" TEXT NOT NULL,
+      "stateKey" TEXT NOT NULL,
+      value TEXT NOT NULL DEFAULT '{}',
+      "updatedAt" TEXT NOT NULL,
+      PRIMARY KEY ("automationId", "triggerId", "stateKey")
+    )`);
+
   const existingAdmin = await db.query.users.findFirst({
     where: (users, { eq }) => eq(users.username, 'admin'),
   });
