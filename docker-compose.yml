@@ -75,6 +75,7 @@ services:
       - UNM_TLS=${UNM_TLS:-}
       - MCP_DEBUG_KEY=${MCP_DEBUG_KEY:-dev-mcp-debug-key}
       - UNM_MCP_URL=http://mcp:3901
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
     volumes:
       - ${UNM_BACKUP_VOLUME:-unm-backups}:/data/backups
       - filerepo:/data/file-repo
@@ -99,6 +100,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://file-repo-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -125,6 +127,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://opnsense-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -149,6 +152,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://icmp-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -170,6 +174,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://generic-snmp-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -193,6 +198,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://lancom-lx-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -216,6 +222,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://lancom-lcos-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -239,6 +246,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://lancom-sx-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -262,6 +270,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://fbox-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -283,6 +292,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://mikrotik-swos-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -304,6 +314,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://mikrotik-routeros-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -325,6 +336,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://ix-truenas-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -346,6 +358,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://mailcow-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -367,6 +380,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://docker-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -390,6 +404,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://openwrt-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -411,6 +426,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://generic-ssh-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -432,6 +448,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://generic-http-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -453,6 +470,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://zabbix-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -474,6 +492,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://netcup-scp-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -495,6 +514,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://generic-ipmi-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -516,6 +536,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://generic-ntp-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -538,6 +559,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://flow-collector-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -561,6 +583,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://web-fetch-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -587,6 +610,7 @@ services:
       - MCP_DEBUG_KEY=${MCP_DEBUG_KEY:-dev-mcp-debug-key}
       - MCP_KEY=${MCP_KEY:-}
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
     volumes:
       - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca:ro
       - ${UNM_MCP_TLS_VOLUME:-unm-mcp-tls}:/data/tls
@@ -628,6 +652,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://basic-auth-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -651,6 +676,7 @@ services:
     environment:
       - PORT=4080
       - ADVERTISED_ENDPOINT=http://secrets-provider-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_API_URL=http://api:3000/v1
       - UNM_TLS=${UNM_TLS:-}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
@@ -671,6 +697,8 @@ services:
   webapp:
     ports:
       - ${UNM_WEB_PORT:-8080}:5173
+    environment:
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
     healthcheck:
       test:
         - CMD-SHELL

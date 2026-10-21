@@ -31,4 +31,10 @@ RUN cd api && npm run build && npm prune --omit=dev --legacy-peer-deps
 WORKDIR /app/api
 EXPOSE 3000
 
+# UNM entrypoint wrapper — optional macvlan default gateway (UNM_DEFAULT_GATEWAY);
+# pure passthrough when the variable is unset. See scripts/docker-entrypoint.sh.
+COPY scripts/docker-entrypoint.sh /usr/local/bin/unm-entrypoint.sh
+RUN chmod +x /usr/local/bin/unm-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/unm-entrypoint.sh"]
+
 CMD ["npm", "start"]

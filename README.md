@@ -26,6 +26,7 @@ Open-source network management and monitoring platform for mixed-vendor environm
   - [Pre-built images (GHCR)](#pre-built-images-ghcr)
 - [Security model](#security-model)
   - [Network exposure — keep it off the public internet](#network-exposure--keep-it-off-the-public-internet)
+  - [Dedicated management VLAN (macvlan deployment)](#dedicated-management-vlan-macvlan-deployment)
 - [Device addressing (multi-IP)](#device-addressing-multi-ip)
 - [Plugin model](#plugin-model)
   - [Plugin log pipeline](#plugin-log-pipeline)
@@ -205,6 +206,33 @@ Permission catalog (current):
 > - a **reverse proxy with additional authentication** in front (TLS termination + auth, e.g. an SSO/OAuth proxy or mutual TLS), ideally combined with source-IP allow-listing.
 >
 > Security has layers: even if every best practice above is applied, each layer only matters while the others hold. A single vulnerability — in UNM, its dependencies, or a misconfigured proxy — becomes fatal when the admin plane sits directly on the internet. Treat "reachable from anywhere" as an incident, not a convenience.
+
+### Dedicated management VLAN (macvlan deployment)
+
+For production you typically want every UNM container to be a first-class citizen of a dedicated management VLAN instead of hiding behind Docker's NAT bridge. All images built from this repository ship with an entrypoint wrapper (`scripts/docker-entrypoint.sh`) that installs a default route when the optional environment variable **`UNM_DEFAULT_GATEWAY`** is set — it is already wired into every service in `docker-compose.dev.yml`, and empty/unset means pure passthrough, so normal bridge deployments are unaffected.
+
+1. Create the macvlan network once on the host (parent = your management NIC):
+   ```bash
+   docker network create -d macvlan \
+     --subnet 192.168.50.0/24 --gateway 192.168.50.1 \
+     -o parent=enp3s0 -o mode=bridge unm-vlan
+   ```
+   `mode=bridge` keeps host↔container reachability (plain macvlan blocks it by design — your healthchecks and curl-from-host debugging would break).
+2. Set the gateway in `.env`: `UNM_DEFAULT_GATEWAY=192.168.50.1`
+3. Uncomment the top-level `networks:` block in `docker-compose.dev.yml` (it documents itself) and give every service a static IP, e.g.
+   ```yaml
+   api:
+     networks:
+       default:            # keep → NAT stays as fallback for internet egress
+       unm-vlan:
+         ipv4_address: 192.168.50.10
+   ```
+
+Notes:
+- **Hybrid vs macvlan-only.** Keeping the implicit `default` bridge attached means traffic to your VLAN goes out the macvlan interface (most-specific route) while everything else still NATs through the host. Dropping `default:` makes ALL egress flow via your gateway — which then needs upstream routing/NAT itself.
+- **Service-name URLs keep working.** Docker's embedded DNS resolves names of containers sharing a user-defined network, macvlan included — so `ADVERTISED_ENDPOINT=http://file-repo-plugin:4080`, `UNM_API_URL=http://api:3000/v1` and the ACME directory default need no changes. Just don't mix service names and VLAN IPs for the same endpoint: plugin mTLS leaf certs get their SAN from the host of `ADVERTISED_ENDPOINT`, so URL and certificate must match.
+- **Inter-container traffic transits the physical segment** on macvlan — expected for a management stack, but it shows up on the wire.
+- The wrapper never blocks startup: if no suitable interface is found or the route cannot be written (missing `CAP_NET_ADMIN`), it logs to stderr and continues. `UNM_GW_IFACE` forces the interface instead of auto-detect (which skips `lo` and Docker's 172.16/12 bridge range).
 
 ## Device addressing (multi-IP)
 

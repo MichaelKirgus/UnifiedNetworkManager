@@ -1,5 +1,30 @@
 version: "3.9"
 
+# ── Optional: dedicated management VLAN via macvlan ───────────────────────────
+# Put every service on its own static IP in an external macvlan network and give
+# each container a default route through the VLAN gateway. The images' entrypoint
+# wrapper (scripts/docker-entrypoint.sh) installs that route when UNM_DEFAULT_GATEWAY
+# is set — it is already wired into EVERY service's environment below, empty = no-op.
+#
+# 1. Create the network once on the host (parent = your management NIC):
+#      docker network create -d macvlan \
+#        --subnet 192.168.50.0/24 --gateway 192.168.50.1 \
+#        -o parent=enp3s0 -o mode=bridge unm-vlan
+#    (mode=bridge keeps host↔container reachability; plain macvlan blocks it.)
+# 2. Set in .env:   UNM_DEFAULT_GATEWAY=192.168.50.1
+# 3. Uncomment the top-level networks block below AND add a per-service block, e.g.
+#    for api (repeat for every service with a distinct IP):
+#      api:
+#        networks:
+#          default:            # keep → NAT stays as fallback for internet egress
+#          unm-vlan:
+#            ipv4_address: 192.168.50.10
+#    Drop the `default:` entry to go macvlan-only (ALL egress via your gateway).
+#
+# networks:
+#   unm-vlan:
+#     external: true
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -108,6 +133,8 @@ services:
       # server's own /tls/renew endpoint (gated by its debug key).
       - MCP_DEBUG_KEY=${MCP_DEBUG_KEY:-dev-mcp-debug-key}
       - UNM_MCP_URL=http://mcp:3901
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
     volumes:
       # Stored UNM backups (Backups page) — local-destination archives live here.
       # Named volume by default; set UNM_BACKUP_VOLUME to a host path or another
@@ -153,6 +180,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://file-repo-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -198,6 +227,8 @@ services:
       # Without this the plugin advertises http://localhost:4080, which is
       # unreachable from the API container.
       - ADVERTISED_ENDPOINT=http://opnsense-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -235,6 +266,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://icmp-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -291,6 +324,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://generic-snmp-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -328,6 +363,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://lancom-lx-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -367,6 +404,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://lancom-lcos-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -406,6 +445,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://lancom-sx-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -441,6 +482,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://fbox-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -475,6 +518,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://mikrotik-swos-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -510,6 +555,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://mikrotik-routeros-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -544,6 +591,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://ix-truenas-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -576,6 +625,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://mailcow-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -609,6 +660,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://docker-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -648,6 +701,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://openwrt-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -683,6 +738,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://generic-ssh-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -719,6 +776,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://generic-http-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -756,6 +815,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://zabbix-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log
       # shipping AND the brokered inventory read (GET /v1/plugin/inventory/hosts).
       - UNM_API_URL=http://api:3000/v1
@@ -790,6 +851,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://netcup-scp-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log
       # shipping AND the brokered inventory read (GET /v1/plugin/inventory/hosts).
       - UNM_API_URL=http://api:3000/v1
@@ -825,6 +888,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://generic-ipmi-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -862,6 +927,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://generic-ntp-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -901,6 +968,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://flow-collector-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — flow batch pushes + logs.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -945,6 +1014,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://web-fetch-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal endpoints (plugin -> API) — log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -1006,6 +1077,8 @@ services:
       # plugin_probe debug tool (it reads every endpoint from the plugins
       # table, so there is no static endpoint list to maintain here).
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
     volumes:
       # mTLS (Stage 2): the CA config volume READ-ONLY — MCP only reads
       # root_ca.crt from it to build its trust bundle. The PKI volume is never
@@ -1069,6 +1142,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://basic-auth-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal user-data endpoints (plugin -> API).
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -1109,6 +1184,8 @@ services:
       - PORT=4080
       # Endpoint the API (in its own container) uses to reach this plugin.
       - ADVERTISED_ENDPOINT=http://secrets-provider-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Base URL of the API's internal secrets-data endpoints (plugin -> API).
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -1145,6 +1222,9 @@ services:
         VITE_API_URL: http://localhost:3000/v1
     ports:
       - ${UNM_WEB_PORT:-8080}:5173
+    environment:
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
     # Static-serve self-check on :5173 (the baked build-tag manifest is a
     # stable same-origin URL that exists in every image).
     healthcheck:
