@@ -1,0 +1,420 @@
+/**
+ * Typed HTTP client for the netcup SCP (Server Control Panel) REST API.
+ *
+ * Contract facts (verified against the live spec, version 2026.1020.160222):
+ *   - Base URL: https://servercontrolpanel.de/scp-core — all endpoints below it
+ *     are /api/... (e.g. <base>/api/v1/servers). The device's managementAddress
+ *     carries the base; a bare host is upgraded to https://<host>.
+ *   - Auth: OAuth2 Bearer token (Keycloak, realm "scp"). Tokens are long-lived
+ *     (~30 days, refreshed on use) and are obtained interactively — see
+ *     docs/README.md. The token travels in the Authorization header; there is
+ *     no client-side refresh here (the user re-pastes a fresh token into the
+ *     bound secret when it expires).
+ *   - PATCH /api/v1/servers/{id} requires Content-Type application/merge-patch+json
+ *     and accepts ONLY ONE attribute per request; stateOption is a QUERY param.
+ *   - Most mutating endpoints answer 202 with a TaskInfo (async work) — callers
+ *     verify via task polling or re-reading the resource.
+ */
+
+import axios, { AxiosInstance } from 'axios';
+import { insecureHttpsAgent } from '@unm/plugin-sdk';
+
+// --- Errors -------------------------------------------------------------------
+
+/** The SCP API answered with an error status (4xx/5xx) — a FINAL failure. */
+export class ScpApiError extends Error {
+  readonly status: number;
+  /** Machine code from the ResponseError body (e.g. "error.not.supported"); '' when absent. */
+  readonly code: string;
+
+  constructor(status: number, message: string, code = '') {
+    super(message);
+    this.name = 'ScpApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** True for auth failures (bad/expired token) — surfaced as a critical health. */
+export function isAuthError(err: unknown): boolean {
+  if (!(err instanceof ScpApiError)) return false;
+  if (err.status === 401 || err.status === 403) return true;
+  return /unauthor|forbidden|invalid.*token|token.*invalid/i.test(`${err.code} ${err.message}`);
+}
+
+// --- Wire types (subset of the SCP OpenAPI spec, flattened for plugin use) -----
+
+export type ServerState = 'NOSTATE' | 'RUNNING' | 'BLOCKED' | 'PAUSED' | 'SHUTDOWN' | 'SHUTOFF' | 'CRASHED' | 'PMSUSPENDED' | 'DISK_SNAPSHOT';
+export type TaskState = 'PENDING' | 'RUNNING' | 'FINISHED' | 'ERROR' | 'WAITING_FOR_CANCEL' | 'CANCELED' | 'ROLLBACK';
+
+/** Row of GET /api/v1/servers (the list endpoint — no live info). */
+export interface ScpServerMinimal {
+  id: number;
+  name: string;
+  hostname?: string | null;
+  nickname?: string | null;
+  disabled?: boolean;
+}
+
+/** Live-info block of GET /api/v1/servers/{id}. */
+export interface ScpServerLiveInfo {
+  state?: ServerState;
+  autostart?: boolean;
+  uefi?: boolean;
+  interfaces?: ScpInterface[];
+  disks?: Record<string, unknown>[];
+  uptimeInSeconds?: number | null;
+  currentServerMemoryInMiB?: number | null;
+  maxServerMemoryInMiB?: number | null;
+  cpuCount?: number | null;
+  cpuMaxCount?: number | null;
+  machineType?: string | null;
+}
+
+/** Full server object (list fields + optional live info). */
+export interface ScpServer extends ScpServerMinimal {
+  serverLiveInfo?: ScpServerLiveInfo | null;
+  ipv4Addresses?: ScpIpv4[];
+  ipv6Addresses?: ScpIpv6[];
+  site?: { id: number; city: string } | null;
+  exportCount?: number;
+  maxCpuCount?: number;
+  disksAvailableSpaceInMiB?: number | null;
+  rescueSystemActive?: boolean;
+  snapshotAllowed?: boolean;
+}
+
+export interface ScpIpv4 { id: number; ip: string; netmask?: string; gateway?: string | null; rdns?: string | null }
+export interface ScpIpv6 { id: number; networkPrefix: string; networkPrefixLength?: number; gateway?: string | null; rdns?: string | null }
+
+/** Interface row (GET /servers/{id}/interfaces, loadRdns=true by default). */
+export interface ScpInterface {
+  mac: string;
+  driver?: string;
+  speedInMBits?: number | null;
+  ipv4Addresses?: ScpIpv4[];
+  ipv6Addresses?: ScpIpv6[];
+}
+
+// --- Firewall -------------------------------------------------------------------
+
+export type FirewallAction = 'ACCEPT' | 'DROP';
+export type FirewallProtocol = 'TCP' | 'UDP' | 'ICMP' | 'ICMPv6';
+export type FirewallRuleDirection = 'INGRESS' | 'EGRESS';
+export type ImplicitRule = 'ACCEPT_ALL' | 'DROP_ALL';
+
+/** One rule of a firewall policy (the save shape — no position/counter fields). */
+export interface ScpFirewallRule {
+  description?: string | null;
+  direction: FirewallRuleDirection;
+  protocol: FirewallProtocol;
+  action: FirewallAction;
+  /** IP/CIDR list; empty/null = any. */
+  sources?: string[] | null;
+  sourcePorts?: string | null;
+  destinations?: string[] | null;
+  destinationPorts?: string | null;
+}
+
+export interface ScpFirewallPolicy {
+  id: number;
+  name: string;
+  description?: string | null;
+  rules: ScpFirewallRule[];
+}
+
+/** GET /servers/{id}/interfaces/{mac}/firewall. */
+export interface ScpServerFirewall {
+  copiedPolicies: (number | { id: number })[];
+  userPolicies: (number | { id: number })[];
+  ingressImplicitRule?: ImplicitRule;
+  egressImplicitRule?: ImplicitRule;
+  consistent?: boolean;
+  active?: boolean;
+}
+
+// --- Snapshots / rescue / ISO / tasks ---------------------------------------------
+
+export interface ScpSnapshot {
+  uuid: string;
+  name: string;
+  description?: string | null;
+  disks?: string[];
+  creationTime?: string | null;
+  state?: ServerState;
+  online?: boolean;
+  exported?: boolean;
+}
+
+export interface ScpRescueStatus { active: boolean; password?: string | null }
+
+export interface ScpIsoImage { id: number; name: string; description?: string | null; architecture?: Record<string, unknown> | null }
+
+export interface ScpTaskInfo {
+  uuid: string;
+  name?: string;
+  state: TaskState;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  executingUser?: { id: number; username?: string } | null;
+  taskProgress?: { expectedFinishedAt?: string | null; progressInPercent?: number | null };
+  message?: string | null;
+  onRollback?: boolean;
+  responseError?: { code?: string; message?: string } | null;
+}
+
+// --- Client -----------------------------------------------------------------------
+
+export interface ScpClientOptions {
+  /** API base URL (e.g. https://servercontrolpanel.de/scp-core) or a bare host. */
+  baseUrl: string;
+  /** Bearer token from the bound apiKeyNoSecret secret. */
+  token: string;
+  timeoutMs?: number;
+}
+
+/** Normalizes managementAddress → API base URL (scheme + trailing slash stripped). */
+export function normalizeBaseUrl(managementAddress: string): string {
+  let u = managementAddress.trim();
+  if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = `https://${u}`;
+  try {
+    const parsed = new URL(u);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return '';
+  }
+}
+
+export class ScpClient {
+  private http: AxiosInstance;
+  readonly baseUrl: string;
+
+  constructor(opts: ScpClientOptions) {
+    this.baseUrl = normalizeBaseUrl(opts.baseUrl);
+    if (!this.baseUrl) throw new ScpApiError(0, 'Invalid SCP base URL');
+    const timeoutMs = opts.timeoutMs ?? 15_000;
+    this.http = axios.create({
+      baseURL: this.baseUrl,
+      timeout: timeoutMs,
+      validateStatus: () => true, // we classify statuses ourselves (2xx vs error body)
+      httpsAgent: insecureHttpsAgent(),
+      headers: { Authorization: `Bearer ${opts.token}` },
+    });
+  }
+
+  /** Throws ScpApiError for non-2xx; returns the parsed body otherwise. */
+  private async request<T>(method: string, path: string, opts?: { body?: unknown; contentType?: string; params?: Record<string, unknown> }): Promise<T> {
+    const config: Record<string, unknown> = {};
+    if (opts?.body !== undefined) {
+      config.data = opts.body;
+      config.headers = { 'Content-Type': opts.contentType ?? 'application/json' };
+    }
+    if (opts?.params) config.params = opts.params;
+    const resp = await this.http.request({ method, url: path, ...config });
+    if (resp.status >= 200 && resp.status < 300) return resp.data as T;
+    // Error body is usually {code, message} — keep both for diagnostics.
+    const data = resp.data;
+    let code = '';
+    let message = typeof data === 'string' ? data : JSON.stringify(data ?? `HTTP ${resp.status}`);
+    if (data && typeof data === 'object') {
+      if (typeof data['code'] === 'string') code = data['code'];
+      if (typeof data['message'] === 'string') message = data['message'];
+    }
+    throw new ScpApiError(resp.status, `${message} (${resp.status})`, code);
+  }
+
+  // --- Misc -----------------------------------------------------------------
+
+  /** Liveness probe — no auth required. Resolves "OK". */
+  async ping(): Promise<string> {
+    const resp = await this.request<string>('GET', '/api/ping');
+    return typeof resp === 'string' ? resp : JSON.stringify(resp);
+  }
+
+  // --- Servers -----------------------------------------------------------------
+
+  listServers(): Promise<ScpServerMinimal[]> {
+    return this.request('GET', '/api/v1/servers');
+  }
+
+  getServer(serverId: number): Promise<ScpServer> {
+    return this.request('GET', `/api/v1/servers/${serverId}`, { params: { loadServerLiveInfo: true } });
+  }
+
+  /**
+   * Power control. ONE attribute per PATCH (API constraint); stateOption is a
+   * query param — valid values: ON → POWERCYCLE|RESET, OFF → POWEROFF.
+   */
+  patchServerState(serverId: number, state: 'ON' | 'OFF', stateOption?: string): Promise<unknown> {
+    const params: Record<string, unknown> = {};
+    if (stateOption) params['stateOption'] = stateOption;
+    return this.request('PATCH', `/api/v1/servers/${serverId}`, { body: { state }, contentType: 'application/merge-patch+json', params });
+  }
+
+  patchServerHostname(serverId: number, hostname: string): Promise<unknown> {
+    return this.request('PATCH', `/api/v1/servers/${serverId}`, { body: { hostname }, contentType: 'application/merge-patch+json' });
+  }
+
+  patchServerNickname(serverId: number, nickname: string): Promise<unknown> {
+    return this.request('PATCH', `/api/v1/servers/${serverId}`, { body: { nickname }, contentType: 'application/merge-patch+json' });
+  }
+
+  // --- Interfaces / networking ---------------------------------------------------
+
+  getInterfaces(serverId: number, loadRdns = true): Promise<ScpInterface[]> {
+    return this.request('GET', `/api/v1/servers/${serverId}/interfaces`, { params: { loadRdns } });
+  }
+
+  setRdnsIpv4(ip: string, rdns: string): Promise<unknown> {
+    return this.request('POST', '/api/v1/rdns/ipv4', { body: { ip, rdns } });
+  }
+
+  deleteRdnsIpv4(ip: string): Promise<void> {
+    return this.request('DELETE', `/api/v1/rdns/ipv4/${encodeURIComponent(ip)}`);
+  }
+
+  getRdnsIpv4(ip: string): Promise<{ rdns?: string | null }> {
+    return this.request('GET', `/api/v1/rdns/ipv4/${encodeURIComponent(ip)}`);
+  }
+
+  setRdnsIpv6(ip: string, rdns: string): Promise<unknown> {
+    return this.request('POST', '/api/v1/rdns/ipv6', { body: { ip, rdns } });
+  }
+
+  deleteRdnsIpv6(ip: string): Promise<void> {
+    return this.request('DELETE', `/api/v1/rdns/ipv6/${encodeURIComponent(ip)}`);
+  }
+
+  getRdnsIpv6(ip: string): Promise<{ rdns?: string | null }> {
+    return this.request('GET', `/api/v1/rdns/ipv6/${encodeURIComponent(ip)}`);
+  }
+
+  // --- Firewalls -------------------------------------------------------------------
+
+  getInterfaceFirewall(serverId: number, mac: string): Promise<ScpServerFirewall> {
+    return this.request('GET', `/api/v1/servers/${serverId}/interfaces/${mac}/firewall`);
+  }
+
+  /** Configure the policy set on one interface (the "firewall settings" write). */
+  putInterfaceFirewall(serverId: number, mac: string, save: { copiedPolicies: number[]; userPolicies: number[]; active?: boolean }): Promise<ScpTaskInfo> {
+    return this.request('PUT', `/api/v1/servers/${serverId}/interfaces/${mac}/firewall`, { body: save });
+  }
+
+  reapplyInterfaceFirewall(serverId: number, mac: string): Promise<ScpTaskInfo> {
+    return this.request('POST', `/api/v1/servers/${serverId}/interfaces/${mac}/firewall:reapply`);
+  }
+
+  listFirewallPolicies(userId: number): Promise<ScpFirewallPolicy[]> {
+    return this.request('GET', `/api/v1/users/${userId}/firewall-policies`, { params: { limit: 200 } });
+  }
+
+  createFirewallPolicy(userId: number, save: { name: string; description?: string; rules: ScpFirewallRule[] }): Promise<ScpFirewallPolicy> {
+    return this.request('POST', `/api/v1/users/${userId}/firewall-policies`, { body: save });
+  }
+
+  updateFirewallPolicy(userId: number, policyId: number, save: { name?: string; description?: string; rules?: ScpFirewallRule[] }): Promise<Record<string, unknown>> {
+    return this.request('PUT', `/api/v1/users/${userId}/firewall-policies/${policyId}`, { body: save });
+  }
+
+  deleteFirewallPolicy(userId: number, policyId: number): Promise<void> {
+    return this.request('DELETE', `/api/v1/users/${userId}/firewall-policies/${policyId}`);
+  }
+
+  // --- Snapshots ---------------------------------------------------------------------
+
+  listSnapshots(serverId: number): Promise<ScpSnapshot[]> {
+    return this.request('GET', `/api/v1/servers/${serverId}/snapshots`);
+  }
+
+  createSnapshot(serverId: number, body: { name: string; description?: string | null; diskName?: string | null; onlineSnapshot?: boolean }): Promise<ScpTaskInfo> {
+    return this.request('POST', `/api/v1/servers/${serverId}/snapshots`, { body });
+  }
+
+  deleteSnapshot(serverId: number, name: string): Promise<ScpTaskInfo> {
+    return this.request('DELETE', `/api/v1/servers/${serverId}/snapshots/${encodeURIComponent(name)}`);
+  }
+
+  revertSnapshot(serverId: number, name: string): Promise<ScpTaskInfo> {
+    return this.request('POST', `/api/v1/servers/${serverId}/snapshots/${encodeURIComponent(name)}/revert`);
+  }
+
+  // --- Rescue system --------------------------------------------------------------------
+
+  getRescueSystem(serverId: number): Promise<ScpRescueStatus> {
+    return this.request('GET', `/api/v1/servers/${serverId}/rescuesystem`);
+  }
+
+  activateRescueSystem(serverId: number): Promise<ScpTaskInfo> {
+    return this.request('POST', `/api/v1/servers/${serverId}/rescuesystem`);
+  }
+
+  deactivateRescueSystem(serverId: number): Promise<ScpTaskInfo> {
+    return this.request('DELETE', `/api/v1/servers/${serverId}/rescuesystem`);
+  }
+
+  // --- ISO / images ------------------------------------------------------------------------
+
+  getAttachedIso(serverId: number): Promise<{ isoAttached?: boolean; iso?: string | null }> {
+    return this.request('GET', `/api/v1/servers/${serverId}/iso`);
+  }
+
+  attachIso(serverId: number, body: { isoId?: number; userIsoName?: string; changeBootDeviceToCdrom?: boolean }): Promise<ScpTaskInfo> {
+    return this.request('POST', `/api/v1/servers/${serverId}/iso`, { body });
+  }
+
+  detachIso(serverId: number): Promise<void> {
+    return this.request('DELETE', `/api/v1/servers/${serverId}/iso`);
+  }
+
+  listIsoImages(serverId: number): Promise<ScpIsoImage[]> {
+    return this.request('GET', `/api/v1/servers/${serverId}/isoimages`);
+  }
+
+  setupImage(serverId: number, body: Record<string, unknown>): Promise<ScpTaskInfo> {
+    return this.request('POST', `/api/v1/servers/${serverId}/image`, { body });
+  }
+
+  listImageFlavours(serverId: number): Promise<Record<string, unknown>[]> {
+    return this.request('GET', `/api/v1/servers/${serverId}/imageflavours`);
+  }
+
+  // --- Tasks -------------------------------------------------------------------------------
+
+  listTasks(opts?: { limit?: number; serverId?: number; state?: TaskState }): Promise<ScpTaskInfo[]> {
+    const params: Record<string, unknown> = { limit: opts?.limit ?? 20 };
+    if (opts?.serverId) params['serverId'] = opts.serverId;
+    if (opts?.state) params['state'] = opts.state;
+    return this.request('GET', '/api/v1/tasks', { params });
+  }
+
+  getTask(uuid: string): Promise<ScpTaskInfo> {
+    return this.request('GET', `/api/v1/tasks/${uuid}`);
+  }
+
+  cancelTask(uuid: string): Promise<ScpTaskInfo | void> {
+    return this.request('PUT', `/api/v1/tasks/${encodeURIComponent(uuid)}:cancel`);
+  }
+
+  /**
+   * Resolves the internal SCP user id bound to THIS token. The API has no
+   * /users/me — the community-proven way is reading executingUser off recent
+   * tasks (see netcup forum "Howto REST-API nutzen"). Returns null when no
+   * task carries an executing user yet.
+   */
+  async resolveUserId(): Promise<number | null> {
+    try {
+      const tasks = await this.listTasks({ limit: 10 });
+      for (const t of tasks) {
+        const id = t.executingUser?.id;
+        if (typeof id === 'number' && id > 0) return id;
+      }
+    } catch { /* no tasks readable — fall through */ }
+    return null;
+  }
+}
+
+/** Factory used by index.ts / actions. */
+export function createScpClient(opts: ScpClientOptions): ScpClient {
+  return new ScpClient(opts);
+}
