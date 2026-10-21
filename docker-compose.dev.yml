@@ -811,6 +811,40 @@ services:
       - api
     restart: unless-stopped
 
+  # Generic IPMI plugin: vendor-agnostic BMC monitoring + control over RMCP+
+  # (cipher suite 3 by default, suite 0 for legacy). The RAKP handshake is
+  # implemented in-process — the password never leaves Node's crypto memory.
+  generic-ipmi-plugin:
+    # Root context — the image also builds the shared @unm/plugin-sdk package.
+    build:
+      context: .
+      dockerfile: plugins/generic-ipmi/Dockerfile
+    ports:
+      - "4024:4080"
+    environment:
+      - PORT=4080
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://generic-ipmi-plugin:4080
+      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
+      - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
+    healthcheck:
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      - api
+    restart: unless-stopped
+
   # Generic (S)NTP plugin: vendor-agnostic NTP/SNTP time-service checker for ANY
   # host that serves NTP. Sends one SNTP request to the configured port (default
   # 123, adjustable in settings), verifies a well-formed server reply arrives,
