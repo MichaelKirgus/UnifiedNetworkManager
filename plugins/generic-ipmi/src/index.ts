@@ -86,6 +86,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     description: 'When enabled, each poll walks the SDR repository and reads every sensor. Disable for faster polls on BMCs with huge repositories.',
   },
   { key: 'logToApi', label: 'Send logs to UNM', type: 'boolean' as const, default: true, description: 'Ship structured log entries (poll/action failures) to the UNM API for the device Logs view.' },
+  {
+    key: 'aspeedFan',
+    label: 'Read Aspeed OEM fan state',
+    type: 'boolean' as const,
+    default: false,
+    description:
+      'Enable on ASRock Rack / AST2600/AST2500 BMC boards (e.g. B650D4U-2L2T/BCM): each poll reads the OEM fan table (netfn 0x3a) and reports per-channel mode + duty in the ipmi.fan metric. Leave off on other BMCs — they do not answer these commands.',
+  },
 ];
 
 // --- Metric descriptors -----------------------------------------------------------
@@ -120,6 +128,14 @@ const METRIC_DESCRIPTORS: MetricDescriptor[] = [
     type: 'string',
     visualization: 'table',
     columns: ['timestamp', 'severity', 'sensorType', 'event'],
+    group: 'IPMI',
+  },
+  {
+    key: 'ipmi.fan',
+    label: 'Fans (Aspeed OEM)',
+    type: 'string',
+    visualization: 'table',
+    columns: ['channel', 'mode', 'dutyPercent'],
     group: 'IPMI',
   },
 ];
@@ -296,6 +312,7 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
     const result = await collectIpmiMonitoring(client, {
       collectInventory,
       collectSensors: settings.collectSensors !== false,
+      aspeedFan: settings.aspeedFan === true,
     });
 
     res.status(200).json({
@@ -309,6 +326,7 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
       activeSettings: {
         cipherSuiteId: ep.cipherSuiteId,
         collectSensors: settings.collectSensors !== false,
+        aspeedFan: settings.aspeedFan === true,
         logToApi: settings.logToApi === true,
       },
     });

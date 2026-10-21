@@ -19,6 +19,7 @@ password lives only in Node crypto memory, never in argv, env or on disk.
 | Inventory | BMC LAN channel IP/mask/MAC → UNM's network inventory (`networks[]` row) |
 | Control (plan-gated) | Power on / ACPI soft-off / hard-off / reset, boot options, SEL clear, NMI pulse, BMC LAN IP/mask/gateway writes — all verified by re-reading state afterwards; dangerous ones require the plan confirm dialog |
 | Fan/thermal tuning | Read + set per-sensor thresholds (Get/Set Sensor Thresholds). There is **no standard "set fan to X RPM" command** in IPMI — on most BMCs the fan curve reacts to these thresholds, so raising a FAN sensor's upper limits (or a temperature sensor's) loosens/raises cooling. Values are entered in engineering units and converted with the SDR record's m/b/k1/k2 |
+| Aspeed OEM fans | Per-channel mode + duty read/set on AST2600 / AST2500 BMCs — the interface used by most **ASRock Rack** mainboards (e.g. B650D4U-2L2T/BCM). Actions `fan.aspeed.get` / `fan.aspeed.set` / `fan.aspeed.auto-restore`; optional per-poll fan table via the `aspeedFan` plugin option (`ipmi.fan`) |
 | Console | **SOL serial console** — the device's "Shell" button opens an interactive terminal on the server's serial port (IPMI Serial-over-LAN) |
 
 ## BMC setup
@@ -65,7 +66,35 @@ password lives only in Node crypto memory, never in argv, env or on disk.
 - **Reading fan speeds**: covered by the normal sensor walk — fan sensors (SDR type
   0x04) appear in `ipmi.sensors` with live RPM readings, unit and threshold state.
 - **Setting a fan to a fixed speed**: not part of the IPMI standard. Some vendors
-  expose OEM commands for it; this plugin intentionally does not ship vendor OEMs.
+  expose OEM commands for it; this plugin ships one well-documented set: Aspeed.
+- **Aspeed OEM fan control** (`fan.aspeed.get` / `fan.aspeed.set` /
+  `fan.aspeed.auto-restore`) — the interface used by most ASRock Rack mainboards
+  (AST2600 on current boards, AST2500 on older ones; community-documented for
+  B650D4U-2L2T/BCM fw 5.02 and ROMED8-2T variants). All commands live on OEM
+  netfn `0x3a`:
+
+  | BMC | Read mode | Set mode | Read duty | Set duty |
+  | --- | --- | --- | --- | --- |
+  | AST2600 | `raw 0x3a 0xd0 0x12` → 16 ch (0=disabled, 1=auto, 2=manual) | `raw 0x3a 0xd0 0x11 <16 ch>` | `raw 0x3a 0xd0 0x0f` → 16 % bytes | `raw 0x3a 0xd0 0x0e <16 ch>` — **only effective in manual mode** |
+  | AST2500 | `raw 0x3a 0xd7` (0=auto, 1=manual) | `raw 0x3a 0xd8 <16 ch>` | `raw 0x3a 0xda` | `raw 0x3a 0x01 <8 ch>` — applies directly |
+
+  Gotchas the plugin handles for you:
+  - The BMC always expects **all 16 channel values** even though boards have ~7
+    physical headers (FAN1 = channel 0, typically CPU; FAN2–FAN7 chassis).
+  - AST2600 duty writes are silently ignored in auto mode — `fan.aspeed.set`
+    switches every channel to manual first, then writes the duty.
+  - Duty below ~20% is rejected by most BMCs ("Invalid data field") — the action
+    clamps input to 20–100%.
+  - **Manual mode + duty do NOT persist across a BMC reboot or AC power cycle** —
+    the BMC returns to auto fan control on its own. Use `fan.aspeed.auto-restore`
+    to switch back immediately; the action result carries this warning.
+  - The BMC may override manual settings when critical temperatures are hit.
+  - Variant is **auto-detected** (probe AST2600 read-mode, fall back to AST2500)
+    unless you pass `variant: "ast2600" | "ast2500"` in the action input.
+  - Monitoring: enable the plugin option **aspeedFan = true** on these boards and
+    each poll adds an `ipmi.fan` table (channel / mode / dutyPercent). Leave it
+    off elsewhere — non-Aspeed BMCs do not answer netfn `0x3a`.
+
 - **The spec-defined lever — sensor thresholds** (`sensor.threshold.get` /
   `sensor.threshold.set`): most BMCs run closed-loop thermal control where fan
   speed is a function of temperature (and sometimes fan) thresholds. Raising the

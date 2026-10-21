@@ -178,6 +178,14 @@ export async function startIpmiMock() {
     [4, Buffer.from([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])],
   ]);
 
+  // Aspeed OEM fan state (netfn 0x3a) — AST2600 layout: mode bytes per channel
+  // (0=disabled, 1=auto, 2=manual) + duty percent. All channels start in auto @40%.
+  const aspeed = {
+    variant: 'ast2600',
+    modes: Array.from({ length: 16 }, () => 1), // all auto
+    duties: Array.from({ length: 16 }, () => 40),
+  };
+
   const BMC_ID = 0x12345678;
   const BMC_GUID = crypto.createHash('sha1').update('mock-bmc-guid').digest().subarray(0, 16);
   let session = null; // current RMCP+ session state (one at a time — the kit is sequential)
@@ -384,6 +392,55 @@ export async function startIpmiMock() {
         events.push('set-lan-param');
         const paramId = readLe16(data, 1);
         lanParams.set(paramId, Buffer.from(data.subarray(3)));
+        return [0x00, Buffer.alloc(0)];
+      }
+
+      case (0x3a << 8) | 0xd0: {
+        // Aspeed AST2600 OEM fan commands — cmd byte is always 0xd0; the
+        // subcommand rides in data[0].
+        const sub = data[0];
+        switch (sub) {
+          case 0x12: // read mode → 16 channel bytes
+            events.push('aspeed-read-mode');
+            return [0x00, Buffer.from(aspeed.modes)];
+          case 0x11: // set mode ← data[1..16] (0=disabled, 1=auto, 2=manual)
+            events.push('aspeed-set-mode');
+            for (let i = 0; i < 16 && i + 1 < data.length; ++i) aspeed.modes[i] = data[i + 1];
+            return [0x00, Buffer.alloc(0)];
+          case 0x0f: // read duty → 16 percent bytes
+            events.push('aspeed-read-duty');
+            return [0x00, Buffer.from(aspeed.duties)];
+          case 0x0e: {
+            // set duty ← data[1..16] — only effective while a channel is manual.
+            events.push('aspeed-set-duty');
+            for (let i = 0; i < 16 && i + 1 < data.length; ++i) if (aspeed.modes[i] === 2) aspeed.duties[i] = data[i + 1];
+            return [0x00, Buffer.alloc(0)];
+          }
+          default:
+            events.push(`aspeed-unknown-sub 0x${sub.toString(16)}`);
+            return [0xff /* unknown command */, Buffer.alloc(0)];
+        }
+      }
+
+      case (0x3a << 8) | 0xd7: // AST2500 read mode → per-channel bytes (0=auto, 1=manual)
+        events.push('aspeed25-read-mode');
+        return [0x00, Buffer.from(aspeed.modes.map((m) => (m === 2 ? 1 : 0)))];
+
+      case (0x3a << 8) | 0xd8: {
+        // AST2500 set mode ← data[0..15] (0=auto, 1=manual).
+        events.push('aspeed25-set-mode');
+        for (let i = 0; i < 16 && i < data.length; ++i) aspeed.modes[i] = data[i] === 1 ? 2 : 1;
+        return [0x00, Buffer.alloc(0)];
+      }
+
+      case (0x3a << 8) | 0xda: // AST2500 read duty → per-channel percent bytes
+        events.push('aspeed25-read-duty');
+        return [0x00, Buffer.from(aspeed.duties)];
+
+      case (0x3a << 8) | 0x01: {
+        // AST2500 set duty ← data[0..7] — applies directly.
+        events.push('aspeed25-set-duty');
+        for (let i = 0; i < 8 && i < data.length; ++i) aspeed.duties[i] = data[i];
         return [0x00, Buffer.alloc(0)];
       }
 
@@ -638,6 +695,7 @@ export async function startIpmiMock() {
     name: 'ipmi-mock-bmc',
     port,
     events,
+    aspeed, // exposed so extraChecks can assert on the mock's fan state
     stop: () => new Promise((resolve) => socket.close(() => resolve())),
   };
 }
@@ -677,6 +735,43 @@ export default {
           });
           const getJ = await getR.json();
           rec.check('X', '/config sensor.threshold.get round-trips (raw 65/75 → 650/750 RPM)', getR.status === 200 && getJ.success === true && getJ.result?.details?.raw?.upperNonCrit === 65 && getJ.result?.details?.converted?.upperNonCrit === 650 && getJ.result?.details?.converted?.upperCrit === 750, JSON.stringify(getJ).slice(0, 300));
+
+          // fan.aspeed.get — auto-detect must resolve to ast2600; all channels start in auto @40%.
+          const fanGetR = await fetch(`${url}/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId: 'x', managementAddress: `127.0.0.1:${bmc.port}`, credentials: { username: 'admin', password: 'secret' }, actionId: 'fan.aspeed.get', input: {} }),
+          });
+          const fanGetJ = await fanGetR.json();
+          rec.check('X', '/config fan.aspeed.get auto-detects ast2600 + reads 16 channels (auto @40%)', fanGetR.status === 200 && fanGetJ.success === true && fanGetJ.result?.details?.variant === 'ast2600' && Array.isArray(fanGetJ.result?.details?.channels) && fanGetJ.result.details.channels.length === 16 && fanGetJ.result.details.channels.every((c) => c.mode === 'auto' && c.dutyPercent === 40), JSON.stringify(fanGetJ).slice(0, 300));
+
+          // fan.aspeed.set — duty 60%: AST2600 must switch to manual first (mock enforces
+          // "duty only applies in manual mode"), then write all 16 channels.
+          const fanSetR = await fetch(`${url}/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId: 'x', managementAddress: `127.0.0.1:${bmc.port}`, credentials: { username: 'admin', password: 'secret' }, actionId: 'fan.aspeed.set', input: { dutyPercent: 60 } }),
+          });
+          const fanSetJ = await fanSetR.json();
+          rec.check('X', '/config fan.aspeed.set applies + verifies 60% (manual mode first)', fanSetR.status === 200 && fanSetJ.success === true && fanSetJ.result?.verified === true && fanSetJ.result?.details?.dutyPercent === 60 && bmc.aspeed.modes.every((m) => m === 2) && bmc.aspeed.duties.every((d) => d === 60), JSON.stringify(fanSetJ).slice(0, 300));
+
+          // fan.aspeed.auto-restore — back to auto; mock duties stay at 60 (BMC keeps last duty in auto too).
+          const fanAutoR = await fetch(`${url}/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId: 'x', managementAddress: `127.0.0.1:${bmc.port}`, credentials: { username: 'admin', password: 'secret' }, actionId: 'fan.aspeed.auto-restore', input: {} }),
+          });
+          const fanAutoJ = await fanAutoR.json();
+          rec.check('X', '/config fan.aspeed.auto-restore returns all channels to auto + verified', fanAutoR.status === 200 && fanAutoJ.success === true && fanAutoJ.result?.verified === true && bmc.aspeed.modes.every((m) => m === 1), JSON.stringify(fanAutoJ).slice(0, 300));
+
+          // Monitoring with the aspeedFan option enabled → ipmi.fan table metric.
+          const monR = await fetch(`${url}/monitoring`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-unm-settings': JSON.stringify({ aspeedFan: true }) },
+            body: JSON.stringify({ deviceId: 'x', managementAddress: `127.0.0.1:${bmc.port}`, credentials: { username: 'admin', password: 'secret' } }),
+          });
+          const monJ = await monR.json();
+          rec.check('X', '/monitoring with aspeedFan=true emits the ipmi.fan table (16 rows, auto mode)', monR.status === 200 && Array.isArray(monJ.metrics?.['ipmi.fan']) && monJ.metrics['ipmi.fan'].length === 16 && monJ.metrics['ipmi.fan'].every((c) => c.mode === 'auto'), JSON.stringify(monJ.metrics?.['ipmi.fan'] ?? null).slice(0, 300));
         },
       },
     };

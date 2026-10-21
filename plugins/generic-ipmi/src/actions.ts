@@ -7,6 +7,8 @@
  *   - SEL      : clear the System Event Log (dangerous — destroys history)
  *   - LED      : pulse the diagnostic interrupt (NMI) — write, for debugging hangs
  *   - Sensors  : read / set per-sensor thresholds (the spec-defined fan/thermal tuning lever)
+ *   - Fans     : Aspeed OEM fan control (AST2600/AST2500 — ASRock Rack boards): read state,
+ *                set manual duty cycle, restore auto mode
  *   - LAN      : set IP address / subnet mask / default gateway on the BMC's LAN channel
  *
  * Conventions (mirrors netcup-scp):
@@ -22,6 +24,20 @@ import type { IpmiClient } from './client/ipmiClient';
 import { IpmiError } from './client/ipmiClient';
 import { getChassisStatus, setSystemPower, setBootOptions, clearSel, setLanParam, getSensorReadings, getSensorThresholds, setSensorThresholds, convertToRaw, convertThresholdRaw } from './client/ipmiCommands';
 import type { SensorReading, ThresholdField } from './client/ipmiCommands';
+import { detectAspeedVariant, readAspeedFanState, setAspeedFanDuty, restoreAspeedAutoMode } from './client/aspeedFan';
+import type { AspeedVariant } from './client/aspeedFan';
+
+/** Resolves the requested Aspeed variant (auto-detect when omitted). */
+async function resolveVariant(ctx: IpmiActionContext, input: Record<string, unknown>): Promise<AspeedVariant> {
+  const v = typeof input['variant'] === 'string' ? (input['variant'] as string) : '';
+  if (v === 'ast2600' || v === 'ast2500') return v;
+  const detected = await detectAspeedVariant(ctx.client);
+  if (!detected) throw new IpmiError('BMC does not answer Aspeed fan OEM commands (netfn 0x3a) — this is not an AST2600/AST2500 BMC', 'protocol');
+  return detected;
+}
+
+/** Optional variant input — factory so each action owns its schema object. */
+const variantInput = () => ({ variant: { type: 'string' as const, required: false, description: 'BMC generation: "ast2600" (current ASRock Rack boards) or "ast2500" (older). Omit to auto-detect.' } });
 
 /** Executor context for one /config step — the client is already connected + authenticated. */
 export interface IpmiActionContext {
@@ -420,6 +436,103 @@ const thresholdSetAction: ActionDescriptor<IpmiActionContext> = {
   },
 };
 
+// --- Aspeed OEM fan control (AST2600 / AST2500 — ASRock Rack & friends) ----------------
+
+const fanAspeedGetAction: ActionDescriptor<IpmiActionContext> = {
+  id: 'fan.aspeed.get',
+  label: 'Read Aspeed fan state (OEM)',
+  description: 'Reads the Aspeed BMC OEM fan table (netfn 0x3a): per-channel mode (auto/manual/disabled) and duty cycle for all 16 channels. Works on AST2600 (current ASRock Rack boards, e.g. B650D4U-2L2T/BCM) and AST2500 (older) BMCs; the variant is auto-detected when not given.',
+  module: 'Fans',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: { ...variantInput() },
+  async execute(ctx, input) {
+    try {
+      const variant = await resolveVariant(ctx, input);
+      const state = await readAspeedFanState(ctx.client, variant);
+      return {
+        success: true,
+        applied: false,
+        verified: true,
+        details: {
+          variant,
+          channels: state.channels.map((c) => ({ channel: c.index, mode: c.mode, dutyPercent: c.dutyPercent })),
+          note: 'Channel 0 is typically FAN1 (CPU); the board exposes ~7 physical headers but the BMC always reports all 16 channels.',
+        },
+      };
+    } catch (err) {
+      return failureResult(err);
+    }
+  },
+};
+
+const fanAspeedSetAction: ActionDescriptor<IpmiActionContext> = {
+  id: 'fan.aspeed.set',
+  label: 'Set Aspeed fan duty cycle (OEM)',
+  description: 'Sets the manual fan duty cycle on an Aspeed BMC (netfn 0x3a). AST2600 switches all channels to manual mode first, then writes the duty; AST2500 applies it directly. Duty below ~20% is rejected by most BMCs ("Invalid data field"). WARNING: manual settings do NOT persist across a BMC reboot or AC power cycle — the BMC returns to auto mode.',
+  module: 'Fans',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    dutyPercent: { type: 'number', required: true, min: 20, max: 100, description: 'Target fan duty in percent (below ~20% is rejected by most BMCs)' },
+    ...variantInput(),
+  },
+  async execute(ctx, input) {
+    const duty = Math.round(Number(input['dutyPercent']));
+    if (!Number.isFinite(duty) || duty < 20 || duty > 100) return { success: false, error: `dutyPercent must be an integer between 20 and 100 (got ${String(input['dutyPercent'])})` };
+    try {
+      const variant = await resolveVariant(ctx, input);
+      await setAspeedFanDuty(ctx.client, variant, duty);
+      // Verify by re-reading the OEM table — every channel must report manual + target duty.
+      const wait = await pollUntil(
+        async () => {
+          const state = await readAspeedFanState(ctx.client, variant);
+          return state.channels.every((c) => c.mode === 'manual' && c.dutyPercent === duty);
+        },
+        (ok) => ok === true,
+        { timeoutMs: 15_000, intervalMs: 2_000 },
+      );
+      if (!wait.ok) return { success: false, error: `fan duty set to ${duty}% but the BMC still reports a different value` };
+      return {
+        success: true,
+        applied: true,
+        verified: true,
+        details: { variant, dutyPercent: duty, note: 'Manual mode + duty do NOT persist across a BMC reboot or AC power cycle — the BMC returns to auto. Use fan.aspeed.auto-restore to switch back immediately.' },
+      };
+    } catch (err) {
+      return failureResult(err);
+    }
+  },
+};
+
+const fanAspeedAutoRestoreAction: ActionDescriptor<IpmiActionContext> = {
+  id: 'fan.aspeed.auto-restore',
+  label: 'Restore Aspeed fans to auto mode (OEM)',
+  description: 'Switches all Aspeed BMC fan channels back to automatic temperature-controlled mode (netfn 0x3a). Use after a manual duty override.',
+  module: 'Fans',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: { ...variantInput() },
+  async execute(ctx, input) {
+    try {
+      const variant = await resolveVariant(ctx, input);
+      await restoreAspeedAutoMode(ctx.client, variant);
+      const wait = await pollUntil(
+        async () => {
+          const state = await readAspeedFanState(ctx.client, variant);
+          return state.channels.every((c) => c.mode === 'auto');
+        },
+        (ok) => ok === true,
+        { timeoutMs: 15_000, intervalMs: 2_000 },
+      );
+      if (!wait.ok) return { success: false, error: 'auto mode requested but the BMC still reports manual channels' };
+      return { success: true, applied: true, verified: true, details: { variant } };
+    } catch (err) {
+      return failureResult(err);
+    }
+  },
+};
+
 // --- Registry ---------------------------------------------------------------------
 
 export const registry = createRegistry<IpmiActionContext>([
@@ -435,4 +548,7 @@ export const registry = createRegistry<IpmiActionContext>([
   lanIpSetAction,
   lanMaskSetAction,
   lanGatewaySetAction,
+  fanAspeedGetAction,
+  fanAspeedSetAction,
+  fanAspeedAutoRestoreAction,
 ]);

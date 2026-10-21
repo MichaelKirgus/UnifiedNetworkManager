@@ -19,12 +19,15 @@
 import { Health } from '@unm/plugin-sdk';
 import type { IpmiClient } from './client/ipmiClient';
 import { getChassisStatus, getSensorReadings, readFru, getSelEntries, getLanConfig } from './client/ipmiCommands';
+import { detectAspeedVariant, readAspeedFanState } from './client/aspeedFan';
 
 export interface IpmiMonitoringOptions {
   /** When false (non-inventory poll), skip FRU/SEL/LAN collection and omit those keys. */
   collectInventory: boolean;
   /** When false, skip the SDR walk + sensor readings entirely (fastest poll). */
   collectSensors: boolean;
+  /** When true, read the Aspeed OEM fan table (netfn 0x3a) on every poll — AST2600/AST2500 boards. */
+  aspeedFan: boolean;
 }
 
 export interface IpmiMonitoringResult {
@@ -113,6 +116,19 @@ export async function collectIpmiMonitoring(client: IpmiClient, opts: IpmiMonito
       sensorStates = sensors.map((s) => s.state);
     } catch (e) {
       errors.push(`sensor walk: ${errMsg(e)}`);
+    }
+  }
+
+  // --- Aspeed OEM fan state (opt-in — AST2600/AST2500 boards, e.g. ASRock Rack) ------
+  if (opts.aspeedFan) {
+    try {
+      const variant = await detectAspeedVariant(client);
+      if (!variant) throw new Error('BMC does not answer Aspeed fan OEM commands (netfn 0x3a) — disable the aspeedFan option on non-Aspeed boards');
+      const state = await readAspeedFanState(client, variant);
+      // Table metric — ARRAY form (one row per channel), rendered by MetricTable.
+      metrics['ipmi.fan'] = state.channels.map((c) => ({ channel: c.index, mode: c.mode, dutyPercent: c.dutyPercent }));
+    } catch (e) {
+      errors.push(`Aspeed fan read: ${errMsg(e)}`);
     }
   }
 
