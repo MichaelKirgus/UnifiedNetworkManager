@@ -6,6 +6,7 @@
  *   - Boot     : set boot options (service partition selector + flags)
  *   - SEL      : clear the System Event Log (dangerous — destroys history)
  *   - LED      : pulse the diagnostic interrupt (NMI) — write, for debugging hangs
+ *   - Sensors  : read / set per-sensor thresholds (the spec-defined fan/thermal tuning lever)
  *   - LAN      : set IP address / subnet mask / default gateway on the BMC's LAN channel
  *
  * Conventions (mirrors netcup-scp):
@@ -19,7 +20,8 @@
 import { ActionDescriptor, ActionResult, createRegistry, isTransientTransportError, pollUntil } from '@unm/plugin-sdk';
 import type { IpmiClient } from './client/ipmiClient';
 import { IpmiError } from './client/ipmiClient';
-import { getChassisStatus, setSystemPower, setBootOptions, clearSel, setLanParam } from './client/ipmiCommands';
+import { getChassisStatus, setSystemPower, setBootOptions, clearSel, setLanParam, getSensorReadings, getSensorThresholds, setSensorThresholds, convertToRaw, convertThresholdRaw } from './client/ipmiCommands';
+import type { SensorReading, ThresholdField } from './client/ipmiCommands';
 
 /** Executor context for one /config step — the client is already connected + authenticated. */
 export interface IpmiActionContext {
@@ -330,6 +332,94 @@ const lanGatewaySetAction: ActionDescriptor<IpmiActionContext> = {
   },
 };
 
+// --- Sensor thresholds (fan/thermal tuning) ----------------------------------------
+
+/** Finds one full-sensor SDR record by its sensor number. */
+async function findSensor(ctx: IpmiActionContext, sensorNum: number): Promise<SensorReading | null> {
+  const sensors = await getSensorReadings(ctx.client, { withReadings: false });
+  return sensors.find((s) => s.sensorNum === sensorNum) ?? null;
+}
+
+const THRESHOLD_FIELDS: ThresholdField[] = ['lowerNonCrit', 'lowerCrit', 'lowerNonRecov', 'upperNonCrit', 'upperCrit', 'upperNonRecov'];
+
+const thresholdGetAction: ActionDescriptor<IpmiActionContext> = {
+  id: 'sensor.threshold.get',
+  label: 'Read sensor thresholds',
+  description: 'Reads the current Get Sensor Thresholds settings of one sensor (raw bytes + converted engineering values). Use to inspect the fan/thermal limits a BMC\'s closed-loop control reacts to.',
+  module: 'Sensors',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    sensorNum: { type: 'number', required: true, min: 0, max: 255, description: 'Sensor number (from the ipmi.sensors table)' },
+  },
+  async execute(ctx, input) {
+    const sensorNum = Number(input['sensorNum']);
+    try {
+      const raw = await getSensorThresholds(ctx.client, sensorNum);
+      const sdr = await findSensor(ctx, sensorNum).catch(() => null); // SDR optional — conversion is best-effort
+      const converted: Record<string, number | null> = {};
+      for (const f of THRESHOLD_FIELDS) {
+        converted[f] = sdr ? convertThresholdRaw(sdr, raw[f]) : null;
+      }
+      return { success: true, applied: false, verified: true, details: { sensorNum, raw, converted, unit: sdr?.unit ?? '' } };
+    } catch (err) {
+      return failureResult(err);
+    }
+  },
+};
+
+const thresholdSetAction: ActionDescriptor<IpmiActionContext> = {
+  id: 'sensor.threshold.set',
+  label: 'Set sensor thresholds (fan/thermal tuning)',
+  description: 'Sets one or more thresholds of a sensor via Set Sensor Thresholds. There is no standard "set fan speed" command in IPMI — on most BMCs the fan curve reacts to these thresholds, so raising a FAN sensor\'s upper limits (or a temperature sensor\'s) loosens/raises cooling. Values are engineering units (converted with the SDR record\'s m/b/k1/k2). Verified by re-reading the thresholds.',
+  module: 'Sensors',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    sensorNum: { type: 'number', required: true, min: 0, max: 255, description: 'Sensor number (from the ipmi.sensors table)' },
+    lowerNonCrit: { type: 'number', required: false, description: 'Lower non-critical threshold (engineering units)' },
+    lowerCrit: { type: 'number', required: false, description: 'Lower critical threshold' },
+    lowerNonRecov: { type: 'number', required: false, description: 'Lower non-recoverable threshold' },
+    upperNonCrit: { type: 'number', required: false, description: 'Upper non-critical threshold (e.g. fan RPM warning limit)' },
+    upperCrit: { type: 'number', required: false, description: 'Upper critical threshold (e.g. fan RPM failure limit)' },
+    upperNonRecov: { type: 'number', required: false, description: 'Upper non-recoverable threshold' },
+  },
+  async execute(ctx, input) {
+    const sensorNum = Number(input['sensorNum']);
+    try {
+      // Convert engineering values to raw bytes using the SDR record's m/b/k1/k2.
+      const sdr = await findSensor(ctx, sensorNum);
+      if (!sdr) return { success: false, error: `No full-sensor SDR record for sensor number ${sensorNum}` };
+
+      const settings: Partial<Record<ThresholdField, number>> = {};
+      const convertedToRaw: Record<string, number> = {};
+      for (const f of THRESHOLD_FIELDS) {
+        const v = input[f];
+        if (typeof v !== 'number') continue;
+        const raw = convertToRaw(sdr, v);
+        if (raw === null) return { success: false, error: `Cannot convert ${f}=${v} to a raw threshold for sensor ${sensorNum} (discrete sensor or no slope in SDR record)` };
+        settings[f] = raw;
+        convertedToRaw[f] = raw;
+      }
+      if (Object.keys(settings).length === 0) return { success: false, error: 'No thresholds provided — set at least one of lowerNonCrit/lowerCrit/lowerNonRecov/upperNonCrit/upperCrit/upperNonRecov' };
+
+      await setSensorThresholds(ctx.client, sensorNum, settings);
+      // Verify by re-reading the thresholds and comparing the fields we wrote.
+      const wait = await pollUntil(
+        async () => {
+          const after = await getSensorThresholds(ctx.client, sensorNum);
+          return THRESHOLD_FIELDS.every((f) => (settings[f] === undefined || after[f] === settings[f]));
+        },
+        (ok) => ok === true,
+        { timeoutMs: 30_000, intervalMs: 2_000 },
+      );
+      return { success: true, applied: true, verified: wait.ok, details: { sensorNum, unit: sdr.unit, requested: input, rawApplied: convertedToRaw } };
+    } catch (err) {
+      return failureResult(err);
+    }
+  },
+};
+
 // --- Registry ---------------------------------------------------------------------
 
 export const registry = createRegistry<IpmiActionContext>([
@@ -340,6 +430,8 @@ export const registry = createRegistry<IpmiActionContext>([
   bootSetAction,
   selClearAction,
   ledPulseDiagAction,
+  thresholdGetAction,
+  thresholdSetAction,
   lanIpSetAction,
   lanMaskSetAction,
   lanGatewaySetAction,

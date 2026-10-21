@@ -38,8 +38,24 @@ const CHASSIS_SYSTEM_POWER_CTRL = 0x06;
 const CHASSIS_SET_BOOT_OPTIONS = 0x08;
 const CHASSIS_GET_SYS_BOOT_OPTIONS = 0x09;
 
-// Sensor reading (openipmi: netfn SE, cmd 0x2d).
+// Sensor reading + thresholds (openipmi: netfn SE for both — ipmi_sdr.c sends
+// Get/Set Sensor Threshold on IPMI_NETFN_SE, cmds 0x27/0x26).
 const CMD_GET_SENSOR_READING = 0x2d;
+const CMD_SET_SENSOR_THRESHOLDS = 0x26;
+const CMD_GET_SENSOR_THRESHOLDS = 0x27;
+
+/** Set-mask bits for Set Sensor Threshold (openipmi *_SPECIFIED constants). */
+export const THRESH_MASK = {
+  lowerNonCrit: 0x01,
+  lowerCrit: 0x02,
+  lowerNonRecov: 0x04,
+  upperNonCrit: 0x08,
+  upperCrit: 0x10,
+  upperNonRecov: 0x20,
+} as const;
+
+/** Field order of the Set Sensor Threshold request data (after sensorNum + mask). */
+const THRESH_FIELD_ORDER: Array<keyof typeof THRESH_MASK> = ['lowerNonCrit', 'lowerCrit', 'lowerNonRecov', 'upperNonCrit', 'upperCrit', 'upperNonRecov'];
 
 // Storage commands.
 const STORAGE_GET_SDR_INFO = 0x20;
@@ -441,6 +457,78 @@ function sensorUnit(code: number): string {
     default:
       return '';
   }
+}
+
+// --- Sensor thresholds ---------------------------------------------------------------
+// Get/Set Sensor Threshold ride on NETFN_SE (openipmi ipmi_sdr.c sends both on
+// IPMI_NETFN_SE, cmds 0x27/0x26). These are the thresholds that drive closed-loop
+// thermal/fan control on most BMCs — there is NO standard "set fan to X RPM"
+// command in the spec; you tune the FAN sensor's thresholds (or the temperature
+// sensor's) and let the BMC's fan curve react.
+
+/** The six threshold fields, in wire order of the Set Sensor Threshold request data. */
+export type ThresholdField = 'lowerNonCrit' | 'lowerCrit' | 'lowerNonRecov' | 'upperNonCrit' | 'upperCrit' | 'upperNonRecov';
+
+/** Raw (unconverted) threshold bytes as stored on the BMC. 0x00/0xff = not set. */
+export interface SensorThresholdsRaw {
+  lowerNonCrit: number;
+  lowerCrit: number;
+  lowerNonRecov: number;
+  upperNonCrit: number;
+  upperCrit: number;
+  upperNonRecov: number;
+}
+
+/** Reads the current threshold settings of one sensor (Get Sensor Thresholds, SE cmd 0x27). */
+export async function getSensorThresholds(client: IpmiClient, sensorNum: number): Promise<SensorThresholdsRaw> {
+  const data = await client.sendCommand(NETFN_SE, CMD_GET_SENSOR_THRESHOLDS, Buffer.from([sensorNum & 0xff]));
+  if (data.length < 6) throw new IpmiError('Get Sensor Thresholds response too short', 'protocol');
+  // Response field order (openipmi dump_sensor_fc_thredshold): lower non-crit @0,
+  // lower crit @1, lower non-recov @2, upper non-crit @3, upper crit @4, upper non-recov @5.
+  return {
+    lowerNonCrit: data[0],
+    lowerCrit: data[1],
+    lowerNonRecov: data[2],
+    upperNonCrit: data[3],
+    upperCrit: data[4],
+    upperNonRecov: data[5],
+  };
+}
+
+/** Sets one or more thresholds of a sensor (Set Sensor Thresholds, SE cmd 0x26).
+ *  Request data: [sensorNum(1), setMask(1), lowerNC, lowerC, lowerNR, upperNC, upperC, upperNR]. */
+export async function setSensorThresholds(client: IpmiClient, sensorNum: number, settings: Partial<Record<ThresholdField, number>>): Promise<void> {
+  let mask = 0;
+  const fields = Buffer.alloc(6);
+  for (let i = 0; i < THRESH_FIELD_ORDER.length; ++i) {
+    const f = THRESH_FIELD_ORDER[i];
+    const v = settings[f];
+    if (v === undefined) continue;
+    if (!Number.isInteger(v) || v < 0 || v > 255) throw new IpmiError(`Threshold "${f}" out of range: ${v}`, 'protocol');
+    mask |= THRESH_MASK[f];
+    fields[i] = v & 0xff;
+  }
+  if (mask === 0) throw new IpmiError('No thresholds to set', 'protocol');
+  await client.sendCommand(NETFN_SE, CMD_SET_SENSOR_THRESHOLDS, Buffer.concat([Buffer.from([sensorNum & 0xff, mask]), fields]));
+}
+
+/** Converts one raw threshold byte of a sensor to engineering units — null when the
+ *  threshold is absent (0x00/0xff per spec) or the record has no conversion. */
+export function convertThresholdRaw(s: SensorReading, raw: number): number | null {
+  if (raw === 0x00 || raw === 0xff) return null; // not set / invalid
+  return convertSensorValue(s, raw);
+}
+
+/** Converts an engineering value back to the sensor's raw byte — the inverse of
+ *  convertSensorValue (openipmi sdr_convert_sensor_value_to_raw). Returns null when
+ *  the record is discrete or has no slope (m=0) so the value cannot be inverted. */
+export function convertToRaw(s: SensorReading, val: number): number | null {
+  const cm = meta.get(s);
+  if (!cm || cm.analogFormat === 3) return null; // discrete — no analog thresholds
+  if (cm.m === 0) return null; // cannot invert without a slope
+  const result = ((val / Math.pow(10, cm.k2)) - cm.b * Math.pow(10, cm.k1)) / cm.m;
+  const raw = Math.round(result); // openipmi: ceil when the fraction is >= .5 — identical for non-negative values
+  return raw >= 0 && raw <= 255 ? raw : null;
 }
 
 // --- FRU ---------------------------------------------------------------------------

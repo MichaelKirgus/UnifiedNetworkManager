@@ -156,6 +156,13 @@ export async function startIpmiMock() {
   // Live sensor readings (raw bytes).
   const sensorReadings = new Map([[0x01, 45], [0x02, 12], [0x03, 45]]); // Fan1: 45*10=450 RPM < 600 non-crit → ok
 
+  // Per-sensor threshold settings (raw bytes) — mutable state for Set Sensor Thresholds.
+  const thresholds = new Map([
+    [0x01, { lowerNonCrit: 0x00, lowerCrit: 0x00, lowerNonRecov: 0xff, upperNonCrit: 75, upperCrit: 85, upperNonRecov: 0xff }], // CPU1 Temp °C
+    [0x02, { lowerNonCrit: 14, lowerCrit: 13, lowerNonRecov: 0xff, upperNonCrit: 14, upperCrit: 15, upperNonRecov: 0xff }], // PSU1 Voltage V
+    [0x03, { lowerNonCrit: 60, lowerCrit: 50, lowerNonRecov: 0xff, upperNonCrit: 70, upperCrit: 80, upperNonRecov: 0xff }], // Fan1 RPM (m=10)
+  ]);
+
   // SEL records (newest first in the backward walk).
   const nowSec = Math.floor(Date.now() / 1000);
   const selRecords = new Map([
@@ -283,6 +290,33 @@ export async function startIpmiMock() {
         const raw = sensorReadings.get(sensorNum);
         if (raw === undefined) return [0xd0 /* sensor not present */, Buffer.alloc(0)];
         return [0x00, Buffer.from([0x00, raw])];
+      }
+
+      case (0x04 << 8) | 0x27: {
+        // Get Sensor Thresholds → request [sensorNum]. Response = 6 raw bytes in the
+        // order lowerNC, lowerC, lowerNR, upperNC, upperC, upperNR.
+        events.push('get-sensor-threshold');
+        const sensorNum = data[0];
+        if (!thresholds.has(sensorNum)) return [0xd0 /* sensor not present */, Buffer.alloc(0)];
+        const t = thresholds.get(sensorNum);
+        return [0x00, Buffer.from([t.lowerNonCrit, t.lowerCrit, t.lowerNonRecov, t.upperNonCrit, t.upperCrit, t.upperNonRecov])];
+      }
+
+      case (0x04 << 8) | 0x26: {
+        // Set Sensor Thresholds → request [sensorNum(1), setMask(1), lNC, lC, lNR, uNC, uC, uNR].
+        events.push('set-sensor-threshold');
+        const sensorNum = data[0];
+        const mask = data[1];
+        if (!thresholds.has(sensorNum)) return [0xd0 /* sensor not present */, Buffer.alloc(0)];
+        const t = thresholds.get(sensorNum);
+        // Mask bits (openipmi *_SPECIFIED): 0x01 lNC, 0x02 lC, 0x04 lNR, 0x08 uNC, 0x10 uC, 0x20 uNR.
+        if (mask & 0x01) t.lowerNonCrit = data[2];
+        if (mask & 0x02) t.lowerCrit = data[3];
+        if (mask & 0x04) t.lowerNonRecov = data[4];
+        if (mask & 0x08) t.upperNonCrit = data[5];
+        if (mask & 0x10) t.upperCrit = data[6];
+        if (mask & 0x20) t.upperNonRecov = data[7];
+        return [0x00, Buffer.alloc(0)];
       }
 
       case (0x0a << 8) | 0x18: {
@@ -619,12 +653,30 @@ export default {
         expectHealth: 'ok',
         deadAddress: `127.0.0.1:${await getDeadUdpPort()}`,
         expectDeadHealth: 'critical',
-        extraChecks: async ({ rec }) => {
+        extraChecks: async ({ url, rec }) => {
           const ev = bmc.events.join(' ');
           rec.check('X', 'mock saw the full RAKP handshake (open→rakp1→rakp3-ok)', /open-session/.test(ev) && /rakp1 user=admin/.test(ev) && /rakp3 authcode-ok/.test(ev), ev.slice(0, 400));
           rec.check('X', 'mock verified the console integrity trailers (no mismatches)', !ev.includes('integrity-trailer-MISMATCH') && !ev.includes('decrypt-failed'), ev.slice(0, 400));
           rec.check('X', 'monitoring read chassis status + SDR walk + sensor readings', /chassis-status/.test(ev) && (ev.match(/get-sdr/g) ?? []).length >= 3 && (ev.match(/get-sensor-reading/g) ?? []).length === 3, ev.slice(0, 400));
           rec.check('X', 'monitoring read FRU + SEL tail + LAN params', /read-fru/.test(ev) && /sel-info/.test(ev) && (ev.match(/get-sel-entry/g) ?? []).length >= 2 && (ev.match(/get-lan-param/g) ?? []).length >= 4, ev.slice(0, 400));
+
+          // sensor.threshold.set — Fan1 (sensor 3, m=10): 650 RPM → raw 65, 750 RPM → raw 75.
+          const setR = await fetch(`${url}/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId: 'x', managementAddress: `127.0.0.1:${bmc.port}`, credentials: { username: 'admin', password: 'secret' }, actionId: 'sensor.threshold.set', input: { sensorNum: 3, upperNonCrit: 650, upperCrit: 750 } }),
+          });
+          const setJ = await setR.json();
+          rec.check('X', '/config sensor.threshold.set applied + verified (raw 65/75)', setR.status === 200 && setJ.success === true && setJ.result?.verified === true && setJ.result?.details?.rawApplied?.upperNonCrit === 65 && setJ.result?.details?.rawApplied?.upperCrit === 75, JSON.stringify(setJ).slice(0, 300));
+
+          // sensor.threshold.get — re-read: raw must be the values we wrote; converted back to engineering units.
+          const getR = await fetch(`${url}/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId: 'x', managementAddress: `127.0.0.1:${bmc.port}`, credentials: { username: 'admin', password: 'secret' }, actionId: 'sensor.threshold.get', input: { sensorNum: 3 } }),
+          });
+          const getJ = await getR.json();
+          rec.check('X', '/config sensor.threshold.get round-trips (raw 65/75 → 650/750 RPM)', getR.status === 200 && getJ.success === true && getJ.result?.details?.raw?.upperNonCrit === 65 && getJ.result?.details?.converted?.upperNonCrit === 650 && getJ.result?.details?.converted?.upperCrit === 750, JSON.stringify(getJ).slice(0, 300));
         },
       },
     };

@@ -18,6 +18,7 @@ password lives only in Node crypto memory, never in argv, env or on disk.
 | SEL | Last 50 System Event Log entries with decoded timestamps + severity (`ipmi.sel`) |
 | Inventory | BMC LAN channel IP/mask/MAC → UNM's network inventory (`networks[]` row) |
 | Control (plan-gated) | Power on / ACPI soft-off / hard-off / reset, boot options, SEL clear, NMI pulse, BMC LAN IP/mask/gateway writes — all verified by re-reading state afterwards; dangerous ones require the plan confirm dialog |
+| Fan/thermal tuning | Read + set per-sensor thresholds (Get/Set Sensor Thresholds). There is **no standard "set fan to X RPM" command** in IPMI — on most BMCs the fan curve reacts to these thresholds, so raising a FAN sensor's upper limits (or a temperature sensor's) loosens/raises cooling. Values are entered in engineering units and converted with the SDR record's m/b/k1/k2 |
 | Console | **SOL serial console** — the device's "Shell" button opens an interactive terminal on the server's serial port (IPMI Serial-over-LAN) |
 
 ## BMC setup
@@ -58,6 +59,22 @@ password lives only in Node crypto memory, never in argv, env or on disk.
   with a random IV per packet (cipher suite 3).
 - All write operations flow through UNM's plan workflow: catalog entry → confirm
   dialog for `dangerous` actions → audit trail → re-read verification.
+
+## Fan speed — what IPMI can and cannot do
+
+- **Reading fan speeds**: covered by the normal sensor walk — fan sensors (SDR type
+  0x04) appear in `ipmi.sensors` with live RPM readings, unit and threshold state.
+- **Setting a fan to a fixed speed**: not part of the IPMI standard. Some vendors
+  expose OEM commands for it; this plugin intentionally does not ship vendor OEMs.
+- **The spec-defined lever — sensor thresholds** (`sensor.threshold.get` /
+  `sensor.threshold.set`): most BMCs run closed-loop thermal control where fan
+  speed is a function of temperature (and sometimes fan) thresholds. Raising the
+  upper limits of a FAN sensor, or the upper critical limit of a CPU/memory
+  temperature sensor, makes the BMC spin fans less aggressively; lowering them
+  tightens cooling. Use `sensor.threshold.get` first to see what the BMC has
+  configured, then adjust one threshold at a time and watch the fan RPM readings.
+- Thresholds are written in engineering units (e.g. `upperNonCrit: 650` for a
+  fan sensor with m=10 → raw byte 65) and verified by re-read.
 
 ## Limitations
 
